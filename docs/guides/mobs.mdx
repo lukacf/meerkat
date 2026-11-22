@@ -337,6 +337,28 @@ such as a typo, fails the member's build with `DeclaredToolUnknown`, unless the
 profile declares an MCP server that maps no `tool_names` or opts into a bundle
 the build withholds; then the name is checked only at call time.
 
+`shell = true` turns on the whole shell family, the script monitor
+`monitor_start` included. A profile that wants `shell` and its three job tools
+without the monitor says so by name:
+
+```toml
+[profiles.worker.tools]
+comms = true
+shell = true
+deny = ["monitor_start"]
+```
+
+The deny also holds for a monitor the member started earlier: after a host
+restart, at the member's next shell job call, it is not run again and its
+job ends as `needs_attention` (`monitor_start_not_permitted`). An operator's
+own monitor for the member is not the member's to end and is left as it is,
+until an operator calls `monitors/start` or `jobs/cancel` for the member's
+session.
+The host's
+own monitor route is not bound by the deny; the `monitor_start` entry of the
+built-in tools reference says what it does. A deny that names `shell` closes
+`monitor_start` with it.
+
 ### Granting tools to a member at run time
 
 `tools.grant_gated` mounts built-in tool families, tool names and the tools of
@@ -606,18 +628,14 @@ mob or the member's role. The mob comms and WorkGraph operating skills are
 preloaded separately and survive any prompt override, so a role prompt does not
 have to repeat them.
 
-<Warning>
-Known issue, noted 2026-11-13: mob members run by the four binaries in the
-Linux x86_64 release archives (`rkat`, `rkat-rpc`, `rkat-rest`, `rkat-mcp`)
-are built without the built-in skills a mob preloads (`mob-communication`,
-and `workgraph-workflow` or `task-workflow` by profile): the spawn succeeds
-and the member still has its communication tools. A project copy of those
-skills does not restore them for members. Members of a mob run by the
-published Meta `rpc_gateway` are not affected. See the
-[known issue on the 0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/v0.9.14)
-for the releases and platforms that were checked and how each statement is
-known.
-</Warning>
+<Note>
+Fixed in 0.9.15: on affected older Linux x86_64 archives, members spawned
+without their built-in skill instructions even though their communication
+tools were present. Copying a skill into the project did not restore member
+preloads. The published Meta `rpc_gateway` was not affected. For the affected
+versions, see the
+[known issue on the 0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/v0.9.14).
+</Note>
 
 Identity-first hosts (Meta) have two more knobs that reach the prompt
 without editing the definition: `DurableAgentSpec.additional_instructions`,
@@ -1269,10 +1287,16 @@ step earlier, also with `-32602` (`work_ref must be a valid UUID: ...`).
 cancels the work that member had admitted when the cancel was taken, not one
 unit: the member's current run is cancelled at the run's next boundary, and
 the input it held queued is abandoned. Input admitted after the cancel is
-untouched. Cancelling an idle member is not an error. On success the result
-is `{"mob_id": "...", "ok": true}`. The cancel is of that member's work
-only: a flow run on another member stays active, and from 0.9.15 a stop of
-the mob is still refused while it is (see
+untouched. The boundary can be some way off: while a model response is in
+progress, the run ends when that response ends (about 30 seconds after the
+call in one run each of `mob/cancel_all_work` and `mob/force_cancel` on
+0.9.15, with a long model response in progress: a measurement, not a bound).
+To end one run at once and keep the member's queued input, stop that run
+instead with `mob/stop_member_run` (in one run on 0.9.15 the run ended at
+once and the queued input ran next). Cancelling an idle member is not an
+error. On success the result is `{"mob_id": "...", "ok": true}`. The cancel
+is of that member's work only: a flow run on another member stays active,
+and from 0.9.15 a stop of the mob is still refused while it is (see
 [Stopping a mob with an active flow run](#stopping-a-mob-with-an-active-flow-run)).
 
 <Warning>
@@ -1297,12 +1321,23 @@ session owns.
 Work the mob itself admitted (member sends, submitted work) and still queued
 at the cancel does not count as a waiting turn. See the
 [known issue on the 0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/v0.9.14).
-Until a release with the fix, do not call `mob/cancel_all_work` on a member
-while such a turn is queued. On a `jsonl` realm, do not call it at all on a
-member whose session owns mobs; if you already have, restart the process
-before the next turn is sent to that member (after a restart the next turn
-ran and the mobs were kept, in one run).
+Fixed in 0.9.15 (see Fixed in the CHANGELOG under `## [0.9.15]`). On 0.9.5
+through 0.9.14, do not call `mob/cancel_all_work` on a member while such a
+turn is queued. On a `jsonl` realm, do not call it at all on a member whose
+session owns mobs; if you already have, restart the process before the next
+turn is sent to that member (after a restart the next turn ran and the mobs
+were kept, in one run).
 </Warning>
+
+Fixed in 0.9.17 (see Fixed in the CHANGELOG under `## [0.9.17]`). Through
+0.9.16, on a realm created with `--realm-backend jsonl` (and on in-memory
+stores), the first work a member's session takes after `mob/cancel_all_work`
+ended a running run is lost once. A turn a client then starts on the
+member's session (`turn/start`) is answered an internal error (`-32603`,
+`turn abandoned: ...`) and its result is not kept; a `mob/member_send` is
+accepted, and its run ends failed without its result; its sender gets no
+error. The work after that runs: send the lost work again. A realm on the
+default `sqlite` backend is not affected.
 
 ## Flows
 
@@ -1636,8 +1671,10 @@ transitively and deepest first: `mob/retire` over JSON-RPC, `meerkat_mob_retire`
 over MCP, the browser runtime's `mob_retire`, and `MobHandle::retire` in
 embedded Rust all cascade (`MobHandle::retire_with_descendants` is an alias).
 Each retirement runs through the ordinary retire path and every one is
-attempted; the first failure is reported, and a retry converges. Members
-spawned by other means are not affected.
+attempted; the first failure is reported, and a retry converges. Ordinary tool-spawned
+members are not retired by this cascade. Keeping a seat does not guarantee
+that a new turn or scheduled delivery will be accepted, or that an earlier
+operation can return its result to its original recipient.
 The mobs the retired member created itself and its delegates end with its
 session, at the next start of the host.
 
@@ -1647,16 +1684,21 @@ declared apply seats it again. Unlist the identity first (see
 [Declared identities](#declared-identities-rust-hosts)).
 
 `rkat mob force-cancel <MOB_ID> <AGENT_IDENTITY>` (RPC `mob/force_cancel`)
-cooperatively cancels a member's in-flight turn without retiring it - the
-member stays in the roster and can take new turns. As the operator remedy for
-a wedged member it is legal whenever the mob is running and idempotent:
-cancelling a member whose runtime is no longer live, or one already retiring,
-converges as a no-op success rather than an admission error. An identity the
-roster has never seen is refused with a typed `MemberNotFound`. A member whose
-runtime registration needs a durability reload is refused with a typed
-`MemberReloadRequired` (`-32029`) until its registration is reloaded. The
-cancel is of that member's work only: a flow run on another member stays
-active, and from 0.9.15 a stop of the mob is still refused while it is (see
+cooperatively cancels the work a member had admitted, without retiring it:
+the member's current run is cancelled at the run's next boundary and the
+input it held queued is abandoned, as with `mob/cancel_all_work` (both calls
+reach the same cancel, by reading the source; in one run on 0.9.15 a send
+queued behind the running turn never ran after the force cancel). The member
+stays in the roster and can take new turns. As the operator remedy for a
+wedged member it is legal whenever the mob is running and idempotent:
+cancelling a member whose runtime is no longer live, or one already
+retiring, converges as a no-op success rather than an admission error. An
+identity the roster has never seen is refused with a typed `MemberNotFound`.
+A member whose runtime registration needs a durability reload is refused
+with a typed `MemberReloadRequired` (`-32029`) until its registration is
+reloaded. The cancel is of that member's work only: a flow run on another
+member stays active, and from 0.9.15 a stop of the mob is still refused
+while it is (see
 [Stopping a mob with an active flow run](#stopping-a-mob-with-an-active-flow-run)).
 
 ## Persistence

@@ -28,7 +28,7 @@ impl AccessPrincipal {
 /// at all and only match rules without resource selectors.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AccessResource<'a> {
-    /// Agent identity (preferred key, e.g. `identity:ops-lead`).
+    /// Agent identity (preferred key, e.g. `ops-lead`).
     pub identity: Option<&'a str>,
     /// Runtime agent/member id, matched against rule `agents` as a fallback.
     pub agent_id: Option<&'a str>,
@@ -105,16 +105,114 @@ fn subject_matches(rule: &AccessRule, principal: &AccessPrincipal) -> bool {
         .any(|group| principal.groups.contains(group))
 }
 
-fn resource_matches(rule: &AccessRule, resource: &AccessResource<'_>) -> bool {
-    if !rule.has_resource_selector() {
-        return true;
+/// Whether one field of what is held of an agent is known. A field that is
+/// not known is never read as "has none": a rule keyed on it is decided
+/// closed ([`resource_match`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum Knowledge {
+    /// The field is as held: a role that is absent is no role, a label key
+    /// that is absent is a label the agent does not carry, a spawner that
+    /// is absent is none.
+    #[default]
+    Known,
+    /// The field is not known. What is held of it is still true as far as
+    /// it goes: a label is held only where the console wrote it itself
+    /// (who the agent is private to), so a held label is one the agent
+    /// carries. A value a spawn call carried is never held so.
+    NotKnown,
+}
+
+/// Which fields of an agent's attributes are known, each on its own: its
+/// role, its labels, and who spawned it (its lineage above itself).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct AttributeKnowledge {
+    pub(crate) role: Knowledge,
+    pub(crate) labels: Knowledge,
+    pub(crate) spawner: Knowledge,
+}
+
+impl AttributeKnowledge {
+    /// Every field is known: the attributes are of the whole agent.
+    pub(crate) const WHOLE: Self = Self {
+        role: Knowledge::Known,
+        labels: Knowledge::Known,
+        spawner: Knowledge::Known,
+    };
+
+    /// Nothing is known beyond the identity and the labels that are held:
+    /// not the role, not any other label, not who spawned the agent.
+    pub(crate) const IDENTITY_AND_HELD_LABELS: Self = Self {
+        role: Knowledge::NotKnown,
+        labels: Knowledge::NotKnown,
+        spawner: Knowledge::NotKnown,
+    };
+}
+
+/// A resource with what is known of each of its fields.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct KnownResource<'a> {
+    pub(crate) resource: AccessResource<'a>,
+    pub(crate) knowledge: AttributeKnowledge,
+}
+
+impl<'a> KnownResource<'a> {
+    /// A resource whose every field is known as given.
+    pub(crate) fn whole(resource: AccessResource<'a>) -> Self {
+        Self {
+            resource,
+            knowledge: AttributeKnowledge::WHOLE,
+        }
     }
+}
+
+/// What a rule's resource selectors say of a resource.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SelectorMatch {
+    /// Every selector is decided by what is known, and the rule matches.
+    Matches,
+    /// A selector is decided by what is known, and the rule does not match.
+    DoesNotMatch,
+    /// No selector rules the resource out, and one of them reads a field
+    /// that is not known: its role, a label it may carry, or another agent
+    /// that may be its spawn ancestor.
+    NotKnown,
+}
+
+/// How `rule`'s resource selectors read against `resource`, field by field:
+/// the one place that matches a rule against a resource. A selector on a
+/// field that is known decides as the field says. A selector on a field
+/// that is not known decides nothing: a role that is not known is never
+/// "has no role", a label key that is not held is never "has none" (a held
+/// label with another value still rules the rule out), and, where the
+/// spawner is not known, an agent the rule names may be a spawn ancestor.
+/// Every field of [`AccessRule`] is named, so a new selector kind does not
+/// compile until it is classified.
+fn resource_match(rule: &AccessRule, known: &KnownResource<'_>) -> SelectorMatch {
+    let AccessRule {
+        id: _,
+        description: _,
+        effect: _,
+        subjects: _,
+        groups: _,
+        actions: _,
+        agents,
+        roles,
+        match_labels,
+    } = rule;
+    if agents.is_empty() && roles.is_empty() && match_labels.is_empty() {
+        return SelectorMatch::Matches;
+    }
+    let KnownResource {
+        resource,
+        knowledge,
+    } = known;
     // A constrained rule can never match a check that has no resource.
     if !resource.is_present() {
-        return false;
+        return SelectorMatch::DoesNotMatch;
     }
-    if !rule.agents.is_empty() {
-        let agent_listed = rule.agents.iter().any(|candidate| {
+    let mut not_known = false;
+    if !agents.is_empty() {
+        let agent_listed = agents.iter().any(|candidate| {
             candidate == "*"
                 || resource
                     .identity
@@ -124,33 +222,58 @@ fn resource_matches(rule: &AccessRule, resource: &AccessResource<'_>) -> bool {
                     .is_some_and(|agent_id| agent_id == candidate)
         });
         if !agent_listed {
-            return false;
+            match knowledge.spawner {
+                Knowledge::Known => return SelectorMatch::DoesNotMatch,
+                // Any other name may be a spawn ancestor of the agent.
+                Knowledge::NotKnown => not_known = true,
+            }
         }
     }
-    if !rule.roles.is_empty() {
-        let role_listed = resource.role.is_some_and(|role| {
-            rule.roles
-                .iter()
-                .any(|candidate| candidate == "*" || candidate == role)
-        });
-        if !role_listed {
-            return false;
+    if !roles.is_empty() {
+        match knowledge.role {
+            Knowledge::Known => {
+                let role_listed = resource.role.is_some_and(|role| {
+                    roles
+                        .iter()
+                        .any(|candidate| candidate == "*" || candidate == role)
+                });
+                if !role_listed {
+                    return SelectorMatch::DoesNotMatch;
+                }
+            }
+            Knowledge::NotKnown => not_known = true,
         }
     }
-    if !rule.match_labels.is_empty() {
-        let Some(labels) = resource.labels else {
-            // Unknown attributes fail label selectors closed.
-            return false;
-        };
-        let all_labels_match = rule
-            .match_labels
-            .iter()
-            .all(|(key, value)| labels.get(key) == Some(value));
-        if !all_labels_match {
-            return false;
+    for (key, value) in match_labels {
+        match resource.labels.and_then(|labels| labels.get(key)) {
+            Some(held) if held == value => {}
+            Some(_) => return SelectorMatch::DoesNotMatch,
+            // No labels at all (attributes never captured) and a key that
+            // is not held fail a label selector closed when the labels are
+            // known, and decide nothing when they are not.
+            None => match knowledge.labels {
+                Knowledge::Known => return SelectorMatch::DoesNotMatch,
+                Knowledge::NotKnown => not_known = true,
+            },
         }
     }
-    true
+    if not_known {
+        SelectorMatch::NotKnown
+    } else {
+        SelectorMatch::Matches
+    }
+}
+
+/// Whether a deny rule applies to `known`: its selectors match, or cannot
+/// be decided by what is known (closed).
+fn deny_applies(rule: &AccessRule, known: &KnownResource<'_>) -> bool {
+    resource_match(rule, known) != SelectorMatch::DoesNotMatch
+}
+
+/// Whether an allow rule applies to `known`: every selector is decided by
+/// what is known, and the rule matches (closed).
+fn allow_applies(rule: &AccessRule, known: &KnownResource<'_>) -> bool {
+    resource_match(rule, known) == SelectorMatch::Matches
 }
 
 /// Evaluate one access check against a configuration.
@@ -168,7 +291,7 @@ pub fn evaluate_access(
         config,
         principal,
         action,
-        std::slice::from_ref(resource),
+        &[KnownResource::whole(*resource)],
         &|_| true,
     )
 }
@@ -176,11 +299,15 @@ pub fn evaluate_access(
 /// Evaluate one access check against an agent and its lineage.
 ///
 /// `resources` is the agent followed by its lineage ancestors (parent,
-/// grandparent, ...). A deny rule applies when it matches *any* resource in
-/// the chain, so a deny anywhere in the lineage denies the descendant
-/// (deny-overrides is preserved across the chain). An allow rule applies
-/// when it matches a resource in the chain that `grants` lets grant, so
-/// permissions granted on a spawning agent extend to the members it spawned.
+/// grandparent, ...), each with what is known of its fields. A deny rule
+/// applies when it matches *any* resource in the chain, so a deny anywhere
+/// in the lineage denies the descendant (deny-overrides is preserved across
+/// the chain). An allow rule applies when it matches a resource in the
+/// chain that `grants` lets grant, so permissions granted on a spawning
+/// agent extend to the members it spawned. A field that is not known is
+/// decided closed in both directions ([`resource_match`]): a deny applies
+/// to a resource it matches or cannot rule out, an allow only to one it
+/// matches by what is known.
 /// A caller passes `&|_| true` unless a link of its chain takes no grant of
 /// its own (the console's side chats,
 /// `AccessView::decide_agent`).
@@ -188,7 +315,7 @@ pub(crate) fn evaluate_access_lineage(
     config: &AccessControlConfig,
     principal: &AccessPrincipal,
     action: &str,
-    resources: &[AccessResource<'_>],
+    resources: &[KnownResource<'_>],
     grants: &dyn Fn(&AccessResource<'_>) -> bool,
 ) -> AccessDecision {
     if !config.enabled {
@@ -212,10 +339,7 @@ pub(crate) fn evaluate_access_lineage(
         }
         match rule.effect {
             AccessEffect::Deny => {
-                if resources
-                    .iter()
-                    .any(|resource| resource_matches(rule, resource))
-                {
+                if resources.iter().any(|known| deny_applies(rule, known)) {
                     return AccessDecision::Deny {
                         reason: format!("denied by rule {}", rule.id),
                     };
@@ -224,7 +348,7 @@ pub(crate) fn evaluate_access_lineage(
             AccessEffect::Allow => {
                 if resources
                     .iter()
-                    .any(|resource| grants(resource) && resource_matches(rule, resource))
+                    .any(|known| grants(&known.resource) && allow_applies(rule, known))
                 {
                     allowed = true;
                 }
@@ -240,14 +364,15 @@ pub(crate) fn evaluate_access_lineage(
     }
 }
 
-/// The first deny rule that matches `resource` for this principal and
-/// action, ignoring allow rules. An admin matches none, as in
-/// [`evaluate_access_lineage`].
+/// The first deny rule that applies to `resource` for this principal and
+/// action, ignoring allow rules: one that matches it or, where a field of
+/// it is not known, one that what is known cannot rule out. An admin
+/// matches none, as in [`evaluate_access_lineage`].
 pub(crate) fn matching_deny_rule<'c>(
     config: &'c AccessControlConfig,
     principal: &AccessPrincipal,
     action: &str,
-    resource: &AccessResource<'_>,
+    resource: &KnownResource<'_>,
 ) -> Option<&'c str> {
     if !config.enabled {
         return None;
@@ -267,7 +392,7 @@ pub(crate) fn matching_deny_rule<'c>(
                     .iter()
                     .any(|pattern| action_matches(pattern, action))
                 && subject_matches(rule, principal)
-                && resource_matches(rule, resource)
+                && deny_applies(rule, resource)
         })
         .map(|rule| rule.id.as_str())
 }
@@ -403,6 +528,446 @@ mod tests {
             id: id.to_string(),
             ..AccessRule::default()
         }
+    }
+
+    /// An agent of which only its identity and some labels are known is
+    /// decided closed by what is not known, in both directions. An allow
+    /// applies only when every selector is decided: by `*`, by the
+    /// identity, or by a label that is known. A deny applies also when a
+    /// selector reads the role, a label that is not among the known ones,
+    /// or another agent that may be a spawn ancestor; a deny on a known
+    /// label with another value, or with a known label that differs, does
+    /// not apply. An admin is allowed, and a disabled configuration allows.
+    #[test]
+    fn an_agent_known_in_part_is_decided_closed_by_what_is_not_known() {
+        const AGENT: &str = "aide";
+        let known = BTreeMap::from([("kept".to_string(), "team".to_string())]);
+        let caller = principal("bob@example.test", &[]);
+        // The agent as the console records one that ended and that only
+        // the record of who each member is private to knows.
+        let agent = [KnownResource {
+            resource: AccessResource {
+                identity: Some(AGENT),
+                agent_id: Some(AGENT),
+                role: None,
+                labels: Some(&known),
+            },
+            knowledge: AttributeKnowledge::IDENTITY_AND_HELD_LABELS,
+        }];
+        let view = |rules: Vec<AccessRule>| {
+            evaluate_access_lineage(
+                &config_with_rules(rules),
+                &caller,
+                "agent.view",
+                &agent,
+                &|_| true,
+            )
+            .is_allow()
+        };
+        let allow = |id: &str| AccessRule {
+            subjects: vec!["*".to_string()],
+            actions: vec!["agent.*".to_string()],
+            ..allow_rule(id)
+        };
+        let deny = |id: &str| AccessRule {
+            effect: AccessEffect::Deny,
+            ..allow(id)
+        };
+        let label = |key: &str, value: &str| BTreeMap::from([(key.to_string(), value.to_string())]);
+        let everything = AccessRule {
+            agents: vec!["*".to_string()],
+            ..allow("everything")
+        };
+
+        // Allows: only what is decided grants.
+        assert!(view(vec![everything.clone()]), "an allow by `*`");
+        assert!(
+            view(vec![AccessRule {
+                agents: vec![AGENT.to_string()],
+                ..allow("by-identity")
+            }]),
+            "an allow by the identity"
+        );
+        assert!(
+            view(vec![AccessRule {
+                match_labels: label("kept", "team"),
+                ..allow("by-the-known-label")
+            }]),
+            "an allow by a label that is known"
+        );
+        for (rule, why) in [
+            (
+                AccessRule {
+                    roles: vec!["worker".to_string()],
+                    ..allow("by-role")
+                },
+                "an allow by role",
+            ),
+            (
+                AccessRule {
+                    roles: vec!["*".to_string()],
+                    ..allow("by-any-role")
+                },
+                "an allow by any role",
+            ),
+            (
+                AccessRule {
+                    match_labels: label("org", "payments"),
+                    ..allow("by-another-label")
+                },
+                "an allow by a label that is not known",
+            ),
+            (
+                AccessRule {
+                    match_labels: label("kept", "other"),
+                    ..allow("by-the-known-label-with-another-value")
+                },
+                "an allow by the known label with another value",
+            ),
+            (
+                AccessRule {
+                    agents: vec!["builder".to_string()],
+                    ..allow("by-another-agent")
+                },
+                "an allow by another agent's name",
+            ),
+        ] {
+            assert!(!view(vec![rule]), "{why} grants nothing");
+        }
+
+        // Denies: what cannot be decided refuses.
+        for (rule, why) in [
+            (
+                AccessRule {
+                    roles: vec!["worker".to_string()],
+                    ..deny("by-role")
+                },
+                "a deny by role",
+            ),
+            (
+                AccessRule {
+                    match_labels: label("org", "payments"),
+                    ..deny("by-another-label")
+                },
+                "a deny by a label that is not known",
+            ),
+            (
+                AccessRule {
+                    agents: vec!["builder".to_string()],
+                    ..deny("by-another-agent")
+                },
+                "a deny by another agent's name",
+            ),
+            (
+                AccessRule {
+                    match_labels: label("kept", "team"),
+                    ..deny("by-the-known-label")
+                },
+                "a deny by the label that is known",
+            ),
+            (
+                AccessRule {
+                    match_labels: BTreeMap::from([
+                        ("kept".to_string(), "team".to_string()),
+                        ("org".to_string(), "payments".to_string()),
+                    ]),
+                    ..deny("by-the-known-label-and-another")
+                },
+                "a deny by the known label and one that is not known",
+            ),
+        ] {
+            assert!(
+                !view(vec![everything.clone(), rule]),
+                "{why} refuses, with another allow present"
+            );
+        }
+        for (rule, why) in [
+            (
+                AccessRule {
+                    match_labels: label("kept", "other"),
+                    ..deny("by-the-known-label-with-another-value")
+                },
+                "a deny by the known label with another value",
+            ),
+            (
+                AccessRule {
+                    match_labels: BTreeMap::from([
+                        ("kept".to_string(), "other".to_string()),
+                        ("org".to_string(), "payments".to_string()),
+                    ]),
+                    ..deny("by-a-known-label-that-differs-and-another")
+                },
+                "a deny whose known label differs",
+            ),
+        ] {
+            assert!(view(vec![everything.clone(), rule]), "{why} does not apply");
+        }
+
+        // An admin, and a disabled configuration.
+        let refused = vec![AccessRule {
+            roles: vec!["worker".to_string()],
+            ..deny("by-role")
+        }];
+        assert!(
+            evaluate_access_lineage(
+                &config_with_rules(refused.clone()),
+                &principal("root@example.test", &[]),
+                "agent.view",
+                &agent,
+                &|_| true,
+            )
+            .is_allow(),
+            "an admin is allowed"
+        );
+        let mut disabled = config_with_rules(refused);
+        disabled.enabled = false;
+        assert!(
+            evaluate_access_lineage(&disabled, &caller, "agent.view", &agent, &|_| true).is_allow(),
+            "a disabled configuration allows"
+        );
+    }
+
+    /// What is known of an agent is known field by field. An agent whose
+    /// role alone is not known is decided closed by a rule on a role, in
+    /// both directions, and by its labels and its spawner as they are held:
+    /// a label that is not held is a label it does not carry, and an agent
+    /// that is not among its ancestors is not its ancestor.
+    #[test]
+    fn a_role_that_is_not_known_is_decided_closed_and_the_other_fields_as_held() {
+        let caller = principal("bob@example.test", &[]);
+        let own_labels = BTreeMap::from([("tier".to_string(), "vault".to_string())]);
+        let planner_labels = BTreeMap::new();
+        // The agent, its role not known, and the agent that spawned it.
+        let role_alone = AttributeKnowledge {
+            role: Knowledge::NotKnown,
+            ..AttributeKnowledge::WHOLE
+        };
+        let chain = [
+            KnownResource {
+                resource: AccessResource {
+                    identity: Some("aide"),
+                    agent_id: Some("aide"),
+                    role: None,
+                    labels: Some(&own_labels),
+                },
+                knowledge: role_alone,
+            },
+            KnownResource::whole(AccessResource {
+                identity: Some("planner"),
+                agent_id: Some("planner"),
+                role: Some("lead"),
+                labels: Some(&planner_labels),
+            }),
+        ];
+        let view = |rules: Vec<AccessRule>| {
+            evaluate_access_lineage(
+                &config_with_rules(rules),
+                &caller,
+                "agent.view",
+                &chain,
+                &|_| true,
+            )
+            .is_allow()
+        };
+        let allow = |id: &str| AccessRule {
+            subjects: vec!["*".to_string()],
+            actions: vec!["agent.*".to_string()],
+            ..allow_rule(id)
+        };
+        let deny = |id: &str| AccessRule {
+            effect: AccessEffect::Deny,
+            ..allow(id)
+        };
+        let label = |key: &str, value: &str| BTreeMap::from([(key.to_string(), value.to_string())]);
+        let everything = AccessRule {
+            agents: vec!["*".to_string()],
+            ..allow("everything")
+        };
+
+        // The role: closed in both directions.
+        assert!(
+            !view(vec![
+                everything.clone(),
+                AccessRule {
+                    roles: vec!["worker".to_string()],
+                    ..deny("by-role")
+                }
+            ]),
+            "a deny by role refuses, with another allow present"
+        );
+        assert!(
+            !view(vec![AccessRule {
+                roles: vec!["worker".to_string()],
+                ..allow("by-role")
+            }]),
+            "an allow by role grants nothing"
+        );
+        // The labels as held.
+        assert!(
+            view(vec![AccessRule {
+                match_labels: label("tier", "vault"),
+                ..allow("by-a-held-label")
+            }]),
+            "an allow by a held label"
+        );
+        assert!(
+            !view(vec![AccessRule {
+                match_labels: label("org", "payments"),
+                ..allow("by-a-label-not-held")
+            }]),
+            "an allow by a label that is not held grants nothing"
+        );
+        assert!(
+            !view(vec![
+                everything.clone(),
+                AccessRule {
+                    match_labels: label("tier", "vault"),
+                    ..deny("by-a-held-label")
+                }
+            ]),
+            "a deny by a held label refuses"
+        );
+        assert!(
+            view(vec![
+                everything.clone(),
+                AccessRule {
+                    match_labels: label("org", "payments"),
+                    ..deny("by-a-label-not-held")
+                }
+            ]),
+            "a deny by a label that is not held does not apply: the labels are known"
+        );
+        // The spawner as held.
+        assert!(
+            view(vec![AccessRule {
+                agents: vec!["planner".to_string()],
+                ..allow("by-the-spawner")
+            }]),
+            "an allow on the spawner"
+        );
+        assert!(
+            !view(vec![
+                everything.clone(),
+                AccessRule {
+                    agents: vec!["planner".to_string()],
+                    ..deny("by-the-spawner")
+                }
+            ]),
+            "a deny on the spawner refuses"
+        );
+        assert!(
+            view(vec![
+                everything,
+                AccessRule {
+                    agents: vec!["builder".to_string()],
+                    ..deny("by-another-agent")
+                }
+            ]),
+            "a deny on an agent that is not an ancestor does not apply: the spawner is known"
+        );
+    }
+
+    /// A field that is not known is decided closed on every link of a
+    /// lineage, an ancestor's as the agent's own: a deny on a role refuses
+    /// an agent one of whose ancestors has a role that is not known, and an
+    /// allow on a role takes nothing from that ancestor. An ancestor of
+    /// which nothing but its name is known refuses the agent under a deny
+    /// on a label and under a deny that names another agent.
+    #[test]
+    fn an_ancestor_with_a_field_that_is_not_known_is_decided_closed() {
+        let caller = principal("bob@example.test", &[]);
+        let none = BTreeMap::new();
+        let child = KnownResource::whole(AccessResource {
+            identity: Some("apprentice"),
+            agent_id: Some("apprentice"),
+            role: Some("reader"),
+            labels: Some(&none),
+        });
+        let ancestor = |knowledge| KnownResource {
+            resource: AccessResource {
+                identity: Some("aide"),
+                agent_id: None,
+                role: None,
+                labels: Some(&none),
+            },
+            knowledge,
+        };
+        let view = |knowledge, rules: Vec<AccessRule>| {
+            evaluate_access_lineage(
+                &config_with_rules(rules),
+                &caller,
+                "agent.view",
+                &[child, ancestor(knowledge)],
+                &|_| true,
+            )
+            .is_allow()
+        };
+        let allow = |id: &str| AccessRule {
+            subjects: vec!["*".to_string()],
+            actions: vec!["agent.*".to_string()],
+            ..allow_rule(id)
+        };
+        let deny = |id: &str| AccessRule {
+            effect: AccessEffect::Deny,
+            ..allow(id)
+        };
+        let everything = AccessRule {
+            agents: vec!["*".to_string()],
+            ..allow("everything")
+        };
+        let by_role = AccessRule {
+            roles: vec!["worker".to_string()],
+            ..deny("by-role")
+        };
+        let by_label = AccessRule {
+            match_labels: BTreeMap::from([("tier".to_string(), "vault".to_string())]),
+            ..deny("by-label")
+        };
+        let by_another_agent = AccessRule {
+            agents: vec!["builder".to_string()],
+            ..deny("by-another-agent")
+        };
+
+        let whole = AttributeKnowledge::WHOLE;
+        let role_not_known = AttributeKnowledge {
+            role: Knowledge::NotKnown,
+            ..AttributeKnowledge::WHOLE
+        };
+        let name_only = AttributeKnowledge::IDENTITY_AND_HELD_LABELS;
+        assert!(
+            view(whole, vec![everything.clone(), by_role.clone()]),
+            "an ancestor known to have no role is not a worker"
+        );
+        for knowledge in [role_not_known, name_only] {
+            assert!(
+                !view(knowledge, vec![everything.clone(), by_role.clone()]),
+                "a deny by role refuses the child of an ancestor whose role is not known"
+            );
+            assert!(
+                !view(
+                    knowledge,
+                    vec![AccessRule {
+                        roles: vec!["worker".to_string()],
+                        ..allow("by-role")
+                    }]
+                ),
+                "an allow by role takes nothing from an ancestor whose role is not known"
+            );
+        }
+        assert!(
+            view(role_not_known, vec![everything.clone(), by_label.clone()])
+                && view(
+                    role_not_known,
+                    vec![everything.clone(), by_another_agent.clone()]
+                ),
+            "an ancestor whose labels and spawner are held is decided by them"
+        );
+        assert!(
+            !view(name_only, vec![everything.clone(), by_label])
+                && !view(name_only, vec![everything, by_another_agent]),
+            "an ancestor of which only the name is known refuses under a deny on a label \
+             and under a deny that names another agent"
+        );
     }
 
     /// The engine knows no side chats: a single resource that carries a

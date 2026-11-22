@@ -22,6 +22,8 @@ mod cli_parse;
 mod exit_status;
 #[cfg(feature = "mcp")]
 mod mcp;
+#[cfg(feature = "mcp")]
+mod mcp_stdio_report;
 #[cfg(all(
     feature = "mob",
     feature = "comms",
@@ -2490,8 +2492,11 @@ enum StorageCommands {
     /// transcript-history footprint, dangling session→blob references, and
     /// orphaned lock/lease/backup artifacts.
     ///
-    /// By default the sweep covers the invocation-context-local
-    /// root (`<context-root>/.rkat/realms`) and the user-global data root. When
+    /// By default the sweep covers the roots ordinary runtime resolution
+    /// probes for an existing realm: the `.rkat/realms` of the context
+    /// root and of every ancestor that has a `.rkat` directory, and the
+    /// user-global data root. A realm present under more than one of them
+    /// is reported with both directories. When
     /// any explicit root is given (the global `--state-root` or one or more
     /// `--root`), ONLY those roots are read. `--realm` restricts the sweep
     /// to one realm id (split-brain twins for it are still detected across
@@ -2516,7 +2521,10 @@ enum StorageCommands {
 
     /// Offline migration framework (dry-run by default)
     ///
-    /// Sweeps the same candidate roots as `storage doctor` and, per realm:
+    /// Sweeps the invocation-context-local root
+    /// (`<context-root>/.rkat/realms`) and the user-global data root, or
+    /// only the roots `--state-root`/`--root` name (an ancestor's root is
+    /// never touched unless named), and, per realm:
     /// (1) ledger baseline — under the realm's exclusive maintenance fence,
     /// every store is opened through its normal constructor so the guarded
     /// schema-ledger migrations admit fresh domains or exact released
@@ -3843,6 +3851,14 @@ enum McpCommands {
 #[derive(Subcommand)]
 enum MobCommands {
     /// Pack a mob directory into a .mobpack archive.
+    ///
+    /// Prints the pack's digest on standard output. On standard error it
+    /// reports how many files it packed and warns, by path, about packed
+    /// files that look like secrets, repository metadata, local state or an
+    /// earlier pack: by name, and for one form by content (a file whose
+    /// text, trimmed, is exactly 64 hex digits). The list is a heuristic: no
+    /// warning does not mean the pack is clean. `rkat mob inspect <pack>`
+    /// lists every file in a pack.
     Pack {
         /// Mob directory to pack
         dir: PathBuf,
@@ -4389,6 +4405,14 @@ enum CliMobLiveControlVerb {
 #[derive(Subcommand)]
 enum MobWebCommands {
     /// Build a browser-deployable WASM bundle from a .mobpack archive.
+    ///
+    /// The bundle serves the whole pack to everyone who can load the page.
+    /// The command warns on standard error, by path, about files in the pack
+    /// that look like secrets, repository metadata, local state or an earlier
+    /// pack: by name, and for one form by content (a file whose text,
+    /// trimmed, is exactly 64 hex digits). The list is a heuristic: no
+    /// warning does not mean the pack is clean. `rkat mob inspect <pack>`
+    /// lists every file in a pack.
     Build {
         /// Path to a .mobpack archive
         pack: PathBuf,
@@ -6053,14 +6077,15 @@ fn resolve_runtime_scope_with_realm(
             .map(|b: RealmBackend| b.as_str().to_string()),
         state_root: cli.state_root.clone(),
     };
-    // Bootstrap path authority: realm-id-first dual-root resolution through
+    // Bootstrap path authority: realm-id-first resolution through
     // `StorageLayout::resolve`. An explicit --state-root wins; else the
-    // realm is used where it already exists (project-local
-    // <project-root>/.rkat/realms — walked up from the context root — or
-    // the user-global data dir; both is a typed split-brain refusal); else
-    // the CLI's documented project-local default applies. The resolved
-    // layout rides on the scope so persistence opens reserve across every
-    // probed candidate root.
+    // realm is used where it already exists (the `.rkat/realms` of the
+    // project root walked up from the context root or of a farther
+    // ancestor, or the user-global data dir; more than one is a typed
+    // split-brain refusal); else the CLI's documented project-local
+    // default, the nearest of them, applies. The resolved layout rides on
+    // the scope so persistence opens reserve across the root that holds
+    // the realm and the user-global root.
     let resolved = meerkat_core::StorageLayout::resolve(
         meerkat_core::StorageLayoutInputs {
             invocation_context: context_root.clone(),
@@ -6072,6 +6097,12 @@ fn resolve_runtime_scope_with_realm(
         &realm_cfg,
     )?;
     let locator = resolved.locator;
+    for root in resolved.layout.unreadable_realm_roots() {
+        eprintln!(
+            "Warning: the realm state root '{}' of an ancestor directory cannot be read and was skipped; a realm kept there is not used.",
+            root.display()
+        );
+    }
     if resolved.root_choice == meerkat_core::RealmRootChoice::ExistingGlobal {
         tracing::info!(
             realm = %locator.realm,
@@ -6234,6 +6265,9 @@ pub(crate) fn with_cli_confinement(
     scope: &RuntimeScope,
     workspace_root: &Path,
 ) -> anyhow::Result<AgentFactory> {
+    // Said first, so a start this function refuses still names a project
+    // file whose administered section is not in effect.
+    report_cli_unread_project_sections(scope, config, workspace_root);
     let confinement = meerkat::HostConfinement::resolve(&config.confinement, Some(workspace_root))?;
     let user_document = cli_global_config_path(scope);
     let mut inputs =
@@ -6355,6 +6389,52 @@ fn report_cli_confinement(
             eprintln!("{}", render_cli_confinement_notice(&notice));
         }
     });
+}
+
+/// The warnings for a project file whose `[confinement]` or `[governance]`
+/// table is not in effect in `config`, this scope's composed configuration
+/// ([`meerkat::HostConfinement::unread_project_sections`]): the file under
+/// the scope's context root (else `workspace_root`) and under the project
+/// root above it, against the realm's and the user's documents this scope
+/// composes.
+fn cli_unread_project_sections(
+    scope: &RuntimeScope,
+    config: &Config,
+    workspace_root: &Path,
+) -> Vec<meerkat::HostConfinementNotice> {
+    let realm_document =
+        cli_filesystem_realm_config_source(scope).config_doc_path(&scope.locator.realm);
+    meerkat::HostConfinement::unread_project_sections(
+        Some(scope.context_root.as_deref().unwrap_or(workspace_root)),
+        config,
+        &realm_document,
+        Some(&cli_global_config_path(scope)),
+    )
+}
+
+/// Print [`cli_unread_project_sections`] once per process on stderr, each as
+/// a warning. It is said whether or not the run confines anything: a table
+/// nobody reads matters most when nothing else states the section.
+fn report_cli_unread_project_sections(
+    scope: &RuntimeScope,
+    config: &Config,
+    workspace_root: &Path,
+) {
+    static REPORTED: std::sync::Once = std::sync::Once::new();
+    REPORTED.call_once(|| {
+        for notice in cli_unread_project_sections(scope, config, workspace_root) {
+            eprintln!("{}", render_cli_confinement_notice(&notice));
+        }
+    });
+}
+
+/// The doctor's `config` warnings for [`cli_unread_project_sections`], one
+/// line per section.
+fn doctor_unread_project_section_lines(scope: &RuntimeScope, config: &Config) -> Vec<String> {
+    cli_unread_project_sections(scope, config, &cli_project_root(scope))
+        .into_iter()
+        .map(|notice| format!("warn\tconfig\t{}", notice.text))
+        .collect()
 }
 
 /// One line of the CLI's confinement report: a warning is marked as one.
@@ -6602,10 +6682,14 @@ async fn handle_config_get(
     let (store, base_dir) = resolve_config_store(scope).await?;
     let runtime =
         meerkat_core::ConfigRuntime::new(Arc::clone(&store), base_dir.join("config_state.json"));
-    let snapshot = runtime
+    let mut snapshot = runtime
         .get()
         .await
         .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
+    // Every output form shows a marker in place of each stored secret
+    // value; `config set` and `config patch` take the marker back. The
+    // document file itself holds the values.
+    meerkat_core::config_secrets::mask_config_secrets(&mut snapshot.config);
     match format {
         ConfigFormat::Toml => {
             let rendered = toml::to_string_pretty(&snapshot.config)
@@ -10350,6 +10434,11 @@ async fn handle_doctor(scope: &RuntimeScope) -> anyhow::Result<()> {
         ok = false;
         println!("warn\tconfig\tmissing config at {}", config_path.display());
     }
+    // A project file's administered section that is not in effect is a
+    // warning only: it does not change the doctor's verdict.
+    for line in doctor_unread_project_section_lines(scope, &config) {
+        println!("{line}");
+    }
 
     let provider_keys: [(&str, &[&str]); 2] = [
         (
@@ -10467,13 +10556,24 @@ async fn handle_doctor(scope: &RuntimeScope) -> anyhow::Result<()> {
         }
     }
 
-    match meerkat_core::mcp_config::McpConfig::load_from_roots(
+    match meerkat_core::mcp_config::McpConfig::resolve_with_scopes_from_roots(
         scope.context_root.as_deref(),
         scope.user_config_root.as_deref(),
     )
     .await
     {
-        Ok(config) => println!("ok\tmcp\t{} configured server(s)", config.servers.len()),
+        Ok(files) => {
+            println!(
+                "ok\tmcp\t{} configured server(s)",
+                files.servers.len() + files.unresolved.len()
+            );
+            // Each server resolves alone: one naming a variable that is not
+            // set is that server's warning.
+            for unresolved in &files.unresolved {
+                ok = false;
+                println!("warn\tmcp\t{unresolved}");
+            }
+        }
         Err(err) => {
             ok = false;
             println!("warn\tmcp\t{err}");
@@ -10715,14 +10815,14 @@ impl StorageHostsFencesLine {
     }
 }
 
-/// Candidate state roots for the storage verbs, resolved WITHOUT opening
-/// persistence, taking leases, or building a service: an explicit
-/// `--state-root`/`--root` set is used verbatim (and nothing else is read);
-/// otherwise the sweep covers the invocation-context-local candidate and the
-/// user-global data root. Unlike ordinary runtime scope, this deliberately
-/// does not walk up to the nearest ancestor containing `.rkat`; callers that
-/// want the runtime's project-local candidate must invoke the verb there or
-/// pass it explicitly.
+/// Candidate state roots for the storage verbs that change or remove
+/// something (`migrate`, `prune`), resolved WITHOUT opening persistence,
+/// taking leases, or building a service: an explicit `--state-root`/`--root`
+/// set is used verbatim (and nothing else is read); otherwise the sweep
+/// covers the invocation-context-local candidate and the user-global data
+/// root. Unlike ordinary runtime scope, this deliberately does not walk up
+/// to an ancestor containing `.rkat`: these verbs act on an ancestor's root
+/// only when `--root` names it.
 fn storage_sweep_roots(cli: &Cli, extra_roots: &[PathBuf]) -> Vec<PathBuf> {
     let mut state_roots: Vec<PathBuf> = Vec::new();
     if let Some(explicit) = &cli.state_root {
@@ -10737,6 +10837,31 @@ fn storage_sweep_roots(cli: &Cli, extra_roots: &[PathBuf]) -> Vec<PathBuf> {
         state_roots.push(meerkat_core::local_realms_candidate(&context_root));
         state_roots.push(meerkat_core::default_state_root());
     }
+    state_roots
+}
+
+/// The roots `storage doctor` reads: an explicit `--state-root`/`--root`
+/// set verbatim; otherwise the roots ordinary runtime resolution probes for
+/// an existing realm (the `.rkat/realms` of the context root's project and
+/// of every farther ancestor that has a `.rkat` directory) and the
+/// user-global data root, so a realm present under more than one of them is
+/// reported. The doctor only reads.
+fn storage_doctor_roots(cli: &Cli, extra_roots: &[PathBuf]) -> Vec<PathBuf> {
+    if cli.state_root.is_some() || !extra_roots.is_empty() {
+        return storage_sweep_roots(cli, extra_roots);
+    }
+    let context_root = cli
+        .context_root
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let mut state_roots = meerkat_core::local_realms_candidates(&context_root);
+    // The context's own candidate stays in the sweep as before, also where
+    // the context has no `.rkat` of its own.
+    let own = meerkat_core::local_realms_candidate(&context_root);
+    if !state_roots.contains(&own) {
+        state_roots.insert(0, own);
+    }
+    state_roots.push(meerkat_core::default_state_root());
     state_roots
 }
 
@@ -10777,7 +10902,7 @@ async fn handle_storage_doctor(
     json: bool,
     extra_roots: &[PathBuf],
 ) -> anyhow::Result<()> {
-    let state_roots = storage_sweep_roots(cli, extra_roots);
+    let state_roots = storage_doctor_roots(cli, extra_roots);
     let mut scope = meerkat_core::DiagnoseScope::new(state_roots);
     if let Some(realm) = storage_realm_filter(cli)? {
         scope = scope.with_realm(realm);
@@ -13080,7 +13205,7 @@ async fn create_mcp_tools(
         host_confinement,
         attempt_guards,
     } = stdio_profile;
-    let effective = McpConfig::effective_servers_from_roots_trusting(
+    let effective = McpConfig::resolve_effective_servers_from_roots_trusting(
         realm_servers,
         scope.context_root.as_deref(),
         scope.user_config_root.as_deref(),
@@ -13090,11 +13215,18 @@ async fn create_mcp_tools(
     .map_err(|e| anyhow::anyhow!("MCP config error: {e}"))?;
     let servers_with_scope = effective.admitted;
     let refused_servers = effective.refused;
+    // Each `mcp.toml` server resolves alone: one naming a variable that is
+    // not set is that server's failure, not the run's.
+    let unresolved_servers = effective.unresolved;
 
-    if servers_with_scope.is_empty() && refused_servers.is_empty() {
+    if servers_with_scope.is_empty() && refused_servers.is_empty() && unresolved_servers.is_empty()
+    {
         return Ok(None);
     }
     report_refused_mcp_servers(&refused_servers);
+    for unresolved in &unresolved_servers {
+        eprintln!("{}", unresolved_mcp_server_warning(unresolved));
+    }
 
     // Warn about project-scoped servers (potential security concern)
     let project_servers: Vec<_> = servers_with_scope
@@ -13108,16 +13240,8 @@ async fn create_mcp_tools(
             project_servers.len()
         );
         for s in &project_servers {
-            let target = match &s.server.transport {
-                meerkat_core::mcp_config::McpTransportConfig::Stdio(stdio) => {
-                    if stdio.args.is_empty() {
-                        stdio.command.clone()
-                    } else {
-                        format!("{} {}", stdio.command, stdio.args.join(" "))
-                    }
-                }
-                meerkat_core::mcp_config::McpTransportConfig::Http(http) => http.url.clone(),
-            };
+            // The listing's own target: a URL without its userinfo and query.
+            let (_, target) = mcp::format_server_target(&s.server);
             eprintln!("  - {} ({})", s.server.name, target);
         }
     }
@@ -13183,6 +13307,14 @@ async fn create_mcp_tools(
             )
             .map_err(|e| anyhow::anyhow!("MCP config: {e}"))?;
     }
+    // An unresolved server is staged as written and fails at once, as a
+    // server that does not connect does: nothing of it is expanded,
+    // connected or spawned.
+    for unresolved in unresolved_servers {
+        router
+            .stage_add_unresolved(unresolved)
+            .map_err(|e| anyhow::anyhow!("MCP config: {e}"))?;
+    }
 
     // Apply staged ops — spawns background connection tasks
     let result = router
@@ -13211,10 +13343,15 @@ async fn create_mcp_tools(
         // K14: wait-for-mcp is fail-closed — servers still pending at the
         // deadline surface as a typed `McpNotReady` fault that aborts the run
         // before the first turn, never a warn-and-proceed.
-        let notices = adapter
-            .wait_until_ready(total_timeout)
-            .await
-            .map_err(|not_ready| anyhow::anyhow!("{not_ready}"))?;
+        let notices = match adapter.wait_until_ready(total_timeout).await {
+            Ok(notices) => notices,
+            Err(not_ready) => {
+                // The stdio servers that did fail are reported to the
+                // operator before the run is refused.
+                mcp_stdio_report::print(&adapter).await;
+                return Err(anyhow::anyhow!("{not_ready}"));
+            }
+        };
         for notice in &notices {
             if notice.status_text().starts_with("failed") {
                 eprintln!(
@@ -13224,6 +13361,9 @@ async fn create_mcp_tools(
                 );
             }
         }
+        // The operator also gets what a failed stdio server wrote to
+        // stderr: on this terminal only.
+        mcp_stdio_report::print(&adapter).await;
     }
 
     // Refresh cached tools to include any that connected immediately
@@ -13233,6 +13373,16 @@ async fn create_mcp_tools(
         .map_err(|e| anyhow::anyhow!("Failed to refresh MCP tools: {e}"))?;
 
     Ok(Some(adapter))
+}
+
+/// What the operator is told, on stderr, about an `mcp.toml` server that
+/// names an environment variable that is not set: the server, the field and
+/// the variable, never a value. The run starts without it.
+#[cfg(feature = "mcp")]
+fn unresolved_mcp_server_warning(
+    unresolved: &meerkat_core::mcp_config::UnresolvedMcpServer,
+) -> String {
+    format!("warning: {unresolved}; the run starts without it")
 }
 
 /// Tell the operator, on stderr, which `mcp.toml` servers are refused: their
@@ -13427,14 +13577,20 @@ async fn governed_configured_mcp_servers(
     #[cfg(feature = "mcp")]
     {
         // An `mcp.toml` a confined process could write configures nothing.
-        let servers = meerkat_core::mcp_config::McpConfig::effective_servers_from_roots_trusting(
-            realm_servers,
-            scope.context_root.as_deref(),
-            scope.user_config_root.as_deref(),
-            &|path| host_confinement.is_some_and(|host| host.untrusted_source(path)),
-        )
-        .await
-        .map_err(|e| anyhow::anyhow!("MCP config error: {e}"))?;
+        let servers =
+            meerkat_core::mcp_config::McpConfig::resolve_effective_servers_from_roots_trusting(
+                realm_servers,
+                scope.context_root.as_deref(),
+                scope.user_config_root.as_deref(),
+                &|path| host_confinement.is_some_and(|host| host.untrusted_source(path)),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("MCP config error: {e}"))?;
+        // The governed set goes to the factory whole: a server naming a
+        // variable that is not set refuses the run, by name.
+        if let Some(unresolved) = servers.unresolved.first() {
+            anyhow::bail!("MCP config error: {unresolved}");
+        }
         report_refused_mcp_servers(&servers.refused);
         Ok(Some(GovernedMcpServers {
             servers: servers
@@ -13506,6 +13662,10 @@ fn with_governed_mcp_auth(
 async fn shutdown_mcp(_adapter: &Option<Arc<McpRouterAdapter>>) {
     #[cfg(feature = "mcp")]
     if let Some(adapter) = _adapter {
+        // A stdio server that failed in the background, during the run, is
+        // reported to the operator here, before the shutdown releases what
+        // the router retains of it; one already reported is not repeated.
+        mcp_stdio_report::print(adapter).await;
         adapter.shutdown().await;
     }
 }
@@ -16039,6 +16199,12 @@ async fn run_agent(
         // authority so shared RPC/REST realms can read them without trusting
         // the compatibility SessionStore projection.
         let schedule_service = persistence.schedule_service();
+        // Whether this host's agents may write a schedule that creates a
+        // session, from the host's own configuration.
+        schedule_service
+            .allow_agent_session_creation(config.tools.agent_schedules_may_create_sessions);
+        #[cfg(feature = "mob")]
+        let run_schedule_service = schedule_service.clone();
         let default_schedule_tools =
             Some(Arc::new(ScheduleToolDispatcher::new(schedule_service))
                 as Arc<dyn AgentToolDispatcher>);
@@ -16077,6 +16243,12 @@ async fn run_agent(
             )
             .await?;
             let ctx = prepare_run_mob_tools_from_surface(storage_scope, mob_surface).await?;
+            // The members of these mobs hold the schedule tools of this
+            // run's schedule service: their schedule writes are judged by
+            // the mobs' own wiring.
+            run_schedule_service.attach_write_judge(Arc::new(
+                meerkat_mob_mcp::MobScheduleWriteJudge::new(&ctx.state),
+            ));
             if keep_alive {
                 ctx.state.set_detached_completion_delivery(
                     meerkat_mob_mcp::DetachedCompletionDelivery::Available,
@@ -16889,6 +17061,12 @@ async fn resume_session_with_llm_override(
         // realize it. Routing through the shared CLI builder is what keeps
         // resume identical to a fresh run.
         let schedule_service = persistence.schedule_service();
+        // Whether this host's agents may write a schedule that creates a
+        // session, from the host's own configuration.
+        schedule_service
+            .allow_agent_session_creation(config.tools.agent_schedules_may_create_sessions);
+        #[cfg(feature = "mob")]
+        let run_schedule_service = schedule_service.clone();
         let default_schedule_tools =
             Some(Arc::new(ScheduleToolDispatcher::new(schedule_service))
                 as Arc<dyn AgentToolDispatcher>);
@@ -16914,6 +17092,12 @@ async fn resume_session_with_llm_override(
             let run_mob_service: Arc<dyn meerkat_mob::MobSessionService> =
                 Arc::new(MobCliSessionService::new(mob_persistent));
             let ctx = prepare_run_mob_tools(scope, run_mob_service).await?;
+            // The members of these mobs hold the schedule tools of this
+            // run's schedule service: their schedule writes are judged by
+            // the mobs' own wiring.
+            run_schedule_service.attach_write_judge(Arc::new(
+                meerkat_mob_mcp::MobScheduleWriteJudge::new(&ctx.state),
+            ));
             if keep_alive {
                 ctx.state.set_detached_completion_delivery(
                     meerkat_mob_mcp::DetachedCompletionDelivery::Available,
@@ -17425,6 +17609,9 @@ async fn get_or_create_cli_persistent_surface_from_bundle(
     let factory = with_cli_confinement(factory, &config, scope, &project_root)?;
 
     let schedule_service = persistence.schedule_service();
+    // Whether this host's agents may write a schedule that creates a
+    // session, from the host's own configuration.
+    schedule_service.allow_agent_session_creation(config.tools.agent_schedules_may_create_sessions);
     let default_schedule_tools = Some(Arc::new(ScheduleToolDispatcher::new(
         schedule_service.clone(),
     )) as Arc<dyn AgentToolDispatcher>);
@@ -17444,7 +17631,10 @@ async fn get_or_create_cli_persistent_surface_from_bundle(
         Some(scope),
     )?;
     #[cfg(all(feature = "mob", feature = "session-store"))]
-    let mob_state_cache = Arc::new(CliMobStateCache::default());
+    let mob_state_cache = Arc::new(CliMobStateCache {
+        state: tokio::sync::Mutex::new(None),
+        schedule_service: Some(schedule_service.clone()),
+    });
     let schedule_host = if schedule_host_supported(schedule_service.store().kind()) {
         #[cfg(all(feature = "mob", feature = "session-store"))]
         let mob_host = build_cli_schedule_mob_host(
@@ -17537,6 +17727,10 @@ struct CliPersistentSurfaceState {
 #[derive(Default)]
 struct CliMobStateCache {
     state: tokio::sync::Mutex<Option<Arc<meerkat_mob_mcp::MobMcpState>>>,
+    /// The schedule service the surface's sessions hold their schedule tools
+    /// over: the mob state, once hydrated, judges its members' schedule
+    /// writes through it.
+    schedule_service: Option<meerkat::ScheduleService>,
 }
 
 #[cfg(all(feature = "mob", feature = "session-store"))]
@@ -17565,6 +17759,11 @@ async fn hydrate_cli_mob_state_cached(
         std::collections::BTreeMap::new(),
     )
     .await?;
+    if let Some(schedule_service) = mob_state_cache.schedule_service.as_ref() {
+        schedule_service.attach_write_judge(Arc::new(meerkat_mob_mcp::MobScheduleWriteJudge::new(
+            &mob_state,
+        )));
+    }
     *cached = Some(Arc::clone(&mob_state));
     Ok(mob_state)
 }
@@ -21597,22 +21796,32 @@ async fn load_mcp_login_servers(
                     .as_deref()
                     .map(meerkat_core::mcp_config::user_mcp_path_in),
             };
-            let servers = McpConfig::load_scope_from_roots(
+            // Each server resolves alone: a variable that is not set fails
+            // only a login addressed to the server that names it.
+            let resolved = McpConfig::resolve_scope_from_roots(
                 scope,
                 cli_scope.context_root.as_deref(),
                 cli_scope.user_config_root.as_deref(),
             )
-            .await?
-            .servers;
+            .await?;
+            let unresolved = resolved
+                .unresolved
+                .into_iter()
+                .find(|unresolved| unresolved.server.name == name);
             if file.as_deref().is_some_and(untrusted)
-                && servers.iter().any(|server| server.name == name)
+                && (unresolved.is_some()
+                    || resolved.servers.iter().any(|file| file.server.name == name))
             {
                 return Err(not_configured());
             }
-            servers
+            if let Some(unresolved) = unresolved {
+                return Err(unresolved.into());
+            }
+            resolved
+                .servers
                 .into_iter()
-                .map(|server| meerkat_core::McpServerWithSource {
-                    server,
+                .map(|file| meerkat_core::McpServerWithSource {
+                    server: file.server,
                     source: McpServerSource::File(scope),
                 })
                 .collect::<Vec<_>>()
@@ -21625,7 +21834,7 @@ async fn load_mcp_login_servers(
         }
         // The realm's MCP set, as a session in this realm sees it.
         None => {
-            let servers = McpConfig::effective_servers_from_roots_trusting(
+            let servers = McpConfig::resolve_effective_servers_from_roots_trusting(
                 &realm_servers,
                 cli_scope.context_root.as_deref(),
                 cli_scope.user_config_root.as_deref(),
@@ -21638,6 +21847,13 @@ async fn load_mcp_login_servers(
                 .any(|refused| refused.server.name == name)
             {
                 return Err(not_configured());
+            }
+            if let Some(unresolved) = servers
+                .unresolved
+                .into_iter()
+                .find(|unresolved| unresolved.server.name == name)
+            {
+                return Err(unresolved.into());
             }
             servers.admitted
         }
@@ -23703,10 +23919,66 @@ async fn execute_mob_pack(
 ) -> anyhow::Result<String> {
     let result = pack_directory_with_excludes(dir, signing, &[output])
         .map_err(|err| anyhow::anyhow!("mob pack failed: {err}"))?;
+    // The pack's own files, read back as every reader of the pack reads them.
+    let packed = extract_targz_safe(&result.archive_bytes)
+        .map_err(|err| anyhow::anyhow!("mob pack failed: {err}"))?;
     tokio::fs::write(output, &result.archive_bytes)
         .await
         .map_err(|err| anyhow::anyhow!("failed writing archive '{}': {err}", output.display()))?;
+    // Standard output stays the digest alone: scripts read it.
+    write_report_to_standard_error(&mob_pack_report(&packed, output));
     Ok(result.digest.to_string())
+}
+
+/// Writes a report to standard error. The report is a courtesy: a standard
+/// error that cannot be written to (a closed pipe) must not fail the command,
+/// change its exit status or keep its standard output from being printed, so
+/// a failed write is dropped.
+#[cfg(feature = "mob")]
+fn write_report_to_standard_error(report: &str) {
+    use std::io::Write as _;
+    let _ = std::io::stderr().write_all(report.as_bytes());
+}
+
+/// The `warning` lines for the files of a pack that look like secrets,
+/// repository metadata, local state or an earlier pack: by name, and for one
+/// form by content (a file whose text, trimmed, is exactly 64 hex digits). A
+/// line names a path and never holds a byte of a file. Empty when the list
+/// knows none of the files, which says nothing about what they hold.
+#[cfg(feature = "mob")]
+fn mobpack_content_warning_lines(files: &std::collections::BTreeMap<String, Vec<u8>>) -> String {
+    meerkat_mob_pack::content_warnings::pack_content_warnings(
+        files
+            .iter()
+            .map(|(path, content)| (path.as_str(), content.as_slice())),
+    )
+    .iter()
+    .fold(String::new(), |mut lines, warning| {
+        lines.push_str(&format!("warning\t{warning}\n"));
+        lines
+    })
+}
+
+/// What a successful `rkat mob pack` writes to standard error: how many files
+/// the pack holds, a warning for each flagged file, and after any warning
+/// where to list every file.
+#[cfg(feature = "mob")]
+fn mob_pack_report(
+    files: &std::collections::BTreeMap<String, Vec<u8>>,
+    pack: &std::path::Path,
+) -> String {
+    let mut report = format!("packed\t{} files\n", files.len());
+    let warnings = mobpack_content_warning_lines(files);
+    if !warnings.is_empty() {
+        report.push_str(&warnings);
+        report.push_str(&format!(
+            "note\tthe warnings come from a short list of names and from one content form (a \
+             file whose text, trimmed, is exactly 64 hex digits), not from a reading of the \
+             files; list every file in the pack with: rkat mob inspect {}\n",
+            pack.display()
+        ));
+    }
+    report
 }
 
 #[cfg(feature = "mob")]
@@ -23967,6 +24239,11 @@ async fn execute_mob_web_build(
 ) -> anyhow::Result<String> {
     let verified =
         load_verified_mobpack(scope, pack, cli_trust_policy, "mob web build failed").await?;
+    let pack_content_warnings = {
+        let files = extract_targz_safe(&verified.bytes)
+            .map_err(|err| anyhow::anyhow!("mob web build failed: {err}"))?;
+        mobpack_content_warning_lines(&files)
+    };
     if let Some(requires) = &verified.archive.manifest.requires {
         for cap in &requires.capabilities {
             if meerkat_contracts::capability::browser_mobpack_capability_decision(cap.id())
@@ -24094,6 +24371,16 @@ async fn execute_mob_web_build(
     for warning in verified.trust_warnings {
         rendered.push_str(&format!("\nwarning\t{warning}"));
     }
+    // The bundle publishes the pack as it is. Standard output stays as it
+    // was; what the pack holds goes to standard error.
+    if !pack_content_warnings.is_empty() {
+        write_report_to_standard_error(&format!(
+            "{pack_content_warnings}note\tthe bundle serves the whole pack, these files included, \
+             to everyone who can load the page; list every file in the pack with: rkat mob \
+             inspect {}\n",
+            pack.display()
+        ));
+    }
     Ok(rendered)
 }
 
@@ -24131,6 +24418,8 @@ struct MobRunPackInvocation<'a> {
     detach: bool,
     json: bool,
     cli_trust_policy: Option<TrustPolicyArg>,
+    /// Sees the composed configuration before the pack's mob is built.
+    config_observer: Option<DeployConfigObserver>,
 }
 
 #[cfg(feature = "mob")]
@@ -24169,6 +24458,7 @@ async fn execute_mob_run_pack_with_stack_relief(
                 detach: invocation.detach,
                 json: invocation.json,
                 cli_trust_policy: invocation.cli_trust_policy,
+                config_observer: None,
             },
         )
         .await
@@ -24202,13 +24492,21 @@ async fn execute_mob_run_pack(
     let params = parse_mob_run_params(invocation.raw_params, invocation.prompt)?;
     validate_mobpack_input_params(&archive, &params)?;
     let mut effective_config = load_deploy_realm_config(scope).await?;
+    // A pack run has no deploy flags of its own; the process's
+    // `--confinement*` selection applies to it as to a deploy.
     let layers = DeployConfigLayers::resolve(
         &archive.manifest,
         &archive.deploy_policy,
         DeploySurfaceArg::Cli,
-        CliOverrides::default(),
+        CliOverrides {
+            confinement: scope.confinement.clone(),
+            ..CliOverrides::default()
+        },
     )?;
     meerkat::HostConfigLayer::apply(&layers, &mut effective_config);
+    if let Some(observer) = invocation.config_observer.as_ref() {
+        observer(&effective_config);
+    }
     let flow_id = choose_mobpack_flow(&archive, invocation.flow)?;
     if invocation.detach && flow_id.is_none() {
         // Refuse before the durable mob-create side effect below.
@@ -34814,6 +35112,243 @@ url = "https://user.example/mcp"
         adapter.shutdown().await;
     }
 
+    /// The `rkat run` loader's failed stdio server is reported to the
+    /// operator once: the phase, the server's own exit status and the lines
+    /// it wrote to stderr. A healthy server is not reported.
+    #[cfg(all(feature = "mcp", unix))]
+    #[tokio::test]
+    async fn test_cli_reports_a_failed_stdio_server_once_with_exit_status_and_stderr() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let scope = test_scope(root.join("realms"), "report-realm");
+        let factory = AgentFactory::new(root.join("sessions"));
+        let crashing = meerkat_core::McpServerConfig::stdio(
+            "crashing",
+            "/bin/sh",
+            vec![
+                "-c".into(),
+                "printf 'config file not found\\n' >&2\nprintf 'giving up\\n' >&2\nexit 3\n".into(),
+            ],
+            HashMap::new(),
+        );
+        let healthy = meerkat_core::McpServerConfig::stdio(
+            "healthy",
+            "/bin/sh",
+            vec![
+                "-c".into(),
+                r#"printf 'serving\n' >&2
+while IFS= read -r line; do
+  id=$(printf '%s\n' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"2025-03-26","capabilities":{"tools":{}},"serverInfo":{"name":"healthy","version":"0"}}}\n' "$id" ;;
+    *'"method":"tools/list"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[]}}\n' "$id" ;;
+  esac
+done
+"#
+                .into(),
+            ],
+            HashMap::new(),
+        );
+
+        let adapter = create_mcp_tools(
+            &scope,
+            &[crashing, healthy],
+            false,
+            CliMcpAuthMode::Stored,
+            Some(Arc::new(
+                meerkat_runtime::handles::RuntimeExternalToolSurfaceHandle::ephemeral(),
+            )),
+            cli_mcp_stdio_profile(&factory),
+            Some(&CliMcpRouterOwner::fresh(&SessionId::new())),
+        )
+        .await
+        .expect("the loader stages the realm servers")
+        .expect("two configured servers");
+        let deltas = adapter
+            .wait_until_ready(std::time::Duration::from_secs(30))
+            .await
+            .unwrap();
+        assert!(
+            deltas.iter().any(|delta| delta.target == "crashing"
+                && delta.phase == meerkat_core::ExternalToolDeltaPhase::Failed),
+            "{deltas:?}"
+        );
+        for delta in &deltas {
+            let rendered = format!("{delta:?}");
+            assert!(
+                !rendered.contains("config file not found") && !rendered.contains("giving up"),
+                "the server's stderr stays out of the notices: {rendered}"
+            );
+        }
+
+        let reports = mcp_stdio_report::collect(&adapter).await;
+        assert_eq!(reports.len(), 1, "the failed server only: {reports:?}");
+        let report = &reports[0];
+        assert!(
+            report.starts_with("MCP server 'crashing': stdio setup failed during initialize: "),
+            "{report}"
+        );
+        #[cfg(target_os = "linux")]
+        assert!(
+            report.contains("the server process ended, exit status 3\n"),
+            "{report}"
+        );
+        assert!(
+            report.ends_with("  its last stderr output:\n  | config file not found\n  | giving up"),
+            "{report}"
+        );
+        assert!(
+            mcp_stdio_report::collect(&adapter).await.is_empty(),
+            "a reported failure is not reported again"
+        );
+        adapter.shutdown().await;
+    }
+
+    /// A user `mcp.toml` whose one server, `alpha`, names a variable that is
+    /// not set, and the scope that reads it. Running `alpha` would create
+    /// the returned marker file.
+    #[cfg(all(feature = "mcp", unix))]
+    async fn scope_with_an_unresolved_mcp_server(
+        root: &Path,
+        realm: &str,
+        absent: &str,
+    ) -> (RuntimeScope, PathBuf) {
+        let marker = root.join("unresolved-launch-marker");
+        let user_root = root.join("user");
+        tokio::fs::create_dir_all(user_root.join(".rkat"))
+            .await
+            .unwrap();
+        tokio::fs::write(
+            user_root.join(".rkat/mcp.toml"),
+            format!(
+                "[[servers]]\nname = \"alpha\"\ncommand = \"/bin/sh\"\n\
+                 args = [\"-c\", \"printf entered > {}\"]\n\
+                 env = {{ TOKEN = \"${{{absent}}}\" }}\n",
+                marker.display()
+            ),
+        )
+        .await
+        .unwrap();
+        let mut scope = test_scope(root.join("realms"), realm);
+        scope.user_config_root = Some(user_root);
+        (scope, marker)
+    }
+
+    /// A variable that is not set fails the one `mcp.toml` server that names
+    /// it, not the run: the loader stages that server as a failed add at
+    /// once, with or without a wait for MCP, and nothing of it is expanded,
+    /// connected or spawned.
+    #[cfg(all(feature = "mcp", unix))]
+    #[tokio::test]
+    async fn test_cli_mcp_loader_fails_only_the_server_naming_an_unset_variable() {
+        const ABSENT: &str = "RKAT_ROW_MCP_LOADER_ABSENT_TOKEN";
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let (scope, marker) =
+            scope_with_an_unresolved_mcp_server(&root, "loader-realm", ABSENT).await;
+        let factory = AgentFactory::new(root.join("sessions"));
+
+        for wait_for_mcp in [true, false] {
+            let adapter = tokio::time::timeout(
+                std::time::Duration::from_secs(20),
+                create_mcp_tools(
+                    &scope,
+                    &[],
+                    wait_for_mcp,
+                    CliMcpAuthMode::Stored,
+                    Some(Arc::new(
+                        meerkat_runtime::handles::RuntimeExternalToolSurfaceHandle::ephemeral(),
+                    )),
+                    cli_mcp_stdio_profile(&factory),
+                    Some(&CliMcpRouterOwner::fresh(&SessionId::new())),
+                ),
+            )
+            .await
+            .expect("an unresolved server is failed at once, never pending")
+            .expect("the run starts beside a server naming an unset variable")
+            .expect("one configured server");
+            if !wait_for_mcp {
+                let deltas = adapter
+                    .wait_until_ready(std::time::Duration::from_secs(15))
+                    .await
+                    .unwrap();
+                assert!(
+                    deltas.iter().any(|delta| {
+                        delta.target == "alpha"
+                            && delta.phase == meerkat_core::ExternalToolDeltaPhase::Failed
+                            && delta.detail.as_deref().is_some_and(|detail| {
+                                detail.contains("env.TOKEN") && detail.contains(ABSENT)
+                            })
+                    }),
+                    "the server is reported failed with its field and variable: {deltas:?}"
+                );
+            }
+            adapter.shutdown().await;
+        }
+        assert!(
+            !marker.exists(),
+            "an unresolved server never starts its process"
+        );
+
+        // What the operator reads on stderr names the server, the field and
+        // the variable.
+        let unresolved = McpConfig::resolve_scope_from_roots(
+            McpScope::User,
+            None,
+            scope.user_config_root.as_deref(),
+        )
+        .await
+        .unwrap()
+        .unresolved;
+        assert_eq!(unresolved.len(), 1);
+        assert_eq!(
+            unresolved_mcp_server_warning(&unresolved[0]),
+            format!(
+                "warning: MCP server 'alpha' in the user mcp.toml is not resolved: environment \
+                 variable '{ABSENT}' referenced in env.TOKEN is not set; the run starts without it"
+            )
+        );
+    }
+
+    /// On a governed realm the configured set goes to the factory whole, so
+    /// a server naming a variable that is not set still refuses the run; the
+    /// refusal names the server, the field and the variable.
+    #[cfg(all(feature = "local-authorization", feature = "mcp", unix))]
+    #[tokio::test]
+    async fn a_governed_run_refuses_an_unset_variable_naming_its_server() {
+        use meerkat::governed_realm::{
+            RealmGovernance, open_governed_realm_persistence_with_provider,
+        };
+        const ABSENT: &str = "RKAT_ROW_MCP_GOVERNED_ABSENT_TOKEN";
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let (scope, _marker) =
+            scope_with_an_unresolved_mcp_server(&root, "ws-unresolved", ABSENT).await;
+        let (_, governed) = open_governed_realm_persistence_with_provider(
+            &meerkat::DiskStorageProvider,
+            &root.join("realms"),
+            "ws-unresolved",
+            None,
+            None,
+            None,
+            RealmGovernance::GovernedWithoutOwners,
+        )
+        .await
+        .expect("governed without owners");
+        assert!(persistence_is_governed(&governed));
+
+        let Err(error) = governed_configured_mcp_servers(&governed, &scope, &[], None).await else {
+            panic!("a governed run refuses a server naming an unset variable");
+        };
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("'alpha'")
+                && message.contains("env.TOKEN")
+                && message.contains(ABSENT),
+            "the refusal names the server, the field and the variable: {message}"
+        );
+    }
+
     /// Run the CLI loader for one stdio server under a factory whose MCP
     /// attempt guard refuses everything, for `owner`; assert the server was
     /// refused before its process started and return what the guard was
@@ -35442,6 +35977,130 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
             cli_mcp_stdio_profile(&factory).profile.capabilities(),
             Ok(None)
         ));
+    }
+
+    /// A `[confinement]` or `[governance]` table in the project file is not
+    /// read. When it is not what the run composes, `rkat` says so in one
+    /// stderr warning per section that names the file, the table and the
+    /// documents it reads (for confinement the flags as well), and
+    /// `rkat doctor` prints the same as `config` warnings. A table that
+    /// does not parse is named too. Nothing is said about a project file
+    /// without the table or with a table that states what is in effect, and
+    /// the same table in the realm's own document takes effect.
+    #[tokio::test]
+    async fn test_cli_names_a_project_file_section_that_is_not_in_effect() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let workspace = base.join("workspace");
+        std::fs::create_dir_all(workspace.join(".rkat")).unwrap();
+        let mut scope = test_scope(base.join("realms"), "notice-realm");
+        scope.context_root = Some(workspace.clone());
+        let project_file = workspace.join(".rkat").join("config.toml");
+        let realm_document =
+            meerkat_store::realm_paths_in(&scope.locator.state_root, scope.locator.realm.as_str())
+                .config_path;
+        let user_document = cli_global_config_path(&scope);
+        let said = |config: &Config| -> Vec<String> {
+            cli_unread_project_sections(&scope, config, &workspace)
+                .iter()
+                .map(render_cli_confinement_notice)
+                .collect()
+        };
+
+        // No table: nothing is said.
+        std::fs::write(&project_file, "[agent]\nmax_turns = 3\n").unwrap();
+        let (config, _) = load_config(&scope).await.expect("load config");
+        assert!(said(&config).is_empty(), "{:?}", said(&config));
+        assert!(doctor_unread_project_section_lines(&scope, &config).is_empty());
+
+        // A table the run does not compose: one warning, and the doctor's.
+        std::fs::write(&project_file, UNENFORCEABLE_CONFINEMENT).unwrap();
+        let (config, _) = load_config(&scope).await.expect("load config");
+        assert!(
+            config.confinement.is_empty(),
+            "the project file's table is not composed"
+        );
+        let lines = said(&config);
+        assert_eq!(
+            lines.len(),
+            1,
+            "one warning for the project file: {lines:?}"
+        );
+        assert!(lines[0].starts_with("warning: "), "{}", lines[0]);
+        for named in [
+            project_file.display().to_string(),
+            "[confinement]".to_owned(),
+            realm_document.display().to_string(),
+            user_document.display().to_string(),
+            "--confinement".to_owned(),
+        ] {
+            assert!(
+                lines[0].contains(&named),
+                "the warning names {named}: {}",
+                lines[0]
+            );
+        }
+        let doctor = doctor_unread_project_section_lines(&scope, &config);
+        assert_eq!(doctor.len(), 1, "{doctor:?}");
+        assert!(
+            doctor[0].starts_with("warn\tconfig\t")
+                && doctor[0].contains(&project_file.display().to_string())
+                && doctor[0].contains(&realm_document.display().to_string()),
+            "{}",
+            doctor[0]
+        );
+
+        // A table that does not parse as the section is named too.
+        std::fs::write(&project_file, "[confinement]\nmode = \"workspace\"\n").unwrap();
+        let lines = said(&config);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(
+            lines[0].contains(&project_file.display().to_string())
+                && lines[0].contains("[confinement]"),
+            "{}",
+            lines[0]
+        );
+
+        // The realm's own document is where the table takes effect, and a
+        // project file that states the same is not named.
+        std::fs::write(&project_file, UNENFORCEABLE_CONFINEMENT).unwrap();
+        std::fs::create_dir_all(realm_document.parent().unwrap()).unwrap();
+        std::fs::write(&realm_document, UNENFORCEABLE_CONFINEMENT).unwrap();
+        let (config, _) = load_config(&scope).await.expect("load config");
+        assert!(
+            !config.confinement.is_empty(),
+            "the realm document's table is composed"
+        );
+        assert!(said(&config).is_empty(), "{:?}", said(&config));
+        assert!(doctor_unread_project_section_lines(&scope, &config).is_empty());
+
+        // The other administered section, by the same rule.
+        std::fs::write(
+            &project_file,
+            format!(
+                "{UNENFORCEABLE_CONFINEMENT}\n[governance.decisions]\noperator_approver_ids = [\"team:owners\"]\n"
+            ),
+        )
+        .unwrap();
+        let lines = said(&config);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(
+            lines[0].starts_with("warning: ")
+                && lines[0].contains(&project_file.display().to_string())
+                && lines[0].contains("[governance]")
+                && lines[0].contains(&realm_document.display().to_string()),
+            "{}",
+            lines[0]
+        );
+
+        // The doctor's line is a warning only: with it, and nothing else
+        // amiss, the doctor's verdict stays good.
+        assert_eq!(
+            doctor_unread_project_section_lines(&scope, &config).len(),
+            1
+        );
+        let verdict = handle_doctor(&scope).await;
+        assert!(verdict.is_ok(), "{verdict:?}");
     }
 
     /// A confined command whose processes could change the realm state is
@@ -37620,6 +38279,237 @@ auth_profile = "inline"
         );
     }
 
+    /// A scope over `root` whose realm document is `document`, with a packed
+    /// fixture mob beside it.
+    #[cfg(feature = "mob")]
+    async fn pack_confinement_fixture(
+        root: &std::path::Path,
+        document: Option<&str>,
+    ) -> (RuntimeScope, PathBuf) {
+        let mut scope = test_scope_with_context(root.to_path_buf());
+        scope.user_config_root = Some(root.to_path_buf());
+        if let Some(document) = document {
+            let config_path = meerkat_store::realm_paths_in(
+                &scope.locator.state_root,
+                scope.locator.realm.as_str(),
+            )
+            .config_path;
+            std::fs::create_dir_all(config_path.parent().expect("config parent"))
+                .expect("mkdir config");
+            std::fs::write(&config_path, document).expect("write config");
+        }
+        let mob_dir = create_mobpack_fixture_dir(root);
+        let pack = root.join("confinement-proof.mobpack");
+        execute_mob_pack(&mob_dir, &pack, None)
+            .await
+            .expect("pack succeeds");
+        (scope, pack)
+    }
+
+    /// An observer that keeps the `[confinement]` of the configuration it is
+    /// shown.
+    #[cfg(feature = "mob")]
+    fn confinement_observer() -> (
+        DeployConfigObserver,
+        Arc<Mutex<Option<meerkat_core::ConfinementConfig>>>,
+    ) {
+        let observed = Arc::new(Mutex::new(None));
+        let observer: DeployConfigObserver = Arc::new({
+            let observed = Arc::clone(&observed);
+            move |config: &Config| {
+                *observed.lock().expect("lock observed") = Some(config.confinement.clone());
+            }
+        });
+        (observer, observed)
+    }
+
+    /// The `[confinement]` a run of `pack` composes on `scope`. The run is
+    /// detached and the fixture pack has no flow, so the run ends at its own
+    /// refusal once the configuration is composed, before any mob is built.
+    #[cfg(feature = "mob")]
+    async fn pack_run_composed_confinement(
+        scope: &RuntimeScope,
+        pack: &std::path::Path,
+    ) -> meerkat_core::ConfinementConfig {
+        let (observer, observed) = confinement_observer();
+        let refusal = Box::pin(execute_mob_run_pack(
+            scope,
+            MobRunPackInvocation {
+                pack,
+                flow: None,
+                prompt: None,
+                raw_params: &[],
+                detach: true,
+                json: false,
+                cli_trust_policy: Some(TrustPolicyArg::Permissive),
+                config_observer: Some(observer),
+            },
+        ))
+        .await
+        .expect_err("a detached run of a pack without a flow is refused");
+        assert!(
+            refusal
+                .to_string()
+                .contains("requires a mobpack with a callable flow"),
+            "unexpected refusal: {refusal}"
+        );
+        observed
+            .lock()
+            .expect("lock observed")
+            .take()
+            .expect("the pack run composed a configuration")
+    }
+
+    /// The `[confinement]` a deploy of `pack` composes on `scope`, with the
+    /// process's selection in the deploy flags as `rkat mob deploy` passes it.
+    #[cfg(feature = "mob")]
+    async fn deploy_composed_confinement(
+        scope: &RuntimeScope,
+        pack: &std::path::Path,
+    ) -> meerkat_core::ConfinementConfig {
+        let (observer, observed) = confinement_observer();
+        let output = Box::pin(execute_mob_deploy_internal(
+            scope,
+            pack,
+            "hello",
+            DeployInvocation {
+                cli_trust_policy: Some(TrustPolicyArg::Permissive),
+                surface: DeploySurfaceArg::Cli,
+                cli_overrides: CliOverrides {
+                    confinement: scope.confinement.clone(),
+                    ..CliOverrides::default()
+                },
+                #[cfg(feature = "rpc-surface")]
+                rpc_io: None,
+                config_observer: Some(observer),
+            },
+        ))
+        .await
+        .expect("deploy succeeds");
+        assert!(
+            output.contains("deployed\tmob="),
+            "unexpected output: {output}"
+        );
+        observed
+            .lock()
+            .expect("lock observed")
+            .take()
+            .expect("the deploy composed a configuration")
+    }
+
+    /// A pack run applies the `--confinement` flags as a deploy does: with a
+    /// flag and no `[confinement]` document, both compose the flag's
+    /// selection for every launch kind.
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn test_mob_run_pack_composes_the_confinement_flag_as_deploy_does() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (mut scope, pack) = pack_confinement_fixture(temp.path(), None).await;
+        scope.confinement = Some(meerkat_core::LaunchConfinement::TrustedHost);
+
+        let run = pack_run_composed_confinement(&scope, &pack).await;
+        let deploy = deploy_composed_confinement(&scope, &pack).await;
+
+        assert_eq!(
+            deploy,
+            meerkat_core::ConfinementConfig::for_all(meerkat_core::LaunchConfinement::TrustedHost),
+            "a deploy composes the flag's selection"
+        );
+        assert_eq!(
+            run, deploy,
+            "a pack run composes the selection a deploy composes from the same flag"
+        );
+    }
+
+    /// Without a `--confinement` flag a pack run and a deploy both compose
+    /// the realm document's `[confinement]`.
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn test_mob_run_pack_and_deploy_compose_the_documents_confinement_without_a_flag() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (scope, pack) =
+            pack_confinement_fixture(temp.path(), Some(UNENFORCEABLE_CONFINEMENT)).await;
+        let (documents, _) = load_config(&scope).await.expect("load config");
+        assert!(
+            documents
+                .confinement
+                .all
+                .as_ref()
+                .is_some_and(meerkat_core::LaunchConfinement::requires_confinement),
+            "the document selects a confinement: {:?}",
+            documents.confinement
+        );
+
+        let run = pack_run_composed_confinement(&scope, &pack).await;
+        let deploy = deploy_composed_confinement(&scope, &pack).await;
+
+        assert_eq!(
+            deploy, documents.confinement,
+            "a deploy composes the document's selection"
+        );
+        assert_eq!(
+            run, documents.confinement,
+            "a pack run composes the document's selection"
+        );
+    }
+
+    /// A `--confinement` flag replaces the realm document's `[confinement]`
+    /// on a pack run and on a deploy alike.
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn test_mob_run_pack_confinement_flag_replaces_the_documents_selection_as_on_deploy() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (mut scope, pack) =
+            pack_confinement_fixture(temp.path(), Some(UNENFORCEABLE_CONFINEMENT)).await;
+        scope.confinement = Some(meerkat_core::LaunchConfinement::TrustedHost);
+
+        let run = pack_run_composed_confinement(&scope, &pack).await;
+        let deploy = deploy_composed_confinement(&scope, &pack).await;
+
+        assert_eq!(
+            deploy,
+            meerkat_core::ConfinementConfig::for_all(meerkat_core::LaunchConfinement::TrustedHost),
+            "on a deploy the flag replaces the document's selection"
+        );
+        assert_eq!(
+            run, deploy,
+            "on a pack run the flag replaces the document's selection as on a deploy"
+        );
+    }
+
+    /// A pack run composes a `--confinement workspace` selection for every
+    /// launch kind. The run ends at its own refusal once the configuration
+    /// is composed, so the selection is read from the composed table alone:
+    /// nothing is lowered and no surface is built.
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn test_mob_run_pack_composes_a_workspace_confinement_flag_for_every_launch_kind() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (mut scope, pack) = pack_confinement_fixture(temp.path(), None).await;
+        let selection =
+            meerkat_core::LaunchConfinement::Workspace(meerkat_core::WorkspaceConfinement {
+                network: meerkat_core::WorkspaceNetwork::Denied,
+                read: Vec::new(),
+                write: Vec::new(),
+            });
+        scope.confinement = Some(selection.clone());
+
+        let run = pack_run_composed_confinement(&scope, &pack).await;
+
+        for kind in meerkat_core::ConfinementLaunchKind::ALL {
+            assert_eq!(
+                run.statement(kind),
+                Some(&selection),
+                "a pack run composes the flag's workspace selection for {kind:?}"
+            );
+        }
+        assert_eq!(
+            run,
+            meerkat_core::ConfinementConfig::for_all(selection),
+            "the composed table is the flag's selection and nothing else"
+        );
+    }
+
     #[test]
     fn test_parse_provider_params_single() -> Result<(), Box<dyn std::error::Error>> {
         let params = vec!["reasoning_effort=high".to_string()];
@@ -39203,7 +40093,7 @@ default_model = "gpt-5.4"
     }
 
     /// The durable external-delivery record a first attempt leaves in mob
-    /// `ops`: its Begin under the occurrence's stable identity, then its
+    /// `ops-redelivery`: its Begin under the occurrence's stable identity, then its
     /// completed terminal.
     #[cfg(all(feature = "mob", feature = "session-store"))]
     async fn record_completed_cli_ops_delivery(
@@ -39212,7 +40102,7 @@ default_model = "gpt-5.4"
         canonical_action: &str,
     ) {
         let intent = meerkat_mob::MobExternalDeliveryIntent::new(
-            meerkat_mob::MobId::from("ops"),
+            meerkat_mob::MobId::from("ops-redelivery"),
             meerkat_mob::MobExternalDeliveryIdentity::new(
                 identity.idempotency_key.clone(),
                 identity.correlation_id.clone(),
@@ -39272,7 +40162,7 @@ default_model = "gpt-5.4"
         .expect("compose the CLI runtime-backed service");
         let mob_state = meerkat_mob_mcp::MobMcpState::new_in_memory();
         let definition: meerkat_mob::MobDefinition = serde_json::from_value(serde_json::json!({
-            "id": "ops",
+            "id": "ops-redelivery",
             "profiles": {
                 "worker": {
                     "model": "gpt-5.4",
@@ -39295,11 +40185,12 @@ default_model = "gpt-5.4"
             runtime_adapter,
             Arc::new(CliMobStateCache {
                 state: tokio::sync::Mutex::new(Some(Arc::clone(&mob_state))),
+                schedule_service: None,
             }),
         );
 
         let mob_target = meerkat::MobTargetBinding::Member {
-            mob_id: "ops".to_string(),
+            mob_id: "ops-redelivery".to_string(),
             member_id: "deploy-monitor".to_string(),
             action: meerkat::ScheduledMobAction::Send {
                 content: "Check deploy state.".to_string().into(),
@@ -39338,7 +40229,7 @@ default_model = "gpt-5.4"
 
         let identity_target = meerkat::IdentityTargetBinding::resumable(
             meerkat::surface::mob_member_schedule_identity(&meerkat_core::MobMemberBinding {
-                mob_id: "ops".to_string(),
+                mob_id: "ops-redelivery".to_string(),
                 role: "worker".to_string(),
                 member: "deploy-monitor".to_string(),
             }),
@@ -39446,6 +40337,451 @@ default_model = "gpt-5.4"
         assert!(names.contains("meerkat_schedule_create"));
         assert!(names.contains("meerkat_schedule_list"));
         assert!(names.contains("meerkat_schedule_occurrences"));
+    }
+
+    /// A model one of whose requests (the one numbered `schedules_at`, from
+    /// zero) calls `meerkat_schedule_create` for a schedule whose target is
+    /// a session created on demand, and whose other requests answer text.
+    struct SessionCreatingScheduleClient {
+        calls: std::sync::atomic::AtomicUsize,
+        schedules_at: usize,
+    }
+
+    #[async_trait]
+    impl LlmClient for SessionCreatingScheduleClient {
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, LlmError> {
+            Ok(messages.to_vec())
+        }
+
+        fn stream<'a>(
+            &'a self,
+            request: &'a LlmRequest,
+        ) -> Pin<Box<dyn futures::Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>> {
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let events = if call == self.schedules_at {
+                vec![
+                    Ok(LlmEvent::ToolCallComplete {
+                        id: "make-a-fresh-session-schedule".into(),
+                        name: "meerkat_schedule_create".into(),
+                        args: serde_json::json!({
+                            "name": "a fresh session",
+                            "trigger": {
+                                "type": "once",
+                                "due_at_utc":
+                                    (chrono::Utc::now() + chrono::Duration::days(1)).to_rfc3339(),
+                            },
+                            "target": {
+                                "target_kind": "session",
+                                "type": "materialize_on_demand_session",
+                                "create": { "model": "gpt-5.4" },
+                                "action": { "type": "prompt", "prompt": "Run the report." }
+                            }
+                        }),
+                        meta: None,
+                    }),
+                    Ok(normalized_cli_fixture_usage(request)),
+                    Ok(LlmEvent::Done {
+                        outcome: LlmDoneOutcome::success(meerkat_core::StopReason::ToolUse),
+                    }),
+                ]
+            } else {
+                vec![
+                    Ok(LlmEvent::TextDelta {
+                        delta: "done".into(),
+                        meta: None,
+                    }),
+                    Ok(normalized_cli_fixture_usage(request)),
+                    Ok(LlmEvent::Done {
+                        outcome: LlmDoneOutcome::success(meerkat_core::StopReason::EndTurn),
+                    }),
+                ]
+            };
+            Box::pin(stream::iter(events))
+        }
+
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::OpenAI
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
+    /// One session on the CLI's session service, built with `build`, whose
+    /// model writes a schedule that creates a session: the schedules the
+    /// service holds afterwards.
+    async fn schedules_after_a_session_schedules_a_session(
+        build: SessionBuildOptions,
+    ) -> Vec<meerkat::Schedule> {
+        schedules_after_a_session_schedules_a_session_on(Config::default(), build).await
+    }
+
+    /// [`schedules_after_a_session_schedules_a_session`] on a host whose
+    /// configuration is `config`.
+    async fn schedules_after_a_session_schedules_a_session_on(
+        config: Config,
+        build: SessionBuildOptions,
+    ) -> Vec<meerkat::Schedule> {
+        let temp = tempfile::tempdir().expect("tempdir must be created");
+        let factory = AgentFactory::new(temp.path().join("sessions"))
+            .builtins(true)
+            .schedule(true);
+        let schedule_service =
+            meerkat::ScheduleService::new(Arc::new(meerkat::MemoryScheduleStore::default()));
+        let default_schedule_tools = Some(Arc::new(ScheduleToolDispatcher::new(
+            schedule_service.clone(),
+        )) as Arc<dyn AgentToolDispatcher>);
+        let service = Arc::new(build_cli_service(factory, config, default_schedule_tools));
+        let llm_override: Arc<dyn LlmClient> = Arc::new(SessionCreatingScheduleClient {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            schedules_at: 0,
+        });
+        service
+            .create_session(CreateSessionRequest {
+                injected_context: Vec::new(),
+                model: "gpt-5.4".to_string(),
+                prompt: "schedule the report".to_string().into(),
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
+                max_tokens: Some(32),
+                event_tx: None,
+                initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: Some(SessionBuildOptions {
+                    custom_models: std::collections::BTreeMap::new(),
+                    image_generation_provider: None,
+                    auto_compact_threshold_override: None,
+                    compaction_curator_override: None,
+                    llm_client_override: Some(meerkat::encode_llm_client_override_for_service(
+                        llm_override,
+                    )),
+                    ..build
+                }),
+                labels: None,
+            })
+            .await
+            .expect("the session's turn ends");
+        schedule_service
+            .list()
+            .await
+            .expect("the schedules are read")
+    }
+
+    /// On the CLI's session service a session built as the host builds one
+    /// by default writes a schedule that creates a session, as before: the
+    /// session the fire creates is built the same way. A session created
+    /// with a tool family switched off that the host's factory has on is
+    /// under a restriction the created session would not be under, and its
+    /// schedule is refused: nothing is stored.
+    #[tokio::test]
+    async fn test_a_session_with_a_tool_family_off_schedules_no_session_on_the_cli_service() {
+        let default_build =
+            schedules_after_a_session_schedules_a_session(SessionBuildOptions::default()).await;
+        assert_eq!(
+            default_build.len(),
+            1,
+            "a session of the host's default build schedules a session as before"
+        );
+
+        let restricted = schedules_after_a_session_schedules_a_session(SessionBuildOptions {
+            override_builtins: meerkat_core::ToolCategoryOverride::Disable,
+            ..SessionBuildOptions::default()
+        })
+        .await;
+        assert!(
+            restricted.is_empty(),
+            "a session with the built-in tools switched off schedules no session: {restricted:?}"
+        );
+
+        let hidden = || {
+            meerkat_core::types::ToolNameSet(
+                [meerkat_core::types::ToolName::new("datetime")]
+                    .into_iter()
+                    .collect(),
+            )
+        };
+        let filtered = schedules_after_a_session_schedules_a_session(SessionBuildOptions {
+            initial_tool_filter: Some(meerkat_core::ToolFilter::Deny(hidden())),
+            ..SessionBuildOptions::default()
+        })
+        .await;
+        assert!(
+            filtered.is_empty(),
+            "a session built with a tool filter schedules no session: {filtered:?}"
+        );
+        let under_policy = schedules_after_a_session_schedules_a_session(SessionBuildOptions {
+            tool_access_policy: Some(meerkat_core::ops::ToolAccessPolicy::DenyList(hidden())),
+            ..SessionBuildOptions::default()
+        })
+        .await;
+        assert!(
+            under_policy.is_empty(),
+            "a session under a tool access policy schedules no session: {under_policy:?}"
+        );
+    }
+
+    /// A host configuration whose realm `desk` has two OpenAI bindings:
+    /// `main`, which the realm selects by default, and `second`. The key's
+    /// source names a variable nothing sets: the rows' scripted model
+    /// resolves no credential.
+    fn config_with_a_default_binding() -> Config {
+        toml::from_str(
+            r#"
+[realm.desk]
+default_binding = "main"
+
+[realm.desk.backend.openai_primary]
+provider = "openai"
+backend_kind = "openai_api"
+
+[realm.desk.auth.openai_key]
+provider = "openai"
+auth_method = "api_key"
+source = { kind = "env", env = "SCHEDULE_ROW_KEY_NOT_SET" }
+
+[realm.desk.binding.main]
+backend_profile = "openai_primary"
+auth_profile = "openai_key"
+
+[realm.desk.binding.second]
+backend_profile = "openai_primary"
+auth_profile = "openai_key"
+"#,
+        )
+        .expect("the row's host configuration parses")
+    }
+
+    fn desk_binding(binding: &str) -> meerkat_core::AuthBindingRef {
+        meerkat_core::AuthBindingRef {
+            realm: meerkat_core::RealmId::parse("desk").expect("realm id parses"),
+            binding: meerkat_core::BindingId::parse(binding).expect("binding id parses"),
+            profile: None,
+            origin: meerkat_core::connection::BindingOrigin::Configured,
+        }
+    }
+
+    /// A stored session of realm `desk` whose record carries `binding`,
+    /// as a first life leaves it: the build records the binding its
+    /// credential resolution selected. It is written here by hand, since a
+    /// scripted model resolves no credential.
+    fn stored_session_on(binding: &str) -> Session {
+        let mut session = Session::new();
+        session
+            .set_session_metadata(meerkat_core::SessionMetadata {
+                model_fallback: None,
+                schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
+                model: "gpt-5.4".to_string(),
+                max_tokens: 4096,
+                structured_output_retries: 2,
+                provider: meerkat_core::Provider::OpenAI,
+                self_hosted_server_id: None,
+                provider_params: None,
+                tooling: meerkat_core::SessionTooling::default(),
+                keep_alive: false,
+                comms_name: None,
+                peer_meta: None,
+                realm_id: Some(meerkat_core::RealmId::parse("desk").expect("realm id parses")),
+                instance_id: None,
+                backend: None,
+                config_generation: None,
+                auth_binding: Some(desk_binding(binding)),
+                mob_member_binding: None,
+            })
+            .expect("the stored record is written");
+        session
+    }
+
+    /// A session built by default stays a default writer when it is
+    /// continued from storage, as every continued CLI run is. Its stored
+    /// record carries the binding the host's credential resolution
+    /// selected for it, and the continued build runs on that binding: where
+    /// it is the binding the host selects by default, the session's
+    /// schedule that creates a session is taken as in its first life. A
+    /// stored binding the host does not select by default, and a binding a
+    /// fresh session names that the host does not select by default, are
+    /// bindings of the session's own: refused, nothing stored.
+    #[tokio::test]
+    async fn test_a_continued_session_on_the_hosts_default_binding_schedules_a_session() {
+        let realm = || meerkat_core::RealmId::parse("desk").expect("realm id parses");
+        let continued = |binding: &str| SessionBuildOptions {
+            resume_session: Some(stored_session_on(binding)),
+            realm_id: Some(realm()),
+            ..SessionBuildOptions::default()
+        };
+        let on_the_default = schedules_after_a_session_schedules_a_session_on(
+            config_with_a_default_binding(),
+            continued("main"),
+        )
+        .await;
+        assert_eq!(
+            on_the_default.len(),
+            1,
+            "a session continued on the host's default binding schedules a session"
+        );
+        let on_another = schedules_after_a_session_schedules_a_session_on(
+            config_with_a_default_binding(),
+            continued("second"),
+        )
+        .await;
+        assert!(
+            on_another.is_empty(),
+            "a session continued on a binding of its own schedules no session: {on_another:?}"
+        );
+        let naming_another = schedules_after_a_session_schedules_a_session_on(
+            config_with_a_default_binding(),
+            SessionBuildOptions {
+                auth_binding: Some(desk_binding("second")),
+                realm_id: Some(realm()),
+                ..SessionBuildOptions::default()
+            },
+        )
+        .await;
+        assert!(
+            naming_another.is_empty(),
+            "a session that names a binding of its own schedules no session: {naming_another:?}"
+        );
+    }
+
+    /// What a host puts on a live session before the turn in which its model
+    /// writes a schedule that creates a session.
+    enum LiveLayer {
+        Nothing,
+        /// A tool filter staged on the live session.
+        Filter,
+        /// A per-turn overlay on that turn alone.
+        TurnOverlay,
+    }
+
+    /// One session of the host's default build on the CLI's session service
+    /// whose first turn answers text and whose second turn writes a schedule
+    /// that creates a session, with `layer` put on the live session between
+    /// the two: the schedules the service holds afterwards.
+    async fn schedules_after_a_later_turn_schedules_a_session(
+        layer: LiveLayer,
+    ) -> Vec<meerkat::Schedule> {
+        let temp = tempfile::tempdir().expect("tempdir must be created");
+        let factory = AgentFactory::new(temp.path().join("sessions"))
+            .builtins(true)
+            .schedule(true);
+        let schedule_service =
+            meerkat::ScheduleService::new(Arc::new(meerkat::MemoryScheduleStore::default()));
+        let default_schedule_tools = Some(Arc::new(ScheduleToolDispatcher::new(
+            schedule_service.clone(),
+        )) as Arc<dyn AgentToolDispatcher>);
+        let service = Arc::new(build_cli_service(
+            factory,
+            Config::default(),
+            default_schedule_tools,
+        ));
+        let llm_override: Arc<dyn LlmClient> = Arc::new(SessionCreatingScheduleClient {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            schedules_at: 1,
+        });
+        let created = service
+            .create_session(CreateSessionRequest {
+                injected_context: Vec::new(),
+                model: "gpt-5.4".to_string(),
+                prompt: "say hello".to_string().into(),
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
+                max_tokens: Some(32),
+                event_tx: None,
+                initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: Some(SessionBuildOptions {
+                    custom_models: std::collections::BTreeMap::new(),
+                    image_generation_provider: None,
+                    auto_compact_threshold_override: None,
+                    compaction_curator_override: None,
+                    llm_client_override: Some(meerkat::encode_llm_client_override_for_service(
+                        llm_override,
+                    )),
+                    ..SessionBuildOptions::default()
+                }),
+                labels: None,
+            })
+            .await
+            .expect("the session's first turn ends");
+        assert!(
+            schedule_service
+                .list()
+                .await
+                .expect("the schedules are read")
+                .is_empty(),
+            "the first turn writes no schedule"
+        );
+
+        let hidden = meerkat_core::types::ToolName::new("datetime");
+        let mut overlay = None;
+        match layer {
+            LiveLayer::Nothing => {}
+            LiveLayer::Filter => service
+                .set_session_tool_filter(
+                    &created.session_id,
+                    meerkat_core::ToolFilter::Deny(meerkat_core::types::ToolNameSet(
+                        [hidden].into_iter().collect(),
+                    )),
+                )
+                .await
+                .expect("the filter is staged on the live session"),
+            LiveLayer::TurnOverlay => {
+                overlay = Some(meerkat_core::service::TurnToolOverlay {
+                    blocked_tools: Some(vec![hidden]),
+                    ..Default::default()
+                });
+            }
+        }
+        service
+            .start_turn(
+                &created.session_id,
+                StartTurnRequest {
+                    injected_context: Vec::new(),
+                    prompt: "schedule the report".to_string().into(),
+                    system_prompt: None,
+                    event_tx: None,
+                    runtime: meerkat_core::service::StartTurnRuntimeSemantics {
+                        turn_tool_overlay: overlay,
+                        ..Default::default()
+                    },
+                },
+            )
+            .await
+            .expect("the second turn ends");
+        schedule_service
+            .list()
+            .await
+            .expect("the schedules are read")
+    }
+
+    /// What narrows a session's tools after its build refuses its schedule
+    /// that creates a session as a restriction of the build does. A session
+    /// of the host's default build writes one in a later turn as before. A
+    /// tool filter the host stages on the live session, and an overlay on
+    /// the one turn, each leave the session with fewer tools than a session
+    /// the fire would create: the schedule is refused and nothing is
+    /// stored. The agent loop states the live layers on every dispatch; no
+    /// argument of the call can.
+    #[tokio::test]
+    async fn test_a_live_sessions_narrowed_tools_schedule_no_session_on_the_cli_service() {
+        let untouched = schedules_after_a_later_turn_schedules_a_session(LiveLayer::Nothing).await;
+        assert_eq!(
+            untouched.len(),
+            1,
+            "a later turn of a session nothing narrows schedules a session as before"
+        );
+        let filtered = schedules_after_a_later_turn_schedules_a_session(LiveLayer::Filter).await;
+        assert!(
+            filtered.is_empty(),
+            "a session under a live tool filter schedules no session: {filtered:?}"
+        );
+        let overlaid =
+            schedules_after_a_later_turn_schedules_a_session(LiveLayer::TurnOverlay).await;
+        assert!(
+            overlaid.is_empty(),
+            "a turn under a tool overlay schedules no session: {overlaid:?}"
+        );
     }
 
     #[cfg(feature = "session-store")]
@@ -40275,6 +41611,110 @@ default_model = "gpt-5.4"
                 .contains(&scope.locator.state_root),
             "the chosen root must be among the reservation candidates"
         );
+    }
+
+    #[test]
+    fn test_resolve_runtime_scope_keeps_a_realm_under_a_farther_ancestor_root() {
+        // A realm that exists under the project's state root is used there
+        // also once a directory between the context root and the project
+        // root holds a `.rkat` entry of its own.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project = temp.path().join("proj");
+        let nested = project.join("a").join("b");
+        std::fs::create_dir_all(&nested).expect("mkdir");
+        std::fs::create_dir_all(project.join(".rkat")).expect("mkdir .rkat");
+        let cli = Cli::try_parse_from([
+            "rkat",
+            "--context-root",
+            nested.to_str().expect("utf-8 path"),
+            "run",
+            "hello",
+        ])
+        .expect("cli should parse");
+        let project_realms = project.join(".rkat").join("realms");
+        let first =
+            resolve_runtime_scope_with_realm(&cli, cli.realm.clone()).expect("scope resolves");
+        assert_eq!(first.locator.state_root, project_realms);
+
+        let realm_dir = project_realms.join(meerkat_core::runtime_bootstrap::sanitize_realm_id(
+            first.locator.realm.as_str(),
+        ));
+        std::fs::create_dir_all(&realm_dir).expect("realm dir");
+        std::fs::write(
+            realm_dir.join(meerkat_core::runtime_bootstrap::REALM_MANIFEST_FILE_NAME),
+            serde_json::json!({
+                "realm_id": first.locator.realm.as_str(),
+                "backend": "sqlite",
+                "created_at": "0",
+            })
+            .to_string(),
+        )
+        .expect("manifest");
+
+        std::fs::create_dir_all(project.join("a").join(".rkat")).expect("nearer .rkat");
+        let second =
+            resolve_runtime_scope_with_realm(&cli, cli.realm.clone()).expect("scope resolves");
+        assert_eq!(second.locator.realm, first.locator.realm);
+        assert_eq!(
+            second.locator.state_root, project_realms,
+            "the realm stays under the root where it exists"
+        );
+        assert_eq!(
+            second.root_choice,
+            meerkat_core::RealmRootChoice::ExistingLocal
+        );
+    }
+
+    #[test]
+    fn test_resolve_runtime_scope_refuses_a_realm_under_two_ancestor_roots() {
+        // The refusal comes from scope resolution itself, before any realm
+        // storage is opened.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project = temp.path().join("proj");
+        let nested = project.join("sub");
+        let roots = [
+            nested.join(".rkat").join("realms"),
+            project.join(".rkat").join("realms"),
+        ];
+        for root in &roots {
+            let realm_dir = root.join("dev");
+            std::fs::create_dir_all(&realm_dir).expect("realm dir");
+            std::fs::write(
+                realm_dir.join(meerkat_core::runtime_bootstrap::REALM_MANIFEST_FILE_NAME),
+                serde_json::json!({
+                    "realm_id": "dev",
+                    "backend": "sqlite",
+                    "created_at": "0",
+                })
+                .to_string(),
+            )
+            .expect("manifest");
+        }
+        let cli = Cli::try_parse_from([
+            "rkat",
+            "--realm",
+            "dev",
+            "--context-root",
+            nested.to_str().expect("utf-8 path"),
+            "run",
+            "hello",
+        ])
+        .expect("cli should parse");
+        let Err(error) = resolve_runtime_scope(&cli) else {
+            panic!("a realm under two candidate roots must refuse scope resolution");
+        };
+        match error.downcast_ref::<meerkat_core::runtime_bootstrap::RuntimeBootstrapError>() {
+            Some(meerkat_core::runtime_bootstrap::RuntimeBootstrapError::RealmSplitBrain {
+                realm_id,
+                local,
+                global,
+            }) => {
+                assert_eq!(realm_id, "dev");
+                assert_eq!(local, &roots[0]);
+                assert_eq!(global, &roots[1]);
+            }
+            other => panic!("wrong error: {other:?} ({error})"),
+        }
     }
 
     #[test]

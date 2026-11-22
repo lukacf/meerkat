@@ -5798,8 +5798,11 @@ const SESSION_CREATE_STACK_CHILD_TEST: &str = "session_create_on_a_sized_worker_
 /// member's turns run on the host's runtime, where they ran on Core's
 /// cleanup runtime before, so the fork child's text-only turn is polled on
 /// these workers, beneath the session task's own poll frame. In a debug build
-/// the restart re-link scenario needs 1,343,488 bytes for it (1,331,200
-/// overflows, at the run loop's first model-request boundary).
+/// the restart re-link scenario needs 1,196,032 bytes for it (1,191,936
+/// overflows, at the compaction check of the turn's effects). It needed
+/// 1,343,488 when this budget was set, and 1,519,616 before the run loop,
+/// the run's failure handling and the session task's commands that are not
+/// a turn were awaited through boxed forms.
 ///
 /// Before that move the worst path was the scenario's runtime delivery owner
 /// admitting the re-linked child's continuation: 999,424 bytes (983,040
@@ -5809,10 +5812,35 @@ const SESSION_CREATE_STACK_CHILD_TEST: &str = "session_create_on_a_sized_worker_
 /// inline. The budget was 1,179,648 then. Session creation, which runs no
 /// turn, needed 901,120.
 ///
-/// This budget leaves about 17% (229,376 bytes) over the 1,343,488 need and
+/// This budget leaves about 31.5% (376,832 bytes) over the 1,196,032 need and
 /// stays 25% (524,288 bytes) under a host's 2 MiB, so a regression that eats
-/// that headroom fails here before it nears a host's limit.
+/// that headroom fails here before it nears a host's limit;
+/// [`RELINK_WORKER_STACK_HEADROOM_TARGET`] holds the headroom itself.
 const WORKER_STACK_BUDGET: usize = 1_572_864;
+/// The worker stack the restart re-link scenario must fit to keep its
+/// headroom under the [`WORKER_STACK_BUDGET`]
+/// ([`restart_relink_keeps_its_worker_stack_headroom`]).
+///
+/// In a debug build the scenario needs 1,196,032 bytes (1,191,936 overflows,
+/// in the member's turn, at the compaction check of its turn effects) with
+/// the run loop, the run's failure handling and the session task's commands
+/// that are not a turn awaited through boxed forms. This target is that need
+/// plus 28,672 bytes, so the path keeps 348,160 bytes (22%) under the budget.
+/// The need is that of a build of Core's whole selection with its test
+/// features, the form of the `closure-tests` rows; a build of this package
+/// alone needs 1,191,936.
+///
+/// A change that takes the need past this target has spent headroom the
+/// budget row cannot see. Take the growth off the path where it arose (box
+/// the payload or the future at its definition; the size row
+/// `the_values_the_agent_loop_holds_inline_keep_their_sizes` of
+/// `meerkat-core` names the values every frame of a turn holds inline), or
+/// raise this target in the same change and say what the headroom was spent
+/// on. The need is measured by running the child fixture
+/// [`RELINK_STACK_CHILD_TEST`] of this binary with a smaller
+/// [`RELINK_WORKER_STACK_ENV`] (`--exact ... --ignored --nocapture
+/// --test-threads=1`) until it overflows.
+const RELINK_WORKER_STACK_HEADROOM_TARGET: usize = 1_224_704;
 /// The stack of a child's driver thread, which builds the fixture and waits
 /// on the scenario: the debug test-thread budget `.cargo/config.toml` sets.
 /// What the scenario measures runs on the workers.
@@ -5840,6 +5868,17 @@ fn restart_relink_fits_the_worker_stack_budget() {
     assert_stack_child_passes(RELINK_STACK_CHILD_TEST);
 }
 
+/// The restart re-link scenario of
+/// [`restart_relink_fits_the_worker_stack_budget`] keeps its headroom under
+/// the [`WORKER_STACK_BUDGET`]: it fits the smaller
+/// [`RELINK_WORKER_STACK_HEADROOM_TARGET`]. The budget row alone turns red
+/// only when the last byte of headroom is gone; this one turns red when a
+/// change starts to spend it, while a host still has room.
+#[test]
+fn restart_relink_keeps_its_worker_stack_headroom() {
+    assert_stack_child_passes_on(RELINK_STACK_CHILD_TEST, RELINK_WORKER_STACK_HEADROOM_TARGET);
+}
+
 /// An embedding host constructs sessions from tasks on tokio workers with the
 /// [`WORKER_STACK_BUDGET`], in a debug build: it creates a runtime-backed
 /// session (the agent build, the session's runtime registration and its
@@ -5856,6 +5895,11 @@ fn session_create_fits_the_worker_stack_budget() {
 /// with the [`WORKER_STACK_BUDGET`], and assert that the child passes. A
 /// stack overflow aborts the whole process, so it is observed from outside.
 fn assert_stack_child_passes(fixture_test: &str) {
+    assert_stack_child_passes_on(fixture_test, WORKER_STACK_BUDGET);
+}
+
+/// [`assert_stack_child_passes`] on workers with a `worker_stack`-byte stack.
+fn assert_stack_child_passes_on(fixture_test: &str, worker_stack: usize) {
     let output_dir = tempfile::tempdir().expect("child output dir");
     let output_path = output_dir.path().join("child-output.txt");
     let stdout = std::fs::File::create(&output_path).expect("child output file");
@@ -5868,7 +5912,7 @@ fn assert_stack_child_passes(fixture_test: &str) {
             "--nocapture",
             "--test-threads=1",
         ])
-        .env(RELINK_WORKER_STACK_ENV, WORKER_STACK_BUDGET.to_string())
+        .env(RELINK_WORKER_STACK_ENV, worker_stack.to_string())
         .stdin(std::process::Stdio::null())
         .stdout(stdout)
         .stderr(stderr)
@@ -5892,7 +5936,7 @@ fn assert_stack_child_passes(fixture_test: &str) {
     let output = std::fs::read_to_string(&output_path).unwrap_or_default();
     assert!(
         status.success() && output.contains("test result: ok. 1 passed"),
-        "{fixture_test} must fit a {WORKER_STACK_BUDGET}-byte worker stack; the child test \
+        "{fixture_test} must fit a {worker_stack}-byte worker stack; the child test \
          process exited with {status}\n{}",
         child_output_tail(&output_path)
     );

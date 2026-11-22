@@ -30,7 +30,7 @@ foreground shell there (`background: false`, the default).
 - A background shell submission is durable, but its worker is explicitly
   non-resumable. After a restart the job record remains and a lost worker
   becomes `worker_lost`; Meerkat does not silently replay the command.
-- Use `monitor_start` only when that high-trust tool is explicitly visible and
+- Use `monitor_start`, where it is offered, for a long-running script, and only if
   the script follows its declared protocol. Framed JSONL can emit typed
   notification, checkpoint, progress, and complete frames; notifications do
   not complete the job.

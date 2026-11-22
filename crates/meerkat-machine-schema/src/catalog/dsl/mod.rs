@@ -5327,6 +5327,7 @@ runtime_internal_inputs!(
         CleanupRetiringExternalPeerObservedAbsent,
         RestoreRetiringExternalPeerObservedAbsent,
         AuthorizeExternalPeerReciprocalTrust,
+        AuthorizeExternalPeerReciprocalTrustRemoval,
         AdmitSupervisorRotation,
         ProvisionSupervisorAuthority,
         RecordSupervisorPendingRotation,

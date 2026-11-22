@@ -8,8 +8,8 @@ use crate::access::{
 };
 use crate::topology_control::{
     TopologyApplyRequest, TopologyApplyScope, TopologyAuditPage, TopologyControlError,
-    TopologyControlMode, TopologyMutation, TopologyNodeAffordances, TopologyPlanRequest,
-    TopologyRuntimeHandle,
+    TopologyControlMode, TopologyMutation, TopologyNodeAffordances, TopologyOperationRecordStatus,
+    TopologyPlanRequest, TopologyRuntimeHandle,
 };
 
 use super::{JSONRPC_VERSION, JsonRpcError, JsonRpcResponse};
@@ -122,7 +122,7 @@ fn project_node_affordances(
             editable
                 && view
                     .filter(|view| view.enforced())
-                    .is_none_or(|view| view.allows_agent(action, identity))
+                    .is_none_or(|view| view.allows_name(action, identity))
         };
         node.affordances = Some(TopologyNodeAffordances {
             can_connect: allowed(crate::access::ACTION_TOPOLOGY_CONNECT),
@@ -161,8 +161,48 @@ pub(crate) async fn handle_plan(
     }
 }
 
+/// The request the denied operation record of an apply the access rules
+/// refuse is written of: the one place that decides what such a record
+/// stores. A request is recorded as it is unless one of its ends is a name
+/// the attribute records of the caller's audience (the Console's) know no
+/// agent under (no member holds it, or the caller's surface stood it in
+/// for a member hidden from the caller) or an agent hidden from the
+/// caller; an agent the rules only refuse the caller a view of keeps its
+/// name in the record. With such an end the request is recorded with its
+/// operations left out: the record then holds no name and nothing derived
+/// from one (its operation id covers the request), it is written and
+/// counted like any other, and [`handle_audit`] shows it to access
+/// administrators only.
+fn denied_record_request(
+    view: &AccessView,
+    request: &TopologyApplyRequest,
+) -> TopologyApplyRequest {
+    let mut recorded = request.clone();
+    if request.operations.iter().any(|operation| {
+        [&operation.edge.a, &operation.edge.b]
+            .into_iter()
+            .any(|end| {
+                !view.knows_agent(end.identity.as_str()) || view.hides_agent(end.identity.as_str())
+            })
+    }) {
+        recorded.operations.clear();
+    }
+    recorded
+}
+
 /// `meta/topology/apply` for a caller of `scope`: its idempotency keys are
 /// its own, so the same key from another caller names another operation.
+///
+/// `owed` is a refusal the caller's surface owes the request whatever the
+/// topology would answer: the console's, for a request in which it stood a
+/// name no member holds in for an end
+/// ([`crate::http_console::ConsoleAbsentNames::recorded_refusal`]). It is
+/// the answer once the request parsed and the access rules allowed every
+/// operation, so the rules' refusal comes first, as it does for any other
+/// name, and such a request is never applied. A refusal of it by the rules
+/// writes its denied operation record like that of any request with an end
+/// that is a name the caller's audience knows no agent under, or an agent
+/// hidden from the caller ([`denied_record_request`]).
 pub(crate) async fn handle_apply(
     topology: &TopologyRuntimeHandle,
     response_id: Value,
@@ -170,6 +210,7 @@ pub(crate) async fn handle_apply(
     view: Option<&AccessView>,
     actor: Option<&str>,
     scope: &TopologyApplyScope,
+    owed: Option<JsonRpcError>,
 ) -> JsonRpcResponse {
     let mut request: TopologyApplyRequest = match serde_json::from_value(params.clone()) {
         Ok(request) => request,
@@ -190,9 +231,13 @@ pub(crate) async fn handle_apply(
                 .clone()
                 .unwrap_or_else(|| "<redacted>".to_string()),
         };
+        let recorded = match view {
+            Some(view) => denied_record_request(view, &request),
+            None => request,
+        };
         if let Err(audit_error) = topology
             .record_denied_apply(
-                &request,
+                &recorded,
                 scope,
                 actor,
                 actor.unwrap_or("local-host"),
@@ -203,6 +248,14 @@ pub(crate) async fn handle_apply(
             return failure(response_id, audit_error);
         }
         return access_denied(response_id, violation);
+    }
+    if let Some(refusal) = owed {
+        return JsonRpcResponse {
+            jsonrpc: JSONRPC_VERSION.to_string(),
+            id: response_id,
+            result: None,
+            error: Some(refusal),
+        };
     }
     let expose_attribution = attribution_allowed_for_operations(view, &request.operations);
     match topology
@@ -246,9 +299,9 @@ pub(crate) async fn handle_operation(
                     [&result.edge.a, &result.edge.b]
                         .into_iter()
                         .all(|endpoint| {
-                            view.can_view_agent(endpoint.identity.as_str())
+                            view.can_view_name(endpoint.identity.as_str())
                                 && view
-                                    .allows_agent(ACTION_TOPOLOGY_VIEW, endpoint.identity.as_str())
+                                    .allows_name(ACTION_TOPOLOGY_VIEW, endpoint.identity.as_str())
                         })
                 });
                 if !visible {
@@ -313,13 +366,23 @@ pub(crate) async fn handle_audit(
     for record in page.records {
         next_after_seq = record.seq;
         let visible = view.is_none_or(|view| {
+            // A denied record that holds no operation is of a request with
+            // an end that was a name its caller's audience knew no agent
+            // under, or an agent hidden from its caller
+            // ([`denied_record_request`]): no end decides who reads it;
+            // access administrators do.
+            if record.status == TopologyOperationRecordStatus::Denied
+                && record.operations.is_empty()
+            {
+                return view.can_administer();
+            }
             record.operations.iter().all(|operation| {
                 [&operation.edge.a, &operation.edge.b]
                     .into_iter()
                     .all(|endpoint| {
-                        view.can_view_agent(endpoint.identity.as_str())
-                            && view.allows_agent(ACTION_TOPOLOGY_VIEW, endpoint.identity.as_str())
-                            && view.allows_agent(ACTION_TOPOLOGY_AUDIT, endpoint.identity.as_str())
+                        view.can_view_name(endpoint.identity.as_str())
+                            && view.allows_name(ACTION_TOPOLOGY_VIEW, endpoint.identity.as_str())
+                            && view.allows_name(ACTION_TOPOLOGY_AUDIT, endpoint.identity.as_str())
                     })
             })
         });
@@ -380,7 +443,7 @@ fn authorize_operations(
     if operations.len() > 1 {
         for operation in operations {
             for endpoint in [&operation.edge.a, &operation.edge.b] {
-                if !view.allows_agent(ACTION_TOPOLOGY_BULK, endpoint.identity.as_str()) {
+                if !view.allows_name(ACTION_TOPOLOGY_BULK, endpoint.identity.as_str()) {
                     return Some(AccessViolation {
                         action: ACTION_TOPOLOGY_BULK,
                         resource: Some(endpoint.identity.clone()),
@@ -398,8 +461,8 @@ fn authorize_operations(
         .flatten()
         .any(|authority| !authority.is_empty() && authority != local_authority);
         for endpoint in [&operation.edge.a, &operation.edge.b] {
-            if !view.can_view_agent(endpoint.identity.as_str())
-                || !view.allows_agent(ACTION_TOPOLOGY_VIEW, endpoint.identity.as_str())
+            if !view.can_view_name(endpoint.identity.as_str())
+                || !view.allows_name(ACTION_TOPOLOGY_VIEW, endpoint.identity.as_str())
             {
                 return Some(AccessViolation {
                     action: ACTION_TOPOLOGY_VIEW,
@@ -407,7 +470,7 @@ fn authorize_operations(
                 });
             }
             if mutation
-                && !view.allows_agent(operation.action.access_action(), endpoint.identity.as_str())
+                && !view.allows_name(operation.action.access_action(), endpoint.identity.as_str())
             {
                 return Some(AccessViolation {
                     action: operation.action.access_action(),
@@ -415,7 +478,7 @@ fn authorize_operations(
                 });
             }
             if cross_authority
-                && !view.allows_agent(ACTION_TOPOLOGY_CROSS_AUTHORITY, endpoint.identity.as_str())
+                && !view.allows_name(ACTION_TOPOLOGY_CROSS_AUTHORITY, endpoint.identity.as_str())
             {
                 return Some(AccessViolation {
                     action: ACTION_TOPOLOGY_CROSS_AUTHORITY,
@@ -436,8 +499,8 @@ fn attribution_allowed_for_operations(
             [&operation.edge.a, &operation.edge.b]
                 .into_iter()
                 .all(|endpoint| {
-                    view.can_view_agent(endpoint.identity.as_str())
-                        && view.allows_agent(ACTION_TOPOLOGY_AUDIT, endpoint.identity.as_str())
+                    view.can_view_name(endpoint.identity.as_str())
+                        && view.allows_name(ACTION_TOPOLOGY_AUDIT, endpoint.identity.as_str())
                 })
         })
     })
@@ -452,8 +515,8 @@ fn attribution_allowed_for_results(
             [&result.edge.a, &result.edge.b]
                 .into_iter()
                 .all(|endpoint| {
-                    view.can_view_agent(endpoint.identity.as_str())
-                        && view.allows_agent(ACTION_TOPOLOGY_AUDIT, endpoint.identity.as_str())
+                    view.can_view_name(endpoint.identity.as_str())
+                        && view.allows_name(ACTION_TOPOLOGY_AUDIT, endpoint.identity.as_str())
                 })
         })
     })
@@ -516,6 +579,22 @@ fn access_denied(response_id: Value, violation: AccessViolation) -> JsonRpcRespo
 }
 
 fn failure(response_id: Value, error: TopologyControlError) -> JsonRpcResponse {
+    JsonRpcResponse {
+        jsonrpc: JSONRPC_VERSION.to_string(),
+        id: response_id,
+        result: None,
+        error: Some(failure_error(error)),
+    }
+}
+
+/// The refusal of an edge's end no member holds, as the topology answers
+/// it. The console answers an end that names a member hidden from its
+/// caller with it.
+pub(crate) fn member_not_found_rpc_error(identity: &str) -> JsonRpcError {
+    failure_error(TopologyControlError::MemberNotFound(identity.to_string()))
+}
+
+fn failure_error(error: TopologyControlError) -> JsonRpcError {
     let code = match error {
         TopologyControlError::InvalidRequest(_)
         | TopologyControlError::InvalidPolicy(_)
@@ -561,15 +640,10 @@ fn failure(response_id: Value, error: TopologyControlError) -> JsonRpcResponse {
     if let Some(receipt) = error.receipt() {
         data["receipt"] = serde_json::to_value(receipt).unwrap_or(Value::Null);
     }
-    JsonRpcResponse {
-        jsonrpc: JSONRPC_VERSION.to_string(),
-        id: response_id,
-        result: None,
-        error: Some(JsonRpcError {
-            code,
-            message: error.to_string(),
-            data: Some(data),
-        }),
+    JsonRpcError {
+        code,
+        message: error.to_string(),
+        data: Some(data),
     }
 }
 
@@ -615,7 +689,7 @@ mod tests {
         for endpoint in [&operation.edge.a, &operation.edge.b] {
             let expected = endpoint.identity == "a";
             assert_eq!(
-                allowed.allows_agent(operation.action.access_action(), &endpoint.identity),
+                allowed.allows_name(operation.action.access_action(), &endpoint.identity),
                 expected
             );
         }

@@ -300,6 +300,80 @@ impl McpStdioSetupFailure {
     }
 }
 
+impl std::fmt::Display for McpStdioSetupPhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Launch => "launch",
+            Self::Initialize => "initialize",
+            Self::ToolDiscovery => "tool discovery",
+        })
+    }
+}
+
+/// The name of a signal whose number is the same on every Unix; `None` for
+/// the others, whose numbers differ by platform.
+fn signal_name(signal: i32) -> Option<&'static str> {
+    Some(match signal {
+        1 => "SIGHUP",
+        2 => "SIGINT",
+        3 => "SIGQUIT",
+        4 => "SIGILL",
+        5 => "SIGTRAP",
+        6 => "SIGABRT",
+        8 => "SIGFPE",
+        9 => "SIGKILL",
+        11 => "SIGSEGV",
+        13 => "SIGPIPE",
+        14 => "SIGALRM",
+        15 => "SIGTERM",
+        _ => return None,
+    })
+}
+
+impl std::fmt::Display for McpStdioExit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Code(code) => write!(f, "exit status {code}"),
+            Self::Signal(signal) => match signal_name(*signal) {
+                Some(name) => write!(f, "killed by signal {signal} ({name})"),
+                None => write!(f, "killed by signal {signal}"),
+            },
+        }
+    }
+}
+
+impl std::fmt::Display for McpStdioSetupFailureClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SpawnFailed => f.write_str("the server process could not be started"),
+            Self::Closed { exit: Some(exit) } => write!(f, "the server process ended, {exit}"),
+            Self::Closed { exit: None } => {
+                f.write_str("the server closed its pipes, exit status not observed")
+            }
+            Self::Rejected { code } => {
+                write!(f, "the server answered with JSON-RPC error {code}")
+            }
+            Self::ProtocolError => f.write_str("the server's answer was not a valid response"),
+            Self::TimedOut => f.write_str("the setup deadline expired"),
+            Self::Unknown => f.write_str("the failure was not classified"),
+        }
+    }
+}
+
+/// What the transport established, in fixed words and numbers: the phase,
+/// the class and, where proven, the server's own exit status or signal. It
+/// names neither the server nor the attempt and carries no server text, so
+/// it can go wherever the typed failure can.
+impl std::fmt::Display for McpStdioSetupFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "stdio setup failed during {}: {}",
+            self.phase, self.class
+        )
+    }
+}
+
 /// The bounded tail of one stdio MCP server setup attempt's stderr.
 ///
 /// SENSITIVE. Server stderr is arbitrary process output: it can contain
@@ -418,5 +492,78 @@ impl std::fmt::Debug for McpAttachmentAttempt {
         f.debug_struct("McpAttachmentAttempt")
             .field("server", &self.server)
             .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sentence(phase: McpStdioSetupPhase, class: McpStdioSetupFailureClass) -> String {
+        McpStdioSetupFailure::new("server-name", 7, phase, class, true).to_string()
+    }
+
+    /// The sentence is fixed words and numbers: the phase, the class and
+    /// the exit, never the server's name or its attempt.
+    #[test]
+    fn a_setup_failure_reads_as_its_phase_class_and_exit() {
+        use McpStdioSetupFailureClass as Class;
+        use McpStdioSetupPhase as Phase;
+        let cases = [
+            (
+                Phase::Launch,
+                Class::SpawnFailed,
+                "stdio setup failed during launch: the server process could not be started",
+            ),
+            (
+                Phase::Initialize,
+                Class::Closed {
+                    exit: Some(McpStdioExit::Code(3)),
+                },
+                "stdio setup failed during initialize: the server process ended, exit status 3",
+            ),
+            (
+                Phase::Initialize,
+                Class::Closed {
+                    exit: Some(McpStdioExit::Signal(11)),
+                },
+                "stdio setup failed during initialize: the server process ended, killed by signal 11 (SIGSEGV)",
+            ),
+            (
+                Phase::Initialize,
+                Class::Closed {
+                    exit: Some(McpStdioExit::Signal(31)),
+                },
+                "stdio setup failed during initialize: the server process ended, killed by signal 31",
+            ),
+            (
+                Phase::Initialize,
+                Class::Closed { exit: None },
+                "stdio setup failed during initialize: the server closed its pipes, exit status not observed",
+            ),
+            (
+                Phase::Initialize,
+                Class::Rejected { code: -32601 },
+                "stdio setup failed during initialize: the server answered with JSON-RPC error -32601",
+            ),
+            (
+                Phase::Initialize,
+                Class::ProtocolError,
+                "stdio setup failed during initialize: the server's answer was not a valid response",
+            ),
+            (
+                Phase::ToolDiscovery,
+                Class::TimedOut,
+                "stdio setup failed during tool discovery: the setup deadline expired",
+            ),
+            (
+                Phase::ToolDiscovery,
+                Class::Unknown,
+                "stdio setup failed during tool discovery: the failure was not classified",
+            ),
+        ];
+        for (phase, class, expected) in cases {
+            assert_eq!(sentence(phase, class), expected);
+        }
     }
 }

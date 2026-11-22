@@ -43,15 +43,17 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use meerkat_contracts::{
-    DecisionGetParams, DecisionListParams, DecisionRenderingParams, DecisionResult,
-    DecisionWithdrawParams,
+    DecisionGetParams, DecisionListParams, DecisionRenderingParams, DecisionRenderingResult,
+    DecisionResult, DecisionWithdrawParams,
 };
 use meerkat_core::approval::decision::{
-    ApproverId, DecisionId, DecisionListFilter, DecisionPrincipalKey, StoredDecision,
-    UnreadableDecision,
+    ApproverId, DecisionId, DecisionListFilter, DecisionPhase, DecisionPrincipalKey,
+    StoredDecision, UnreadableDecision,
 };
+use meerkat_runtime::ask_user::ASK_USER_QUESTIONS_KIND;
 use meerkat_runtime::decision::wire::{wire_decision, wire_unreadable_decision};
 use meerkat_runtime::decision::{DecisionError, DecisionWithdrawer, DurableDecisionService};
+use serde::Serialize;
 use serde_json::{Value, json};
 
 use super::owner::RuntimeDecisions;
@@ -125,6 +127,24 @@ impl ConsoleDecisionCaller<'_> {
     fn reads_undecodable(&self) -> bool {
         self.administers() && !self.kept_apart()
     }
+
+    /// Whether the caller cannot be told yet whose a question set is: who
+    /// held its asker's name when it was asked is still being read
+    /// (`crate::http_console::gating_origins_not_read`). Every request of
+    /// such a caller is answered that it must ask again, whatever the store
+    /// holds: an answer that depended on the store would tell the caller
+    /// of what it may not see.
+    fn awaits_askers(&self) -> bool {
+        crate::http_console::gating_origins_not_read(self.access_view)
+    }
+}
+
+/// The answer to a caller who cannot be told yet whose a question set is:
+/// the Console's retryable refusal
+/// (`crate::http_console::gating_origins_not_read_error`).
+fn askers_not_read(id: &Value) -> Value {
+    let error = crate::http_console::gating_origins_not_read_error();
+    wire::failure(id, error.code, error.message, error.data)
 }
 
 /// The caller's sight of decisions, fixed for one request: the approver ids
@@ -180,7 +200,13 @@ impl<'a> Viewer<'a> {
         match crate::ask_user::question_set_asker(row) {
             crate::ask_user::QuestionSetAsker::NotAQuestionSet => true,
             crate::ask_user::QuestionSetAsker::Asker(asker) => {
-                crate::http_console::gating_origin_visible(self.caller.access_view, &asker)
+                // A set is its asking member's: decided by who held the
+                // asker's name when the set was asked.
+                crate::http_console::gating_origin_visible(
+                    self.caller.access_view,
+                    &asker,
+                    Some(row.descriptor.created_at_ms),
+                )
             }
             crate::ask_user::QuestionSetAsker::Unreadable => !self.caller.kept_apart(),
         }
@@ -275,6 +301,9 @@ pub(crate) fn handle_console_decision_rpc(
     let answer = match method {
         LIST_METHOD | GET_METHOD | RENDERING_METHOD if !caller.may(ACTION_DECISIONS_VIEW) => {
             access_denied(id, ACTION_DECISIONS_VIEW)
+        }
+        LIST_METHOD | GET_METHOD | RENDERING_METHOD if caller.awaits_askers() => {
+            askers_not_read(id)
         }
         LIST_METHOD => list(decisions, caller, id, params),
         GET_METHOD => get(decisions, caller, id, params),
@@ -541,7 +570,7 @@ fn rendering(
         Err(answer) => return answer,
     };
     match visible(decisions, caller, id, params.decision_id) {
-        Ok((row, Sight::Whole)) => wire::success(id, rendering_of(&row, max_part_bytes)),
+        Ok((row, Sight::Whole)) => wire::success(id, console_rendering(&row, max_part_bytes)),
         Ok(_) => wire::failure(
             id,
             crate::http_console::ACCESS_DENIED_RPC_CODE,
@@ -549,6 +578,51 @@ fn rendering(
             Some(json!({"kind": "content_not_visible"})),
         ),
         Err(answer) => answer,
+    }
+}
+
+/// What the Console adds to the end of the rendering of an open question
+/// set: a blank line and a closing note. A Console page of an earlier
+/// release draws a question set, where it shows one at all, as the text of
+/// a decision with no way to answer; the note says where the questions are
+/// answered and what to do on such a page.
+const QUESTION_SET_CLOSING_NOTE: &str = "\n\nAnswer these questions in the Console, in the agent's chat or under Approvals. If this page offers no way to answer them, it runs an earlier Console: reload the page, or, in an application that builds the Console in, update its Console.";
+
+/// The Console's `meta/decisions/rendering` answer: the held rendering as
+/// every door answers it and, for an open question set, the closing note
+/// after it.
+#[derive(Serialize)]
+struct ConsoleDecisionRendering {
+    #[serde(flatten)]
+    held: DecisionRenderingResult,
+    /// Exactly what was added to the end of `rendering`, the blank line
+    /// included, so that a reader takes it off again: a current Console
+    /// page does, and says in its own words where a set is answered.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rendering_suffix: Option<&'static str>,
+}
+
+/// The rendering of `row` as the Console answers it. The note is added
+/// here, after the answer is built from the held text, and nowhere else:
+/// the decision's rendering, its digest (the one a decide compares) and its
+/// parts stay those of the held text, and the stdio host's answer never
+/// carries the note. Only an open decision of kind `ask_user.questions`
+/// gets it; a set that ended, a set past its deadline (which the read finds
+/// ended) and every other kind are answered as they are held.
+fn console_rendering(
+    row: &StoredDecision,
+    max_part_bytes: Option<std::num::NonZeroU32>,
+) -> ConsoleDecisionRendering {
+    let mut held = rendering_of(row, max_part_bytes);
+    let open_question_set = row.descriptor.kind.as_str() == ASK_USER_QUESTIONS_KIND
+        && row.state.phase == DecisionPhase::Open;
+    let rendering_suffix = open_question_set.then_some(QUESTION_SET_CLOSING_NOTE);
+    if let Some(note) = rendering_suffix {
+        held.rendering.push_str(note);
+    }
+    ConsoleDecisionRendering {
+        held,
+        rendering_suffix,
     }
 }
 
@@ -573,12 +647,18 @@ fn withdraw(
             return wire::invalid_params(id, format!("invalid decision request: {error}"));
         }
     };
+    // A caller who cannot be told yet whose a question set is asks again,
+    // before any store is read.
+    if caller.awaits_askers() {
+        return askers_not_read(id);
+    }
     if !decisions.is_available() {
         return wire::no_decision_store(id);
     }
     // The read records nothing: the withdraw's own touch still answers
     // what it records (the expiry of a decision past its deadline).
-    let hidden = match decisions.owner().for_candidate_launch().get(&decision_id) {
+    let read = decisions.owner().for_candidate_launch().get(&decision_id);
+    let hidden = match read {
         Ok(row) => Viewer::of(caller).sight(&row) == Sight::Nothing,
         Err(DecisionError::Unreadable { .. }) => !caller.reads_undecodable(),
         Err(_) => false,

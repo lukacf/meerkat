@@ -55,7 +55,7 @@ LINES: tuple[tuple[str, str], ...] = (
     (r"gpt-live-(?P<v>\d+)", "gpt-live"),
     (r"gpt-live-(?P<v>\d+)-codex", "gpt-live-codex"),
     (r"gpt-realtime-(?P<v>\d+)", "gpt-realtime"),
-    (r"gemini-(?P<v>\d+)-(?P<line>carbon|argon|hydrogen)", "gemini-{line}"),
+    (r"gemini-(?P<v>\d+)-(?P<line>carbon|argon|hydrogen|neon)", "gemini-{line}"),
     (r"gemini-(?P<v>\d+(?:\.\d+)?)-flash", "gemini-hydrogen"),
     (r"gemini-(?P<v>\d+(?:\.\d+)?)-pro(?:-preview)?", "gemini-argon"),
     (r"gemini-(?P<v>\d+(?:\.\d+)?)-flash-lite(?:-preview)?", "gemini-flash-lite"),

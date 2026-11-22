@@ -356,6 +356,36 @@ struct TestState {
     rotate_refresh_tokens: AtomicBool,
     /// The refresh tokens issued while `rotate_refresh_tokens` is set.
     issued_refresh_tokens: Mutex<Vec<String>>,
+    /// The server publishes no protected resource metadata: the well-known
+    /// document is absent.
+    protected_resource_absent: AtomicBool,
+    /// The protected resource metadata URL answers with this status and no
+    /// document (a redirection status answers a redirect).
+    protected_resource_answer: Mutex<Option<StatusCode>>,
+    /// The protected resource metadata location under the server's own
+    /// endpoint path answers with this status and no document, in place of
+    /// `404` (a `401` carries a challenge that names no resource metadata).
+    endpoint_path_resource_answer: Mutex<Option<StatusCode>>,
+    /// The protected resource metadata location at the origin root, without
+    /// the server's path, answers with this status and no document, in
+    /// place of `404`.
+    origin_root_resource_answer: Mutex<Option<StatusCode>>,
+    /// The `401` of the location under the endpoint path carries a
+    /// challenge that names resource metadata.
+    endpoint_path_challenge_names_resource_metadata: AtomicBool,
+    /// The `401` of the location under the endpoint path carries exactly
+    /// this challenge.
+    endpoint_path_challenge: Mutex<Option<&'static str>>,
+    /// The origin-root location without the server's path serves a
+    /// protected resource metadata document that names this authorization
+    /// server.
+    origin_root_resource_authorization_server: Mutex<Option<String>>,
+    /// The server publishes no authorization-server metadata: the RFC 8414
+    /// and the OpenID Connect discovery documents are both absent.
+    authorization_metadata_absent: AtomicBool,
+    /// The authorization server the protected resource metadata names, in
+    /// place of the fixture's own origin.
+    authorization_server_override: Mutex<Option<String>>,
 }
 
 /// The confidential client a token endpoint authenticates.
@@ -580,6 +610,14 @@ async fn spawn_oauth_fixture() -> (String, Arc<TestState>) {
             get(protected_resource),
         )
         .route(
+            "/mcp/.well-known/oauth-protected-resource",
+            get(endpoint_path_resource),
+        )
+        .route(
+            "/.well-known/oauth-protected-resource",
+            get(origin_root_resource),
+        )
+        .route(
             "/.well-known/oauth-authorization-server",
             get(authorization_metadata),
         )
@@ -652,10 +690,92 @@ async fn mcp_endpoint(headers: HeaderMap) -> impl IntoResponse {
         .into_response()
 }
 
+/// The answer of a protected resource metadata location that serves no
+/// document: `status`, or `404` when none is set.
+fn documentless_answer(status: Option<StatusCode>) -> axum::response::Response {
+    match status {
+        None => StatusCode::NOT_FOUND.into_response(),
+        Some(status) if status.is_redirection() => {
+            Redirect::temporary("/redirected").into_response()
+        }
+        Some(StatusCode::UNAUTHORIZED) => (
+            StatusCode::UNAUTHORIZED,
+            [(
+                "www-authenticate",
+                r#"Bearer realm="OAuth", error="invalid_token""#,
+            )],
+            "",
+        )
+            .into_response(),
+        Some(status) => status.into_response(),
+    }
+}
+
+async fn endpoint_path_resource(State(state): State<Arc<TestState>>) -> axum::response::Response {
+    let answer = *state.endpoint_path_resource_answer.lock();
+    if answer == Some(StatusCode::UNAUTHORIZED)
+        && let Some(challenge) = *state.endpoint_path_challenge.lock()
+    {
+        return (
+            StatusCode::UNAUTHORIZED,
+            [("www-authenticate", challenge)],
+            "",
+        )
+            .into_response();
+    }
+    if answer == Some(StatusCode::UNAUTHORIZED)
+        && state
+            .endpoint_path_challenge_names_resource_metadata
+            .load(Ordering::SeqCst)
+    {
+        return (
+            StatusCode::UNAUTHORIZED,
+            [(
+                "www-authenticate",
+                r#"Bearer error="invalid_token", resource_metadata="/guarded/resource-metadata""#,
+            )],
+            "",
+        )
+            .into_response();
+    }
+    documentless_answer(answer)
+}
+
+async fn origin_root_resource(
+    State(state): State<Arc<TestState>>,
+    headers: HeaderMap,
+) -> axum::response::Response {
+    if let Some(authorization_server) = state
+        .origin_root_resource_authorization_server
+        .lock()
+        .clone()
+    {
+        let host = headers
+            .get("host")
+            .and_then(|value| value.to_str().ok())
+            .unwrap();
+        return Json(serde_json::json!({
+            "resource": format!("http://{host}/mcp"),
+            "authorization_servers": [authorization_server],
+        }))
+        .into_response();
+    }
+    documentless_answer(*state.origin_root_resource_answer.lock())
+}
+
 async fn protected_resource(
     State(state): State<Arc<TestState>>,
     headers: HeaderMap,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if state.protected_resource_absent.load(Ordering::SeqCst) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    if let Some(status) = *state.protected_resource_answer.lock() {
+        if status.is_redirection() {
+            return Redirect::temporary("/redirected").into_response();
+        }
+        return status.into_response();
+    }
     let host = headers
         .get("host")
         .and_then(|value| value.to_str().ok())
@@ -665,11 +785,17 @@ async fn protected_resource(
         .lock()
         .clone()
         .unwrap_or_else(|| format!("http://{host}/mcp"));
+    let authorization_server = state
+        .authorization_server_override
+        .lock()
+        .clone()
+        .unwrap_or_else(|| format!("http://{host}"));
     Json(serde_json::json!({
         "resource": resource,
-        "authorization_servers": [format!("http://{host}")],
+        "authorization_servers": [authorization_server],
         "scopes_supported": ["mcp.read"]
     }))
+    .into_response()
 }
 
 async fn authorization_metadata(
@@ -682,6 +808,7 @@ async fn authorization_metadata(
     if state
         .authorization_metadata_via_openid_configuration
         .load(Ordering::SeqCst)
+        || state.authorization_metadata_absent.load(Ordering::SeqCst)
     {
         return StatusCode::NOT_FOUND.into_response();
     }
@@ -891,7 +1018,10 @@ async fn token(
 async fn openid_configuration(
     State(state): State<Arc<TestState>>,
     headers: HeaderMap,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if state.authorization_metadata_absent.load(Ordering::SeqCst) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
     let host = headers
         .get("host")
         .and_then(|value| value.to_str().ok())
@@ -914,7 +1044,7 @@ async fn openid_configuration(
             .unwrap_or_else(|| format!("http://{host}/userinfo"));
         body["userinfo_endpoint"] = serde_json::json!(endpoint);
     }
-    Json(body)
+    Json(body).into_response()
 }
 
 async fn userinfo(State(state): State<Arc<TestState>>, headers: HeaderMap) -> impl IntoResponse {
@@ -11024,4 +11154,959 @@ async fn a_lease_released_twice_serves_a_later_login_from_another_process() {
         Ok(Some("credential-of-the-later-login".to_owned())),
         "this process serves the later login's credential"
     );
+}
+
+/// The `401` challenge of a server that names no protected resource
+/// metadata.
+const CHALLENGE_WITHOUT_RESOURCE_METADATA: &str = r#"Bearer realm="OAuth", error="invalid_token""#;
+
+/// Whether the fixture was asked for `path`.
+fn asked_for(state: &TestState, path: &str) -> bool {
+    state.request_paths.lock().iter().any(|asked| asked == path)
+}
+
+/// A server of the earlier MCP authorization revision (2025-03-26) names no
+/// protected resource: its challenge carries no `resource_metadata`, it has
+/// no protected resource metadata document, and it serves RFC 8414
+/// authorization-server metadata at its own origin. A login discovers that
+/// origin's authorization server, registers there and completes against its
+/// endpoints, with the configured server URL as the resource.
+#[tokio::test]
+async fn a_server_with_only_origin_authorization_server_metadata_logs_in() {
+    for challenge in [Some(CHALLENGE_WITHOUT_RESOURCE_METADATA), None] {
+        let (base, state) = spawn_oauth_fixture().await;
+        state
+            .protected_resource_absent
+            .store(true, Ordering::SeqCst);
+        let store = Arc::new(EphemeralTokenStore::new());
+        let authority = split_authority(&state, store.clone());
+        let target = split_target(&base, "origin-metadata");
+
+        let start = authority
+            .login_start(&target, SPLIT_REDIRECT, challenge)
+            .await
+            .expect("the origin's authorization-server metadata admits the login");
+        assert!(
+            start
+                .authorize_url
+                .starts_with(&format!("{base}/authorize?")),
+            "the origin's authorization endpoint is used"
+        );
+        let authorize = reqwest::Url::parse(&start.authorize_url).unwrap();
+        let parameter = |name: &str| {
+            authorize
+                .query_pairs()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.into_owned())
+        };
+        assert_eq!(
+            parameter("resource"),
+            Some(format!("{base}/mcp")),
+            "the configured server URL is the resource"
+        );
+        assert_eq!(parameter("code_challenge_method").as_deref(), Some("S256"));
+        assert_eq!(parameter("client_id").as_deref(), Some("client-123"));
+        assert_eq!(
+            state.registration_requests.lock().len(),
+            1,
+            "the client registers at the origin's registration endpoint"
+        );
+        let paths = state.request_paths.lock().clone();
+        let resource_metadata = paths
+            .iter()
+            .position(|path| path == "/.well-known/oauth-protected-resource/mcp")
+            .expect("the protected resource metadata is asked for first");
+        let authorization_metadata = paths
+            .iter()
+            .position(|path| path == "/.well-known/oauth-authorization-server")
+            .expect("the origin's authorization-server metadata is read");
+        assert!(resource_metadata < authorization_metadata, "{paths:?}");
+
+        let complete = authority
+            .login_complete(&target, split_callback(&start, &start.state))
+            .await
+            .expect("the login completes against the origin's token endpoint");
+        assert_eq!(complete.account_id.as_deref(), Some("fixture-account-42"));
+        let token_requests = state.token_requests.lock().clone();
+        assert_eq!(token_requests.len(), 1);
+        assert_eq!(token_requests[0]["grant_type"], "authorization_code");
+        assert_eq!(token_requests[0]["resource"], format!("{base}/mcp"));
+        assert_eq!(
+            authority
+                .stored_bearer_token(&target)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("access-token")
+        );
+    }
+}
+
+/// Without protected resource metadata only the server's own origin can be
+/// its authorization server: origin metadata that names another issuer is
+/// refused before any registration and before any browser opens.
+#[tokio::test]
+async fn origin_authorization_server_metadata_naming_another_issuer_is_refused() {
+    let (base, state) = spawn_oauth_fixture().await;
+    state
+        .protected_resource_absent
+        .store(true, Ordering::SeqCst);
+    *state.issuer_override.lock() = Some("http://127.0.0.1:9".to_owned());
+    let authority = split_authority(&state, Arc::new(EphemeralTokenStore::new()));
+    let target = split_target(&base, "origin-other-issuer");
+
+    let refused = authority
+        .login_start(
+            &target,
+            SPLIT_REDIRECT,
+            Some(CHALLENGE_WITHOUT_RESOURCE_METADATA),
+        )
+        .await;
+
+    let Err(McpOAuthError::DiscoveryFailed { reason, .. }) = &refused else {
+        panic!("expected the issuer refusal, got {refused:?}");
+    };
+    assert!(
+        reason.contains(&format!(
+            "authorization server metadata issuer 'http://127.0.0.1:9' does not match discovered issuer '{base}'"
+        )),
+        "{reason}"
+    );
+    assert!(authority.pending_attempt(&target).unwrap().is_none());
+    assert!(state.registration_requests.lock().is_empty());
+    assert!(state.token_requests.lock().is_empty());
+    assert!(!asked_for(&state, "/authorize"));
+}
+
+/// A server with neither document is refused, and the refusal names both
+/// the protected resource metadata and the authorization-server metadata
+/// that were asked for.
+#[tokio::test]
+async fn a_server_with_neither_metadata_document_is_refused_naming_both() {
+    let (base, state) = spawn_oauth_fixture().await;
+    state
+        .protected_resource_absent
+        .store(true, Ordering::SeqCst);
+    state
+        .authorization_metadata_absent
+        .store(true, Ordering::SeqCst);
+    let authority = split_authority(&state, Arc::new(EphemeralTokenStore::new()));
+    let target = split_target(&base, "no-metadata");
+
+    let refused = authority
+        .login_start(
+            &target,
+            SPLIT_REDIRECT,
+            Some(CHALLENGE_WITHOUT_RESOURCE_METADATA),
+        )
+        .await;
+
+    let Err(McpOAuthError::DiscoveryFailed { reason, .. }) = &refused else {
+        panic!("expected a discovery refusal, got {refused:?}");
+    };
+    assert!(reason.contains("oauth-protected-resource"), "{reason}");
+    assert!(
+        reason.contains("no authorization server metadata (RFC 8414 or OpenID Connect discovery)"),
+        "{reason}"
+    );
+    assert!(reason.contains(&format!("origin '{base}'")), "{reason}");
+    assert!(asked_for(
+        &state,
+        "/.well-known/oauth-protected-resource/mcp"
+    ));
+    assert!(asked_for(&state, "/.well-known/oauth-authorization-server"));
+    assert!(asked_for(&state, "/.well-known/openid-configuration"));
+    assert!(authority.pending_attempt(&target).unwrap().is_none());
+    assert!(state.registration_requests.lock().is_empty());
+    assert!(!asked_for(&state, "/authorize"));
+}
+
+/// Published protected resource metadata decides the authorization server:
+/// the server's own origin metadata is never read when the document names
+/// another issuer.
+#[tokio::test]
+async fn published_protected_resource_metadata_decides_the_authorization_server() {
+    let (resource_base, resource_state) = spawn_oauth_fixture().await;
+    let (issuer_base, issuer_state) = spawn_oauth_fixture().await;
+    *resource_state.authorization_server_override.lock() = Some(issuer_base.clone());
+    let authority = split_authority(&issuer_state, Arc::new(EphemeralTokenStore::new()));
+    let target = split_target(&resource_base, "published-resource");
+
+    let start = authority
+        .login_start(
+            &target,
+            SPLIT_REDIRECT,
+            Some(CHALLENGE_WITHOUT_RESOURCE_METADATA),
+        )
+        .await
+        .expect("the named authorization server admits the login");
+
+    assert!(
+        start
+            .authorize_url
+            .starts_with(&format!("{issuer_base}/authorize?")),
+        "the authorization server the document names is used"
+    );
+    assert!(asked_for(
+        &resource_state,
+        "/.well-known/oauth-protected-resource/mcp"
+    ));
+    assert!(
+        !asked_for(&resource_state, "/.well-known/oauth-authorization-server"),
+        "the server's own origin metadata is not read"
+    );
+    assert!(resource_state.registration_requests.lock().is_empty());
+    assert_eq!(issuer_state.registration_requests.lock().len(), 1);
+}
+
+/// A challenge that names protected resource metadata is followed and
+/// nothing else: when that document is absent the login is refused, and
+/// the server's own origin metadata is not read in its place.
+#[tokio::test]
+async fn a_challenge_naming_absent_resource_metadata_is_refused_without_origin_metadata() {
+    let (base, state) = spawn_oauth_fixture().await;
+    state
+        .protected_resource_absent
+        .store(true, Ordering::SeqCst);
+    let authority = split_authority(&state, Arc::new(EphemeralTokenStore::new()));
+    let target = split_target(&base, "named-absent-resource");
+
+    let refused = authority
+        .login_start(
+            &target,
+            SPLIT_REDIRECT,
+            Some(r#"Bearer resource_metadata="/.well-known/oauth-protected-resource/mcp""#),
+        )
+        .await;
+
+    assert!(
+        matches!(refused, Err(McpOAuthError::DiscoveryFailed { .. })),
+        "{refused:?}"
+    );
+    assert!(asked_for(
+        &state,
+        "/.well-known/oauth-protected-resource/mcp"
+    ));
+    assert!(!asked_for(
+        &state,
+        "/.well-known/oauth-authorization-server"
+    ));
+    assert!(state.registration_requests.lock().is_empty());
+    assert!(!asked_for(&state, "/authorize"));
+}
+
+/// Published protected resource metadata that names another resource is
+/// refused as before: the server's own origin metadata is not read in its
+/// place.
+#[tokio::test]
+async fn published_resource_metadata_for_another_resource_is_refused_without_origin_metadata() {
+    let (base, state) = spawn_oauth_fixture().await;
+    *state.resource_override.lock() = Some(format!("{base}/other"));
+    let authority = split_authority(&state, Arc::new(EphemeralTokenStore::new()));
+    let target = split_target(&base, "other-resource");
+
+    let refused = authority
+        .login_start(
+            &target,
+            SPLIT_REDIRECT,
+            Some(CHALLENGE_WITHOUT_RESOURCE_METADATA),
+        )
+        .await;
+
+    let Err(McpOAuthError::DiscoveryFailed { reason, .. }) = &refused else {
+        panic!("expected the resource refusal, got {refused:?}");
+    };
+    assert!(reason.contains("does not match MCP server"), "{reason}");
+    assert!(!asked_for(
+        &state,
+        "/.well-known/oauth-authorization-server"
+    ));
+    assert!(state.registration_requests.lock().is_empty());
+}
+
+/// A host-registered client stays bound to an authorization server its
+/// server's protected resource metadata names: without that document its
+/// login is refused, the server's own origin metadata is not read, and the
+/// client's secret goes nowhere.
+#[tokio::test]
+async fn a_fixed_client_is_refused_without_protected_resource_metadata() {
+    let method = McpOAuthClientAuthMethod::ClientSecretPost;
+    let (base, state) = spawn_fixed_client_fixture(method).await;
+    let authority = split_authority(&state, Arc::new(EphemeralTokenStore::new()));
+    let target = split_target(&base, "fixed-no-resource");
+    install_registered_fixed_client(&authority, &base, &target, method).await;
+    state
+        .protected_resource_absent
+        .store(true, Ordering::SeqCst);
+    state.request_paths.lock().clear();
+
+    let refused = authority
+        .login_start_registered(
+            &target,
+            &registered_base(),
+            Some(CHALLENGE_WITHOUT_RESOURCE_METADATA),
+        )
+        .await;
+
+    let Err(McpOAuthError::DiscoveryFailed { reason, .. }) = &refused else {
+        panic!("expected a discovery refusal, got {refused:?}");
+    };
+    assert!(reason.contains("oauth-protected-resource"), "{reason}");
+    assert!(asked_for(
+        &state,
+        "/.well-known/oauth-protected-resource/mcp"
+    ));
+    assert!(!asked_for(
+        &state,
+        "/.well-known/oauth-authorization-server"
+    ));
+    assert!(!asked_for(&state, "/.well-known/openid-configuration"));
+    assert!(state.token_requests.lock().is_empty());
+    assert!(!asked_for(&state, "/authorize"));
+}
+
+/// The origin's own issuer has two written forms with one RFC 8414
+/// metadata URL: the origin, and the origin with one trailing slash. A
+/// server that writes the second logs in as well, and the issuer is kept
+/// as its metadata states it (the completion reads the same document again
+/// for that issuer).
+#[tokio::test]
+async fn origin_authorization_server_metadata_may_state_its_issuer_with_one_trailing_slash() {
+    let (base, state) = spawn_oauth_fixture().await;
+    state
+        .protected_resource_absent
+        .store(true, Ordering::SeqCst);
+    *state.issuer_override.lock() = Some(format!("{base}/"));
+    let authority = split_authority(&state, Arc::new(EphemeralTokenStore::new()));
+    let target = split_target(&base, "origin-slash-issuer");
+
+    let start = authority
+        .login_start(
+            &target,
+            SPLIT_REDIRECT,
+            Some(CHALLENGE_WITHOUT_RESOURCE_METADATA),
+        )
+        .await
+        .expect("the origin written with a trailing slash is the origin");
+    assert!(
+        start
+            .authorize_url
+            .starts_with(&format!("{base}/authorize?"))
+    );
+    authority
+        .login_complete(&target, split_callback(&start, &start.state))
+        .await
+        .expect("the completion finds the issuer as the metadata states it");
+    assert_eq!(
+        authority
+            .stored_bearer_token(&target)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("access-token")
+    );
+}
+
+/// No other form is the origin: an issuer with a path, with two trailing
+/// slashes or on another host is refused before any registration.
+#[tokio::test]
+async fn origin_authorization_server_metadata_with_a_path_or_another_host_is_refused() {
+    let (base, state) = spawn_oauth_fixture().await;
+    state
+        .protected_resource_absent
+        .store(true, Ordering::SeqCst);
+    let authority = split_authority(&state, Arc::new(EphemeralTokenStore::new()));
+    let target = split_target(&base, "origin-not-the-issuer");
+    let other_host = base.replace("127.0.0.1", "localhost");
+    for issuer in [
+        format!("{base}/tenant"),
+        format!("{base}//"),
+        format!("{base}/?tenant=1"),
+        other_host,
+    ] {
+        *state.issuer_override.lock() = Some(issuer.clone());
+
+        let refused = authority
+            .login_start(
+                &target,
+                SPLIT_REDIRECT,
+                Some(CHALLENGE_WITHOUT_RESOURCE_METADATA),
+            )
+            .await;
+
+        let Err(McpOAuthError::DiscoveryFailed { reason, .. }) = &refused else {
+            panic!("expected the issuer refusal for {issuer}, got {refused:?}");
+        };
+        assert!(
+            reason.contains(&format!(
+                "authorization server metadata issuer '{issuer}' does not match discovered issuer '{base}'"
+            )),
+            "{reason}"
+        );
+        assert!(authority.pending_attempt(&target).unwrap().is_none());
+    }
+    assert!(state.registration_requests.lock().is_empty());
+    assert!(!asked_for(&state, "/authorize"));
+}
+
+/// Published protected resource metadata names its issuer exactly: the
+/// trailing-slash form is admitted only for a server's own origin when it
+/// publishes no resource metadata.
+#[tokio::test]
+async fn a_published_issuer_is_still_matched_exactly() {
+    let (base, state) = spawn_oauth_fixture().await;
+    *state.issuer_override.lock() = Some(format!("{base}/"));
+    let authority = split_authority(&state, Arc::new(EphemeralTokenStore::new()));
+    let target = split_target(&base, "published-exact-issuer");
+
+    let refused = authority.login_start(&target, SPLIT_REDIRECT, None).await;
+
+    let Err(McpOAuthError::DiscoveryFailed { reason, .. }) = &refused else {
+        panic!("expected the issuer refusal, got {refused:?}");
+    };
+    assert_eq!(
+        reason,
+        &format!(
+            "authorization server metadata issuer '{base}/' does not match discovered issuer '{base}'"
+        )
+    );
+    assert!(state.registration_requests.lock().is_empty());
+}
+
+/// A protected resource metadata URL that answers `status` is not an absent
+/// document: the server may publish one, so the login is refused as before
+/// and the server's own origin metadata is not read in its place.
+async fn assert_unreadable_resource_metadata_is_refused(status: StatusCode) {
+    let (base, state) = spawn_oauth_fixture().await;
+    *state.protected_resource_answer.lock() = Some(status);
+    let authority = split_authority(&state, Arc::new(EphemeralTokenStore::new()));
+    let target = split_target(&base, "unreadable-resource");
+
+    let refused = authority
+        .login_start(
+            &target,
+            SPLIT_REDIRECT,
+            Some(CHALLENGE_WITHOUT_RESOURCE_METADATA),
+        )
+        .await;
+
+    let Err(McpOAuthError::DiscoveryFailed { reason, .. }) = &refused else {
+        panic!("expected the resource metadata refusal for {status}, got {refused:?}");
+    };
+    assert_eq!(
+        reason, "no oauth-protected-resource metadata found",
+        "{status}"
+    );
+    assert!(asked_for(
+        &state,
+        "/.well-known/oauth-protected-resource/mcp"
+    ));
+    assert!(
+        !asked_for(&state, "/.well-known/oauth-authorization-server"),
+        "{status}: the server's own origin metadata is not read"
+    );
+    assert!(!asked_for(&state, "/.well-known/openid-configuration"));
+    assert!(!asked_for(&state, "/redirected"));
+    assert!(authority.pending_attempt(&target).unwrap().is_none());
+    assert!(state.registration_requests.lock().is_empty());
+    assert!(!asked_for(&state, "/authorize"));
+}
+
+/// A server error of the protected resource metadata URL is not an absent
+/// document.
+#[tokio::test]
+async fn a_resource_metadata_url_that_answers_a_server_error_is_not_absent() {
+    for status in [
+        StatusCode::INTERNAL_SERVER_ERROR,
+        StatusCode::SERVICE_UNAVAILABLE,
+    ] {
+        assert_unreadable_resource_metadata_is_refused(status).await;
+    }
+}
+
+/// A protected resource metadata URL that demands authorization is not an
+/// absent document.
+#[tokio::test]
+async fn a_resource_metadata_url_that_demands_authorization_is_not_absent() {
+    for status in [StatusCode::UNAUTHORIZED, StatusCode::FORBIDDEN] {
+        assert_unreadable_resource_metadata_is_refused(status).await;
+    }
+}
+
+/// A protected resource metadata URL that redirects is not an absent
+/// document, and the redirect is not followed.
+#[tokio::test]
+async fn a_resource_metadata_url_that_redirects_is_not_absent() {
+    assert_unreadable_resource_metadata_is_refused(StatusCode::TEMPORARY_REDIRECT).await;
+}
+
+/// `410 Gone` says, like `404`, that the document is absent: the server's
+/// own origin metadata is then read.
+#[tokio::test]
+async fn a_gone_resource_metadata_url_is_an_absent_document() {
+    let (base, state) = spawn_oauth_fixture().await;
+    *state.protected_resource_answer.lock() = Some(StatusCode::GONE);
+    let authority = split_authority(&state, Arc::new(EphemeralTokenStore::new()));
+    let target = split_target(&base, "gone-resource");
+
+    let start = authority
+        .login_start(
+            &target,
+            SPLIT_REDIRECT,
+            Some(CHALLENGE_WITHOUT_RESOURCE_METADATA),
+        )
+        .await
+        .expect("the origin's authorization-server metadata admits the login");
+
+    assert!(
+        start
+            .authorize_url
+            .starts_with(&format!("{base}/authorize?"))
+    );
+    assert!(asked_for(&state, "/.well-known/oauth-authorization-server"));
+}
+
+/// The origin's authorization-server metadata may come from OpenID Connect
+/// discovery when its RFC 8414 document is absent, as for any issuer.
+#[tokio::test]
+async fn origin_authorization_server_metadata_may_come_from_openid_connect_discovery() {
+    let (base, state) = spawn_oauth_fixture().await;
+    state
+        .protected_resource_absent
+        .store(true, Ordering::SeqCst);
+    state
+        .authorization_metadata_via_openid_configuration
+        .store(true, Ordering::SeqCst);
+    let authority = split_authority(&state, Arc::new(EphemeralTokenStore::new()));
+    let target = split_target(&base, "origin-openid-discovery");
+
+    let start = authority
+        .login_start(
+            &target,
+            SPLIT_REDIRECT,
+            Some(CHALLENGE_WITHOUT_RESOURCE_METADATA),
+        )
+        .await
+        .expect("OpenID Connect discovery at the origin supplies the metadata");
+    assert!(
+        start
+            .authorize_url
+            .starts_with(&format!("{base}/authorize?"))
+    );
+    let paths = state.request_paths.lock().clone();
+    let rfc8414 = paths
+        .iter()
+        .position(|path| path == "/.well-known/oauth-authorization-server")
+        .expect("RFC 8414 is tried first");
+    let oidc = paths
+        .iter()
+        .position(|path| path == "/.well-known/openid-configuration")
+        .expect("OpenID Connect discovery is tried next");
+    assert!(rfc8414 < oidc, "{paths:?}");
+    authority
+        .login_complete(&target, split_callback(&start, &start.state))
+        .await
+        .expect("the completion reads the same document again");
+    assert_eq!(
+        authority
+            .stored_bearer_token(&target)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("access-token")
+    );
+}
+
+/// A second start joins the pending attempt of an origin whose issuer is
+/// written with a trailing slash: the join reads the metadata again for the
+/// issuer as the metadata states it.
+#[tokio::test]
+async fn a_second_start_joins_the_pending_attempt_of_a_trailing_slash_issuer() {
+    let (base, state) = spawn_oauth_fixture().await;
+    state
+        .protected_resource_absent
+        .store(true, Ordering::SeqCst);
+    *state.issuer_override.lock() = Some(format!("{base}/"));
+    let authority = split_authority(&state, Arc::new(EphemeralTokenStore::new()));
+    let target = split_target(&base, "origin-slash-join");
+
+    let first = authority
+        .login_start(
+            &target,
+            SPLIT_REDIRECT,
+            Some(CHALLENGE_WITHOUT_RESOURCE_METADATA),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.disposition, McpOAuthLoginDisposition::Started);
+    let joined = authority
+        .login_start(
+            &target,
+            "http://127.0.0.1:10/mcp/oauth/callback",
+            Some(CHALLENGE_WITHOUT_RESOURCE_METADATA),
+        )
+        .await
+        .expect("the join finds the issuer as the metadata states it");
+    assert_eq!(joined.disposition, McpOAuthLoginDisposition::Joined);
+    assert_eq!(joined.state, first.state);
+    assert_eq!(joined.authorize_url, first.authorize_url);
+    assert_eq!(
+        state.registration_requests.lock().len(),
+        1,
+        "a join registers no second client"
+    );
+    authority
+        .login_complete(&target, split_callback(&joined, &joined.state))
+        .await
+        .expect("the joined projection completes the single attempt");
+}
+
+const ENDPOINT_PATH_RESOURCE_METADATA: &str = "/mcp/.well-known/oauth-protected-resource";
+const ORIGIN_ROOT_RESOURCE_METADATA: &str = "/.well-known/oauth-protected-resource";
+
+/// A server whose own endpoint guard answers the metadata location under
+/// its endpoint path: the two well-known URLs at the origin root answer
+/// `404`, the one under the endpoint path answers `401` with a challenge
+/// that names no resource metadata, and the origin serves
+/// authorization-server metadata. That `401` is the endpoint's guard, not a
+/// document: the server publishes none, and the login completes against
+/// the origin's endpoints.
+#[tokio::test]
+async fn an_endpoint_path_metadata_location_that_demands_authorization_is_absent() {
+    let (base, state) = spawn_oauth_fixture().await;
+    state
+        .protected_resource_absent
+        .store(true, Ordering::SeqCst);
+    *state.endpoint_path_resource_answer.lock() = Some(StatusCode::UNAUTHORIZED);
+    let authority = split_authority(&state, Arc::new(EphemeralTokenStore::new()));
+    let target = split_target(&base, "guarded-endpoint-path");
+
+    let start = authority
+        .login_start(
+            &target,
+            SPLIT_REDIRECT,
+            Some(CHALLENGE_WITHOUT_RESOURCE_METADATA),
+        )
+        .await
+        .expect("the endpoint guard's answer is not a published document");
+    assert!(
+        start
+            .authorize_url
+            .starts_with(&format!("{base}/authorize?"))
+    );
+    for asked in [
+        "/.well-known/oauth-protected-resource/mcp",
+        ENDPOINT_PATH_RESOURCE_METADATA,
+        ORIGIN_ROOT_RESOURCE_METADATA,
+        "/.well-known/oauth-authorization-server",
+    ] {
+        assert!(asked_for(&state, asked), "{asked} was not asked for");
+    }
+    authority
+        .login_complete(&target, split_callback(&start, &start.state))
+        .await
+        .expect("the login completes against the origin's token endpoint");
+    assert_eq!(
+        state.token_requests.lock()[0]["resource"],
+        format!("{base}/mcp")
+    );
+    assert_eq!(
+        authority
+            .stored_bearer_token(&target)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("access-token")
+    );
+}
+
+/// Under the endpoint path `403` and `405` are the endpoint's own answers
+/// as well: the server publishes no document there.
+#[tokio::test]
+async fn an_endpoint_path_metadata_location_that_is_forbidden_or_not_allowed_is_absent() {
+    for status in [StatusCode::FORBIDDEN, StatusCode::METHOD_NOT_ALLOWED] {
+        let (base, state) = spawn_oauth_fixture().await;
+        state
+            .protected_resource_absent
+            .store(true, Ordering::SeqCst);
+        *state.endpoint_path_resource_answer.lock() = Some(status);
+        let authority = split_authority(&state, Arc::new(EphemeralTokenStore::new()));
+        let target = split_target(&base, "guarded-endpoint-path");
+
+        let start = authority
+            .login_start(
+                &target,
+                SPLIT_REDIRECT,
+                Some(CHALLENGE_WITHOUT_RESOURCE_METADATA),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{status} under the endpoint path: {error:?}"));
+
+        assert!(
+            start
+                .authorize_url
+                .starts_with(&format!("{base}/authorize?")),
+            "{status}"
+        );
+        assert!(asked_for(&state, ENDPOINT_PATH_RESOURCE_METADATA));
+        assert!(asked_for(&state, "/.well-known/oauth-authorization-server"));
+    }
+}
+
+/// A server error or a redirect of the location under the endpoint path is
+/// not an absent document there either: the login is refused and the
+/// server's own origin metadata is not read.
+#[tokio::test]
+async fn an_endpoint_path_metadata_location_that_fails_or_redirects_is_not_absent() {
+    for status in [
+        StatusCode::INTERNAL_SERVER_ERROR,
+        StatusCode::SERVICE_UNAVAILABLE,
+        StatusCode::TEMPORARY_REDIRECT,
+    ] {
+        let (base, state) = spawn_oauth_fixture().await;
+        state
+            .protected_resource_absent
+            .store(true, Ordering::SeqCst);
+        *state.endpoint_path_resource_answer.lock() = Some(status);
+        let authority = split_authority(&state, Arc::new(EphemeralTokenStore::new()));
+        let target = split_target(&base, "failing-endpoint-path");
+
+        let refused = authority
+            .login_start(
+                &target,
+                SPLIT_REDIRECT,
+                Some(CHALLENGE_WITHOUT_RESOURCE_METADATA),
+            )
+            .await;
+
+        let Err(McpOAuthError::DiscoveryFailed { reason, .. }) = &refused else {
+            panic!("expected the resource metadata refusal for {status}, got {refused:?}");
+        };
+        assert_eq!(
+            reason, "no oauth-protected-resource metadata found",
+            "{status}"
+        );
+        assert!(asked_for(&state, ENDPOINT_PATH_RESOURCE_METADATA));
+        assert!(!asked_for(
+            &state,
+            "/.well-known/oauth-authorization-server"
+        ));
+        assert!(!asked_for(&state, "/redirected"));
+        assert!(state.registration_requests.lock().is_empty());
+    }
+}
+
+/// At the origin root only `404` and `410` say a document is absent: a
+/// root well-known URL that demands authorization, forbids or does not
+/// allow the request refuses the login, whichever of the two root forms it
+/// is, and the server's own origin metadata is not read.
+#[tokio::test]
+async fn an_origin_root_metadata_location_that_demands_authorization_is_not_absent() {
+    for status in [
+        StatusCode::UNAUTHORIZED,
+        StatusCode::FORBIDDEN,
+        StatusCode::METHOD_NOT_ALLOWED,
+    ] {
+        for path_inserted in [true, false] {
+            let (base, state) = spawn_oauth_fixture().await;
+            if path_inserted {
+                *state.protected_resource_answer.lock() = Some(status);
+            } else {
+                state
+                    .protected_resource_absent
+                    .store(true, Ordering::SeqCst);
+                *state.origin_root_resource_answer.lock() = Some(status);
+            }
+            let authority = split_authority(&state, Arc::new(EphemeralTokenStore::new()));
+            let target = split_target(&base, "guarded-origin-root");
+
+            let refused = authority
+                .login_start(
+                    &target,
+                    SPLIT_REDIRECT,
+                    Some(CHALLENGE_WITHOUT_RESOURCE_METADATA),
+                )
+                .await;
+
+            let Err(McpOAuthError::DiscoveryFailed { reason, .. }) = &refused else {
+                panic!(
+                    "expected the resource metadata refusal for {status} (path inserted: {path_inserted}), got {refused:?}"
+                );
+            };
+            assert_eq!(
+                reason, "no oauth-protected-resource metadata found",
+                "{status}"
+            );
+            assert!(!asked_for(
+                &state,
+                "/.well-known/oauth-authorization-server"
+            ));
+            assert!(state.registration_requests.lock().is_empty());
+        }
+    }
+}
+
+/// A `401` under the endpoint path whose own challenge names resource
+/// metadata is the server saying it publishes a document: it is not absent,
+/// whether or not the caller passed the endpoint's challenge on. The login
+/// is refused as before and the server's own origin metadata is not read.
+#[tokio::test]
+async fn an_endpoint_path_401_whose_challenge_names_resource_metadata_is_not_absent() {
+    for challenge in [None, Some(CHALLENGE_WITHOUT_RESOURCE_METADATA)] {
+        let (base, state) = spawn_oauth_fixture().await;
+        state
+            .protected_resource_absent
+            .store(true, Ordering::SeqCst);
+        *state.endpoint_path_resource_answer.lock() = Some(StatusCode::UNAUTHORIZED);
+        state
+            .endpoint_path_challenge_names_resource_metadata
+            .store(true, Ordering::SeqCst);
+        let authority = split_authority(&state, Arc::new(EphemeralTokenStore::new()));
+        let target = split_target(&base, "guarded-document");
+
+        let refused = authority
+            .login_start(&target, SPLIT_REDIRECT, challenge)
+            .await;
+
+        let Err(McpOAuthError::DiscoveryFailed { reason, .. }) = &refused else {
+            panic!("expected the resource metadata refusal, got {refused:?}");
+        };
+        assert_eq!(reason, "no oauth-protected-resource metadata found");
+        assert!(asked_for(&state, ENDPOINT_PATH_RESOURCE_METADATA));
+        assert!(!asked_for(
+            &state,
+            "/.well-known/oauth-authorization-server"
+        ));
+        assert!(!asked_for(&state, "/guarded/resource-metadata"));
+        assert!(authority.pending_attempt(&target).unwrap().is_none());
+        assert!(state.registration_requests.lock().is_empty());
+        assert!(!asked_for(&state, "/authorize"));
+    }
+}
+
+/// A later location that serves the document is followed although the
+/// location under the endpoint path answers its guard's `401`: the
+/// authorization server that document names is used, and the server's own
+/// origin metadata is not read.
+#[tokio::test]
+async fn a_document_at_the_origin_root_is_followed_past_a_guarded_endpoint_path() {
+    let (resource_base, resource_state) = spawn_oauth_fixture().await;
+    let (issuer_base, issuer_state) = spawn_oauth_fixture().await;
+    resource_state
+        .protected_resource_absent
+        .store(true, Ordering::SeqCst);
+    *resource_state.endpoint_path_resource_answer.lock() = Some(StatusCode::UNAUTHORIZED);
+    *resource_state
+        .origin_root_resource_authorization_server
+        .lock() = Some(issuer_base.clone());
+    let authority = split_authority(&issuer_state, Arc::new(EphemeralTokenStore::new()));
+    let target = split_target(&resource_base, "root-document");
+
+    let start = authority
+        .login_start(
+            &target,
+            SPLIT_REDIRECT,
+            Some(CHALLENGE_WITHOUT_RESOURCE_METADATA),
+        )
+        .await
+        .expect("the document at the origin root names the authorization server");
+
+    assert!(
+        start
+            .authorize_url
+            .starts_with(&format!("{issuer_base}/authorize?")),
+        "the authorization server the document names is used"
+    );
+    let paths = resource_state.request_paths.lock().clone();
+    let guarded = paths
+        .iter()
+        .position(|path| path == ENDPOINT_PATH_RESOURCE_METADATA)
+        .expect("the location under the endpoint path is asked");
+    let root = paths
+        .iter()
+        .position(|path| path == ORIGIN_ROOT_RESOURCE_METADATA)
+        .expect("the origin-root location is asked");
+    assert!(guarded < root, "{paths:?}");
+    assert!(!asked_for(
+        &resource_state,
+        "/.well-known/oauth-authorization-server"
+    ));
+    assert_eq!(issuer_state.registration_requests.lock().len(), 1);
+}
+
+/// When two locations serve different documents the earlier location wins:
+/// the origin-root URL with the server's path inserted is asked first, and
+/// a later location is not asked once it serves a document.
+#[tokio::test]
+async fn the_earlier_of_two_locations_that_serve_a_document_is_followed() {
+    let (resource_base, resource_state) = spawn_oauth_fixture().await;
+    let (other_base, other_state) = spawn_oauth_fixture().await;
+    *resource_state
+        .origin_root_resource_authorization_server
+        .lock() = Some(other_base.clone());
+    let authority = split_authority(&resource_state, Arc::new(EphemeralTokenStore::new()));
+    let target = split_target(&resource_base, "two-documents");
+
+    let start = authority
+        .login_start(
+            &target,
+            SPLIT_REDIRECT,
+            Some(CHALLENGE_WITHOUT_RESOURCE_METADATA),
+        )
+        .await
+        .expect("the first location's document names the authorization server");
+
+    assert!(
+        start
+            .authorize_url
+            .starts_with(&format!("{resource_base}/authorize?")),
+        "the earlier location's document is the one followed"
+    );
+    assert!(asked_for(
+        &resource_state,
+        "/.well-known/oauth-protected-resource/mcp"
+    ));
+    assert!(!asked_for(&resource_state, ENDPOINT_PATH_RESOURCE_METADATA));
+    assert!(!asked_for(&resource_state, ORIGIN_ROOT_RESOURCE_METADATA));
+    assert!(other_state.registration_requests.lock().is_empty());
+    assert!(other_state.request_paths.lock().is_empty());
+}
+
+/// Any mention of resource metadata in the challenge of a `401` under the
+/// endpoint path counts as naming a document, whatever the letter case of
+/// the parameter's name and however its value is written: the login is
+/// refused and the server's own origin metadata is not read.
+#[tokio::test]
+async fn an_endpoint_path_401_that_mentions_resource_metadata_in_any_form_is_not_absent() {
+    for challenge in [
+        r#"Bearer error="invalid_token", Resource_Metadata="/guarded/resource-metadata""#,
+        r#"Bearer RESOURCE_METADATA="/guarded/resource-metadata""#,
+        r#"Bearer error="invalid_token", resource_metadata="/guarded/resource-metadata"#,
+        "Bearer resource_metadata=/guarded/resource-metadata",
+    ] {
+        let (base, state) = spawn_oauth_fixture().await;
+        state
+            .protected_resource_absent
+            .store(true, Ordering::SeqCst);
+        *state.endpoint_path_resource_answer.lock() = Some(StatusCode::UNAUTHORIZED);
+        *state.endpoint_path_challenge.lock() = Some(challenge);
+        let authority = split_authority(&state, Arc::new(EphemeralTokenStore::new()));
+        let target = split_target(&base, "guarded-document-form");
+
+        let refused = authority.login_start(&target, SPLIT_REDIRECT, None).await;
+
+        let Err(McpOAuthError::DiscoveryFailed { reason, .. }) = &refused else {
+            panic!("expected the resource metadata refusal for {challenge:?}, got {refused:?}");
+        };
+        assert_eq!(
+            reason, "no oauth-protected-resource metadata found",
+            "{challenge:?}"
+        );
+        assert!(asked_for(&state, ENDPOINT_PATH_RESOURCE_METADATA));
+        assert!(
+            !asked_for(&state, "/.well-known/oauth-authorization-server"),
+            "{challenge:?}"
+        );
+        assert!(state.registration_requests.lock().is_empty());
+    }
 }

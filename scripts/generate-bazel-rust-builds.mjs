@@ -933,6 +933,12 @@ const nativeE2eSystemTests = [
   },
   {
     packageKey: "meerkat-cli",
+    cargoTestTarget: "system_cli_realm_mcp",
+    name: "e2e_system_cli_realm_mcp_review_rule_bazel_test",
+    testName: "integration_real_cli_realm_mcp_review_rule_refuses_above_r1",
+  },
+  {
+    packageKey: "meerkat-cli",
     cargoTestTarget: "system_cli_export_atif",
     name: "e2e_system_cli_export_atif_bazel_test",
     testName: "integration_real_cli_export_atif",

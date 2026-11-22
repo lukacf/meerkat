@@ -111,9 +111,11 @@
 //!   plane only exists when an SDK host is on the other end of stdin.
 //!
 //! - **Registry / resume.** `meta_gateway` maintains a cross-process
-//!   runtime registry keyed by a config fingerprint and can answer
-//!   `launch_state: "resumed"` without booting a runtime at all.
-//!   `rpc_gateway` has no such concept.
+//!   runtime registry keyed by a config fingerprint and can answer a
+//!   launch started with `--resume-from-registry` as
+//!   `launch_state: "resumed"` without booting a runtime at all; a launch
+//!   without that argument always binds and starts. `rpc_gateway` has no
+//!   such concept.
 //!
 //! Profile-specific enrichment remains explicit between bootstrap and
 //! activation. This is the checked seam list, not a closed census:
@@ -1607,6 +1609,88 @@ pub fn open_provider_credentials_root(
 }
 
 // ---------------------------------------------------------------------------
+// Declared host paths
+// ---------------------------------------------------------------------------
+
+/// Declare to the in-process file tools (`apply_patch`, `blob_save_file`,
+/// `blob_load_file`, `view_image`) of every agent `factory` builds the paths
+/// a composition keeps its state and configuration in, as Meerkat's own
+/// hosts do
+/// ([`meerkat::AgentFactory::with_protected_host_inputs`]): `state` are the
+/// directories its stores live in (the state directory, the gateway home),
+/// `named` the configuration files and roots its launch names or adopts. The
+/// process default provider credential store is declared with them when it
+/// is kept in files, and so is the directory `factory` keeps its sessions'
+/// comms identities in: call this once the factory's user configuration
+/// root is set.
+///
+/// Meerkat applies a declared path where it lies strictly inside the
+/// directory an agent's file tools are rooted in, with everything under it,
+/// and nowhere else: a path outside that directory is already out of the
+/// tools' reach, and one that contains it is not applied. A `.rkat`
+/// directory under the root is refused without a declaration. The
+/// declaration holds for these tools' writes and reads alike: the two
+/// writing tools write nothing in a declared path and the two reading tools
+/// read nothing in it. It does not reach a shell, a hook or an MCP server.
+pub fn declare_host_paths(
+    factory: meerkat::AgentFactory,
+    state: impl IntoIterator<Item = PathBuf>,
+    named: impl IntoIterator<Item = PathBuf>,
+) -> meerkat::AgentFactory {
+    let mut inputs: Vec<(meerkat::HostInput, PathBuf)> = state
+        .into_iter()
+        .map(|root| (meerkat::HostInput::RealmState, root))
+        .collect();
+    inputs.extend(
+        meerkat::TokenStoreBackend::default_auto()
+            .ok()
+            .as_ref()
+            .and_then(meerkat::HostConfinement::credential_store_input),
+    );
+    if let meerkat_core::SessionCommsIdentityRoot::Durable(root) =
+        factory.session_comms_identity_root()
+    {
+        inputs.push((meerkat::HostInput::CredentialStore, root));
+    }
+    let named: Vec<PathBuf> = named.into_iter().collect();
+    factory.with_protected_host_inputs(&inputs, &named, &[])
+}
+
+/// Whether `tools_root`, the directory a composition's members' file tools
+/// are rooted in, is `state`, a directory the composition keeps state in,
+/// or lies inside it: the two physical paths when it does. Meerkat applies
+/// a declared path only where it lies strictly inside the tools' root
+/// ([`declare_host_paths`]), so a gateway starts only in a layout where
+/// its declaration of `state` is applied or `state` is out of the tools'
+/// reach, and refuses its start otherwise. A path that does not exist yet
+/// is taken where its deepest existing ancestor really lies.
+pub fn tools_root_in_state(tools_root: &Path, state: &Path) -> Option<(PathBuf, PathBuf)> {
+    let real = |path: &Path| {
+        crate::storage_layout::canonicalize_storage_root(path)
+            .unwrap_or_else(|_| path.to_path_buf())
+    };
+    let (root, state) = (real(tools_root), real(state));
+    root.starts_with(&state).then_some((root, state))
+}
+
+/// The files a mob definition's skills are read from. A profile's skill
+/// given by a file path is read from that file at each build of a member,
+/// into the member's instructions, so a composition declares each such
+/// file with its other paths ([`declare_host_paths`]). A relative path is
+/// taken from the process working directory, as the build opens it. The
+/// files' directories are not the composition's own and are not declared.
+pub fn definition_skill_files(definition: &meerkat_mob::MobDefinition) -> Vec<PathBuf> {
+    definition
+        .skills
+        .values()
+        .filter_map(|source| match source {
+            meerkat_mob::definition::SkillSource::Path { path } => Some(PathBuf::from(path)),
+            meerkat_mob::definition::SkillSource::Inline { .. } => None,
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
 // Schedule firing host
 // ---------------------------------------------------------------------------
 
@@ -1736,6 +1820,17 @@ pub async fn adopt_schedule_mob_targets(
             crate::schedule_wiring::EndedPrivateMemberSchedules::new(schedule_service.clone()),
         ))
         .await;
+    // Only the launch that speaks for its composition hands its runtime the
+    // release of a mob's schedules: a create under a mob's id then ends the
+    // schedules that name that id before the mob exists. A candidate
+    // launch, above, declares its schedules and never binds the release, so
+    // it refuses such a create and ends no schedule.
+    runtime.mob_runtime().mob_schedules().bind(Arc::new(
+        crate::schedule_wiring::MobAgentSchedules::new(
+            schedule_service.clone(),
+            mob_target_registry.clone(),
+        ),
+    ));
     match crate::schedule_wiring::repair_resumable_session_targets_to_mob_members(
         schedule_service,
         mob_target_registry,

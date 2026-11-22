@@ -442,6 +442,7 @@ mod per_call {
             record,
             namespace,
             resolved.member.role.as_str(),
+            resolved.member.labels.get("role").map(String::as_str),
         )];
         let mut visited = BTreeSet::from([record.identity.clone()]);
         let mut child_labels = record.labels.clone();
@@ -485,14 +486,23 @@ mod per_call {
                         continue;
                     };
                     if candidate_record.session_id.as_deref() == Some(bound_session) {
-                        confirmed = Some((candidate_record, candidate.member.role.to_string()));
+                        confirmed = Some((
+                            candidate_record,
+                            candidate.member.role.to_string(),
+                            candidate.member.labels.get("role").cloned(),
+                        ));
                         break;
                     }
                 }
             }
             match confirmed {
-                Some((parent_record, role)) => {
-                    lineage.push(lineage_link_for_record(&parent_record, namespace, &role));
+                Some((parent_record, role, own_role_label)) => {
+                    lineage.push(lineage_link_for_record(
+                        &parent_record,
+                        namespace,
+                        &role,
+                        own_role_label.as_deref(),
+                    ));
                     child_labels = parent_record.labels;
                 }
                 None => {
@@ -1252,5 +1262,43 @@ async fn a_stream_page_with_an_unknown_identity_refreshes_the_identity_read_mode
         );
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
+    let _ = runtime.mob_handle().stop().await;
+}
+
+/// The labels a frame captures of its member are the member's own: a
+/// label named `role` that the member carries is captured as it is, beside
+/// the member's role in its mob, which the frame carries apart.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_frame_captures_its_members_own_label_named_role() {
+    let (runtime, entry) = identity_first_realm(0).await;
+    spawn_trusted_identity_projected_member(
+        &runtime,
+        spec(
+            "claimant",
+            &[("agent_identity", "claimant"), ("role", "auditor")],
+        ),
+    )
+    .await;
+    let cut = MemberCut::new(&entry);
+    let mut captured = None;
+    for member in cut.members().await {
+        let Some(own) = member.record().await else {
+            continue;
+        };
+        if own.identity == "claimant" {
+            captured = Some(capture_member_lineage_in(&cut, &member.resolved, own).await);
+        }
+    }
+    let lineage = captured.expect("the member is listed");
+    let own = lineage.first().expect("the member's own link");
+    assert_eq!(own.role.as_deref(), Some("worker"), "{own:#?}");
+    assert_eq!(
+        own.labels
+            .as_ref()
+            .and_then(|labels| labels.get("role"))
+            .map(String::as_str),
+        Some("auditor"),
+        "the captured labels are the member's own: {own:#?}"
+    );
     let _ = runtime.mob_handle().stop().await;
 }

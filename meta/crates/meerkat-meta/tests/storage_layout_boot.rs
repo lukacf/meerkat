@@ -813,6 +813,74 @@ fn with_meta_gateway<T>(
     env: &[(&str, &Path)],
     while_up: impl FnOnce(&Value) -> T,
 ) -> (Value, T) {
+    with_meta_gateway_args(workspace, params, env, &[], while_up)
+}
+
+/// [`with_meta_gateway`], with `args` as the gateway's start arguments.
+fn with_meta_gateway_args<T>(
+    workspace: &Path,
+    params: &Value,
+    env: &[(&str, &Path)],
+    args: &[&str],
+    while_up: impl FnOnce(&Value) -> T,
+) -> (Value, T) {
+    let gateway = start_meta_gateway(workspace, params, env, args);
+    let outcome = while_up(&gateway.response);
+    let response = gateway.response.clone();
+    drop(gateway);
+    (response, outcome)
+}
+
+/// A started `meta_gateway` and its `meta/init` response. Dropping it ends
+/// the gateway as a crash would.
+struct StartedMetaGateway {
+    child: std::process::Child,
+    /// Held open while the gateway serves.
+    stdin: Option<std::process::ChildStdin>,
+    response: Value,
+}
+
+impl StartedMetaGateway {
+    /// Stop the gateway with SIGTERM and wait for its graceful exit.
+    #[cfg(unix)]
+    fn terminate(&mut self) {
+        let status = Command::new("kill")
+            .args(["-TERM", &self.child.id().to_string()])
+            .status()
+            .expect("run kill");
+        assert!(status.success(), "kill -TERM failed: {status}");
+        let deadline = std::time::Instant::now() + Duration::from_mins(1);
+        while self
+            .child
+            .try_wait()
+            .expect("wait for the gateway")
+            .is_none()
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "meta_gateway did not exit within 60s of SIGTERM"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+}
+
+impl Drop for StartedMetaGateway {
+    fn drop(&mut self) {
+        drop(self.stdin.take());
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// Spawn the real `meta_gateway` in `workspace` with `args` and `env` set,
+/// send `meta/init` with `params` and wait for the init response.
+fn start_meta_gateway(
+    workspace: &Path,
+    params: &Value,
+    env: &[(&str, &Path)],
+    args: &[&str],
+) -> StartedMetaGateway {
     let init = json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -820,6 +888,7 @@ fn with_meta_gateway<T>(
         "params": params,
     });
     let mut child = Command::new(env!("CARGO_BIN_EXE_meta_gateway"))
+        .args(args)
         .current_dir(workspace)
         // Dummy provider secrets: the fallback mob's LLM client is created
         // at bootstrap but never called (mirrors meta_gateway_bootstrap).
@@ -854,11 +923,11 @@ fn with_meta_gateway<T>(
         .recv_timeout(Duration::from_secs(90))
         .expect("meta_gateway did not answer meta/init");
     let response: Value = serde_json::from_str(line.trim()).expect("init response json");
-    let outcome = while_up(&response);
-    drop(stdin);
-    let _ = child.kill();
-    let _ = child.wait();
-    (response, outcome)
+    StartedMetaGateway {
+        child,
+        stdin: Some(stdin),
+        response,
+    }
 }
 
 /// meta_gateway's top-level `provider_credentials_root` is opened at boot and
@@ -978,6 +1047,301 @@ fn meta_gateway_fresh_store_dir_converges_on_canonical_names() {
         "a directory this version created must start again: {again}"
     );
     assert_no_sessions_database(&store_dir);
+}
+
+/// The runtime registry of a gateway started by [`with_meta_gateway`] in
+/// `workspace`: its gateway home is `<workspace>/xdg-state/meerkat-meta`.
+fn runtime_registry_file(workspace: &Path) -> std::path::PathBuf {
+    workspace
+        .join("xdg-state")
+        .join("meerkat-meta")
+        .join(meerkat_meta::storage_layout::RUNTIME_REGISTRY_FILE_NAME)
+}
+
+/// A loopback listener that answers every request `200 OK` for the rest of
+/// the test process. Returns its base URL.
+fn answering_listener() -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a loopback listener");
+    let address = listener.local_addr().expect("the listener's address");
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request);
+            let _ = stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+        }
+    });
+    format!("http://{address}")
+}
+
+/// The `meta/init` params of a persistent launch on `store_dir`.
+fn persistent_launch(workspace: &Path, store_dir: &Path) -> Value {
+    json!({
+        "workspace_root": workspace,
+        "store_path": store_dir,
+        "persistent_sessions": true,
+    })
+}
+
+/// A launch without `--resume-from-registry` is not answered from the
+/// runtime registry. The registry holds an entry under the launch's own
+/// resume key whose address answers `/healthz`; the launch still starts a
+/// runtime and reports that runtime's listener.
+#[test]
+fn meta_gateway_launch_without_resume_argument_starts_beside_an_answering_registry_entry() {
+    let workspace = TempDir::new().expect("workspace");
+    let store = TempDir::new().expect("store");
+    let store_dir = store.path().join("store");
+
+    // Ended after init as a crash would: its registry entry stays.
+    let first = meta_gateway_init(workspace.path(), &store_dir);
+    assert_eq!(
+        first["result"]["launch_state"],
+        json!("created"),
+        "the first launch starts a runtime: {first}"
+    );
+
+    let registry_file = runtime_registry_file(workspace.path());
+    let mut registry: Value =
+        serde_json::from_str(&std::fs::read_to_string(&registry_file).expect("read the registry"))
+            .expect("registry json");
+    let entries = registry["entries"]
+        .as_array_mut()
+        .expect("the registry's entries");
+    assert_eq!(entries.len(), 1, "the first launch left one entry");
+    let answering = answering_listener();
+    entries[0]["http_base_url"] = json!(answering);
+    std::fs::write(
+        &registry_file,
+        serde_json::to_string_pretty(&registry).expect("registry text"),
+    )
+    .expect("write the registry");
+
+    let second = meta_gateway_init(workspace.path(), &store_dir);
+    assert_eq!(
+        second["result"]["launch_state"],
+        json!("created"),
+        "a launch without the argument starts a runtime: {second}"
+    );
+    assert!(
+        second["result"]["http_base_url"].is_string(),
+        "the launch reports a listener: {second}"
+    );
+    assert_ne!(
+        second["result"]["http_base_url"],
+        json!(answering),
+        "the launch reports its own listener, not the registry entry's: {second}"
+    );
+}
+
+/// While a gateway serves a state directory, a second launch with the same
+/// parameters and without `--resume-from-registry` is not answered with the
+/// first one's listener. It goes on to start, and the state directory claim
+/// refuses it typed.
+#[test]
+fn meta_gateway_second_launch_without_resume_argument_is_refused_on_a_claimed_state_directory() {
+    let workspace = TempDir::new().expect("workspace");
+    let store = TempDir::new().expect("store");
+    let params = persistent_launch(workspace.path(), &store.path().join("store"));
+
+    let (first, second) = with_meta_gateway(workspace.path(), &params, &[], |_| {
+        with_meta_gateway(workspace.path(), &params, &[], |_| ()).0
+    });
+    assert_eq!(
+        first["result"]["launch_state"],
+        json!("created"),
+        "the first launch starts a runtime: {first}"
+    );
+    assert_eq!(
+        second["error"]["code"],
+        json!(meerkat_meta::STORAGE_RESOLUTION_CODE),
+        "{second}"
+    );
+    let message = second["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("is in use by another Meta runtime"),
+        "{second}"
+    );
+    assert!(
+        second.get("result").is_none(),
+        "a refused launch reports no listener: {second}"
+    );
+}
+
+/// With `--resume-from-registry`, a launch whose resume key matches a
+/// registered runtime that answers is answered `resumed`, with that
+/// runtime's id and listener.
+#[test]
+fn meta_gateway_launch_with_resume_argument_reports_the_registered_runtime() {
+    let workspace = TempDir::new().expect("workspace");
+    let store = TempDir::new().expect("store");
+    let params = persistent_launch(workspace.path(), &store.path().join("store"));
+
+    let (first, second) = with_meta_gateway(workspace.path(), &params, &[], |_| {
+        with_meta_gateway_args(
+            workspace.path(),
+            &params,
+            &[],
+            &["--resume-from-registry"],
+            |_| (),
+        )
+        .0
+    });
+    assert_eq!(
+        first["result"]["launch_state"],
+        json!("created"),
+        "the first launch starts a runtime: {first}"
+    );
+    assert_eq!(
+        second["result"]["launch_state"],
+        json!("resumed"),
+        "a launch with the argument is answered from the registry: {second}"
+    );
+    assert_eq!(
+        second["result"]["runtime_id"], first["result"]["runtime_id"],
+        "{second}"
+    );
+    assert_eq!(
+        second["result"]["http_base_url"], first["result"]["http_base_url"],
+        "{second}"
+    );
+}
+
+/// The listener addresses the runtime registry of `workspace` lists.
+fn registered_listeners(workspace: &Path) -> Vec<Value> {
+    let registry: Value = serde_json::from_str(
+        &std::fs::read_to_string(runtime_registry_file(workspace)).expect("read the registry"),
+    )
+    .expect("registry json");
+    registry["entries"]
+        .as_array()
+        .expect("the registry's entries")
+        .iter()
+        .map(|entry| entry["http_base_url"].clone())
+        .collect()
+}
+
+/// A graceful exit removes only the exiting gateway's own registry entry.
+/// Two gateways of one resume key serve at once (a process-local launch with
+/// `identity_first: false` claims no state directory, so the second starts
+/// on its own port) and the registry lists the later one. The earlier one's
+/// exit on SIGTERM leaves that entry in place.
+#[cfg(unix)]
+#[test]
+fn meta_gateway_graceful_exit_leaves_the_registry_entry_of_another_gateway_of_its_key() {
+    let workspace = TempDir::new().expect("workspace");
+    let store = TempDir::new().expect("store");
+    let params = json!({
+        "workspace_root": workspace.path(),
+        "store_path": store.path().join("store"),
+        "identity_first": false,
+    });
+
+    let mut earlier = start_meta_gateway(workspace.path(), &params, &[], &[]);
+    let later = start_meta_gateway(workspace.path(), &params, &[], &[]);
+    for response in [&earlier.response, &later.response] {
+        assert_eq!(
+            response["result"]["launch_state"],
+            json!("created"),
+            "each launch starts a runtime: {response}"
+        );
+    }
+    let later_listener = later.response["result"]["http_base_url"].clone();
+    assert_ne!(
+        earlier.response["result"]["http_base_url"], later_listener,
+        "each gateway has its own listener"
+    );
+    assert_eq!(
+        registered_listeners(workspace.path()),
+        vec![later_listener.clone()],
+        "the registry lists the later gateway"
+    );
+
+    earlier.terminate();
+    assert_eq!(
+        registered_listeners(workspace.path()),
+        vec![later_listener],
+        "the earlier gateway's exit leaves the later gateway's entry"
+    );
+}
+
+/// Whether the listener at `base_url` answers `GET /healthz` with 200.
+fn listener_answers(base_url: &str) -> bool {
+    let authority = base_url
+        .strip_prefix("http://")
+        .unwrap_or_else(|| panic!("a plain http base url: {base_url}"));
+    let Ok(mut stream) = std::net::TcpStream::connect(authority) else {
+        return false;
+    };
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .expect("read timeout");
+    if write!(
+        stream,
+        "GET /healthz HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\n\r\n"
+    )
+    .is_err()
+    {
+        return false;
+    }
+    let mut reply = String::new();
+    let _ = stream.read_to_string(&mut reply);
+    reply.starts_with("HTTP/1.1 200")
+}
+
+/// The identity mode is not part of the resume key, and a process-local
+/// launch claims the state directory only when it is identity-first. So of
+/// two process-local launches of one key on an ephemeral port, the second
+/// starts a runtime whenever one of the two has `identity_first: false`, in
+/// either order: both answer `created`, both serve, and the registry lists
+/// the later one.
+#[test]
+fn meta_gateway_process_local_launches_of_one_key_both_start_when_one_is_not_identity_first() {
+    // `None` leaves the parameter out: the default, identity-first.
+    for (earlier_mode, later_mode) in [(None, Some(false)), (Some(false), None)] {
+        let workspace = TempDir::new().expect("workspace");
+        let store = TempDir::new().expect("store");
+        let params = |identity_first: Option<bool>| {
+            let mut params = json!({
+                "workspace_root": workspace.path(),
+                "store_path": store.path().join("store"),
+            });
+            if let Some(identity_first) = identity_first {
+                params["identity_first"] = json!(identity_first);
+            }
+            params
+        };
+        let order = format!("identity_first {earlier_mode:?}, then {later_mode:?}");
+
+        let earlier = start_meta_gateway(workspace.path(), &params(earlier_mode), &[], &[]);
+        let later = start_meta_gateway(workspace.path(), &params(later_mode), &[], &[]);
+        let mut listeners = Vec::new();
+        for response in [&earlier.response, &later.response] {
+            assert_eq!(
+                response["result"]["launch_state"],
+                json!("created"),
+                "{order}: each launch starts a runtime: {response}"
+            );
+            let listener = response["result"]["http_base_url"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{order}: a listener: {response}"));
+            assert!(
+                listener_answers(listener),
+                "{order}: the gateway at {listener} serves"
+            );
+            listeners.push(listener.to_string());
+        }
+        assert_ne!(
+            listeners[0], listeners[1],
+            "{order}: each gateway has its own listener"
+        );
+        assert_eq!(
+            registered_listeners(workspace.path()),
+            vec![json!(listeners[1])],
+            "{order}: one resume key, and the registry lists the later gateway"
+        );
+    }
 }
 
 #[test]

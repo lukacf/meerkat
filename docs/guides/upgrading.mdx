@@ -55,6 +55,120 @@ Meerkat is pre-1.0, and patch releases can carry declared breaking changes.
 - `rkat storage doctor` reports no new problems.
 - An SDK `connect()` succeeds.
 
+## Unreleased
+
+### Gemini provider default: Argon to Neon
+
+Core's Gemini session-model resolver now selects `gemini-4-neon` instead of
+`gemini-4-argon` when no explicit model or applicable configured/binding default
+is supplied. Both require a paid Gemini API tier. For these sessions, retain
+Argon with `--model gemini-4-argon` or `[models] gemini = "gemini-4-argon"`.
+Explicit model selections, configured/binding defaults and existing sessions'
+recorded models keep their precedence. Hydrogen remains recommended and
+selectable; `gemini-3.1-pro-preview` remains at the supported catalog tier.
+
+An unset thinking level sends no thinking override. For a session moving from
+Argon to Neon, Google's documented default therefore changes from `medium` to
+`high`; Meerkat does not explicitly send `high`. To retain medium thinking in
+that session, keep Argon or set `--reasoning-effort medium` (or the corresponding
+`reasoning_effort` parameter). An unsupported turn reasoning preference, such
+as `xhigh`, is recorded as not applied and preserves the existing request level
+or provider default. This is separate from strict `reasoning_effort` validation.
+
+Two other consumers use the catalog default:
+
+- Browser bootstrap with a Gemini key and no explicit model or configured
+  Gemini model now selects Neon when Gemini is the highest-priority configured
+  provider. An existing configured Gemini model remains in effect.
+- When the fallback web-search helper uses Gemini, it now selects Neon directly
+  from the catalog. It does not use the main session's explicit model,
+  `[models] gemini` override or binding default. Pinning the session to Argon
+  therefore does not retain Argon for this helper. The helper supplies no
+  thinking override, so Google's documented Neon default is `high`.
+
+With no provider, model, binding or configured default, the global catalog
+fallback remains `gpt-6-astra`. Image-generation defaults are unchanged.
+The existing Google Code Assist and Copilot Gemini login defaults remain
+`gemini-3.8-flash`; catalog support does not establish access on those routes.
+Forge's local setup preset still selects `gemini-3.1-pro-preview`, and its
+separately pinned installer catalog is unchanged. This Core catalog/resolver
+change does not establish Neon availability in that installer.
+
+### A custom `gemini-4-neon` entry
+
+The unreleased catalog includes `gemini-4-neon`. Model IDs must be unique across
+built-in, custom and self-hosted entries. Remove any custom
+`[models.gemini-4-neon]` entry from realm/project configurations and mob
+definitions before upgrading, or validation refuses the duplicate ID.
+The built-in row supports `low`, `medium` and `high`; Google's `xhigh` level
+is not yet expressible by Meerkat's Gemini tag. Neon requires a paid Gemini
+API tier. Its provider default is separate from the global and image defaults.
+See [Providers](/concepts/providers) for the synchronous limits. If rolling
+back to 0.9.17, restore the custom entry where you still select Neon; that
+release has no built-in Neon row.
+
+## Upgrading to 0.9.17
+
+This section is for systems running 0.9.16. The full list of changes is in
+the CHANGELOG under `## [0.9.17]`; read its Breaking and Upgrade notes
+sections before you upgrade.
+
+### What was sent to a session that an earlier release had stopped
+
+This is for a host on which, before the upgrade, a session stopped running
+after a response to a peer request that carried no result. From 0.9.17
+such a response no longer stops the session (see Fixed in the CHANGELOG
+under `## [0.9.17]`, the entry that begins "Peer requests: a response to a
+peer request without a result no longer stops the requester"). What was
+sent to such a session while it was stopped:
+
+- At the first start on 0.9.17, an input that was queued behind the stop is
+  ended as abandoned and is not run, however soon after the stop that start
+  comes. Any start on 0.9.15 and 0.9.16 did the same. New work runs.
+- One exception was seen: a message that a Meta gateway took with an
+  idempotency key (`meta/send` with `idempotency_key`) is run at that
+  start, once. Sending it again under the same key makes no second input
+  and answers the session id and the input id.
+- No log line and no event reports an abandoned input to a host. A program
+  that embeds Meerkat and waits on the input in the same process is given
+  its end (read from the source).
+- Where the caller holds the input's id, its status can be asked:
+  JSON-RPC `session/input_status`, or `meta/send_status` on a Meta gateway,
+  reads `abandoned`, without a reason. A `meta/send` without a key answers
+  no input id.
+
+(Shown by runs on the published 0.9.15 and 0.9.16 and on a candidate build
+of 0.9.17.)
+
+**Do:** after the first start on 0.9.17, send again what was sent to such a
+session while it was stopped. A `meta/send` that carried an idempotency key
+need not be sent again; if you do repeat it, use the same key, not a new
+one: the repeat makes no second input and answers the ids, with which its
+status can be asked.
+
+### A catalog model you had defined yourself: `gpt-6.2-astra`, `gpt-6.2-sol`
+
+Model IDs are unique across the catalog, `[models.<id>]` entries and
+self-hosted models, and 0.9.17 adds `gpt-6.2-astra` and `gpt-6.2-sol` to the
+catalog. A realm or project configuration, or a mob definition, that has
+`[models."gpt-6.2-astra"]` or `[models."gpt-6.2-sol"]` (quoted, as the ids
+contain dots) is refused with
+`model id '<id>' must be unique across built-in, custom, and self-hosted entries`:
+a configuration by configuration validation, a mob definition when one of
+its members is built. You have such an entry if you ran one of the models
+before the catalog listed it. (Read from the source, not run on 0.9.17. On
+the published 0.9.16, in one run each: `gpt-6.2-sol` ran with such an
+entry, and `rkat config patch` refused an entry for an id its catalog
+lists, `gpt-6.1-sol`, with this message.)
+
+**Do:** remove the entry. The catalog row then serves the model with its own
+limits and reasoning effort levels (see [Providers](/concepts/providers)).
+After going back to 0.9.16 the catalog has no such row again: there
+`--model gpt-6.2-sol` is refused (`cannot infer provider from model
+'gpt-6.2-sol'`, or, with the provider named, `model 'openai:gpt-6.2-sol' is
+absent from the effective model registry`) until the entry is back (run on
+the published 0.9.16).
+
 ## Upgrading to 0.9.16
 
 This section is for systems running 0.9.15. The full list of changes is in

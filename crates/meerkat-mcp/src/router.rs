@@ -160,6 +160,11 @@ impl AttemptState {
 struct RetainedStdioFailure {
     failure: meerkat_core::mcp_attachment::McpStdioSetupFailure,
     record: Arc<crate::stdio_diagnostics::StdioAttemptRecord>,
+    /// Whether the host already claimed this failure for its operator's
+    /// report (see `McpRouter::claim_stdio_failures`). It records that the
+    /// failure was handed to the host's report and decides nothing about
+    /// the server: not a lifecycle fact.
+    claimed: std::sync::atomic::AtomicBool,
 }
 
 pub(crate) type AttemptSender = tokio::sync::watch::Sender<AttemptState>;
@@ -183,6 +188,27 @@ pub(crate) enum InstalledOperation {
     NotRouted,
     /// The server's current connection is another one, or none.
     Replaced,
+}
+
+/// Why a staged add fails at its boundary, before anything about it is
+/// resolved, authorized, connected or spawned.
+#[derive(Debug, Clone)]
+enum StagedAddFailure {
+    /// The host refused the definition ([`McpRouter::stage_add_refused`]).
+    Refused(meerkat_core::confinement::ConfinementRefusal),
+    /// The definition names an environment variable that is not set
+    /// ([`McpRouter::stage_add_unresolved`]); the text names the server,
+    /// the field and the variable, never a value.
+    Unresolved(String),
+}
+
+impl StagedAddFailure {
+    fn into_error(self) -> McpError {
+        match self {
+            Self::Refused(refusal) => McpError::Confinement(refusal),
+            Self::Unresolved(reason) => McpError::ConnectionFailed { reason },
+        }
+    }
 }
 
 struct PendingResult {
@@ -1588,7 +1614,7 @@ pub struct McpRouter {
     /// The typed refusal staged with each refused add's payload
     /// ([`Self::stage_add_refused`]); it moves with the payload to the
     /// boundary, where the add fails before anything about it is resolved.
-    refused_payloads: HashMap<String, meerkat_core::confinement::ConfinementRefusal>,
+    refused_payloads: HashMap<String, StagedAddFailure>,
     /// Servers attached under a governed control, and governed adds a
     /// staged removal withdrew. Their descriptor never changes or reconnects
     /// without a new control (no reload) until the removal's actual
@@ -2516,7 +2542,28 @@ impl McpRouter {
         // one that would not validate is reported refused like any other,
         // and never fails the rest of the session's setup.
         self.stage_payload(config)?;
-        self.refused_payloads.insert(name, refusal);
+        self.refused_payloads
+            .insert(name, StagedAddFailure::Refused(refusal));
+        Ok(())
+    }
+
+    /// Stage the add of an `mcp.toml` server that names an environment
+    /// variable that is not set. It follows an ordinary add's lifecycle and
+    /// fails at its boundary at once, as a server that does not connect
+    /// does, with a detail naming the server, the field and the variable;
+    /// the definition is staged as written, and nothing in it is expanded,
+    /// authorized, connected or spawned.
+    pub fn stage_add_unresolved(
+        &mut self,
+        unresolved: meerkat_core::mcp_config::UnresolvedMcpServer,
+    ) -> Result<(), McpError> {
+        self.refuse_ungoverned_change(&unresolved.server.name)?;
+        let name = unresolved.server.name.clone();
+        let reason = unresolved.to_string();
+        // Never connected, so not validated: see `stage_add_refused`.
+        self.stage_payload(unresolved.server)?;
+        self.refused_payloads
+            .insert(name, StagedAddFailure::Unresolved(reason));
         Ok(())
     }
 
@@ -2930,8 +2977,8 @@ impl McpRouter {
         }
         self.pending_obligations
             .insert(server_name, obligation.clone());
-        if let Some(refusal) = refused {
-            self.spawn_refused(config, obligation, refusal);
+        if let Some(failure) = refused {
+            self.spawn_refused(config, obligation, failure);
             return;
         }
 
@@ -3038,13 +3085,14 @@ impl McpRouter {
         });
     }
 
-    /// Complete a refused add's attempt at once with its typed refusal: no
-    /// custody is admitted and nothing is authorized, connected or spawned.
+    /// Complete a refused or unresolved add's attempt at once with its
+    /// failure: no custody is admitted and nothing is authorized, connected
+    /// or spawned.
     fn spawn_refused(
         &mut self,
         config: McpServerConfig,
         obligation: SurfaceCompletionObligation,
-        refusal: meerkat_core::confinement::ConfinementRefusal,
+        failure: StagedAddFailure,
     ) {
         let tx = self.pending_tx.clone();
         let progress = Arc::clone(&self.progress);
@@ -3058,7 +3106,7 @@ impl McpRouter {
                 .send(PendingResult {
                     obligation,
                     config,
-                    result: Err(McpError::Confinement(refusal)),
+                    result: Err(failure.into_error()),
                     guard: None,
                 })
                 .await;
@@ -3300,16 +3348,16 @@ impl McpRouter {
                     .notify_lifecycle_failed(&server_name, &err.to_string())
                     .err();
 
-                let (snapshot_alignment, operation) = match self.surface_owner.apply(
-                    ExternalToolSurfaceInput::PendingFailed {
+                let (snapshot_alignment, operation, stdio_failure_text) = match self
+                    .surface_owner
+                    .apply(ExternalToolSurfaceInput::PendingFailed {
                         surface_id: SurfaceId(obligation.surface_id.clone()),
                         operation: local_surface_operation(obligation.operation),
                         pending_task_sequence: obligation.pending_task_sequence,
                         staged_intent_sequence: obligation.staged_intent_sequence,
                         applied_at_turn: TurnNumber(obligation.applied_at_turn),
                         cause: ExternalToolSurfaceFailureCause::PendingFailed,
-                    },
-                ) {
+                    }) {
                     Ok(transition) => {
                         self.pending_obligations.remove(&server_name);
                         let stdio_failure = attempt_diagnostics.and_then(|record| {
@@ -3323,8 +3371,15 @@ impl McpRouter {
                                     record.captured(),
                                 ),
                                 record,
+                                claimed: std::sync::atomic::AtomicBool::new(false),
                             })
                         });
+                        // What the transport established, in fixed words
+                        // and numbers (never server output), for the Failed
+                        // action's detail.
+                        let stdio_failure_text = stdio_failure
+                            .as_ref()
+                            .map(|retained| retained.failure.to_string());
                         resolve_attempt(
                             attempt.as_ref(),
                             AttemptState::Failed {
@@ -3355,7 +3410,11 @@ impl McpRouter {
                             );
                             return None;
                         };
-                        (latest_snapshot_alignment(&transition.effects), operation)
+                        (
+                            latest_snapshot_alignment(&transition.effects),
+                            operation,
+                            stdio_failure_text,
+                        )
                     }
                     Err(e) => {
                         tracing::warn!(
@@ -3395,12 +3454,15 @@ impl McpRouter {
                     "MCP server background connection failed"
                 );
 
-                let detail = match mirror_fault {
-                    None => err.to_string(),
-                    Some(mirror_fault) => {
-                        format!("{err}; {mirror_fault}")
-                    }
-                };
+                // The transport's own error text first; then, for a
+                // classified stdio setup failure, its phase, class and the
+                // server's own exit status; then a rejected mirror apply.
+                let mut detail = err.to_string();
+                let mirror_fault = mirror_fault.map(|fault| fault.to_string());
+                for part in [stdio_failure_text, mirror_fault].into_iter().flatten() {
+                    detail.push_str("; ");
+                    detail.push_str(&part);
+                }
                 self.completed_updates.push_back(CompletedLifecycleUpdate {
                     action: McpLifecycleAction::new(
                         server_name,
@@ -3454,6 +3516,47 @@ impl McpRouter {
             return None;
         }
         retained.record.stderr_tail()
+    }
+
+    /// Every retained failed stdio attempt not claimed yet, by server name:
+    /// the host's report to its operator. A retained failure is returned by
+    /// one call only; the claim releases nothing.
+    pub(crate) fn claim_stdio_failures(
+        &self,
+    ) -> Vec<meerkat_core::mcp_attachment::McpStdioSetupFailure> {
+        let mut claimed: Vec<_> = self
+            .failed_stdio_attempts
+            .values()
+            .filter(|retained| {
+                !retained
+                    .claimed
+                    .swap(true, std::sync::atomic::Ordering::AcqRel)
+            })
+            .map(|retained| retained.failure.clone())
+            .collect();
+        claimed.sort_by(|left, right| left.server.cmp(&right.server));
+        claimed
+    }
+
+    /// The redacted stderr tail of `server`'s retained exact failed
+    /// `attempt`, and whether its capture has ended (nothing more will be
+    /// added to it). `(None, true)` once that attempt is no longer retained
+    /// or captured nothing. SENSITIVE: host and operator only.
+    pub(crate) fn stdio_stderr_tail_and_capture_end(
+        &self,
+        server: &str,
+        attempt: u64,
+    ) -> (
+        Option<meerkat_core::mcp_attachment::McpStdioStderrTail>,
+        bool,
+    ) {
+        match self.failed_stdio_attempts.get(server) {
+            Some(retained) if retained.failure.attempt == attempt => (
+                retained.record.stderr_tail(),
+                retained.record.stderr_capture_ended(),
+            ),
+            _ => (None, true),
+        }
     }
 
     /// Whether the router still retains the stderr tail of `server`'s exact

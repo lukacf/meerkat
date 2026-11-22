@@ -46,7 +46,12 @@ the same root. Without `--realm`, RPC still creates an isolated realm.
 For CLI commands, the default invocation context is the current directory. The
 project-local state root is `<project-root>/.rkat/realms`, where the project
 root is the nearest ancestor containing a `.rkat` entry. If none exists, the
-context root is used. `--context-root` changes the ancestor-search starting
+context root is used. A realm that already exists (has its manifest) under a
+farther ancestor's `.rkat/realms` is used where it lies, so a `.rkat`
+directory that appears nearer, for example after `rkat init` in a
+subdirectory, does not leave it behind; only a new realm goes to the nearest
+root. A realm found under more than one of these roots is refused.
+`--context-root` changes the ancestor-search starting
 point; `--state-root` bypasses discovery.
 
 Use `--verbose` on `rkat run` to print the active realm, context root, and
@@ -74,15 +79,18 @@ The active realm document is the head of the runtime config chain. Under the
 default project-local state root it is
 `<project-root>/.rkat/realms/<realm>/config.toml`.
 
-Compatibility files still exist:
+Two more files carry the same name:
 
-| Scope | Path |
-|-------|------|
-| User | `~/.rkat/config.toml` |
-| Project | `.rkat/config.toml` |
+| Scope | Path | What reads it |
+|-------|------|---------------|
+| User | `~/.rkat/config.toml` | The reserved `global` realm's document: every realm whose chain ends in `global` inherits it, and its `[confinement]` applies to every realm |
+| Project | `.rkat/config.toml` | Written by `rkat init` as a copy of the user document. A run reads only its hook entries (`[[hooks.entries]]`); no other table in it has an effect, `[confinement]` and `[governance]` included |
 
-These remain convention inputs for templates and compatibility workflows.
-CLI, RPC, REST, and MCP all resolve the same realm chain.
+Ordinary settings for one project (models, tools, limits and the like) go in
+that project's realm document, not in the project file; `rkat doctor` prints
+the realm document's path on its `config` line. For `[confinement]` see
+[OS process confinement](#os-process-confinement). CLI, RPC, REST, and MCP
+all resolve the same realm chain.
 
 Realm config supports explicit inheritance:
 
@@ -119,6 +127,7 @@ comms_enabled = false
 mob_enabled = false
 schedule_enabled = true
 workgraph_enabled = false
+agent_schedules_may_create_sessions = false
 default_timeout = "10m"
 max_concurrent = 10
 
@@ -136,6 +145,14 @@ explicit composition by a trusted embedding host. OS process confinement is the
 for the current supported profiles and [native governed embedding](/rust/native-authorization)
 for Rust setup.
 </Note>
+
+`agent_schedules_may_create_sessions` says whether an agent's schedule may
+create a session when it fires (a `materialize_on_demand_session` target).
+Off, the default, only the host writes such a schedule, and an agent whose
+own session is built as the host builds one by default; any other agent's
+write is refused (`schedule_session_creation_not_allowed`). On, every agent
+that holds the schedule tools may. The host reads it when it starts. See
+[scheduling](/guides/scheduling).
 
 `default_timeout` and each per-tool timeout in `[tools.tool_timeouts]` accept
 humantime strings such as `"30s"`, `"2m"` or `"1h 2m"`. A per-tool timeout
@@ -173,7 +190,6 @@ working directory containing `.rkat`, else the working directory.
 # ~/.rkat/config.toml: confine every launch kind of every realm.
 [confinement.all]
 mode = "workspace"
-write = ["/tmp/build"]
 ```
 
 The `--confinement` flags replace the section for one invocation, for every
@@ -198,21 +214,106 @@ confinement and what keeps its own inputs from its confined processes
 confine, a guarantee it does not claim, and each untrusted convention
 source.
 
-`rkat` refuses a command whose confined processes could change its realm
-state or user config document (see
-[the host's own inputs](/concepts/configuration#the-host%E2%80%99s-own-inputs)). On
-macOS the workspace preset protects `<project>/.rkat`, where the default
-realm state lives. On Linux it cannot, so start with `--state-root <dir>`
-outside the project:
+### Confinement for one project
+
+State confinement for every launch kind in the user document,
+`~/.rkat/config.toml`, as in the example above: `[confinement.all]` with
+`mode = "workspace"`. It applies at every start of `rkat`, `rkat-rpc`,
+`rkat-rest` and `rkat-mcp` and to every realm of that user; with
+`--user-config-root <dir>` the user document is `<dir>/.rkat/config.toml`. A
+server started without `--context-root` refuses the workspace preset at its
+start, so with this table in the user document every `rkat-rpc`, `rkat-rest`
+and `rkat-mcp` start needs `--context-root`, the `rkat-rpc` an SDK starts
+included (the SDK's `context_root` or `contextRoot` option). A table for one
+kind (`[confinement.shell]`, `[confinement.command_hooks]`,
+`[confinement.mcp_stdio]`) replaces `all` for that kind in that document:
+confine all three kinds, not the shell alone, and do not rely on a realm
+document as its only statement.
+
+In 0.9.16 a `[confinement]` table in the `.rkat/config.toml` of a project is
+not read, and `rkat` does not warn about it.
+
+The `--confinement` flags are for the one command that carries them. They
+state one selection for all three launch kinds and replace the user document's
+section for that command, `--confinement trusted-host` included:
+
+```bash
+rkat --confinement workspace run "Build and test the project"
+```
+
+On Linux this command is refused when the realm state would lie inside the
+directory it is started in (that directory holds a `.rkat` entry, or no
+directory above it does): then it also needs `--state-root <dir>` outside the
+project (see below).
+
+Check that command's stderr for the confinement lines: where none is printed,
+it is not confined. A later run started without the flags has only what the
+config documents state (the user document, and the realm's own); unless every
+launch kind is confined in that run, on Linux it trusts the project's `.rkat`
+files as they then are, also where an earlier confined run changed them. A mob
+member placed on another host runs under that host's confinement, not the
+controller's.
+
+As soon as one launch kind has a requirement, a command that runs agents
+prints one confinement line for each of the three kinds (`shell`,
+`command_hooks`, `mcp_stdio`), and the line of a kind without a requirement
+reads `trusted host`; so do some commands that run none, such as
+`rkat session list` and `rkat skill list`. Commands that only read
+configuration, such as `rkat config get`, `rkat realm current` and
+`rkat mcp list`, print none. With no requirement none is printed. A line that
+says the requirement cannot be enforced on this host means every launch of
+that kind is refused, not that it runs unconfined. When some kinds are
+confined and others run as the trusted host, `rkat` warns that it gives no
+guarantee for its own inputs (the realm state, the user config document and
+the credential store): a process the agent drives can still change them, and
+no project file is refused.
+
+With every launch kind confined (the example above, or the flags):
+
+- On Linux a start is refused when its realm state lies in a write path, as
+  the default state root does when it would lie inside the directory the
+  command is started in (that directory holds a `.rkat` entry, or no directory
+  above it does), with a message that says so. Start with `--state-root <dir>`
+  outside the project and outside every write path (see below).
+- On Linux the project's `.rkat/mcp.toml`, `.rkat/config.toml` (from which
+  only hook entries are read) and `.rkat/skills` are refused as files a
+  confined process can write, and stderr names each. Keep MCP servers in
+  `~/.rkat/mcp.toml` and hooks as `[[hooks.entries]]` in
+  `~/.rkat/config.toml`. There is no user skills directory:
+  `rkat skill add <path>` registers a skills directory for this project's
+  realm. Choose one outside the project and outside every write path: a
+  directory a confined process can write is not loaded, and stderr does not
+  say so.
+- On macOS the workspace preset protects `<project>/.rkat`, so neither
+  happens, unless a write path lies outside the project (`write` in the
+  section, or `--confinement-write`): then both happen as on Linux.
+
+A confined process can change files in the workspace, among them `AGENTS.md`,
+which the next run reads as instructions.
+
+With every launch kind confined, `rkat` refuses a command whose confined
+processes could change its realm state, user config document or credential
+store (see [the host's own
+inputs](/concepts/configuration#the-host%E2%80%99s-own-inputs)). On macOS the
+workspace preset protects `<project>/.rkat`, where the default realm state
+lives. On Linux it cannot, so start with `--state-root <dir>` outside the
+project:
 
 ```bash
 rkat --state-root ~/.local/share/meerkat/realms --confinement workspace \
   run "Build and test the project"
 ```
 
-A project `mcp.toml` or `.rkat/config.toml` that a confined process can write
-is not trusted: its MCP servers and hooks are refused, and `rkat` says so on
-stderr.
+A `write` path outside the project (`write` in the section, or
+`--confinement-write`) takes that protection away on macOS as well: `rkat`
+then treats `<project>/.rkat` as changeable by a confined process. On either
+platform, keep the state root outside the project and outside every write
+path.
+
+When every launch kind is confined, a project `.rkat/mcp.toml`,
+`.rkat/config.toml` or `.rkat/skills` that a confined process can write is not
+trusted: the MCP servers, hooks and skills it defines are refused, and `rkat`
+says so on stderr.
 
 With or without confinement, the agent's file tools (`apply_patch`,
 `blob_save_file`) never write `<project>/.rkat/` (or a `.rkat` directory
@@ -453,6 +554,15 @@ expanding it would let an API caller copy host environment variables into a
 request to a server of its choice. Writes refuse a realm server holding `${`,
 and a realm config that already holds one fails when its MCP servers are
 resolved. Put env-derived values in an `mcp.toml` server.
+
+A variable that is not set fails only the `mcp.toml` server that names it.
+`rkat mcp list` and `rkat mcp get` show that server with nothing expanded
+(`--json` prints it as written; the text forms mask its env and header values
+as for any server), marked unresolved with the field and the variable's name,
+and the commands for the other servers work. A run starts without it: the server is reported as failed,
+with a warning naming the server, the field and the variable. `rkat mcp login`
+for that server, and a run in a governed realm, are refused with the same
+message until the variable is set.
 
 A literal token in a server's args, env or headers is in the file as written.
 On Unix `rkat` writes `mcp.toml`, like every config document, readable by its

@@ -96,6 +96,8 @@ fn build_app_state(client: Arc<dyn LlmClient>) -> (AppState, axum::Router) {
         max_tokens: config.agent.resolved_max_tokens_per_turn(),
         rest_host: config.rest.host.clone().into(),
         rest_port: config.rest.port,
+        rest_allowed_origins: Default::default(),
+        rest_served_hosts: Default::default(),
         enable_builtins: false,
         enable_shell: false,
         project_root: Some(project_root),

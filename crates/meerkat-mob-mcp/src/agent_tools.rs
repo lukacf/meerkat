@@ -11062,12 +11062,30 @@ mod tests {
 
         let mob_id = parsed["mob_id"].as_str().expect("mob id");
         let helper_name = format!("{mob_id}/delegate/helper-dispatch-1");
+        // The helper's row on the parent goes when the helper ends. In this
+        // harness its retirement cannot complete (the debt asserted above),
+        // so the helper is still a member, and a member that has not ended
+        // is still its parent's peer. The mob crate's rows cover a
+        // retirement that completes: the row and the listing entry go.
+        let helper_still_seated = state
+            .handle_for(&meerkat_mob::MobId::from(mob_id.to_string()))
+            .await
+            .expect("mob handle")
+            .get_member(&AgentIdentity::from("helper-dispatch-1"))
+            .await
+            .expect("roster lookup")
+            .is_some();
+        assert!(
+            helper_still_seated,
+            "a helper whose retirement did not complete is still a member: {}",
+            parsed["retirement_error"]
+        );
         let parent_peers = CoreCommsRuntime::peers(&*parent_comms).await;
         assert!(
             parent_peers
                 .iter()
                 .any(|entry| entry.name.as_str() == helper_name),
-            "delegate() should add the helper to the parent peer directory"
+            "a helper that is still a member is still in the parent peer directory"
         );
     }
 

@@ -294,7 +294,7 @@ impl MetaRuntimeHandle {
     }
     fn record_gating_audit(&mut self, audit_id: String, mut entry: GatingAuditEntry) {
         entry.audit_id = audit_id;
-        entry.timestamp_ms = current_time_ms();
+        entry.timestamp_ms = gating_time_ms();
         // A wake only; readers pull what changed through the audit cursor.
         let _ = self.gating_changes.send(());
         self.gating_audit.push(entry);
@@ -303,7 +303,7 @@ impl MetaRuntimeHandle {
         }
     }
     fn refresh_gating_timeouts(&mut self) {
-        self.refresh_gating_timeouts_at(current_time_ms());
+        self.refresh_gating_timeouts_at(gating_time_ms());
     }
 
     /// Apply expiry as of `now_ms`. A decision uses the same instant for its
@@ -688,7 +688,7 @@ impl MetaRuntimeHandle {
             }
             GatingRiskTier::R3 => {
                 let pending_id = self.mint_gating_id("pending")?;
-                let created_at_ms = current_time_ms();
+                let created_at_ms = gating_time_ms();
                 // Clamp both ends. The upper bound stops a deadline that
                 // saturates past `u64::MAX` from never expiring (the
                 // timeout-fallback guarantee must stay reachable). The lower
@@ -1002,7 +1002,7 @@ impl MetaRuntimeHandle {
         evidence: Option<&GatingDecisionEvidence>,
         withheld: bool,
     ) -> Result<GatingDecisionResult, GatingDecideError> {
-        let now_ms = current_time_ms();
+        let now_ms = gating_time_ms();
         self.refresh_gating_timeouts_at(now_ms);
         // Every check runs against a copy of the entry before anything is
         // taken, so a refusal leaves the entry, its order, the ids and the
@@ -1235,7 +1235,7 @@ impl MetaRuntimeHandle {
         &mut self,
         request: GatingWithdrawRequest,
     ) -> Result<GatingWithdrawResult, GatingWithdrawError> {
-        let now_ms = current_time_ms();
+        let now_ms = gating_time_ms();
         self.refresh_gating_timeouts_at(now_ms);
         // Every check runs before anything is taken: a refusal leaves the
         // entry, its order, the ids and the audit exactly as they were.

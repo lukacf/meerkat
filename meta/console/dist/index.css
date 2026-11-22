@@ -14107,6 +14107,17 @@ svg[data-svg=fit],
   line-height: 1;
   padding: 2px 6px;
 }
+.meta-update-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 14px;
+  background: var(--bg-elev-1);
+  color: var(--ink);
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+}
 .console-sign-in {
   display: flex;
   flex-direction: column;

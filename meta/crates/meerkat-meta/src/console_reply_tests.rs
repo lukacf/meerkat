@@ -1504,6 +1504,8 @@ async fn a_relabelled_agent_hides_its_item_without_a_prior_read() -> TestResult 
         .owner
         .console_events()
         .register_identity_labels(
+            fixture.owner.mob_runtime().handle().mob_id().as_str(),
+            "alpha",
             "alpha",
             std::collections::BTreeMap::from([("tier".to_string(), "secret".to_string())]),
         )

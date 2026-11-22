@@ -1751,6 +1751,8 @@ impl Drop for AttemptRetireGuard {
 
 /// Authorization-server endpoints validated for one issuer.
 struct AuthorizationServerEndpoints {
+    /// The issuer as its metadata states it.
+    issuer: String,
     authorization_metadata_url: String,
     authorization_endpoint: String,
     token_endpoint: String,
@@ -1760,6 +1762,26 @@ struct AuthorizationServerEndpoints {
     offline_access: bool,
     /// The server says its authorization responses carry `iss` (RFC 9207).
     iss_parameter_supported: bool,
+}
+
+/// Which `issuer` the metadata read for an authorization server may state.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum IssuerForm {
+    /// Exactly the issuer the metadata was read for.
+    Exact,
+    /// The origin of a server that publishes no protected resource
+    /// metadata, written as that origin or as that origin and one trailing
+    /// slash: RFC 8414 gives both the same metadata URL, and no document
+    /// says which the server uses. Nothing else: no path, no other host.
+    ServerOrigin,
+}
+
+impl IssuerForm {
+    /// Whether metadata read for `expected` may state `issuer`.
+    fn admits(self, issuer: &str, expected: &str) -> bool {
+        issuer == expected
+            || (self == Self::ServerOrigin && issuer.strip_suffix('/') == Some(expected))
+    }
 }
 
 /// How the client of an attempt was registered with its authorization
@@ -2943,6 +2965,7 @@ impl McpOAuthAuthority {
                 self.discover_authorization_server(
                     target,
                     &facts.issuer,
+                    IssuerForm::Exact,
                     ClientRegistration::of(profile),
                 ),
             )
@@ -3298,6 +3321,7 @@ impl McpOAuthAuthority {
                     self.discover_authorization_server(
                         target,
                         &facts.issuer,
+                        IssuerForm::Exact,
                         ClientRegistration::of(profile.as_ref()),
                     ),
                 ),
@@ -4414,6 +4438,14 @@ impl McpOAuthAuthority {
     /// profile's resource and list its issuer, whose metadata needs no
     /// registration endpoint, and the profile's scopes, when it names them,
     /// are the resource's.
+    ///
+    /// A server that publishes no resource metadata (its challenge names
+    /// none and every well-known URL says no document is published there,
+    /// see [`ResourceMetadataPlace::says_absent`]; MCP authorization
+    /// 2025-03-26) has one possible authorization server, its own origin:
+    /// the resource is then the configured server URL, and that origin's
+    /// metadata must pass the same authorization-server stage. A
+    /// host-registered client is never discovered this way.
     async fn discover(
         &self,
         target: &McpServerIdentity,
@@ -4422,7 +4454,7 @@ impl McpOAuthAuthority {
         profile: Option<&BoundClientProfile>,
     ) -> Result<(StoredMcpOAuthDiscovery, RequestedScopes), McpOAuthError> {
         require_https_or_loopback(target, target.server_url(), "MCP protected resource")?;
-        let (resource_metadata_url, resource) = self
+        let published = self
             .bounded_stage(
                 target,
                 McpOAuthNetworkStage::ResourceMetadata,
@@ -4430,6 +4462,29 @@ impl McpOAuthAuthority {
                 self.fetch_protected_resource_metadata(target, www_authenticate),
             )
             .await?;
+        let (resource_metadata_url, resource, origin_fallback) = match (published, profile) {
+            (Some((resource_metadata_url, resource)), _) => (resource_metadata_url, resource, None),
+            // The profile's client is registered with an issuer the
+            // server's resource metadata must name.
+            (None, Some(_)) => {
+                return Err(McpOAuthError::DiscoveryFailed {
+                    server_name: target.server_name().to_string(),
+                    reason: NO_RESOURCE_METADATA.to_string(),
+                });
+            }
+            (None, None) => {
+                let origin = server_origin(target)?;
+                (
+                    canonical_resource_metadata_url(target)?,
+                    ProtectedResourceMetadata {
+                        resource: target.server_url().to_owned(),
+                        authorization_servers: vec![origin.clone()],
+                        scopes_supported: Vec::new(),
+                    },
+                    Some(origin),
+                )
+            }
+        };
         let client_profile_refusal = |refusal| McpOAuthError::ClientProfile {
             server_name: target.server_name().to_owned(),
             refusal,
@@ -4484,10 +4539,27 @@ impl McpOAuthAuthority {
                 self.discover_authorization_server(
                     target,
                     &auth_server,
+                    if origin_fallback.is_some() {
+                        IssuerForm::ServerOrigin
+                    } else {
+                        IssuerForm::Exact
+                    },
                     ClientRegistration::of(profile),
                 ),
             )
-            .await?;
+            .await
+            .map_err(|error| match (error, &origin_fallback) {
+                // The refusal names both documents that were asked for.
+                (McpOAuthError::DiscoveryFailed { server_name, reason }, Some(origin)) => {
+                    McpOAuthError::DiscoveryFailed {
+                        server_name,
+                        reason: format!(
+                            "{NO_RESOURCE_METADATA}; authorization server metadata of the server's origin '{origin}': {reason}"
+                        ),
+                    }
+                }
+                (error, _) => error,
+            })?;
         // A profile's scopes are requested and required in place of the ones
         // the server names; `offline_access` is never required, and is
         // requested when the profile names it or the server advertises it.
@@ -4513,7 +4585,9 @@ impl McpOAuthAuthority {
             StoredMcpOAuthDiscovery {
                 resource: resource.resource,
                 resource_metadata_url,
-                authorization_server: auth_server,
+                // As the metadata states it: the form every later check of
+                // this issuer compares with.
+                authorization_server: endpoints.issuer,
                 authorization_metadata_url: endpoints.authorization_metadata_url,
                 authorization_endpoint: endpoints.authorization_endpoint,
                 token_endpoint: endpoints.token_endpoint,
@@ -4525,12 +4599,16 @@ impl McpOAuthAuthority {
     }
 
     /// The protected resource's metadata URL (from the challenge, or the
-    /// first well-known candidate that answers) and its document.
+    /// first well-known candidate that answers) and its document. `None`
+    /// when the server publishes none: its challenge names no document and
+    /// every well-known candidate says none is published there
+    /// ([`ResourceMetadataPlace::says_absent`]). A document the challenge names, or
+    /// one that answers, is the server's word: any defect of it is an error.
     async fn fetch_protected_resource_metadata(
         &self,
         target: &McpServerIdentity,
         www_authenticate: Option<&str>,
-    ) -> Result<(String, ProtectedResourceMetadata), McpOAuthError> {
+    ) -> Result<Option<(String, ProtectedResourceMetadata)>, McpOAuthError> {
         let stage = McpOAuthNetworkStage::ResourceMetadata;
         let resource_metadata_url = match www_authenticate.and_then(resource_metadata_from_header) {
             Some(value) => absolutize_url(target.server_url(), &value).map_err(|error| {
@@ -4540,8 +4618,13 @@ impl McpOAuthAuthority {
                 }
             })?,
             None => {
-                self.discover_resource_metadata_url_by_well_known(target)
+                let Some(answering) = self
+                    .discover_resource_metadata_url_by_well_known(target)
                     .await?
+                else {
+                    return Ok(None);
+                };
+                answering
             }
         };
         let response = self
@@ -4571,13 +4654,15 @@ impl McpOAuthAuthority {
                     }
                 })
             })?;
-        Ok((resource_metadata_url, resource))
+        Ok(Some((resource_metadata_url, resource)))
     }
 
     /// Fetch and validate the authorization-server metadata of `auth_server`:
     /// RFC 8414, then OpenID Connect discovery when the RFC 8414 document is
     /// absent (see [`authorization_server_metadata_urls`]). The first document
-    /// found must have the exact issuer, PKCE S256, and https (or loopback)
+    /// found must have the exact issuer (or, for [`IssuerForm::ServerOrigin`],
+    /// that origin in either of its two written forms), PKCE S256, and https
+    /// (or loopback)
     /// endpoints, and, for a dynamically registered client, a registration
     /// endpoint. A host-registered client's token endpoint must also fit its
     /// issuer ([`require_client_secret_endpoint`]). Redirects are refused.
@@ -4585,6 +4670,7 @@ impl McpOAuthAuthority {
         &self,
         target: &McpServerIdentity,
         auth_server: &str,
+        issuer_form: IssuerForm,
         registration: ClientRegistration,
     ) -> Result<AuthorizationServerEndpoints, McpOAuthError> {
         let auth_server = auth_server.to_owned();
@@ -4638,7 +4724,7 @@ impl McpOAuthAuthority {
                     }
                 })
             })?;
-        if auth.issuer != auth_server {
+        if !issuer_form.admits(&auth.issuer, &auth_server) {
             return Err(McpOAuthError::DiscoveryFailed {
                 server_name: target.server_name().to_string(),
                 reason: format!(
@@ -4707,6 +4793,7 @@ impl McpOAuthAuthority {
             .iter()
             .any(|scope| scope == OFFLINE_ACCESS_SCOPE);
         Ok(AuthorizationServerEndpoints {
+            issuer: auth.issuer,
             authorization_metadata_url,
             authorization_endpoint,
             token_endpoint,
@@ -4716,18 +4803,31 @@ impl McpOAuthAuthority {
         })
     }
 
+    /// The first protected-resource well-known URL of the server that
+    /// answers. `None` when every candidate says that no document is
+    /// published there ([`ResourceMetadataPlace::says_absent`]: `404` or
+    /// `410`, and under the server's own endpoint path also `403`, `405`
+    /// and a `401` whose challenge names no resource metadata): the server
+    /// publishes none. With any other answer of a
+    /// candidate and no later candidate answering, the server may publish
+    /// a document that could not be read, which is the refusal it has
+    /// always been.
     async fn discover_resource_metadata_url_by_well_known(
         &self,
         target: &McpServerIdentity,
-    ) -> Result<String, McpOAuthError> {
+    ) -> Result<Option<String>, McpOAuthError> {
+        let mut every_candidate_absent = true;
         for candidate in protected_resource_well_known_candidates(target.server_url())? {
             let response = self
-                .http_for(target, &candidate)?
-                .get(&candidate)
+                .http_for(target, &candidate.url)?
+                .get(&candidate.url)
                 .send()
                 .await;
             match response {
-                Ok(response) if response.status().is_success() => return Ok(candidate),
+                Ok(response) if response.status().is_success() => return Ok(Some(candidate.url)),
+                // Only an answer that says no document is published at this
+                // place lets the server be one that publishes none.
+                Ok(response) if candidate.place.says_absent(&response) => {}
                 // The egress profile's own resolver refusal is typed, and so is
                 // a probe that passed its client's bound; neither is ever taken
                 // as an absent document.
@@ -4745,13 +4845,22 @@ impl McpOAuthAuthority {
                         },
                     ));
                 }
-                _ => {}
+                // Any other answer (a server error, a redirect, a root URL
+                // that demands authorization) and any other failed request:
+                // a later candidate may still answer, but the server may
+                // publish a document here, so it is never said to publish
+                // none.
+                _ => every_candidate_absent = false,
             }
         }
-        Err(McpOAuthError::DiscoveryFailed {
-            server_name: target.server_name().to_string(),
-            reason: "no oauth-protected-resource metadata found".to_string(),
-        })
+        if every_candidate_absent {
+            Ok(None)
+        } else {
+            Err(McpOAuthError::DiscoveryFailed {
+                server_name: target.server_name().to_string(),
+                reason: NO_RESOURCE_METADATA.to_string(),
+            })
+        }
     }
 
     async fn register_client(
@@ -5311,13 +5420,9 @@ fn completion_discovery(
     facts: &crate::connector_oauth::ConnectorOAuthParameters,
     endpoints: AuthorizationServerEndpoints,
 ) -> Result<StoredMcpOAuthDiscovery, McpOAuthError> {
-    let resource_metadata_url = protected_resource_well_known_candidates(target.server_url())?
-        .into_iter()
-        .next()
-        .unwrap_or_default();
     Ok(StoredMcpOAuthDiscovery {
         resource: facts.resource.clone(),
-        resource_metadata_url,
+        resource_metadata_url: canonical_resource_metadata_url(target)?,
         authorization_server: facts.issuer.clone(),
         authorization_metadata_url: endpoints.authorization_metadata_url,
         authorization_endpoint: endpoints.authorization_endpoint,
@@ -5831,9 +5936,64 @@ pub(crate) fn absolutize_url(base: &str, value: &str) -> Result<String, String> 
         .map_err(|error| error.to_string())
 }
 
+/// Where a protected resource metadata candidate lies on its server.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ResourceMetadataPlace {
+    /// A well-known URL at the origin root (RFC 9728), with or without the
+    /// server's path inserted: the origin's own word.
+    OriginRoot,
+    /// The well-known suffix under the server's own endpoint path, a form
+    /// no standard defines: the endpoint's own guard commonly answers it.
+    UnderEndpointPath,
+}
+
+impl ResourceMetadataPlace {
+    /// Whether `response` says that no document is published at a candidate
+    /// in this place: `404` or `410` anywhere, and under the endpoint path
+    /// also the answers of the endpoint's own guard: `403`, `405`, and a
+    /// `401` whose challenge names no resource metadata (one that names it
+    /// is the server saying that it publishes a document). Every other
+    /// answer leaves open that a document is published there.
+    fn says_absent(self, response: &reqwest::Response) -> bool {
+        use reqwest::StatusCode;
+        match response.status() {
+            StatusCode::NOT_FOUND | StatusCode::GONE => true,
+            StatusCode::FORBIDDEN | StatusCode::METHOD_NOT_ALLOWED => {
+                self == Self::UnderEndpointPath
+            }
+            StatusCode::UNAUTHORIZED => {
+                self == Self::UnderEndpointPath && !challenge_names_resource_metadata(response)
+            }
+            _ => false,
+        }
+    }
+}
+
+/// Whether a `WWW-Authenticate` challenge of `response` mentions resource
+/// metadata: the parameter's name anywhere in the header, in any letter
+/// case. Its value is not parsed, so a value written in any form counts,
+/// and a header that is not text counts as one that mentions it.
+fn challenge_names_resource_metadata(response: &reqwest::Response) -> bool {
+    response
+        .headers()
+        .get_all(reqwest::header::WWW_AUTHENTICATE)
+        .iter()
+        .any(|challenge| {
+            challenge.to_str().map_or(true, |header| {
+                header.to_ascii_lowercase().contains("resource_metadata")
+            })
+        })
+}
+
+/// One URL a server's protected resource metadata may be published at.
+struct ResourceMetadataCandidate {
+    url: String,
+    place: ResourceMetadataPlace,
+}
+
 fn protected_resource_well_known_candidates(
     server_url: &str,
-) -> Result<Vec<String>, McpOAuthError> {
+) -> Result<Vec<ResourceMetadataCandidate>, McpOAuthError> {
     let url = reqwest::Url::parse(server_url).map_err(|error| McpOAuthError::DiscoveryFailed {
         server_name: "unknown".to_string(),
         reason: error.to_string(),
@@ -5842,15 +6002,47 @@ fn protected_resource_well_known_candidates(
     let path = url.path().trim_matches('/');
     let mut candidates = Vec::new();
     if !path.is_empty() {
-        candidates.push(format!(
-            "{origin}/.well-known/oauth-protected-resource/{path}"
-        ));
-        candidates.push(format!(
-            "{origin}/{path}/.well-known/oauth-protected-resource"
-        ));
+        candidates.push(ResourceMetadataCandidate {
+            url: format!("{origin}/.well-known/oauth-protected-resource/{path}"),
+            place: ResourceMetadataPlace::OriginRoot,
+        });
+        candidates.push(ResourceMetadataCandidate {
+            url: format!("{origin}/{path}/.well-known/oauth-protected-resource"),
+            place: ResourceMetadataPlace::UnderEndpointPath,
+        });
     }
-    candidates.push(format!("{origin}/.well-known/oauth-protected-resource"));
+    candidates.push(ResourceMetadataCandidate {
+        url: format!("{origin}/.well-known/oauth-protected-resource"),
+        place: ResourceMetadataPlace::OriginRoot,
+    });
     Ok(candidates)
+}
+
+/// The refusal of a server that publishes no protected resource metadata.
+const NO_RESOURCE_METADATA: &str = "no oauth-protected-resource metadata found";
+
+/// The first protected-resource well-known URL of the server: the stored
+/// form's resource metadata URL where no document was read from it.
+fn canonical_resource_metadata_url(target: &McpServerIdentity) -> Result<String, McpOAuthError> {
+    Ok(
+        protected_resource_well_known_candidates(target.server_url())?
+            .into_iter()
+            .next()
+            .map(|candidate| candidate.url)
+            .unwrap_or_default(),
+    )
+}
+
+/// The origin of the configured server URL (its path dropped): the only
+/// authorization server of a server that publishes no protected resource
+/// metadata (MCP authorization 2025-03-26, authorization base URL).
+fn server_origin(target: &McpServerIdentity) -> Result<String, McpOAuthError> {
+    reqwest::Url::parse(target.server_url())
+        .map(|url| url.origin().ascii_serialization())
+        .map_err(|error| McpOAuthError::DiscoveryFailed {
+            server_name: target.server_name().to_string(),
+            reason: error.to_string(),
+        })
 }
 
 /// Well-known authorization-server metadata URIs of `server`, in the order
@@ -6496,6 +6688,83 @@ mod tests {
 
     fn realm(id: &str) -> RealmId {
         RealmId::parse(id).unwrap()
+    }
+
+    /// The stored token of an HTTP MCP server that names an account is
+    /// selected by a key that holds the server's URL as written. After the
+    /// entry's URL changes, the token stored for the old address is not
+    /// found for the entry: its token key and its lease key are other
+    /// ones. The token stays under the old address's key. The same holds
+    /// for an entry that names an account selection, and in a realm.
+    #[tokio::test]
+    async fn a_stored_token_is_not_found_for_an_entry_whose_url_changed() {
+        const STORED_FOR: &str = "https://mcp.synthetic.invalid/one";
+        const CHANGED: &str = "https://mcp.synthetic.invalid/two";
+        let tokens = PersistedTokens {
+            auth_mode: PersistedAuthMode::McpOauth,
+            primary_secret: Some(["synthetic", "stored", "token"].join(" ")),
+            refresh_token: None,
+            id_token: None,
+            expires_at: None,
+            last_refresh: None,
+            scopes: Vec::new(),
+            account_id: None,
+            metadata: serde_json::Value::Null,
+        };
+        for account in [
+            serde_json::json!({"oauth_account": "account-1"}),
+            serde_json::json!({"oauth_account_selection": "discover"}),
+        ] {
+            let entry = |url: &str| -> meerkat_core::McpServerConfig {
+                let mut entry = serde_json::json!({"name": "remote", "url": url});
+                entry
+                    .as_object_mut()
+                    .unwrap()
+                    .extend(account.as_object().unwrap().clone());
+                serde_json::from_value(entry).unwrap()
+            };
+            for in_realm in [None, Some(realm("alpha"))] {
+                let identity = |url: &str| {
+                    let identity = McpServerIdentity::from_config(&entry(url)).unwrap();
+                    match &in_realm {
+                        Some(realm) => identity.in_realm(realm.clone()),
+                        None => identity,
+                    }
+                };
+                let stored_for = identity(STORED_FOR);
+                let changed = identity(CHANGED);
+                let store = EphemeralTokenStore::new();
+                store
+                    .save(
+                        &meerkat_core::AdmissionGuard::none(),
+                        &stored_for.token_key().unwrap(),
+                        &tokens,
+                    )
+                    .await
+                    .unwrap();
+                assert!(
+                    store
+                        .load(&changed.token_key().unwrap())
+                        .await
+                        .unwrap()
+                        .is_none(),
+                    "no token is found for the entry at its changed URL ({account})"
+                );
+                assert_ne!(
+                    changed.lease_key().unwrap(),
+                    stored_for.lease_key().unwrap(),
+                    "{account}"
+                );
+                assert!(
+                    store
+                        .load(&stored_for.token_key().unwrap())
+                        .await
+                        .unwrap()
+                        .is_some(),
+                    "the token stays under the key of the address it was stored for ({account})"
+                );
+            }
+        }
     }
 
     /// The same server in two realms, and realm-less, has three distinct

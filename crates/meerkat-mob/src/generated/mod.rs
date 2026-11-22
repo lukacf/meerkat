@@ -9,6 +9,7 @@ pub mod adaptive_mob_bundle;
 pub mod catalog_input;
 pub mod protocol_mob_destroying_session_ingress;
 pub mod protocol_mob_external_peer_reciprocal_trust;
+pub mod protocol_mob_external_peer_reciprocal_trust_removal;
 pub mod protocol_mob_external_peer_trust_repair;
 pub mod protocol_mob_external_peer_trust_unwiring;
 pub mod protocol_mob_external_peer_trust_wiring;

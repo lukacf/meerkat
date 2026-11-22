@@ -973,5 +973,221 @@ class SelfDevDependency(unittest.TestCase):
         self.assertEqual(len(pcs.self_dev_dependency_failures("demo", targeted)), 1)
 
 
+WORKSPACE_ONLY_FEATURES = {"default": ["std"], "std": [], "extra": [], "workspace-tests": []}
+
+
+class WorkspaceOnlyGates(unittest.TestCase):
+    """The pull-request side of the census's parity: read from the sources,
+    the lib tests `workspace-tests` gates are the tests the manifest declares
+    workspace-only, and the feature gates test code only."""
+
+    LIB = (
+        "pub fn shipped() {}\n"
+        "#[cfg(test)]\n"
+        "mod tests {\n"
+        "    #[test]\n"
+        "    fn plain() {}\n"
+        '    #[cfg(feature = "workspace-tests")]\n'
+        "    #[tokio::test]\n"
+        "    async fn needs_the_workspace() {}\n"
+        "}\n"
+    )
+
+    def failures(self, files, rows=(), features=None, standalone=None):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            for relative, text in files.items():
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(text)
+            manifest = crate_manifest(standalone, WORKSPACE_ONLY_FEATURES if features is None else features)
+            entry = {"workspace_only": [{"target": "src/lib.rs", "reason": "needs a sibling", **row} for row in rows]}
+            return pcs.workspace_only_gate_failures("demo", entry, manifest, root)
+
+    def test_a_declared_gated_test_passes(self):
+        self.assertEqual(self.failures({"src/lib.rs": self.LIB}, [{"tests": ["tests::needs_the_workspace"]}]), [])
+
+    def test_a_gated_test_the_manifest_does_not_declare_fails(self):
+        failures = self.failures({"src/lib.rs": self.LIB})
+        self.assertEqual(len(failures), 1)
+        self.assertIn("src/lib.rs:8: test tests::needs_the_workspace is gated on workspace-tests", failures[0])
+        self.assertIn("does not declare it workspace-only", failures[0])
+
+    def test_a_declared_test_that_is_not_gated_fails(self):
+        failures = self.failures(
+            {"src/lib.rs": self.LIB}, [{"tests": ["tests::needs_the_workspace", "tests::plain"]}]
+        )
+        self.assertEqual(len(failures), 1)
+        self.assertIn("declared workspace-only test tests::plain is not gated on workspace-tests", failures[0])
+
+    def test_a_declared_test_that_does_not_exist_fails(self):
+        failures = self.failures(
+            {"src/lib.rs": self.LIB}, [{"tests": ["tests::needs_the_workspace", "tests::renamed"]}]
+        )
+        self.assertEqual(len(failures), 1)
+        self.assertIn("declared workspace-only test tests::renamed is not a test of src/lib.rs", failures[0])
+
+    def test_a_declared_module_covers_its_gated_tests_and_no_other(self):
+        lib = (
+            '#[cfg(all(test, feature = "workspace-tests"))]\n'
+            "mod sibling_tests;\n"
+            "#[cfg(test)]\n"
+            "mod mixed {\n"
+            "    #[test]\n"
+            "    fn plain() {}\n"
+            '    #[cfg(feature = "workspace-tests")]\n'
+            "    #[test]\n"
+            "    fn gated() {}\n"
+            "}\n"
+        )
+        files = {"src/lib.rs": lib, "src/sibling_tests.rs": "#[test]\nfn one() {}\nmod inner {\n    #[test]\n    fn two() {}\n}\n"}
+        self.assertEqual(self.failures(files, [{"modules": ["sibling_tests"], "tests": ["mixed::gated"]}]), [])
+        failures = self.failures(files, [{"modules": ["sibling_tests", "mixed"]}])
+        self.assertEqual(len(failures), 1)
+        self.assertIn("declared workspace-only module mixed holds mixed::plain, which is not gated", failures[0])
+        failures = self.failures(files, [{"modules": ["sibling_tests", "gone"], "tests": ["mixed::gated"]}])
+        self.assertEqual(len(failures), 1)
+        self.assertIn("declared workspace-only module gone holds no test gated on workspace-tests", failures[0])
+        # A module name is a path, not a string prefix.
+        failures = self.failures(files, [{"modules": ["sibling"], "tests": ["mixed::gated"]}])
+        self.assertEqual(len(failures), 3)
+
+    def test_module_files_are_found_where_rust_finds_them(self):
+        files = {
+            "src/lib.rs": (
+                "mod flat;\nmod nested;\n"
+                '#[cfg(all(test, feature = "workspace-tests"))]\n#[path = "elsewhere_tests.rs"]\nmod renamed;\n'
+            ),
+            "src/flat.rs": '#[cfg(all(test, feature = "workspace-tests"))]\nmod tests;\n',
+            "src/flat/tests.rs": "#[test]\nfn in_a_child_file() {}\n",
+            "src/nested/mod.rs": (
+                "#[cfg(test)]\nmod inline {\n"
+                '    #[cfg(feature = "workspace-tests")]\n    mod deeper;\n}\n'
+            ),
+            "src/nested/inline/deeper.rs": "#[test]\nfn in_an_inline_module() {}\n",
+            "src/elsewhere_tests.rs": "#[test]\nfn by_path_attribute() {}\n",
+        }
+        failures = self.failures(files)
+        self.assertEqual(
+            sorted(failure.split(" test ")[1].split(" is gated")[0] for failure in failures),
+            ["flat::tests::in_a_child_file", "nested::inline::deeper::in_an_inline_module", "renamed::by_path_attribute"],
+        )
+        self.assertEqual(self.failures(files, [{"modules": ["flat::tests", "nested::inline::deeper", "renamed"]}]), [])
+
+    def test_a_module_without_a_source_file_fails(self):
+        failures = self.failures({"src/lib.rs": "mod missing;\n"})
+        self.assertEqual(len(failures), 1)
+        self.assertIn("src/lib.rs:1: module missing has no source file", failures[0])
+
+    def test_other_predicates_are_decided_under_the_census_configuration(self):
+        lib = (
+            "#[cfg(test)]\nmod tests {\n"
+            '    #[cfg(feature = "workspace-tests")]\n    #[cfg(not(target_arch = "wasm32"))]\n    #[test]\n    fn on_linux() {}\n'
+            '    #[cfg(all(feature = "workspace-tests", target_os = "macos"))]\n    #[test]\n    fn on_macos_only() {}\n'
+            '    #[cfg(all(feature = "workspace-tests", feature = "extra"))]\n    #[test]\n    fn behind_an_undeclared_test_feature() {}\n'
+            '    #[cfg(all(feature = "workspace-tests", feature = "std"))]\n    #[test]\n    fn behind_a_default_feature() {}\n'
+            '    #[cfg(all(feature = "workspace-tests", tokio_unstable))]\n    #[test]\n    fn behind_an_unknown_flag() {}\n'
+            "}\n"
+        )
+        # Required: the tests the census host builds only with the feature.
+        failures = self.failures({"src/lib.rs": lib})
+        self.assertEqual(
+            sorted(failure.split(" test ")[1].split(" is gated")[0] for failure in failures),
+            ["tests::behind_a_default_feature", "tests::on_linux"],
+        )
+        declared = ["tests::behind_a_default_feature", "tests::on_linux"]
+        self.assertEqual(self.failures({"src/lib.rs": lib}, [{"tests": declared}]), [])
+        # A declared test feature counts as on.
+        with_extra = self.failures({"src/lib.rs": lib}, [{"tests": declared}], standalone={"features": ["extra"]})
+        self.assertEqual(len(with_extra), 1)
+        self.assertIn("tests::behind_an_undeclared_test_feature is gated", with_extra[0])
+        # A test the workspace's test build compiles out cannot be declared
+        # (the census would call the row stale); an undecided one may be.
+        compiled_out = self.failures({"src/lib.rs": lib}, [{"tests": [*declared, "tests::on_macos_only"]}])
+        self.assertEqual(len(compiled_out), 1)
+        self.assertIn("tests::on_macos_only is compiled out of the workspace's test build", compiled_out[0])
+        self.assertEqual(self.failures({"src/lib.rs": lib}, [{"tests": [*declared, "tests::behind_an_unknown_flag"]}]), [])
+
+    def test_the_feature_gates_test_code_only(self):
+        ok = (
+            '#[cfg(feature = "workspace-tests")]\n#[cfg(test)]\nuse helper::Thing;\n'
+            '#[cfg(all(test, feature = "workspace-tests"))]\nmod helper {\n    pub struct Thing;\n}\n'
+            "#[cfg(test)]\nmod tests {\n"
+            '    #[cfg(feature = "workspace-tests")]\n    fn helper() {}\n'
+            "    #[test]\n    fn plain() {\n"
+            '        #[cfg(feature = "workspace-tests")]\n        helper();\n    }\n}\n'
+        )
+        self.assertEqual(self.failures({"src/lib.rs": ok}), [])
+        for source, line in (
+            ('#[cfg(feature = "workspace-tests")]\npub fn only_in_the_workspace() {}\n', 1),
+            ('pub fn shipped() {\n    #[cfg(feature = "workspace-tests")]\n    extra();\n}\n', 2),
+            ('pub struct Shipped {\n    #[cfg(feature = "workspace-tests")]\n    pub extra: u8,\n}\n', 2),
+            ('#[cfg(any(test, unix))]\nmod helpers {\n    #[cfg(feature = "workspace-tests")]\n    pub fn extra() {}\n}\n', 3),
+        ):
+            with self.subTest(source=source):
+                failures = self.failures({"src/lib.rs": source})
+                self.assertEqual(len(failures), 1)
+                self.assertIn(f"src/lib.rs:{line}: a workspace-tests gate outside test code", failures[0])
+
+    def test_text_in_comments_and_strings_is_not_code(self):
+        lib = (
+            '// #[cfg(feature = "workspace-tests")]\n// pub fn commented() {}\n'
+            'pub const TEXT: &str = "#[cfg(feature = \\"workspace-tests\\")] #[test] fn quoted() {}";\n'
+            "#[cfg(test)]\nmod tests {\n"
+            "    /* #[test] fn in_a_block_comment() {} */\n"
+            '    const BRACES: &str = "}";\n'
+            '    #[cfg(feature = "workspace-tests")]\n    #[test]\n    fn after_a_brace_in_a_string() {}\n'
+            "}\n"
+        )
+        failures = self.failures({"src/lib.rs": lib})
+        self.assertEqual(len(failures), 1)
+        self.assertIn("tests::after_a_brace_in_a_string is gated", failures[0])
+
+    def test_a_crate_without_the_feature_declares_nothing(self):
+        files = {"src/lib.rs": "#[cfg(test)]\nmod tests {\n    #[test]\n    fn plain() {}\n}\n"}
+        self.assertEqual(self.failures(files, features={}), [])
+        failures = self.failures(files, [{"tests": ["tests::plain"]}], features={})
+        self.assertEqual(len(failures), 1)
+        self.assertIn("the crate has no workspace-tests feature", failures[0])
+
+    def test_rows_of_another_target_are_not_the_lib_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            (root / "src").mkdir()
+            (root / "src" / "lib.rs").write_text(self.LIB)
+            entry = {"workspace_only": [{"target": "tests/other.rs", "reason": "x", "tests": ["tests::needs_the_workspace"]}]}
+            failures = pcs.workspace_only_gate_failures("demo", entry, crate_manifest(None, WORKSPACE_ONLY_FEATURES), root)
+        self.assertEqual(len(failures), 1)
+        self.assertIn("tests::needs_the_workspace is gated", failures[0])
+
+    def test_cfg_value(self):
+        on = {"workspace-tests", "std"}
+        for predicate, value in (
+            ("test", True),
+            ('feature = "workspace-tests"', True),
+            ('feature = "other"', False),
+            ('all(test, feature = "workspace-tests")', True),
+            ('all(test, feature = "other")', False),
+            ('all(feature = "other", unknown_flag)', False),
+            ('all(test, unknown_flag)', None),
+            ('any(feature = "other", unix)', True),
+            ('any(feature = "other", unknown_flag)', None),
+            ('not(target_arch = "wasm32")', True),
+            ('target_os = "macos"', False),
+            ('not(unknown_flag)', None),
+            ("all()", True),
+            ("any()", False),
+            ('feature = workspace-tests', None),
+        ):
+            with self.subTest(predicate=predicate):
+                self.assertIs(pcs.cfg_value(predicate, on), value)
+        self.assertIs(pcs.cfg_value('all(test, feature = "workspace-tests")', on, test=False), False)
+        self.assertIs(pcs.cfg_value('any(test, feature = "workspace-tests")', on, test=False), True)
+
+    def test_feature_closure(self):
+        manifest = {"features": {"default": ["a"], "a": ["b", "dep:x", "other/feature"], "b": [], "c": []}}
+        self.assertEqual(pcs.feature_closure(manifest, ["default", "missing"]), {"default", "a", "b"})
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -355,3 +355,19 @@ The suffix indicates the primary language/surface:
 - `py` — Python SDK
 - `ts` — TypeScript SDK
 - `sh` — Shell/CLI
+
+## Model Names
+
+The examples name the newest model of each line in the catalog (for example
+`claude-sonnet-5-5`, `gpt-6-astra`, `gemini-4-hydrogen`), because they are
+copied. After a change of the catalog, list the names that have fallen behind:
+
+```bash
+python3 examples/tests/model_names.py          # exit 1 and a list when a name is behind
+python3 examples/tests/model_names.py --lines  # each line and its newest model
+```
+
+It reads the catalog in `crates/meerkat-models/src/capabilities/` and every
+tracked text file under `examples/` and `meta/examples/`; it needs no build
+and no network. An example that names an older model on purpose carries a
+line `model-names: keep <model id> (<reason>)`.

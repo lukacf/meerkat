@@ -670,12 +670,21 @@ async fn agent_events_sse_handler(
     // before it decides an item once that read is as old as a kept
     // record's bound.
     let mut prime_age = StreamPrimeAge::primed(std::time::Instant::now());
-    // An agent private to another person is answered as a member the
-    // console does not hold.
-    if live_view
-        .as_ref()
-        .is_some_and(|live| agent_stream_hidden(live.view(), &agent_id, &policy_identity))
+    // An agent private to another person is answered as a name no member
+    // holds, by what this view answers such a name: a refusal where the
+    // access rules refuse a name they know nothing of (a deny the name
+    // cannot rule out, or no allow that reaches it), a member the console
+    // does not hold otherwise. A runtime alias that names no member is
+    // answered so above, whatever the rules say.
+    if let Some(live) = live_view.as_ref()
+        && agent_stream_hidden(live.view(), &agent_id, &policy_identity)
     {
+        let absent = crate::http_console::ConsoleAbsentNames::fresh().absent_spelling(&agent_id);
+        if !crate::member_comms_id::is_reserved_generated_alias(&agent_id)
+            && !agent_stream_allowed(live.view(), &absent, &absent)
+        {
+            return Err(sse_access_denied(ACTION_AGENT_VIEW));
+        }
         return Err(http_error(StatusCode::NOT_FOUND, "member_not_found"));
     }
     // The access rules judge the member the request resolved to as well

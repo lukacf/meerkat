@@ -235,6 +235,51 @@ async fn console_experience_storage_scope_tracks_authenticated_principal() {
     );
 }
 
+/// The experience names the console bundle the gateway serves: the version
+/// its page gives its app script. A page that runs another bundle (one
+/// opened before an upgrade, or an application's own older console) reads
+/// it there and says that it is out of date.
+#[tokio::test]
+async fn console_experience_names_the_console_bundle_the_gateway_serves() {
+    use tower::ServiceExt;
+    // The page the gateway embeds, as its build wrote it.
+    let page = include_str!("../console-dist/index.html");
+    let marker = "console-app.js?v=";
+    let start = page.find(marker).expect("the page names its app script") + marker.len();
+    let served: String = page[start..]
+        .chars()
+        .take_while(char::is_ascii_alphanumeric)
+        .collect();
+    assert!(!served.is_empty(), "the app script carries a version");
+
+    let app = meerkat_meta::console_json_router_with_aggregator_and_access(
+        decision_state(),
+        meerkat_meta::MetaConsoleAggregator::new(std::sync::Arc::new(
+            meerkat_meta::InMemoryConsoleLogStore::default(),
+        )),
+        None,
+    );
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/console/experience")
+                .body(axum::body::Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), 512 * 1024)
+        .await
+        .expect("body");
+    let body: Value = serde_json::from_slice(&bytes).expect("JSON");
+    assert_eq!(
+        body["console_bundle"],
+        json!(served),
+        "the experience names the bundle of the page the gateway serves"
+    );
+}
+
 #[tokio::test]
 async fn console_voice_readiness_is_target_scoped_and_false_without_a_host() {
     let contract: Value = serde_json::from_str(include_str!("fixtures/console_voice_v1.json"))

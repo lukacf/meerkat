@@ -86,6 +86,96 @@ pub(crate) fn optional<T>(value: &Option<T>) -> Option<&'static str> {
     value.as_ref().map(|_| REDACTED)
 }
 
+/// A TOML reader's error as an answer or a log line may show it: where the
+/// error sits (line and column, and the path of keys where the reader gives
+/// one) and what is wrong, never the reader's own display and never a value
+/// of the document. The display quotes the line of the document the error
+/// sits on, with whatever the document holds there; and the message
+/// renders an unexpected value whole ([`without_unexpected_value`]).
+pub(crate) fn toml_error_text(error: &toml::de::Error) -> String {
+    let display = error.to_string();
+    // The display's first line is the place alone; the document's line
+    // follows it.
+    let place = display
+        .lines()
+        .next()
+        .and_then(|first| first.strip_prefix("TOML parse error at "));
+    // Without the document the reader prints its message and, below it,
+    // the path of keys the error sits under.
+    let mut bare = error.clone();
+    bare.set_input(None);
+    let bare = bare.to_string();
+    let keys = bare
+        .strip_prefix(error.message())
+        .map(str::trim)
+        .filter(|keys| keys.starts_with("in `"));
+    let what = without_unexpected_value(error.message());
+    match (place, keys) {
+        (Some(place), Some(keys)) => format!("{place}, {keys}: {what}"),
+        (Some(place), None) => format!("{place}: {what}"),
+        (None, Some(keys)) => format!("{keys}: {what}"),
+        (None, None) => what,
+    }
+}
+
+/// A reader's message without the rendering of an unexpected value. Where a
+/// value has another type than the schema expects, or is no variant of an
+/// enum, the message quotes it whole (`invalid type: string "...", expected
+/// ...`, `invalid value: ...`, ``unknown variant `...`, expected ...``): a
+/// secret string where a table is expected would be printed. The kind of
+/// the value and what was expected stay; so does every message that names a
+/// key (an unknown, missing or duplicate field).
+pub(crate) fn without_unexpected_value(message: &str) -> String {
+    for prefix in ["invalid type: ", "invalid value: "] {
+        if let Some(rest) = message.strip_prefix(prefix) {
+            // `<kind> <value>, expected <what>`. The value can hold any
+            // text, so what was expected is taken from the end, and the
+            // kind is the words before the value's opening quote.
+            let (unexpected, expected) = match rest.rsplit_once(", expected ") {
+                Some((unexpected, expected)) => (unexpected, Some(expected)),
+                None => (rest, None),
+            };
+            let kind = unexpected
+                .split(['`', '"'])
+                .next()
+                .unwrap_or_default()
+                .trim_end();
+            return match expected {
+                Some(expected) => format!("{prefix}{kind}, expected {expected}"),
+                None => format!("{prefix}{kind}"),
+            };
+        }
+    }
+    if let Some(rest) = message.strip_prefix("unknown variant `") {
+        return match rest.rsplit_once("`, expected ") {
+            Some((_, expected)) => format!("unknown variant, expected {expected}"),
+            None => "unknown variant".to_string(),
+        };
+    }
+    message.to_string()
+}
+
+/// The same error without the document it was read from: its message is
+/// [`toml_error_text`]'s, place included. The reader's error holds the
+/// whole document, and its `Debug` form prints it.
+pub(crate) fn toml_error_without_document(error: &toml::de::Error) -> toml::de::Error {
+    <toml::de::Error as serde::de::Error>::custom(toml_error_text(error))
+}
+
+/// The line and column (from 1) of the byte `offset` of `content`, as an
+/// error names a place: `line 3, column 14`.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn line_and_column(content: &str, offset: usize) -> String {
+    let before = content.get(..offset).unwrap_or(content);
+    let line = before.matches('\n').count() + 1;
+    let column = before
+        .rsplit('\n')
+        .next()
+        .map_or(0, |last| last.chars().count())
+        + 1;
+    format!("line {line}, column {column}")
+}
+
 /// Marker [`redact_secret_shapes`] (and exact-value redaction of the same
 /// diagnostics) puts in place of a redacted value.
 pub const SECRET_REDACTION_MARKER: &str = "[REDACTED]";

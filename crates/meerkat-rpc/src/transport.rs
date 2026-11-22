@@ -293,6 +293,9 @@ pub struct JsonlTransport<R, W> {
     admitted_frame: Vec<u8>,
     admitted_frame_memory: JsonlFrameMemoryPermit,
     admitted_frame_started_at: Option<tokio::time::Instant>,
+    /// Whether the connection's first frame is still to come: the frame
+    /// that says whether the peer speaks JSON lines at all.
+    awaiting_first_frame: bool,
 }
 
 impl<R: AsyncBufRead + Unpin, W: TransportWriter> JsonlTransport<R, W> {
@@ -305,6 +308,7 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> JsonlTransport<R, W> {
             admitted_frame: Vec::new(),
             admitted_frame_memory: JsonlFrameMemoryPermit::default(),
             admitted_frame_started_at: None,
+            awaiting_first_frame: true,
         }
     }
 
@@ -317,6 +321,7 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> JsonlTransport<R, W> {
             admitted_frame: Vec::new(),
             admitted_frame_memory: JsonlFrameMemoryPermit::default(),
             admitted_frame_started_at: None,
+            awaiting_first_frame: true,
         }
     }
 
@@ -396,6 +401,7 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> JsonlTransport<R, W> {
         let frame = std::mem::take(&mut self.admitted_frame);
         let frame_memory = std::mem::take(&mut self.admitted_frame_memory);
         self.admitted_frame_started_at = None;
+        self.refuse_http_request_line(&frame)?;
         let wire_bytes = frame.len();
         match parse_rpc_message_frame(&frame) {
             Ok(Some(message)) => Ok(Some(AdmittedJsonlMessage {
@@ -412,6 +418,25 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> JsonlTransport<R, W> {
         self.admitted_frame = Vec::new();
         self.admitted_frame_memory = JsonlFrameMemoryPermit::default();
         self.admitted_frame_started_at = None;
+    }
+
+    /// Refuse a connection whose first line reads as an HTTP request line.
+    ///
+    /// A peer that opens with one is an HTTP client (a browser page can make
+    /// one reach a listening port), not a JSON-RPC client. The refusal is a
+    /// transport error on that first line: the server ends the connection
+    /// before it reads any later line, so nothing the request carries is
+    /// dispatched, a JSON line in its body included. Only the first line is
+    /// read this way: once a connection has sent one, an HTTP-looking line
+    /// is one more line that is not JSON.
+    fn refuse_http_request_line(&mut self, frame: &[u8]) -> Result<(), TransportError> {
+        if std::mem::take(&mut self.awaiting_first_frame) && is_http_request_line(frame) {
+            return Err(TransportError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                HTTP_REQUEST_ON_RPC_LISTENER,
+            )));
+        }
+        Ok(())
     }
 
     /// Read the next JSON-RPC message (request or response) from the transport.
@@ -450,6 +475,7 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> JsonlTransport<R, W> {
             if trimmed.is_empty() {
                 continue; // skip empty lines
             }
+            self.refuse_http_request_line(trimmed.as_bytes())?;
             return parse_rpc_message_frame(trimmed.as_bytes());
         }
     }
@@ -483,6 +509,38 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> JsonlTransport<R, W> {
             .await
             .map_err(|_| TransportError::WriteTimeout)?
     }
+}
+
+/// What the transport error says when a connection opens with an HTTP
+/// request line. A listener logs it with the peer's address when it ends
+/// the connection.
+pub(crate) const HTTP_REQUEST_ON_RPC_LISTENER: &str = "an HTTP request arrived on the RPC listener; the connection is closed and nothing of \
+     the request is dispatched";
+
+/// Whether `frame` reads as an HTTP request line: a method token, a target
+/// and `HTTP/<digit>.<digit>`, separated by single spaces. The method is
+/// any run of visible characters: a client library passes a caller's method
+/// string through, in any letter case, with digits or a hyphen. No JSON
+/// line reads so.
+fn is_http_request_line(frame: &[u8]) -> bool {
+    let Ok(line) = std::str::from_utf8(frame) else {
+        return false;
+    };
+    let mut parts = line.trim().split(' ');
+    let (Some(method), Some(target), Some(version), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return false;
+    };
+    !method.is_empty()
+        && method.bytes().all(|byte| byte.is_ascii_graphic())
+        && !target.is_empty()
+        && version.strip_prefix("HTTP/").is_some_and(|number| {
+            matches!(
+                number.as_bytes(),
+                [major, b'.', minor] if major.is_ascii_digit() && minor.is_ascii_digit()
+            )
+        })
 }
 
 fn parse_rpc_message_frame(frame: &[u8]) -> Result<Option<RpcMessage>, TransportError> {
@@ -754,6 +812,85 @@ mod tests {
         // Second line has no `method` → should be Response.
         let msg2 = transport.read_message().await.unwrap().unwrap();
         assert!(matches!(msg2, RpcMessage::Response(_)));
+    }
+
+    #[test]
+    fn an_http_request_line_is_a_method_a_target_and_a_version() {
+        for line in [
+            "GET / HTTP/1.1",
+            "POST /config HTTP/1.1\r",
+            "OPTIONS * HTTP/1.0",
+            "PRI * HTTP/2.0",
+            "DELETE /sessions/x?y=z HTTP/1.1",
+            "GET http://127.0.0.1:4800/ HTTP/1.1",
+            "CONNECT 127.0.0.1:4800 HTTP/1.1",
+            // A method is any token: a client library passes a caller's through.
+            "get / HTTP/1.1",
+            "x / HTTP/1.1",
+            "M-SEARCH * HTTP/1.1",
+        ] {
+            assert!(is_http_request_line(line.as_bytes()), "{line:?}");
+        }
+        for line in [
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#,
+            r#"["GET / HTTP/1.1"]"#,
+            "hello there",
+            "get / http/1.1",
+            "GET / http/1.1",
+            "GET /",
+            "GET HTTP/1.1",
+            "GET / HTTP/1.1 and more",
+            "GET  / HTTP/1.1",
+            "GET / HTTP/11",
+            "GET / HTTP/1.x",
+            "HTTP/1.1 200 OK",
+        ] {
+            assert!(!is_http_request_line(line.as_bytes()), "{line:?}");
+        }
+    }
+
+    /// The transport refuses an HTTP request line as a connection's first
+    /// line only, on either read path; later it is one more line that is not
+    /// JSON.
+    #[tokio::test]
+    async fn an_http_request_line_is_refused_as_the_first_line_only() {
+        let request = r#"{"jsonrpc":"2.0","id":1,"method":"turn/start","params":{}}"#;
+
+        let mut transport = make_transport(&format!("\n  \nPOST / HTTP/1.1\r\n{request}\n"));
+        let refused = transport.read_message().await.unwrap_err();
+        assert!(
+            matches!(&refused, TransportError::Io(error)
+                if error.kind() == std::io::ErrorKind::InvalidData
+                    && error.to_string() == HTTP_REQUEST_ON_RPC_LISTENER),
+            "{refused:?}"
+        );
+
+        let admission = JsonlFrameAdmission::new(JSONL_SMALL_FRAME_BYTES * 3, 0);
+        let mut transport = make_transport(&format!("POST / HTTP/1.1\r\n{request}\n"));
+        let refused = transport
+            .read_message_admitted(&admission)
+            .await
+            .map(|message| message.map(|message| message.wire_bytes))
+            .unwrap_err();
+        assert!(
+            matches!(&refused, TransportError::Io(error)
+                if error.to_string() == HTTP_REQUEST_ON_RPC_LISTENER),
+            "{refused:?}"
+        );
+
+        let mut transport = make_transport(&format!("{request}\nPOST / HTTP/1.1\r\n{request}\n"));
+        assert!(matches!(
+            transport.read_message().await.unwrap(),
+            Some(RpcMessage::Request(_))
+        ));
+        assert!(matches!(
+            transport.read_message().await.unwrap_err(),
+            TransportError::Parse(_)
+        ));
+        assert!(matches!(
+            transport.read_message().await.unwrap(),
+            Some(RpcMessage::Request(_))
+        ));
     }
 
     #[tokio::test]

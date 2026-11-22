@@ -80,6 +80,7 @@ fn request_only_context_is_not_part_of_the_replay_identity() {
 /// A stored input never holds its request-only context, and the input the
 /// runtime recovers after a restart runs with none: the recovered run recalls
 /// nothing rather than replay a section from the store.
+#[cfg(feature = "sqlite-store")]
 #[tokio::test]
 async fn a_restart_drops_request_only_context() {
     let dir = tempfile::tempdir().expect("store dir");

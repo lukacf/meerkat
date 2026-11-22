@@ -46,7 +46,16 @@ scripts/release-rust-crates.sh lists.
           its lib.rs carries the test-feature canary over exactly them, and
           no path-only self dev-dependency turns them on (the workspace's
           test commands pass them; the edge would make the crate's lib test
-          wait for its own library).
+          wait for its own library);
+        - the lib tests its `workspace-tests` feature gates are the tests
+          ci/standalone-workspace-only.toml declares workspace-only for
+          src/lib.rs: a gated test is declared, a declared test exists and
+          is gated, a declared module holds gated tests only; and the
+          feature gates test code only. Read from the sources under the
+          census host's configuration (Linux, the crate's default and
+          declared test features); a test under a predicate that
+          configuration cannot decide, or one a macro expands to, is left
+          to the census.
       A flagged line that is not a test escape is listed under the crate's
       `guard_allow` with its reason.
 
@@ -682,6 +691,334 @@ def scan_source(packaged: set[str], relative: str, text: str) -> list[tuple[str,
     return findings
 
 
+# ---------------------------------------------------------------------------
+# Workspace-only gates (static)
+# ---------------------------------------------------------------------------
+
+# The reference configuration the gate rows decide cfg predicates under: the
+# census host with the crate's default and declared test features. A name
+# outside these tables is unknown, and a predicate that depends on it is
+# undecided (the census, which builds, stays the judge of those tests).
+GATE_CFG_FLAGS = {"unix": True, "windows": False, "debug_assertions": True, "miri": False, "loom": False}
+GATE_CFG_VALUES = {
+    "target_os": "linux",
+    "target_family": "unix",
+    "target_arch": "x86_64",
+    "target_pointer_width": "64",
+    "target_env": "gnu",
+}
+GATE_ATTR_OPEN = re.compile(r"\s*#\s*(!?)\s*\[")
+GATE_CFG_HEAD = re.compile(r"\s*cfg\s*\(")
+GATE_PATH_HEAD = re.compile(r'\s*path\s*=\s*"([^"]+)"\s*$')
+GATE_TEST_ATTR = re.compile(r"\s*(?:[A-Za-z_][A-Za-z0-9_]*\s*::\s*)*test\b")
+GATE_VISIBILITY = r"(?:pub\s*(?:\([^)]*\))?\s+)?"
+GATE_MOD_HEAD = re.compile(GATE_VISIBILITY + r"mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*([;{])")
+GATE_FN_HEAD = re.compile(
+    GATE_VISIBILITY + r"(?:(?:async|unsafe|const|extern(?:\s+\"[^\"]*\")?)\s+)*fn\s+([A-Za-z_][A-Za-z0-9_]*)"
+)
+LIB_TARGET = "src/lib.rs"
+
+
+def cfg_value(predicate: str, features: set[str], test: bool = True) -> bool | None:
+    """True, False or None (undecided) for a `cfg(...)` predicate under the
+    reference configuration, with exactly `features` on and `test` as given."""
+    tokens: list[str] = []
+    pos = 0
+    while predicate[pos:].strip():
+        match = CFG_TOKEN.match(predicate, pos)
+        if not match:
+            return None
+        tokens.append(match.group(1) or match.group(2) or match.group(3))
+        pos = match.end()
+
+    def parse(i: int) -> tuple[bool | None, int]:
+        name = tokens[i]
+        if not (name[0].isalpha() or name[0] == "_"):
+            raise ValueError(name)
+        i += 1
+        if i < len(tokens) and tokens[i] == "=":
+            value = tokens[i + 1]
+            if not value.startswith('"'):
+                raise ValueError(value)
+            if name == "feature":
+                return value[1:-1] in features, i + 2
+            if name in GATE_CFG_VALUES:
+                return GATE_CFG_VALUES[name] == value[1:-1], i + 2
+            return None, i + 2
+        if i < len(tokens) and tokens[i] == "(":
+            i += 1
+            members: list[bool | None] = []
+            while tokens[i] != ")":
+                member, i = parse(i)
+                members.append(member)
+                if tokens[i] == ",":
+                    i += 1
+            i += 1
+            if name == "all":
+                return cfg_all(members), i
+            if name == "any":
+                if any(member is True for member in members):
+                    return True, i
+                return (None if any(member is None for member in members) else False), i
+            if name == "not" and len(members) == 1:
+                return (None if members[0] is None else not members[0]), i
+            return None, i
+        if name == "test":
+            return test, i
+        return GATE_CFG_FLAGS.get(name), i
+
+    try:
+        value, end = parse(0)
+    except (ValueError, IndexError):
+        return None
+    return value if end == len(tokens) else None
+
+
+def cfg_all(values: list[bool | None]) -> bool | None:
+    """The value of predicates that must all hold."""
+    if any(value is False for value in values):
+        return False
+    return None if any(value is None for value in values) else True
+
+
+def feature_closure(manifest: dict, names: list[str]) -> set[str]:
+    """The crate's own features that `names` turn on (through [features])."""
+    table = manifest.get("features") or {}
+    on: set[str] = set()
+    todo = list(names)
+    while todo:
+        name = todo.pop()
+        if name in on or name not in table:
+            continue
+        on.add(name)
+        todo += [member for member in table[name] if ":" not in member and "/" not in member]
+    return on
+
+
+class LibTests:
+    """The `#[test]`-attributed functions of a crate's lib target, read from
+    its sources: each with its test name (module path and function), the cfg
+    predicates on it and on the modules and files around it, and its place.
+    Also every `cfg` attribute that needs `workspace-tests`, with the
+    predicates around it. A test a macro expands to is not seen."""
+
+    def __init__(self, package_root: pathlib.Path):
+        self.package_root = package_root
+        self.tests: list[tuple[str, list[str], str]] = []
+        self.gates: list[tuple[list[str], str]] = []
+        self.problems: list[str] = []
+        lib = package_root / LIB_TARGET
+        self.read_file(lib, [], lib.parent, [])
+
+    def place(self, path: pathlib.Path, text: str, offset: int) -> str:
+        return f"{path.relative_to(self.package_root)}:{text.count(chr(10), 0, offset) + 1}"
+
+    def read_file(self, path: pathlib.Path, mod_path: list[str], child_dir: pathlib.Path, cfgs: list[str]) -> None:
+        try:
+            text = strip_comments(path.read_text(errors="replace"))
+        except OSError as err:
+            self.problems.append(f"{path.relative_to(self.package_root)}: cannot be read: {err}")
+            return
+        cfgs = list(cfgs)
+        i = 0
+        # Leading inner attributes: `#![cfg(...)]` gates the whole file.
+        while match := GATE_ATTR_OPEN.match(text, i):
+            close = matching_close(text, match.end() - 1)
+            if close is None or not match.group(1):
+                break
+            body = text[match.end() : close]
+            head = GATE_CFG_HEAD.match(body)
+            if head and ")" in body:
+                cfgs.append(body[head.end() : body.rindex(")")])
+            i = close + 1
+        self.read_scope(text, i, len(text), mod_path, path, child_dir, path.parent, cfgs)
+
+    def read_gates(self, text: str, start: int, end: int, path: pathlib.Path, cfgs: list[str]) -> None:
+        """Record the `workspace-tests` gates in text[start:end], an extent
+        that holds no module of its own."""
+        pos = start
+        while (match := CFG_ATTR.search(text, pos)) and match.start() < end:
+            close = matching_close(text, match.end() - 1)
+            if close is None:
+                return
+            pos = close + 1
+            predicate = text[match.end() : close]
+            if cfg_requires(predicate, WORKSPACE_TESTS):
+                self.gates.append(([*cfgs, predicate], self.place(path, text, match.start())))
+
+    def read_scope(self, text: str, i: int, end: int, mod_path: list[str], path: pathlib.Path,
+                   child_dir: pathlib.Path, attr_dir: pathlib.Path, cfgs: list[str]) -> None:
+        """Read the items of text[i:end]. `child_dir` holds the files of the
+        modules declared here; `attr_dir` is what a `#[path]` here is relative
+        to (the file's directory, or `child_dir` inside an inline module)."""
+        while i < end:
+            attrs: list[tuple[int, str]] = []
+            while (match := GATE_ATTR_OPEN.match(text, i)) and match.start() < end:
+                close = matching_close(text, match.end() - 1)
+                if close is None:
+                    return
+                attrs.append((match.end(), text[match.end() : close]))
+                i = close + 1
+            while i < end and (text[i].isspace() or text[i] == ";"):
+                i += 1
+            # The predicates on the item: its own cfg attributes hold together
+            # with those around it.
+            item_cfgs = list(cfgs)
+            own: list[tuple[int, str]] = []
+            path_attr = None
+            is_test = False
+            for offset, attr in attrs:
+                head = GATE_CFG_HEAD.match(attr)
+                if head and ")" in attr:
+                    predicate = attr[head.end() : attr.rindex(")")]
+                    item_cfgs.append(predicate)
+                    own.append((offset, predicate))
+                found = GATE_PATH_HEAD.match(attr)
+                if found:
+                    path_attr = found.group(1)
+                if GATE_TEST_ATTR.match(attr):
+                    is_test = True
+            for offset, predicate in own:
+                if cfg_requires(predicate, WORKSPACE_TESTS):
+                    self.gates.append((item_cfgs, self.place(path, text, offset)))
+            if i >= end:
+                return
+            if text[i] == "#":
+                continue
+            mod = GATE_MOD_HEAD.match(text, i)
+            if mod and mod.group(2) == "{":
+                close = matching_close(text, mod.end() - 1)
+                if close is None:
+                    return
+                inline_dir = child_dir / mod.group(1)
+                self.read_scope(text, mod.end(), close, [*mod_path, mod.group(1)], path, inline_dir, inline_dir, item_cfgs)
+                i = close + 1
+                continue
+            if mod:
+                name = mod.group(1)
+                if path_attr is not None:
+                    # A file a `#[path]` names owns its directory, as a mod.rs does.
+                    target = attr_dir / path_attr
+                    candidates = [(target, target.parent)]
+                else:
+                    candidates = [(child_dir / f"{name}.rs", child_dir / name), (child_dir / name / "mod.rs", child_dir / name)]
+                for target, children in candidates:
+                    if target.exists():
+                        self.read_file(target, [*mod_path, name], children, item_cfgs)
+                        break
+                else:
+                    self.problems.append(f"{self.place(path, text, i)}: module {name} has no source file")
+                i = mod.end()
+                continue
+            fn = GATE_FN_HEAD.match(text, i)
+            if fn and is_test:
+                self.tests.append(("::".join([*mod_path, fn.group(1)]), item_cfgs, self.place(path, text, i)))
+            item_close = self.item_end(text, i, end)
+            # A gate inside the item (on a statement, a field, a nested item)
+            # is read with the item's predicates around it.
+            self.read_gates(text, i, item_close, path, item_cfgs)
+            i = item_close
+
+    @staticmethod
+    def item_end(text: str, i: int, end: int) -> int:
+        """The index after the item that starts at `i`: its first block at
+        depth 0, or its `;` at depth 0."""
+        depth = 0
+        while i < end:
+            after = skip_literal(text, i)
+            if after is not None:
+                i = after
+                continue
+            c = text[i]
+            if c == "{" and depth == 0:
+                close = matching_close(text, i)
+                return end if close is None else min(close + 1, end)
+            if c in "([{":
+                depth += 1
+            elif c in ")]}":
+                depth -= 1
+                if depth < 0:
+                    return end
+            elif c == ";" and depth == 0:
+                return i + 1
+            i += 1
+        return end
+
+
+def workspace_only_gate_failures(crate: str, entry: dict, manifest: dict, package_root: pathlib.Path) -> list[str]:
+    """The pull-request side of the census's parity: the lib tests the crate's
+    `workspace-tests` feature gates are exactly the tests the manifest declares
+    workspace-only for src/lib.rs, and the feature gates test code only.
+      - a test the reference configuration builds only with `workspace-tests`
+        is declared (by name, or under a declared module);
+      - a declared test exists and is such a test; a declared module holds at
+        least one, and no test that builds without the feature;
+      - every `workspace-tests` gate is compiled out of a build that is not a
+        test build, so the feature cannot change the library.
+    A test whose other predicates the reference configuration cannot decide
+    is neither required nor refused: the census builds it and judges."""
+    rows = [item for item in entry.get("workspace_only") or [] if item.get("target") == LIB_TARGET]
+    declares = WORKSPACE_TESTS in (manifest.get("features") or {})
+    if not declares:
+        return [f"{crate}: {MANIFEST} declares workspace-only tests but the crate has no {WORKSPACE_TESTS} feature"] if rows else []
+    declared = standalone_features(manifest)
+    without = feature_closure(manifest, ["default", *declared])
+    with_feature = feature_closure(manifest, ["default", *declared, WORKSPACE_TESTS])
+    lib = LibTests(package_root)
+    failures = [f"{crate}: {problem}" for problem in lib.problems]
+    gated: dict[str, str] = {}
+    plain: dict[str, str] = {}
+    absent: dict[str, str] = {}
+    undecided: dict[str, str] = {}
+    for name, cfgs, place in lib.tests:
+        on = cfg_all([cfg_value(cfg, with_feature) for cfg in cfgs])
+        off = cfg_all([cfg_value(cfg, without) for cfg in cfgs])
+        if on is True and off is False:
+            gated[name] = place
+        elif on is True and off is True:
+            plain[name] = place
+        elif on is False:
+            absent[name] = place
+        else:
+            undecided[name] = place
+    tests = {test for item in rows for test in item.get("tests") or []}
+    modules = {module for item in rows for module in item.get("modules") or []}
+
+    def under(name: str) -> bool:
+        return any(name.startswith(module + "::") for module in modules)
+
+    for name in sorted(gated):
+        if name not in tests and not under(name):
+            failures.append(
+                f"{crate}: {gated[name]}: test {name} is gated on {WORKSPACE_TESTS} but {MANIFEST} does not declare it "
+                "workspace-only (name it there with the reason it needs the workspace)"
+            )
+    for name in sorted(tests):
+        if name in gated or name in undecided:
+            continue
+        if name in plain:
+            failures.append(f"{crate}: {plain[name]}: declared workspace-only test {name} is not gated on {WORKSPACE_TESTS}")
+        elif name in absent:
+            failures.append(f"{crate}: {absent[name]}: declared workspace-only test {name} is compiled out of the workspace's test build")
+        else:
+            failures.append(f"{crate}: declared workspace-only test {name} is not a test of {LIB_TARGET}")
+    for module in sorted(modules):
+        prefix = module + "::"
+        if not any(name.startswith(prefix) for name in [*gated, *undecided]):
+            failures.append(f"{crate}: declared workspace-only module {module} holds no test gated on {WORKSPACE_TESTS}")
+        for name in sorted(name for name in plain if name.startswith(prefix)):
+            failures.append(
+                f"{crate}: {plain[name]}: declared workspace-only module {module} holds {name}, which is not gated on {WORKSPACE_TESTS}"
+            )
+    for cfgs, place in lib.gates:
+        if cfg_all([cfg_value(cfg, with_feature, test=False) for cfg in cfgs]) is not False:
+            failures.append(
+                f"{crate}: {place}: a {WORKSPACE_TESTS} gate outside test code (the feature must not change the library: "
+                "put the item under cfg(test))"
+            )
+    return failures
+
+
 def guard(root: pathlib.Path, crates: list[str]) -> int:
     manifest = load_manifest(root)
     dirs = crate_dirs(root)
@@ -717,6 +1054,7 @@ def guard(root: pathlib.Path, crates: list[str]) -> int:
         failures.extend(bazel_workspace_tests_failures(crate, cargo_manifest, package_root))
         failures.extend(canary_failures(crate, cargo_manifest, package_root))
         failures.extend(self_dev_dependency_failures(crate, cargo_manifest))
+        failures.extend(workspace_only_gate_failures(crate, entry, cargo_manifest, package_root))
         print(f"  {crate:<36}{'FAIL' if any(f.startswith(crate + ':') for f in failures) else 'OK'}")
     for failure in failures:
         print(f"FAIL {failure}", file=sys.stderr)

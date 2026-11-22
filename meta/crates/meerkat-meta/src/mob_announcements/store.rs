@@ -564,10 +564,83 @@ pub trait AnnouncementStore: Send + Sync {
         self.put_subscription(operation, request, now_ms).await
     }
 
+    /// Whether this store keeps the rule of who receives a member's
+    /// announcement: it judges every capture, every replay of an earlier
+    /// start and every seal by the roster facts it is handed (see
+    /// [`Self::announce_with_facts`], [`Self::put_subscription_with_roster`]
+    /// and [`Self::seal_batch_with_roster`]). The owner gives a store that
+    /// does not say so no announcement of a member that is private to a
+    /// person, or that its mob's roster does not name, and makes no
+    /// subscription there that starts at an earlier frontier. The answer
+    /// gates those two calls and not the seal: what such a store holds
+    /// already is sealed as that store seals it.
+    fn judges_readers(&self) -> bool {
+        false
+    }
+
+    /// The members whose retained announcements `request` would replay: the
+    /// announcers of what its earlier start names, on its topics. None for a
+    /// start that replays nothing.
+    async fn replay_announcers(&self, request: &PutSubscription) -> Result<BTreeSet<Member>> {
+        let _ = request;
+        Ok(BTreeSet::new())
+    }
+
+    /// [`Self::put_subscription_with_facts`] with the roster facts of the
+    /// subscriber and of the members [`Self::replay_announcers`] names, as
+    /// the owner read them. An earlier start replays what a member announced
+    /// only where the announcer's facts let the subscriber receive it (see
+    /// [`Self::announce_with_facts`]), and not where the facts do not name
+    /// the announcer.
+    async fn put_subscription_with_roster(
+        &self,
+        operation: &OperationId,
+        request: PutSubscription,
+        facts: &RosterFacts,
+        now_ms: u64,
+    ) -> Result<Subscription> {
+        let subscriber = facts.get(&request.member).cloned();
+        self.put_subscription_with_facts(operation, request, subscriber, now_ms)
+            .await
+    }
+
+    /// The members that announced an item `member` is owed and no batch
+    /// holds yet.
+    async fn owed_announcers(&self, member: &Member) -> Result<BTreeSet<Member>> {
+        let _ = member;
+        Ok(BTreeSet::new())
+    }
+
+    /// [`Self::seal_batch_with_facts`] with the roster facts of the member
+    /// and of the members [`Self::owed_announcers`] names, as the owner read
+    /// them now. An owed item the member may not receive by its announcer's
+    /// facts (see [`Self::announce_with_facts`]) is settled as cancelled and
+    /// enters no batch; an item whose announcer the facts do not name was
+    /// judged when it was captured and is sealed.
+    async fn seal_batch_with_roster(
+        &self,
+        member: &Member,
+        batch_id: &BatchId,
+        policy: &SealingPolicy,
+        facts: &RosterFacts,
+        now_ms: u64,
+    ) -> Result<Option<Batch>> {
+        let own = facts.get(member).cloned();
+        self.seal_batch_with_facts(member, batch_id, policy, own, now_ms)
+            .await
+    }
+
     /// [`Self::announce`] with the roster facts of the members whose
     /// subscriptions take a topic a source owns: on such a topic only a
     /// covered member captures, and each withheld capture is an audit row.
     /// A member the facts do not name is covered by a member grant alone.
+    ///
+    /// What a member announces is captured as the facts say too: where its
+    /// announcer's facts name a person it is private to, by the announcer's
+    /// own subscriptions and by those of members whose facts name the same
+    /// person, and by no other; where the facts do not name its announcer,
+    /// by the announcer's own subscriptions alone. No audit row counts what
+    /// is left out. The host's and a source's announcements are not judged.
     async fn announce_with_facts(
         &self,
         request: AnnounceRequest,

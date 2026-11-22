@@ -1314,12 +1314,11 @@ async fn file_tools_refuse_every_declared_host_input_inside_the_project() {
 }
 
 /// A server started without a context root roots its tools in the realm
-/// directory itself. The realm's own documents are refused there; the
-/// state root as a whole contains the project root and is not applied, so
-/// an ordinary file is written as before. The stores beside the documents
-/// stay writable in this layout (a store file is written below): that is
-/// the stated limit of the rule there, and a host that wants them out of
-/// reach gives its tools a context root.
+/// directory itself. The realm's own documents and stores are refused
+/// there, each store with its side files; the state root as a whole
+/// contains the project root and is not applied, so an ordinary file is
+/// written as before, also one whose name only begins like a store's or
+/// that carries a store's name in a directory of its own.
 #[tokio::test]
 async fn file_tools_keep_the_realm_documents_where_the_realm_is_the_project_root() {
     let temp = tempfile::tempdir().unwrap();
@@ -1369,9 +1368,239 @@ async fn file_tools_keep_the_realm_documents_where_the_realm_is_the_project_root
         assert_engine_file_refusal(&result, case);
         assert!(!realm.join(path).exists(), "{case}: {path} was written");
     }
-    for path in ["out.txt", "notes/config.toml", "tasks.db"] {
+    for (case, path) in [
+        ("the session store", "sessions.sqlite3"),
+        (
+            "the session store's write-ahead log",
+            "sessions.sqlite3-wal",
+        ),
+        (
+            "a backup beside the session store",
+            "sessions.sqlite3.pre-1-1700000000",
+        ),
+        ("the JSONL session store", "sessions_jsonl/planted.jsonl"),
+        ("the runtime store", "runtime.sqlite3"),
+        (
+            "the runtime store's presence lock",
+            "runtime.sqlite3.mpresence",
+        ),
+        ("the job store", "jobs.sqlite3"),
+        ("the work graph store", "workgraph.sqlite3"),
+        ("the memory store", "memory/memory.sqlite3"),
+        ("the task store", "tasks.db"),
+        ("the blob store", "blobs/planted.bin"),
+        ("the artifact store", "artifacts/planted.bin"),
+        ("the mob stores", "mobs/planted.db"),
+        ("the approval records", "approvals.json"),
+        ("the approval records' lock", "approvals.json.lock"),
+        ("the decision store", "approval_decisions.sqlite3"),
+        ("the lease directory", "leases/planted.json"),
+        ("the hosting lock directory", "hosting/planted.lock"),
+        ("the delivery directory", "delivery/planted.lock"),
+        ("the config generation sidecar's lock", "config_state.lock"),
+        (
+            "the decision store's executor lock",
+            "approval_decisions.executor.lock",
+        ),
+        (
+            "a decision kind's executor lock",
+            "approval_decisions.executor.tool_grant.issue.lock",
+        ),
+        (
+            "the process custody records",
+            "tool_process_custody/planted.json",
+        ),
+        ("the realm's admission fence", "admission.lock"),
+        ("the realm's write-admission lock", "realm.mfence"),
+    ] {
+        let result = apply_patch_through(factory(), add_file_patch(path)).await;
+        assert_engine_file_refusal(&result, case);
+        assert!(!realm.join(path).exists(), "{case}: {path} was written");
+    }
+    for path in [
+        "out.txt",
+        "notes/config.toml",
+        "notes/tasks.db",
+        "sessions.sqlite3x",
+        "memory.md",
+        "config.yaml",
+        "tasks.md",
+    ] {
         let result = apply_patch_through(factory(), add_file_patch(path)).await;
         assert!(!result.0, "{path} is written as before: {result:?}");
         assert!(realm.join(path).is_file(), "{path} was written");
     }
+}
+
+/// One run in which the scripted model calls `tool` once with `args`, in a
+/// session that has a blob store: whether the result it got back is an
+/// error, and its text.
+async fn file_tool_call_through(
+    factory: AgentFactory,
+    tool: &'static str,
+    args: serde_json::Value,
+) -> (bool, String) {
+    let client = Arc::new(ScriptedClient::new(tool, args));
+    let mut build = AgentBuildConfig::new("claude-sonnet-4-5");
+    build.llm_client_override = Some(client.clone());
+    build.blob_store_override = Some(Arc::new(meerkat_store::MemoryBlobStore::new()));
+    let mut agent = tokio::time::timeout(
+        Duration::from_secs(15),
+        factory.build_agent(build, &Config::default()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(15),
+        agent.run("Read the file".to_string().into()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let mut results = client.returned_results();
+    assert_eq!(results.len(), 1, "one {tool} result: {results:?}");
+    results.remove(0)
+}
+
+/// Where a server roots its tools in the realm directory, the reading tools
+/// refuse every entry the host declares for the realm, its documents and
+/// its stores, and a listed file's side files, as the writing tools do. An
+/// ordinary file in that directory is loaded and viewed.
+#[tokio::test]
+async fn reading_tools_refuse_every_declared_realm_entry_where_the_realm_is_the_project_root() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = temp.path().canonicalize().unwrap();
+    let state_root = base.join("realms");
+    let realm = state_root.join("realm-1");
+    std::fs::create_dir_all(&realm).unwrap();
+    std::fs::write(realm.join("notes.txt"), "note\n").unwrap();
+    std::fs::write(
+        realm.join("chart.png"),
+        [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3],
+    )
+    .unwrap();
+    let factory = || {
+        let inputs =
+            HostConfinement::host_inputs(&state_root, Some(&base.join("user/.rkat/config.toml")));
+        AgentFactory::new(realm.clone())
+            .session_store(Arc::new(meerkat_store::MemoryStore::new()))
+            .runtime_root(realm.clone())
+            .project_root(realm.clone())
+            .builtins(true)
+            .shell(false)
+            .with_protected_host_inputs(
+                &inputs,
+                &HostConfinement::realm_documents(&realm),
+                &HostConfinement::convention_sources(None, Some(&base.join("user"))),
+            )
+    };
+    let read_refused = |result: &(bool, String)| {
+        result.0
+            && result.1.contains("engine's own directory")
+            && result.1.contains("do not read there")
+    };
+
+    // Each listed entry by its own name when it is a file, and a file under
+    // it when it is a directory; then side files of listed files, and the
+    // realm's two lock files that belong to no single store.
+    let mut paths: Vec<String> = HostConfinement::realm_documents(&realm)
+        .iter()
+        .map(|entry| {
+            let name = entry.file_name().unwrap().to_str().unwrap();
+            if name.rfind('.').is_some_and(|index| index > 0) {
+                name.to_owned()
+            } else {
+                format!("{name}/planted.png")
+            }
+        })
+        .collect();
+    paths.extend(
+        [
+            "sessions.sqlite3-wal",
+            "approvals.json.lock",
+            "config_state.lock",
+            "admission.lock",
+            "realm.mfence",
+        ]
+        .map(str::to_owned),
+    );
+    assert!(paths.len() > 20, "the declared list is read: {paths:?}");
+    for path in &paths {
+        let loaded = file_tool_call_through(
+            factory(),
+            "blob_load_file",
+            json!({ "path": path, "media_type": "text/plain" }),
+        )
+        .await;
+        assert!(read_refused(&loaded), "blob_load_file {path}: {loaded:?}");
+        let viewed = file_tool_call_through(factory(), "view_image", json!({ "path": path })).await;
+        assert!(read_refused(&viewed), "view_image {path}: {viewed:?}");
+    }
+
+    let loaded =
+        file_tool_call_through(factory(), "blob_load_file", json!({ "path": "notes.txt" })).await;
+    assert!(!loaded.0, "an ordinary file is loaded: {loaded:?}");
+    let viewed =
+        file_tool_call_through(factory(), "view_image", json!({ "path": "chart.png" })).await;
+    assert!(!viewed.0, "an ordinary image is viewed: {viewed:?}");
+}
+
+/// Whether `name`, an entry at a realm's root, is one its host declares to
+/// its file tools: a listed entry, or a side file of a listed file (the
+/// file's name followed by `-` or `.`, or the file's name without its
+/// extension followed by `.` and ending in `.lock`).
+fn declared_realm_entry(listed: &[std::path::PathBuf], realm: &Path, name: &str) -> bool {
+    listed
+        .iter()
+        .filter(|entry| entry.parent() == Some(realm))
+        .filter_map(|entry| entry.file_name()?.to_str())
+        .any(|declared| {
+            if name == declared {
+                return true;
+            }
+            let Some(stem) = declared
+                .rfind('.')
+                .filter(|index| *index > 0)
+                .map(|index| &declared[..index])
+            else {
+                return false;
+            };
+            name.strip_prefix(declared)
+                .is_some_and(|rest| rest.starts_with(['-', '.']))
+                || (name.ends_with(".lock")
+                    && name
+                        .strip_prefix(stem)
+                        .is_some_and(|rest| rest.starts_with('.')))
+        })
+}
+
+/// Every entry a realm's persistence creates at the realm's root when it
+/// opens is one the host declares to its file tools.
+#[cfg(feature = "session-store")]
+#[tokio::test]
+async fn the_declared_list_covers_every_entry_an_opened_realm_holds() {
+    let temp = tempfile::tempdir().unwrap();
+    let state_root = temp.path().canonicalize().unwrap().join("realms");
+    std::fs::create_dir_all(&state_root).unwrap();
+    let (_manifest, _persistence) =
+        meerkat::open_realm_persistence_in(&state_root, "realm-1", None, None)
+            .await
+            .expect("the realm opens");
+    let realm = meerkat_store::realm_paths_in(&state_root, "realm-1").root;
+    let listed = HostConfinement::realm_documents(&realm);
+    let mut entries: Vec<String> = std::fs::read_dir(&realm)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    entries.sort();
+    assert!(!entries.is_empty(), "the opened realm holds entries");
+    let undeclared: Vec<&String> = entries
+        .iter()
+        .filter(|name| !declared_realm_entry(&listed, &realm, name))
+        .collect();
+    assert!(
+        undeclared.is_empty(),
+        "entries of an opened realm the host does not declare: {undeclared:?} (all: {entries:?})"
+    );
 }

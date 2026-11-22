@@ -6,8 +6,10 @@
 //! resolve the very account the session already holds. The swap must carry
 //! that selection into the identity it applies and persists and into the
 //! request policy whose credential the runner rotates to. Otherwise the
-//! rotation sees "account A -> none", releases A's lease, and the next turn on
-//! the new client (which still uses A) finds no lease.
+//! rotation sees "account A -> none" and the session's identity and policy
+//! name no credential while its new client still uses A. (While a rotation
+//! still released the credential a session left, that also released A's
+//! lease, and the next turn on the new client found none.)
 //!
 //! Two provider layers run the same scenario through the real runtime loop,
 //! including a cold recreation of the persisted session:

@@ -4,7 +4,7 @@ description: "JSON-RPC 2.0 protocol for Meta runtime operations: gating, memory,
 icon: "plug"
 ---
 
-*Mirrored from Meerkat Meta main at [2d1d4867d3db](https://github.com/lukacf/meerkat/commit/2d1d4867d3db76895b2ed927666cfd57d017ab32) on 2026-11-21; Meta version 0.9.17 at that commit.*
+*Mirrored from Meerkat Meta main at [dca30fbb4416](https://github.com/lukacf/meerkat/commit/dca30fbb4416907692283c67dcf9db1b0480bdf5) on 2026-11-22; Meta version 0.9.17 at that commit.*
 
 Meta exposes its operational API over JSON-RPC 2.0. SDK gateways use JSON lines over stdio, while the embedded console uses `POST /console/rpc` for console-specific methods and explicitly implemented runtime operations. The HTTP dispatcher is not a general stdio passthrough; check `meta/capabilities` on the surface you use.
 

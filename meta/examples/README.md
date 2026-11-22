@@ -24,6 +24,7 @@ Host programs:
 - `007-supervised-python-app` (Python; a long-lived application: work, recovery, restart, a lost gateway; a provider key is optional)
 - `008-typescript-quickstart` (a TypeScript project to copy: one agent, a question, its answer; no console; a provider key for the question)
 - `009-mob-announcements` (Python and TypeScript; no console; a provider key for the steps in which agents run)
+- `010-ask-the-user` (Python and TypeScript; an agent asks a person and goes on with the answer; no console; needs a provider key)
 - [TypeScript host runnable](../sdk/typescript/examples/README.md)
   (a durable source-runner schedule and its callback; no provider key)
 
@@ -132,4 +133,12 @@ state directory; with `OPENAI_API_KEY` set it also runs the agents):
 
 ```bash
 ./009-mob-announcements/examples.sh
+```
+
+Run the ask-the-user example (Python and TypeScript; with `OPENAI_API_KEY`
+set the agent asks, the host answers after a restart, and a second question
+is dismissed; without it only the start is checked):
+
+```bash
+./010-ask-the-user/examples.sh
 ```

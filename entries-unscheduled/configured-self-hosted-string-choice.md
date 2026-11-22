@@ -6,4 +6,4 @@ Configured self-hosted Chat Completions and Responses clients now describe an en
 
 If you inspect these request schemas, read the allowed strings from `enum`; do not rely on per-choice descriptions. Omission is still allowed for the optional parameter. This does not establish that sending `null` is equivalent to omitting it.
 
-Verification covered locally constructed requests for one built-in parameter, with direct OpenAI, alternate base URL, and non-engine controls. It did not establish that a server accepts the schema or that boolean parameters change.
+The tests inspected locally constructed requests for one built-in parameter. Unchanged controls included Chat Completions on the Copilot backend, one OpenAI Responses case at an alternate base URL, and non-engine schemas. No test used OpenAI at its default address or checked server acceptance. A boolean sub-schema (where the schema itself is the literal `true` or `false`) is outside this change.

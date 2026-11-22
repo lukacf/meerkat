@@ -1,7 +1,7 @@
 "use strict";
 const assert = require("node:assert/strict");
 const { test } = require("node:test");
-const { assertScopeCancellation } = require("./recovery-scope-oracle.cjs");
+const { assertScopeCancellation, heldReadsOfLastStart } = require("./recovery-scope-oracle.cjs");
 
 function validEvidence() {
   return {
@@ -111,3 +111,42 @@ for (const [name, corrupt] of [
     assert.throws(() => assertScopeCancellation(evidence));
   });
 }
+
+// The held history reads that a scope switch must cancel are those of the
+// console's last start. `at` is a time on the proxy's clock.
+function startEvidence({ features, everyMobRead = null, reads }) {
+  const capabilities = features === undefined ? [] : [{
+    scope: "scope-a", path: "/console/rpc", method: "POST", status: 200, startedAt: 1, endedAt: 4,
+    request: JSON.stringify({ method: "meta/capabilities", params: {} }),
+    response: JSON.stringify({ result: features === null ? {} : { feature_capabilities: features } }),
+  }];
+  const experience = everyMobRead ? [{ scope: "scope-a", path: "/console/experience?mobs=*", method: "GET", status: 200, ...everyMobRead }] : [];
+  const held = reads.map(([startedAt, abortedAt]) => ({
+    scope: "scope-a", path: "/console/rpc", method: "POST", status: 200, startedAt, heldAt: startedAt + 1,
+    ...(abortedAt === undefined ? {} : { abortedAt }),
+  }));
+  return { observations: [...capabilities, ...experience, ...held], held, scope: "scope-a" };
+}
+
+test("on a gateway that lists mob addressing only a live read held after the every-mob experience read is of the last start", () => {
+  // Before the capabilities answer, and before the every-mob experience read ends: nothing yet.
+  assert.deepEqual(heldReadsOfLastStart(startEvidence({ reads: [[2]] })), []);
+  assert.deepEqual(heldReadsOfLastStart(startEvidence({ features: ["mob_addressing"], reads: [[2, 6], [7]] })), []);
+  assert.deepEqual(heldReadsOfLastStart(startEvidence({ features: ["mob_addressing"], everyMobRead: { startedAt: 5 }, reads: [[2, 6], [7]] })), []);
+  // An every-mob read made before the capabilities answer is not the one the last start follows.
+  assert.deepEqual(heldReadsOfLastStart(startEvidence({ features: ["mob_addressing"], everyMobRead: { startedAt: 3, endedAt: 6 }, reads: [[7]] })), []);
+  // The read of the second start is still live when the every-mob read ends: the console cancels it itself.
+  assert.deepEqual(heldReadsOfLastStart(startEvidence({ features: ["mob_addressing"], everyMobRead: { startedAt: 5, endedAt: 9 }, reads: [[2, 6], [7]] })), []);
+  const settled = startEvidence({ features: ["mob_addressing"], everyMobRead: { startedAt: 5, endedAt: 9 }, reads: [[2, 6], [7, 10], [11]] });
+  assert.deepEqual(heldReadsOfLastStart(settled), [settled.held[2]]);
+});
+
+test("on a gateway that hosts one mob every live held read is of the last start", () => {
+  for (const features of [null, [], ["other"]]) {
+    const evidence = startEvidence({ features, reads: [[2, 6], [7]] });
+    assert.deepEqual(heldReadsOfLastStart(evidence), [evidence.held[1]]);
+  }
+  const otherScope = startEvidence({ features: [], reads: [[7]] });
+  otherScope.held[0].scope = "scope-b";
+  assert.deepEqual(heldReadsOfLastStart(otherScope), []);
+});

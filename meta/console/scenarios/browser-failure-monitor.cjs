@@ -4,6 +4,16 @@ const assert = require("node:assert/strict");
 const pageMonitors = new WeakMap();
 const aborted = "net::ERR_ABORTED";
 
+// While a document initializes the console starts its one unscoped
+// subscription (a recent-page read, then the stream) up to three times: at
+// load, again when the experience names its scope, and again when the
+// gateway's capabilities first list mob addressing. Each later start cancels
+// the read or the stream then in flight, so the first two of each may be
+// cancelled and no third.
+const initializationStarts = 2;
+// The unscoped stream: no query, or the one that asks for every mob.
+const unscopedStreamQueries = ["", "?mobs=*"];
+
 // Observe the context so popup requests are included from their first request.
 // Expected failures name exact Playwright Request objects, never URL wildcards.
 function browserFailureMonitor(context, { origin, initializationPrefixes = [""] }) {
@@ -24,12 +34,15 @@ function browserFailureMonitor(context, { origin, initializationPrefixes = [""] 
     if (url.origin !== authority) return null;
     const prefix = prefixes.find(item => url.pathname === `${item}/console/timeline/stream` || url.pathname === `${item}/console/rpc`);
     if (prefix === undefined) return null;
-    if (request.method() === "GET" && url.pathname === `${prefix}/console/timeline/stream` && !url.search) return `${prefix}:stream`;
+    if (request.method() === "GET" && url.pathname === `${prefix}/console/timeline/stream`) {
+      return unscopedStreamQueries.includes(url.search) ? `${prefix}:stream` : null;
+    }
     if (request.method() !== "POST" || url.pathname !== `${prefix}/console/rpc`) return null;
     try {
       const body = JSON.parse(request.postData() || "{}");
       return body.method === "meta/console/query_timeline" && body.params?.mode === "recent"
         && body.params?.limit === 200 && !Object.hasOwn(body.params, "identity")
+        && !Object.hasOwn(body.params, "mob_id") && (!Object.hasOwn(body.params, "mobs") || body.params.mobs === "*")
         && !Object.hasOwn(body.params, "before") && !Object.hasOwn(body.params, "after") ? `${prefix}:seed` : null;
     } catch { return null; }
   }
@@ -52,8 +65,9 @@ function browserFailureMonitor(context, { origin, initializationPrefixes = [""] 
     }
     if (!action?.prefixes.length) return;
     const kind = initializationKind(request, action.prefixes);
-    if (!kind || action.initial.has(kind)) return;
-    action.initial.add(kind);
+    const started = kind ? action.initial.get(kind) || 0 : initializationStarts;
+    if (started >= initializationStarts) return;
+    action.initial.set(kind, started + 1);
     bind(request, `${action.reason}: authority initialization`, aborted, action);
   }
   function observeFinished(request) {
@@ -125,7 +139,7 @@ function browserFailureMonitor(context, { origin, initializationPrefixes = [""] 
     },
     async during(page, reason, action, { priorRequests = () => true, initialize = false, documentNavigation = false } = {}) {
       assert(!actions.has(page), "failure action scopes must not overlap on a page");
-      const scope = { reason, prefixes: actionPrefixes(initialize), initial: new Set() };
+      const scope = { reason, prefixes: actionPrefixes(initialize), initial: new Map() };
       if (documentNavigation) {
         // Requests can begin after the action snapshot while the old document
         // is still running, even after navigation begins. Stop collecting at
@@ -154,7 +168,7 @@ function browserFailureMonitor(context, { origin, initializationPrefixes = [""] 
     },
     async popup(reason, action) {
       assert.equal(popupAction, null, "popup action scopes must not overlap");
-      const scope = { reason, prefixes: actionPrefixes(true), initial: new Set(), page: null };
+      const scope = { reason, prefixes: actionPrefixes(true), initial: new Map(), page: null };
       popupAction = scope;
       try { return await action(); } finally { popupAction = null; finishAction(scope); }
     },

@@ -7,7 +7,7 @@ const { randomUUID } = require("node:crypto");
 const { chromium } = require("playwright");
 const { startFixture, eventually, rpc } = require("../acceptance-runtime.cjs");
 const { startScopeProxy } = require("../recovery-scope-proxy.cjs");
-const { assertScopeCancellation } = require("../recovery-scope-oracle.cjs");
+const { assertScopeCancellation, heldReadsOfLastStart } = require("../recovery-scope-oracle.cjs");
 const { browserFailureMonitor } = require("./browser-failure-monitor.cjs");
 
 const evidence = process.env.META_BROWSER_EVIDENCE || path.join(__dirname, "../../output/playwright/console-acceptance");
@@ -115,6 +115,9 @@ async function scopeCancellation(host, phase) {
       await page.getByTestId("host-scope").waitFor();
       if (host === "stock") await page.locator('.agent[role="button"], .cc-sidebar-row').filter({ hasText: /router/i }).first().waitFor();
       if (phase === "repair") await page.locator('[data-testid="console-transport-status"][data-phase="live"]').waitFor();
+      // The stock console cancels the held read of each earlier start itself:
+      // the action ends once the read of its last start is held.
+      else if (host === "stock") await eventually(() => heldReadsOfLastStart({ observations: proxy.observations, held: proxy.held.map(item => item.observation), scope: "scope-a" }).length > 0, "initial successful owner history of the console's last start is held");
       else await eventually(() => proxy.held.some(item => !item.observation.abortedAt), "initial successful owner history is held");
     }, { priorRequests: () => false, initialize: ["/scope-a"] });
     if (phase === "repair") {

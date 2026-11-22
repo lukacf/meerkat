@@ -5,8 +5,12 @@
 // and paging starts instead from a saved layout whose one pane is empty: the
 // experience gets a storage scope so the layout persists, and the layout is
 // in place before the console loads.
+// The console reads the experience with and without a query (`?mobs=*` on a
+// gateway that lists mob addressing). Every read gets the scope: two reads
+// that name different scopes are two signed-in users to the console, which
+// then loads again for each answer.
 async function startFromEmptyFirstPane(page, storageScope) {
-  await page.route("**/console/experience", async (route) => {
+  await page.route((url) => url.pathname.endsWith("/console/experience"), async (route) => {
     const response = await route.fetch();
     const value = await response.json();
     await route.fulfill({ response, json: { ...value, storage_scope: storageScope } });

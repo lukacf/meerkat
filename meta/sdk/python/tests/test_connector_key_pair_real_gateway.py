@@ -25,6 +25,7 @@ Run:
 """
 from __future__ import annotations
 
+import contextlib
 import os
 from pathlib import Path
 
@@ -45,7 +46,7 @@ from .test_wire_cross_mob_real_gateways import (
     _config_toml,
 )
 
-pytestmark = pytest.mark.skipif(
+_needs_a_gateway = pytest.mark.skipif(
     not (_GATEWAY_BIN and os.path.isfile(_GATEWAY_BIN)),
     reason="META_GATEWAY_BIN not set to a built rpc_gateway",
 )
@@ -109,6 +110,54 @@ async def _gateway(tmp_path: Path, base_url: str):
     )
 
 
+async def _stop_gateway_and_model(runtime, fake, first: BaseException | None) -> None:
+    """Stop the gateway and then the stand-in model.
+
+    Both are always attempted, and the first error is the one that surfaces:
+    ``first``, the test's own, when there is one; else the gateway's shutdown
+    error; else the model's close error. A later error never replaces an
+    earlier one: it is printed and dropped.
+    """
+    cleanup_error: Exception | None = None
+    try:
+        if runtime is not None:
+            await runtime.shutdown()
+    except Exception as error:
+        cleanup_error = error
+    finally:
+        try:
+            fake.close()
+        except Exception as error:
+            if cleanup_error is None:
+                cleanup_error = error
+            else:
+                print(f"dropped, a later cleanup error: the model's close failed: {error!r}")
+    if cleanup_error is None:
+        return
+    if first is not None:
+        print(f"dropped, a later cleanup error: {cleanup_error!r}")
+        return
+    raise cleanup_error
+
+
+@contextlib.asynccontextmanager
+async def _running(fake, start):
+    """The runtime ``start()`` gives, stopped afterwards together with ``fake``
+    (:func:`_stop_gateway_and_model`). An error of the body, or of ``start()``
+    itself, is the one that surfaces."""
+    runtime = None
+    first: BaseException | None = None
+    try:
+        runtime = await start()
+        yield runtime
+    except BaseException as error:
+        first = error
+        raise
+    finally:
+        await _stop_gateway_and_model(runtime, fake, first)
+
+
+@_needs_a_gateway
 @pytest.mark.asyncio
 @pytest.mark.timeout(120)
 async def test_the_gateway_admits_the_helpers_pair_and_refuses_each_half(tmp_path, monkeypatch):
@@ -125,9 +174,7 @@ async def test_the_gateway_admits_the_helpers_pair_and_refuses_each_half(tmp_pat
     monkeypatch.setenv("HOME", str(home))
 
     fake = _FakeModel()
-    runtime = None
-    try:
-        runtime = await _gateway(tmp_path, fake.base_url)
+    async with _running(fake, lambda: _gateway(tmp_path, fake.base_url)) as runtime:
         capabilities = await runtime.mob_handle().capabilities()
         print(
             f"GATEWAY contract_version={capabilities.contract_version}"
@@ -186,10 +233,6 @@ async def test_the_gateway_admits_the_helpers_pair_and_refuses_each_half(tmp_pat
                 in message
             ), message
             print(f"REFUSED {sorted(half)} alone: code={refused.value.code} message={message}")
-    finally:
-        if runtime is not None:
-            await runtime.shutdown()
-        fake.close()
 
     # The isolation held: the gateway kept the agent's session identity in a
     # directory under this test's own state home (under its own home on macOS).
@@ -205,3 +248,64 @@ async def test_the_gateway_admits_the_helpers_pair_and_refuses_each_half(tmp_pat
         if entry.is_dir()
     ]
     assert kept, f"no session identity directory under {state_home} or {home}"
+
+
+class _ShutdownFails:
+    """A runtime stand-in whose shutdown raises, as a real one does when the
+    gateway's cleanup does not settle."""
+
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+        self.shutdowns = 0
+
+    async def shutdown(self) -> None:
+        self.shutdowns += 1
+        raise self.error
+
+
+class _CountsCloses:
+    """A model stand-in: no listener, it counts its closes."""
+
+    def __init__(self, error: Exception | None = None) -> None:
+        self.error = error
+        self.closes = 0
+
+    def close(self) -> None:
+        self.closes += 1
+        if self.error is not None:
+            raise self.error
+
+
+# No gateway, no network: the cleanup of the row above, driven by stand-ins.
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("own_fails", "close_fails"),
+    [(False, False), (True, False), (False, True)],
+    ids=["shutdown-fails-alone", "after-the-tests-own-error", "and-the-close-fails-too"],
+)
+async def test_a_failed_shutdown_still_closes_the_model_and_the_first_error_surfaces(
+    own_fails, close_fails, capsys
+):
+    own_error = AssertionError("the test's own failure") if own_fails else None
+    shutdown_error = RuntimeError("the gateway's cleanup did not settle")
+    close_error = OSError("the model's close failed") if close_fails else None
+    runtime = _ShutdownFails(shutdown_error)
+    fake = _CountsCloses(close_error)
+
+    async def start():
+        return runtime
+
+    with pytest.raises(Exception) as surfaced:
+        async with _running(fake, start):
+            if own_error is not None:
+                raise own_error
+
+    assert runtime.shutdowns == 1
+    assert fake.closes == 1, "the model was not closed after the failed shutdown"
+    assert surfaced.value is (own_error or shutdown_error), surfaced.value
+    # The later error is printed, not raised.
+    later = close_error if close_fails else shutdown_error if own_fails else None
+    printed = capsys.readouterr().out
+    assert ("dropped, a later cleanup error" in printed) == (later is not None), printed
+    if later is not None:
+        assert repr(later) in printed, printed

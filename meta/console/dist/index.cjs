@@ -27647,7 +27647,8 @@ function createQuestionSetResource(input) {
         } else if (!refusal) {
           setDecision(pendingId, { phase: "failed", action, ...sent, error: errorText2(error48) });
         } else if (refusal.kind === "not_open" || refusal.kind === "expired") {
-          remove(pendingId, refusal.kind);
+          const timedOut = refusal.kind === "not_open" && set3.deadlineAtMs !== void 0 && env2.now() >= set3.deadlineAtMs;
+          remove(pendingId, timedOut ? "expired" : refusal.kind);
         } else if (refusal.kind === "not_accepted") {
           unsettled.set(pendingId, { phase: "refused", action, ...sent, refusal, error: refusal.words });
         } else if (refusal.kind === "not_sent" && previous3?.phase === "failed") {
@@ -68728,13 +68729,18 @@ function decisionCardsOf(page, renderings) {
 var QUESTION_SET_DECISION_KIND = "ask_user.questions";
 function decisionCardsBesideQuestions(cards, questions) {
   const status = questions?.status;
-  if (!questions || status !== "loading" && status !== "ready" && status !== "stale") return cards;
+  const standingIn = (why) => (card) => card.kind === QUESTION_SET_DECISION_KIND && card.unanswerable !== why ? { ...card, unanswerable: why } : card;
+  if (!questions || status !== "loading" && status !== "ready" && status !== "stale") return cards.map(standingIn("not_read"));
   if (status === "loading") return cards.filter((card) => card.kind !== QUESTION_SET_DECISION_KIND);
   const held = /* @__PURE__ */ new Set([
     ...questions.sets.map((set3) => set3.pendingId),
     ...questions.closed.map((closed) => closed.set.pendingId)
   ]);
-  return cards.filter((card) => card.kind !== QUESTION_SET_DECISION_KIND || !held.has(card.decisionId));
+  return cards.filter((card) => card.kind !== QUESTION_SET_DECISION_KIND || !held.has(card.decisionId)).map(standingIn("not_listed"));
+}
+function questionSetStandInHint(why, askedBy) {
+  const where = askedBy?.trim() ? "".concat(askedBy.trim(), "'s conversation") : "the asking agent's conversation";
+  return why === "not_listed" ? "This card has no answer form: the list of questions agents asked does not hold this set. It is answered in ".concat(where, " or here, once the list holds it.") : "This card has no answer form: the questions agents asked could not be read here. This set is answered in ".concat(where, " or here, once they can be read.");
 }
 function decisionPageParams(limit, after) {
   return after === void 0 ? { phase: "open", limit } : { phase: "open", limit, after };
@@ -68748,8 +68754,11 @@ function mergeDecisionCards(current, more) {
   return [...byId.values()].sort(byDeadline2);
 }
 function renderingOf(answer) {
-  const rendering = recordOf8(answer)?.rendering;
-  return typeof rendering === "string" ? rendering : void 0;
+  const record11 = recordOf8(answer);
+  const rendering = record11?.rendering;
+  if (typeof rendering !== "string") return void 0;
+  const added = record11?.rendering_suffix;
+  return typeof added === "string" && added !== "" && rendering.endsWith(added) ? rendering.slice(0, rendering.length - added.length) : rendering;
 }
 function phaseWords(phase2) {
   return humanizeEnum(phase2);
@@ -68839,7 +68848,7 @@ function DecisionCard({ card, now: now3, own: own6 }) {
               }))
             }
           ) : null,
-          open ? /* @__PURE__ */ (0, import_jsx_runtime91.jsx)("p", { className: "cc-approval__hint cc-decision__hint", children: identityChange ? "Decide where it was presented. A person cannot approve their own request." : "Decide where it was presented." }) : null
+          open ? /* @__PURE__ */ (0, import_jsx_runtime91.jsx)("p", { className: "cc-approval__hint cc-decision__hint", children: card.kind === QUESTION_SET_DECISION_KIND ? questionSetStandInHint(card.unanswerable ?? "not_read", card.requesterName) : identityChange ? "Decide where it was presented. A person cannot approve their own request." : "Decide where it was presented." }) : null
         ] }),
         withdrawable ? /* @__PURE__ */ (0, import_jsx_runtime91.jsx)("div", { className: "cc-btn-row cc-decision__own", children: /* @__PURE__ */ (0, import_jsx_runtime91.jsx)(Button, { size: "sm", disabled: busy, onClick: () => void withdraw(), "data-testid": "decision-card-withdraw", children: "Withdraw request" }) }) : null,
         refusal ? /* @__PURE__ */ (0, import_jsx_runtime91.jsxs)(import_jsx_runtime91.Fragment, { children: [
@@ -70617,7 +70626,7 @@ function AccessPanel({
           testId: "access-rule-agents",
           value: ruleDraft.agents,
           onChange: (value) => setRuleDraft({ ...ruleDraft, agents: value }),
-          placeholder: agents.slice(0, 2).map((agent) => agent.identity).join(", ") || "identity:ops-lead"
+          placeholder: agents.slice(0, 2).map((agent) => agent.identity).join(", ") || "ops-lead"
         }
       ),
       /* @__PURE__ */ (0, import_jsx_runtime93.jsx)(
@@ -93754,6 +93763,33 @@ function useQuestionSets(input) {
   } : void 0, [snapshot]);
 }
 
+// src/lib/console-bundle.ts
+var APP_SCRIPT_VERSION = /\/console-app\.js\?(?:[^#]*&)?v=([0-9A-Za-z._-]+)/;
+function builtBeside() {
+  const named = true ? "7c40ad94afbb".trim() : "";
+  return named || void 0;
+}
+function loadedByThePage(page) {
+  for (const script of Array.from(page.querySelectorAll("script[src]"))) {
+    const match = APP_SCRIPT_VERSION.exec(script.getAttribute("src") ?? "");
+    if (match) return match[1];
+  }
+  return void 0;
+}
+function runningConsoleBundle(page = typeof document === "undefined" ? void 0 : document) {
+  return builtBeside() ?? (page ? loadedByThePage(page) : void 0);
+}
+function servedConsoleBundle(experience) {
+  const named = typeof experience?.console_bundle === "string" ? experience.console_bundle.trim() : "";
+  return named || void 0;
+}
+function consoleBundleIsStale(running, served) {
+  return running !== void 0 && served !== void 0 && running !== served;
+}
+function consoleBundleNotice() {
+  return builtBeside() !== void 0 ? "This Console is of another build than its gateway's. Reload the page; if this notice stays, the application needs the Console of its gateway's release." : "This page is of another Console build than its gateway's. Reload the page to use the gateway's version.";
+}
+
 // src/lib/send-attempt-storage.ts
 var consoleSendStorageKey = (namespace, destination) => "meta-send-attempts:v1:".concat(encodeURIComponent(namespace), ":").concat(encodeURIComponent(destination));
 var predecessorConsoleSendStorageKey = (namespace, destination) => "mobkit-send-attempts:v1:".concat(encodeURIComponent(namespace), ":").concat(encodeURIComponent(destination));
@@ -96259,6 +96295,9 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     null
   );
   const serverStorageScope = experience?.storage_scope?.trim() ? experience.storage_scope : void 0;
+  const runningBundle = import_react107.default.useMemo(() => runningConsoleBundle(), []);
+  const bundleIsStale = consoleBundleIsStale(runningBundle, servedConsoleBundle(experience));
+  const bundleNotice = import_react107.default.useMemo(() => consoleBundleNotice(), []);
   const hostStorageNamespace = storageNamespace?.trim() || null;
   const persistentSendScope = serverStorageScope ? JSON.stringify([hostStorageNamespace ?? baseUrl, serverStorageScope]) : experience && hostStorageNamespace ? hostStorageNamespace : null;
   const savedPanelRuntimeSelection = import_react107.default.useMemo(
@@ -100618,6 +100657,10 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         panelState.errors.length > 0 ? /* @__PURE__ */ (0, import_jsx_runtime128.jsxs)("div", { className: "meta-action-error", role: "alert", children: [
           "Custom panels could not load: ",
           panelState.errors.join("; ")
+        ] }) : null,
+        bundleIsStale ? /* @__PURE__ */ (0, import_jsx_runtime128.jsxs)("div", { className: "meta-update-notice", "data-testid": "console-bundle-notice", role: "status", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime128.jsx)("span", { children: bundleNotice }),
+          /* @__PURE__ */ (0, import_jsx_runtime128.jsx)("button", { type: "button", className: "cc-btn cc-btn--sm", onClick: () => window.location.reload(), children: "Reload" })
         ] }) : null,
         actionError && /* @__PURE__ */ (0, import_jsx_runtime128.jsxs)("div", { className: "meta-action-error", "data-testid": "console-action-error", role: "alert", children: [
           /* @__PURE__ */ (0, import_jsx_runtime128.jsx)("span", { children: actionError }),

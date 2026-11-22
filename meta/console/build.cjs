@@ -62,26 +62,8 @@ async function main() {
   await fs.mkdir(outDir, { recursive: true });
   await fs.mkdir(embeddedOutDir, { recursive: true });
 
-  // Library bundle (CJS) for JSDOM / smoke tests
-  await build({
-    absWorkingDir: __dirname,
-    entryPoints: [indexSourcePath],
-    outfile: libraryBundlePath,
-    bundle: true,
-    format: "cjs",
-    platform: "neutral",
-    conditions: ["browser"],
-    mainFields: ["module", "main"],
-    target: ["es2020"],
-    external: ["react", "react-dom", "react-dom/client", "react/jsx-runtime", "react/jsx-dev-runtime"],
-    alias,
-    nodePaths,
-    loader: fontLoaders,
-    ...bundleSyntaxOptions,
-    minify: false,
-  });
-
-  // Browser app bundle (IIFE) served by the gateway
+  // Browser app bundle (IIFE) served by the gateway. Built first: its
+  // version is what the gateway's page names, and the library is told it.
   await build({
     absWorkingDir: __dirname,
     entryPoints: [browserSourcePath],
@@ -106,14 +88,47 @@ async function main() {
     fs.readFile(appBundlePath),
     fs.readFile(path.join(outDir, "console-app.css")),
   ]);
+  const jsVersion = assetVersion(appBundle);
+  // One form for the app bundle's version: lowercase hex digits. The page
+  // (src/lib/console-bundle.ts), the gateway (`console_bundle` in the
+  // experience document) and the freshness check each read it out of the
+  // page; a version in another form would be cut differently by them, and
+  // a page would then call itself out of date for ever.
+  if (!/^[0-9a-f]+$/.test(jsVersion)) {
+    throw new Error(`the app bundle's version is not lowercase hex digits: ${JSON.stringify(jsVersion)}`);
+  }
   await fs.writeFile(
     htmlPath,
     renderHtml({
-      jsVersion: assetVersion(appBundle),
+      jsVersion,
       cssVersion: assetVersion(cssBundle),
     }),
     "utf8",
   );
+
+  // Library bundle (CJS) for applications that mount the console themselves,
+  // and for JSDOM / smoke tests. It names the app bundle it was built
+  // beside: the gateway's page reads which bundle it runs from the script
+  // it loaded, a page that mounts this library cannot, and both compare it
+  // with the bundle the gateway says it serves (src/lib/console-bundle.ts).
+  await build({
+    absWorkingDir: __dirname,
+    entryPoints: [indexSourcePath],
+    outfile: libraryBundlePath,
+    bundle: true,
+    format: "cjs",
+    platform: "neutral",
+    conditions: ["browser"],
+    mainFields: ["module", "main"],
+    target: ["es2020"],
+    external: ["react", "react-dom", "react-dom/client", "react/jsx-runtime", "react/jsx-dev-runtime"],
+    define: { __META_CONSOLE_BUNDLE__: JSON.stringify(jsVersion) },
+    alias,
+    nodePaths,
+    loader: fontLoaders,
+    ...bundleSyntaxOptions,
+    minify: false,
+  });
 
   await Promise.all(
     EMBEDDED_SHARED_FILES.map((file) => (

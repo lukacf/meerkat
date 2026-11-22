@@ -1059,4 +1059,855 @@ mod tests {
         let (result, _held) = held.release_and_finish().await;
         assert_eq!(result.expect("the held run completes").text, "held answer");
     }
+
+    /// On the RPC host, the schedule tools a mob member holds judge its
+    /// schedule write as its own message to the member the target names:
+    /// refused for a member it is not wired to, with the very answer a name
+    /// no member holds gets, and accepted once the two are wired. The
+    /// host's own write on the schedule service is not judged.
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn a_mob_members_schedule_write_is_judged_by_the_mobs_wiring_on_the_rpc_host() {
+        use meerkat_core::AgentToolDispatcher as _;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (_, bundle) = meerkat::open_realm_persistence_in(
+            temp.path(),
+            "schedule-member-write",
+            Some(meerkat_store::RealmBackend::Sqlite),
+            None,
+        )
+        .await
+        .expect("realm persistence");
+        let config_store: Arc<dyn meerkat_core::ConfigStore> =
+            Arc::new(meerkat_core::MemoryConfigStore::new(
+                meerkat_core::Config::default(),
+                meerkat_models::canonical(),
+            ));
+        let runtime = Arc::new(
+            SessionRuntime::new_with_config_store(
+                meerkat::AgentFactory::new(temp.path().join("sessions")),
+                meerkat_core::Config::default(),
+                config_store,
+                1,
+                bundle,
+                crate::router::NotificationSink::noop(),
+            )
+            .expect("compose the RPC session runtime"),
+        );
+        let mob_state = meerkat_mob_mcp::MobMcpState::new_in_memory();
+        let definition: meerkat_mob::MobDefinition = serde_json::from_value(serde_json::json!({
+            "id": "ops",
+            "profiles": {
+                "worker": {
+                    "model": "gpt-5.4",
+                    "external_addressable": true,
+                    "tools": { "comms": true, "schedule": true }
+                }
+            }
+        }))
+        .expect("test mob definition should decode");
+        let mob_id = mob_state
+            .mob_create_definition(definition)
+            .await
+            .expect("the mob is created");
+        for member in ["anna", "boris"] {
+            mob_state
+                .mob_spawn(
+                    &mob_id,
+                    meerkat_mob::ProfileName::from("worker"),
+                    meerkat_mob::AgentIdentity::from(member),
+                    Some(meerkat_mob::MobRuntimeMode::TurnDriven),
+                    None,
+                    None,
+                )
+                .await
+                .expect("the member is seated");
+        }
+        let anna = mob_state
+            .mob_resolve_bridge_session_id(&mob_id, &meerkat_mob::AgentIdentity::from("anna"))
+            .await
+            .expect("anna's session is read")
+            .expect("anna has a session");
+        runtime.set_mob_state(Arc::clone(&mob_state));
+
+        // The tools the RPC host installs for its sessions, over its own
+        // schedule service.
+        let tools = meerkat::ScheduleToolDispatcher::new(runtime.schedule_service());
+        let turn_of_anna =
+            meerkat_core::ToolDispatchContext::default().with_runtime_identity(anna, None);
+        let create_for = |member: &str| {
+            serde_json::value::RawValue::from_string(
+                serde_json::json!({
+                    "name": "a note",
+                    "trigger": {
+                        "type": "once",
+                        "due_at_utc": (chrono::Utc::now() + chrono::Duration::days(1)).to_rfc3339(),
+                    },
+                    "target": {
+                        "target_kind": "mob",
+                        "type": "member",
+                        "mob_id": "ops",
+                        "member_id": member,
+                        "action": { "type": "send", "content": "A scheduled note." },
+                    },
+                })
+                .to_string(),
+            )
+            .expect("create arguments")
+        };
+        let mut refusals = Vec::new();
+        for member in ["boris", "nobody"] {
+            let args = create_for(member);
+            let answer = tools
+                .dispatch_with_context(
+                    meerkat_core::types::ToolCallView {
+                        id: "member-write",
+                        name: "meerkat_schedule_create",
+                        args: &args,
+                    },
+                    &turn_of_anna,
+                )
+                .await;
+            assert!(
+                matches!(
+                    &answer,
+                    Err(meerkat_core::ToolError::PolicyDenied { denial })
+                        if denial.code == meerkat::SCHEDULE_TARGET_NOT_A_PEER
+                ),
+                "anna's schedule for {member} is refused as a target that is not a peer: \
+                 {answer:?}"
+            );
+            refusals.push(format!("{:?}", answer.err()));
+        }
+        assert_eq!(
+            refusals[0], refusals[1],
+            "a member out of reach answers as a name no member holds does"
+        );
+        assert!(
+            runtime
+                .schedule_service()
+                .list()
+                .await
+                .expect("the schedules are read")
+                .is_empty(),
+            "nothing is stored"
+        );
+
+        mob_state
+            .mob_wire(
+                &mob_id,
+                meerkat_mob::AgentIdentity::from("anna"),
+                meerkat_mob::PeerTarget::Local(meerkat_mob::AgentIdentity::from("boris")),
+            )
+            .await
+            .expect("anna and boris are wired");
+        let args = create_for("boris");
+        let wired = tools
+            .dispatch_with_context(
+                meerkat_core::types::ToolCallView {
+                    id: "member-write",
+                    name: "meerkat_schedule_create",
+                    args: &args,
+                },
+                &turn_of_anna,
+            )
+            .await;
+        assert!(
+            wired.is_ok(),
+            "anna's schedule for a member she can message stands: {wired:?}"
+        );
+        let hosts = tools
+            .dispatch(meerkat_core::types::ToolCallView {
+                id: "host-write",
+                name: "meerkat_schedule_create",
+                args: &create_for("nobody"),
+            })
+            .await;
+        assert!(
+            hosts.is_ok(),
+            "a schedule tool call of no session's turn is the host's own: {hosts:?}"
+        );
+    }
+
+    /// The RPC host reads from its own configuration whether its agents'
+    /// schedules may create sessions, and hands it to the schedule service
+    /// its tools write through: off by default, on with
+    /// `[tools] agent_schedules_may_create_sessions = true`.
+    #[tokio::test]
+    async fn the_rpc_host_reads_its_allowance_for_schedules_that_create_sessions() {
+        for allowed in [false, true] {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let (_, bundle) = meerkat::open_realm_persistence_in(
+                temp.path(),
+                "schedule-session-creation-allowance",
+                Some(meerkat_store::RealmBackend::Sqlite),
+                None,
+            )
+            .await
+            .expect("realm persistence");
+            let mut config = meerkat_core::Config::default();
+            assert!(
+                !config.tools.agent_schedules_may_create_sessions,
+                "off by default"
+            );
+            config.tools.agent_schedules_may_create_sessions = allowed;
+            let config_store: Arc<dyn meerkat_core::ConfigStore> = Arc::new(
+                meerkat_core::MemoryConfigStore::new(config.clone(), meerkat_models::canonical()),
+            );
+            let runtime = SessionRuntime::new_with_config_store(
+                meerkat::AgentFactory::new(temp.path().join("sessions")),
+                config,
+                config_store,
+                1,
+                bundle,
+                crate::router::NotificationSink::noop(),
+            )
+            .expect("compose the RPC session runtime");
+            assert_eq!(
+                runtime.schedule_service().agent_session_creation_allowed(),
+                allowed,
+                "the host's configuration decides"
+            );
+        }
+    }
+
+    /// On the RPC host a mob member's schedule whose target is a session
+    /// created on demand is refused, by a create and by an update of one the
+    /// host wrote, and nothing is written for it; the host's own call writes
+    /// one as before. Its schedule that spawns or forks a helper in its own
+    /// mob is refused the same way: it holds no mob tools. Its schedule for
+    /// a member of a mob the host does not hold is refused with the answer
+    /// a name no member holds gets.
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn a_mob_members_schedule_that_creates_a_session_is_refused_on_the_rpc_host() {
+        use meerkat_core::AgentToolDispatcher as _;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (_, bundle) = meerkat::open_realm_persistence_in(
+            temp.path(),
+            "schedule-member-session-creation",
+            Some(meerkat_store::RealmBackend::Sqlite),
+            None,
+        )
+        .await
+        .expect("realm persistence");
+        let config_store: Arc<dyn meerkat_core::ConfigStore> =
+            Arc::new(meerkat_core::MemoryConfigStore::new(
+                meerkat_core::Config::default(),
+                meerkat_models::canonical(),
+            ));
+        let runtime = Arc::new(
+            SessionRuntime::new_with_config_store(
+                meerkat::AgentFactory::new(temp.path().join("sessions")),
+                meerkat_core::Config::default(),
+                config_store,
+                1,
+                bundle,
+                crate::router::NotificationSink::noop(),
+            )
+            .expect("compose the RPC session runtime"),
+        );
+        let mob_state = meerkat_mob_mcp::MobMcpState::new_in_memory();
+        let definition: meerkat_mob::MobDefinition = serde_json::from_value(serde_json::json!({
+            "id": "ops",
+            "profiles": {
+                "worker": {
+                    "model": "gpt-5.4",
+                    "external_addressable": true,
+                    "tools": { "comms": true, "schedule": true }
+                }
+            }
+        }))
+        .expect("test mob definition should decode");
+        let mob_id = mob_state
+            .mob_create_definition(definition)
+            .await
+            .expect("the mob is created");
+        mob_state
+            .mob_spawn(
+                &mob_id,
+                meerkat_mob::ProfileName::from("worker"),
+                meerkat_mob::AgentIdentity::from("anna"),
+                Some(meerkat_mob::MobRuntimeMode::TurnDriven),
+                None,
+                None,
+            )
+            .await
+            .expect("the member is seated");
+        let anna = mob_state
+            .mob_resolve_bridge_session_id(&mob_id, &meerkat_mob::AgentIdentity::from("anna"))
+            .await
+            .expect("anna's session is read")
+            .expect("anna has a session");
+        runtime.set_mob_state(Arc::clone(&mob_state));
+
+        let tools = meerkat::ScheduleToolDispatcher::new(runtime.schedule_service());
+        let turn_of_anna =
+            meerkat_core::ToolDispatchContext::default().with_runtime_identity(anna, None);
+        let call = |name: &'static str, args: serde_json::Value| {
+            let raw =
+                serde_json::value::RawValue::from_string(args.to_string()).expect("tool arguments");
+            (name, raw)
+        };
+        let due = (chrono::Utc::now() + chrono::Duration::days(1)).to_rfc3339();
+        let fresh = serde_json::json!({
+            "name": "a fresh session",
+            "trigger": { "type": "once", "due_at_utc": due },
+            "target": {
+                "target_kind": "session",
+                "type": "materialize_on_demand_session",
+                "create": { "model": "gpt-5.4" },
+                "action": { "type": "prompt", "prompt": "Run the report." },
+            },
+        });
+        let refused_session_creation =
+            |answer: &Result<meerkat_core::ToolDispatchOutcome, meerkat_core::ToolError>| {
+                matches!(
+                    answer,
+                    Err(meerkat_core::ToolError::PolicyDenied { denial })
+                        if denial.code == "schedule_session_creation_not_allowed"
+                )
+            };
+
+        let (name, args) = call("meerkat_schedule_create", fresh.clone());
+        let created = tools
+            .dispatch_with_context(
+                meerkat_core::types::ToolCallView {
+                    id: "member-write",
+                    name,
+                    args: &args,
+                },
+                &turn_of_anna,
+            )
+            .await;
+        assert!(
+            refused_session_creation(&created),
+            "anna's schedule that creates a session is refused: {created:?}"
+        );
+        assert!(
+            runtime
+                .schedule_service()
+                .list()
+                .await
+                .expect("the schedules are read")
+                .is_empty(),
+            "nothing is stored"
+        );
+
+        // Her schedule for a helper in her own mob: her profile holds the
+        // schedule tools and not the mob tools, and no call made here states
+        // otherwise.
+        for kind in ["spawn_helper", "fork_helper"] {
+            let mut target = serde_json::json!({
+                "target_kind": "mob",
+                "type": kind,
+                "mob_id": "ops",
+                "member_id": "helper-1",
+                "prompt": "Do the scheduled work.",
+            });
+            if kind == "fork_helper" {
+                target["source_member_id"] = serde_json::json!("anna");
+            }
+            let (name, args) = call(
+                "meerkat_schedule_create",
+                serde_json::json!({
+                    "name": "a helper",
+                    "trigger": { "type": "once", "due_at_utc": due },
+                    "target": target,
+                }),
+            );
+            let created = tools
+                .dispatch_with_context(
+                    meerkat_core::types::ToolCallView {
+                        id: "member-write",
+                        name,
+                        args: &args,
+                    },
+                    &turn_of_anna,
+                )
+                .await;
+            assert!(
+                refused_session_creation(&created),
+                "anna's schedule that creates a helper ({kind}) is refused: {created:?}"
+            );
+        }
+        assert!(
+            runtime
+                .schedule_service()
+                .list()
+                .await
+                .expect("the schedules are read")
+                .is_empty(),
+            "nothing is stored for a helper"
+        );
+
+        let (name, args) = call("meerkat_schedule_create", fresh);
+        let hosts = tools
+            .dispatch(meerkat_core::types::ToolCallView {
+                id: "host-write",
+                name,
+                args: &args,
+            })
+            .await
+            .expect("the host's own call writes one");
+        let hosts: serde_json::Value =
+            serde_json::from_str(&hosts.result.text_content()).expect("the created schedule");
+        let stored = runtime
+            .schedule_service()
+            .list()
+            .await
+            .expect("the schedules are read");
+        assert_eq!(stored.len(), 1);
+        let (name, args) = call(
+            "meerkat_schedule_update",
+            serde_json::json!({ "schedule_id": hosts["schedule_id"], "name": "renamed" }),
+        );
+        let updated = tools
+            .dispatch_with_context(
+                meerkat_core::types::ToolCallView {
+                    id: "member-write",
+                    name,
+                    args: &args,
+                },
+                &turn_of_anna,
+            )
+            .await;
+        assert!(
+            refused_session_creation(&updated),
+            "anna's update of a schedule that creates a session is refused: {updated:?}"
+        );
+        assert_eq!(
+            runtime
+                .schedule_service()
+                .list()
+                .await
+                .expect("the schedules are read"),
+            stored,
+            "the schedule is as it was"
+        );
+
+        // A member of a mob this host does not hold.
+        let mut refusals = Vec::new();
+        for (mob, member) in [("ops", "nobody"), ("no-such-mob", "carl")] {
+            let (name, args) = call(
+                "meerkat_schedule_create",
+                serde_json::json!({
+                    "name": "a note",
+                    "trigger": { "type": "once", "due_at_utc": due },
+                    "target": {
+                        "target_kind": "mob",
+                        "type": "member",
+                        "mob_id": mob,
+                        "member_id": member,
+                        "action": { "type": "send", "content": "A scheduled note." },
+                    },
+                }),
+            );
+            let answer = tools
+                .dispatch_with_context(
+                    meerkat_core::types::ToolCallView {
+                        id: "member-write",
+                        name,
+                        args: &args,
+                    },
+                    &turn_of_anna,
+                )
+                .await;
+            assert!(
+                matches!(
+                    &answer,
+                    Err(meerkat_core::ToolError::PolicyDenied { denial })
+                        if denial.code == meerkat::SCHEDULE_TARGET_NOT_A_PEER
+                ),
+                "anna's schedule for {member} of {mob} is refused: {answer:?}"
+            );
+            refusals.push(format!("{:?}", answer.err()));
+        }
+        assert_eq!(
+            refusals[0], refusals[1],
+            "a mob the host does not hold answers as a name no member holds does"
+        );
+    }
+
+    /// A model whose first request calls `meerkat_schedule_create` for a
+    /// schedule whose target is `target`, and whose later requests answer
+    /// text. It keeps the last message of each later request: what its tool
+    /// call was answered.
+    struct SessionSchedulingLlmClient {
+        target: serde_json::Value,
+        calls: std::sync::atomic::AtomicUsize,
+        answers: std::sync::Mutex<Vec<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl meerkat_client::LlmClient for SessionSchedulingLlmClient {
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+            Ok(messages.to_vec())
+        }
+
+        fn stream<'a>(
+            &'a self,
+            request: &'a meerkat_client::LlmRequest,
+        ) -> std::pin::Pin<
+            Box<
+                dyn futures::Stream<
+                        Item = Result<meerkat_client::LlmEvent, meerkat_client::LlmError>,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            let usage = || {
+                Ok(meerkat_client::LlmEvent::UsageUpdate {
+                    usage: meerkat_core::TurnUsage::host_declared(
+                        meerkat_core::Provider::Anthropic,
+                        &request.model,
+                        meerkat_core::Usage::default(),
+                    ),
+                })
+            };
+            let first = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0;
+            if !first {
+                self.answers
+                    .lock()
+                    .expect("the answers lock")
+                    .push(format!("{:?}", request.messages.last()));
+            }
+            let events = if first {
+                vec![
+                    Ok(meerkat_client::LlmEvent::ToolCallComplete {
+                        id: "make-a-fresh-session-schedule".into(),
+                        name: "meerkat_schedule_create".into(),
+                        args: serde_json::json!({
+                            "name": "a fresh session",
+                            "trigger": {
+                                "type": "once",
+                                "due_at_utc":
+                                    (chrono::Utc::now() + chrono::Duration::days(1)).to_rfc3339(),
+                            },
+                            "target": self.target.clone(),
+                        }),
+                        meta: None,
+                    }),
+                    usage(),
+                    Ok(meerkat_client::LlmEvent::Done {
+                        outcome: meerkat_client::LlmDoneOutcome::success(
+                            meerkat_core::StopReason::ToolUse,
+                        ),
+                    }),
+                ]
+            } else {
+                vec![
+                    Ok(meerkat_client::LlmEvent::TextDelta {
+                        delta: "done".into(),
+                        meta: None,
+                    }),
+                    usage(),
+                    Ok(meerkat_client::LlmEvent::Done {
+                        outcome: meerkat_client::LlmDoneOutcome::success(
+                            meerkat_core::StopReason::EndTurn,
+                        ),
+                    }),
+                ]
+            };
+            Box::pin(futures::stream::iter(events))
+        }
+
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
+        }
+
+        async fn health_check(&self) -> Result<(), meerkat_client::LlmError> {
+            Ok(())
+        }
+    }
+
+    /// On the RPC host with the factory `rkat-rpc` builds (the built-in
+    /// tools, the shell, the schedule tools and memory on), through the
+    /// runtime a `session/create` and a
+    /// `turn/start` reach: a session created with nothing said is built as
+    /// the host builds one, and its model's schedule that creates a session
+    /// is stored as before. A session created with the shell off, or with
+    /// the built-in tools off (what `enable_shell: false` and
+    /// `enable_builtins: false` on `session/create` set), is under a
+    /// restriction the created session would not be under: its schedule is
+    /// refused and nothing is stored. The host's own `schedule/list` shows
+    /// the stored one with its on-demand target, and `schedule/delete` ends
+    /// it.
+    #[tokio::test]
+    async fn a_session_created_without_the_shell_schedules_no_session_on_the_rpc_host() {
+        use meerkat_core::ToolCategoryOverride::{Disable, Inherit};
+
+        for (case, builtins, shell, stored) in [
+            ("a session created with nothing said", Inherit, Inherit, 1),
+            ("a session created with the shell off", Inherit, Disable, 0),
+            (
+                "a session created with the built-in tools off",
+                Disable,
+                Inherit,
+                0,
+            ),
+        ] {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let (_, bundle) = meerkat::open_realm_persistence_in(
+                temp.path(),
+                "schedule-session-creation-door",
+                Some(meerkat_store::RealmBackend::Sqlite),
+                None,
+            )
+            .await
+            .expect("realm persistence");
+            let runtime = Arc::new(
+                SessionRuntime::new(
+                    meerkat::AgentFactory::new(temp.path().join("sessions"))
+                        .builtins(true)
+                        .shell(true)
+                        .schedule(true)
+                        .memory(true),
+                    meerkat_core::Config::default(),
+                    1,
+                    bundle,
+                    crate::router::NotificationSink::noop(),
+                )
+                .expect("compose the RPC session runtime"),
+            );
+            let scripted = Arc::new(SessionSchedulingLlmClient {
+                target: serde_json::json!({
+                    "target_kind": "session",
+                    "type": "materialize_on_demand_session",
+                    "create": { "model": "claude-sonnet-4-5" },
+                    "action": { "type": "prompt", "prompt": "Run the report." }
+                }),
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                answers: std::sync::Mutex::new(Vec::new()),
+            });
+            let client: Arc<dyn meerkat_client::LlmClient> = scripted.clone();
+            runtime.set_default_llm_client(Some(Arc::clone(&client)));
+            let mut build = meerkat::AgentBuildConfig::new("claude-sonnet-4-5");
+            build.llm_client_override = Some(client);
+            build.override_builtins = builtins;
+            build.override_shell = shell;
+            let id = runtime
+                .create_session(build, None, None, Vec::new())
+                .await
+                .expect("the session is created");
+            let (event_tx, _event_rx) = tokio::sync::mpsc::channel(100);
+            runtime
+                .start_turn_via_runtime(
+                    &id,
+                    "Schedule the report.".to_string().into(),
+                    Vec::new(),
+                    event_tx,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .expect("the session's turn ends");
+            let schedules = runtime
+                .schedule_service()
+                .list()
+                .await
+                .expect("the schedules are read");
+            let answers = scripted.answers.lock().expect("the answers lock").clone();
+            assert_eq!(
+                schedules.len(),
+                stored,
+                "{case}: {schedules:?}; the tool call was answered {answers:?}"
+            );
+            assert_eq!(
+                answers
+                    .first()
+                    .is_some_and(|answer| answer.contains("schedule_session_creation_not_allowed")),
+                stored == 0,
+                "{case}: a writer is refused by the rule and by nothing else: {answers:?}"
+            );
+
+            if stored == 1 {
+                // The host's own door: what an operator lists and deletes.
+                let listed = crate::handlers::schedule::handle_list(
+                    Some(crate::protocol::RpcId::Num(1)),
+                    None,
+                    Arc::clone(&runtime),
+                )
+                .await;
+                let listed: serde_json::Value = serde_json::from_str(
+                    listed.result.as_ref().expect("schedule/list answers").get(),
+                )
+                .expect("the listing is JSON");
+                let row = &listed["schedules"][0];
+                assert_eq!(
+                    row["target"]["type"], "materialize_on_demand_session",
+                    "the field an operator looks for: {listed}"
+                );
+                let params = serde_json::value::RawValue::from_string(
+                    serde_json::json!({ "schedule_id": row["schedule_id"] }).to_string(),
+                )
+                .expect("delete params");
+                let deleted = crate::handlers::schedule::handle_delete(
+                    Some(crate::protocol::RpcId::Num(2)),
+                    Some(params.as_ref()),
+                    Arc::clone(&runtime),
+                )
+                .await;
+                assert!(deleted.error.is_none(), "schedule/delete: {deleted:?}");
+                assert!(
+                    runtime
+                        .schedule_service()
+                        .list()
+                        .await
+                        .expect("the schedules are read")
+                        .is_empty(),
+                    "the deleted schedule is listed no more"
+                );
+            }
+            runtime.try_shutdown().await.expect("the runtime stops");
+        }
+    }
+
+    /// On the RPC host with the factory `rkat-rpc` builds, through the
+    /// runtime a `session/create` and a `turn/start` reach: a session no
+    /// member holds, created with nothing said, is built as the host builds
+    /// one, and its model's schedule into another session of the host by
+    /// id is stored as before. A session created with the shell off (what
+    /// `enable_shell: false` on `session/create` sets) is not built so: its
+    /// schedule into another session is refused with the code of a schedule
+    /// that creates a session and nothing is stored, while its schedule
+    /// into its own session is stored as before.
+    #[tokio::test]
+    async fn a_session_created_without_the_shell_schedules_into_no_other_session_on_the_rpc_host() {
+        use meerkat_core::ToolCategoryOverride::{Disable, Inherit};
+
+        for (case, shell, into_another, stored) in [
+            (
+                "a session created with nothing said, into another session",
+                Inherit,
+                true,
+                1,
+            ),
+            (
+                "a session created with the shell off, into another session",
+                Disable,
+                true,
+                0,
+            ),
+            (
+                "a session created with the shell off, into its own session",
+                Disable,
+                false,
+                1,
+            ),
+        ] {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let (_, bundle) = meerkat::open_realm_persistence_in(
+                temp.path(),
+                "schedule-other-session-door",
+                Some(meerkat_store::RealmBackend::Sqlite),
+                None,
+            )
+            .await
+            .expect("realm persistence");
+            let runtime = Arc::new(
+                SessionRuntime::new(
+                    meerkat::AgentFactory::new(temp.path().join("sessions"))
+                        .builtins(true)
+                        .shell(true)
+                        .schedule(true)
+                        .memory(true),
+                    meerkat_core::Config::default(),
+                    2,
+                    bundle,
+                    crate::router::NotificationSink::noop(),
+                )
+                .expect("compose the RPC session runtime"),
+            );
+            let scripted_client = |target: serde_json::Value| {
+                Arc::new(SessionSchedulingLlmClient {
+                    target,
+                    calls: std::sync::atomic::AtomicUsize::new(0),
+                    answers: std::sync::Mutex::new(Vec::new()),
+                })
+            };
+            let idle: Arc<dyn meerkat_client::LlmClient> = scripted_client(serde_json::Value::Null);
+            runtime.set_default_llm_client(Some(Arc::clone(&idle)));
+            let mut others_build = meerkat::AgentBuildConfig::new("claude-sonnet-4-5");
+            others_build.llm_client_override = Some(idle);
+            let other = runtime
+                .create_session(others_build, None, None, Vec::new())
+                .await
+                .expect("the other session is created");
+
+            let action = serde_json::json!({ "type": "prompt", "prompt": "Run the report." });
+            let scripted = scripted_client(if into_another {
+                serde_json::json!({
+                    "target_kind": "session",
+                    "type": "resumable_session",
+                    "session_id": other.to_string(),
+                    "action": action,
+                })
+            } else {
+                serde_json::json!({
+                    "target_kind": "session",
+                    "type": "current_session",
+                    "action": action,
+                })
+            });
+            let client: Arc<dyn meerkat_client::LlmClient> = scripted.clone();
+            let mut build = meerkat::AgentBuildConfig::new("claude-sonnet-4-5");
+            build.llm_client_override = Some(client);
+            build.override_shell = shell;
+            let id = runtime
+                .create_session(build, None, None, Vec::new())
+                .await
+                .expect("the session is created");
+            let (event_tx, _event_rx) = tokio::sync::mpsc::channel(100);
+            runtime
+                .start_turn_via_runtime(
+                    &id,
+                    "Schedule the report.".to_string().into(),
+                    Vec::new(),
+                    event_tx,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .expect("the session's turn ends");
+            let schedules = runtime
+                .schedule_service()
+                .list()
+                .await
+                .expect("the schedules are read");
+            let answers = scripted.answers.lock().expect("the answers lock").clone();
+            assert_eq!(
+                schedules.len(),
+                stored,
+                "{case}: {schedules:?}; the tool call was answered {answers:?}"
+            );
+            assert_eq!(
+                answers
+                    .first()
+                    .is_some_and(|answer| answer.contains("schedule_session_creation_not_allowed")),
+                stored == 0,
+                "{case}: a writer is refused by the rule and by nothing else: {answers:?}"
+            );
+            if let Some(schedule) = schedules.first() {
+                let aimed_at = if into_another { &other } else { &id };
+                assert!(
+                    serde_json::to_string(&schedule.target)
+                        .expect("the target encodes")
+                        .contains(&aimed_at.to_string()),
+                    "{case}: the stored schedule names the session: {:?}",
+                    schedule.target
+                );
+            }
+            runtime.try_shutdown().await.expect("the runtime stops");
+        }
+    }
 }

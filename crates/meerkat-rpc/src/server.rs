@@ -4290,6 +4290,528 @@ mod tests {
         (Arc::new(runtime), config_store)
     }
 
+    /// One connection of the TCP door, served in process: the constructor
+    /// and the end-of-input setting of one TCP connection
+    /// (`serve_tcp_connection_with_options_and_admission`).
+    struct ServedConnection {
+        client: tokio::io::DuplexStream,
+        output: Arc<std::sync::Mutex<Vec<u8>>>,
+        task: tokio::task::JoinHandle<Result<(), ServerError>>,
+    }
+
+    impl ServedConnection {
+        fn open(
+            runtime: &Arc<SessionRuntime>,
+            config_store: &Arc<dyn meerkat_core::ConfigStore>,
+        ) -> Self {
+            let (client, server_stream) = tokio::io::duplex(32 * 1024);
+            let output = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let mut server = Box::new(
+                RpcServer::new_on_connection(
+                    TokioBufReader::new(server_stream),
+                    SharedBufferWriter(Arc::clone(&output)),
+                    Arc::clone(runtime),
+                    Arc::clone(config_store),
+                    None,
+                    ProcessDefaultRoute::Leave,
+                )
+                .expect("construct runtime authority"),
+            );
+            server.skip_shutdown_on_eof = true;
+            let task = tokio::spawn(async move { server.run().await });
+            Self {
+                client,
+                output,
+                task,
+            }
+        }
+
+        async fn write(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+            self.client.write_all(bytes).await
+        }
+
+        /// Every line the server wrote to this connection.
+        fn answers(&self) -> Vec<serde_json::Value> {
+            let bytes = self.output.lock().expect("output lock").clone();
+            String::from_utf8_lossy(&bytes)
+                .lines()
+                .filter_map(|line| serde_json::from_str(line).ok())
+                .collect()
+        }
+
+        fn answer_to(&self, id: i64) -> Option<serde_json::Value> {
+            self.answers()
+                .into_iter()
+                .find(|answer| answer.get("id") == Some(&serde_json::json!(id)))
+        }
+
+        /// The answer that carries `id`, waited for until it arrives, the
+        /// connection ends, or `within` passes.
+        async fn await_answer_to(
+            &self,
+            id: i64,
+            within: std::time::Duration,
+        ) -> Option<serde_json::Value> {
+            let deadline = tokio::time::Instant::now() + within;
+            while self.answer_to(id).is_none()
+                && !self.task.is_finished()
+                && tokio::time::Instant::now() < deadline
+            {
+                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+            }
+            self.answer_to(id)
+        }
+
+        /// Whether the server ended the connection within `within`.
+        async fn ended_within(&self, within: std::time::Duration) -> bool {
+            let deadline = tokio::time::Instant::now() + within;
+            while !self.task.is_finished() && tokio::time::Instant::now() < deadline {
+                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+            }
+            self.task.is_finished()
+        }
+    }
+
+    impl Drop for ServedConnection {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    const ANSWER_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+    fn json_line(id: i64, method: &str, params: serde_json::Value) -> Vec<u8> {
+        let mut line =
+            serde_json::json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params})
+                .to_string()
+                .into_bytes();
+        line.push(b'\n');
+        line
+    }
+
+    /// The realm's config generation and REST port, read through an ordinary
+    /// connection.
+    async fn config_through_an_ordinary_connection(
+        runtime: &Arc<SessionRuntime>,
+        config_store: &Arc<dyn meerkat_core::ConfigStore>,
+    ) -> (u64, u64) {
+        let mut connection = ServedConnection::open(runtime, config_store);
+        connection
+            .write(&json_line(1, "config/get", serde_json::json!({})))
+            .await
+            .unwrap();
+        let answer = connection
+            .await_answer_to(1, ANSWER_WAIT)
+            .await
+            .expect("an ordinary connection reads the config");
+        let result = &answer["result"];
+        (
+            result["generation"]
+                .as_u64()
+                .unwrap_or_else(|| panic!("no generation in {answer}")),
+            result["config"]["rest"]["port"]
+                .as_u64()
+                .unwrap_or_else(|| panic!("no rest.port in {answer}")),
+        )
+    }
+
+    /// The TCP door speaks JSON lines only. A connection whose first line
+    /// reads as an HTTP request is not a client of it: nothing the request
+    /// carries is dispatched, a JSON line in its body included, and the
+    /// connection ends.
+    #[tokio::test]
+    async fn tcp_connection_dispatches_nothing_from_an_http_shaped_request() {
+        let temp = tempfile::tempdir().expect("test tempdir");
+        let (runtime, config_store) = build_test_runtime(&temp);
+        let mut connection = ServedConnection::open(&runtime, &config_store);
+
+        let body = "{\"jsonrpc\":\"2.0\",\"id\":41,\"method\":\"config/get\"}\n";
+        let request = format!(
+            "POST / HTTP/1.1\r\nHost: 127.0.0.1:4800\r\nContent-Type: text/plain\r\n\
+             Content-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        // The server may end the connection before it has taken every byte.
+        let _ = connection.write(request.as_bytes()).await;
+
+        let answered = connection.await_answer_to(41, ANSWER_WAIT).await;
+        let connection_ended = connection.ended_within(ANSWER_WAIT).await;
+
+        assert!(
+            answered.is_none(),
+            "the JSON line in the body of an HTTP-shaped request was dispatched and answered: \
+             {answered:?}"
+        );
+        assert!(
+            connection_ended,
+            "the connection stayed open after an HTTP-shaped first line"
+        );
+        assert_eq!(
+            connection.answers(),
+            Vec::<serde_json::Value>::new(),
+            "nothing is written back to a connection that opened with an HTTP request"
+        );
+    }
+
+    /// The request a browser page sends: the request line, the header lines
+    /// of a plain-text `fetch`, a blank line, and a body of one JSON line
+    /// that would write the realm's config. The connection ends on the
+    /// request line, before any later line is read; no answer to the body's
+    /// line comes back; and the config, read back through an ordinary
+    /// connection, has not changed.
+    #[tokio::test]
+    async fn tcp_connection_ends_on_the_request_line_of_a_browser_post_and_writes_nothing() {
+        let temp = tempfile::tempdir().expect("test tempdir");
+        let (runtime, config_store) = build_test_runtime(&temp);
+        let (generation_before, port_before) =
+            config_through_an_ordinary_connection(&runtime, &config_store).await;
+        let written_port = port_before + 1;
+
+        let mut connection = ServedConnection::open(&runtime, &config_store);
+        connection.write(b"POST / HTTP/1.1\r\n").await.unwrap();
+        let ended_on_the_request_line = connection
+            .ended_within(std::time::Duration::from_secs(2))
+            .await;
+
+        let body = String::from_utf8(json_line(
+            7,
+            "config/patch",
+            serde_json::json!({"patch": {"rest": {"port": written_port}}}),
+        ))
+        .unwrap();
+        let rest_of_the_request = format!(
+            "Host: localhost:4800\r\n\
+             Connection: keep-alive\r\n\
+             Content-Length: {}\r\n\
+             User-Agent: Mozilla/5.0 (X11; Linux x86_64)\r\n\
+             Content-Type: text/plain;charset=UTF-8\r\n\
+             Accept: */*\r\n\
+             Origin: http://localhost:5173\r\n\
+             Sec-Fetch-Site: same-site\r\n\
+             Sec-Fetch-Mode: no-cors\r\n\
+             Sec-Fetch-Dest: empty\r\n\
+             Referer: http://localhost:5173/\r\n\
+             Accept-Encoding: gzip, deflate, br\r\n\
+             Accept-Language: en-US,en;q=0.9\r\n\
+             \r\n\
+             {body}",
+            body.len()
+        );
+        // A connection the server has ended takes no more bytes.
+        let _ = connection.write(rest_of_the_request.as_bytes()).await;
+        let answered = connection.await_answer_to(7, ANSWER_WAIT).await;
+
+        let (generation_after, port_after) =
+            config_through_an_ordinary_connection(&runtime, &config_store).await;
+
+        assert!(
+            answered.is_none(),
+            "the write in the body of a browser's POST was dispatched and answered: {answered:?}"
+        );
+        assert_eq!(
+            (generation_after, port_after),
+            (generation_before, port_before),
+            "the realm's config changed"
+        );
+        assert!(
+            ended_on_the_request_line,
+            "the connection was still open after the request line"
+        );
+    }
+
+    /// What one connection does with `first_bytes` followed by a JSON line
+    /// (request 9): whether the server answered that line, and whether it
+    /// ended the connection.
+    async fn open_with_then_send_a_json_line(
+        runtime: &Arc<SessionRuntime>,
+        config_store: &Arc<dyn meerkat_core::ConfigStore>,
+        first_bytes: &str,
+    ) -> (Option<serde_json::Value>, bool) {
+        let mut connection = ServedConnection::open(runtime, config_store);
+        // The server may end the connection before it has taken every byte.
+        let _ = connection.write(first_bytes.as_bytes()).await;
+        let _ = connection
+            .write(&json_line(9, "config/get", serde_json::json!({})))
+            .await;
+        let answered = connection.await_answer_to(9, ANSWER_WAIT).await;
+        let ended = connection
+            .ended_within(std::time::Duration::from_secs(2))
+            .await;
+        (answered, ended)
+    }
+
+    /// A request line's method is any token: a client library passes a
+    /// caller's method string through, in any letter case, with digits or a
+    /// hyphen. Each such line ends the connection as `POST` does.
+    #[tokio::test]
+    async fn tcp_connection_ends_on_a_request_line_with_any_method_token() {
+        let temp = tempfile::tempdir().expect("test tempdir");
+        let (runtime, config_store) = build_test_runtime(&temp);
+
+        let mut served = Vec::new();
+        for request_line in [
+            "get / HTTP/1.1\r\n",
+            "x / HTTP/1.1\r\n",
+            "M-SEARCH * HTTP/1.1\r\n",
+            "Patch2 /config HTTP/1.1\r\n",
+        ] {
+            let (answered, ended) =
+                open_with_then_send_a_json_line(&runtime, &config_store, request_line).await;
+            if answered.is_some() || !ended {
+                served.push(format!(
+                    "{request_line:?}: the line after it answered: {}, the connection ended: \
+                     {ended}",
+                    answered.is_some()
+                ));
+            }
+        }
+        assert!(
+            served.is_empty(),
+            "request lines the server read on past:\n{}",
+            served.join("\n")
+        );
+    }
+
+    /// Every form of request line ends the connection: an absolute target (a
+    /// client that takes the listener for a proxy), an asterisk, an
+    /// authority, HTTP/1.0, the first line of the HTTP/2 preface, and a
+    /// request line that follows empty lines (the first line that is not
+    /// empty is the connection's first).
+    #[tokio::test]
+    async fn tcp_connection_ends_on_every_form_of_request_line() {
+        let temp = tempfile::tempdir().expect("test tempdir");
+        let (runtime, config_store) = build_test_runtime(&temp);
+
+        let mut served = Vec::new();
+        for first_bytes in [
+            "GET http://127.0.0.1:4800/ HTTP/1.1\r\n",
+            "OPTIONS * HTTP/1.1\r\n",
+            "CONNECT 127.0.0.1:4800 HTTP/1.1\r\n",
+            "GET / HTTP/1.0\r\n",
+            "PRI * HTTP/2.0\r\n",
+            "\r\n\r\n  \r\nPOST / HTTP/1.1\r\n",
+        ] {
+            let (answered, ended) =
+                open_with_then_send_a_json_line(&runtime, &config_store, first_bytes).await;
+            if answered.is_some() || !ended {
+                served.push(format!(
+                    "{first_bytes:?}: the line after it answered: {}, the connection ended: \
+                     {ended}",
+                    answered.is_some()
+                ));
+            }
+        }
+        assert!(
+            served.is_empty(),
+            "request lines the server read on past:\n{}",
+            served.join("\n")
+        );
+    }
+
+    /// The rule reads the first line of a connection only. A connection
+    /// that opened with a JSON line is a client: an HTTP-looking line later
+    /// is one more line that is not JSON, answered with a parse error, and
+    /// the lines after it are served.
+    #[tokio::test]
+    async fn tcp_connection_that_opened_with_json_keeps_being_served_past_an_http_looking_line() {
+        let temp = tempfile::tempdir().expect("test tempdir");
+        let (runtime, config_store) = build_test_runtime(&temp);
+        let mut connection = ServedConnection::open(&runtime, &config_store);
+
+        connection
+            .write(&json_line(1, "config/get", serde_json::json!({})))
+            .await
+            .unwrap();
+        let first = connection.await_answer_to(1, ANSWER_WAIT).await;
+        connection.write(b"POST / HTTP/1.1\r\n").await.unwrap();
+        connection
+            .write(&json_line(2, "config/get", serde_json::json!({})))
+            .await
+            .unwrap();
+        let second = connection.await_answer_to(2, ANSWER_WAIT).await;
+
+        assert!(
+            first
+                .as_ref()
+                .is_some_and(|answer| answer["result"].is_object()),
+            "{first:?}"
+        );
+        assert!(
+            second
+                .as_ref()
+                .is_some_and(|answer| answer["result"].is_object()),
+            "the line after an HTTP-looking line is served: {second:?} of {:?}",
+            connection.answers()
+        );
+        let parse_errors = connection
+            .answers()
+            .iter()
+            .filter(|answer| answer["error"]["code"] == crate::error::PARSE_ERROR)
+            .count();
+        assert_eq!(parse_errors, 1, "{:?}", connection.answers());
+        assert!(!connection.task.is_finished(), "the connection stays open");
+    }
+
+    /// The control: an ordinary client is served as before, and so is a
+    /// connection whose first line is not JSON and not an HTTP request line:
+    /// it gets its parse error and the connection goes on.
+    #[tokio::test]
+    async fn tcp_connection_serves_json_lines_and_answers_a_first_line_that_is_not_http() {
+        let temp = tempfile::tempdir().expect("test tempdir");
+        let (runtime, config_store) = build_test_runtime(&temp);
+
+        let mut client = ServedConnection::open(&runtime, &config_store);
+        client
+            .write(&json_line(1, "config/get", serde_json::json!({})))
+            .await
+            .unwrap();
+        client
+            .write(&json_line(2, "config/get", serde_json::json!({})))
+            .await
+            .unwrap();
+        for id in [1, 2] {
+            let answer = client.await_answer_to(id, ANSWER_WAIT).await;
+            assert!(
+                answer
+                    .as_ref()
+                    .is_some_and(|answer| answer["result"].is_object()),
+                "request {id}: {answer:?}"
+            );
+        }
+        assert!(!client.task.is_finished(), "the connection stays open");
+
+        for first_line in [
+            "hello there\n",
+            "get / http/1.1\n",
+            "POST / HTTP/1.1 and more\n",
+            "POST HTTP/1.1\n",
+        ] {
+            let mut other = ServedConnection::open(&runtime, &config_store);
+            other.write(first_line.as_bytes()).await.unwrap();
+            other
+                .write(&json_line(3, "config/get", serde_json::json!({})))
+                .await
+                .unwrap();
+            let answer = other.await_answer_to(3, ANSWER_WAIT).await;
+            assert!(
+                answer
+                    .as_ref()
+                    .is_some_and(|answer| answer["result"].is_object()),
+                "{first_line:?}: the line after it is served: {answer:?}"
+            );
+            assert_eq!(
+                other
+                    .answers()
+                    .iter()
+                    .filter(|answer| answer["error"]["code"] == crate::error::PARSE_ERROR)
+                    .count(),
+                1,
+                "{first_line:?}: {:?}",
+                other.answers()
+            );
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct CapturedLog(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CapturedLog {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("log lock").extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// The operator's log says why such a connection ended: one line at
+    /// WARN, with the peer's address, that an HTTP request arrived on the
+    /// RPC listener.
+    #[tokio::test]
+    async fn tcp_listener_logs_a_warning_with_the_peer_when_an_http_request_arrives() {
+        use tracing_subscriber::util::SubscriberInitExt;
+
+        let log = CapturedLog::default();
+        let writer = log.clone();
+        // A second registered Dispatch keeps callsite interest from being
+        // cached `never` by threads without a subscriber.
+        let _anchor = tracing::Dispatch::new(tracing_subscriber::Registry::default());
+        let _capture = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish()
+            .set_default();
+
+        let temp = tempfile::tempdir().expect("test tempdir");
+        let (runtime, config_store) = build_test_runtime(&temp);
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let addr = format!("127.0.0.1:{port}");
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let server = {
+            let addr = addr.clone();
+            tokio::spawn(async move {
+                serve_tcp_with_options_until(&addr, runtime, config_store, None, None, async {
+                    let _ = stopped.await;
+                })
+                .await
+            })
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut stream = loop {
+            match tokio::net::TcpStream::connect(&addr).await {
+                Ok(stream) => break stream,
+                Err(_) => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "server never listened"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+            }
+        };
+        let peer = stream.local_addr().unwrap().to_string();
+        stream
+            .write_all(b"GET /config HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+            .await
+            .unwrap();
+
+        let warning = || {
+            let bytes = log.0.lock().expect("log lock").clone();
+            String::from_utf8_lossy(&bytes)
+                .lines()
+                .find(|line| {
+                    line.contains("WARN")
+                        && line.contains(&peer)
+                        && line.contains("an HTTP request arrived on the RPC listener")
+                })
+                .map(str::to_string)
+        };
+        let deadline = tokio::time::Instant::now() + ANSWER_WAIT;
+        while warning().is_none() && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        }
+        let warned = warning();
+        let logged = String::from_utf8_lossy(&log.0.lock().expect("log lock").clone()).into_owned();
+
+        stop.send(()).unwrap();
+        let served = tokio::time::timeout(std::time::Duration::from_secs(20), server)
+            .await
+            .expect("the server drains and returns")
+            .unwrap();
+        assert!(served.is_ok(), "{served:?}");
+        assert!(
+            warned.is_some(),
+            "no warning names the peer {peer} and the HTTP request; the log:\n{logged}"
+        );
+    }
+
     /// A stdio connection that ends on a transport error still runs the
     /// owning runtime shutdown (and its MCP attempt sweep), and keeps the
     /// connection error.

@@ -1,0 +1,17 @@
+# One profile for the one agent of this example. The agent is declared in the
+# roster of the program (planner).
+[mob]
+id = "outings"
+
+[profiles.planner]
+model = "gpt-6-astra"
+# A turn_driven agent runs when something is delivered to it: a message of
+# the host, or the answer to a question it asked.
+runtime_mode = "turn_driven"
+external_addressable = true
+
+[profiles.planner.tools]
+comms = true
+# Nothing here names ask_user: an agent of a Meta gateway is offered it
+# unless its profile denies it. To keep it from the agents of this profile,
+# add the line: deny = ["ask_user"]

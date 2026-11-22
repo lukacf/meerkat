@@ -423,6 +423,7 @@ pub enum CommsTrustAuthoritySourceKind {
     MobMachineExternalPeerTrustUnwiring,
     MobMachineExternalPeerTrustRepair,
     MobMachineExternalPeerReciprocalTrust,
+    MobMachineExternalPeerReciprocalTrustRemoval,
 }
 
 impl CommsTrustAuthoritySourceKind {
@@ -437,6 +438,9 @@ impl CommsTrustAuthoritySourceKind {
             Self::MobMachineExternalPeerTrustUnwiring => "MobMachineExternalPeerTrustUnwiring",
             Self::MobMachineExternalPeerTrustRepair => "MobMachineExternalPeerTrustRepair",
             Self::MobMachineExternalPeerReciprocalTrust => "MobMachineExternalPeerReciprocalTrust",
+            Self::MobMachineExternalPeerReciprocalTrustRemoval => {
+                "MobMachineExternalPeerReciprocalTrustRemoval"
+            }
         }
     }
 }

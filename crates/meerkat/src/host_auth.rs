@@ -406,7 +406,9 @@ pub async fn resolve_configured_mcp_target_in_realm_trusting(
         EffectiveMcpServersError, McpConfig, McpTransportConfig, McpTransportKind,
     };
     let server_name = || target.server_name.clone();
-    let servers = McpConfig::effective_servers_from_roots_trusting(
+    // Each `mcp.toml` server resolves alone: a variable that is not set
+    // fails only the server that names it.
+    let servers = McpConfig::resolve_effective_servers_from_roots_trusting(
         realm_servers,
         context_root,
         user_config_root,
@@ -433,6 +435,23 @@ pub async fn resolve_configured_mcp_target_in_realm_trusting(
             refusal: meerkat_core::confinement::ConfinementRefusal::UntrustedConfigurationSource,
         }
         .into());
+    }
+    if let Some(unresolved) = servers
+        .unresolved
+        .iter()
+        .find(|unresolved| unresolved.server.name == target.server_name)
+    {
+        // The public text does not echo the host's configuration: the
+        // field and the variable's name go to the host's log.
+        tracing::warn!(
+            target: "meerkat::auth",
+            server = %unresolved.server.name,
+            scope = %unresolved.scope,
+            field = %unresolved.field,
+            variable = %unresolved.variable,
+            "MCP auth target names an environment variable that is not set"
+        );
+        return Err(HostMcpTargetRefusal::ConfigUnavailable(unresolved.missing_env_var()).into());
     }
     let server = servers
         .admitted
@@ -2905,6 +2924,57 @@ oauth_account_selection = "unverified"
                 refusal @ HostMcpTargetRefusal::RealmServerEnvReference(_),
             )) => assert!(!refusal.is_refusal(), "{refusal}"),
             other => panic!("expected the literal-realm-server refusal, got {other:?}"),
+        }
+    }
+
+    /// A variable that is not set is the failure of the one `mcp.toml`
+    /// server that names it: another server still resolves as an auth
+    /// target, and the unresolved one is an unreadable configuration (the
+    /// wire reason `configuration_invalid`), whose text does not echo the
+    /// host's configuration.
+    #[tokio::test]
+    async fn an_unset_variable_fails_only_the_auth_target_that_names_it() {
+        const ABSENT: &str = "RKAT_ROW_MCP_AUTH_TARGET_ABSENT_PATH";
+        let roots = tempfile::tempdir().unwrap();
+        write_project_mcp(
+            roots.path(),
+            &format!(
+                "[[servers]]\nname = \"alpha\"\nurl = \"https://alpha.example/${{{ABSENT}}}/mcp\"\n\n\
+                 [[servers]]\nname = \"beta\"\nurl = \"https://beta.example/mcp\"\n"
+            ),
+        );
+        let resolve = |name: &'static str, url: &'static str| {
+            let root = roots.path().to_path_buf();
+            async move {
+                resolve_configured_mcp_target_in_realm_trusting(
+                    &wire_target(name, url, None),
+                    &[],
+                    Some(&root),
+                    None,
+                    &|_| false,
+                )
+                .await
+            }
+        };
+
+        let other = resolve("beta", "https://beta.example/mcp")
+            .await
+            .expect("a target beside a server naming an unset variable resolves");
+        assert_eq!(other.server_url(), "https://beta.example/mcp");
+
+        match resolve("alpha", "https://alpha.example/mcp").await {
+            Err(error @ HostAuthError::McpTarget(HostMcpTargetRefusal::ConfigUnavailable(_))) => {
+                assert_eq!(
+                    error.reason(),
+                    meerkat_contracts::WireAuthErrorReason::ConfigurationInvalid
+                );
+                let text = error.to_string();
+                assert!(
+                    !text.contains(ABSENT) && !text.contains("alpha.example"),
+                    "{text}"
+                );
+            }
+            other => panic!("expected an unreadable configuration, got {other:?}"),
         }
     }
 

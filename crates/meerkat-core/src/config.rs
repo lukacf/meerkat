@@ -140,7 +140,7 @@ impl Config {
 
     /// Parse the config template into a Config value.
     pub fn template() -> Result<Self, ConfigError> {
-        toml::from_str(CONFIG_TEMPLATE_TOML).map_err(ConfigError::Parse)
+        toml::from_str(CONFIG_TEMPLATE_TOML).map_err(ConfigError::from)
     }
 
     /// Parse one persisted config document (a realm or user `config.toml`).
@@ -322,7 +322,7 @@ impl Config {
         let skills_layer = file_config.skills.clone();
         // Merge (file values override defaults)
         self.merge(file_config);
-        let parsed: toml::Value = toml::from_str(content).map_err(ConfigError::Parse)?;
+        let parsed: toml::Value = toml::from_str(content).map_err(ConfigError::from)?;
         self.merge_tools_from_toml_presence(&parsed, &tools_layer);
         self.merge_retry_from_toml_presence(&parsed, &retry_layer);
         self.merge_self_hosted_from_toml_presence(&parsed, &self_hosted_layer);
@@ -632,6 +632,11 @@ impl Config {
         if other.workgraph_enabled != defaults.workgraph_enabled {
             self.tools.workgraph_enabled = other.workgraph_enabled;
         }
+        if other.agent_schedules_may_create_sessions != defaults.agent_schedules_may_create_sessions
+        {
+            self.tools.agent_schedules_may_create_sessions =
+                other.agent_schedules_may_create_sessions;
+        }
     }
 
     /// `[agent] budget_warning_threshold` by presence: an explicit value wins
@@ -686,6 +691,10 @@ impl Config {
         }
         if tools.contains_key("workgraph_enabled") {
             self.tools.workgraph_enabled = layer.workgraph_enabled;
+        }
+        if tools.contains_key("agent_schedules_may_create_sessions") {
+            self.tools.agent_schedules_may_create_sessions =
+                layer.agent_schedules_may_create_sessions;
         }
     }
 
@@ -1051,6 +1060,7 @@ impl Config {
         if let Some(governance) = &self.governance {
             governance.validate()?;
         }
+        self.rest.validate()?;
         if self.max_tokens == Some(0) {
             return Err(ConfigError::Validation(
                 "max_tokens must be greater than 0 when set".to_string(),
@@ -1993,6 +2003,23 @@ impl LimitsConfig {
 pub struct RestServerConfig {
     pub host: String,
     pub port: u16,
+    /// The origins of the browser pages the server answers. Each entry is
+    /// one origin as a browser sends it: a scheme, a host and an optional
+    /// port (`https://app.example.com`, `http://localhost:5173`). Empty, the
+    /// default: the server answers no page. A request that carries no
+    /// `Origin` header is not a page's request and is served whatever this
+    /// lists. The server reads the list when it starts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_origins: Vec<String>,
+    /// The host names the server answers for besides `localhost` and
+    /// address literals: the names it is reached under, such as the public
+    /// name a reverse proxy forwards (`api.example.com`) or a container or
+    /// service name. Whatever address the server is bound to, it refuses a
+    /// request whose `Host` names anything else. Entries are names: no
+    /// scheme, port, path or wildcard. The server reads the list when it
+    /// starts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub served_hosts: Vec<String>,
 }
 
 impl Default for RestServerConfig {
@@ -2000,8 +2027,88 @@ impl Default for RestServerConfig {
         Self {
             host: "127.0.0.1".to_string(),
             port: 8080,
+            allowed_origins: Vec::new(),
+            served_hosts: Vec::new(),
         }
     }
+}
+
+impl RestServerConfig {
+    /// Refuse an `allowed_origins` entry that is not one origin, and a
+    /// `served_hosts` entry that is not one host name. A wildcard and `null`
+    /// are not origins: no entry allows every page, and no entry allows a
+    /// page that has no origin of its own. No entry serves every host name.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if let Some(entry) = self.served_hosts.iter().find(|entry| !is_host_name(entry)) {
+            return Err(ConfigError::Validation(format!(
+                "rest.served_hosts: `{entry}` is not a host name; list each name the server is \
+                 reached under without a scheme, a port or a path, such as `api.example.com` \
+                 (a wildcard cannot be listed)"
+            )));
+        }
+        if let Some(entry) = self
+            .allowed_origins
+            .iter()
+            .find(|entry| !is_serialized_origin(entry))
+        {
+            return Err(ConfigError::Validation(format!(
+                "rest.allowed_origins: `{entry}` is not an origin; list each origin as a scheme, \
+                 a host and an optional port, such as `https://app.example.com` (`*` and `null` \
+                 cannot be listed)"
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// Whether `entry` is one host name: a DNS name or an address literal, with
+/// no scheme, port, path or wildcard.
+fn is_host_name(entry: &str) -> bool {
+    entry.parse::<std::net::IpAddr>().is_ok()
+        || (!entry.is_empty()
+            && entry
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_')))
+}
+
+/// Whether `entry` is one origin as a browser serializes it: a scheme,
+/// `://`, a host, an optional `:port`, and nothing else.
+fn is_serialized_origin(entry: &str) -> bool {
+    let Some((scheme, authority)) = entry.split_once("://") else {
+        return false;
+    };
+    let scheme_is_valid = scheme.starts_with(|first: char| first.is_ascii_alphabetic())
+        && scheme
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'));
+    let (host, port, host_is_valid) = if let Some(bracketed) = authority.strip_prefix('[') {
+        // An IPv6 literal.
+        let Some((host, after)) = bracketed.split_once(']') else {
+            return false;
+        };
+        let port = match after.strip_prefix(':') {
+            Some(port) => Some(port),
+            None if after.is_empty() => None,
+            None => return false,
+        };
+        let host_is_valid = host
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() || matches!(c, ':' | '.'));
+        (host, port, host_is_valid)
+    } else {
+        let (host, port) = match authority.rsplit_once(':') {
+            Some((host, port)) => (host, Some(port)),
+            None => (authority, None),
+        };
+        let host_is_valid = host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_'));
+        (host, port, host_is_valid)
+    };
+    scheme_is_valid
+        && !host.is_empty()
+        && host_is_valid
+        && port.is_none_or(|port| !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// Authentication mode for comms listeners.
@@ -2733,6 +2840,22 @@ pub struct ToolsConfig {
     pub schedule_enabled: bool,
     /// WorkGraph tools enabled
     pub workgraph_enabled: bool,
+    /// Whether an agent's schedule may create a session or a helper when it
+    /// fires, or send into another session.
+    ///
+    /// A schedule whose target is a session created on demand has the host
+    /// build a fresh session at the fire, as the host builds a session by
+    /// default and not as the writer's was built. Off (the default), only
+    /// the host writes such a schedule, and an agent whose own session is
+    /// built as the host builds one by default and whose tools nothing
+    /// narrows. The same holds for a schedule that sends into a session
+    /// other than the writer's own, written by an agent that is no mob
+    /// member. A schedule that spawns or forks a helper is written, when
+    /// off, only by the host and by an agent that holds the mob tools. On,
+    /// every agent that holds the schedule tools may write all three. Read
+    /// when the host composes its schedule tools; written only when on.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub agent_schedules_may_create_sessions: bool,
 }
 
 impl Default for ToolsConfig {
@@ -2748,6 +2871,7 @@ impl Default for ToolsConfig {
             mob_enabled: false,
             schedule_enabled: true,
             workgraph_enabled: false,
+            agent_schedules_may_create_sessions: false,
         }
     }
 }
@@ -3124,6 +3248,76 @@ fn composition_remedy(change: &str) -> &'static str {
     }
 }
 
+impl AdministeredSection {
+    /// Every administered section, in the order hosts report them.
+    pub const ALL: [Self; 2] = [Self::Confinement, Self::Governance];
+}
+
+impl Config {
+    /// The administered sections that `document`, the text of a config file
+    /// this configuration was not composed from, states and that are not in
+    /// effect here.
+    ///
+    /// A section counts when its table is present, not empty, and either
+    /// does not parse as the section or states something other than this
+    /// configuration does: for `[confinement]`, another requirement for some
+    /// launch kind ([`crate::ConfinementConfig::requires_the_same`]); for
+    /// `[governance]`, a section that differs from the one here, an absent
+    /// one being the default. In text that is not TOML at all, a table
+    /// header of the section counts. A file that states what is in effect
+    /// misleads nobody and is not listed.
+    #[must_use]
+    pub fn administered_sections_not_in_effect(&self, document: &str) -> Vec<AdministeredSection> {
+        let Ok(stated) = toml::from_str::<toml::Table>(document) else {
+            return AdministeredSection::ALL
+                .into_iter()
+                .filter(|section| states_table_header(document, *section))
+                .collect();
+        };
+        AdministeredSection::ALL
+            .into_iter()
+            .filter(|section| {
+                let Some(table) = stated.get(&section.to_string()) else {
+                    return false;
+                };
+                if table.as_table().is_some_and(toml::Table::is_empty) {
+                    return false;
+                }
+                let in_effect = match section {
+                    AdministeredSection::Confinement => table
+                        .clone()
+                        .try_into::<crate::ConfinementConfig>()
+                        .is_ok_and(|stated| stated.requires_the_same(&self.confinement)),
+                    AdministeredSection::Governance => table
+                        .clone()
+                        .try_into::<crate::GovernanceConfig>()
+                        .is_ok_and(|stated| {
+                            self.governance
+                                .as_ref()
+                                .map_or_else(|| stated.is_empty(), |here| *here == stated)
+                        }),
+                };
+                !in_effect
+            })
+            .collect()
+    }
+}
+
+/// Whether a line of `document`, text that is not TOML, opens a table of
+/// `section`: `[section]`, `[section.key]` or an array form of either.
+fn states_table_header(document: &str, section: AdministeredSection) -> bool {
+    let name = section.to_string();
+    document.lines().any(|line| {
+        let line = line.trim_start();
+        line.starts_with('[')
+            && line
+                .trim_start_matches('[')
+                .trim_start()
+                .strip_prefix(name.as_str())
+                .is_some_and(|rest| rest.trim_start().starts_with([']', '.']))
+    })
+}
+
 impl std::fmt::Display for AdministeredSection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
@@ -3139,8 +3333,12 @@ pub enum ConfigError {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
-    #[error("Parse error: {0}")]
-    Parse(#[from] toml::de::Error),
+    /// A document that does not parse. The text says where the error sits
+    /// (line and column) and what is wrong, never the reader's own display,
+    /// which quotes the line of the document; an error converted with `?`
+    /// or [`From`] no longer holds the document either.
+    #[error("Parse error: {}", crate::redact::toml_error_text(.0))]
+    Parse(toml::de::Error),
 
     #[error("TOML serialization error: {0}")]
     TomlSerialize(#[from] toml::ser::Error),
@@ -3310,6 +3508,14 @@ impl From<crate::realm_admission::AdmissionRefusal> for ConfigError {
     }
 }
 
+/// A TOML reader's error becomes [`ConfigError::Parse`] without the
+/// document it was read from: the place and the message stay.
+impl From<toml::de::Error> for ConfigError {
+    fn from(error: toml::de::Error) -> Self {
+        Self::Parse(crate::redact::toml_error_without_document(&error))
+    }
+}
+
 impl ConfigError {
     /// The administered section a refused write would change, when this
     /// error is such a refusal ([`Self::ConfinementAdministration`],
@@ -3369,6 +3575,19 @@ pub enum ConfigWarning {
     /// ignored and the threshold is inherited from the parent realm, or the
     /// default if there is none.
     OutOfRangeBudgetWarningThreshold,
+    /// A binding whose auth profile holds an inline secret was left out of
+    /// the realm's composition: the `[self_hosted.servers]` entry its
+    /// backend names (or, when the backend names no server, the
+    /// `[self_hosted]` section) is stated or changed by another config
+    /// document on the realm's chain, so the secret would go to a server
+    /// its own document does not state. The realm composes without the
+    /// binding, which the warning names with its auth profile.
+    InlineSecretBindingLeftOut {
+        /// The binding the composition left out.
+        binding: &'static str,
+        /// The auth profile it names, which holds the inline secret.
+        profile: &'static str,
+    },
 }
 
 impl std::fmt::Display for ConfigWarning {
@@ -3405,8 +3624,41 @@ impl std::fmt::Display for ConfigWarning {
                  in that range or delete the key",
                 AgentConfig::default().budget_warning_threshold
             ),
+            Self::InlineSecretBindingLeftOut { binding, profile } => write!(
+                f,
+                "binding '{binding}' was left out of this realm: its auth profile \
+                 '{profile}' holds an inline secret, and the [self_hosted.servers] entry \
+                 its backend names (or, when the backend names no server, the \
+                 [self_hosted] section) is stated or changed by another config document \
+                 on the realm's chain. State the whole entry in the document that holds \
+                 the secret and in no other document on the chain, or declare \
+                 server = \"<id>\" on the backend; until then a session that names the \
+                 binding gets the binding of that id from an ancestor realm if one defines \
+                 it, with that realm's credential and backend, and fails as an unknown \
+                 binding otherwise, and a session that names none uses another binding \
+                 of the realm or of an ancestor if there is one"
+            ),
         }
     }
+}
+
+/// `name` with a `'static` lifetime, kept once per distinct name. Load
+/// warnings are small `Copy` values; the names they carry are the few
+/// bindings and auth profiles a composition leaves out, so the names kept
+/// are bounded by what the host's documents state.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn warning_name(name: &str) -> &'static str {
+    static NAMES: std::sync::Mutex<std::collections::BTreeSet<&'static str>> =
+        std::sync::Mutex::new(std::collections::BTreeSet::new());
+    let mut names = NAMES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(kept) = names.get(name) {
+        return kept;
+    }
+    let kept: &'static str = Box::leak(name.to_owned().into_boxed_str());
+    names.insert(kept);
+    kept
 }
 
 /// One persisted config document as written on disk, parsed strictly except
@@ -3460,7 +3712,7 @@ impl LegacyModelFallbackKeys {
             .remove(Self::USE_CATALOG_DEFAULT_CHAIN)
             .map(toml::Value::try_into::<bool>)
             .transpose()
-            .map_err(ConfigError::Parse)?;
+            .map_err(ConfigError::from)?;
         // Through 0.8.36 `use_catalog_default_chain = true` replaced the
         // whole table with the catalog default, so its sibling values never
         // took effect. The catalog chain no longer exists; the faithful
@@ -3510,7 +3762,7 @@ impl LegacyModelFallbackKeys {
 
 impl PersistedConfigDocument {
     pub(crate) fn parse(content: &str) -> Result<Self, ConfigError> {
-        let mut document: toml::Table = toml::from_str(content).map_err(ConfigError::Parse)?;
+        let mut document: toml::Table = toml::from_str(content).map_err(ConfigError::from)?;
         let legacy_keys = LegacyModelFallbackKeys::take_from(&mut document)
             .map_err(ConfigError::in_persisted_document)?;
         // Without legacy keys, parse the original text so errors keep their
@@ -3520,7 +3772,7 @@ impl PersistedConfigDocument {
         } else {
             document.try_into()
         }
-        .map_err(ConfigError::Parse)?;
+        .map_err(ConfigError::from)?;
         config
             .reject_unwired_agent_provider_params()
             .map_err(ConfigError::in_persisted_document)?;
@@ -3745,51 +3997,72 @@ pub(crate) fn check_composed_confinement(
     )
 }
 
-/// Refuse a composition in which a binding whose auth profile runs a
-/// credential command does not keep the command's token where its document
-/// sends it: its backend is self-hosted and declares no server
+/// Keep the credential of a binding whose auth profile runs a credential
+/// command, or holds an inline secret, where its document sends it.
+///
+/// A binding with a credential command refuses the composition: when its
+/// backend is self-hosted and declares no server
 /// ([`ConfigError::CredentialCommandServerUndeclared`]; such a backend's
-/// endpoint is the server that serves a request's model), or it takes the
-/// `[self_hosted.servers]` entry its backend names from a document other
-/// than the one that states the binding
-/// ([`ConfigError::CredentialCommandServer`]). A composed realm section is
-/// the section of the chain member nearest the head whose document states
-/// it, whole, so the binding, its auth profile and its backend all come
-/// from that document; the server entry composes field by field across the
-/// chain and must equal that document's own.
+/// endpoint is the server that serves a request's model), or when it takes
+/// the `[self_hosted.servers]` entry its backend names from a document
+/// other than the one that states the binding
+/// ([`ConfigError::CredentialCommandServer`]).
+///
+/// A binding with an inline secret is judged by the same rule for the entry
+/// its backend names; and when its self-hosted backend declares no server,
+/// the `[self_hosted]` section, which then decides the server through a
+/// request's model, must be that of the document that states the binding.
+/// Such a binding does not refuse the composition: it is returned, by realm,
+/// binding id and auth profile, for the composer to leave out of the composed realm
+/// section, so the realm composes and only that binding does not resolve.
+/// One document, and a chain whose other documents leave `[self_hosted]`
+/// alone, keep every binding.
+///
+/// A composed realm section is the section of the chain member nearest the
+/// head whose document states it, whole, so the binding, its auth profile
+/// and its backend all come from that document; `[self_hosted]` composes
+/// field by field across the chain and must equal that document's own where
+/// the credential goes by it.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn check_composed_command_servers(
     docs: &std::collections::BTreeMap<crate::connection::RealmId, Config>,
     chain: &crate::connection::RealmChain,
     composed: &Config,
-) -> Result<(), ConfigError> {
+) -> Result<Vec<(String, String, String)>, ConfigError> {
+    use crate::connection::CredentialSourceSpec;
+
+    let mut left_out = Vec::new();
     for (realm, section) in &composed.realm {
         let stated_by = chain
             .realms()
             .iter()
             .find_map(|member| docs.get(member).filter(|doc| doc.realm.contains_key(realm)));
         for (binding_id, binding) in &section.binding {
-            let commanded = section.auth.get(&binding.auth_profile).is_some_and(|auth| {
-                matches!(
-                    auth.source,
-                    crate::connection::CredentialSourceSpec::Command { .. }
-                )
-            });
-            if !commanded {
-                continue;
-            }
+            let profile = &binding.auth_profile;
+            let commanded = match section.auth.get(profile).map(|auth| &auth.source) {
+                Some(CredentialSourceSpec::Command { .. }) => true,
+                Some(CredentialSourceSpec::InlineSecret { .. }) => false,
+                _ => continue,
+            };
             let Some(backend) = section.backend.get(&binding.backend_profile) else {
                 continue;
             };
             let Some(server) = backend.server.as_ref() else {
                 if crate::provider::Provider::parse_strict(&backend.provider)
-                    == Some(crate::provider::Provider::SelfHosted)
+                    != Some(crate::provider::Provider::SelfHosted)
                 {
+                    continue;
+                }
+                if commanded {
                     return Err(ConfigError::CredentialCommandServerUndeclared {
                         realm: realm.clone(),
                         binding: binding_id.clone(),
                         backend: binding.backend_profile.clone(),
                     });
+                }
+                if stated_by.is_some_and(|stated_by| stated_by.self_hosted != composed.self_hosted)
+                {
+                    left_out.push((realm.clone(), binding_id.clone(), profile.clone()));
                 }
                 continue;
             };
@@ -3797,16 +4070,19 @@ pub(crate) fn check_composed_command_servers(
                 && stated_by.self_hosted.servers.get(server)
                     != composed.self_hosted.servers.get(server)
             {
-                return Err(ConfigError::CredentialCommandServer {
-                    realm: realm.clone(),
-                    binding: binding_id.clone(),
-                    profile: binding.auth_profile.clone(),
-                    server: server.clone(),
-                });
+                if commanded {
+                    return Err(ConfigError::CredentialCommandServer {
+                        realm: realm.clone(),
+                        binding: binding_id.clone(),
+                        profile: profile.clone(),
+                        server: server.clone(),
+                    });
+                }
+                left_out.push((realm.clone(), binding_id.clone(), profile.clone()));
             }
         }
     }
-    Ok(())
+    Ok(left_out)
 }
 
 /// The chain [`compose_effective_config`] folds for `head`, resolved by the
@@ -4322,6 +4598,120 @@ max_tool_calls = 12
         assert_eq!(config.agent.model, "cli-model");
         assert_eq!(config.budget_limits().max_tokens, Some(50000));
         assert_eq!(config.budget.max_tokens, None);
+    }
+
+    /// A config file a configuration was not composed from is judged
+    /// against what is in effect: an administered section it states
+    /// differently, or that does not parse, is listed; one that states what
+    /// is in effect, an empty or absent one, and every ordinary section are
+    /// not.
+    #[test]
+    fn a_file_is_judged_on_the_administered_sections_not_in_effect() {
+        const WORKSPACE: &str = "[confinement.all]\nmode = \"workspace\"\n";
+        const APPROVERS: &str =
+            "[governance.decisions]\noperator_approver_ids = [\"team:owners\"]\n";
+        let nothing = Config::default();
+        let confined = Config {
+            confinement: crate::ConfinementConfig::for_all(crate::LaunchConfinement::Workspace(
+                crate::WorkspaceConfinement::default(),
+            )),
+            ..Config::default()
+        };
+        let governed = Config {
+            governance: Some(
+                toml::from_str::<Config>(APPROVERS)
+                    .expect("a governance section")
+                    .governance
+                    .expect("a present section"),
+            ),
+            ..Config::default()
+        };
+
+        // Stated differently from what is in effect.
+        assert_eq!(
+            nothing.administered_sections_not_in_effect(WORKSPACE),
+            vec![AdministeredSection::Confinement]
+        );
+        assert_eq!(
+            confined.administered_sections_not_in_effect(
+                "[confinement.all]\nmode = \"workspace\"\nnetwork = \"unrestricted\"\n"
+            ),
+            vec![AdministeredSection::Confinement]
+        );
+        assert_eq!(
+            confined.administered_sections_not_in_effect(
+                "[confinement.shell]\nmode = \"trusted_host\"\n"
+            ),
+            vec![AdministeredSection::Confinement]
+        );
+        assert_eq!(
+            nothing.administered_sections_not_in_effect(APPROVERS),
+            vec![AdministeredSection::Governance]
+        );
+        assert_eq!(
+            nothing.administered_sections_not_in_effect(&format!("{WORKSPACE}{APPROVERS}")),
+            AdministeredSection::ALL.to_vec()
+        );
+
+        // A table that does not parse as its section, and a table header in
+        // text that is not TOML.
+        for unreadable in [
+            "[confinement]\nmode = \"workspace\"\n",
+            "confinement = \"workspace\"\n",
+            "[confinement.all]\nmode = workspace\n",
+        ] {
+            assert_eq!(
+                confined.administered_sections_not_in_effect(unreadable),
+                vec![AdministeredSection::Confinement],
+                "{unreadable}"
+            );
+        }
+        assert_eq!(
+            governed.administered_sections_not_in_effect("[governance]\nreviewers = 2\n"),
+            vec![AdministeredSection::Governance]
+        );
+
+        // What is in effect, restated: per launch kind for confinement,
+        // with `trusted_host` the same as no statement.
+        assert!(
+            confined
+                .administered_sections_not_in_effect(WORKSPACE)
+                .is_empty()
+        );
+        assert!(
+            confined
+                .administered_sections_not_in_effect(
+                    "[confinement.shell]\nmode = \"workspace\"\n\n[confinement.command_hooks]\nmode = \"workspace\"\n\n[confinement.mcp_stdio]\nmode = \"workspace\"\n"
+                )
+                .is_empty()
+        );
+        assert!(
+            nothing
+                .administered_sections_not_in_effect("[confinement.all]\nmode = \"trusted_host\"\n")
+                .is_empty()
+        );
+        assert!(
+            governed
+                .administered_sections_not_in_effect(APPROVERS)
+                .is_empty()
+        );
+
+        // Nothing stated: absent, empty, ordinary sections, and text that is
+        // not TOML without a header of an administered section.
+        for silent in [
+            "",
+            "[confinement]\n",
+            "[governance]\n",
+            "[agent]\nmax_turns = 3\n\n[limits]\nmax_sessions = 4\n",
+            "[agent\nconfinement_note = 1\n",
+        ] {
+            assert!(
+                confined
+                    .administered_sections_not_in_effect(silent)
+                    .is_empty(),
+                "{silent}"
+            );
+        }
     }
 
     /// The operator's `--confinement*` selection replaces the composed
@@ -6673,6 +7063,62 @@ stream_inactivity_timeout = "2m"
         assert_eq!(parsed, config.provider_tools);
     }
 
+    /// The allowance for agents' schedules that create a session is off
+    /// unless a `[tools]` table sets it, and is written only when on, so a
+    /// document of a host that never set it is the document an earlier
+    /// build wrote. A later layer that does not name it keeps it; one that
+    /// names it wins. A `[tools]` table with a key the build does not know
+    /// still loads, which is how an earlier build reads a document that
+    /// carries this key.
+    #[test]
+    fn the_allowance_for_schedules_that_create_sessions_is_written_only_when_on() {
+        const KEY: &str = "agent_schedules_may_create_sessions";
+        let off = Config::default();
+        assert!(!off.tools.agent_schedules_may_create_sessions);
+        let written = toml::to_string(&off.tools).unwrap();
+        assert!(!written.contains(KEY), "off is not written: {written}");
+        let whole = toml::to_string(&off).unwrap();
+        assert!(!whole.contains(KEY), "off is not written: {whole}");
+
+        let on: Config = toml::from_str(&format!("[tools]\n{KEY} = true\n")).unwrap();
+        assert!(on.tools.agent_schedules_may_create_sessions);
+        let written = toml::to_string(&on.tools).unwrap();
+        assert!(written.contains(&format!("{KEY} = true")), "{written}");
+        let read_back: ToolsConfig = toml::from_str(&written).unwrap();
+        assert!(read_back.agent_schedules_may_create_sessions);
+
+        let mut layered = Config::default();
+        layered
+            .merge_toml_str(&format!("[tools]\n{KEY} = true\n"))
+            .unwrap();
+        assert!(layered.tools.agent_schedules_may_create_sessions);
+        layered
+            .merge_toml_str("[tools]\nschedule_enabled = true\n")
+            .unwrap();
+        assert!(
+            layered.tools.agent_schedules_may_create_sessions,
+            "a layer that does not name it keeps it"
+        );
+        layered
+            .merge_toml_str(&format!("[tools]\n{KEY} = false\n"))
+            .unwrap();
+        assert!(
+            !layered.tools.agent_schedules_may_create_sessions,
+            "a layer that names it wins"
+        );
+
+        let later: Config =
+            toml::from_str("[tools]\na_key_of_a_later_build = true\nschedule_enabled = true\n")
+                .unwrap();
+        assert!(later.tools.schedule_enabled);
+        assert!(!later.tools.agent_schedules_may_create_sessions);
+        let mut merged = Config::default();
+        merged
+            .merge_toml_str("[tools]\na_key_of_a_later_build = true\n")
+            .unwrap();
+        assert!(!merged.tools.agent_schedules_may_create_sessions);
+    }
+
     #[test]
     fn test_model_fallback_defaults_disabled_without_chain() {
         let config = Config::default();
@@ -7216,5 +7662,149 @@ provider_params = { provider_tag = { provider = "anthropic", cache_control = "di
             matches!(err, ConfigError::Validation(_)),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn rest_allowed_origins_default_to_none_and_round_trip() {
+        let default = Config::default();
+        assert!(default.rest.allowed_origins.is_empty());
+        let rendered = toml::to_string(&default).expect("the default config renders");
+        assert!(
+            !rendered.contains("allowed_origins"),
+            "a realm that lists no origin writes no key: {rendered}"
+        );
+
+        // A document written before the key existed.
+        let earlier = toml::from_str::<Config>("[rest]\nhost = \"127.0.0.1\"\nport = 8080\n")
+            .expect("a document without the key loads");
+        assert!(earlier.rest.allowed_origins.is_empty());
+
+        let listed = toml::from_str::<Config>(
+            "[rest]\nallowed_origins = [\"https://app.example.com\", \"http://localhost:5173\"]\n",
+        )
+        .expect("a document that lists origins loads");
+        assert_eq!(
+            listed.rest.allowed_origins,
+            ["https://app.example.com", "http://localhost:5173"]
+        );
+        let reloaded =
+            toml::from_str::<Config>(&toml::to_string(&listed).expect("the config renders"))
+                .expect("the rendered config loads");
+        assert_eq!(reloaded.rest, listed.rest);
+    }
+
+    #[test]
+    fn rest_allowed_origins_lists_origins_only() {
+        let with = |entry: &str| RestServerConfig {
+            allowed_origins: vec![entry.to_string()],
+            ..RestServerConfig::default()
+        };
+        for origin in [
+            "https://app.example.com",
+            "https://app.example.com:8443",
+            "http://localhost:5173",
+            "http://127.0.0.1:3000",
+            "http://[::1]:3000",
+            "http://[::1]",
+            "tauri://localhost",
+            "HTTPS://App.Example.com",
+        ] {
+            let checked = with(origin).validate();
+            assert!(checked.is_ok(), "`{origin}` is an origin: {checked:?}");
+        }
+        for entry in [
+            "*",
+            "null",
+            "",
+            "app.example.com",
+            "https://",
+            "https://app.example.com/",
+            "https://app.example.com/console",
+            "https://app.example.com?x=1",
+            "https://user@app.example.com",
+            "https://*.example.com",
+            "https://app.example.com:",
+            "https://app.example.com:https",
+            "https://a:b:80",
+            "http://[::1",
+            "http://[::1]x",
+            "https://app.example.com https://other.example.com",
+            "://app.example.com",
+        ] {
+            let error = with(entry)
+                .validate()
+                .expect_err("an entry that is not one origin is refused");
+            assert!(
+                error.to_string().contains("rest.allowed_origins"),
+                "`{entry}`: {error}"
+            );
+        }
+
+        // The whole config refuses it too, so a load and a write both do.
+        let mut config = Config::default();
+        config.rest.allowed_origins = vec!["*".to_string()];
+        let error = config
+            .validate(*crate::model_profile::test_catalog::TEST_CATALOG)
+            .expect_err("a config that lists a wildcard origin is refused");
+        assert!(
+            error.to_string().contains("rest.allowed_origins"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn rest_served_hosts_default_to_none_and_list_host_names_only() {
+        let default = Config::default();
+        assert!(default.rest.served_hosts.is_empty());
+        let rendered = toml::to_string(&default).expect("the default config renders");
+        assert!(
+            !rendered.contains("served_hosts"),
+            "a realm that lists no name writes no key: {rendered}"
+        );
+        let listed = toml::from_str::<Config>(
+            "[rest]\nserved_hosts = [\"api.example.com\", \"rkat-rest\"]\n",
+        )
+        .expect("a document that lists names loads");
+        assert_eq!(listed.rest.served_hosts, ["api.example.com", "rkat-rest"]);
+        let reloaded =
+            toml::from_str::<Config>(&toml::to_string(&listed).expect("the config renders"))
+                .expect("the rendered config loads");
+        assert_eq!(reloaded.rest, listed.rest);
+
+        let with = |entry: &str| RestServerConfig {
+            served_hosts: vec![entry.to_string()],
+            ..RestServerConfig::default()
+        };
+        for name in [
+            "api.example.com",
+            "API.Example.com",
+            "rkat-rest",
+            "rest_internal",
+            "10.0.0.7",
+            "::1",
+            "fd00::7",
+        ] {
+            let checked = with(name).validate();
+            assert!(checked.is_ok(), "`{name}` is a host name: {checked:?}");
+        }
+        for entry in [
+            "*",
+            "*.example.com",
+            "",
+            "https://api.example.com",
+            "api.example.com:443",
+            "api.example.com/console",
+            "api example.com",
+            "[::1]",
+            "user@api.example.com",
+        ] {
+            let error = with(entry)
+                .validate()
+                .expect_err("an entry that is not one host name is refused");
+            assert!(
+                error.to_string().contains("rest.served_hosts"),
+                "`{entry}`: {error}"
+            );
+        }
     }
 }

@@ -322,8 +322,8 @@ impl TopologySnapshot {
     /// inspect through the topology action family.
     pub fn retain_visible_to(&mut self, view: &crate::access::AccessView) {
         let visible = |endpoint: &TopologyEndpoint| {
-            view.can_view_agent(endpoint.identity.as_str())
-                && view.allows_agent(
+            view.can_view_name(endpoint.identity.as_str())
+                && view.allows_name(
                     crate::access::ACTION_TOPOLOGY_VIEW,
                     endpoint.identity.as_str(),
                 )

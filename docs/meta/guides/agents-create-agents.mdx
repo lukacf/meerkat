@@ -4,7 +4,7 @@ description: "Let an agent create, change, archive and remove long-term agents u
 icon: "user-plus"
 ---
 
-*Mirrored from Meerkat Meta main at [de520227a811](https://github.com/lukacf/meerkat/commit/de520227a81178fce9ffea3abcafa4a7bddfbf27) on 2026-11-17; Meta version 0.9.16 at that commit.*
+*Mirrored from Meerkat Meta main at [dca30fbb4416](https://github.com/lukacf/meerkat/commit/dca30fbb4416907692283c67dcf9db1b0480bdf5) on 2026-11-22; Meta version 0.9.17 at that commit.*
 
 Available from Meerkat Meta 0.9.15.
 
@@ -459,6 +459,41 @@ change that names such a member answers `identity_unknown` at `name`, exactly
 as for a name no agent holds, so the answer tells nothing about it.
 
 All three are reads: they never wake an agent and load nothing.
+
+## Where no person answers questions
+
+From 0.9.15 a member is offered the `ask_user` tool (see
+[Question sets](/meta/concepts/gating#question-sets), which lists the members that
+are not), an agent an agent created included, also on a host where no person
+will see its questions:
+
+- Where the gateway's Console signs nobody in (`console_auth_required(False)`
+  without access control), a call answers `no_human_surface` and holds
+  nothing.
+- Where the Console requires sign-in, as an SDK-launched gateway does unless
+  told otherwise, the questions are held until their deadline (one hour
+  unless the call says otherwise), also when nobody ever signs in. The host
+  reads the open sets with `gating_questions()` (`gatingQuestions()` in
+  TypeScript).
+
+A host that shows the questions to nobody keeps the tool from its agents by
+listing it in the profile's `tools.deny`:
+
+```toml
+[profiles.worker.tools]
+comms = true
+deny = ["ask_user"]
+```
+
+A member of that profile is not offered the tool. In a stored mob definition
+the change is declared as an
+[update](/meta/reference/configuration#one-shot-mob-definition-update); from the
+start that commits it, the profile's members are built without the tool, an
+agent that existed before included. Such a profile can be used for every
+member: in 0.9.15 the build of a member whose host decides the member's
+tool surface itself (a host that installs a member registration hook, as
+Connect's native host does) was refused with such a deny; from 0.9.16 the
+deny is accepted, and such members are still not offered the tool.
 
 ## Tool list size
 

@@ -932,6 +932,10 @@ const MOB_MACHINE_RUNTIME_INTERNAL_CLASSIFICATIONS:
         reason: MobMachineRuntimeInternalReason::TrustHandoffAuthority,
     },
     MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::AuthorizeExternalPeerReciprocalTrustRemoval,
+        reason: MobMachineRuntimeInternalReason::TrustHandoffAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
         input: MobMachineCatalogInput::CleanupRetiringExternalPeer,
         reason: MobMachineRuntimeInternalReason::TrustHandoffAuthority,
     },

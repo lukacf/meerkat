@@ -50,6 +50,7 @@ pub use ingress::{
     check_approver_ingresses,
 };
 pub(crate) use owner::DecisionEventBinding;
+pub(crate) use owner::EntryTimeClock;
 pub use owner::RuntimeDecisions;
 pub use stdio::{DecisionNoticeSink, StdioDecisionConnection};
 pub(crate) use wire::decision_error;

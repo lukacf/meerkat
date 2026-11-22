@@ -1,3 +1,7 @@
+// Every test here runs on SQLite too and several use the crate's test
+// faults: the target needs both features, as the crate's test command
+// passes them.
+#![cfg(all(feature = "sqlite-store", feature = "test-support"))]
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 //! Scoped tool grants through the runtime: the grant service over a store,
 //! a served session's grant gate on its runtime bindings, the visibility
@@ -382,7 +386,11 @@ async fn dispatch_after_the_deadline_is_refused_although_the_boundary_showed_the
         assert_eq!(served.visible(), OPEN);
 
         // The boundary showed the tool; the call is adjudicated at the
-        // deadline.
+        // deadline. The deadline timer is a true observer of the same
+        // expiry, and whichever observes it first records it. This row is
+        // about the call's own observation, so the timer is disarmed before
+        // the clock moves.
+        machine.tool_grant_deadlines().disarm(&session_id);
         clock.set(grant.expires_at_ms);
         let refusal = served
             .call("shell", "call-at-deadline")
@@ -3657,6 +3665,11 @@ async fn a_build_reads_which_gated_servers_a_live_server_grant_covers() {
                 .await
                 .unwrap();
         }
+        // The deadline timer is a true observer of the lapsed grant's expiry
+        // too, and whichever observes it first records it. This row is about
+        // the build's own observation, so the timer is disarmed before the
+        // clock moves.
+        machine.tool_grant_deadlines().disarm(&session_id);
         clock.set(T0 + 120_000);
 
         let asked: BTreeSet<String> = ["tickets", "calendar", "mail", "deploy", "unknown"]

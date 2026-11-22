@@ -549,12 +549,23 @@ impl KeyedInjectServer {
             }
             Err(error) => return Err(native_unavailable(error)),
         }
-        match self
+        // An identity kept apart from other callers is, for a peer gateway,
+        // an identity that is not registered here: the same answer, and
+        // nothing of it is prepared.
+        let service = if self
             .native
-            .identity_service(identity)
+            .kept_apart(identity)
             .await
             .map_err(native_unavailable)?
         {
+            IdentityService::Unknown
+        } else {
+            self.native
+                .identity_service(identity)
+                .await
+                .map_err(native_unavailable)?
+        };
+        match service {
             IdentityService::Local => {}
             IdentityService::Unknown => {
                 return Err(KeyedInjectRefusal::new(
@@ -667,6 +678,20 @@ impl KeyedInjectReceiver for KeyedInjectServer {
         Box::pin(async move {
             let identity = hosted_identity(member)?;
             BatchId::new(delivery_key).map_err(invalid)?;
+            // An identity kept apart from other callers reads, for a peer
+            // gateway, as a name no identity has: no commit, whatever its
+            // continuation owner holds.
+            if self
+                .native
+                .kept_apart(&identity)
+                .await
+                .map_err(native_unavailable)?
+            {
+                return Ok(KeyedInjectStatusAnswer {
+                    status: NativeStatus::NotCommitted,
+                    input: None,
+                });
+            }
             let status = self
                 .native
                 .status_of(&identity, &scope.native_key(delivery_key))

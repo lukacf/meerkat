@@ -4,6 +4,8 @@
 The census and the guard run cargo; what they decide from cargo's output is
 pure and pinned here: comment stripping, the guard's findings, the test-name
 listing parser, the manifest's workspace-only selection and name parity.
+Also the census workflow's jobs (scripts/published_crates_standalone_jobs.py):
+every release crate is tested by exactly one job.
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ import io
 import json
 import os
 import pathlib
+import re
 import shutil
 import sys
 import tarfile
@@ -1187,6 +1190,292 @@ class WorkspaceOnlyGates(unittest.TestCase):
     def test_feature_closure(self):
         manifest = {"features": {"default": ["a"], "a": ["b", "dep:x", "other/feature"], "b": [], "c": []}}
         self.assertEqual(pcs.feature_closure(manifest, ["default", "missing"]), {"default", "a", "b"})
+
+
+# ---------------------------------------------------------------------------
+# The census workflow's jobs (scripts/published_crates_standalone_jobs.py)
+# ---------------------------------------------------------------------------
+
+JOBS_SCRIPT = SCRIPT.parent / "published_crates_standalone_jobs.py"
+jobs_spec = importlib.util.spec_from_file_location("published_crates_standalone_jobs", JOBS_SCRIPT)
+assert jobs_spec is not None and jobs_spec.loader is not None
+pcj = importlib.util.module_from_spec(jobs_spec)
+sys.modules["published_crates_standalone_jobs"] = pcj
+jobs_spec.loader.exec_module(pcj)
+
+CENSUS_WORKFLOW = SCRIPT.parent.parent / ".github" / "workflows" / "published-crates-standalone.yml"
+
+
+def census_selects(arguments, crates):
+    """(exit code, the crates the census would test) for `arguments` over the
+    release list `crates`: the census's own `main`, with the list it reads
+    and the run it starts replaced."""
+    started = []
+
+    def record(_root, selected, _out, _stack, _allow_dirty):
+        started.append(list(selected))
+        return 0
+
+    with unittest.mock.patch.object(pcs, "release_crates", return_value=list(crates)), \
+            unittest.mock.patch.object(pcs, "census", side_effect=record), \
+            contextlib.redirect_stderr(io.StringIO()):
+        code = pcs.main(["census", "--out", "unused", *arguments])
+    return code, (started[0] if started else None)
+
+
+def job_starts(crates, job, partitions, isolate):
+    """What the workflow's job does over the release list `crates`: (exit
+    code, the census arguments it starts make with, or None when it starts no
+    census). The jobs script's own `run`, with only the start replaced."""
+    commands = []
+
+    def record(command):
+        commands.append(command)
+        return 0
+
+    with unittest.mock.patch.object(pcj, "start_census", side_effect=record), \
+            contextlib.redirect_stdout(io.StringIO()):
+        try:
+            code = pcj.run(list(crates), job, partitions, isolate, pathlib.Path("/census-out"))
+        except pcj.UsageError:
+            return 2, None
+    if not commands:
+        return code, None
+    (command,) = commands
+    assert command[:2] == ["make", "published-crates-standalone-census"], command
+    variables = dict(word.split("=", 1) for word in command[2:])
+    assert variables["STANDALONE_CENSUS_OUT"] == "/census-out", command
+    # The Makefile's recipe puts the value on the census's command line,
+    # where the shell splits it at blanks (an empty value adds no word).
+    return code, variables["STANDALONE_CENSUS_ARGS"].split()
+
+
+def job_selections(crates, partitions, isolate, extra=()):
+    """job -> the crates the census would test in it ([] for a job that
+    starts no census, None for a job that fails). `extra` is appended to
+    every census's arguments (the controls use it)."""
+    selections = {}
+    for job in pcj.jobs(partitions):
+        code, arguments = job_starts(crates, job, partitions, isolate)
+        if code != 0:
+            selections[job] = None
+        elif arguments is None:
+            selections[job] = []
+        else:
+            code, selected = census_selects([*arguments, *extra], crates)
+            selections[job] = selected if code == 0 else None
+    return selections
+
+
+def coverage_problems(crates, selections, partitions, isolate):
+    """What is wrong with `selections` as a census of `crates`: every crate
+    is tested exactly once, nothing else is, each partition job tests its
+    ordinary partition (what `census --shard K/N` tests) without `isolate`,
+    and `isolate` is tested by the isolated job alone."""
+    problems = []
+    tested = [name for names in selections.values() for name in names or []]
+    for name in crates:
+        if tested.count(name) != 1:
+            problems.append(f"{name} is tested {tested.count(name)} times")
+    problems += [f"{name} is not a release crate" for name in sorted(set(tested) - set(crates))]
+    for k in range(1, partitions + 1):
+        code, ordinary = census_selects(["--shard", f"{k}/{partitions}"], crates)
+        expected = [name for name in ordinary if name != isolate] if code == 0 else None
+        if selections.get(str(k)) != expected:
+            problems.append(f"job {k} tests {selections.get(str(k))}, its partition without {isolate} is {expected}")
+    if isolate in crates and selections.get(pcj.ISOLATED) != [isolate]:
+        problems.append(f"the isolated job tests {selections.get(pcj.ISOLATED)}")
+    return problems
+
+
+def workflow_census_jobs():
+    """(the matrix's jobs, the partition count, the isolated crate) as the
+    census workflow states them."""
+    text = "\n".join(line for line in CENSUS_WORKFLOW.read_text().splitlines() if not line.lstrip().startswith("#"))
+    matrix = re.search(r"^\s+shard: \[(.*)\]$", text, re.M)
+    partitions = re.search(r"^\s+--partitions (\d+)$", text, re.M)
+    isolate = re.findall(r"^\s+STANDALONE_CENSUS_ISOLATED: (\S+)$", text, re.M)
+    assert matrix and partitions and len(isolate) == 1, "the census workflow no longer states its jobs this way"
+    return [item.strip().strip('"') for item in matrix.group(1).split(",")], int(partitions.group(1)), isolate[0]
+
+
+class CensusJobs(unittest.TestCase):
+    """Every release crate is tested by exactly one job of the census
+    workflow, whatever the release list becomes."""
+
+    ISOLATE = "long"
+
+    def crates(self, count=20, at=12):
+        """A release list of `count` crates with the isolated one at entry `at`."""
+        names = [f"crate-{index:02d}" for index in range(1, count)]
+        return names[: at - 1] + [self.ISOLATE] + names[at - 1 :]
+
+    def assert_covered(self, crates, partitions=8, isolate=None):
+        isolate = isolate or self.ISOLATE
+        selections = job_selections(crates, partitions, isolate)
+        self.assertEqual(coverage_problems(crates, selections, partitions, isolate), [])
+        return selections
+
+    def test_the_release_list_with_the_workflows_own_jobs(self):
+        jobs, partitions, isolate = workflow_census_jobs()
+        crates = pcs.release_crates(SCRIPT.parent.parent)
+        self.assertEqual(jobs, pcj.jobs(partitions))
+        self.assertIn(isolate, crates)
+        selections = self.assert_covered(crates, partitions, isolate)
+        changed = [job for job in jobs[:-1]
+                   if selections[job] != census_selects(["--shard", f"{job}/{partitions}"], crates)[1]]
+        self.assertEqual(len(changed), 1, "exactly the isolated crate's partition differs from the ordinary one")
+        self.assertEqual([job for job, names in selections.items() if isolate in names], [pcj.ISOLATED])
+
+    def test_a_crate_added_at_the_front(self):
+        self.assert_covered(["crate-new", *self.crates()])
+
+    def test_a_crate_added_in_the_middle(self):
+        crates = self.crates()
+        self.assert_covered(crates[:9] + ["crate-new"] + crates[9:])
+
+    def test_a_crate_added_at_the_end(self):
+        self.assert_covered([*self.crates(), "crate-new"])
+
+    def test_a_crate_removed(self):
+        crates = self.crates()
+        self.assert_covered(crates[:3] + crates[4:])
+
+    def test_two_crates_swapped(self):
+        crates = self.crates()
+        crates[2], crates[15] = crates[15], crates[2]
+        self.assert_covered(crates)
+
+    def test_the_isolated_crate_at_another_entry_lands_in_another_partition(self):
+        for at, job in ((1, "1"), (12, "4"), (20, "4"), (8, "8")):
+            with self.subTest(at=at):
+                crates = self.crates(at=at)
+                selections = self.assert_covered(crates)
+                ordinary = census_selects(["--shard", f"{job}/8"], crates)[1]
+                self.assertIn(self.ISOLATE, ordinary)
+                self.assertEqual(selections[job], [name for name in ordinary if name != self.ISOLATE])
+
+    def test_the_isolated_crate_alone_in_its_partition_leaves_a_job_that_starts_no_census(self):
+        crates = self.crates(count=12, at=8)
+        self.assertEqual(census_selects(["--shard", "8/8"], crates)[1], [self.ISOLATE])
+        self.assertEqual(job_starts(crates, "8", 8, self.ISOLATE), (0, None))
+        self.assertEqual(self.assert_covered(crates)["8"], [])
+
+    def test_a_list_shorter_than_the_partition_count(self):
+        crates = self.crates(count=5, at=3)
+        selections = self.assert_covered(crates)
+        self.assertEqual([job for job, names in selections.items() if names == []], ["3", "6", "7", "8"])
+        for job in ("6", "7", "8"):
+            self.assertEqual(job_starts(crates, job, 8, self.ISOLATE), (0, None))
+
+    def test_an_isolated_name_the_list_no_longer_has_fails_its_job_and_leaves_the_partitions_whole(self):
+        crates = [name for name in self.crates() if name != self.ISOLATE]
+        selections = job_selections(crates, 8, self.ISOLATE)
+        self.assertIsNone(selections.pop(pcj.ISOLATED))
+        self.assertEqual(job_starts(crates, pcj.ISOLATED, 8, self.ISOLATE), (2, None))
+        tested = [name for names in selections.values() for name in names]
+        self.assertEqual(sorted(tested), sorted(crates))
+        for job, names in selections.items():
+            self.assertEqual(names, census_selects(["--shard", f"{job}/8"], crates)[1])
+
+    def test_a_job_without_a_crate_never_reaches_the_census_as_every_crate(self):
+        crates = self.crates()
+        # Why: the census with no `--crate` tests the whole list.
+        self.assertEqual(census_selects([], crates), (0, crates))
+        with self.assertRaises(pcj.UsageError):
+            pcj.census_arguments([])
+        with self.assertRaises(pcj.UsageError):
+            pcj.census_command([], pathlib.Path("/census-out"))
+        for job in pcj.jobs(8):
+            code, arguments = job_starts(crates, job, 8, self.ISOLATE)
+            self.assertEqual(code, 0)
+            self.assertEqual(arguments[0], "--crate")
+            self.assertEqual(arguments[::2], ["--crate"] * (len(arguments) // 2))
+            self.assertTrue(all(pcj.CRATE_NAME.fullmatch(name) for name in arguments[1::2]))
+            self.assertNotIn("--shard", arguments)
+
+    def test_an_unusable_request_is_a_usage_error(self):
+        crates = self.crates()
+        for job, partitions, isolate, listed in (
+            ("9", 8, self.ISOLATE, crates),
+            ("0", 8, self.ISOLATE, crates),
+            ("", 8, self.ISOLATE, crates),
+            ("1/8", 8, self.ISOLATE, crates),
+            ("1", 0, self.ISOLATE, crates),
+            ("1", 8, "", crates),
+            ("1", 8, "two words", crates),
+            ("1", 8, "--shard", crates),
+            ("1", 8, self.ISOLATE, [*crates, crates[0]]),
+            ("1", 8, self.ISOLATE, [*crates, "bad name"]),
+        ):
+            with self.subTest(job=job, partitions=partitions, isolate=isolate):
+                self.assertEqual(job_starts(listed, job, partitions, isolate), (2, None))
+
+    def test_the_command_fails_closed_and_starts_nothing_on_a_usage_error(self):
+        with unittest.mock.patch.object(pcj, "start_census") as start, \
+                unittest.mock.patch.object(pcj, "census_module", return_value=unittest.mock.Mock(
+                    release_crates=lambda _root: self.crates())), \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            code = pcj.main(["run", "--job", "1", "--partitions", "8", "--isolate", "", "--out", "/census-out"])
+        self.assertEqual(code, 2)
+        self.assertIn("--isolate must name a crate", err.getvalue())
+        start.assert_not_called()
+
+    def test_the_check_fails_when_the_stride_is_applied_a_second_time(self):
+        crates = self.crates()
+        selections = job_selections(crates, 8, self.ISOLATE, extra=("--shard", "2/8"))
+        self.assertNotEqual(coverage_problems(crates, selections, 8, self.ISOLATE), [])
+
+    def test_the_check_fails_when_the_isolated_crate_stays_in_its_partition(self):
+        crates = self.crates()
+        selections = {str(k): census_selects(["--shard", f"{k}/8"], crates)[1] for k in range(1, 9)}
+        selections[pcj.ISOLATED] = [self.ISOLATE]
+        self.assertIn(f"{self.ISOLATE} is tested 2 times", coverage_problems(crates, selections, 8, self.ISOLATE))
+
+    def test_the_check_fails_when_a_job_tests_every_crate(self):
+        crates = self.crates()
+        selections = job_selections(crates, 8, self.ISOLATE)
+        selections["3"] = census_selects([], crates)[1]
+        self.assertNotEqual(coverage_problems(crates, selections, 8, self.ISOLATE), [])
+
+
+class CensusWorkflow(unittest.TestCase):
+    """published-crates-standalone.yml starts every census through the jobs
+    script, names the isolated crate once, and its gate needs every job."""
+
+    def lines(self):
+        return [line for line in CENSUS_WORKFLOW.read_text().splitlines() if not line.lstrip().startswith("#")]
+
+    def test_every_job_starts_its_census_through_the_jobs_script(self):
+        text = "\n".join(self.lines())
+        step = text.split("      - name: Standalone census\n", 1)[1].split("\n\n", 1)[0]
+        self.assertEqual(
+            step.split(),
+            'run: >- python3 scripts/published_crates_standalone_jobs.py run --job "${{ matrix.shard }}" '
+            '--partitions 8 --isolate "${STANDALONE_CENSUS_ISOLATED}" '
+            '--out "${{ runner.temp }}/standalone-census"'.split(),
+        )
+        self.assertNotIn("STANDALONE_CENSUS_ARGS", text)
+        self.assertNotIn("--shard", text)
+        self.assertNotIn("published-crates-standalone-census", text)
+
+    def test_the_isolated_crate_is_named_once(self):
+        _jobs, _partitions, isolate = workflow_census_jobs()
+        self.assertEqual([line.strip() for line in self.lines() if isolate in line],
+                         [f"STANDALONE_CENSUS_ISOLATED: {isolate}"])
+
+    def test_the_jobs_have_names_and_reports_of_their_own_and_the_gate_needs_them_all(self):
+        text = "\n".join(self.lines())
+        jobs, partitions, _isolate = workflow_census_jobs()
+        self.assertEqual(len(set(jobs)), partitions + 1)
+        self.assertIn("name: Standalone census (${{ matrix.shard }}${{ matrix.shard != 'isolated' && '/8' || '' }})", text)
+        self.assertIn("name: published-crates-standalone-${{ matrix.shard }}\n", text)
+        self.assertIn("      fail-fast: false\n", text)
+        census, gate = text.split("\n  gate:\n", 1)
+        self.assertEqual(census.count("\n  census:\n"), 1)
+        self.assertIn("    needs: census\n", gate)
+        self.assertIn("CENSUS_RESULT: ${{ needs.census.result }}", gate)
+        self.assertIn('if [[ "${CENSUS_RESULT}" != "success" ]]; then', gate)
 
 
 if __name__ == "__main__":

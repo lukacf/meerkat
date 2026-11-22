@@ -29,7 +29,7 @@ its partition, or the list is shorter than N) does not start the census,
 because a census without `--crate` tests every release crate: it says that
 it has nothing to test and exits 0, as a census of an empty partition does.
 
-Exit: `run` returns the census's exit code (0 without a crate); 2 = usage
+Exit: `run` is non-zero when the census fails (make's status); 2 = usage
 error (an unknown job, a NAME that is not a crate name, a release list with
 a repeated or malformed name).
 """

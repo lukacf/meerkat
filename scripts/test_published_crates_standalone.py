@@ -18,6 +18,7 @@ import json
 import os
 import pathlib
 import re
+import shlex
 import shutil
 import sys
 import tarfile
@@ -1204,6 +1205,34 @@ sys.modules["published_crates_standalone_jobs"] = pcj
 jobs_spec.loader.exec_module(pcj)
 
 CENSUS_WORKFLOW = SCRIPT.parent.parent / ".github" / "workflows" / "published-crates-standalone.yml"
+MAKEFILE = SCRIPT.parent.parent / "Makefile"
+CENSUS_TARGET = "published-crates-standalone-census"
+
+
+def census_recipe():
+    """The recipe lines of the Makefile's census target: what hands the
+    jobs script's values to the census."""
+    lines = MAKEFILE.read_text().splitlines()
+    recipe = []
+    for line in lines[lines.index(f"{CENSUS_TARGET}:") + 1 :]:
+        if not line.startswith("\t"):
+            break
+        recipe.append(line[1:])
+    return recipe
+
+
+def census_recipe_arguments(variables):
+    """The census's arguments when make runs that recipe with `variables`:
+    make puts each value into the line as text and the shell splits the line
+    into words (an empty value adds no word)."""
+    (line,) = census_recipe()
+    line = line.removeprefix("@")
+    for name, value in {"PYTHON": "python3", **variables}.items():
+        line = line.replace(f"$({name})", value)
+    assert "$" not in line, line
+    words = shlex.split(line)
+    assert words[:3] == ["python3", "scripts/published_crates_standalone.py", "census"], words
+    return words[3:]
 
 
 def census_selects(arguments, crates):
@@ -1242,12 +1271,10 @@ def job_starts(crates, job, partitions, isolate):
     if not commands:
         return code, None
     (command,) = commands
-    assert command[:2] == ["make", "published-crates-standalone-census"], command
-    variables = dict(word.split("=", 1) for word in command[2:])
-    assert variables["STANDALONE_CENSUS_OUT"] == "/census-out", command
-    # The Makefile's recipe puts the value on the census's command line,
-    # where the shell splits it at blanks (an empty value adds no word).
-    return code, variables["STANDALONE_CENSUS_ARGS"].split()
+    assert command[:2] == ["make", CENSUS_TARGET], command
+    words = census_recipe_arguments(dict(word.split("=", 1) for word in command[2:]))
+    assert words[:2] == ["--out", "/census-out"], words
+    return code, words[2:]
 
 
 def job_selections(crates, partitions, isolate, extra=()):
@@ -1445,6 +1472,17 @@ class CensusWorkflow(unittest.TestCase):
 
     def lines(self):
         return [line for line in CENSUS_WORKFLOW.read_text().splitlines() if not line.lstrip().startswith("#")]
+
+    def test_the_makefile_recipe_hands_the_out_directory_and_the_arguments_to_the_census(self):
+        # Unquoted: the shell splits the arguments into the census's words.
+        # A recipe without them would start a census of every crate.
+        self.assertEqual(census_recipe(), [
+            "@$(PYTHON) scripts/published_crates_standalone.py census "
+            "--out $(STANDALONE_CENSUS_OUT) $(STANDALONE_CENSUS_ARGS)"
+        ])
+
+    def test_no_job_may_fail_and_leave_the_gate_green(self):
+        self.assertNotIn("continue-on-error", "\n".join(self.lines()))
 
     def test_every_job_starts_its_census_through_the_jobs_script(self):
         text = "\n".join(self.lines())

@@ -71,7 +71,7 @@ Three things to know before copying this:
   [Cancel work](https://docs.rkat.ai/guides/mobs#cancel-work) in the mobs
   guide, which links the known issue.
 - [0.9.17 fixed a lost-result bug after `mob/cancel_all_work`](https://github.com/lukacf/meerkat/blob/v0.9.17/CHANGELOG.md#L477-L506).
-  On affected versions (0.9.5–0.9.16), if a run was cancelled at its boundary,
+  On affected versions (0.9.5 through 0.9.16), if a run was cancelled at its boundary,
   the first subsequent turn on a JSONL or in-memory store could make its model
   call and then lose the result. The default SQLite backend was unaffected.
   A missing result did not mean the work had not run; do not automatically

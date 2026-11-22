@@ -36,6 +36,14 @@ export type ReasoningEffortTurnOverride =
 export const REASONING_EFFORT_REFUSED_KIND = "reasoning_effort_refused";
 
 /**
+ * A device sign-in is required; an operator-token lease is not this cause.
+ * No built-in provider reports a cause yet.
+ */
+export const REASONING_CAUSE_NEW_SIGN_IN_REQUIRED = "new_sign_in_required";
+/** A held typed exchange outage leaves no usable account token. */
+export const REASONING_CAUSE_TOKEN_EXCHANGE_UNAVAILABLE = "token_exchange_unavailable";
+
+/**
  * Why a level is refused. A closed vocabulary: a reason this SDK does not
  * know is not parsed (see `reasoningEffortRefusal`).
  */
@@ -97,15 +105,27 @@ export interface ReasoningEffortRefusal {
   /** That setting's own level, when it is one. */
   readonly conflictingLevel?: ReasoningEffortLevel;
   /**
-   * Whether the same request can succeed later with no configuration
-   * change. True only for `supported_levels_unavailable` (the account's
-   * model list is not loaded yet); every other reason is permanent until
-   * the request or the configuration changes. Read from `reason`.
+   * Optional open account-state name. An absent cause means cause unknown,
+   * not that sign-in is required. Unknown and empty strings are retained.
+   */
+  readonly cause?: string;
+  /**
+   * Absolute eligibility time, an RFC 3339 timestamp kept as sent; not a
+   * countdown or recovery promise. Absent when no time was reported, which
+   * does not say that none applies. A refusal whose `not_before` is not a
+   * timestamp is not parsed, as in the typed server.
+   */
+  readonly notBefore?: string;
+  /**
+   * True for supported_levels_unavailable unless the known cause is
+   * new_sign_in_required. Unknown or absent causes keep the historical reason
+   * class. This does not schedule a retry.
    */
   readonly transient: boolean;
   /**
-   * The server's own mark of the transient class (`error.data.retryable`),
-   * when it sent one. It agrees with `transient`.
+   * The server's explicit mark, preserved even when it differs from transient.
+   * Older SDKs classify only by reason and may return transient true beside
+   * retryable false for a new-sign-in payload.
    */
   readonly retryable?: boolean;
 }
@@ -131,6 +151,27 @@ function parseRoute(value: unknown): ReasoningRoute | null | undefined {
   if (!isRecord(value)) return undefined;
   if (typeof value.backend !== "string" || typeof value.api !== "string") return undefined;
   return { backend: value.backend, api: value.api };
+}
+
+const TIMESTAMP =
+  /^([0-9]{4})-([0-9]{2})-([0-9]{2})[Tt]([0-9]{2}):([0-9]{2}):([0-9]{2})(?:\.[0-9]+)?(?:[Zz]|[+-]([0-9]{2}):([0-9]{2}))$/;
+
+/**
+ * Whether a value is an RFC 3339 date-time: a calendar date, `T` or `t`, a
+ * time of day, and `Z`, `z` or a numeric offset with a colon.
+ */
+function isTimestamp(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const match = TIMESTAMP.exec(value);
+  if (match === null) return false;
+  const [year, month, day, hour, minute, second] = match.slice(1, 7).map(Number);
+  const offsetHour = Number(match[7] ?? 0);
+  const offsetMinute = Number(match[8] ?? 0);
+  if (month < 1 || month > 12 || hour > 23 || minute > 59 || second > 60) return false;
+  if (offsetHour > 23 || offsetMinute > 59) return false;
+  const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1];
+  return day >= 1 && day <= days;
 }
 
 /**
@@ -160,6 +201,10 @@ export function parseReasoningEffortRefusal(
     levels = [...supported];
   }
   if (facts !== null && facts !== undefined && typeof facts !== "string") return undefined;
+  const cause = value.cause;
+  const notBefore = value.not_before;
+  if (cause !== undefined && cause !== null && typeof cause !== "string") return undefined;
+  if (notBefore !== undefined && notBefore !== null && !isTimestamp(notBefore)) return undefined;
   const conflictingParam = value.conflicting_param;
   const conflictingLevel = value.conflicting_level;
   if (conflictingParam !== undefined && conflictingParam !== null && typeof conflictingParam !== "string") {
@@ -178,7 +223,9 @@ export function parseReasoningEffortRefusal(
     facts: typeof facts === "string" ? facts : null,
     ...(typeof conflictingParam === "string" ? { conflictingParam } : {}),
     ...(isLevel(conflictingLevel) ? { conflictingLevel } : {}),
-    transient: reason === "supported_levels_unavailable",
+    ...(typeof cause === "string" ? { cause } : {}),
+    ...(isTimestamp(notBefore) ? { notBefore } : {}),
+    transient: reason === "supported_levels_unavailable" && cause !== REASONING_CAUSE_NEW_SIGN_IN_REQUIRED,
     ...(typeof retryable === "boolean" ? { retryable } : {}),
   };
 }

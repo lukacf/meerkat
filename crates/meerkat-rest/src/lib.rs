@@ -21627,6 +21627,178 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
         }
     }
 
+    /// [`MockLlmClient`] on an account route whose model list is not loaded,
+    /// which reports a cause and a fixed time when it is asked about it. It
+    /// counts how often it is asked and how many requests it serves.
+    struct CauseReportingMockLlmClient {
+        cause: Option<&'static str>,
+        asks: AtomicUsize,
+        requests: AtomicUsize,
+    }
+
+    impl CauseReportingMockLlmClient {
+        const NOT_BEFORE: &'static str = "2020-01-02T03:04:05Z";
+    }
+
+    #[async_trait]
+    impl LlmClient for CauseReportingMockLlmClient {
+        fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+            Some(meerkat_core::ReasoningRouteObservation {
+                backend: meerkat_core::ReasoningBackend::Anthropic(
+                    meerkat_core::provider_matrix::AnthropicBackendKind::Copilot,
+                ),
+                api: meerkat_core::ModelApi::Messages,
+                account: meerkat_core::AccountLevelStatement::ListUnavailable,
+                operator_levels: None,
+            })
+        }
+
+        fn on_reasoning_effort_unavailable(&self) -> meerkat_core::ReasoningEffortUnavailable {
+            self.asks.fetch_add(1, AtomicOrdering::SeqCst);
+            let mut held = meerkat_core::ReasoningEffortUnavailable::default();
+            held.cause = self.cause.map(str::to_string);
+            held.not_before = Self::NOT_BEFORE.parse().ok();
+            held
+        }
+
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+            Ok(messages.to_vec())
+        }
+
+        fn stream<'a>(
+            &'a self,
+            request: &'a LlmRequest,
+        ) -> Pin<Box<dyn futures::Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>> {
+            static MOCK: MockLlmClient = MockLlmClient;
+            self.requests.fetch_add(1, AtomicOrdering::SeqCst);
+            MOCK.stream(request)
+        }
+
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
+    /// A `POST /sessions` whose level is refused because the account's model
+    /// list is not loaded answers HTTP 400 with what the client reports when
+    /// it is asked: `retryable` is `false` when the client reports that a new
+    /// sign-in is required, and `true` for an exchange outage and for no
+    /// cause. The client is asked once, serves no request, and no session is
+    /// created: the error names none and the store holds none.
+    #[tokio::test]
+    async fn a_create_refused_with_a_cause_answers_http_400_with_its_own_retryable() {
+        use axum::body::Body;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        for (cause, retryable) in [
+            (
+                Some(meerkat_core::REASONING_CAUSE_NEW_SIGN_IN_REQUIRED),
+                false,
+            ),
+            (
+                Some(meerkat_core::REASONING_CAUSE_TOKEN_EXCHANGE_UNAVAILABLE),
+                true,
+            ),
+            (None, true),
+        ] {
+            let temp = TempDir::new().unwrap();
+            let mut state = AppState::load_from(temp.path().to_path_buf())
+                .await
+                .unwrap();
+            let client = Arc::new(CauseReportingMockLlmClient {
+                cause,
+                asks: AtomicUsize::new(0),
+                requests: AtomicUsize::new(0),
+            });
+            state.llm_client_override = Some(client.clone());
+            let response = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                router(state.clone()).oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri("/sessions")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            json!({"prompt": "Reply briefly.", "reasoning_effort": "high"})
+                                .to_string(),
+                        ))
+                        .unwrap(),
+                ),
+            )
+            .await
+            .expect("the refused create route timed out")
+            .unwrap();
+            let status = response.status();
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            let payload: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "cause {cause:?}: {payload}"
+            );
+            assert_eq!(
+                payload["code"], "INVALID_PARAMS",
+                "cause {cause:?}: {payload}"
+            );
+            let details = &payload["details"];
+            let refusal = &details["reasoning_effort_refusal"];
+            assert_eq!(
+                (details["kind"].as_str(), refusal["reason"].as_str()),
+                (
+                    Some("reasoning_effort_refused"),
+                    Some("supported_levels_unavailable")
+                ),
+                "cause {cause:?}: {payload}"
+            );
+            assert_eq!(
+                details["retryable"], retryable,
+                "cause {cause:?}: {payload}"
+            );
+            assert_eq!(
+                refusal.get("cause").and_then(Value::as_str),
+                cause,
+                "cause {cause:?}: {payload}"
+            );
+            assert_eq!(
+                refusal["not_before"],
+                CauseReportingMockLlmClient::NOT_BEFORE,
+                "cause {cause:?}: {payload}"
+            );
+            assert_eq!(
+                (details.get("session_id"), details.get("session_created")),
+                (None, None),
+                "cause {cause:?}: no session was created: {payload}"
+            );
+            // The witness: the cause is the answer of the request's client,
+            // asked once for this refusal, and no request was sent.
+            assert_eq!(
+                client.asks.load(AtomicOrdering::SeqCst),
+                1,
+                "cause {cause:?}"
+            );
+            assert_eq!(client.requests.load(AtomicOrdering::SeqCst), 0);
+            // No session was created: the store holds none.
+            let stored = state
+                .session_service
+                .list(meerkat_core::service::SessionQuery::default())
+                .await
+                .expect("list the sessions the service holds");
+            assert!(
+                stored.is_empty(),
+                "cause {cause:?}: a create refused for its level leaves no session: {} left",
+                stored.len()
+            );
+        }
+    }
+
     #[cfg(feature = "mob")]
     #[tokio::test]
     async fn test_compatibility_mob_routes_are_not_found() {

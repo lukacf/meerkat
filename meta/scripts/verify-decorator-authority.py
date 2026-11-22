@@ -25,6 +25,11 @@ applies to a request that carries no tag, so a resolved `reasoning_effort`
 level replaces them instead of joining them. Every production decorator
 defines it as well.
 
+The same companion rule applies to `on_reasoning_effort_unavailable`: its
+empty default would hide the selected client's held cause and time. This scan
+covers AgentLlmClient decorators only; behavior rows also cover the raw
+LlmClient wrappers and composed chains.
+
 THREE TRAPS THIS AVOIDS, all found the hard way:
 
   FILE-LEVEL MATCHING IS NOT IMPL-LEVEL. Asking whether the FILE containing an
@@ -154,6 +159,18 @@ def main() -> int:
                     "            self.inner.default_provider_tag()\n"
                     "        }"
                 )
+            if "fn on_reasoning_effort_unavailable" not in body and name in ROUTE_EXEMPT:
+                print(f"  exempt   {name} on_reasoning_effort_unavailable ({ROUTE_EXEMPT[name]})")
+            elif "fn on_reasoning_effort_unavailable" not in body:
+                failures.append(
+                    f"{name} ({rel}:{i + 1}) does not define on_reasoning_effort_unavailable. "
+                    "The empty trait default hides the wrapped client's diagnostics. "
+                    "Forward it to that client:\n"
+                    "        fn on_reasoning_effort_unavailable(&self) "
+                    "-> meerkat_core::ReasoningEffortUnavailable {\n"
+                    "            self.inner.on_reasoning_effort_unavailable()\n"
+                    "        }"
+                )
             if "fn request_attempt_authority" in body:
                 continue
             if name in EXEMPT:
@@ -181,7 +198,7 @@ def main() -> int:
     if failures:
         print(
             "production AgentLlmClient decorators must forward authority and "
-            "define reasoning_route and default_provider_tag:",
+            "define reasoning_route, default_provider_tag and on_reasoning_effort_unavailable:",
             file=sys.stderr,
         )
         for f in failures:

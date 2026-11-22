@@ -704,6 +704,10 @@ impl AgentLlmClient for LlmClientAdapter {
         self.client.reasoning_route()
     }
 
+    fn on_reasoning_effort_unavailable(&self) -> meerkat_core::ReasoningEffortUnavailable {
+        self.client.on_reasoning_effort_unavailable()
+    }
+
     /// The tag this adapter was configured with: it is applied to every
     /// request that carries no tag of its own.
     fn default_provider_tag(&self) -> Option<ProviderTag> {
@@ -1045,7 +1049,7 @@ mod tests {
 
     /// The adapter reports exactly the route its client reports.
     #[test]
-    fn adapter_forwards_the_route_its_client_reports() {
+    fn adapter_forwards_the_route_its_client_reports() -> Result<(), chrono::ParseError> {
         use meerkat_core::model_profile::capabilities::EffortLevel;
         use meerkat_core::provider_matrix::OpenAiBackendKind;
         use meerkat_core::{
@@ -1054,11 +1058,21 @@ mod tests {
 
         struct RoutedClient {
             observation: ReasoningRouteObservation,
+            calls: Arc<std::sync::atomic::AtomicUsize>,
+            not_before: chrono::DateTime<chrono::Utc>,
         }
 
         #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
         #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
         impl LlmClient for RoutedClient {
+            fn on_reasoning_effort_unavailable(&self) -> meerkat_core::ReasoningEffortUnavailable {
+                self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let mut facts = meerkat_core::ReasoningEffortUnavailable::default();
+                facts.cause = Some("fixture_unavailable".to_string());
+                facts.not_before = Some(self.not_before);
+                facts
+            }
+
             fn reasoning_route(&self) -> Option<ReasoningRouteObservation> {
                 Some(self.observation.clone())
             }
@@ -1082,13 +1096,25 @@ mod tests {
             account: AccountLevelStatement::Stated(vec![EffortLevel::Low, EffortLevel::High]),
             operator_levels: None,
         };
+        let not_before = "2020-01-02T03:04:05Z".parse::<chrono::DateTime<chrono::Utc>>()?;
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let adapter = LlmClientAdapter::new(
             Arc::new(RoutedClient {
                 observation: observation.clone(),
+                calls: Arc::clone(&calls),
+                not_before,
             }),
             "test-model".to_string(),
         );
         assert_eq!(AgentLlmClient::reasoning_route(&adapter), Some(observation));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        for expected in 1..=2 {
+            let facts = AgentLlmClient::on_reasoning_effort_unavailable(&adapter);
+            assert_eq!(facts.cause.as_deref(), Some("fixture_unavailable"));
+            assert_eq!(facts.not_before, Some(not_before));
+            assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), expected);
+        }
+        Ok(())
     }
 
     /// The adapter's default tag is the tag it was configured with, which it

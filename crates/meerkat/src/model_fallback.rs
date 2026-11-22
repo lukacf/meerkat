@@ -199,6 +199,12 @@ impl ModelFallbackClient {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl AgentLlmClient for ModelFallbackClient {
+    fn on_reasoning_effort_unavailable(&self) -> meerkat_core::ReasoningEffortUnavailable {
+        // Sample once; a concurrent switch does not retarget this call.
+        let client = Arc::clone(&self.candidates[self.active_index()].client);
+        client.on_reasoning_effort_unavailable()
+    }
+
     fn controller_model_selection(&self) -> Option<meerkat_core::ControllerModelSelection> {
         self.candidates[self.active_index()]
             .client
@@ -667,6 +673,7 @@ mod tests {
         model: String,
         seen_tools: Arc<Mutex<Vec<Vec<String>>>>,
         pressure_available: bool,
+        diagnostic_calls: Arc<std::sync::atomic::AtomicUsize>,
     }
 
     /// The route a scripted candidate of `provider` reports: its family's
@@ -719,6 +726,19 @@ mod tests {
     #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
     #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
     impl AgentLlmClient for ScriptedClient {
+        fn on_reasoning_effort_unavailable(&self) -> meerkat_core::ReasoningEffortUnavailable {
+            self.diagnostic_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let mut facts = meerkat_core::ReasoningEffortUnavailable::default();
+            facts.cause = Some(format!("fixture_{}", self.model));
+            facts.not_before = Some(
+                "2020-01-02T03:04:05Z"
+                    .parse()
+                    .expect("absolute fixture time"),
+            );
+            facts
+        }
+
         fn controller_model_selection(&self) -> Option<meerkat_core::ControllerModelSelection> {
             let binding = meerkat_core::AuthBindingRef {
                 realm: meerkat_core::RealmId::parse("fixture-realm").unwrap(),
@@ -864,6 +884,7 @@ mod tests {
                 model: model.to_string(),
                 seen_tools,
                 pressure_available: true,
+                diagnostic_calls: Arc::default(),
             }),
             target_profile,
         }
@@ -938,20 +959,36 @@ mod tests {
     /// with the candidate's own observation and adds nothing to it.
     #[test]
     fn every_adapter_reports_its_route() {
-        let primary = candidate(
+        let mut primary = candidate(
             Provider::OpenAI,
             "primary",
             Some(1_000_000),
             Some(8192),
             Arc::default(),
         );
-        let target = candidate(
+        let mut target = candidate(
             Provider::Anthropic,
             "target",
             Some(1_000_000),
             Some(8192),
             Arc::default(),
         );
+        let primary_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let target_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        primary.client = Arc::new(ScriptedClient {
+            provider: Provider::OpenAI,
+            model: "primary".to_string(),
+            seen_tools: Arc::default(),
+            pressure_available: true,
+            diagnostic_calls: Arc::clone(&primary_calls),
+        });
+        target.client = Arc::new(ScriptedClient {
+            provider: Provider::Anthropic,
+            model: "target".to_string(),
+            seen_tools: Arc::default(),
+            pressure_available: true,
+            diagnostic_calls: Arc::clone(&target_calls),
+        });
         let previous = primary.identity.clone();
         let next = target.identity.clone();
         let client =
@@ -962,8 +999,34 @@ mod tests {
         let target_route = scripted_route(Provider::Anthropic);
         assert!(primary_route.is_some() && primary_route != target_route);
         assert_eq!(client.reasoning_route(), primary_route);
+        assert_eq!(primary_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(target_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let facts = client.on_reasoning_effort_unavailable();
+        assert_eq!(facts.cause.as_deref(), Some("fixture_primary"));
+        assert_eq!(
+            facts.not_before,
+            Some(
+                "2020-01-02T03:04:05Z"
+                    .parse::<chrono::DateTime<chrono::Utc>>()
+                    .unwrap()
+            )
+        );
+        assert_eq!(primary_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(target_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
         client.commit_model_fallback(&previous, &next).unwrap();
         assert_eq!(client.reasoning_route(), target_route);
+        let facts = client.on_reasoning_effort_unavailable();
+        assert_eq!(facts.cause.as_deref(), Some("fixture_target"));
+        assert_eq!(
+            facts.not_before,
+            Some(
+                "2020-01-02T03:04:05Z"
+                    .parse::<chrono::DateTime<chrono::Utc>>()
+                    .unwrap()
+            )
+        );
+        assert_eq!(primary_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(target_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     /// The fallback client reports the default tag of its active candidate,
@@ -1078,6 +1141,7 @@ mod tests {
             model: "target".into(),
             seen_tools: Arc::default(),
             pressure_available: false,
+            diagnostic_calls: Arc::default(),
         });
         let client =
             ModelFallbackClient::new(vec![primary, target], Default::default(), Vec::new(), None)

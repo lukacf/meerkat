@@ -15,6 +15,9 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from pathlib import Path
+
+import meerkat as sdk
 from typing import Any
 
 import pytest
@@ -711,3 +714,94 @@ def test_a_fallback_skip_reason_this_sdk_does_not_type_is_kept(reason: str) -> N
     assert isinstance(event, UnknownEvent)
     assert event.type == "model_fallback_skipped"
     assert event.data == raw
+
+
+@pytest.fixture(scope="module")
+def diagnostic_cases() -> dict[str, Any]:
+    """Shared producer cases require a full Meerkat repository checkout."""
+    path = (
+        Path(__file__).resolve().parents[3]
+        / "crates/meerkat-core/src/reasoning_effort/diagnostics_cases.json"
+    )
+    if not path.is_file():
+        pytest.fail("Diagnostic compatibility cases require a full Meerkat repository checkout.")
+    return json.loads(path.read_text())
+
+
+def test_diagnostic_fields_and_instance_class_preserve_the_wire(diagnostic_cases: dict[str, Any]) -> None:
+    for case in diagnostic_cases["typed_cases"] + diagnostic_cases["compatibility_cases"]:
+        data = case["data"]
+        error = refused(data)
+        result = reasoning_effort_refusal(error)
+        assert result is not None, case["name"]
+        wire = data["reasoning_effort_refusal"]
+        assert result.cause == wire.get("cause"), case["name"]
+        assert result.not_before == wire.get("not_before"), case["name"]
+        assert result.transient is case["transient"], case["name"]
+        mark = data.get("retryable")
+        assert result.retryable is (mark if isinstance(mark, bool) else None), case["name"]
+        assert error.details == data
+
+
+def test_diagnostic_fields_reject_non_strings_without_losing_raw_error(diagnostic_cases: dict[str, Any]) -> None:
+    for field in ("cause", "not_before"):
+        for value in diagnostic_cases["invalid_values"]:
+            data = with_refusal(**{field: value})
+            error = refused(data)
+            assert reasoning_effort_refusal(error) is None, (field, value)
+            assert error.details == data
+    error = refused(with_refusal(reason="future_reason", cause="future_cause"))
+    assert reasoning_effort_refusal(error) is None
+    assert error.details["reasoning_effort_refusal"]["cause"] == "future_cause"
+
+
+def test_not_before_is_a_timestamp_or_the_refusal_is_not_parsed(diagnostic_cases: dict[str, Any]) -> None:
+    times = diagnostic_cases["times"]
+    assert times["readable"] and times["unreadable"]
+    for value in times["readable"]:
+        result = reasoning_effort_refusal(refused(with_refusal(not_before=value)))
+        assert result is not None, value
+        assert result.not_before == value
+    for value in times["unreadable"]:
+        data = with_refusal(not_before=value)
+        error = refused(data)
+        assert reasoning_effort_refusal(error) is None, value
+        assert error.details == data
+        wire = data["reasoning_effort_refusal"]
+        reason = run_failed({"reason_type": "reasoning_effort_refused", "refusal": wire}).error_report.reason
+        assert reason.reason_type == "unknown", value
+        assert reason.reasoning_effort_refusal is None
+        assert reason.raw["refusal"] == wire
+
+
+def test_run_failed_preserves_optional_diagnostics(diagnostic_cases: dict[str, Any]) -> None:
+    for case in diagnostic_cases["typed_cases"]:
+        event = run_failed(case["event_reason"])
+        result = event.error_report.reason.reasoning_effort_refusal
+        assert result is not None
+        wire = case["data"]["reasoning_effort_refusal"]
+        assert result.cause == wire.get("cause")
+        assert result.not_before == wire.get("not_before")
+        assert result.transient is case["transient"]
+        assert result.retryable is None, "RunFailed has no outer RPC retryable mark"
+
+
+def test_run_failed_unreadable_diagnostics_retain_raw_fields(diagnostic_cases: dict[str, Any]) -> None:
+    original = diagnostic_cases["typed_cases"][0]["data"]["reasoning_effort_refusal"]
+    for field in ("cause", "not_before"):
+        for value in diagnostic_cases["invalid_values"]:
+            wire = {**original, field: value}
+            reason = run_failed({"reason_type": "reasoning_effort_refused", "refusal": wire}).error_report.reason
+            assert reason.reason_type == "unknown"
+            assert reason.raw_reason_type == "reasoning_effort_refused"
+            assert reason.reasoning_effort_refusal is None
+            assert reason.raw["refusal"] == wire
+    newer = {**original, "reason": "future_reason", "cause": "future_cause"}
+    reason = run_failed({"reason_type": "reasoning_effort_refused", "refusal": newer}).error_report.reason
+    assert reason.reason_type == "unknown"
+    assert reason.raw["refusal"] == newer
+
+
+def test_known_diagnostic_constants_keep_wire_values_open(diagnostic_cases: dict[str, Any]) -> None:
+    assert getattr(sdk, "REASONING_CAUSE_NEW_SIGN_IN_REQUIRED", None) == diagnostic_cases["known_causes"]["new_sign_in_required"]
+    assert getattr(sdk, "REASONING_CAUSE_TOKEN_EXCHANGE_UNAVAILABLE", None) == diagnostic_cases["known_causes"]["token_exchange_unavailable"]

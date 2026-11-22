@@ -476,6 +476,10 @@ impl GeminiCopilotChatClient {
 #[cfg(all(feature = "copilot", not(target_arch = "wasm32")))]
 #[async_trait]
 impl LlmClient for GeminiCopilotChatClient {
+    fn on_reasoning_effort_unavailable(&self) -> meerkat_core::ReasoningEffortUnavailable {
+        self.inner.on_reasoning_effort_unavailable()
+    }
+
     async fn prepare_controller_credential(&self) -> Result<(), meerkat_core::auth::AuthError> {
         self.inner.prepare_controller_credential().await
     }
@@ -2462,6 +2466,7 @@ mod tests {
 
     #[cfg(all(feature = "copilot", not(target_arch = "wasm32")))]
     struct CapturingCopilotChatClient {
+        diagnostic_calls: Arc<std::sync::atomic::AtomicUsize>,
         seen_provider_params:
             Arc<Mutex<Option<meerkat_core::lifecycle::run_primitive::ProviderTag>>>,
     }
@@ -2469,6 +2474,19 @@ mod tests {
     #[cfg(all(feature = "copilot", not(target_arch = "wasm32")))]
     #[async_trait]
     impl LlmClient for CapturingCopilotChatClient {
+        fn on_reasoning_effort_unavailable(&self) -> meerkat_core::ReasoningEffortUnavailable {
+            self.diagnostic_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let mut facts = meerkat_core::ReasoningEffortUnavailable::default();
+            facts.cause = Some("fixture_unavailable".to_string());
+            facts.not_before = Some(
+                "2020-01-02T03:04:05Z"
+                    .parse()
+                    .expect("absolute fixture time"),
+            );
+            facts
+        }
+
         fn project_replay_messages(
             &self,
             messages: &[meerkat_core::Message],
@@ -2512,6 +2530,7 @@ mod tests {
         let seen = Arc::new(Mutex::new(None));
         let client = GeminiCopilotChatClient {
             inner: Arc::new(CapturingCopilotChatClient {
+                diagnostic_calls: Arc::default(),
                 seen_provider_params: Arc::clone(&seen),
             }),
         };
@@ -2547,6 +2566,7 @@ mod tests {
 
         let client = GeminiCopilotChatClient {
             inner: Arc::new(CapturingCopilotChatClient {
+                diagnostic_calls: Arc::default(),
                 seen_provider_params: Arc::new(Mutex::new(None)),
             }),
         };
@@ -2571,9 +2591,11 @@ mod tests {
     #[test]
     fn every_adapter_reports_its_route() {
         let inner = Arc::new(CapturingCopilotChatClient {
+            diagnostic_calls: Arc::default(),
             seen_provider_params: Arc::new(Mutex::new(None)),
         });
         assert_eq!(inner.reasoning_route(), None);
+        let calls = Arc::clone(&inner.diagnostic_calls);
         let client = GeminiCopilotChatClient { inner };
         assert_eq!(
             client.reasoning_route(),
@@ -2584,6 +2606,20 @@ mod tests {
                 operator_levels: None,
             })
         );
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        for expected in 1..=2 {
+            let facts = client.on_reasoning_effort_unavailable();
+            assert_eq!(facts.cause.as_deref(), Some("fixture_unavailable"));
+            assert_eq!(
+                facts.not_before,
+                Some(
+                    "2020-01-02T03:04:05Z"
+                        .parse::<chrono::DateTime<chrono::Utc>>()
+                        .unwrap()
+                )
+            );
+            assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), expected);
+        }
     }
 
     /// The Gemini family's Copilot client serves one route and answers for
@@ -2594,6 +2630,7 @@ mod tests {
     fn the_route_of_a_projection_is_the_route_the_client_reports() {
         let client = GeminiCopilotChatClient {
             inner: Arc::new(CapturingCopilotChatClient {
+                diagnostic_calls: Arc::default(),
                 seen_provider_params: Arc::new(Mutex::new(None)),
             }),
         };
@@ -2625,6 +2662,7 @@ mod tests {
             let seen = Arc::new(Mutex::new(None));
             let client = GeminiCopilotChatClient {
                 inner: Arc::new(CapturingCopilotChatClient {
+                    diagnostic_calls: Arc::default(),
                     seen_provider_params: Arc::clone(&seen),
                 }),
             };

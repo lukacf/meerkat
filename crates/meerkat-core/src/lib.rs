@@ -548,11 +548,13 @@ pub use realtime_transcript_sidecar::{
     RealtimeTranscriptSnapshotReasonV1,
 };
 pub use reasoning_effort::{
-    AccountLevelStatement, ModelApi, ReasoningBackend, ReasoningEffortDecidedBy,
+    AccountLevelStatement, ModelApi, REASONING_CAUSE_NEW_SIGN_IN_REQUIRED,
+    REASONING_CAUSE_TOKEN_EXCHANGE_UNAVAILABLE, ReasoningBackend, ReasoningEffortDecidedBy,
     ReasoningEffortRefusal, ReasoningEffortRefusalReason, ReasoningEffortReport,
-    ReasoningEffortResolution, ReasoningEffortSent, ReasoningFactsSource, ReasoningLevelFacts,
-    ReasoningResolveInput, ReasoningResolveMode, ReasoningRoute, ReasoningRouteObservation,
-    direct_route_observation, resolve_reasoning_effort, supported_reasoning_levels,
+    ReasoningEffortResolution, ReasoningEffortSent, ReasoningEffortUnavailable,
+    ReasoningFactsSource, ReasoningLevelFacts, ReasoningResolveInput, ReasoningResolveMode,
+    ReasoningRoute, ReasoningRouteObservation, direct_route_observation, resolve_reasoning_effort,
+    supported_reasoning_levels,
 };
 pub use retry::{
     DEFAULT_STREAM_INACTIVITY_TIMEOUT, LlmRetryFailure, LlmRetryFailureKind, LlmRetryPlan,

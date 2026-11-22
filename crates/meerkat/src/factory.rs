@@ -11740,7 +11740,14 @@ impl AgentFactory {
                     .profile_witness_for_identity(config, &resolved_llm_identity)
                     .and_then(|witness| witness.catalog_capabilities()),
             )
-            .map_err(BuildAgentError::ReasoningEffortRefused)?;
+            .map_err(|mut refusal| {
+                if refusal.reason.is_transient() {
+                    let diagnostics = llm_adapter.on_reasoning_effort_unavailable();
+                    refusal.cause = diagnostics.cause;
+                    refusal.not_before = diagnostics.not_before;
+                }
+                BuildAgentError::ReasoningEffortRefused(refusal)
+            })?;
         }
         if let Some(params) = build_config.provider_params.clone() {
             builder = builder.provider_params(params);

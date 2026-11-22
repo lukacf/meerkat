@@ -121,6 +121,17 @@ pub trait LlmClient: Send + Sync {
         None
     }
 
+    /// Held diagnostics for a strict reasoning-effort refusal whose reason is
+    /// `supported_levels_unavailable`. The answer can itself make that
+    /// refusal not retryable.
+    /// This returns immediately. A provider reports what it holds and must
+    /// not acquire a new credential, send the refused inference request or
+    /// change its level.
+    /// Wrappers forward to the same selected client; the default does nothing.
+    fn on_reasoning_effort_unavailable(&self) -> meerkat_core::ReasoningEffortUnavailable {
+        meerkat_core::ReasoningEffortUnavailable::default()
+    }
+
     /// The route observation of the route `projection` is bound to: what
     /// [`Self::reasoning_route`] reported for the route this client
     /// projected the request on. A client whose route can change between

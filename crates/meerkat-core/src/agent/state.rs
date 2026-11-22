@@ -1333,11 +1333,13 @@ where
         // Every preparation resolves the level again, against the route the
         // serving client observes now: a preparation repeated after a route
         // change never reuses an earlier translation.
-        let reasoning_effort = self.resolve_request_reasoning_effort(
-            self.client.as_ref(),
-            self.active_model_profile.as_ref(),
-            &mut provider_params,
-        )?;
+        let reasoning_effort = self
+            .resolve_request_reasoning_effort(
+                self.client.as_ref(),
+                self.active_model_profile.as_ref(),
+                &mut provider_params,
+            )
+            .map_err(|error| self.enrich_selected_reasoning_effort_refusal(error))?;
         Arc::clone(&self.client)
             .prepare_request_attempt_authorized(
                 messages,
@@ -1389,6 +1391,20 @@ where
         .map_err(AgentError::ReasoningEffortRefused)
     }
 
+    /// Enrich only a real strict judgment, never the shared resolver's probes.
+    /// Nothing is sent and nothing is stored here.
+    fn enrich_selected_reasoning_effort_refusal(&self, error: AgentError) -> AgentError {
+        match error {
+            AgentError::ReasoningEffortRefused(mut refusal) if refusal.reason.is_transient() => {
+                let diagnostics = self.client.on_reasoning_effort_unavailable();
+                refusal.cause = diagnostics.cause;
+                refusal.not_before = diagnostics.not_before;
+                AgentError::ReasoningEffortRefused(refusal)
+            }
+            other => other,
+        }
+    }
+
     /// The session's level as it resolves on the session's route now, for
     /// the run-start report: the session's own params on a scratch copy,
     /// against the session client. Nothing is sent and nothing is stored.
@@ -1409,6 +1425,7 @@ where
             self.active_model_profile.as_ref(),
             &mut scratch,
         )
+        .map_err(|error| self.enrich_selected_reasoning_effort_refusal(error))
         .map(|resolution| resolution.map(|resolution| *resolution))
     }
 
@@ -36229,6 +36246,8 @@ mod tests {
             /// Fail the backup's next request recoverably and move the backup
             /// onto this route at that moment.
             backup_failure_then_route: Mutex<Option<crate::ReasoningRouteObservation>>,
+            diagnostic_calls: std::sync::atomic::AtomicUsize,
+            diagnostic_counts_at_probe: Mutex<Vec<usize>>,
             probed: Mutex<Vec<Option<LeveledParams>>>,
             served: Mutex<Vec<(&'static str, Option<LeveledParams>)>>,
         }
@@ -36267,6 +36286,8 @@ mod tests {
                         &[EffortLevel::Low, EffortLevel::High],
                     )),
                     backup_failure_then_route: Mutex::new(None),
+                    diagnostic_calls: std::sync::atomic::AtomicUsize::new(0),
+                    diagnostic_counts_at_probe: Mutex::new(Vec::new()),
                     probed: Mutex::new(Vec::new()),
                     served: Mutex::new(Vec::new()),
                 }
@@ -36317,6 +36338,15 @@ mod tests {
         #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
         #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
         impl AgentLlmClient for LeveledFallbackClient {
+            fn on_reasoning_effort_unavailable(&self) -> crate::ReasoningEffortUnavailable {
+                self.diagnostic_calls
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                crate::ReasoningEffortUnavailable {
+                    cause: Some("fixture_unavailable".to_string()),
+                    not_before: Some("2020-01-02T03:04:05Z".parse().unwrap()),
+                }
+            }
+
             fn reasoning_route(&self) -> Option<crate::ReasoningRouteObservation> {
                 Some(if self.on_backup() {
                     self.backup_route()
@@ -36333,6 +36363,10 @@ mod tests {
                 _temperature: Option<f32>,
                 params: Option<&LeveledParams>,
             ) -> Result<Option<crate::ProviderRequestPressure>, AgentError> {
+                self.diagnostic_counts_at_probe.lock().unwrap().push(
+                    self.diagnostic_calls
+                        .load(std::sync::atomic::Ordering::SeqCst),
+                );
                 self.probed.lock().unwrap().push(params.cloned());
                 if params.is_some_and(|params| params.reasoning_effort.is_some()) {
                     return Err(AgentError::InternalError(
@@ -36705,49 +36739,92 @@ mod tests {
         #[tokio::test]
         async fn a_level_refused_on_the_fallback_target_stays_the_typed_refusal() {
             use crate::model_profile::capabilities::EffortLevel;
+            let mut unavailable = leveled_account_route(crate::ModelApi::Responses, &[]);
+            unavailable.account = crate::AccountLevelStatement::ListUnavailable;
+            for (next_route, reason, expected_calls) in [
+                (
+                    leveled_account_route(crate::ModelApi::Responses, &[EffortLevel::Low]),
+                    crate::ReasoningEffortRefusalReason::UnsupportedLevel,
+                    0,
+                ),
+                (
+                    unavailable,
+                    crate::ReasoningEffortRefusalReason::SupportedLevelsUnavailable,
+                    1,
+                ),
+            ] {
+                let client = Arc::new(LeveledFallbackClient::new());
+                let mut agent = leveled_fallback_agent(&client).await;
+                let (result, _) = run_leveled(&mut agent, "trigger fallback").await;
+                result.expect("the fallback attempt runs at the session's level");
+                let probes_before = client.probed().len();
 
-            let client = Arc::new(LeveledFallbackClient::new());
-            let mut agent = leveled_fallback_agent(&client).await;
-            let (result, _) = run_leveled(&mut agent, "trigger fallback").await;
-            result.expect("the fallback attempt runs at the session's level");
-            let probes_before = client.probed().len();
+                // Run-start still succeeds. Only the next served request changes
+                // the route, so the retry actually visits the resume probe.
+                *client.backup_failure_then_route.lock().unwrap() = Some(next_route);
+                let served_before = client.served().len();
+                let (result, events) = run_leveled(&mut agent, "the route changes").await;
+                assert!(
+                    events
+                        .iter()
+                        .any(|event| matches!(event, crate::AgentEvent::RunStarted { .. })),
+                    "run-start succeeded before the route changed"
+                );
+                assert_eq!(
+                    client.served().len(),
+                    served_before + 1,
+                    "only the scripted failing request was served; no refused retry inference"
+                );
+                let error = result.expect_err("the route no longer takes the level");
+                let AgentError::ReasoningEffortRefused(refusal) = &error else {
+                    panic!("expected the typed reasoning effort refusal, got {error:?}");
+                };
+                assert_eq!(refusal.requested, EffortLevel::High);
+                assert_eq!(refusal.reason, reason);
+                assert_eq!(refusal.model, "backup");
+                assert_eq!(
+                    client
+                        .diagnostic_calls
+                        .load(std::sync::atomic::Ordering::SeqCst),
+                    expected_calls
+                );
+                assert!(
+                    client
+                        .diagnostic_counts_at_probe
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .all(|count| *count == 0),
+                    "the real resume probe never invokes the diagnostic hook"
+                );
+                assert_eq!(
+                    refusal.cause.as_deref(),
+                    (expected_calls == 1).then_some("fixture_unavailable")
+                );
+                assert_eq!(
+                    refusal.not_before,
+                    (expected_calls == 1).then(|| "2020-01-02T03:04:05Z".parse().unwrap())
+                );
 
-            // The target's next request fails recoverably, and from then on its
-            // account states only `low`.
-            *client.backup_failure_then_route.lock().unwrap() = Some(leveled_account_route(
-                crate::ModelApi::Responses,
-                &[EffortLevel::Low],
-            ));
-            let (result, _) = run_leveled(&mut agent, "the route changes").await;
-            let error = result.expect_err("the route no longer takes the level");
-            let AgentError::ReasoningEffortRefused(refusal) = &error else {
-                panic!("expected the typed reasoning effort refusal, got {error:?}");
-            };
-            assert_eq!(refusal.requested, EffortLevel::High);
-            assert_eq!(
-                refusal.reason,
-                crate::ReasoningEffortRefusalReason::UnsupportedLevel
-            );
-            assert_eq!(refusal.model, "backup");
-
-            let probed = client.probed();
-            let last = probed
-                .last()
-                .expect("the retry's resume admission probed")
-                .as_ref()
-                .expect("the probe carries params");
-            assert!(
-                probed.len() > probes_before,
-                "the retry's resume admission probed the target"
-            );
-            assert_eq!(
-                last.reasoning_effort, None,
-                "a refused level is dropped from the probe, never handed on unresolved"
-            );
-            assert!(
-                last.provider_tag.is_none(),
-                "and nothing is written in its place: {last:?}"
-            );
+                let probed = client.probed();
+                let last = probed
+                    .last()
+                    .expect("the retry's resume admission probed")
+                    .as_ref()
+                    .expect("the probe carries params");
+                assert!(
+                    probed.len() > probes_before,
+                    "the retry's resume admission probed the target"
+                );
+                assert_eq!(
+                    last.reasoning_effort, None,
+                    "a refused level is dropped from the probe, never handed on unresolved"
+                );
+                assert!(
+                    last.provider_tag.is_none(),
+                    "and nothing is written in its place: {last:?}"
+                );
+            }
         }
 
         /// The reports of a turn's reasoning preference, one per attempt, in

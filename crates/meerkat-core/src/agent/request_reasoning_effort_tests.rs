@@ -214,6 +214,88 @@ impl AgentLlmClient for RouteClient {
     }
 }
 
+/// A selected client with observable diagnostics; the plain RouteClient keeps
+/// exercising the trait's unchanged empty default.
+struct DiagnosticRouteClient {
+    inner: RouteClient,
+    calls: AtomicUsize,
+}
+
+impl DiagnosticRouteClient {
+    fn new(inner: RouteClient) -> Self {
+        Self {
+            inner,
+            calls: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl std::ops::Deref for DiagnosticRouteClient {
+    type Target = RouteClient;
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+#[async_trait]
+impl AgentLlmClient for DiagnosticRouteClient {
+    fn reasoning_route(&self) -> Option<ReasoningRouteObservation> {
+        self.inner.reasoning_route()
+    }
+    fn default_provider_tag(&self) -> Option<ProviderTag> {
+        self.inner.default_provider_tag()
+    }
+    fn on_reasoning_effort_unavailable(&self) -> crate::ReasoningEffortUnavailable {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        crate::ReasoningEffortUnavailable {
+            cause: Some("fixture_unavailable".to_string()),
+            not_before: Some("2020-01-02T03:04:05Z".parse().unwrap()),
+        }
+    }
+    async fn stream_response(
+        &self,
+        messages: &[Message],
+        tools: &[Arc<ToolDef>],
+        max_tokens: u32,
+        temperature: Option<f32>,
+        params: Option<&ProviderParamsOverride>,
+    ) -> Result<LlmStreamResult, AgentError> {
+        self.inner
+            .stream_response(messages, tools, max_tokens, temperature, params)
+            .await
+    }
+    fn prepare_model_fallback(
+        &self,
+        failure: &AgentError,
+        request: &meerkat_core::model_fallback::ModelFallbackRequest<'_>,
+    ) -> Result<
+        meerkat_core::AgentLlmFallbackSwitch,
+        Vec<meerkat_core::AgentLlmFallbackSkippedTarget>,
+    > {
+        self.inner.prepare_model_fallback(failure, request)
+    }
+    fn provider(&self) -> Provider {
+        self.inner.provider()
+    }
+    fn model(&self) -> &str {
+        self.inner.model()
+    }
+}
+
+#[test]
+fn refusal_diagnostics_default_client_is_empty_without_observations_or_requests() {
+    let client = RouteClient::new(None);
+    let erased: &dyn AgentLlmClient = &client;
+    for _ in 0..3 {
+        let diagnostics = erased.on_reasoning_effort_unavailable();
+        assert_eq!(diagnostics.cause, None);
+        assert_eq!(diagnostics.not_before, None);
+    }
+    assert_eq!(client.reads(), (0, 0));
+    assert!(client.served().is_empty());
+    assert_eq!(client.fallback_proposals.load(Ordering::SeqCst), 0);
+}
+
 fn text(reply: &str) -> LlmStreamResult {
     LlmStreamResult::new(
         vec![AssistantBlock::Text {
@@ -405,9 +487,12 @@ fn base_builder(params: ProviderParamsOverride) -> AgentBuilder {
         .provider_params(params)
 }
 
-type TestAgent = crate::agent::Agent<RouteClient, LookupTool, NoopStore>;
+type TestAgent<L = RouteClient> = crate::agent::Agent<L, LookupTool, NoopStore>;
 
-async fn build(client: &Arc<RouteClient>, builder: AgentBuilder) -> TestAgent {
+async fn build<L: AgentLlmClient + 'static>(
+    client: &Arc<L>,
+    builder: AgentBuilder,
+) -> TestAgent<L> {
     builder
         .build_standalone(
             Arc::clone(client),
@@ -417,8 +502,8 @@ async fn build(client: &Arc<RouteClient>, builder: AgentBuilder) -> TestAgent {
         .await
 }
 
-async fn run_collecting(
-    agent: &mut TestAgent,
+async fn run_collecting<L: AgentLlmClient + 'static>(
+    agent: &mut TestAgent<L>,
     prompt: &str,
 ) -> (Result<crate::types::RunResult, AgentError>, Vec<AgentEvent>) {
     let (tx, mut rx) = mpsc::channel::<AgentEvent>(1024);
@@ -600,7 +685,7 @@ async fn refusal_makes_no_provider_call_and_changes_no_model_or_route() {
             None,
         ),
     ] {
-        let client = Arc::new(RouteClient::new(route.clone()));
+        let client = Arc::new(DiagnosticRouteClient::new(RouteClient::new(route.clone())));
         let mut agent = build(&client, base_builder(level_params(EffortLevel::Xhigh))).await;
         let identity_before = serde_json::to_value(agent.session().session_metadata()).unwrap();
         let (result, events) = run_collecting(&mut agent, "hello").await;
@@ -608,6 +693,9 @@ async fn refusal_makes_no_provider_call_and_changes_no_model_or_route() {
         let refusal = refusal_of(&error);
         assert_eq!(refusal.requested, EffortLevel::Xhigh);
         assert_eq!(refusal.reason, reason);
+        assert_eq!(refusal.cause, None);
+        assert_eq!(refusal.not_before, None);
+        assert_eq!(client.calls.load(Ordering::SeqCst), 0);
         assert_eq!(refusal.supported, supported);
         assert_eq!(refusal.facts, facts);
         assert_eq!(
@@ -658,6 +746,64 @@ async fn refusal_makes_no_provider_call_and_changes_no_model_or_route() {
             )
         );
     }
+}
+
+/// A strict run-start refusal asks the selected client once, preserves its
+/// diagnostics in the actual RunFailed event and sends no provider request.
+#[tokio::test]
+async fn unavailable_run_start_reports_selected_client_diagnostics_once() {
+    let route = ReasoningRouteObservation {
+        backend: ReasoningBackend::OpenAi(OpenAiBackendKind::Copilot),
+        api: ModelApi::Responses,
+        account: AccountLevelStatement::ListUnavailable,
+        operator_levels: None,
+    };
+    let mut inner = RouteClient::new(Some(route));
+    inner.provider = Provider::OpenAI;
+    let client = Arc::new(DiagnosticRouteClient::new(inner));
+    let mut agent = build(&client, base_builder(level_params(EffortLevel::High))).await;
+    let identity_before = serde_json::to_value(agent.session().session_metadata()).unwrap();
+    let (result, events) = run_collecting(&mut agent, "strict unavailable").await;
+    let error = result.expect_err("the strict level remains refused");
+    let refusal = refusal_of(&error);
+    assert_eq!(
+        refusal.reason,
+        ReasoningEffortRefusalReason::SupportedLevelsUnavailable
+    );
+    assert_eq!(refusal.cause.as_deref(), Some("fixture_unavailable"));
+    assert_eq!(
+        refusal.not_before,
+        Some("2020-01-02T03:04:05Z".parse().unwrap())
+    );
+    assert_eq!(client.calls.load(Ordering::SeqCst), 1);
+    assert!(client.served().is_empty());
+    assert_eq!(client.fallback_proposals.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        serde_json::to_value(agent.session().session_metadata()).unwrap(),
+        identity_before
+    );
+    assert!(run_started_reports(&events).is_empty());
+    let failures: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::RunFailed { error_report, .. } => Some(error_report),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(failures.len(), 1);
+    assert_eq!(
+        failures[0].reason,
+        Some(
+            meerkat_core::event::AgentErrorReason::ReasoningEffortRefused {
+                refusal: Box::new(refusal.clone()),
+            }
+        )
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::Retrying { .. }))
+    );
 }
 
 /// `run_started` carries the resolution against the session's route, a run
@@ -1109,7 +1255,7 @@ async fn preference_on_a_copilot_route_uses_the_account_list() {
     ] {
         let mut client = RouteClient::new(Some(copilot(account.clone())));
         client.provider = Provider::OpenAI;
-        let client = Arc::new(client);
+        let client = Arc::new(DiagnosticRouteClient::new(client));
         let mut agent = build(
             &client,
             base_builder(ProviderParamsOverride {
@@ -1121,6 +1267,7 @@ async fn preference_on_a_copilot_route_uses_the_account_list() {
         agent.set_active_turn_request_reasoning(Some(ReasoningBatchDisposition::Apply(preferred)));
         let (result, events) = run_collecting(&mut agent, "voice turn").await;
         result.expect("a preference never fails a turn");
+        assert_eq!(client.calls.load(Ordering::SeqCst), 0);
         let reported = events
             .iter()
             .find_map(|event| match event {
@@ -1161,10 +1308,10 @@ async fn preference_on_a_copilot_route_uses_the_account_list() {
 #[tokio::test]
 async fn a_request_without_a_level_asks_the_client_for_nothing() {
     for params in [None, Some(ProviderParamsOverride::default())] {
-        let client = Arc::new(
+        let client = Arc::new(DiagnosticRouteClient::new(
             RouteClient::new(Some(operator_route(&[])))
                 .with_replies(vec![tool_call("call-1"), text("done")]),
-        );
+        ));
         let builder = match params.clone() {
             Some(params) => base_builder(params),
             None => AgentBuilder::new().with_turn_state_handle(Arc::new(
@@ -1174,6 +1321,7 @@ async fn a_request_without_a_level_asks_the_client_for_nothing() {
         let mut agent = build(&client, builder).await;
         let (result, events) = run_collecting(&mut agent, "go").await;
         result.expect("a session without a level runs");
+        assert_eq!(client.calls.load(Ordering::SeqCst), 0);
         assert_eq!(client.served().len(), 2, "two requests were made");
         assert_eq!(
             client.reads(),

@@ -3427,8 +3427,12 @@ mod tests {
         use meerkat::ScheduleWriteVerdict::{Accepted, NotAMember, OutOfReach, Unavailable};
 
         let state = MobMcpState::new_in_memory();
-        let ops = worker_mob(&state, "ops", &["anna", "boris", "carl"]).await;
-        let side = worker_mob(&state, "side", &["helper"]).await;
+        // Mob ids of this test's own: a mob's supervisor registers
+        // `<mob_id>/__mob_supervisor__` in the process-global in-process
+        // comms registry, so two tests that create one id while both run
+        // collide with `ParticipantNameOccupied`.
+        let ops = worker_mob(&state, "write-ops", &["anna", "boris", "carl"]).await;
+        let side = worker_mob(&state, "write-side", &["helper"]).await;
         state
             .mob_wire(
                 &ops,
@@ -3444,24 +3448,29 @@ mod tests {
         let nobodys = meerkat_core::types::SessionId::new();
 
         for (case, writer, target, expected) in [
-            ("a wired member", &anna, send_to("ops", "boris"), Accepted),
+            (
+                "a wired member",
+                &anna,
+                send_to("write-ops", "boris"),
+                Accepted,
+            ),
             (
                 "the wired member back",
                 &boris,
-                send_to("ops", "anna"),
+                send_to("write-ops", "anna"),
                 Accepted,
             ),
-            ("itself", &anna, send_to("ops", "anna"), Accepted),
+            ("itself", &anna, send_to("write-ops", "anna"), Accepted),
             (
                 "an unwired member",
                 &anna,
-                send_to("ops", "carl"),
+                send_to("write-ops", "carl"),
                 OutOfReach,
             ),
             (
                 "a name no member holds",
                 &anna,
-                send_to("ops", "nobody"),
+                send_to("write-ops", "nobody"),
                 OutOfReach,
             ),
             (
@@ -3473,37 +3482,37 @@ mod tests {
             (
                 "a member of another mob",
                 &anna,
-                send_to("side", "helper"),
+                send_to("write-side", "helper"),
                 OutOfReach,
             ),
             (
                 "another mob's member, the other way",
                 &helper,
-                send_to("ops", "anna"),
+                send_to("write-ops", "anna"),
                 OutOfReach,
             ),
             (
                 "a fork of a wired member",
                 &anna,
-                fork_of("ops", "boris"),
+                fork_of("write-ops", "boris"),
                 Accepted,
             ),
             (
                 "a fork of an unwired member",
                 &anna,
-                fork_of("ops", "carl"),
+                fork_of("write-ops", "carl"),
                 OutOfReach,
             ),
             (
                 "a wired member by identity",
                 &anna,
-                identity_of("ops", "boris"),
+                identity_of("write-ops", "boris"),
                 Accepted,
             ),
             (
                 "an unwired member by identity",
                 &anna,
-                identity_of("ops", "carl"),
+                identity_of("write-ops", "carl"),
                 OutOfReach,
             ),
             ("its own session", &anna, session_of(&anna), Accepted),
@@ -3528,7 +3537,7 @@ mod tests {
             (
                 "a writer no member is",
                 &nobodys,
-                send_to("ops", "carl"),
+                send_to("write-ops", "carl"),
                 NotAMember,
             ),
             (
@@ -3556,7 +3565,7 @@ mod tests {
             meerkat::ScheduleWriteJudge::judge_schedule_write(
                 &judge,
                 &anna,
-                &send_to("ops", "carl")
+                &send_to("write-ops", "carl")
             )
             .await,
             OutOfReach,
@@ -3567,7 +3576,7 @@ mod tests {
             meerkat::ScheduleWriteJudge::judge_schedule_write(
                 &no_mobs,
                 &anna,
-                &send_to("ops", "carl")
+                &send_to("write-ops", "carl")
             )
             .await,
             NotAMember,
@@ -3578,7 +3587,7 @@ mod tests {
             meerkat::ScheduleWriteJudge::judge_schedule_write(
                 &judge,
                 &anna,
-                &send_to("ops", "carl")
+                &send_to("write-ops", "carl")
             )
             .await,
             Unavailable,
@@ -3616,23 +3625,30 @@ mod tests {
         use meerkat::ScheduleWriteVerdict::{Accepted, NotAMember, OutOfReach};
 
         let state = MobMcpState::new_in_memory();
-        let ops = worker_mob(&state, "ops", &["anna"]).await;
-        let side = worker_mob(&state, "side", &["helper"]).await;
+        // Mob ids of this test's own, as in the test above: the two run
+        // as threads of one process and each creates its mobs.
+        let ops = worker_mob(&state, "acts-ops", &["anna"]).await;
+        let side = worker_mob(&state, "acts-side", &["helper"]).await;
         let anna = session_held_by(&state, &ops, "anna").await;
         let helper = session_held_by(&state, &side, "helper").await;
         let nobodys = meerkat_core::types::SessionId::new();
 
         for (case, writer, mob, expected) in [
-            ("its own mob", &anna, "ops", Accepted),
-            ("another mob it did not create", &helper, "ops", OutOfReach),
-            ("another mob, the other way", &anna, "side", OutOfReach),
+            ("its own mob", &anna, "acts-ops", Accepted),
+            (
+                "another mob it did not create",
+                &helper,
+                "acts-ops",
+                OutOfReach,
+            ),
+            ("another mob, the other way", &anna, "acts-side", OutOfReach),
             (
                 "a mob the host does not hold",
                 &anna,
                 "elsewhere",
                 OutOfReach,
             ),
-            ("a writer no member is", &nobodys, "ops", NotAMember),
+            ("a writer no member is", &nobodys, "acts-ops", NotAMember),
         ] {
             for form in ["spawn_helper", "flow"] {
                 assert_eq!(

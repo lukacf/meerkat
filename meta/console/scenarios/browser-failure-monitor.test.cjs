@@ -293,6 +293,49 @@ test("initialization allows a cancelled seed or stream once the subscription's n
   }
 });
 
+// The browser reports a successor's start before the failure of the start it
+// replaces: the console cancels the old request and sends the new one in the
+// same turn, and the cancellation's report arrives later.
+test("a successor that the browser reports before the cancelled start's failure replaces it", async () => {
+  const s = setup();
+  await s.monitor.navigation(s.page, "initial host", async () => {
+    const first = s.start(seedOf(s));
+    const second = s.start(seedOf(s));
+    s.fail(first);
+    assert.equal(s.monitor.expected.length, 1, "the later start is already there");
+    s.start(seedOf(s, { body: everyMobSeed }));
+    s.fail(second);
+    assert.equal(s.monitor.expected.length, 2);
+  });
+  s.monitor.assertClean();
+  assert(s.monitor.failures.every(item => item.expected === true && item.reason === "initial host: authority initialization"));
+});
+
+test("an earlier start replaces nothing: the latest start cancelled with nothing after it is a failed replacement", async () => {
+  const s = setup();
+  await s.monitor.navigation(s.page, "initial host", async () => {
+    s.start(seedOf(s));
+    s.fail(s.start(seedOf(s, { body: everyMobSeed })));
+  });
+  assert.equal(s.monitor.expected.length, 0);
+  assert.equal(s.monitor.errors.length, 1);
+});
+
+test("a third cancelled start stays unexpected when its successor is reported first", async () => {
+  const s = setup();
+  await s.monitor.navigation(s.page, "initial host", async () => {
+    const first = s.start(seedOf(s));
+    const second = s.start(seedOf(s));
+    s.fail(first);
+    const third = s.start(seedOf(s, { body: everyMobSeed }));
+    s.fail(second);
+    s.start(seedOf(s, { body: everyMobSeed }));
+    s.fail(third);
+  });
+  assert.equal(s.monitor.expected.length, 2);
+  assert.equal(s.monitor.errors.length, 1);
+});
+
 test("a cancelled seed or stream that no successor follows in its action is a failed replacement", async () => {
   const s = setup();
   await s.monitor.navigation(s.page, "initial host", async () => {

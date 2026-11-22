@@ -9,9 +9,11 @@ const aborted = "net::ERR_ABORTED";
 // when the experience names its scope and, on a gateway whose capabilities
 // list mob addressing, once more after it has read the experience for every
 // mob. A cancelled read or stream is the console's own only as a replaced
-// start: the next read or stream of the same subscription begins after it,
-// in the same action. Two starts may be replaced in one action and no third;
-// a cancellation that no successor follows is a failed replacement.
+// start: a read or stream of the same subscription that began later than it,
+// in the same action. The browser reports that later start before or after
+// the cancellation; either way it must be there by the end of the action.
+// Two starts may be replaced in one action and no third; a cancellation that
+// no later start follows is a failed replacement.
 const replacedStarts = 2;
 // The unscoped stream: no query, or the one that asks for every mob.
 const unscopedStreamQueries = ["", "?mobs=*"];
@@ -51,7 +53,8 @@ function browserFailureMonitor(context, { origin, initializationPrefixes = [""] 
     } catch { return undefined; }
   }
   // `subscription` names the prefix whose unscoped subscription the request
-  // belongs to: its cancellation counts only as a replaced start.
+  // belongs to and its place among that subscription's requests in the
+  // action: its cancellation counts only as a replaced start.
   function bind(request, reason, error, action, required = false, subscription = undefined) {
     assert(!allowances.has(request), "a request cannot have overlapping failure allowances");
     allowances.set(request, { reason, error, action, required, subscription });
@@ -78,10 +81,12 @@ function browserFailureMonitor(context, { origin, initializationPrefixes = [""] 
     if (!action?.prefixes.length) return;
     const prefix = subscriptionPrefix(request, action.prefixes);
     if (prefix === undefined) return;
-    if (!action.starts.has(prefix)) action.starts.set(prefix, { replaced: 0, cancelled: [] });
+    if (!action.starts.has(prefix)) action.starts.set(prefix, { replaced: 0, begun: 0, cancelled: [] });
+    const start = action.starts.get(prefix);
+    start.begun += 1;
     // This request is the successor of the starts cancelled before it.
-    for (const record of action.starts.get(prefix).cancelled.splice(0)) accept(record, `${action.reason}: authority initialization`);
-    bind(request, `${action.reason}: authority initialization`, aborted, action, false, prefix);
+    for (const record of start.cancelled.splice(0)) accept(record, `${action.reason}: authority initialization`);
+    bind(request, `${action.reason}: authority initialization`, aborted, action, false, { prefix, order: start.begun });
   }
   function observeFinished(request) {
     active.delete(request);
@@ -94,13 +99,18 @@ function browserFailureMonitor(context, { origin, initializationPrefixes = [""] 
     const failure = { method: request.method(), url: request.url(), postData: request.postData(), error: request.failure()?.errorText };
     const matches = Boolean(allowance && failure.error === allowance.error);
     // A cancelled start waits for its successor; an action replaces no third.
-    const start = matches && allowance.subscription !== undefined ? allowance.action.starts.get(allowance.subscription) : undefined;
+    const start = matches && allowance.subscription !== undefined ? allowance.action.starts.get(allowance.subscription.prefix) : undefined;
     const accepted = matches && !start;
     const record = { ...failure, expected: accepted, ...(accepted ? { reason: allowance.reason } : {}) };
     failures.push(record);
     const document = actions.get(active.get(request))?.document;
     if (accepted) expected.push({ ...failure, reason: allowance.reason });
-    else if (start && start.replaced < replacedStarts) { start.replaced += 1; start.cancelled.push(record); }
+    else if (start && start.replaced < replacedStarts) {
+      start.replaced += 1;
+      // Its successor has begun already, or the cancellation waits for it.
+      if (start.begun > allowance.subscription.order) accept(record, allowance.reason);
+      else start.cancelled.push(record);
+    }
     else if (!allowance && failure.error === aborted && document?.request && document.candidates.has(request)) document.failures.push(record);
     else errors.push(errorText(failure));
     document?.candidates.delete(request);

@@ -66,6 +66,8 @@ them.
   Forge's local setup preset and separately pinned installer catalog are
   unchanged; this does not establish Neon availability there.
 
+- Configured self-hosted Chat Completions and Responses clients now describe an engine-authored closed set of string choices as a string enum in the outgoing tool schema. An optional parameter still stays out of `required`. The schema no longer advertises a description for each choice or an explicit `null` alternative.
+
 ### Upgrade notes
 
 - For ordinary Gemini sessions, pin `--model gemini-4-argon` or
@@ -75,6 +77,10 @@ them.
   `[models.gemini-4-neon]` entry before upgrading because model IDs must be
   unique. See the [upgrade guide](docs/guides/upgrading.mdx) for consumer-specific
   behavior and rollback notes.
+
+- If you inspect these request schemas, read the allowed strings from `enum`; do not rely on per-choice descriptions. Omission is still allowed for the optional parameter. This does not establish that sending `null` is equivalent to omitting it.
+
+  The tests inspected locally constructed requests for one built-in parameter. Unchanged controls included Chat Completions on the Copilot backend, one OpenAI Responses case at an alternate base URL, and non-engine schemas. No test used OpenAI at its default address or checked server acceptance. A boolean sub-schema (where the schema itself is the literal `true` or `false`) is outside this change.
 
 ## [0.9.17] - 2026-11-18
 

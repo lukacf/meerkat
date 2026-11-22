@@ -3472,3 +3472,52 @@ fn the_values_the_agent_loop_holds_inline_keep_their_sizes() {
         .collect();
     assert!(over.is_empty(), "{over:?} (all: {sizes:?})");
 }
+
+/// A run result whose structured output is JSON null reads back as it was
+/// written: an explicit null is a value, not an absent field. The run's
+/// result is stored with digests taken over it, so a result that reads back
+/// differently makes its stored row unreadable.
+#[test]
+fn run_result_null_structured_output_reads_back_as_present() {
+    let result = RunResult {
+        reasoning_effort: None,
+        text: "null".to_string(),
+        session_id: SessionId::new(),
+        usage: Usage::default(),
+        turns: 1,
+        tool_calls: 0,
+        terminal_cause_kind: None,
+        structured_output: Some(Value::Null),
+        extraction_error: None,
+        schema_warnings: None,
+        skill_diagnostics: None,
+        run_usage: None,
+        request_usage: Vec::new(),
+    };
+    let written = serde_json::to_vec(&result).unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&written).unwrap()["structured_output"],
+        Value::Null
+    );
+    let reread: RunResult = serde_json::from_slice(&written).unwrap();
+    assert_eq!(reread.structured_output, Some(Value::Null));
+    assert_eq!(serde_json::to_vec(&reread).unwrap(), written);
+
+    // An absent field stays absent, and a value stays the value.
+    let mut absent = result.clone();
+    absent.structured_output = None;
+    let written = serde_json::to_vec(&absent).unwrap();
+    assert!(
+        serde_json::from_slice::<Value>(&written)
+            .unwrap()
+            .get("structured_output")
+            .is_none()
+    );
+    let reread: RunResult = serde_json::from_slice(&written).unwrap();
+    assert_eq!(reread.structured_output, None);
+
+    let mut valued = result;
+    valued.structured_output = Some(json!({"answer": 1}));
+    let reread: RunResult = serde_json::from_slice(&serde_json::to_vec(&valued).unwrap()).unwrap();
+    assert_eq!(reread.structured_output, Some(json!({"answer": 1})));
+}

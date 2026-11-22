@@ -230,6 +230,8 @@ With the SQLite store (the default), identity-first members whose profile enable
 
 A member private to a person (its roster labels carry `console.private_to`: a Console side chat a signed-in person opened, and the members it creates; see [Private side chats](/concepts/access-control#private-side-chats)) keeps its memory to itself. Its `memory` tool writes to its own identity scope, and its `propose_to_mob` is refused: it runs inside no mob, so nothing of its memory reaches a scope its mob shares. The distiller never reads its conversation, and the steward's dreams never cover its identity scope, its proposals or its exit interview, after it retired too. A dream runs only once the record of who the members are private to has been read (it runs in the background from the start), and the store's own record of the private members it retired counts too.
 
+A member that is not a registered agent and is not private to a person keeps its agent memory under its member name: a member created later under the same name continues that memory. Give such members names you do not reuse for unrelated work.
+
 ## Content trust and session taint
 
 A memory tool that can be poisoned by prompt injection is worse than no memory tool, so the recorder ships with a deterministic firewall:

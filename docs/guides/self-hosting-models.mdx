@@ -131,6 +131,22 @@ binding that declares none does not compose. The binding is never inferred from
 its `default_model` and never unconstrained, and naming it explicitly for a model
 it does not declare fails closed.
 
+A binding whose auth profile holds an inline secret
+(`source = { kind = "inline_secret" }`) may leave `server` undeclared, but the
+secret follows the document that states the binding: the `[self_hosted.servers]`
+entry a declared `server` names, or with no declared server the whole
+`[self_hosted]` section, must be that document's own. When another config
+document on the realm's chain states or changes it, the realm still loads
+without that one binding and reports a load warning that names the binding and
+its auth profile. A run that names the binding gets the binding of that id from
+an ancestor realm if one defines it, with that realm's credential and backend,
+and fails as an unknown binding otherwise; a run that names none uses another
+binding of the realm or of an ancestor if there is one, also when the binding
+left out was the realm's default. State the server's whole entry in the same
+document as the secret and in no other document on the chain; declaring
+`server` on the backend profile narrows what must be the document's own to that
+entry.
+
 When the server cannot be identified honestly - no binding names it, or several
 unconstrained bindings are reachable - the run fails closed with an error naming
 the server and every binding considered, rather than sending some other server's

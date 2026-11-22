@@ -163,6 +163,7 @@ impl MobActor {
         let mut entries = Vec::new();
         let mut restored_records = Vec::new();
         let mut bound_in_place = Vec::new();
+        let mut adopted_labels = Vec::new();
         let mut edges = Vec::new();
         for exported in &commit.export.identities {
             let record = &exported.record;
@@ -229,6 +230,13 @@ impl MobActor {
                         .contains_key(&dsl_identity)
                     {
                         bound_in_place.push(identity.clone());
+                        // The labels a record adopted from a roster spec
+                        // keeps for the member this import found seated.
+                        if record.adopted_from_roster()
+                            && let Some(spec) = &record.spec
+                        {
+                            adopted_labels.push((identity.clone(), spec.labels.clone()));
+                        }
                     }
                     IdentityChangeEntryOutcome::Committed
                 }
@@ -391,11 +399,30 @@ impl MobActor {
             .await?;
         // The roster folds each binding row as a replay does: the member
         // keeps its binding, and its spawner is cleared.
-        {
+        let relabelled = {
             let mut roster = self.roster.write().await;
             for event in &stored {
                 roster.apply_event(event);
             }
+            // A record adopted from a roster spec, bound in place: its
+            // member was seated before the record was restored, as at the
+            // adoption itself. Its roster entry reads the record's labels
+            // from this step on, as after the adoption's commit and as the
+            // next start reads them, while the member's last seat row is
+            // still the one this entry into store custody found
+            // ([`crate::roster::Roster::seat_is_as_adopted`]). Nothing is
+            // written for it, and the member's live build keeps its labels
+            // until its next build. A record that entered any other way
+            // keeps the entry its member has.
+            let mut relabelled = false;
+            for (identity, labels) in &adopted_labels {
+                relabelled |= roster.seat_is_as_adopted(identity)
+                    && roster.set_store_owned_seat_labels(identity, labels);
+            }
+            relabelled
+        };
+        if relabelled {
+            self.publish_machine_state_projection();
         }
         Ok(ChangeCommitted::Committed(receipt))
     }

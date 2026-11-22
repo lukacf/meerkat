@@ -501,11 +501,14 @@ Sessions are realm-scoped.
   adds `provider` and `ephemeral_domains`; readers refuse formats newer than
   they support instead of silently ignoring fields, and realms pinned to an
   external storage provider refuse built-in disk opens typed).
-- State roots resolve realm-id-first across the project-local and
-  user-global candidates; a realm materialized under both is a typed
+- State roots resolve realm-id-first across the project-local candidates
+  (the project root's `.rkat/realms` and that of every farther ancestor with
+  a `.rkat` directory) and the user-global candidate; an existing realm is
+  used where it lies, and a realm materialized under more than one is a typed
   split-brain refusal (see `rkat storage doctor`).
-- First materialization of a fresh realm reserves across the candidate set
-  resolved by that invocation before writing the manifest. Processes using
+- First materialization of a fresh realm reserves across the root that will
+  hold it and the user-global root before writing the manifest; a farther
+  ancestor's root is only read. Processes using
   the same multi-root set converge; surfaces probing different sets do not.
   Use one explicit root or matching server context for cross-surface starts.
 - A fresh prompt-first CLI run or `rkat help` whose workspace-derived realm

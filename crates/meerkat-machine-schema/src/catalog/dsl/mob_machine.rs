@@ -2457,6 +2457,11 @@ macro_rules! mob_catalog_machine_dsl {
             // in the same actor command as its seat commit, and the replay
             // of a spawn row that carries it records it again.
             RecordMemberInstructionLineage { agent_identity: AgentIdentity, root_identity: AgentIdentity },
+            // The removal twin of AuthorizeExternalPeerReciprocalTrust
+            // (0.9.17). Declared last: the kernel's `Input` and `InputKind`
+            // follow this list's order, so a new input goes at the end and
+            // no published variant's implicit discriminant moves.
+            AuthorizeExternalPeerReciprocalTrustRemoval { key: ExternalPeerKey, agent_identity: AgentIdentity },
         }
 
         surface_only [
@@ -3197,6 +3202,13 @@ macro_rules! mob_catalog_machine_dsl {
             // with the admission the host derived, build without one, or
             // refuse the build.
             MemberDispatchAdmissionResolved { lineage: Enum<MemberDispatchAdmissionLineage>, host_answer: Enum<MemberDispatchAdmissionHostAnswer>, verdict: Enum<MemberDispatchAdmissionVerdict> },
+            // The removal of the row `ExternalPeerReciprocalTrustRequested`
+            // added (0.9.17): the member's peer (`peer_id`) leaves the trust
+            // store of the edge's external peer. Declared last: the kernel's
+            // `Effect` and `EffectKind` follow this list's order, so a new
+            // effect goes at the end and no published variant's implicit
+            // discriminant moves.
+            ExternalPeerReciprocalTrustRemovalRequested { key: ExternalPeerKey, edge: ExternalPeerEdge, peer_id: PeerId, epoch: u64 },
         }
 
         // One total, pure classifier over desired authority, lease ownership,
@@ -4951,6 +4963,7 @@ macro_rules! mob_catalog_machine_dsl {
         disposition MemberPeerRebindAuthorized => local seam NoOwnerRealization,
         disposition MemberPeerOverlayAuthorized => external handoff mob_member_peer_overlay seam OwnerRealizationOnly,
         disposition ExternalPeerReciprocalTrustRequested => external handoff mob_external_peer_reciprocal_trust seam OwnerRealizationOnly,
+        disposition ExternalPeerReciprocalTrustRemovalRequested => external handoff mob_external_peer_reciprocal_trust_removal seam OwnerRealizationOnly,
         disposition PersistSupervisorAuthority => local seam SurfaceResultAlignment,
         disposition DeleteSupervisorAuthority => local seam SurfaceResultAlignment,
         disposition EmitWiringLifecycleNotice => external seam SurfaceResultAlignment,
@@ -19236,6 +19249,29 @@ macro_rules! mob_catalog_machine_dsl {
                 edge: self.external_peer_edges_by_key.get_cloned(key).get("value"),
                 peer_id: self.member_peer_ids.get_cloned(agent_identity).get("value"),
                 peer_endpoint: self.member_peer_endpoints.get_cloned(agent_identity).get("value"),
+                epoch: self.topology_epoch
+            }
+        }
+
+        // The removal twin of the reciprocal add above. The owner asks it
+        // while the external edge is still wired and the member's peer is
+        // still registered, before the input that ends the edge (the
+        // member's retirement, its mob's destroy, an explicit unwire): the
+        // edge and the member's current peer id both come from MobMachine
+        // state. It changes no state, as the add changes none, and a
+        // retirement runs in a stopped mob too.
+        transition AuthorizeExternalPeerReciprocalTrustRemoval {
+            per_phase [Running, Stopped]
+            on input AuthorizeExternalPeerReciprocalTrustRemoval { key, agent_identity }
+            guard "external_peer_key_currently_wired" { self.external_peer_edges_by_key.contains_key(key) == true }
+            guard "external_peer_key_matches_member" { mob_machine_external_peer_key_matches_local(key, agent_identity) }
+            guard "member_peer_registered" { self.member_peer_ids.contains_key(agent_identity) == true }
+            update {}
+            to Running
+            emit ExternalPeerReciprocalTrustRemovalRequested {
+                key: key,
+                edge: self.external_peer_edges_by_key.get_cloned(key).get("value"),
+                peer_id: self.member_peer_ids.get_cloned(agent_identity).get("value"),
                 epoch: self.topology_epoch
             }
         }

@@ -52,7 +52,8 @@ pub use controller::{
 };
 pub(crate) use controller::{
     AccessDecisionFence, AccessEditError, AccessEditPrecondition, AccessMutation,
-    CapturedLineageLink, LiveAccessView, MAX_LINEAGE_DEPTH, PrivateOwnerRecordReader,
+    CapturedLineageLink, HeldAccessView, LiveAccessView, MAX_LINEAGE_DEPTH,
+    PrivateOwnerRecordReader,
 };
 pub use engine::{AccessDecision, AccessPrincipal, AccessResource, evaluate_access};
 pub(crate) use model::is_ingress_name;
@@ -74,4 +75,4 @@ pub use model::{
     OPERATOR_INGRESS, PRIVATE_TO_LABEL, normalize_access_config_for_memory_actions,
     normalize_access_config_for_schedule_actions, validate_access_config,
 };
-pub(crate) use model::{UNKNOWN_PRIVATE_OWNER, private_owner};
+pub(crate) use model::{UNKNOWN_PRIVATE_OWNER, private_owner, private_to_another};

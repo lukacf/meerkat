@@ -343,6 +343,7 @@ pub(crate) fn handle_console_rest_json_route_with_pending_rows(
             request,
             resolved_auth.as_ref(),
             live_snapshot,
+            SnapshotRows::OfRosters,
             access,
             None,
             memory_panel_available,
@@ -481,6 +482,27 @@ pub(crate) fn console_rest_route_view(
         .on_console(identifies_people)
 }
 
+/// Where the member rows of a live snapshot come from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SnapshotRows {
+    /// Roster rows: each row carries its member's role in its mob and the
+    /// member's console labels, the values every route's roster priming
+    /// records. The experience records them as its members' access
+    /// attributes.
+    OfRosters,
+    /// Identity records, on a console with no runtime of its own. A record
+    /// is what a list serializes of a member: it carries the role under
+    /// the label key `role`, where a label of that name would sit, and not
+    /// every label the roster priming records. Its rows are no access
+    /// attributes: the route's caller primed the cache from the runtimes,
+    /// as every other route of such a console does, and a member row is
+    /// shown only if the view of its agent allows it too. With no caller
+    /// resolved (no audience handed in) nothing primed a cache, there is
+    /// no view of an agent to ask, and no member is shown: no member row,
+    /// no agent row and no module row.
+    OfIdentityRecords,
+}
+
 /// The response to a request [`authorize_console_rest_json_route`] accepted,
 /// given the authentication it resolved. `audience` is the caller's agent
 /// audience when the Console resolved it ([`crate::http_console`]'s routes:
@@ -493,6 +515,7 @@ pub(crate) fn render_console_rest_json_route(
     request: &ConsoleRestJsonRequest,
     resolved_auth: Option<&ConsoleAccessRequest>,
     live_snapshot: Option<&ConsoleLiveSnapshot>,
+    rows: SnapshotRows,
     access: Option<&AccessController>,
     audience: Option<&AccessView>,
     memory_panel_available: bool,
@@ -517,7 +540,17 @@ pub(crate) fn render_console_rest_json_route(
         .unwrap_or_else(|| default_console_live_snapshot(decisions));
     // Every caller's experience is decided per agent: a view that enforces
     // nothing still hides the agents private to another person.
-    prime_access_attributes(&view.controller(), &live_snapshot);
+    if rows == SnapshotRows::OfRosters {
+        prime_access_attributes(&view.controller(), &live_snapshot);
+    } else if audience.is_none() {
+        // Record rows and no caller resolved: closed. The sidebar and the
+        // topology fall back to the agent rows and the module rows when
+        // no member is left, and in such a snapshot both are the records
+        // again: all three are cleared.
+        live_snapshot.members.clear();
+        live_snapshot.agents.clear();
+        live_snapshot.loaded_modules.clear();
+    }
     filter_snapshot_for_access(&mut live_snapshot, &view);
     let mut body = if base_path == CONSOLE_EXPERIENCE_ROUTE {
         build_console_experience_contract(&modules, &live_snapshot, &decisions.console, pending)
@@ -751,8 +784,10 @@ fn prime_access_attributes(controller: &AccessController, snapshot: &ConsoleLive
             console_member_access_attributes(&member.agent_identity, &member.role, &member.labels)
         },
     )));
+    // The snapshot is a walk made earlier and kept: a row of it may be older
+    // than its agent's end, so it never replaces an entry recorded as ended.
     for attributes in attributes.into_values() {
-        controller.record_agent_attributes(attributes);
+        controller.record_snapshot_agent_attributes(attributes);
     }
 }
 
@@ -813,13 +848,26 @@ fn filter_snapshot_for_access(snapshot: &mut ConsoleLiveSnapshot, view: &AccessV
     // its lineage, as every agent-scoped check judges it: a member an agent
     // spawned follows its spawner, and a side chat its source. A view that
     // enforces nothing still hides the agents private to another person.
-    snapshot.members.retain(|member| {
-        view.decide_agent_with_attributes(
-            crate::access::ACTION_AGENT_VIEW,
-            &console_member_access_attributes(&member.agent_identity, &member.role, &member.labels),
-        )
-        .is_allow()
-    });
+    // A row is also judged by the view of its agent, on the entry the
+    // access cache holds. A row built from an identity record is not the
+    // member's access attributes ([`SnapshotRows::OfIdentityRecords`]); a
+    // roster row is, and its entry was recorded from it, unless the row
+    // was walked before its member's end: the entry is then the ended
+    // one, and the row is shown to nobody that entry refuses.
+    // The cache is taken once for all rows, and nothing here awaits.
+    {
+        let held = view.over_held_attributes();
+        snapshot.members.retain(|member| {
+            let attributes = console_member_access_attributes(
+                &member.agent_identity,
+                &member.role,
+                &member.labels,
+            );
+            held.decide_agent_with_attributes(crate::access::ACTION_AGENT_VIEW, &attributes)
+                .is_allow()
+                && !held.refuses_view_of_known_agent(&attributes.identity)
+        });
+    }
     // A member's peer list names no member hidden from the caller.
     for member in &mut snapshot.members {
         member.wired_to.retain(|peer| !view.hides_agent(peer));
@@ -830,10 +878,12 @@ fn filter_snapshot_for_access(snapshot: &mut ConsoleLiveSnapshot, view: &AccessV
     });
     // Module IDs double as module-agent sidebar rows when no roster
     // member survives filtering; gate them like any other agent so a
-    // fully-denied caller is not shown the module fallback.
+    // fully-denied caller is not shown the module fallback. A configured
+    // module's id is no agent the access records hold a row of: one they
+    // do not know is judged by its name.
     snapshot
         .loaded_modules
-        .retain(|module_id| view.allows_agent(crate::access::ACTION_AGENT_VIEW, module_id));
+        .retain(|module_id| view.allows_name(crate::access::ACTION_AGENT_VIEW, module_id));
 }
 
 /// Intersect the projected experience with the caller's grants and append
@@ -3247,6 +3297,167 @@ mod access_priming_tests {
                 .view_for_subject(None)
                 .allows_agent(ACTION_AGENT_VIEW, "scout"),
             "the member's richer attributes stay recorded"
+        );
+    }
+
+    /// The snapshot is a walk made earlier and kept. A member that ended
+    /// after the walk is recorded as ended by a priming that reads the
+    /// roster; a poll with the stale snapshot does not record it whole
+    /// again and publishes nothing. Seated again under its name, the member
+    /// stays decided as ended here until a priming that reads the roster
+    /// records it whole; from then on the snapshot's row is recorded again.
+    #[test]
+    fn a_poll_of_a_stale_snapshot_never_records_an_ended_member_whole_again() {
+        let controller = AccessController::new(AccessControlConfig {
+            enabled: true,
+            admins: vec!["root@example.test".to_string()],
+            rules: vec![
+                AccessRule {
+                    id: "everyone-views".to_string(),
+                    actions: vec![ACTION_AGENT_VIEW.to_string()],
+                    agents: vec!["*".to_string()],
+                    ..AccessRule::default()
+                },
+                AccessRule {
+                    id: "deny-secret".to_string(),
+                    effect: AccessEffect::Deny,
+                    actions: vec![ACTION_AGENT_VIEW.to_string()],
+                    match_labels: BTreeMap::from([("tier".to_string(), "secret".to_string())]),
+                    ..AccessRule::default()
+                },
+            ],
+            ..AccessControlConfig::default()
+        })
+        .expect("controller");
+        let publication = LocalAuthorizationPublication::new();
+        controller
+            .join_authorization_publication(publication.clone())
+            .expect("first join");
+        let mut snapshot = ConsoleLiveSnapshot {
+            runtime_id: None,
+            running: Some(true),
+            loaded_modules: Vec::new(),
+            agents: vec![agent("scout", "worker")],
+            members: vec![member("scout", "worker", "public")],
+            has_mob_runtime: true,
+            unobserved: None,
+            last_activity_ms: BTreeMap::new(),
+            mob_id: None,
+        };
+        let shown = || {
+            controller
+                .view_for_subject(None)
+                .allows_agent(ACTION_AGENT_VIEW, "scout")
+        };
+        prime_access_attributes(&controller, &snapshot);
+        assert!(shown(), "the living member, by its row");
+
+        // The member ends: a priming that reads the roster records what
+        // outlives it. Its labels are not known, so the deny on a label
+        // cannot be ruled out for it.
+        controller.record_ended_agent_attributes(AgentResourceAttributes {
+            identity: "scout".to_string(),
+            agent_id: None,
+            role: None,
+            labels: BTreeMap::new(),
+        });
+        assert!(!shown(), "ended: the deny on a label is not ruled out");
+        let quiet = publication.observe(|| ()).expect("quiet publication").1;
+        prime_access_attributes(&controller, &snapshot);
+        assert!(
+            !shown(),
+            "a row of the stale snapshot does not record the ended member whole again"
+        );
+        assert!(
+            quiet.check_current().is_ok(),
+            "a poll of the stale snapshot publishes no access change"
+        );
+
+        // Seated again: a priming that reads the roster records the member
+        // whole, and the snapshot's rows are recorded over that entry again.
+        let seated = member("scout", "worker", "public");
+        controller.record_agent_attributes(console_member_access_attributes(
+            &seated.agent_identity,
+            &seated.role,
+            &seated.labels,
+        ));
+        assert!(shown(), "seated again and read from the roster: by its row");
+        snapshot.members[0]
+            .labels
+            .insert("tier".to_string(), "secret".to_string());
+        prime_access_attributes(&controller, &snapshot);
+        assert!(
+            !shown(),
+            "an entry that is not of an ended member is replaced by the snapshot's row"
+        );
+    }
+
+    /// The sidebar keeps a member row by the row's own attributes and by
+    /// the view of its agent on the entry the access records hold. A row
+    /// whose agent the records do not hold yet is kept by the row alone: a
+    /// live member is not dropped for a record that was not read yet. A row
+    /// whose agent is recorded as ended (the row was walked before the
+    /// member's end) is dropped for a caller the ended entry refuses.
+    #[test]
+    fn a_member_row_is_kept_by_its_row_until_its_agent_is_recorded_and_dropped_once_recorded_as_ended()
+     {
+        let controller = AccessController::new(AccessControlConfig {
+            enabled: true,
+            admins: vec!["root@example.test".to_string()],
+            rules: vec![
+                AccessRule {
+                    id: "everyone-views".to_string(),
+                    actions: vec![ACTION_AGENT_VIEW.to_string()],
+                    agents: vec!["*".to_string()],
+                    ..AccessRule::default()
+                },
+                AccessRule {
+                    id: "deny-secret".to_string(),
+                    effect: AccessEffect::Deny,
+                    actions: vec![ACTION_AGENT_VIEW.to_string()],
+                    match_labels: BTreeMap::from([("tier".to_string(), "secret".to_string())]),
+                    ..AccessRule::default()
+                },
+            ],
+            ..AccessControlConfig::default()
+        })
+        .expect("controller");
+        let snapshot = || ConsoleLiveSnapshot {
+            runtime_id: None,
+            running: Some(true),
+            loaded_modules: Vec::new(),
+            agents: Vec::new(),
+            members: vec![member("scout", "worker", "public")],
+            has_mob_runtime: true,
+            unobserved: None,
+            last_activity_ms: BTreeMap::new(),
+            mob_id: None,
+        };
+        let listed = || {
+            let mut snapshot = snapshot();
+            filter_snapshot_for_access(&mut snapshot, &controller.view_for_subject(None));
+            snapshot.members.len()
+        };
+        assert!(!controller.view_for_subject(None).knows_agent("scout"));
+        assert_eq!(
+            listed(),
+            1,
+            "the records do not hold the agent yet: the row alone keeps it"
+        );
+        prime_access_attributes(&controller, &snapshot());
+        assert_eq!(listed(), 1, "recorded from the row: the row is kept");
+        controller.record_ended_agent_attributes(AgentResourceAttributes {
+            identity: "scout".to_string(),
+            agent_id: None,
+            role: None,
+            labels: BTreeMap::new(),
+        });
+        prime_access_attributes(&controller, &snapshot());
+        assert_eq!(
+            listed(),
+            0,
+            "recorded as ended, and the deny on a label is not ruled out for it: the stale row is \
+             dropped"
         );
     }
 }

@@ -776,7 +776,7 @@ async fn reserved_side_chat_labels_refused_from_callers() -> TestResult {
             "nothing is seated for {key}"
         );
         let labels = BTreeMap::from([(key.to_string(), "alpha".to_string())]);
-        let message = crate::member_comms_id::validate_member_creation_labels(&labels)
+        let message = crate::member_comms_id::validate_host_member_creation_labels(&labels)
             .expect_err("every member-creation surface refuses it");
         assert!(message.contains(key), "{message}");
     }

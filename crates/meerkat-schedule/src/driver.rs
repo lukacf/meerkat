@@ -160,6 +160,52 @@ pub trait ScheduleIdentityTargetProbe: Send + Sync {
     ) -> Result<IdentityTargetDeliverability, ScheduleDomainError>;
 }
 
+/// What a host answers a schedule write an agent's own turn makes
+/// ([`ScheduleWriteJudge`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScheduleWriteVerdict {
+    /// The write stands for a writer the host judges: the target names
+    /// nobody a message could go to, or the writer could message whom the
+    /// target names.
+    Accepted,
+    /// The writer could not message whom the schedule's target names.
+    OutOfReach,
+    /// The turn belongs to nobody the host judges (no member of a mob it
+    /// holds): the host says nothing of this writer's reach. The schedule
+    /// tools then take the write, except a schedule into a session other
+    /// than the writer's own, which they hold to the host's statements
+    /// about the writer.
+    NotAMember,
+    /// Whether it could cannot be read now. Never read as "it could".
+    Unavailable,
+}
+
+/// A host's judgement of a schedule create or update an agent's own turn
+/// makes: whether the writer's own message to whom the schedule's target
+/// names would be accepted.
+///
+/// A schedule fires later under the host's authority, where nobody asks who
+/// wrote it, so the write is the seam where the writer's reach applies. A
+/// host that holds agents which can message each other attaches its judge
+/// to the [`crate::ScheduleService`] its schedule tools write through
+/// (`attach_write_judge`); the agent-facing schedule tools ask it for every
+/// create and update a session's turn makes, with the target the schedule
+/// has after the call. A host's own write on the service is never judged.
+///
+/// The service keeps the judge for as long as any clone of it lives, so an
+/// implementation holds what it reads weakly and answers
+/// [`ScheduleWriteVerdict::Unavailable`] once that is gone.
+#[async_trait]
+pub trait ScheduleWriteJudge: Send + Sync {
+    /// Judge the write of a schedule aimed at `target` by the turn of the
+    /// session `writer_session`.
+    async fn judge_schedule_write(
+        &self,
+        writer_session: &meerkat_core::SessionId,
+        target: &crate::TargetBinding,
+    ) -> ScheduleWriteVerdict;
+}
+
 #[async_trait]
 pub trait ScheduleTargetDelivery: Send + Sync {
     /// Realize the already-committed `DispatchStarted` intent.

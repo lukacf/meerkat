@@ -2096,6 +2096,13 @@ impl UnifiedRuntime {
         // A candidate launch's listener rewires no member and admits no
         // member input: a peer's Wire, Unwire and Inject are refused.
         handler = handler.with_candidate_launch(!self.speaks_for_composition());
+        // A member kept apart from other callers is no member for a peer
+        // gateway: the handler asks the runtime's own record of its members.
+        handler = handler.with_members_apart(
+            crate::runtime::cross_mob_control::MembersApart::of_the_runtime(
+                self.mob_runtime.private_owners().clone(),
+            ),
+        );
         let handler: std::sync::Arc<dyn crate::runtime::cross_mob_control::ControlHandler> =
             std::sync::Arc::new(handler);
         *task_slot = Some(tokio::spawn(bound.serve_with_authorizer(
@@ -4088,3 +4095,8 @@ mod tests {
         ));
     }
 }
+
+/// Rows of the control channel's member verbs for a member kept apart.
+#[cfg(test)]
+#[path = "control_member_verbs_tests.rs"]
+mod control_member_verbs_tests;

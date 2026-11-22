@@ -55,6 +55,12 @@ const LAZY_DROPPED_TEST: &str =
     "a_lazy_restart_holds_a_restored_member_the_roster_no_longer_lists_until_it_is_retired";
 const BOOTED_DEFINITION_TEST: &str =
     "the_boot_roster_is_read_from_the_booted_definition_on_a_fresh_launch_and_a_resume";
+const SET_ASIDE_TEST: &str =
+    "a_gateway_start_sets_notes_aside_before_an_agent_of_the_name_is_first_built";
+const WITHOUT_MEMORY_TEST: &str =
+    "a_gateway_start_without_agent_memory_starts_and_leaves_the_stored_notes";
+const REFUSED_STEP_TEST: &str =
+    "a_gateway_start_whose_first_start_step_cannot_run_is_refused_and_changes_nothing";
 const REFUSED_COMPOSITION_TEST: &str =
     "a_restart_refused_for_its_composition_keeps_the_refusal_code_and_message";
 const BACKSTOP: Duration = Duration::from_mins(3);
@@ -70,6 +76,20 @@ runtime_mode = "turn_driven"
 
 [profiles.worker.tools]
 comms = true
+"#;
+/// [`MOB_CONFIG`]'s mob under another id, with agent memory on its profile:
+/// its members are given their notes at a build.
+const MEMORY_MOB_CONFIG: &str = r#"
+[mob]
+id = "gateway-restored-customizer-tools-memory"
+
+[profiles.worker]
+model = "gpt-5.5"
+runtime_mode = "turn_driven"
+
+[profiles.worker.tools]
+comms = true
+memory = true
 "#;
 /// The same mob with its one profile renamed: a definition that differs
 /// from the one [`MOB_CONFIG`] stores.
@@ -286,6 +306,13 @@ struct Launch {
     /// A request sent once the init settled ready (its roster callbacks are
     /// recorded apart from the init's).
     after_ready: Option<&'static str>,
+    /// Agent memory over the bundled store (`runtime_options.agent_memory`),
+    /// every record given at a build.
+    agent_memory: bool,
+    /// The gateway host process gets an environment of its own instead of
+    /// the caller's: no provider key of any kind (the launch runs on
+    /// `demo_llm`, which needs none).
+    own_environment: bool,
 }
 
 impl Default for Launch {
@@ -298,6 +325,8 @@ impl Default for Launch {
             lazy: false,
             member_restore: None,
             after_ready: None,
+            agent_memory: false,
+            own_environment: false,
         }
     }
 }
@@ -392,11 +421,33 @@ fn boot(test: &str, dir: &Path, state: Option<&Path>, ending: Ending, launch: &L
         .parent()
         .expect("a boot directory sits in its test's directory")
         .join("xdg-state");
-    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    if launch.own_environment {
+        // An environment of the boot's own: no provider key and nothing
+        // else of the caller's, with every user directory under the boot's
+        // directory. The test thread's stack budget is the caller's.
+        command.env_clear();
+        command.env("PATH", "/usr/bin:/bin").env("LANG", "C.UTF-8");
+        for (name, sub) in [
+            ("HOME", "home"),
+            ("XDG_CONFIG_HOME", "xdg-config"),
+            ("XDG_DATA_HOME", "xdg-data"),
+            ("XDG_CACHE_HOME", "xdg-cache"),
+        ] {
+            let path = dir.join(sub);
+            std::fs::create_dir_all(&path).expect("a user directory of the boot");
+            command.env(name, path);
+        }
+        if let Some(stack) = std::env::var_os("RUST_MIN_STACK") {
+            command.env("RUST_MIN_STACK", stack);
+        }
+    } else {
+        command.env("OPENAI_API_KEY", "sk-regression-test");
+    }
+    let mut child = command
         .args(["--exact", test, "--nocapture"])
         .env(HOST_PROCESS, "1")
         .env(RECORD, &record)
-        .env("OPENAI_API_KEY", "sk-regression-test")
         .env("XDG_STATE_HOME", xdg_state)
         .current_dir(dir)
         .stdin(std::process::Stdio::piped())
@@ -432,6 +483,9 @@ fn boot(test: &str, dir: &Path, state: Option<&Path>, ending: Ending, launch: &L
     }
     if launch.lazy {
         runtime_options["identity_bootstrap_mode"] = json!({ "mode": "lazy_materialize" });
+    }
+    if launch.agent_memory {
+        runtime_options["agent_memory"] = json!({ "selection": "always" });
     }
     if let Some(restore) = launch.member_restore {
         runtime_options["member_restore"] = json!(restore);
@@ -999,4 +1053,375 @@ fn a_restart_refused_for_its_composition_keeps_the_refusal_code_and_message() {
         );
         assert_eq!(settled["durable_effects"], "possible", "{settled}");
     }
+}
+
+/// A gateway that is started without agent memory starts as before: it
+/// runs no step over the agent memory store and changes nothing in it. A
+/// store in its state directory that holds a note under a temporary council
+/// participant's name and no marker of the step (as an earlier release
+/// leaves it) is as it was after such a start.
+#[test]
+fn a_gateway_start_without_agent_memory_starts_and_leaves_the_stored_notes() {
+    use meerkat_meta::AgentMemoryProvider as _;
+    use meerkat_meta::memory::records::{MemoryAuthor, MemoryKind, MemoryScope, NewMemoryRecord};
+
+    serve_if_host_process();
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    let launch = Launch {
+        own_environment: true,
+        ..Launch::default()
+    };
+
+    let first = boot(
+        WITHOUT_MEMORY_TEST,
+        &dir.path().join("boot-1"),
+        Some(&state),
+        Ending::Close,
+        &launch,
+    );
+    assert_eq!(first.outcome, "ready", "{}", first.settled);
+
+    let store = meerkat_meta::SqliteAgentMemoryStore::open(state.join("agent-memory"))
+        .expect("an agent memory store in the state directory");
+    let realm_file = store.path_for_realm("default");
+    let tokio = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    tokio
+        .block_on(store.remember_authored(
+            &MemoryScope::Identity {
+                realm: "default".to_string(),
+                identity: "council-p1".to_string(),
+            },
+            NewMemoryRecord {
+                kind: MemoryKind::Fact,
+                title: "Council fact".to_string(),
+                description: String::new(),
+                body: "COUNCIL-KEPT".to_string(),
+                tags: Vec::new(),
+                evidence: Vec::new(),
+                verification: None,
+            },
+            MemoryAuthor::Agent {
+                identity: "council-p1".to_string(),
+            },
+        ))
+        .expect("store a note");
+    drop(store);
+    let stored = || -> (Vec<(String, String, String, i64)>, i64) {
+        let db = rusqlite::Connection::open(&realm_file).expect("the realm's store file");
+        let notes = db
+            .prepare(
+                "SELECT memory_id, scope_key, status_kind, updated_at_ms FROM records \
+                 ORDER BY memory_id",
+            )
+            .expect("read the notes")
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .expect("read the notes")
+            .collect::<Result<_, _>>()
+            .expect("read the notes");
+        let audit_rows = db
+            .query_row("SELECT COUNT(*) FROM audit", [], |row| row.get(0))
+            .expect("count the audit rows");
+        (notes, audit_rows)
+    };
+    let before = stored();
+    assert_eq!(before.0.len(), 1, "{before:?}");
+    assert_eq!(before.0[0].1, "council-p1", "{before:?}");
+    assert_eq!(before.0[0].2, "active", "{before:?}");
+
+    let second = boot(
+        WITHOUT_MEMORY_TEST,
+        &dir.path().join("boot-2"),
+        Some(&state),
+        Ending::Close,
+        &launch,
+    );
+    assert_eq!(second.outcome, "ready", "{}", second.settled);
+    assert_eq!(
+        stored(),
+        before,
+        "a start without agent memory changed nothing in the store"
+    );
+}
+
+/// A gateway start whose first start's step cannot run is refused, and
+/// nothing in the agent memory store is changed. Here the store refuses the
+/// step (a note under a temporary council participant's name whose stored
+/// provenance cannot be read): the start settles failed with the storage
+/// code and "agent memory could not be prepared: the agent memory store
+/// refused the step (...); nothing was changed; start again, or start
+/// without agent memory (configure no `agent_memory`)", the note is where
+/// it was, and no marker is written. A
+/// start without agent memory over the same state then starts.
+#[test]
+fn a_gateway_start_whose_first_start_step_cannot_run_is_refused_and_changes_nothing() {
+    use meerkat_meta::AgentMemoryProvider as _;
+    use meerkat_meta::memory::records::{MemoryAuthor, MemoryKind, MemoryScope, NewMemoryRecord};
+
+    serve_if_host_process();
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    let launch = Launch {
+        mob_config: MEMORY_MOB_CONFIG,
+        agent_memory: true,
+        own_environment: true,
+        ..Launch::default()
+    };
+
+    let first = boot(
+        REFUSED_STEP_TEST,
+        &dir.path().join("boot-1"),
+        Some(&state),
+        Ending::Close,
+        &launch,
+    );
+    assert_eq!(first.outcome, "ready", "{}", first.settled);
+
+    let store = meerkat_meta::SqliteAgentMemoryStore::open(state.join("agent-memory"))
+        .expect("the gateway's agent memory store");
+    let realm_file = store.path_for_realm("default");
+    let tokio = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    let note = tokio
+        .block_on(store.remember_authored(
+            &MemoryScope::Identity {
+                realm: "default".to_string(),
+                identity: "council-p1".to_string(),
+            },
+            NewMemoryRecord {
+                kind: MemoryKind::Fact,
+                title: "Council fact".to_string(),
+                description: String::new(),
+                body: "COUNCIL-KEPT".to_string(),
+                tags: Vec::new(),
+                evidence: Vec::new(),
+                verification: None,
+            },
+            MemoryAuthor::Agent {
+                identity: "council-p1".to_string(),
+            },
+        ))
+        .expect("store a note")
+        .memory_id;
+    drop(store);
+    let db = rusqlite::Connection::open(&realm_file).expect("the realm's store file");
+    // As an earlier release leaves the store (no marker of the step), with
+    // one note the store cannot read back.
+    db.execute(
+        "DELETE FROM audit WHERE stage_token LIKE 'set-aside-first-start/%'",
+        [],
+    )
+    .expect("remove the marker");
+    db.execute(
+        "UPDATE records SET provenance = 'not a provenance' WHERE memory_id = ?1",
+        [&note],
+    )
+    .expect("make the note unreadable");
+    let stored = |db: &rusqlite::Connection| -> (String, String, String, i64) {
+        let (scope_key, status, provenance): (String, String, String) = db
+            .query_row(
+                "SELECT scope_key, status_kind, provenance FROM records WHERE memory_id = ?1",
+                [&note],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("the note is in the store");
+        let audit_rows = db
+            .query_row("SELECT COUNT(*) FROM audit", [], |row| row.get(0))
+            .expect("count the audit rows");
+        (scope_key, status, provenance, audit_rows)
+    };
+    let before = stored(&db);
+    assert_eq!(before.0, "council-p1", "{before:?}");
+    drop(db);
+
+    let refused = boot(
+        REFUSED_STEP_TEST,
+        &dir.path().join("boot-2"),
+        Some(&state),
+        Ending::Close,
+        &launch,
+    );
+    let settled = &refused.settled;
+    assert_eq!(refused.outcome, "failed", "{settled}");
+    assert_eq!(settled["code"], json!(-32014), "{settled}");
+    assert!(
+        settled["message"].as_str().is_some_and(|message| {
+            message.starts_with(
+                "agent memory could not be prepared: the agent memory store refused the step (",
+            ) && message.ends_with(
+                "; nothing was changed; start again, or start without agent memory (configure \
+                 no `agent_memory`)",
+            )
+        }),
+        "{settled}"
+    );
+    let db = rusqlite::Connection::open(&realm_file).expect("the realm's store file");
+    assert_eq!(
+        stored(&db),
+        before,
+        "the refused start changed nothing in the store"
+    );
+    drop(db);
+
+    // The operator's way on: the same state starts without agent memory.
+    let without = boot(
+        REFUSED_STEP_TEST,
+        &dir.path().join("boot-3"),
+        Some(&state),
+        Ending::Close,
+        &Launch {
+            agent_memory: false,
+            ..launch
+        },
+    );
+    assert_eq!(without.outcome, "ready", "{}", without.settled);
+    let db = rusqlite::Connection::open(&realm_file).expect("the realm's store file");
+    assert_eq!(stored(&db), before);
+}
+
+/// A gateway's start runs the bundled agent memory store's first start's
+/// step before any agent is built over the store. A store that holds notes
+/// under a temporary council participant's name and no marker of the step
+/// (as an earlier release leaves it) is opened by a start whose roster
+/// registers an agent under that name for the first time: the notes are set
+/// aside, and the agent's first build is given none of them (no injection
+/// row names them). An agent registered beside it is given its own name's
+/// note at its first build, so the builds did read the store. Each start
+/// leaves the step's one marker for the gateway's mob.
+#[test]
+fn a_gateway_start_sets_notes_aside_before_an_agent_of_the_name_is_first_built() {
+    use meerkat_meta::AgentMemoryProvider as _;
+    use meerkat_meta::memory::records::{MemoryAuthor, MemoryKind, MemoryScope, NewMemoryRecord};
+
+    serve_if_host_process();
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    let launch = Launch {
+        mob_config: MEMORY_MOB_CONFIG,
+        agent_memory: true,
+        own_environment: true,
+        ..Launch::default()
+    };
+
+    let first = boot(
+        SET_ASIDE_TEST,
+        &dir.path().join("boot-1"),
+        Some(&state),
+        Ending::Close,
+        &launch,
+    );
+    assert_eq!(first.outcome, "ready", "{}", first.settled);
+
+    let store = meerkat_meta::SqliteAgentMemoryStore::open(state.join("agent-memory"))
+        .expect("the gateway's agent memory store");
+    let realm_file = store.path_for_realm("default");
+    let tokio = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    let remember = |name: &str, title: &str, body: &str| -> String {
+        tokio
+            .block_on(store.remember_authored(
+                &MemoryScope::Identity {
+                    realm: "default".to_string(),
+                    identity: name.to_string(),
+                },
+                NewMemoryRecord {
+                    kind: MemoryKind::Fact,
+                    title: title.to_string(),
+                    description: String::new(),
+                    body: body.to_string(),
+                    tags: Vec::new(),
+                    evidence: Vec::new(),
+                    verification: None,
+                },
+                MemoryAuthor::Agent {
+                    identity: name.to_string(),
+                },
+            ))
+            .expect("store a note")
+            .memory_id
+    };
+    let council_note = remember("council-p1", "Council fact", "COUNCIL-KEPT");
+    let scribe_note = remember("scribe", "Scribe fact", "SCRIBE-KEPT");
+    drop(store);
+    let markers = |db: &rusqlite::Connection| -> i64 {
+        db.query_row(
+            "SELECT COUNT(*) FROM audit \
+             WHERE stage_token LIKE 'set-aside-first-start/%' AND op_index = 0",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count the step's markers")
+    };
+    let db = rusqlite::Connection::open(&realm_file).expect("the realm's store file");
+    assert_eq!(
+        markers(&db),
+        1,
+        "the first start ran the step and left its marker"
+    );
+    // As an earlier release leaves the store: without the step's marker.
+    db.execute(
+        "DELETE FROM audit WHERE stage_token LIKE 'set-aside-first-start/%'",
+        [],
+    )
+    .expect("remove the marker");
+    drop(db);
+
+    let second = boot(
+        SET_ASIDE_TEST,
+        &dir.path().join("boot-2"),
+        Some(&state),
+        Ending::Close,
+        &Launch {
+            roster: Roster::Listed(&[IDENTITY, "council-p1", "scribe"]),
+            ..launch
+        },
+    );
+    assert_eq!(second.outcome, "ready", "{}", second.settled);
+
+    let db = rusqlite::Connection::open(&realm_file).expect("the realm's store file");
+    let note = |id: &str| -> (String, String) {
+        db.query_row(
+            "SELECT scope_key, status_kind FROM records WHERE memory_id = ?1",
+            [id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("the note is in the store")
+    };
+    let given = |id: &str| -> i64 {
+        db.query_row(
+            "SELECT COUNT(*) FROM injections WHERE record_id = ?1",
+            [id],
+            |row| row.get(0),
+        )
+        .expect("count the note's injections")
+    };
+    assert_eq!(
+        note(&council_note),
+        ("set-aside/council-p1".to_string(), "tombstoned".to_string()),
+        "the notes under the name are set aside"
+    );
+    assert_eq!(
+        given(&council_note),
+        0,
+        "the agent registered under the name was given none of them at its first build"
+    );
+    assert_eq!(
+        note(&scribe_note),
+        ("scribe".to_string(), "active".to_string()),
+        "another name's note is as it was"
+    );
+    assert!(
+        given(&scribe_note) > 0,
+        "an agent registered beside it was given its own name's note at its first build"
+    );
+    assert_eq!(markers(&db), 1, "the second start left the step's marker");
 }

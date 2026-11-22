@@ -53,6 +53,315 @@ pub(crate) const VIA_TOOL_LABEL: &str = "via_tool";
 /// performed the spawn and not a later member under the same identity.
 pub(crate) const SPAWNED_BY_SESSION_LABEL: &str = "spawned_by_session";
 
+/// The label keys of a member's row that are the Console's own. It writes
+/// some from its own facts (the member's role, the mob it sits in, the host
+/// of an implicit delegate, its group, whether it can be addressed) and
+/// reads the host's marks from the others (its attention marks, and
+/// `singleton`, which keeps a member from being retired there). The
+/// visibility policy, the access rules and the member controls read them,
+/// so no spawn call
+/// sets one: the agent tool wrapper refuses it
+/// ([`console_row_label_in_spawn_args`]), the spawn registry's merge leaves
+/// it out ([`merge_registered_labels`]), and the row builder writes the
+/// ones it knows from where it read the member.
+pub(crate) const CONSOLE_ROW_LABELS: [&str; 10] = [
+    "role",
+    "source_mob_id",
+    "delegate_host_identity",
+    "group",
+    "addressable",
+    "console_watched",
+    "console_alert_level",
+    "console_degraded",
+    "console_degraded_reason",
+    "singleton",
+];
+
+/// The label a spawn call carries into its member's row for display, and
+/// which the row's builders therefore read from a label. The census row
+/// holds the builders' label keys against this list and the one above.
+#[cfg(test)]
+pub(crate) const CARRIED_ROW_LABELS: [&str; 1] = ["display_name"];
+
+/// Whether `key` is one of the [`CONSOLE_ROW_LABELS`].
+pub(crate) fn is_console_row_label(key: &str) -> bool {
+    CONSOLE_ROW_LABELS.contains(&key)
+}
+
+/// The refusal of a spawn call's [`CONSOLE_ROW_LABELS`] entry, naming it.
+pub(crate) fn console_row_label_refusal(key: &str) -> String {
+    format!(
+        "labels.{key} is the Console's own: it writes or reads this key of a member's row itself, and a spawn cannot set it; remove it from the spawn's labels"
+    )
+}
+
+/// One entry of the Console's spawn registry: what an agent-tool spawn
+/// registered for the member it seated.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct SpawnRegistryEntry {
+    /// The roster member id the spawn seated: the mob's own name of the
+    /// member, by which the mob's member lifecycle names it.
+    pub(crate) member_id: String,
+    /// The generation that member held when its spawn registered the
+    /// entry: a roster row seated before it is an earlier member's. `None`
+    /// for an entry that no spawn of the tool path registered.
+    pub(crate) seat_generation: Option<u64>,
+    /// The registered console labels: the spawn's own labels and its
+    /// runtime-derived lineage (`spawned_by`, `spawned_by_session`,
+    /// `via_tool`).
+    pub(crate) labels: BTreeMap<String, String>,
+}
+
+/// The Console's spawn registry: the entries the agent-tool spawn path
+/// registered, keyed by the mob a spawn seated its member in and the
+/// member's console identity. A member's name is its mob's own: the same
+/// name in two mobs is two members, and each has its own entry.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct SpawnRegistry {
+    entries: BTreeMap<(String, String), SpawnRegistryEntry>,
+    /// The mobs whose entries cannot be told for the request this copy of
+    /// the registry serves: their member lifecycle journal was not read
+    /// to its head. Empty in the store's own registry.
+    unread_mobs: std::collections::BTreeSet<String>,
+}
+
+impl SpawnRegistry {
+    /// The entry of a roster row: the one registered for the row's mob and
+    /// the row's console identity. Every reader of the registry asks here,
+    /// with the mob of the row it reads for. A row of another mob has no
+    /// entry, and the row alone decides. Nor has a row of a mob this copy
+    /// notes as not read ([`Self::note_unread_mob`]): what the registry
+    /// holds of that mob cannot be told for the request.
+    pub(crate) fn entry_of_row(&self, mob_id: &str, identity: &str) -> Option<&SpawnRegistryEntry> {
+        // A mob this copy notes as not read cannot be told: no row takes
+        // an entry of it.
+        if self.unread_mobs.contains(mob_id) {
+            return None;
+        }
+        self.entries
+            .get(&(mob_id.to_string(), identity.to_string()))
+    }
+
+    /// The registered labels of a roster row ([`Self::entry_of_row`]).
+    pub(crate) fn labels_of_row(
+        &self,
+        mob_id: &str,
+        identity: &str,
+    ) -> Option<&BTreeMap<String, String>> {
+        self.entry_of_row(mob_id, identity)
+            .map(|entry| &entry.labels)
+    }
+
+    /// The console identities the registry holds an entry of, each once,
+    /// whichever mob its entries are of.
+    pub(crate) fn identities(&self) -> impl Iterator<Item = &str> {
+        self.entries
+            .keys()
+            .map(|(_, identity)| identity.as_str())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+    }
+
+    /// Whether the registry holds an entry of `identity` in any mob.
+    #[cfg(test)]
+    pub(crate) fn holds_identity(&self, identity: &str) -> bool {
+        self.identities().any(|held| held == identity)
+    }
+
+    /// The mobs the registry holds an entry of.
+    pub(crate) fn mobs(&self) -> std::collections::BTreeSet<String> {
+        self.entries
+            .keys()
+            .map(|(mob_id, _)| mob_id.clone())
+            .collect()
+    }
+
+    /// End every entry of `mob_id` that was registered for one of the roster
+    /// members `members`, or every entry of `mob_id` when `all` is set: the
+    /// member such an entry was registered for is a member no more. Answers
+    /// the console identities of the entries ended.
+    pub(crate) fn end_entries(
+        &mut self,
+        mob_id: &str,
+        members: &std::collections::BTreeSet<String>,
+        all: bool,
+    ) -> std::collections::BTreeSet<String> {
+        let ended: Vec<(String, String)> = self
+            .entries
+            .iter()
+            .filter(|((mob, _), entry)| {
+                mob.as_str() == mob_id && (all || members.contains(&entry.member_id))
+            })
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in &ended {
+            self.entries.remove(key);
+        }
+        ended.into_iter().map(|(_, identity)| identity).collect()
+    }
+
+    /// Note the generation the member of the entry of `identity` in
+    /// `mob_id` was seated at when its spawn registered the entry.
+    pub(crate) fn note_entry_seat(&mut self, mob_id: &str, identity: &str, seat: u64) {
+        if let Some(entry) = self
+            .entries
+            .get_mut(&(mob_id.to_string(), identity.to_string()))
+        {
+            entry.seat_generation = Some(seat);
+        }
+    }
+
+    /// Note that `mob_id`'s entries cannot be told for the request this copy
+    /// of the registry serves.
+    pub(crate) fn note_unread_mob(&mut self, mob_id: &str) {
+        self.unread_mobs.insert(mob_id.to_string());
+    }
+
+    /// The console identities whose entry this copy cannot tell for its
+    /// request: the entries of the mobs noted as unread, and every entry
+    /// that `now`, a later copy, holds no more or holds changed. A request
+    /// that took this copy before it read the roster reads `now` after: a
+    /// name seated anew by no rotation in between has no entry there.
+    pub(crate) fn identities_not_told(&self, now: &Self) -> std::collections::BTreeSet<String> {
+        self.entries
+            .iter()
+            .filter(|(key, entry)| {
+                self.unread_mobs.contains(&key.0)
+                    || now.unread_mobs.contains(&key.0)
+                    || now.entries.get(*key) != Some(*entry)
+            })
+            .map(|((_, identity), _)| identity.clone())
+            .collect()
+    }
+
+    /// Every label key an entry of `identity` holds, in whichever mob.
+    pub(crate) fn label_keys_of(&self, identity: &str) -> std::collections::BTreeSet<String> {
+        self.entries
+            .iter()
+            .filter(|((_, held), _)| held.as_str() == identity)
+            .flat_map(|(_, entry)| entry.labels.keys().cloned())
+            .collect()
+    }
+
+    /// Merge `labels` into the entry of `identity` in `mob_id`, seated as
+    /// `member_id`: per key, the latest registration wins, so a respawn can
+    /// update its member's labels.
+    pub(crate) fn register(
+        &mut self,
+        mob_id: &str,
+        identity: &str,
+        member_id: &str,
+        labels: BTreeMap<String, String>,
+    ) {
+        let entry = self
+            .entries
+            .entry((mob_id.to_string(), identity.to_string()))
+            .or_default();
+        entry.member_id = member_id.to_string();
+        entry.labels.extend(labels);
+    }
+
+    /// Remove one registered key from the entry of `identity` in `mob_id`,
+    /// and the entry with its last key.
+    pub(crate) fn unregister_label(&mut self, mob_id: &str, identity: &str, key: &str) {
+        let entry_key = (mob_id.to_string(), identity.to_string());
+        if let Some(entry) = self.entries.get_mut(&entry_key) {
+            entry.labels.remove(key);
+            if entry.labels.is_empty() {
+                self.entries.remove(&entry_key);
+            }
+        }
+    }
+}
+
+/// What one fact of a mob's member lifecycle journal says of the spawn
+/// registry's entries of that mob.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SeatFact {
+    /// A member was seated at `generation`. `fresh` when no rotation made
+    /// the seat: a new member holds the name, and an entry registered for
+    /// an earlier member of the name was that member's, and ends. A seat a
+    /// rotation made (a respawn's, a rotation's, a requested next life's)
+    /// and a member's reset seat the same member on: its entry stays.
+    Seat {
+        member_id: String,
+        generation: u64,
+        fresh: bool,
+    },
+    /// The mob was reset: no member before it is a member after it.
+    MobReset,
+    /// A fact that seats no member: a retirement or its start, an adoption.
+    NoSeat,
+    /// A fact this reading does not know. It is never passed over as
+    /// nothing: what it means for an entry cannot be told.
+    Unclassified,
+}
+
+/// Classify one member lifecycle fact for the spawn registry. MobMachine
+/// decides each fact in the step that writes its journal row: a seat names
+/// the rotation that made it, and a seat that names none is a new member.
+pub(crate) fn seat_fact(event: &meerkat_mob::MemberLifecycleEvent) -> SeatFact {
+    use meerkat_mob::MemberLifecycleEvent as Fact;
+    match event {
+        Fact::Spawned {
+            agent_identity,
+            generation,
+            rotation,
+            ..
+        } => SeatFact::Seat {
+            member_id: agent_identity.as_str().to_string(),
+            generation: generation.get(),
+            fresh: rotation.is_none(),
+        },
+        Fact::Reset {
+            agent_identity,
+            new_generation,
+            ..
+        } => SeatFact::Seat {
+            member_id: agent_identity.as_str().to_string(),
+            generation: new_generation.get(),
+            fresh: false,
+        },
+        Fact::EntryAdopted { .. } | Fact::RetirementStarted { .. } | Fact::Retired { .. } => {
+            SeatFact::NoSeat
+        }
+        Fact::MobReset { .. } => SeatFact::MobReset,
+        _ => SeatFact::Unclassified,
+    }
+}
+
+/// The seats of one roster member that the settles of the spawn registry
+/// have read from its mob's journal.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct SeenSeats {
+    /// The generation of the latest seat no rotation made: the member that
+    /// holds the name began there.
+    pub(crate) fresh: Option<u64>,
+    /// The highest generation the settles know of: a row at or below it is
+    /// told, a row above it is of a seat not read yet.
+    pub(crate) seen: u64,
+}
+
+/// What one settle of the spawn registry against a mob's member lifecycle
+/// journal found ([`ConsoleSpawnSink::settle_with_journal`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct SpawnJournalRead {
+    /// The console identities whose entry this settle ended.
+    pub(crate) ended: std::collections::BTreeSet<String>,
+    /// The journal was not read to its head: what the registry holds of
+    /// this mob cannot be told.
+    pub(crate) unread: bool,
+}
+
+/// What the spawn registry holds of a member cannot be told.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SpawnEntryNotTold;
+
+/// How many journal events one page of a settle asks for, and how many
+/// pages one settle reads at most.
+const SPAWN_JOURNAL_PAGE: usize = 256;
+const SPAWN_JOURNAL_PAGES: usize = 1024;
+
 /// One spawned member, as seen by the agent-tool spawn path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ConsoleSpawnSeed {
@@ -68,7 +377,7 @@ pub(crate) struct ConsoleSpawnSeed {
     /// The kickoff content delivered to the member, when present. Either a
     /// JSON string or a content-blocks array, exactly as the spawn carried it.
     pub(crate) initial_message: Option<Value>,
-    /// Labels the spawn carried (e.g. `display_name`, `group`, `agent_type`).
+    /// Labels the spawn carried (e.g. `display_name`, `agent_type`, `team`).
     pub(crate) labels: BTreeMap<String, String>,
     /// Identity of the agent that performed the spawn, when known.
     pub(crate) spawned_by: Option<String>,
@@ -95,13 +404,243 @@ impl ConsoleSpawnSink {
         Self { console_events }
     }
 
-    /// All console identity metadata registered through this sink, keyed by
-    /// console identity. Consumed by roster/attribute projections so spawn
-    /// labels and lineage survive wholesale cache rebuilds.
-    pub(crate) async fn identity_labels_snapshot(
-        &self,
-    ) -> BTreeMap<String, BTreeMap<String, String>> {
+    /// All console identity metadata registered through this sink: the
+    /// spawn registry, each entry under its mob and console identity.
+    /// Consumed by roster/attribute projections so spawn labels and lineage
+    /// survive wholesale cache rebuilds.
+    pub(crate) async fn identity_labels_snapshot(&self) -> SpawnRegistry {
         self.console_events.identity_labels_snapshot().await
+    }
+
+    /// The mobs the spawn registry holds an entry of.
+    pub(crate) async fn spawn_registry_mobs(&self) -> std::collections::BTreeSet<String> {
+        self.console_events.spawn_registry_mobs().await
+    }
+
+    /// Settle the registry's entries of `handle`'s mob against that mob's
+    /// member lifecycle journal: read it from where the last settle stopped
+    /// to its head, end the entry of every member the journal shows seated
+    /// anew by no rotation since (the entry was an earlier member's), and
+    /// every entry of the mob at a mob reset. A respawn, a rotation and a
+    /// reset seat the same member, and its entry stays. A mob never read is
+    /// read from its head on.
+    ///
+    /// Fails closed: a journal that cannot be read answers `unread` for
+    /// this settle, and a fact this reading does not know marks the mob's
+    /// entries as not to be told from then on.
+    pub(crate) async fn settle_with_journal(
+        &self,
+        handle: &meerkat_mob::MobHandle,
+    ) -> SpawnJournalRead {
+        let mob_id = handle.mob_id().to_string();
+        let unread = || SpawnJournalRead {
+            ended: std::collections::BTreeSet::new(),
+            unread: true,
+        };
+        // A second pass only when another settle applied the stretch first.
+        for _ in 0..2 {
+            let from = match self.console_events.spawn_journal_cursor(&mob_id).await {
+                Ok(Some(from)) => from,
+                Ok(None) => {
+                    #[cfg(test)]
+                    self.console_events.note_spawn_journal_reads(1).await;
+                    return match handle.events().latest_cursor().await {
+                        Ok(head) => {
+                            self.console_events.begin_spawn_journal(&mob_id, head).await;
+                            SpawnJournalRead::default()
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                %mob_id,
+                                %error,
+                                "spawn registry: the head of the mob's journal could not be \
+                                 read; its entries cannot be told for this request"
+                            );
+                            unread()
+                        }
+                    };
+                }
+                Err(SpawnEntryNotTold) => return unread(),
+            };
+            let mut cursor = from;
+            let mut seats: BTreeMap<String, SeenSeats> = BTreeMap::new();
+            let mut reset = false;
+            let mut classified = true;
+            let mut at_head = false;
+            for _ in 0..SPAWN_JOURNAL_PAGES {
+                #[cfg(test)]
+                self.console_events.note_spawn_journal_reads(1).await;
+                let page = match handle
+                    .member_lifecycle_events(
+                        meerkat_mob::MobJournalCursor::new(cursor),
+                        SPAWN_JOURNAL_PAGE,
+                    )
+                    .await
+                {
+                    Ok(page) => page,
+                    Err(error) => {
+                        tracing::warn!(
+                            %mob_id,
+                            %error,
+                            "spawn registry: the mob's member lifecycle journal could not be \
+                             read; its entries cannot be told for this request"
+                        );
+                        return unread();
+                    }
+                };
+                for record in &page.records {
+                    match seat_fact(&record.event) {
+                        SeatFact::Seat {
+                            member_id,
+                            generation,
+                            fresh,
+                        } => {
+                            let read = seats.entry(member_id).or_default();
+                            read.seen = read.seen.max(generation);
+                            if fresh {
+                                read.fresh = Some(generation);
+                            }
+                        }
+                        SeatFact::MobReset => reset = true,
+                        SeatFact::NoSeat => {}
+                        SeatFact::Unclassified => classified = false,
+                    }
+                }
+                if page.next.get() == cursor {
+                    at_head = true;
+                    break;
+                }
+                cursor = page.next.get();
+            }
+            let Some(ended) = self
+                .console_events
+                .apply_spawn_journal(&mob_id, from, cursor, &seats, reset)
+                .await
+            else {
+                continue;
+            };
+            if !classified {
+                tracing::warn!(
+                    %mob_id,
+                    "spawn registry: the mob's journal holds a member lifecycle fact this \
+                     reading does not know; its entries cannot be told until a restart"
+                );
+                self.console_events.mark_spawn_journal_untold(&mob_id).await;
+            }
+            return SpawnJournalRead {
+                ended,
+                unread: !(classified && at_head),
+            };
+        }
+        unread()
+    }
+
+    /// Settle `mob_id`'s entries before a spawn registers one there, so
+    /// that what an earlier member of the name left is ended first and the
+    /// new entry is not ended by a later read of its own member's seat.
+    /// `handle` is the mob's, when one is found. Without that read behind
+    /// it the entry about to be registered cannot be told from an earlier
+    /// member's, and the mob's entries are marked so.
+    pub(crate) async fn settle_before_registering(
+        &self,
+        mob_id: &str,
+        handle: Option<&meerkat_mob::MobHandle>,
+    ) {
+        let unread = match handle {
+            Some(handle) => self.settle_with_journal(handle).await.unread,
+            None => true,
+        };
+        if unread {
+            tracing::warn!(
+                %mob_id,
+                "spawn registry: a spawn registers an entry with no read of the mob's journal \
+                 behind it; the mob's entries cannot be told until a restart"
+            );
+            self.console_events.mark_spawn_journal_untold(mob_id).await;
+        }
+    }
+
+    /// Note the generation `member_id` holds in `handle`'s mob as the seat
+    /// the entry of `identity` there was registered for: the spawn that
+    /// registered it has just seated that member.
+    pub(crate) async fn note_registered_seat(
+        &self,
+        handle: &meerkat_mob::MobHandle,
+        identity: &str,
+        member_id: &str,
+    ) {
+        let seated = handle
+            .get_member(&meerkat_mob::AgentIdentity::from(member_id))
+            .await;
+        if let Ok(Some(entry)) = seated {
+            self.console_events
+                .note_spawn_seat(
+                    handle.mob_id().as_str(),
+                    member_id,
+                    entry.generation.get(),
+                    Some(identity),
+                )
+                .await;
+        }
+    }
+
+    /// The registered labels of one incarnation of a member, for a reader
+    /// that has the roster row in hand before it reads the registry and
+    /// decides by what it reads alone: the row of `identity` in `handle`'s
+    /// mob, seated as `member_id` at `generation`. The mob's journal is read
+    /// only when the row is of a seat the settles have not read yet, so a
+    /// reader that asks for every event of a member reads it once per seat.
+    /// `Err` when what a spawn registered of that incarnation cannot be
+    /// told: the journal could not be read, or the row is an earlier
+    /// member's than the one that holds the name now.
+    pub(crate) async fn labels_of_seated_row(
+        &self,
+        handle: &meerkat_mob::MobHandle,
+        identity: &str,
+        member_id: &str,
+        generation: Option<u64>,
+    ) -> Result<Option<BTreeMap<String, String>>, SpawnEntryNotTold> {
+        let mob_id = handle.mob_id().to_string();
+        match self.console_events.spawn_journal_cursor(&mob_id).await {
+            // Never read: no spawn the settle stood behind registered an
+            // entry there, and an entry that is there is read as it is.
+            Ok(None) => {
+                return Ok(self.console_events.identity_labels(&mob_id, identity).await);
+            }
+            Ok(Some(_)) => {}
+            Err(SpawnEntryNotTold) => {
+                return match self.console_events.identity_labels(&mob_id, identity).await {
+                    Some(_) => Err(SpawnEntryNotTold),
+                    None => Ok(None),
+                };
+            }
+        }
+        // A row that names no generation is settled every time, and takes
+        // the entry the settled registry holds.
+        let Some(generation) = generation else {
+            if self.settle_with_journal(handle).await.unread {
+                return Err(SpawnEntryNotTold);
+            }
+            return Ok(self.console_events.identity_labels(&mob_id, identity).await);
+        };
+        if !self
+            .console_events
+            .spawn_seat_is_read(&mob_id, member_id, generation)
+            .await
+        {
+            if self.settle_with_journal(handle).await.unread {
+                return Err(SpawnEntryNotTold);
+            }
+            // The row is in hand, so its seat is at or before the head just
+            // read: a seat the stretches read does not name was made before
+            // the settle began, and no seat of the name was read since.
+            self.console_events
+                .note_spawn_seat(&mob_id, member_id, generation, None)
+                .await;
+        }
+        self.console_events
+            .spawn_labels_of_incarnation(&mob_id, identity, member_id, generation)
+            .await
     }
 
     /// Register the member's console identity and, for a seed that names
@@ -138,55 +677,17 @@ impl ConsoleSpawnSink {
             .register_runtime_identity(format!("rt:{member_id}"), identity)
             .await;
 
-        let mut labels = seed.labels.clone();
-        // A spawn never names a side chat's source, creator or private
-        // owner: only the console's projection of Meerkat's fork record
-        // writes them
-        // (`crate::side_chat::project_side_chat_lineage`), so the registry
-        // never holds them.
-        labels.remove(crate::side_chat::SIDE_CHAT_OF_LABEL);
-        labels.remove(crate::side_chat::SIDE_CHAT_OF_SESSION_LABEL);
-        labels.remove(crate::side_chat::SIDE_CHAT_CREATOR_LABEL);
-        labels.remove(crate::access::PRIVATE_TO_LABEL);
-        // Lineage is runtime-derived truth: ABAC inheritance hangs off
-        // `spawned_by`, so a caller-supplied label must never spoof (or
-        // erase) who actually performed the spawn.
-        match seed.spawned_by.as_deref() {
-            Some(spawned_by) => {
-                labels.insert(SPAWNED_BY_LABEL.to_string(), spawned_by.to_string());
-            }
-            None => {
-                labels.remove(SPAWNED_BY_LABEL);
-                // Registrations merge per key, so a respawn with an unknown
-                // spawner must also evict any previously registered lineage.
-                self.console_events
-                    .unregister_identity_label(identity, SPAWNED_BY_LABEL)
-                    .await;
-            }
-        }
-        // The spawning incarnation binds the lineage; without one, a stale
-        // binding from an earlier spawn must not stay registered.
-        match seed
-            .spawned_by
+        // The registry's entry is its mob's: a spawn whose mob is not known
+        // registers none, and the member's row alone decides it.
+        if let Some(mob_id) = seed
+            .mob_id
             .as_deref()
-            .and(seed.spawned_by_session.as_deref())
             .map(str::trim)
-            .filter(|session| !session.is_empty())
+            .filter(|mob_id| !mob_id.is_empty())
         {
-            Some(session) => {
-                labels.insert(SPAWNED_BY_SESSION_LABEL.to_string(), session.to_string());
-            }
-            None => {
-                labels.remove(SPAWNED_BY_SESSION_LABEL);
-                self.console_events
-                    .unregister_identity_label(identity, SPAWNED_BY_SESSION_LABEL)
-                    .await;
-            }
+            self.register_spawn_labels(mob_id, identity, member_id, seed)
+                .await;
         }
-        labels.insert(VIA_TOOL_LABEL.to_string(), seed.via_tool.clone());
-        self.console_events
-            .register_identity_labels(identity, labels)
-            .await;
 
         let Some(initial_message) = seed.initial_message.as_ref() else {
             return;
@@ -240,6 +741,66 @@ impl ConsoleSpawnSink {
                 timestamp_ms: current_time_ms(),
                 data,
             })
+            .await;
+    }
+
+    /// Register the seed's labels and runtime-derived lineage as the entry
+    /// of `identity` in `mob_id`, the mob the spawn seated `member_id` in.
+    async fn register_spawn_labels(
+        &self,
+        mob_id: &str,
+        identity: &str,
+        member_id: &str,
+        seed: &ConsoleSpawnSeed,
+    ) {
+        let mut labels = seed.labels.clone();
+        // A spawn never names a side chat's source, creator or private
+        // owner: only the console's projection of Meerkat's fork record
+        // writes them
+        // (`crate::side_chat::project_side_chat_lineage`), so the registry
+        // never holds them.
+        labels.remove(crate::side_chat::SIDE_CHAT_OF_LABEL);
+        labels.remove(crate::side_chat::SIDE_CHAT_OF_SESSION_LABEL);
+        labels.remove(crate::side_chat::SIDE_CHAT_CREATOR_LABEL);
+        labels.remove(crate::access::PRIVATE_TO_LABEL);
+        // Lineage is runtime-derived truth: ABAC inheritance hangs off
+        // `spawned_by`, so a caller-supplied label must never spoof (or
+        // erase) who actually performed the spawn.
+        match seed.spawned_by.as_deref() {
+            Some(spawned_by) => {
+                labels.insert(SPAWNED_BY_LABEL.to_string(), spawned_by.to_string());
+            }
+            None => {
+                labels.remove(SPAWNED_BY_LABEL);
+                // Registrations merge per key, so a respawn with an unknown
+                // spawner must also evict any previously registered lineage.
+                self.console_events
+                    .unregister_identity_label(mob_id, identity, SPAWNED_BY_LABEL)
+                    .await;
+            }
+        }
+        // The spawning incarnation binds the lineage; without one, a stale
+        // binding from an earlier spawn must not stay registered.
+        match seed
+            .spawned_by
+            .as_deref()
+            .and(seed.spawned_by_session.as_deref())
+            .map(str::trim)
+            .filter(|session| !session.is_empty())
+        {
+            Some(session) => {
+                labels.insert(SPAWNED_BY_SESSION_LABEL.to_string(), session.to_string());
+            }
+            None => {
+                labels.remove(SPAWNED_BY_SESSION_LABEL);
+                self.console_events
+                    .unregister_identity_label(mob_id, identity, SPAWNED_BY_SESSION_LABEL)
+                    .await;
+            }
+        }
+        labels.insert(VIA_TOOL_LABEL.to_string(), seed.via_tool.clone());
+        self.console_events
+            .register_identity_labels(mob_id, identity, member_id, labels)
             .await;
     }
 }
@@ -304,6 +865,35 @@ pub(crate) fn spawned_by_from_comms_name(comms_name: &str) -> Option<String> {
     let (_mob, _role) = (parts.next()?, parts.next()?);
     let identity = parts.next()?.trim();
     (!identity.is_empty()).then(|| identity.to_string())
+}
+
+/// The mob of the spawning agent derived from its comms name
+/// (`{mob_id}/{role}/{identity}`): the first segment. A name without
+/// separators names no mob.
+fn spawner_mob_from_comms_name(comms_name: &str) -> Option<String> {
+    let (mob_id, _) = comms_name.trim().split_once('/')?;
+    let mob_id = mob_id.trim();
+    (!mob_id.is_empty()).then(|| mob_id.to_string())
+}
+
+/// The mob a spawn tool seated its members in, as Core did it: the mob
+/// `mob_spawn_member` was called for, the mob the outcome of `delegate` or
+/// `fork_off` names, and for the member spawn tools the caller's own mob.
+/// The spawn registry keys a member's entry by this mob.
+fn spawn_seated_mob(
+    tool_name: &str,
+    args: &Value,
+    outcome: Option<&Value>,
+    spawner_comms_name: Option<&str>,
+) -> Option<String> {
+    match tool_name {
+        "mob_spawn_member" => text_field(args, "mob_id"),
+        "delegate" | "fork_off" => outcome.and_then(|outcome| text_field(outcome, "mob_id")),
+        "spawn_member" | "spawn_many_members" => {
+            spawner_comms_name.and_then(spawner_mob_from_comms_name)
+        }
+        _ => None,
+    }
 }
 
 /// Strip the runtime-derived lineage keys from labels that did not come
@@ -478,15 +1068,65 @@ pub(crate) fn identity_label_in_spawn_args(args: &Value) -> bool {
 /// spawn-tool call supplies: its own `labels`, or those of an entry of its
 /// `specs` or `members` array. An agent's spawn refuses it, naming it.
 pub(crate) fn reserved_label_in_spawn_args(args: &Value) -> Option<&'static str> {
-    let label_maps = std::iter::once(args).chain(
-        ["specs", "members"]
-            .into_iter()
-            .filter_map(|key| args.get(key).and_then(Value::as_array))
-            .flatten(),
-    );
-    label_maps
-        .filter_map(|value| value.get("labels").and_then(Value::as_object))
+    spawn_label_maps(args)
         .find_map(|labels| crate::member_comms_id::reserved_authority_label(labels.keys()))
+}
+
+/// The refusal of the first label key, among the labels a spawn-tool call
+/// supplies (its own `labels`, or those of an entry of its `specs` or
+/// `members` array), that a caller who is not the host may not supply
+/// beyond the exact keys only Meta writes: a key that differs from one of
+/// those only by letter case, or a key Core reserves for runtime facts
+/// ([`meerkat_core::validate_public_labels`]: `mob_id`, `role`, `meerkat_id`
+/// and the `meerkat` namespace, without regard to letter case). An agent's
+/// spawn refuses such a key as console member creation does
+/// ([`crate::member_comms_id::validate_caller_member_creation_labels`]).
+///
+/// The exact key `agent_identity` is not judged here: the console identity
+/// a spawn's labels may name has its own rule.
+pub(crate) fn caller_reserved_label_refusal_in_spawn_args(args: &Value) -> Option<String> {
+    spawn_label_maps(args)
+        .flat_map(|labels| labels.keys())
+        .find_map(|key| {
+            if let Some(reserved) =
+                crate::member_comms_id::reserved_authority_label_case_variant(key)
+            {
+                return Some(
+                    crate::member_comms_id::reserved_authority_label_case_variant_refusal(
+                        key, reserved,
+                    ),
+                );
+            }
+            (key.as_str() != "agent_identity" && meerkat_core::is_reserved_meerkat_label_key(key))
+                .then(|| {
+                    meerkat_core::SurfaceMetadataError::ReservedLabelKey { key: key.clone() }
+                        .to_string()
+                })
+        })
+}
+
+/// The first of the [`CONSOLE_ROW_LABELS`] among the labels a spawn-tool
+/// call supplies: its own `labels`, or those of an entry of its `specs` or
+/// `members` array. An agent's spawn refuses it, naming it.
+pub(crate) fn console_row_label_in_spawn_args(args: &Value) -> Option<&'static str> {
+    spawn_label_maps(args).find_map(|labels| {
+        CONSOLE_ROW_LABELS
+            .into_iter()
+            .find(|key| labels.contains_key(*key))
+    })
+}
+
+/// Every label map a spawn-tool call supplies: its own `labels`, and those
+/// of each entry of its `specs` or `members` array.
+fn spawn_label_maps(args: &Value) -> impl Iterator<Item = &serde_json::Map<String, Value>> {
+    std::iter::once(args)
+        .chain(
+            ["specs", "members"]
+                .into_iter()
+                .filter_map(|key| args.get(key).and_then(Value::as_array))
+                .flatten(),
+        )
+        .filter_map(|value| value.get("labels").and_then(Value::as_object))
 }
 
 fn spawn_arg_records(args: &Value) -> Vec<SpawnArgRecord> {
@@ -643,6 +1283,11 @@ pub(crate) fn console_spawn_seeds(
         );
     }
 
+    // The mob Core seated the members in. A seed names it, or no mob: a
+    // mob that only an argument record or a nested outcome names is not
+    // taken, and one that disagrees with it leaves the seed without a mob.
+    let seated_mob = spawn_seated_mob(tool_name, args, outcome.as_ref(), spawner_comms_name);
+
     let seed_for = |member_id: String,
                     mob_id: Option<String>,
                     session_id: Option<String>,
@@ -652,10 +1297,15 @@ pub(crate) fn console_spawn_seeds(
             .map(|record| record.labels.clone())
             .unwrap_or_default();
         let identity = spawn_seed_console_identity(&member_id, &labels);
+        let named_mob = mob_id
+            .or_else(|| record.and_then(|record| record.mob_id.clone()))
+            .or_else(|| text_field(args, "mob_id"));
         ConsoleSpawnSeed {
-            mob_id: mob_id
-                .or_else(|| record.and_then(|record| record.mob_id.clone()))
-                .or_else(|| text_field(args, "mob_id")),
+            mob_id: seated_mob.clone().filter(|seated| {
+                named_mob
+                    .as_ref()
+                    .is_none_or(|named_mob| named_mob == seated)
+            }),
             member_id,
             identity,
             initial_message: record.and_then(|record| record.initial_message.clone()),
@@ -720,7 +1370,9 @@ fn hash_short(input: &str) -> String {
 /// Roster/member labels win on conflict — except the runtime-derived lineage
 /// keys (`spawned_by`, `via_tool`), where the spawn registry is the source
 /// of truth: ABAC inheritance hangs off `spawned_by`, so a spec-supplied
-/// label must not displace who actually performed the spawn.
+/// label must not displace who actually performed the spawn. A registered
+/// label of the Console's own row keys ([`CONSOLE_ROW_LABELS`]) is never
+/// taken: the row says those itself.
 pub(crate) fn merge_registered_labels(
     labels: &mut BTreeMap<String, String>,
     registered: &BTreeMap<String, String>,
@@ -732,6 +1384,7 @@ pub(crate) fn merge_registered_labels(
             && key != crate::side_chat::SIDE_CHAT_OF_SESSION_LABEL
             && key != crate::side_chat::SIDE_CHAT_CREATOR_LABEL
             && key != crate::access::PRIVATE_TO_LABEL
+            && !is_console_row_label(key)
         {
             // A spawn's own labels never name a side chat's source, creator
             // or private owner.
@@ -843,7 +1496,8 @@ mod tests {
             !sink
                 .identity_labels_snapshot()
                 .await
-                .contains_key(crate::console_contracts::SYSTEM_EVENT_IDENTITY),
+                .identities()
+                .any(|identity| identity == crate::console_contracts::SYSTEM_EVENT_IDENTITY),
             "no identity metadata may register under the reserved identity"
         );
     }
@@ -868,7 +1522,8 @@ mod tests {
             !sink
                 .identity_labels_snapshot()
                 .await
-                .contains_key("__console__"),
+                .identities()
+                .any(|identity| identity == "__console__"),
             "no identity metadata may register under the reserved identity"
         );
     }
@@ -903,7 +1558,7 @@ mod tests {
             "no initial_message means no chat frames until first activity"
         );
         let labels = store
-            .identity_labels("worker-9")
+            .identity_labels("ops", "worker-9")
             .await
             .expect("identity labels registered");
         assert_eq!(labels.get("group").map(String::as_str), Some("workers"));
@@ -971,7 +1626,7 @@ mod tests {
         );
         sink.project_spawned_member(&bound).await;
         let labels = store
-            .identity_labels("worker-3")
+            .identity_labels("ops", "worker-3")
             .await
             .expect("identity labels registered");
         assert_eq!(
@@ -982,7 +1637,7 @@ mod tests {
         // Respawned by a spawner whose session is unknown: no stale binding.
         sink.project_spawned_member(&seed("worker-3", None)).await;
         let labels = store
-            .identity_labels("worker-3")
+            .identity_labels("ops", "worker-3")
             .await
             .expect("identity labels registered");
         assert_eq!(labels.get(SPAWNED_BY_SESSION_LABEL), None);
@@ -1014,7 +1669,7 @@ mod tests {
         sink.project_spawned_member(&spoofed).await;
 
         let labels = store
-            .identity_labels("worker-3")
+            .identity_labels("ops", "worker-3")
             .await
             .expect("identity labels registered");
         assert_eq!(
@@ -1036,7 +1691,7 @@ mod tests {
         };
         sink.project_spawned_member(&unknown_parent).await;
         let labels = store
-            .identity_labels("worker-9")
+            .identity_labels("ops", "worker-9")
             .await
             .expect("identity labels registered");
         assert!(
@@ -1144,7 +1799,7 @@ mod tests {
         sink.project_spawned_member(&seed("worker-3", None)).await;
         assert_eq!(
             store
-                .identity_labels("worker-3")
+                .identity_labels("ops", "worker-3")
                 .await
                 .and_then(|labels| labels.get(SPAWNED_BY_LABEL).cloned())
                 .as_deref(),
@@ -1161,7 +1816,7 @@ mod tests {
         sink.project_spawned_member(&unknown_spawner).await;
 
         let labels = store
-            .identity_labels("worker-3")
+            .identity_labels("ops", "worker-3")
             .await
             .expect("identity labels registered");
         assert!(
@@ -1253,7 +1908,7 @@ mod tests {
         let sink = ConsoleSpawnSink::new(store.clone());
         sink.project_spawned_member(seed).await;
         let labels = store
-            .identity_labels("durable-investigator")
+            .identity_labels("ops", "durable-investigator")
             .await
             .expect("retained child is registered in the normal console identity snapshot");
         assert_eq!(
@@ -1422,6 +2077,184 @@ mod tests {
         );
     }
 
+    /// The registry's entry is its mob's: the same console identity in two
+    /// mobs is two entries, a row reads the one of its own mob, and a row of
+    /// a mob that registered none reads none.
+    #[test]
+    fn a_registry_entry_is_read_by_its_mob_and_console_identity() {
+        let spawned_by =
+            |spawner: &str| BTreeMap::from([(SPAWNED_BY_LABEL.to_string(), spawner.to_string())]);
+        let mut registry = SpawnRegistry::default();
+        registry.register("launch", "worker", "worker", spawned_by("lead"));
+        registry.register("side", "worker", "worker", spawned_by("other"));
+        let spawner_of = |registry: &SpawnRegistry, mob: &str| {
+            registry
+                .labels_of_row(mob, "worker")
+                .and_then(|labels| labels.get(SPAWNED_BY_LABEL))
+                .cloned()
+        };
+        assert_eq!(spawner_of(&registry, "launch").as_deref(), Some("lead"));
+        assert_eq!(spawner_of(&registry, "side").as_deref(), Some("other"));
+        assert!(
+            registry.entry_of_row("elsewhere", "worker").is_none(),
+            "a row of a mob that registered no entry reads none"
+        );
+        assert_eq!(
+            registry.identities().collect::<Vec<_>>(),
+            vec!["worker"],
+            "the registry names an identity once, whichever mobs hold an entry of it"
+        );
+        assert_eq!(
+            registry
+                .entry_of_row("launch", "worker")
+                .map(|entry| entry.member_id.as_str()),
+            Some("worker"),
+            "the entry keeps the roster member id its spawn seated"
+        );
+
+        registry.unregister_label("side", "worker", SPAWNED_BY_LABEL);
+        assert!(
+            registry.entry_of_row("side", "worker").is_none(),
+            "an entry goes with its last key"
+        );
+        assert_eq!(
+            spawner_of(&registry, "launch").as_deref(),
+            Some("lead"),
+            "the other mob's entry is as it was"
+        );
+    }
+
+    /// A spawn registers its entry under the mob that seated its member: an
+    /// entry of the same name in another mob stays as it was, and a seed
+    /// that names no mob registers no entry.
+    #[tokio::test]
+    async fn a_spawn_registers_its_entry_under_its_own_mob_only() {
+        let store = ConsoleEventStore::new();
+        let sink = ConsoleSpawnSink::new(store.clone());
+        sink.project_spawned_member(&seed("worker-3", None)).await;
+
+        let mut elsewhere = seed("worker-3", None);
+        elsewhere.mob_id = Some("side".to_string());
+        elsewhere.spawned_by = Some("other-lead".to_string());
+        sink.project_spawned_member(&elsewhere).await;
+
+        let mut unspawned = seed("worker-3", None);
+        unspawned.mob_id = Some("third".to_string());
+        unspawned.spawned_by = None;
+        sink.project_spawned_member(&unspawned).await;
+
+        let spawner_in = |labels: Option<BTreeMap<String, String>>| {
+            labels.and_then(|labels| labels.get(SPAWNED_BY_LABEL).cloned())
+        };
+        assert_eq!(
+            spawner_in(store.identity_labels("ops", "worker-3").await).as_deref(),
+            Some("ops-lead"),
+            "the first mob's entry keeps its own spawner"
+        );
+        assert_eq!(
+            spawner_in(store.identity_labels("side", "worker-3").await).as_deref(),
+            Some("other-lead")
+        );
+        assert_eq!(
+            spawner_in(store.identity_labels("third", "worker-3").await),
+            None,
+            "a spawn with no known spawner evicts no other mob's lineage"
+        );
+
+        let mut no_mob = seed("worker-7", None);
+        no_mob.mob_id = None;
+        sink.project_spawned_member(&no_mob).await;
+        assert!(
+            !sink
+                .identity_labels_snapshot()
+                .await
+                .holds_identity("worker-7"),
+            "a seed that names no mob registers no entry"
+        );
+    }
+
+    /// A seed's mob is the one Core seated its member in: the mob
+    /// `mob_spawn_member` was called for, the mob the outcome of `delegate`
+    /// or `fork_off` names, the caller's own mob for the member spawn tools.
+    /// A mob that only an argument record names is not taken, and one that
+    /// disagrees leaves the seed without a mob.
+    #[test]
+    fn a_seed_names_the_mob_its_member_was_seated_in() {
+        let caller = Some("ops/orchestrator/ops-lead");
+        let mob_of = |tool: &str, args: Value, outcome: Value| {
+            let seeds = console_spawn_seeds(tool, &args, &outcome.to_string(), caller);
+            assert_eq!(seeds.len(), 1, "{tool}: one seed");
+            seeds[0].mob_id.clone()
+        };
+        let spawned = json!({ "agent_identity": "worker-3" });
+        assert_eq!(
+            mob_of(
+                "mob_spawn_member",
+                json!({ "mob_id": "own", "member_id": "worker-3" }),
+                spawned.clone(),
+            )
+            .as_deref(),
+            Some("own")
+        );
+        assert_eq!(
+            mob_of(
+                "mob_spawn_member",
+                json!({
+                    "mob_id": "own",
+                    "member_id": "worker-3",
+                    "specs": [{ "member_id": "worker-3", "mob_id": "ops" }]
+                }),
+                spawned.clone(),
+            ),
+            None,
+            "an argument record that names another mob leaves the seed without a mob"
+        );
+        for tool in ["delegate", "fork_off"] {
+            assert_eq!(
+                mob_of(
+                    tool,
+                    json!({ "task": "look it up", "mob_id": "ops" }),
+                    json!({ "agent_identity": "worker-3", "mob_id": "implicit-1" }),
+                )
+                .as_deref(),
+                Some("implicit-1"),
+                "{tool}: the outcome's mob is taken, whatever the arguments name"
+            );
+            assert_eq!(
+                mob_of(
+                    tool,
+                    json!({ "task": "look it up" }),
+                    json!({ "agent_identity": "worker-3", "mob_id": "implicit-1" }),
+                )
+                .as_deref(),
+                Some("implicit-1")
+            );
+            assert_eq!(
+                mob_of(tool, json!({ "task": "look it up" }), spawned.clone()),
+                None,
+                "{tool}: an outcome that names no mob leaves the seed without one"
+            );
+        }
+        assert_eq!(
+            mob_of(
+                "spawn_member",
+                json!({ "member_id": "worker-3" }),
+                spawned.clone(),
+            )
+            .as_deref(),
+            Some("ops"),
+            "a member spawn tool seats in the caller's own mob"
+        );
+        assert_eq!(
+            mob_of(
+                "spawn_member",
+                json!({ "member_id": "worker-3", "mob_id": "elsewhere" }),
+                spawned,
+            ),
+            None
+        );
+    }
+
     /// The outcome `spawn_many_members` returns: Core's typed results, one
     /// entry per spec, in spec order.
     fn spawn_many_outcome(results: Vec<meerkat_contracts::MobSpawnManyResultEntry>) -> String {
@@ -1455,7 +2288,13 @@ mod tests {
         });
         let outcome = spawn_many_outcome(vec![spawned_row("worker-a"), failed_row()]);
 
-        let seeds = console_spawn_seeds("spawn_many_members", &args, &outcome, None);
+        // The batch tool seats its members in the caller's own mob.
+        let seeds = console_spawn_seeds(
+            "spawn_many_members",
+            &args,
+            &outcome,
+            Some("ops/orchestrator/ops-lead"),
+        );
 
         let projected = seeds
             .iter()
@@ -1596,6 +2435,140 @@ mod tests {
         assert_eq!(labels.get("role").map(String::as_str), Some("worker"));
     }
 
+    /// The Console writes some keys of a member's row from its own facts
+    /// (the member's role, the mob it sits in, the host of an implicit
+    /// delegate, its group, whether it can be addressed) and reads the
+    /// host's attention marks from others. A registered label of such a key
+    /// is not taken into a row that lacks it; a display name still fills a
+    /// gap, and so does a label the Console reads nothing from.
+    #[test]
+    fn merge_registered_labels_takes_no_key_the_row_writes_itself() {
+        let registered = BTreeMap::from([
+            ("role".to_string(), "delegate".to_string()),
+            ("source_mob_id".to_string(), "another-mob".to_string()),
+            ("delegate_host_identity".to_string(), "a-host".to_string()),
+            ("addressable".to_string(), "false".to_string()),
+            ("group".to_string(), "workers".to_string()),
+            ("console_watched".to_string(), "true".to_string()),
+            ("console_alert_level".to_string(), "critical".to_string()),
+            ("console_degraded".to_string(), "true".to_string()),
+            (
+                "console_degraded_reason".to_string(),
+                "a reason".to_string(),
+            ),
+            ("singleton".to_string(), "true".to_string()),
+            ("display_name".to_string(), "Worker 3".to_string()),
+            ("team".to_string(), "ops".to_string()),
+        ]);
+        let mut labels = BTreeMap::new();
+
+        merge_registered_labels(&mut labels, &registered);
+
+        assert_eq!(
+            labels,
+            BTreeMap::from([
+                ("display_name".to_string(), "Worker 3".to_string()),
+                ("team".to_string(), "ops".to_string()),
+            ]),
+            "the display name and the other label are taken, no key of the Console's"
+        );
+    }
+
+    /// The census of a member row's keys. Every label key the builders of a
+    /// member's row read or write stands in one of two lists: the Console's
+    /// own ([`CONSOLE_ROW_LABELS`]), which no spawn call sets (refused in
+    /// every label position, left out by the registry's merge), or the
+    /// carried ones ([`CARRIED_ROW_LABELS`]). A key a builder starts to read
+    /// fails this row until it stands in one of them.
+    #[test]
+    fn the_keys_a_member_rows_builders_read_are_refused_or_carried() {
+        for key in CONSOLE_ROW_LABELS {
+            for args in [
+                json!({ "labels": { key: "x" } }),
+                json!({ "specs": [{ "labels": { key: "x" } }] }),
+                json!({ "members": [{ "labels": { key: "x" } }] }),
+            ] {
+                assert_eq!(
+                    console_row_label_in_spawn_args(&args),
+                    Some(key),
+                    "{key} is found in {args}"
+                );
+            }
+            assert!(
+                console_row_label_refusal(key).contains(key),
+                "the refusal names {key}"
+            );
+            let mut labels = BTreeMap::new();
+            merge_registered_labels(
+                &mut labels,
+                &BTreeMap::from([(key.to_string(), "x".to_string())]),
+            );
+            assert!(labels.is_empty(), "{key} is not taken from the registry");
+        }
+        for key in CARRIED_ROW_LABELS {
+            assert_eq!(
+                console_row_label_in_spawn_args(&json!({ "labels": { key: "x" } })),
+                None,
+                "{key} is carried"
+            );
+        }
+
+        // The label keys the row's builders name, read from their source.
+        let console = include_str!("http_console.rs");
+        let experience = include_str!("runtime/console_ingress.rs");
+        let mut named = std::collections::BTreeSet::new();
+        let mut unlisted = Vec::new();
+        for (source, function) in [
+            (console, "fn write_where_the_member_sits("),
+            (console, "fn projected_console_member_labels("),
+            (console, "fn console_member_from_runtime_alias("),
+            (console, "fn console_identity_record_from_console_member("),
+            (console, "fn console_identity_record_from_runtime_alias("),
+            (console, "fn record_labels_with_the_members_role("),
+            (console, "async fn build_live_snapshot("),
+            (experience, "fn build_console_experience_contract("),
+        ] {
+            let Some(start) = source.find(function) else {
+                unlisted.push(format!("{function} is not in its source file"));
+                continue;
+            };
+            let body = &source[start..];
+            let body = &body[..body.find("\n}\n").unwrap_or(body.len())];
+            // The reads and writes of a label map, however their lines break.
+            let body = body.split_whitespace().collect::<String>();
+            for read in [
+                "labels.get(\"",
+                "labels.entry(\"",
+                "labels.insert(\"",
+                "labels.remove(\"",
+                "labels.contains_key(\"",
+            ] {
+                let mut rest = body.as_str();
+                while let Some(at) = rest.find(read) {
+                    let tail = &rest[at + read.len()..];
+                    let key = &tail[..tail.find('"').unwrap_or(0)];
+                    named.insert(key.to_string());
+                    if !CONSOLE_ROW_LABELS.contains(&key) && !CARRIED_ROW_LABELS.contains(&key) {
+                        unlisted.push(format!("{function} names {key}"));
+                    }
+                    rest = tail;
+                }
+            }
+        }
+        assert!(unlisted.is_empty(), "{unlisted:#?}");
+        // The scan finds what it is meant to find: the keys the row builder
+        // writes and the policy records read.
+        for key in [
+            "source_mob_id",
+            "delegate_host_identity",
+            "group",
+            "role",
+            "singleton",
+        ] {
+            assert!(named.contains(key), "the builders name {key}: {named:?}");
+        }
+    }
+
     #[test]
     fn merge_registered_labels_keeps_lineage_keys_runtime_derived() {
         let mut labels = BTreeMap::from([
@@ -1643,7 +2616,7 @@ mod tests {
         spoofed.labels.extend(claim());
         sink.project_spawned_member(&spoofed).await;
         let registered = store
-            .identity_labels("worker-5")
+            .identity_labels("ops", "worker-5")
             .await
             .expect("identity labels registered");
         assert!(
@@ -1717,5 +2690,87 @@ mod tests {
         )]);
         assert!(!names_side_chat_source(&blank_side_chat));
         assert_eq!(lineage_parent(&BTreeMap::new()), None);
+    }
+}
+
+#[cfg(test)]
+mod spawn_registry_settle_tests {
+    use super::*;
+
+    fn labels(key: &str, value: &str) -> BTreeMap<String, String> {
+        [(key.to_string(), value.to_string())].into_iter().collect()
+    }
+
+    fn members(names: &[&str]) -> std::collections::BTreeSet<String> {
+        names.iter().map(ToString::to_string).collect()
+    }
+
+    #[test]
+    fn an_entry_ends_with_the_member_it_was_registered_for_and_no_other() {
+        let mut registry = SpawnRegistry::default();
+        registry.register("launch", "worker", "worker", labels("tier", "vault"));
+        registry.register("launch", "scribe", "scribe-1", labels("tier", "open"));
+        registry.register("side", "worker", "worker", labels("tier", "side"));
+
+        let ended = registry.end_entries("launch", &members(&["worker", "absent"]), false);
+        assert_eq!(ended, members(&["worker"]));
+        assert!(registry.entry_of_row("launch", "worker").is_none());
+        assert!(
+            registry.entry_of_row("launch", "scribe").is_some(),
+            "another member's entry stays"
+        );
+        assert!(
+            registry.entry_of_row("side", "worker").is_some(),
+            "the same name's entry in another mob stays"
+        );
+
+        let ended = registry.end_entries("launch", &members(&[]), true);
+        assert_eq!(
+            ended,
+            members(&["scribe"]),
+            "a mob reset ends the mob's entries"
+        );
+        assert_eq!(registry.mobs(), members(&["side"]));
+    }
+
+    #[test]
+    fn a_copy_names_what_it_cannot_tell_against_a_later_copy() {
+        let mut earlier = SpawnRegistry::default();
+        earlier.register("launch", "worker", "worker", labels("tier", "vault"));
+        earlier.register("launch", "scribe", "scribe", labels("tier", "open"));
+        earlier.register("side", "helper", "helper", labels("tier", "side"));
+        assert_eq!(
+            earlier.label_keys_of("worker"),
+            members(&["tier"]),
+            "the keys an entry of the name holds"
+        );
+
+        // Nothing moved: every entry is told.
+        assert!(earlier.identities_not_told(&earlier.clone()).is_empty());
+
+        // A name seated anew by no rotation has no entry in the later copy,
+        // and an entry registered anew differs.
+        let mut now = earlier.clone();
+        now.end_entries("launch", &members(&["worker"]), false);
+        now.register("launch", "scribe", "scribe", labels("tier", "other"));
+        assert_eq!(
+            earlier.identities_not_told(&now),
+            members(&["worker", "scribe"])
+        );
+
+        // A mob whose journal the later settle could not read.
+        let mut unread = earlier.clone();
+        unread.note_unread_mob("side");
+        assert_eq!(earlier.identities_not_told(&unread), members(&["helper"]));
+
+        // The seat an entry was registered for is the entry's own.
+        let mut seated = earlier.clone();
+        seated.note_entry_seat("launch", "worker", 4);
+        assert_eq!(
+            seated
+                .entry_of_row("launch", "worker")
+                .and_then(|entry| entry.seat_generation),
+            Some(4)
+        );
     }
 }

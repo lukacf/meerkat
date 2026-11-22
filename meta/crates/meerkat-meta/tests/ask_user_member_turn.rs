@@ -27,6 +27,7 @@ use meerkat_core::approval::decision::{
 };
 use meerkat_core::types::StopReason;
 use meerkat_core::{PrincipalKind, PrincipalRef, TrustDomainId};
+use meerkat_meta::identity_creation::{IdentityCreationPolicy, IdentityFamilyOptions};
 use meerkat_meta::identity_first::contracts::RosterProvider;
 use meerkat_meta::identity_first::{
     AgentAddressability, AgentIdentity, DurableAgentSpec, RosterContext, RosterError,
@@ -41,7 +42,11 @@ use tower::ServiceExt;
 
 const ISSUER: &str = "https://trusted.meta.localhost";
 const PERSON: &str = "person@example.test";
+/// Another person who may sign in to the rows' Console.
+const OTHER_PERSON: &str = "other@example.test";
 const IDENTITY: &str = "agent-a";
+/// The name of the side chat [`PERSON`] forks of the agent.
+const SIDE_CHAT: &str = "agent-a-side";
 /// What the row sends the member to make it ask.
 const ASK_NOW: &str = "ASK-NOW-KILO-3: ask which day to release.";
 const CALL_ID: &str = "call-ask-1";
@@ -118,7 +123,9 @@ restart_policy = "always"
         .to_string(),
         auth: AuthPolicy {
             default_provider: meerkat_meta::AuthProvider::GoogleOAuth,
-            email_allowlist: [PERSON.to_string()].into_iter().collect(),
+            email_allowlist: [PERSON.to_string(), OTHER_PERSON.to_string()]
+                .into_iter()
+                .collect(),
         },
         trusted_oidc: TrustedOidcRuntimeConfig {
             discovery_json: json!({
@@ -301,6 +308,11 @@ async fn runtime_of(
 
 /// One Console JSON-RPC call, signed in as [`PERSON`].
 async fn console_rpc(app: &axum::Router, method: &str, params: Value) -> Value {
+    console_rpc_as(app, PERSON, method, params).await
+}
+
+/// One Console JSON-RPC call, signed in as `person`.
+async fn console_rpc_as(app: &axum::Router, person: &str, method: &str, params: Value) -> Value {
     let mut jwt_header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256);
     jwt_header.kid = Some("kid-current".to_string());
     let token = jsonwebtoken::encode(
@@ -308,8 +320,8 @@ async fn console_rpc(app: &axum::Router, method: &str, params: Value) -> Value {
         &json!({
             "iss": ISSUER,
             "aud": "meerkat-console",
-            "sub": PERSON,
-            "email": PERSON,
+            "sub": person,
+            "email": person,
             "provider": "google_oauth",
             "exp": chrono::Utc::now().timestamp() + 300,
         }),
@@ -853,5 +865,199 @@ async fn a_member_is_offered_the_tool_again_after_its_runtime_restarts() {
     assert_eq!(
         offered_after, offered_before,
         "the resumed member is offered the tools it was offered before the restart"
+    );
+}
+
+/// The launch's identity policy of the row below: the stdio host may create
+/// an agent of the profile `worker`, at once.
+fn the_host_creates_workers() -> Arc<IdentityCreationPolicy> {
+    Arc::new(
+        IdentityCreationPolicy::parse(&json!({
+            "enabled": true,
+            "peers": {"default": "allow"},
+            "approval": {"rules": [{
+                "change": ["create"],
+                "requester": {"kind": "host"},
+                "target": {"profile": ["worker"]},
+                "outcome": {"kind": "allow"},
+            }]},
+        }))
+        .expect("the policy parses")
+        .expect("the policy is enabled"),
+    )
+}
+
+/// A question set is its asking member's, and so is what becomes of it. A
+/// person forks a side chat of the agent, private to them, and the side
+/// chat's own turn asks a question. The person closes the side chat, and
+/// the stdio host creates a long-term agent under the side chat's name.
+/// The set was withdrawn when its asker ended: no other person is listed it
+/// or answers it, its notice is settled as failed for good, and the model of
+/// the agent that holds the name now is sent nothing of it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_agent_created_under_an_ended_private_side_chats_name_is_sent_nothing_of_its_question_set()
+ {
+    const FIRST_TURN: &str = "FIRST-TURN-OSCAR-2: say ok.";
+    let state = tempfile::tempdir().unwrap();
+    let model = AskingModel::new();
+    let runtime = runtime(state.path(), &model).await;
+    assert!(
+        runtime.attach_identity_policy(the_host_creates_workers(), IdentityFamilyOptions::new()),
+        "the runtime serves identities and takes the policy"
+    );
+    let app = runtime.build_console_json_router(decision_state());
+    let questions = |person: &'static str| {
+        let app = app.clone();
+        async move { console_rpc_as(&app, person, "meta/gating/questions", json!({})).await }
+    };
+
+    // The agent's first turn gives it a conversation to fork.
+    send_text(&runtime, FIRST_TURN, "first-turn").await;
+    model.request_with(&[FIRST_TURN]).await;
+    let mut forked = Value::Null;
+    for _ in 0..100 {
+        forked = console_rpc(
+            &app,
+            "meta/fork_member",
+            json!({"source_member_id": IDENTITY, "agent_identity": SIDE_CHAT}),
+        )
+        .await;
+        if forked["error"].is_null() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert!(
+        forked["error"].is_null(),
+        "the person forks a side chat: {forked}"
+    );
+
+    // The side chat's own turn asks.
+    let sent = console_rpc(
+        &app,
+        "meta/console/send",
+        json!({
+            "identity": SIDE_CHAT,
+            "content": ASK_NOW,
+            "origin": "console:row",
+            "idempotency_key": "the-side-chat-asks",
+        }),
+    )
+    .await;
+    assert!(
+        sent["error"].is_null(),
+        "the person sends to the side chat: {sent}"
+    );
+    model
+        .request_with(&[CALL_ID, r#"\"outcome\":\"asked\""#])
+        .await;
+    let owners_list = questions(PERSON).await;
+    let set = owners_list["result"]["question_sets"][0].clone();
+    let pending_id = set["pending_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the owner is listed the set: {owners_list}"))
+        .to_string();
+    let others_list_while_it_lives = questions(OTHER_PERSON).await;
+
+    // The owner closes the side chat; the host creates an agent under its
+    // name; another person then reads the questions and tries to answer.
+    let retired = console_rpc(&app, "meta/retire_member", json!({"member_id": SIDE_CHAT})).await;
+    assert!(
+        retired["error"].is_null(),
+        "the owner closes the side chat: {retired}"
+    );
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let created = stdio_rpc(
+        &runtime,
+        "meta/identity/create",
+        json!({
+            "request_id": "an-agent-under-the-name",
+            "agents": [{"name": SIDE_CHAT, "profile": "worker"}],
+        }),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let others_list_after = questions(OTHER_PERSON).await;
+    let others_answer = console_rpc_as(
+        &app,
+        OTHER_PERSON,
+        "meta/gating/decide",
+        json!({
+            "pending_id": pending_id,
+            "decision": "approve",
+            "presented_digest": set["subject_digest"],
+            "answers": [{"question_id": "day", "answer": {"kind": "choice", "choice_id": "fri"}}],
+        }),
+    )
+    .await;
+
+    // What becomes of the set's notice: wait until a model is sent the
+    // set's result, or the notice is settled as failed.
+    let decision_id =
+        meerkat_core::approval::decision::DecisionId::new(pending_id.clone()).expect("decision id");
+    let stored = || {
+        runtime
+            .decision_owner()
+            .get(&decision_id)
+            .expect("the set's decision")
+    };
+    let deadline = tokio::time::Instant::now() + Duration::from_mins(1);
+    let (sent_to_a_model, notice) = loop {
+        let sent_to_a_model = model
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|request| request.contains("ask_user_result\\n") && request.contains(&pending_id))
+            .cloned();
+        // The notice's state, as the decision's wire form spells it.
+        let notice = serde_json::to_value(
+            meerkat_runtime::decision::wire::wire_decision(&stored(), false).notice,
+        )
+        .expect("the notice state");
+        if sent_to_a_model.is_some()
+            || notice == json!("failed")
+            || tokio::time::Instant::now() >= deadline
+        {
+            break (sent_to_a_model, notice);
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+    let phase = stored().state.phase;
+    runtime.shutdown().await;
+
+    assert_eq!(
+        set["origin"],
+        json!({ "identity": SIDE_CHAT }),
+        "{owners_list}"
+    );
+    assert_eq!(
+        others_list_while_it_lives["result"],
+        json!({ "question_sets": [] }),
+        "the side chat's set is its owner's while it lives"
+    );
+    assert_eq!(
+        sent_to_a_model, None,
+        "no model is sent the result of the ended side chat's set (the agent under the name: \
+         {created}; the other person's answer: {others_answer}; the notice: {notice})"
+    );
+    assert_eq!(
+        phase,
+        DecisionPhase::Withdrawn,
+        "the set was withdrawn when its asker ended"
+    );
+    assert_eq!(
+        notice,
+        json!("failed"),
+        "the set's notice is settled as failed"
+    );
+    assert_eq!(
+        others_list_after["result"],
+        json!({ "question_sets": [] }),
+        "no other person is listed the set once another member holds the name"
+    );
+    assert!(
+        !others_answer["error"].is_null(),
+        "no other person answers the set: {others_answer}"
     );
 }

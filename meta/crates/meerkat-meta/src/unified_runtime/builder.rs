@@ -180,6 +180,9 @@ pub struct UnifiedRuntimeBuilder {
     schedule_store: Option<Arc<dyn meerkat::ScheduleStore>>,
     workgraph_store: Option<Arc<dyn meerkat::WorkGraphStore>>,
     storage_provider: Option<Arc<dyn crate::storage_provider::MetaStorageProvider>>,
+    /// The bundled agent memory store, when the storage provider's agent
+    /// memory is that store: the build runs its first start's step.
+    storage_provider_memory_store: Option<crate::memory::sqlite_store::SqliteAgentMemoryStore>,
     meerkat_realm_declaration: Option<crate::storage_provider::MeerkatLevelRealmDeclaration>,
     // Materialized from `storage_provider` (M4b): the meerkat-level bundle
     // opened through `meerkat_provider()` for non-disk backends, and the
@@ -2041,6 +2044,14 @@ impl UnifiedRuntimeBuilder {
         // event sink and mob handle exist. An explicit `agent_memory()`
         // provider is used as-is — `attach_memory_engines` capability-checks
         // it; otherwise the bundled SQLite store opens under the layout root.
+        //
+        // The bundled store's first start's step (`crate::memory::set_aside`)
+        // runs once the mob is bootstrapped, below: it leaves where they are
+        // the notes stored from this moment on. The bundled store is the
+        // one opened here, or the one a storage provider's agent memory is.
+        let memory_notes_before_ms = crate::memory::set_aside::now_ms();
+        let mut bundled_memory_store: Option<crate::memory::sqlite_store::SqliteAgentMemoryStore> =
+            self.storage_provider_memory_store.clone();
         let stack_provider: Option<Arc<dyn AgentMemoryProvider>> =
             if self.agent_memory_engines.is_some() {
                 if let Some(provider) = self.agent_memory_provider.clone() {
@@ -2069,15 +2080,9 @@ impl UnifiedRuntimeBuilder {
                     // lies; fresh deployments get the canonical
                     // `agent-memory/` root.
                     let memory_path = layout.agent_memory_root()?.path;
-                    Some(Arc::new(
-                        crate::memory::sqlite_store::SqliteAgentMemoryStore::open(&memory_path)
-                            .map_err(|e| {
-                                UnifiedRuntimeBuilderError::Io(format!(
-                                    "failed to open agent memory store at {}: {e}",
-                                    memory_path.display()
-                                ))
-                            })?,
-                    ))
+                    let store = open_bundled_memory_store(&memory_path)?;
+                    bundled_memory_store = Some(store.clone());
+                    Some(Arc::new(store))
                 }
             } else {
                 None
@@ -2096,11 +2101,22 @@ impl UnifiedRuntimeBuilder {
         // A console side chat inherits its source's tool overlay, recorder
         // included: every member build binds a side chat's `memory` tool to
         // the side chat's own identity with this provider, on the classic
-        // and the identity-first path alike.
+        // and the identity-first path alike. The side chat's tool is gated
+        // as its source's own recorder is: per agent profile where the agent
+        // customizer attaches it, for every member where the mob's spawn
+        // customizer does (the classic path, below).
         if let Some(provider) = agent_memory_provider.as_ref() {
-            mob_spec.side_chat_memory_slot().fill(
+            let gate = if wants_identity_first {
+                crate::memory::side_chat_memory::SideChatMemoryGate::AgentProfiles(
+                    self.agent_memory_profile_policy.clone(),
+                )
+            } else {
+                crate::memory::side_chat_memory::SideChatMemoryGate::EveryMember
+            };
+            mob_spec.side_chat_memory_slot().fill_gated(
                 provider.clone(),
                 self.agent_memory_config.clone().unwrap_or_default(),
+                gate,
             );
         }
 
@@ -2118,14 +2134,20 @@ impl UnifiedRuntimeBuilder {
         if let Some(provider) = classic_agent_memory.as_ref() {
             // Composed after a spawn customizer the spec already carries,
             // never replacing it: the host's runs first, and memory keys on
-            // the identity it leaves.
+            // the identity it leaves. It reads who the spawn will be private
+            // to from the mob's owner record: the owner is written on the
+            // spec only after it.
+            let private_owners = mob_spec.private_owners.clone();
             mob_spec.spawn_member_customizer =
                 Some(crate::identity_first::ComposedSpawnMemberCustomizer::over(
                     mob_spec.spawn_member_customizer.take(),
-                    Arc::new(crate::memory::MemorySpawnCustomizer::new(
-                        provider.clone(),
-                        self.agent_memory_config.clone().unwrap_or_default(),
-                    )),
+                    Arc::new(
+                        crate::memory::MemorySpawnCustomizer::new(
+                            provider.clone(),
+                            self.agent_memory_config.clone().unwrap_or_default(),
+                        )
+                        .with_private_owners(private_owners),
+                    ),
                 ));
         }
         // Identity-first `customize_build` tools follow each member across
@@ -2280,6 +2302,33 @@ impl UnifiedRuntimeBuilder {
                 error
             })
         })?;
+
+        // The bundled agent memory store's first start's step
+        // (`crate::memory::set_aside`), through the bootstrapped mob's event
+        // log and those of the mobs its agent mob tools host: before the
+        // identity runtime is given its customizer and its
+        // injector, before the roster's agents are built and before the
+        // memory panel is given the store. The recorder slot and, on a
+        // runtime without registered agents, the spawn customizer were
+        // given the store before the bootstrap, so a member the bootstrap
+        // restored was built before this step. A step that cannot run fails
+        // the build: nothing was written, and the next build tries again.
+        if let Some(store) = bundled_memory_store.as_ref() {
+            let realm = self.agent_memory_config.clone().unwrap_or_default().realm;
+            let start = Box::pin(crate::memory::set_aside::memory_start_for(
+                store,
+                &realm,
+                &runtime.mob_runtime,
+                memory_notes_before_ms,
+            ))
+            .await;
+            match start {
+                crate::memory::set_aside::MemoryStart::Attach => {}
+                crate::memory::set_aside::MemoryStart::Refuse { message } => {
+                    return Err(UnifiedRuntimeBuilderError::Io(message));
+                }
+            }
+        }
 
         #[cfg(feature = "extension-state")]
         {
@@ -3235,7 +3284,17 @@ impl UnifiedRuntimeBuilder {
                 });
         }
 
-        self.install_realm_store_set(set);
+        // A provider whose agent memory is Meta's bundled store (the disk
+        // bundle's is): the build runs that store's first start's step over
+        // it, as over the store it opens itself. A host store realm's
+        // memory is the host's own and is installed as it is, below.
+        let bundled_memory = set
+            .agent_memory_provider
+            .as_ref()
+            .and_then(|memory| memory.as_bundled_store());
+        if self.install_realm_store_set(set) {
+            self.storage_provider_memory_store = bundled_memory;
+        }
         Ok(())
     }
 
@@ -3269,8 +3328,9 @@ impl UnifiedRuntimeBuilder {
     }
 
     /// Install a provider's realm store set into the per-slot seams the rest
-    /// of `build()` composes through.
-    fn install_realm_store_set(&mut self, set: crate::storage_provider::MetaRealmStoreSet) {
+    /// of `build()` composes through. Answers whether the set's agent memory
+    /// became this build's.
+    fn install_realm_store_set(&mut self, set: crate::storage_provider::MetaRealmStoreSet) -> bool {
         self.continuity_store = Some(set.continuity_store);
         self.lease_provider = Some(match set.lease_authority {
             crate::storage_provider::MetaLeaseAuthority::Provider(provider) => provider,
@@ -3295,7 +3355,9 @@ impl UnifiedRuntimeBuilder {
             && let Some(memory) = set.agent_memory_provider
         {
             self.agent_memory_provider = Some(memory);
+            return true;
         }
+        false
     }
 
     /// [`Self::materialize_storage_provider`] for a provider that keeps the
@@ -3626,6 +3688,14 @@ impl UnifiedRuntimeBuilder {
         } else {
             None
         };
+        // The access file this builder was given, when its controller
+        // persists to one, and the sibling a save of it is written
+        // through: the runtime declares both to its members' file tools.
+        let host_named_paths: Vec<PathBuf> = self
+            .access_controller
+            .as_ref()
+            .map(crate::access::AccessController::persist_paths)
+            .unwrap_or_default();
         let mut spec = if let Some((store_path, realm, ephemeral, authority)) = persistent {
             MobBootstrapSpec::persistent_inner_with_provider_stores(
                 definition,
@@ -3651,6 +3721,7 @@ impl UnifiedRuntimeBuilder {
                 self.session_identity_config_root.clone(),
                 self.provider_auth_persistence.clone(),
                 personal_accounts.clone(),
+                host_named_paths,
             )
             .await
             .map_err(storage_resolution_builder_error)?
@@ -3681,6 +3752,7 @@ impl UnifiedRuntimeBuilder {
                 self.session_identity_config_root.clone(),
                 self.provider_auth_persistence.clone(),
                 personal_accounts.clone(),
+                host_named_paths,
             )
             .map_err(storage_resolution_builder_error)?
         } else {
@@ -3709,6 +3781,7 @@ impl UnifiedRuntimeBuilder {
                 self.session_identity_config_root.clone(),
                 self.provider_auth_persistence.clone(),
                 personal_accounts.clone(),
+                host_named_paths,
             )
             .map_err(storage_resolution_builder_error)?;
             spec._ephemeral_dir = Some(Arc::new(temp_dir));
@@ -3896,6 +3969,22 @@ fn root_host_store_mob_storage_failure(
             "failed to open the host store realm's mob storage: {other}"
         )),
     }
+}
+
+/// Open the bundled agent memory store under `memory_path`.
+#[allow(
+    clippy::result_large_err,
+    reason = "UnifiedRuntimeBuilderError is the published builder error; boxing it would change that public type"
+)]
+fn open_bundled_memory_store(
+    memory_path: &std::path::Path,
+) -> Result<crate::memory::sqlite_store::SqliteAgentMemoryStore, UnifiedRuntimeBuilderError> {
+    crate::memory::sqlite_store::SqliteAgentMemoryStore::open(memory_path).map_err(|e| {
+        UnifiedRuntimeBuilderError::Io(format!(
+            "failed to open agent memory store at {}: {e}",
+            memory_path.display()
+        ))
+    })
 }
 
 /// An identity-first resume binds to the stored definition its roster was

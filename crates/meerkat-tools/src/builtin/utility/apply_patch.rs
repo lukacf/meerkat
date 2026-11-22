@@ -37,7 +37,7 @@ impl ApplyPatchTool {
 
 /// Model-facing documentation of the patch grammar. This is the single copy:
 /// the `patch` argument schema points here instead of repeating it.
-const APPLY_PATCH_DESCRIPTION: &str = "Apply a patch that adds, deletes, updates, or moves files. Paths are relative to the project root; absolute paths and paths that escape the root via '..' are rejected.
+const APPLY_PATCH_DESCRIPTION: &str = "Apply a patch that adds, deletes, updates, or moves files. Paths are relative to the project root; a path that leaves the root, absolute or via '..', is rejected.
 
 The patch begins with '*** Begin Patch' and ends with '*** End Patch', each on its own line and used once, with one or more file operations between them:
 - '*** Add File: <path>' followed by the file content, every line prefixed with '+'.
@@ -687,7 +687,11 @@ fn compute_replacements(
         let mut new_slice: &[String] = &chunk.new_lines;
         let mut found = seek_sequence(original_lines, pattern, line_index, chunk.is_end_of_file);
 
-        if found.is_none() && pattern.last().is_some_and(String::is_empty) {
+        // Unchanged lines that end in an empty line may stand for the file's
+        // last newline: retry without it, as long as a line is left to
+        // match. A pattern is never reduced to nothing, which would match
+        // anywhere.
+        if found.is_none() && pattern.len() > 1 && pattern.last().is_some_and(String::is_empty) {
             pattern = &pattern[..pattern.len() - 1];
             if new_slice.last().is_some_and(String::is_empty) {
                 new_slice = &new_slice[..new_slice.len() - 1];
@@ -1035,7 +1039,8 @@ mod tests {
             "each search starts after the previous hunk",
             "*** End of File",
             "'..'",
-            "absolute paths",
+            "absolute",
+            "leaves the root",
         ] {
             assert!(
                 def.description.contains(rule),
@@ -1043,6 +1048,13 @@ mod tests {
                 def.description
             );
         }
+        // A path with a drive prefix is refused wherever it leads, so the
+        // description promises no acceptance of an absolute path.
+        assert!(
+            !def.description.contains("accepted"),
+            "the description must not promise that an absolute path is accepted: {}",
+            def.description
+        );
     }
 
     #[test]
@@ -1096,6 +1108,54 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "alpha\ngamma");
     }
 
+    /// A hunk whose only unchanged line is an empty line names a blank line
+    /// of the file. Where the file has none to match, the hunk is refused
+    /// and the file is left as it was, with or without the end marker.
+    #[test]
+    fn update_hunk_with_only_an_empty_unchanged_line_needs_a_matching_line() {
+        for (case, hunk) in [
+            ("with the end marker", "@@\n+head\n\n*** End of File"),
+            ("without the end marker", "@@\n+head\n"),
+        ] {
+            let dir = tempdir().unwrap();
+            let root = dir.path();
+            let path = root.join("lines.txt");
+            std::fs::write(&path, "alpha\nbeta\n").unwrap();
+
+            let patch = wrap_patch(&format!("*** Update File: lines.txt\n{hunk}"));
+            let result = apply_patch(root, &ProtectedPaths::default(), &patch, &mut || Ok(()));
+
+            assert!(
+                matches!(
+                    &result,
+                    Err(ApplyPatchError::ComputeReplacements(message))
+                        if message.contains("Failed to find expected lines")
+                ),
+                "{case}: expected a context mismatch, got {result:?}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                "alpha\nbeta\n",
+                "{case}: the file is unchanged"
+            );
+        }
+    }
+
+    /// Unchanged lines that end in an empty line, standing for the file's
+    /// last newline, still match the file's last lines.
+    #[test]
+    fn update_hunk_ending_in_an_empty_unchanged_line_still_applies() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let path = root.join("lines.txt");
+        std::fs::write(&path, "alpha\nbeta\n").unwrap();
+
+        let patch = wrap_patch("*** Update File: lines.txt\n@@\n alpha\n-beta\n+gamma\n");
+        apply_patch(root, &ProtectedPaths::default(), &patch, &mut || Ok(())).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "alpha\ngamma\n");
+    }
+
     #[test]
     fn addition_only_chunk_inserts_after_context() {
         let dir = tempdir().unwrap();
@@ -1121,6 +1181,28 @@ mod tests {
         })
         .expect_err("escape should fail");
         assert!(err.to_string().contains("escapes the project root"));
+    }
+
+    /// What the tool does with an absolute path where paths have no drive
+    /// prefix: one that lies inside the root is applied, and one that leaves
+    /// the root is rejected like a path through `..`.
+    #[cfg(unix)]
+    #[test]
+    fn an_absolute_path_is_applied_inside_the_root_and_rejected_outside_it() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let inside = root.join("inside.txt");
+        let patch = wrap_patch(&format!("*** Add File: {}\n+hello", inside.display()));
+        apply_patch(root, &ProtectedPaths::default(), &patch, &mut || Ok(())).unwrap();
+        assert_eq!(std::fs::read_to_string(&inside).unwrap(), "hello\n");
+
+        let elsewhere = tempdir().unwrap();
+        let outside = elsewhere.path().join("outside.txt");
+        let patch = wrap_patch(&format!("*** Add File: {}\n+bad", outside.display()));
+        let err = apply_patch(root, &ProtectedPaths::default(), &patch, &mut || Ok(()))
+            .expect_err("an absolute path outside the root should fail");
+        assert!(err.to_string().contains("escapes the project root"));
+        assert!(!outside.exists());
     }
 
     #[test]

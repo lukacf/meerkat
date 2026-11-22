@@ -958,6 +958,19 @@ pub struct ToolDispatchContext {
     observation_barrier: Option<Arc<dyn crate::authorization::OperationObservationBarrier>>,
     // Monotonic restriction set by the core execution policy owner.
     read_only_execution_required: bool,
+    /// Whether a live layer narrows the calling session's tools at this
+    /// round ([`crate::ToolScope::narrowed_by_a_live_layer`]), bound by the
+    /// agent loop with the round. `None` outside a round, and when the loop
+    /// could not read it: unknown, never "nothing narrows".
+    live_tool_narrowing: Option<bool>,
+    /// Stated by the composition that built the calling session's tools:
+    /// the session's build is the host's default build
+    /// ([`Self::with_host_default_build_stated`]).
+    host_default_build_stated: bool,
+    /// Whether the composition that built the calling session's tools
+    /// stated that the session's build mounts the mob tools
+    /// ([`Self::with_mob_tools_held_stated`]).
+    mob_tools_held_stated: bool,
 }
 
 /// The reply capabilities of one turn: the turn-start list, parsed once when
@@ -1801,6 +1814,9 @@ impl ToolDispatchContext {
             refusal_observer: None,
             observation_barrier: None,
             read_only_execution_required: false,
+            live_tool_narrowing: None,
+            host_default_build_stated: false,
+            mob_tools_held_stated: false,
         }
     }
 
@@ -2748,6 +2764,7 @@ impl ToolDispatchContext {
     pub(crate) fn bind_run_id(&mut self, run_id: crate::RunId) {
         self.run_id = Some(run_id);
         self.round = None;
+        self.live_tool_narrowing = None;
     }
 
     /// Zero-based index of the run's round this dispatch belongs to, when the
@@ -2761,18 +2778,97 @@ impl ToolDispatchContext {
     }
 
     /// The round's calls are dispatched and their outcomes collected: a call
-    /// the host dispatches outside a round carries no dedupe key.
+    /// the host dispatches outside a round carries no dedupe key, and no
+    /// reading of the session's live tool layers.
     pub(crate) fn clear_round(&mut self) {
         self.round = None;
+        self.live_tool_narrowing = None;
     }
 
     /// This context for a call the host dispatches itself (an external
     /// call): it belongs to no round of the agent's loop, so it carries no
-    /// dedupe key, whatever round the agent bound last.
+    /// dedupe key, whatever round the agent bound last, and no reading of
+    /// the session's live tool layers.
     #[must_use]
     pub(crate) fn outside_round(mut self) -> Self {
         self.round = None;
+        self.live_tool_narrowing = None;
         self
+    }
+
+    /// Whether a live layer narrows the calling session's tools at this
+    /// round: a filter set on the session after it was built, a per-turn
+    /// overlay, a closed grant gate
+    /// ([`crate::ToolScope::narrowed_by_a_live_layer`]). `None` when the
+    /// dispatch belongs to no round of an agent's loop, or the loop could
+    /// not read the session's tool scope: the answer is unknown, and a tool
+    /// that needs "nothing narrows" refuses.
+    #[must_use]
+    pub const fn live_tool_narrowing(&self) -> Option<bool> {
+        self.live_tool_narrowing
+    }
+
+    /// Bind what the session's tool scope answers for this round. The agent
+    /// loop binds it with the round; a host that dispatches a session's
+    /// tool call itself states what it knows of that session. Never a value
+    /// of the call's arguments or of anything a model wrote.
+    #[must_use]
+    pub fn with_live_tool_narrowing(mut self, narrowing: Option<bool>) -> Self {
+        self.live_tool_narrowing = narrowing;
+        self
+    }
+
+    pub(crate) fn bind_live_tool_narrowing(&mut self, narrowing: Option<bool>) {
+        self.live_tool_narrowing = narrowing;
+    }
+
+    /// State that the calling session's build is the host's default build:
+    /// the session is under no restriction a session the host builds with
+    /// nothing set would not be under. Only the composition that built the
+    /// session's tools, from the build itself, states it. Never a value of
+    /// the call's arguments or of anything a model wrote.
+    #[must_use]
+    pub fn with_host_default_build_stated(mut self) -> Self {
+        self.host_default_build_stated = true;
+        self
+    }
+
+    /// Drop a statement that the calling session's build is the host's
+    /// default build ([`Self::with_host_default_build_stated`]): the
+    /// composition that builds a session's tools keeps no word about the
+    /// build but its own.
+    #[must_use]
+    pub fn without_host_default_build_stated(mut self) -> Self {
+        self.host_default_build_stated = false;
+        self
+    }
+
+    /// Whether the composition that built the calling session's tools
+    /// stated that the session's build is the host's default build
+    /// ([`Self::with_host_default_build_stated`]). Not stated is unknown.
+    #[must_use]
+    pub const fn host_default_build_stated(&self) -> bool {
+        self.host_default_build_stated
+    }
+
+    /// State whether the calling session's build mounts the mob tools:
+    /// the session can create helpers in its mob with tools of its own.
+    /// Only the composition that built the session's tools, from the
+    /// build itself, states it, and it sets the statement either way, so
+    /// one that arrives with a call is not kept. Never a value of the
+    /// call's arguments or of anything a model wrote.
+    #[must_use]
+    pub fn with_mob_tools_held_stated(mut self, held: bool) -> Self {
+        self.mob_tools_held_stated = held;
+        self
+    }
+
+    /// Whether the composition that built the calling session's tools
+    /// stated that the session's build mounts the mob tools
+    /// ([`Self::with_mob_tools_held_stated`]). Not stated is unknown.
+    #[must_use]
+    pub const fn mob_tools_held_stated(&self) -> bool {
+        self.mob_tools_held_stated
     }
 
     /// The deduplication key of one call of this dispatch's round.

@@ -85,6 +85,10 @@ impl BlobSaveFileTool {
 pub struct BlobLoadFileTool {
     project_root: PathBuf,
     blob_store: Arc<dyn BlobStore>,
+    /// Where the tool never reads: the engine's own directory and, when
+    /// the host declared them, its state and input paths under
+    /// `<project_root>/`.
+    protected: ProtectedPaths,
 }
 
 impl BlobLoadFileTool {
@@ -92,7 +96,14 @@ impl BlobLoadFileTool {
         Self {
             project_root,
             blob_store,
+            protected: ProtectedPaths::default(),
         }
+    }
+
+    /// The tool with the host's declared paths protected as well.
+    pub(crate) fn protecting(mut self, protected: ProtectedPaths) -> Self {
+        self.protected = protected;
+        self
     }
 }
 
@@ -510,6 +521,11 @@ impl BlobLoadFileTool {
             .map_err(|err| BuiltinToolError::invalid_args(err.to_string()))?;
         let user_path = PathBuf::from(&args.path);
         let resolved = resolve_project_path(&self.project_root, &user_path)?;
+        // Before the file is touched: the engine's own directory and the
+        // host's declared paths are not the project's to read.
+        self.protected
+            .admit_tool_read(&self.project_root, &resolved, &user_path)
+            .await?;
         let metadata =
             ensure_existing_file_under_root(&self.project_root, &resolved, &user_path).await?;
         if metadata.len() > MAX_LOAD_FILE_SIZE {
@@ -1099,23 +1115,40 @@ mod tests {
         }
     }
 
-    /// Reading is not restricted: `blob_load_file` still loads a file the
-    /// engine keeps under `.rkat`, and a save beside `.rkat` is still
+    fn assert_engine_read_refusal(result: &Result<ToolOutput, BuiltinToolError>, case: &str) {
+        assert!(
+            matches!(
+                result,
+                Err(BuiltinToolError::InvalidArgs(reason))
+                    if reason.contains("engine's own directory")
+                        && reason.contains("do not read there")
+            ),
+            "{case}: expected the engine directory read refusal, got {result:?}"
+        );
+    }
+
+    /// `blob_load_file` does not load a file the engine keeps under `.rkat`
+    /// and loads one beside it, and a save beside `.rkat` is still
     /// written. A `.rkat` directory deeper in the project is an engine
     /// directory too (a host started from that subdirectory reads it), so a
     /// save into one is refused.
     #[tokio::test]
-    async fn reads_and_ordinary_saves_are_unchanged() {
+    async fn engine_directory_loads_are_refused_and_ordinary_files_are_unchanged() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().canonicalize().unwrap();
         tokio::fs::create_dir_all(root.join(".rkat")).await.unwrap();
         tokio::fs::write(root.join(".rkat/notes.txt"), b"readable")
             .await
             .unwrap();
+        tokio::fs::write(root.join("notes.txt"), b"readable")
+            .await
+            .unwrap();
         let (store, blob_id) = seeded_store().await;
         let load = BlobLoadFileTool::new(root.clone(), Arc::clone(&store));
+        let refused = load.call(json!({"path": ".rkat/notes.txt"})).await;
+        assert_engine_read_refusal(&refused, ".rkat/notes.txt");
         let loaded = load
-            .call(json!({"path": ".rkat/notes.txt"}))
+            .call(json!({"path": "notes.txt"}))
             .await
             .unwrap()
             .into_json()
@@ -1143,14 +1176,134 @@ mod tests {
         assert!(!root.join("assets/.rkat").exists() && !root.join("packages").exists());
     }
 
+    /// `blob_load_file` refuses every path under `.rkat`: every spelling of
+    /// one, a nested one, one that does not exist, and a symbolic link in
+    /// the project that leads into one.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn load_file_refuses_the_engine_directory_in_every_spelling_and_through_links() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        for directory in [".rkat", "packages/app/.rkat", "docs/.Rkat", "out"] {
+            tokio::fs::create_dir_all(root.join(directory))
+                .await
+                .unwrap();
+        }
+        for file in [
+            ".rkat/config.toml",
+            "packages/app/.rkat/config.toml",
+            "docs/.Rkat/config.toml",
+        ] {
+            tokio::fs::write(root.join(file), b"kept").await.unwrap();
+        }
+        symlink(root.join(".rkat"), root.join("settings")).unwrap();
+        symlink(".rkat/config.toml", root.join("alias.toml")).unwrap();
+        let (store, _) = seeded_store().await;
+        let load = BlobLoadFileTool::new(root.clone(), store);
+
+        let absolute = root.join(".rkat/config.toml");
+        for path in [
+            ".rkat/config.toml",
+            "./.rkat/config.toml",
+            "out/../.rkat/config.toml",
+            absolute.to_str().unwrap(),
+            "packages/app/.rkat/config.toml",
+            "docs/.Rkat/config.toml",
+            ".rkat/absent.toml",
+            "settings/config.toml",
+            "alias.toml",
+        ] {
+            // The media type is given, so the call does not stop at the
+            // extension: the path alone decides.
+            let result = load
+                .call(json!({ "path": path, "media_type": "text/plain" }))
+                .await;
+            assert_engine_read_refusal(&result, path);
+        }
+    }
+
+    /// `blob_load_file` does not read through a symbolic link whose target
+    /// does not exist.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn load_file_refuses_a_link_that_leads_nowhere() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        symlink(root.join("missing.txt"), root.join("link.txt")).unwrap();
+        let (store, _) = seeded_store().await;
+        let load = BlobLoadFileTool::new(root.clone(), store);
+
+        let result = load.call(json!({ "path": "link.txt" })).await;
+        assert!(
+            matches!(
+                &result,
+                Err(BuiltinToolError::InvalidArgs(reason))
+                    if reason.contains("symbolic link whose target does not exist")
+                        && reason.ends_with("do not read through it")
+            ),
+            "expected the dangling link refusal, got {result:?}"
+        );
+    }
+
+    /// A refused path answers one sentence whatever stands there: a file,
+    /// nothing, a file over the size limit, a name with no media type of
+    /// its own, or a symbolic link that leads nowhere.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn load_file_answers_a_refused_path_the_same_whatever_stands_there() {
+        use super::super::protected_paths::ReadRefusal;
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        for directory in [".rkat", "state"] {
+            let directory = root.join(directory);
+            std::fs::create_dir_all(&directory).unwrap();
+            std::fs::write(directory.join("notes.txt"), "kept").unwrap();
+            std::fs::File::create(directory.join("huge.txt"))
+                .unwrap()
+                .set_len(MAX_LOAD_FILE_SIZE + 1)
+                .unwrap();
+            std::fs::write(directory.join("store.sqlite3"), "kept").unwrap();
+            symlink(root.join("missing-target"), directory.join("dangling.txt")).unwrap();
+        }
+        let (store, _) = seeded_store().await;
+        let load = BlobLoadFileTool::new(root.clone(), store)
+            .protecting(ProtectedPaths::with_host_paths([root.join("state")]));
+
+        for directory in [".rkat", "state"] {
+            for name in [
+                "notes.txt",
+                "absent.txt",
+                "huge.txt",
+                "store.sqlite3",
+                "dangling.txt",
+            ] {
+                let path = format!("{directory}/{name}");
+                let result = load.call(json!({ "path": path })).await;
+                assert!(
+                    matches!(
+                        &result,
+                        Err(BuiltinToolError::InvalidArgs(reason))
+                            if *reason == ReadRefusal::Protected.reason(Path::new(&path))
+                    ),
+                    "{path}: expected the one read refusal, got {result:?}"
+                );
+            }
+        }
+    }
+
     /// The paths a host declared as its own are refused like the engine
     /// directory. A host whose tools are rooted inside its own state root
-    /// (a server started without a context root) keeps its realm documents
-    /// and still lets ordinary files, a store file included, be written
-    /// there: the state root contains the project root, so it is not applied
-    /// as a whole. That the stores stay writable in that layout is a known
-    /// limit of this rule, stated in the tools reference; a host that wants
-    /// them out of reach gives its tools a context root.
+    /// (a server started without a context root) keeps what it declares
+    /// there, and a file it did not declare is still written: the state
+    /// root contains the project root, so it is not applied as a whole. The
+    /// stock hosts declare their realm's documents and stores; this host
+    /// declares two documents.
     #[tokio::test]
     async fn save_file_refuses_host_declared_paths() {
         let temp = tempfile::tempdir().unwrap();

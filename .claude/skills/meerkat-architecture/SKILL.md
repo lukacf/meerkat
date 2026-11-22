@@ -85,8 +85,8 @@ When updating architecture docs or reviewing current code, do not stop at the
 - Azure OpenAI auth/backend support, project-local CLI realm defaults, HTML
   artifact output, typed transcript notices, provider-native search/image
   improvements, structured skill identity, and model-aware compaction defaults.
-- `gemini-4-argon` is the catalog default Gemini text model (paid Gemini API
-  tiers only); it and `gemini-3.8-flash` are `ModelTier::Recommended`
+- `gemini-4-neon` is the catalog default Gemini text model (paid Gemini API
+  tiers only); it, Argon, Hydrogen and `gemini-3.8-flash` are `ModelTier::Recommended`
   (`crates/meerkat-models/src/catalog.rs`), and older Flash rows such as
   `gemini-3.6-flash` and `gemini-3.5-flash` are `ModelTier::Supported`. The
   Google Code Assist and Copilot Gemini login routes default to
@@ -245,9 +245,10 @@ Since 0.8.4 (PR #912, the storage unification arc):
   resolved once at bootstrap, carried through composition; the
   `storage-ambient-gate` CI gate bans ambient root resolution (`dirs::*`,
   `HOME`/`XDG`) outside the bootstrap/layout modules. Realm state roots
-  resolve realm-id-first across the project-local and user-global
-  candidates (`RealmConfig::resolve_locator_dual_root`): explicit root wins,
-  a single existing candidate is used where it lies, both is a typed
+  resolve realm-id-first across every ancestor's project-local candidate
+  and the user-global root (`RealmConfig::resolve_locator_among_roots`):
+  explicit root wins, a single existing candidate is used where it lies
+  (also a farther ancestor's), more than one is a typed
   `RealmSplitBrain` refusal, neither goes to the surface default. Probing
   fails closed (typed `RootProbeFailed` / `RealmDirectoryCollision` /
   `ManifestUnreadable`); `DualRootResolution.candidate_roots` arms a

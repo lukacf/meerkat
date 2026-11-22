@@ -14,6 +14,12 @@
 //! (`MobSessionService::recorded_build_instructions`, a provided method) or
 //! is listed with the reason it has no committed read
 //! (`NO_COMMITTED_SECTIONS_READ`).
+//!
+//! And one about the hosts' compositions: every shipped file of Core, Meta
+//! and Connect that composes the agent-facing schedule tools attaches a
+//! write judge to the schedule service (`SCHEDULE_TOOL_HOSTS`), and inside
+//! the tools' crate every run of a schedule tool call but the host's own
+//! wire call puts the call to that judge first (`SCHEDULE_TOOL_CALLS`).
 
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
@@ -1983,4 +1989,195 @@ mod tests {
         Err("fn build() -> Box<dyn MobSessionService for Odd> {}".to_string()),
         "a `MobSessionService for` that is no impl header is reported, not skipped"
     );
+}
+
+/// Expressions that compose the agent-facing schedule tools over a schedule
+/// service.
+const SCHEDULE_TOOL_COMPOSITIONS: &[&str] = &[
+    "ScheduleToolDispatcher::new(",
+    "ScheduleToolSurface::new(",
+    "wire_schedule_tools(",
+];
+
+/// The call that attaches a host's judge of its agents' schedule writes to
+/// the schedule service the tools write through.
+const SCHEDULE_WRITE_JUDGE_ATTACH: &str = "attach_write_judge(";
+
+/// The crate that defines the schedule tools: its own constructions are the
+/// tools' definitions, not a host's composition, and are checked by
+/// [`SCHEDULE_TOOL_CALLS`].
+const SCHEDULE_TOOLS_CRATE: &str = "crates/meerkat-schedule/";
+
+/// Every shipped file of Core, Meta and Connect that composes the schedule
+/// tools for agents. Each attaches a write judge in the same file.
+const SCHEDULE_TOOL_HOSTS: &[&str] = &[
+    "crates/meerkat-cli/src/main.rs",
+    "crates/meerkat-cli/src/mob_host.rs",
+    "crates/meerkat-mcp-server/src/lib.rs",
+    "crates/meerkat-rest/src/lib.rs",
+    "crates/meerkat-rpc/src/session_runtime.rs",
+    "meta/crates/meerkat-meta/src/schedule_wiring.rs",
+];
+
+/// Inside the schedule tools' crate: each shipped file that runs a schedule
+/// tool call, how many times it does, and how many of those runs put the
+/// call to the write judge first. The one run that does not is the host's
+/// own wire call (`handle_schedule_tools_call`), which belongs to no
+/// session's turn.
+const SCHEDULE_TOOL_CALLS: &[(&str, usize, usize)] = &[
+    ("crates/meerkat-schedule/src/tool_surface.rs", 1, 1),
+    ("crates/meerkat-schedule/src/tools.rs", 2, 1),
+];
+
+/// The run of a schedule tool call, and the judge's question before it.
+const SCHEDULE_TOOL_CALL: &str = "run_schedule_tools_call(";
+const SCHEDULE_WRITE_JUDGED: &str = "refuse_write_out_of_reach(";
+
+/// How often `code` uses `expression`, a path or call that ends in `(`: not
+/// as the tail of a longer name, and not where it is defined.
+fn uses_of(code: &str, expression: &str) -> usize {
+    code.match_indices(expression)
+        .filter(|(at, _)| {
+            let before = &code[..*at];
+            !before.chars().next_back().is_some_and(is_identifier_char)
+                && !before.trim_end().ends_with("fn")
+        })
+        .count()
+}
+
+/// Every shipped file under `root` of Core and of the products `products`,
+/// by repository path, with its shipped code.
+fn shipped_files(root: &Path, products: &[&str]) -> Vec<(String, String)> {
+    let mut paths = walk_rust_sources(root);
+    for product in products {
+        paths.extend(rust_sources_under(&root.join(product)));
+    }
+    let mut files = Vec::new();
+    for path in paths {
+        let relative = path
+            .strip_prefix(root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let relative = relative.trim_start_matches("./").to_string();
+        let in_product = products.iter().find_map(|product| {
+            relative
+                .strip_prefix(product)
+                .and_then(|rest| rest.strip_prefix('/'))
+        });
+        if !is_shipped_source(in_product.unwrap_or(relative.as_str())) {
+            continue;
+        }
+        let source = fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+        files.push((relative, shipped_code(&source)));
+    }
+    files
+}
+
+/// Every composition that hands agents the schedule tools attaches a write
+/// judge: a member's schedule create or update is judged as its own message
+/// to the member the target names only where the host attached a judge to
+/// the schedule service, so a host that composes the tools without one lets
+/// any agent that holds them schedule for any member. A shipped file of
+/// Core, Meta or Connect that composes the tools is listed in
+/// `SCHEDULE_TOOL_HOSTS` and attaches a judge itself; a listed file that no
+/// longer composes them fails too. Inside the tools' own crate, every run of
+/// a schedule tool call but the host's own wire call puts the call to the
+/// judge first (`SCHEDULE_TOOL_CALLS`).
+#[test]
+fn every_composition_of_the_schedule_tools_attaches_a_write_judge() {
+    let root = repo_root();
+    let files = shipped_files(&root, &["meta", "connect"]);
+    assert!(
+        files.len() > 100,
+        "the shipped sources were not found under {} ({} files)",
+        root.display(),
+        files.len()
+    );
+
+    let mut hosts: BTreeMap<&str, bool> = BTreeMap::new();
+    let mut calls: Vec<(&str, usize, usize)> = Vec::new();
+    for (relative, code) in &files {
+        if relative.starts_with(SCHEDULE_TOOLS_CRATE) {
+            let runs = uses_of(code, SCHEDULE_TOOL_CALL);
+            if runs > 0 {
+                calls.push((
+                    relative.as_str(),
+                    runs,
+                    uses_of(code, SCHEDULE_WRITE_JUDGED),
+                ));
+            }
+            continue;
+        }
+        if SCHEDULE_TOOL_COMPOSITIONS
+            .iter()
+            .any(|expression| uses_of(code, expression) > 0)
+        {
+            hosts.insert(
+                relative.as_str(),
+                code.contains(SCHEDULE_WRITE_JUDGE_ATTACH),
+            );
+        }
+    }
+
+    let unlisted: Vec<&str> = hosts
+        .keys()
+        .filter(|file| !SCHEDULE_TOOL_HOSTS.contains(*file))
+        .copied()
+        .collect();
+    assert!(
+        unlisted.is_empty(),
+        "these shipped files compose the schedule tools and are not in SCHEDULE_TOOL_HOSTS: \
+         {unlisted:?}. A host that hands agents the tools attaches a write judge to the \
+         schedule service (`ScheduleService::attach_write_judge`) and is listed"
+    );
+    let gone: Vec<&str> = SCHEDULE_TOOL_HOSTS
+        .iter()
+        .filter(|file| !hosts.contains_key(*file))
+        .copied()
+        .collect();
+    assert!(
+        gone.is_empty(),
+        "SCHEDULE_TOOL_HOSTS lists files that no longer compose the schedule tools: {gone:?}"
+    );
+    let unjudged: Vec<&str> = hosts
+        .iter()
+        .filter(|(_, attaches)| !**attaches)
+        .map(|(file, _)| *file)
+        .collect();
+    assert!(
+        unjudged.is_empty(),
+        "these shipped files compose the schedule tools and attach no write judge: \
+         {unjudged:?}. An agent that holds the tools there could schedule for any member"
+    );
+
+    calls.sort_unstable();
+    assert_eq!(
+        calls, SCHEDULE_TOOL_CALLS,
+        "the runs of a schedule tool call in the tools' crate (file, runs, runs judged first) \
+         differ from SCHEDULE_TOOL_CALLS: a dispatcher that runs a call puts it to the write \
+         judge first (`refuse_write_out_of_reach`)"
+    );
+}
+
+/// The composition scan counts a use, not a longer name that ends in the
+/// expression, a definition, a comment, a literal or test code.
+#[test]
+fn the_schedule_tool_scan_counts_uses_only() {
+    let source = r#"
+fn host() { let tools = ScheduleToolDispatcher::new(service.clone()); }
+fn wrapped() { let tools = CurrentSessionScheduleToolDispatcher::new(tools, session); }
+fn run_schedule_tools_call() {}
+fn runs() { run_schedule_tools_call(); crate::tools::run_schedule_tools_call(); }
+// ScheduleToolDispatcher::new(in_a_comment)
+fn literal() { let _ = "ScheduleToolDispatcher::new("; }
+#[cfg(test)]
+mod tests {
+    fn fixture() { let tools = ScheduleToolDispatcher::new(service); }
+}
+"#;
+    let code = shipped_code(source);
+    assert_eq!(uses_of(&code, "ScheduleToolDispatcher::new("), 1);
+    assert_eq!(uses_of(&code, SCHEDULE_TOOL_CALL), 2);
 }

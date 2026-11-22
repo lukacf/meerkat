@@ -61777,6 +61777,389 @@ async fn parked_queued_input_session_count_sees_the_five_day_wedge_shape() {
     .await;
 }
 
+/// A clock reading past the run settlement notice, for the census reads of
+/// the rows below: the rows stay as the runtime wrote them, and only the
+/// reader's clock moves.
+fn past_run_settlement_notice() -> chrono::DateTime<chrono::Utc> {
+    chrono::Utc::now()
+        + chrono::Duration::from_std(crate::run_progress::RUN_SETTLEMENT_NOTICE)
+            .expect("the notice fits a chrono duration")
+        + chrono::Duration::seconds(1)
+}
+
+/// Poll the run settlement census at `now` until it publishes `expected`,
+/// admitting only `None` (a transient unreadable ledger) on the way; any
+/// other count is a wrong reading and fails immediately.
+async fn run_settlement_census_settles_at(
+    machine: &Arc<MeerkatMachine>,
+    now: impl Fn() -> chrono::DateTime<chrono::Utc>,
+    expected: usize,
+    claim: &str,
+) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match machine
+                .unsettled_run_session_count_at(crate::run_progress::RUN_SETTLEMENT_NOTICE, now())
+            {
+                Some(count) if count == expected => break,
+                Some(count) => {
+                    panic!("census read {count} while exactly {expected} was true: {claim}")
+                }
+                None => tokio::task::yield_now().await,
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("census never settled at {expected}: {claim}"));
+}
+
+/// A registered persistent session with a blocking executor, its runtime loop
+/// armed to pause between its next run's terminal commit and the steps that
+/// settle the run's terminal work, with one prompt run up to that pause.
+struct HeldAfterTerminalCommit {
+    machine: Arc<MeerkatMachine>,
+    session_id: SessionId,
+    apply_started: Arc<Notify>,
+    apply_release: Arc<Notify>,
+    release: crate::tokio::sync::oneshot::Sender<()>,
+    completion_handle: crate::completion::CompletionHandle,
+    /// [`run_settlement_watchers`] before the run was accepted.
+    watchers_before: usize,
+}
+
+/// How many weak handles stand on the session's driver. A run settlement
+/// watchdog holds exactly one from the run's terminal commit until it ends,
+/// so the difference to the count before the run is the number of watchdogs
+/// alive for the session.
+async fn run_settlement_watchers(machine: &Arc<MeerkatMachine>, session_id: &SessionId) -> usize {
+    let sessions = machine.sessions.read().await;
+    Arc::weak_count(
+        &sessions
+            .get(session_id)
+            .expect("registered session entry")
+            .driver,
+    )
+}
+
+async fn hold_a_run_after_its_terminal_commit() -> HeldAfterTerminalCommit {
+    let machine = persistent_health_probe_machine();
+    let session_id = SessionId::new();
+    let apply_started = Arc::new(Notify::new());
+    let apply_release = Arc::new(Notify::new());
+    machine
+        .prepare_bindings(session_id.clone())
+        .await
+        .expect("bindings should prepare");
+    machine
+        .ensure_session_with_executor(
+            session_id.clone(),
+            Box::new(HealthProbeBlockingExecutor {
+                apply_started: Arc::clone(&apply_started),
+                apply_release: Arc::clone(&apply_release),
+            }),
+        )
+        .await
+        .expect("runtime executor registration should succeed");
+    run_settlement_census_settles_at(
+        &machine,
+        past_run_settlement_notice,
+        0,
+        "a session that committed no run owes no settlement",
+    )
+    .await;
+
+    let watchers_before = run_settlement_watchers(&machine, &session_id).await;
+    let (entered, release) =
+        machine.arm_runtime_loop_before_boundary_acknowledgement_test_hook(session_id.clone());
+    let (accept_outcome, completion_handle) = machine
+        .accept_input_with_completion(&session_id, make_prompt("run settlement census"))
+        .await
+        .expect("input should be accepted");
+    assert!(matches!(accept_outcome, AcceptOutcome::Accepted { .. }));
+    tokio::time::timeout(Duration::from_secs(5), apply_started.notified())
+        .await
+        .expect("the accepted input should reach executor apply");
+    apply_release.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), entered)
+        .await
+        .expect("the run should commit")
+        .expect("the armed pause should be reached");
+
+    // The watchdog of the run is alive from its terminal commit.
+    assert_eq!(
+        run_settlement_watchers(&machine, &session_id).await,
+        watchers_before + 1,
+        "the terminal commit starts exactly one run settlement watchdog"
+    );
+
+    HeldAfterTerminalCommit {
+        machine,
+        session_id,
+        apply_started,
+        apply_release,
+        release,
+        completion_handle: completion_handle
+            .expect("accepted input should register a completion waiter"),
+        watchers_before,
+    }
+}
+
+/// The `session_run_settlement` census while a runtime loop stands between a
+/// run's terminal commit and the settlement of its terminal work. Every
+/// earlier dimension reads this session as healthy: its registration is
+/// `Active`, its loop is alive, no run is staged and nothing is queued. The
+/// census reads it from the input rows: nothing inside the notice, one
+/// session past it, and nothing again once the loop settles the work.
+#[tokio::test]
+async fn unsettled_run_session_count_sees_a_committed_run_whose_loop_stands() {
+    let held = hold_a_run_after_its_terminal_commit().await;
+    let machine = &held.machine;
+
+    run_settlement_census_settles_at(
+        machine,
+        chrono::Utc::now,
+        0,
+        "a run committed a moment ago is inside the notice",
+    )
+    .await;
+    assert_ne!(
+        machine.unsettled_run_session_count(),
+        Some(1),
+        "the production clock reads a run committed a moment ago as inside the notice"
+    );
+    run_settlement_census_settles_at(
+        machine,
+        past_run_settlement_notice,
+        1,
+        "a committed run whose terminal work stays unsettled past the notice is counted \
+         while its loop stands",
+    )
+    .await;
+    let unsettled = machine
+        .unsettled_run_at(
+            &held.session_id,
+            crate::run_progress::RUN_SETTLEMENT_NOTICE,
+            past_run_settlement_notice(),
+        )
+        .expect("the per-session read names the unsettled run");
+    assert!(unsettled.unsettled_for >= crate::run_progress::RUN_SETTLEMENT_NOTICE);
+    assert_eq!(
+        machine.unsettled_run(&held.session_id),
+        None,
+        "the production clock reads a run committed a moment ago as inside the notice"
+    );
+
+    // A read that cannot take the session's driver establishes nothing, and
+    // a lock miss alone is never published as a failed read: the census
+    // answers with its last completed reading, the per-session read with
+    // nothing.
+    {
+        let sessions = machine.sessions.read().await;
+        let entry = sessions
+            .get(&held.session_id)
+            .expect("registered session entry");
+        let driver_held = entry.driver.lock().await;
+        assert_eq!(
+            machine.unsettled_run_session_count_at(
+                crate::run_progress::RUN_SETTLEMENT_NOTICE,
+                past_run_settlement_notice(),
+            ),
+            Some(1),
+            "a lock miss with nothing read keeps the last completed reading"
+        );
+        assert_eq!(
+            machine.unsettled_run_at(
+                &held.session_id,
+                crate::run_progress::RUN_SETTLEMENT_NOTICE,
+                past_run_settlement_notice(),
+            ),
+            None
+        );
+        drop(driver_held);
+    }
+
+    held.release
+        .send(())
+        .expect("the paused loop should still wait for its release");
+    tokio::time::timeout(Duration::from_secs(5), held.completion_handle.wait())
+        .await
+        .expect("completion waiter should resolve")
+        .expect("the noop turn should complete");
+    run_settlement_census_settles_at(
+        machine,
+        past_run_settlement_notice,
+        0,
+        "a run whose terminal work the loop settled owes nothing, however old its rows",
+    )
+    .await;
+    // The same miss on a healthy session: the last completed reading is
+    // zero, and that is what a busy healthy host publishes, not a failed
+    // read.
+    {
+        let sessions = machine.sessions.read().await;
+        let entry = sessions
+            .get(&held.session_id)
+            .expect("registered session entry");
+        let driver_held = entry.driver.lock().await;
+        assert_eq!(
+            machine.unsettled_run_session_count_at(
+                crate::run_progress::RUN_SETTLEMENT_NOTICE,
+                past_run_settlement_notice(),
+            ),
+            Some(0),
+            "a lock miss on a healthy session is not a failed read"
+        );
+        drop(driver_held);
+    }
+    assert_eq!(
+        machine.unsettled_run_at(
+            &held.session_id,
+            crate::run_progress::RUN_SETTLEMENT_NOTICE,
+            past_run_settlement_notice(),
+        ),
+        None
+    );
+    // The loop settled the work itself, so it ended the run's watchdog: its
+    // weak handle on the session's driver is gone.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while run_settlement_watchers(machine, &held.session_id).await != held.watchers_before {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the loop should end the watchdog of a run it settled");
+}
+
+/// The `session_run_settlement` census after a runtime loop LEFT with a
+/// committed run's terminal work unsettled: the finalizing write was refused,
+/// the loop logged and returned, and the registration was kept. No loop is
+/// alive to report anything, and the session accepts input it never runs.
+/// The census still counts it, because it reads the input rows and not the
+/// loop.
+#[tokio::test]
+async fn unsettled_run_session_count_sees_a_committed_run_whose_loop_left() {
+    let held = hold_a_run_after_its_terminal_commit().await;
+    let machine = &held.machine;
+
+    // Make the live rows differ from the stored ones, so the finalizing
+    // write's exact compare is refused at every try.
+    {
+        let sessions = machine.sessions.read().await;
+        let entry = sessions
+            .get(&held.session_id)
+            .expect("registered session entry");
+        let mut driver = entry.driver.lock().await;
+        let owners = driver.ledger().pending_terminal_owner_ids();
+        assert!(
+            !owners.is_empty(),
+            "the terminal commit must leave a row that owns the run's unsettled work"
+        );
+        for input_id in owners {
+            let mut state = driver
+                .ledger()
+                .get(&input_id)
+                .expect("an indexed owner has a ledger row")
+                .clone();
+            state.recovery_count += 1;
+            driver.insert_input_state_for_test(state);
+        }
+    }
+    held.release
+        .send(())
+        .expect("the paused loop should still wait for its release");
+
+    // The loop leaves.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let left = {
+                let sessions = machine.sessions.read().await;
+                let entry = sessions
+                    .get(&held.session_id)
+                    .expect("the registration is kept");
+                match &entry.attachment_slot {
+                    RuntimeLoopAttachmentSlot::Pending(attachment)
+                    | RuntimeLoopAttachmentSlot::Attached(attachment) => {
+                        attachment.loop_handle.is_finished()
+                    }
+                    RuntimeLoopAttachmentSlot::Empty => true,
+                }
+            };
+            if left {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the runtime loop should leave once its finalizing write is refused");
+
+    run_settlement_census_settles_at(
+        machine,
+        chrono::Utc::now,
+        0,
+        "a run committed a moment ago is inside the notice",
+    )
+    .await;
+    run_settlement_census_settles_at(
+        machine,
+        past_run_settlement_notice,
+        1,
+        "a committed run whose terminal work stays unsettled past the notice is counted \
+         with no loop alive",
+    )
+    .await;
+    let unsettled = machine
+        .unsettled_run_at(
+            &held.session_id,
+            crate::run_progress::RUN_SETTLEMENT_NOTICE,
+            past_run_settlement_notice(),
+        )
+        .expect("the per-session read names the unsettled run with no loop alive");
+    assert!(unsettled.unsettled_for >= crate::run_progress::RUN_SETTLEMENT_NOTICE);
+
+    // The run's watchdog outlives the loop that left: it is what keeps
+    // reporting the session, the run and its inputs once a minute.
+    assert_eq!(
+        run_settlement_watchers(machine, &held.session_id).await,
+        held.watchers_before + 1,
+        "the watchdog of a run whose loop left with its work unsettled is still alive"
+    );
+
+    // The session still accepts input, and runs none of it.
+    let (accept_outcome, _later_completion) = machine
+        .accept_input_with_completion(&held.session_id, make_prompt("after the loop left"))
+        .await
+        .expect("a session whose loop left still accepts input");
+    assert!(matches!(accept_outcome, AcceptOutcome::Accepted { .. }));
+    held.apply_release.notify_one();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), held.apply_started.notified())
+            .await
+            .is_err(),
+        "no loop is alive to run the later input"
+    );
+    run_settlement_census_settles_at(
+        machine,
+        past_run_settlement_notice,
+        1,
+        "the unsettled run stays counted for as long as its rows stand",
+    )
+    .await;
+    // The kept registration of a loop that is gone is what the runtime loop
+    // dimension counts: the two dimensions read this session together.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match machine.dead_runtime_loop_session_count() {
+                Some(1) => break,
+                Some(count) => panic!("the loop that left is one dead loop, read {count}"),
+                None => tokio::task::yield_now().await,
+            }
+        }
+    })
+    .await
+    .expect("the runtime loop dimension should count the loop that left");
+}
+
 /// The loop-side arming pin for `session_run_start`: a real turn through the
 /// real runtime loop must arm the session's staged-run window, because the
 /// census reads nothing else. Every other census assertion arms the window by

@@ -141,6 +141,10 @@ impl MobActor {
                 (spec, IdentityAdoptedFrom::Worker)
             }
         };
+        // The labels a roster spec declares for the identity: its member's
+        // seat reads them from the row this adoption writes.
+        let adopted_labels =
+            matches!(from, IdentityAdoptedFrom::Roster).then(|| spec.labels.clone());
         spec.validate().map_err(|error| {
             refused(IdentityChangeRefusal::InvalidRequest {
                 problem: error.to_string(),
@@ -317,11 +321,27 @@ impl MobActor {
             .await?;
         // The roster folds the binding row as a replay does: the member keeps
         // its binding, and its spawner is cleared.
-        {
+        let relabelled = {
             let mut roster = self.roster.write().await;
             for event in &stored {
                 roster.apply_event(event);
             }
+            // An adoption from a roster spec makes the row it wrote the
+            // identity's record, and seats nothing: the member it found
+            // was seated before the identity had a row. Its roster entry
+            // reads the row's labels from this step on, as after an
+            // update's commit; a start and a build read the same from the
+            // row while the member's last seat row is still this one
+            // ([`crate::roster::Roster::seat_is_as_adopted`]). Nothing is
+            // written for it: the row records no owed restamp, and the
+            // member's live build keeps its labels until its next build.
+            adopted_labels.as_ref().is_some_and(|labels| {
+                roster.seat_is_as_adopted(&commit.identity)
+                    && roster.set_store_owned_seat_labels(&commit.identity, labels)
+            })
+        };
+        if relabelled {
+            self.publish_machine_state_projection();
         }
         Ok(AdoptionCommitted::Committed(receipt))
     }

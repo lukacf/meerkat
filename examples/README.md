@@ -163,6 +163,7 @@ What it does not cover: examples 034 and 035 (their flows are long), 028 to
 030 (they make no provider call), microphone and real-browser use of 036 and
 037, and anything beyond the first round, prompt or scenario of 031 to 033.
 It also skips 040, which waits about a minute for its scheduled follow-up.
+Example 041 calls a model server and is not run by this target.
 
 Standalone Rust examples own separate lockfiles. `make verify-lock-consistency`
 checks these as well as the root lock; release preparation refreshes and stages
@@ -234,6 +235,7 @@ resulting example locks, and commit them together with the relevant changes.
 | 036 | [realtime-audio-py](036-realtime-audio-py/) | Python | Command-line OpenAI realtime audio app with live transcript, callback tools, inline mob skills, and helper sub-agents |
 | 037 | [live-webrtc-web](037-live-webrtc-web/) | Web + TypeScript | Browser WebRTC smoke-test cockpit with AEC microphone capture, live controls, note and text-pane callbacks, and real mob-mcp tools |
 | 040 | [One scheduled follow-up](040-one-shot-follow-up-py/) | Python | An agent schedules one turn for itself; the host verifies delivery and the resulting assistant message separately |
+| 041 | [Verify a background job](041-background-job-py/) | Python | Match an agent's shell receipt to its session and check the terminal calculation output |
 
 ## Examples by Feature
 
@@ -260,6 +262,7 @@ resulting example locks, and commit them together with the relevant changes.
 | **MCP Server** | 034 |
 | **Flow Engine** | 019, 031, 034 |
 | **Remote Computer Control** | 035 |
+| **Background jobs** | 041 |
 | **Scheduling** | 035, 040 |
 | **Realtime Audio** | 036, 037 |
 | **REST API** | 022 |
@@ -272,7 +275,7 @@ resulting example locks, and commit them together with the relevant changes.
 | Surface | Examples |
 |---------|----------|
 | **Rust SDK** | 001, 005, 006, 009, 011-015, 017-019, 024, 025, 034, 035 |
-| **Python SDK** | 002, 007, 021, 026, 036, 038, 040 |
+| **Python SDK** | 002, 007, 021, 026, 036, 038, 040, 041 |
 | **TypeScript SDK** | 003, 008, 023, 027, 039 |
 | **REST client** | 022 |
 | **CLI (Shell)** | 004, 010, 028, 029, 030, 031 |

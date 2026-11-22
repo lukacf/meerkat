@@ -23,8 +23,14 @@ use tokio::sync::{Mutex as AsyncMutex, Notify, mpsc};
 
 use crate::input_state::InputLifecycleState;
 
+mod acknowledged_before_registration;
+mod next_request;
+mod next_request_recovery;
+mod recall;
+mod recycle_beside_a_steer;
 mod request_only_context;
 mod requester;
+mod waits_across_a_restart;
 
 /// How long a test makes the runner's append record lag the boundary take.
 const APPEND_RECORD_LAG: Duration = Duration::from_millis(150);
@@ -71,6 +77,11 @@ struct RunnerScript {
     steps_done: AtomicUsize,
     primitives: std::sync::Mutex<Vec<Vec<InputId>>>,
     applied_durable: std::sync::Mutex<Vec<InputId>>,
+    /// What each boundary take wrote for the model request that follows it:
+    /// the applied durable appends, by input and rendered payload, in the
+    /// order the runner applied them. One entry per boundary take, empty when
+    /// the boundary carried no durable append.
+    boundary_takes: std::sync::Mutex<Vec<Vec<(InputId, String)>>>,
     /// Request-only contexts each boundary take handed the model.
     request_only_taken: std::sync::Mutex<Vec<usize>>,
     discarded: std::sync::Mutex<Vec<meerkat_core::event::BoundaryAppendsDiscarded>>,
@@ -130,6 +141,7 @@ impl RunnerScript {
             steps_done: AtomicUsize::new(0),
             primitives: std::sync::Mutex::new(Vec::new()),
             applied_durable: std::sync::Mutex::new(Vec::new()),
+            boundary_takes: std::sync::Mutex::new(Vec::new()),
             request_only_taken: std::sync::Mutex::new(Vec::new()),
             discarded: std::sync::Mutex::new(Vec::new()),
             applied_runs: std::sync::Mutex::new(Vec::new()),
@@ -184,6 +196,10 @@ impl RunnerScript {
 
     fn applied_durable(&self) -> Vec<InputId> {
         self.applied_durable.lock().unwrap().clone()
+    }
+
+    fn boundary_takes(&self) -> Vec<Vec<(InputId, String)>> {
+        self.boundary_takes.lock().unwrap().clone()
     }
 
     fn prepared_reply_capabilities(&self) -> Vec<Vec<meerkat_core::comms::PeerReplyCapability>> {
@@ -437,7 +453,8 @@ impl CoreExecutor for DurableSteerExecutor {
                             .unwrap()
                             .push(taken.request_only.len());
                     }
-                    if let Some(appends) = taken.applied_durable {
+                    let mut boundary_take = Vec::new();
+                    for appends in taken.applied_durable {
                         let lag = self.script.append_record_lag_ms.load(Ordering::SeqCst);
                         if lag > 0 {
                             tokio::time::sleep(Duration::from_millis(lag)).await;
@@ -447,7 +464,16 @@ impl CoreExecutor for DurableSteerExecutor {
                             .lock()
                             .unwrap()
                             .push(appends.input_id().clone());
+                        boundary_take.push((
+                            appends.input_id().clone(),
+                            format!("{:?}", appends.messages()),
+                        ));
                     }
+                    self.script
+                        .boundary_takes
+                        .lock()
+                        .unwrap()
+                        .push(boundary_take);
                     if matches!(step, RunnerStep::BoundaryThenToolCalls) {
                         self.state
                             .open_next_boundary_for_test(&run_id)
@@ -583,6 +609,10 @@ impl DurableSteerRig {
             .await
             .expect("prepare generated runtime bindings");
         let state = meerkat_core::TransientTurnContextStateHandle::new();
+        // As the agent builder does for the coordinator it creates.
+        if let Some(admissions) = bindings.turn_state().pending_boundary_admissions() {
+            state.bind_pending_boundary_admissions(admissions);
+        }
         let script = RunnerScript::new();
         adapter
             .ensure_session_with_executor(
@@ -1275,8 +1305,9 @@ async fn applied_steer_then_image_discarded_is_redelivered_exactly_once(
     steer_id
 }
 
-/// Admit each input in order; only the oldest durable one prepares, so
-/// exactly one delivery is registered once they are all admitted.
+/// Admit each input in order; only the oldest durable one prepares (it
+/// holds the boundary for all of them), so exactly one delivery is
+/// registered once they are all admitted.
 async fn admit_in_order(rig: &DurableSteerRig, inputs: Vec<Input>) -> Vec<InputId> {
     let mut ids = Vec::new();
     for input in inputs {
@@ -1295,7 +1326,7 @@ async fn admit_in_order(rig: &DurableSteerRig, inputs: Vec<Input>) -> Vec<InputI
 }
 
 #[tokio::test]
-async fn second_durable_steer_while_the_first_waits_joins_the_following_boundary() {
+async fn second_durable_steer_while_the_first_waits_joins_the_same_boundary() {
     let rig = DurableSteerRig::ephemeral().await;
     rig.start_busy_turn().await;
     rig.script
@@ -1314,19 +1345,25 @@ async fn second_durable_steer_while_the_first_waits_joins_the_following_boundary
     };
     let (first_id, second_id) = (first_id.clone(), second_id.clone());
 
-    // Each boundary takes one durable delivery, in arrival order: the second
-    // prepares once the first has joined, for the following boundary.
-    rig.script.step(RunnerStep::OpenNextBoundary);
-    rig.script.step(RunnerStep::BoundaryThenToolCalls);
+    // One boundary takes every durable delivery waiting in the lane, in
+    // arrival order: the second joins the boundary the first waited for.
+    rig.script.step_and_wait(RunnerStep::OpenNextBoundary).await;
+    rig.script
+        .step_and_wait(RunnerStep::BoundaryThenToolCalls)
+        .await;
+    assert_eq!(
+        rig.script
+            .boundary_takes()
+            .last()
+            .expect("the boundary was taken")
+            .iter()
+            .map(|(input_id, _)| input_id.clone())
+            .collect::<Vec<_>>(),
+        vec![first_id.clone(), second_id.clone()],
+        "both join the first boundary after their admission"
+    );
     rig.wait_for_phase(&first_id, InputLifecycleState::Staged)
         .await;
-    rig.wait_for_applied_durable(1).await;
-    assert_eq!(
-        rig.phase(&second_id).await,
-        Some(InputLifecycleState::Queued)
-    );
-    rig.wait_for_waiting_delivery().await;
-    rig.script.step(RunnerStep::BoundaryThenToolCalls);
     rig.wait_for_phase(&second_id, InputLifecycleState::Staged)
         .await;
     rig.wait_for_applied_durable(2).await;
@@ -1354,24 +1391,22 @@ async fn durable_steer_still_waiting_when_the_run_ends_takes_the_fifo_follow_up(
     rig.script
         .step_and_wait(RunnerStep::BoundaryThenStream)
         .await;
-    let ids = admit_in_order(
-        &rig,
-        vec![
-            typed_steer("first", ConversationAppendRole::SystemNotice),
-            typed_steer("second", ConversationAppendRole::SystemNotice),
-        ],
-    )
-    .await;
-    let [first_id, second_id] = ids.as_slice() else {
-        unreachable!("two steers")
-    };
-    let (first_id, second_id) = (first_id.clone(), second_id.clone());
+    let first = typed_steer("first", ConversationAppendRole::SystemNotice);
+    let first_id = first.id().clone();
+    rig.admit(first).await;
+    rig.wait_for_waiting_delivery().await;
 
-    rig.script.step(RunnerStep::OpenNextBoundary);
-    rig.script.step(RunnerStep::BoundaryThenToolCalls);
+    rig.script.step_and_wait(RunnerStep::OpenNextBoundary).await;
+    rig.script
+        .step_and_wait(RunnerStep::BoundaryThenToolCalls)
+        .await;
     rig.wait_for_phase(&first_id, InputLifecycleState::Staged)
         .await;
-    // The second registers for the next boundary of the running run.
+    // The second arrives after that boundary's request input was fixed: it
+    // registers for the next boundary of the running run.
+    let second = typed_steer("second", ConversationAppendRole::SystemNotice);
+    let second_id = second.id().clone();
+    rig.admit(second).await;
     rig.wait_for_waiting_delivery().await;
     // The model answers: the run ends before the boundary the second waits for.
     rig.script.step(RunnerStep::Finish);
@@ -1567,10 +1602,10 @@ async fn request_only_steer_keeps_its_boundary_while_a_durable_steer_waits() {
     );
 }
 
-/// Three peer steers admitted inside one gated boundary are
-/// each delivered exactly once, in arrival order: one per boundary of the
-/// running run (each prepares once the one before it has joined), and the
-/// one still waiting when the run ends in its follow-up turn.
+/// Three peer steers admitted inside one gated boundary are each delivered
+/// exactly once, in arrival order, all at the first boundary of the running
+/// run after their admission: the next model request carries the three, and
+/// no follow-up turn runs.
 #[tokio::test]
 async fn three_peer_steers_in_one_gated_boundary_land_once_each_in_arrival_order() {
     let rig = DurableSteerRig::ephemeral().await;
@@ -1590,33 +1625,55 @@ async fn three_peer_steers_in_one_gated_boundary_land_once_each_in_arrival_order
         unreachable!("three steers")
     };
 
-    rig.script.step(RunnerStep::OpenNextBoundary);
-    rig.script.step(RunnerStep::BoundaryThenToolCalls);
-    rig.wait_for_applied_durable(1).await;
-    rig.wait_for_waiting_delivery().await;
-    rig.script.step(RunnerStep::BoundaryThenToolCalls);
-    rig.wait_for_applied_durable(2).await;
-    rig.wait_for_waiting_delivery().await;
-    assert_eq!(rig.phase(three).await, Some(InputLifecycleState::Queued));
-    // The model answers before a third boundary: the third takes the
-    // follow-up turn.
-    rig.script.step(RunnerStep::Finish);
-    rig.wait_for_apply_calls(2).await;
+    rig.script.step_and_wait(RunnerStep::OpenNextBoundary).await;
+    rig.script
+        .step_and_wait(RunnerStep::BoundaryThenToolCalls)
+        .await;
+    let next_request = rig
+        .script
+        .boundary_takes()
+        .last()
+        .cloned()
+        .expect("the boundary was taken");
+    assert_eq!(
+        next_request
+            .iter()
+            .map(|(input_id, _)| input_id.clone())
+            .collect::<Vec<_>>(),
+        steers,
+        "the next request carries all three, in arrival order"
+    );
+    for (index, payload) in ["peer one", "peer two", "peer three"]
+        .into_iter()
+        .enumerate()
+    {
+        assert!(
+            next_request[index].1.contains(payload),
+            "{payload} at {index}: {next_request:?}"
+        );
+    }
+    // The model answers: the run ends with all three in it.
     rig.script.step(RunnerStep::Finish);
     for id in [one, two, three] {
         rig.wait_for_phase(id, InputLifecycleState::Consumed).await;
     }
     assert_eq!(
         rig.script.applied_durable(),
-        vec![one.clone(), two.clone()],
-        "the first two land at the first and second boundary of the running run"
+        steers,
+        "each lands exactly once, at the first boundary after its admission"
     );
-    assert_eq!(contributions(&rig.script.primitives(), one), 0);
-    assert_eq!(contributions(&rig.script.primitives(), two), 0);
+    for id in [one, two, three] {
+        assert_eq!(
+            contributions(&rig.script.primitives(), id),
+            0,
+            "no follow-up turn delivers {id}"
+        );
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(
-        contributions(&rig.script.primitives(), three),
+        rig.script.apply_calls.load(Ordering::SeqCst),
         1,
-        "the third is delivered by exactly one follow-up turn"
+        "all three joined the running run; no follow-up turn ran"
     );
 }
 

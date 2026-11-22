@@ -776,6 +776,7 @@ test_suite(
         "//crates/meerkat-machine-schema:phase_target_contract_test",
         "//crates/meerkat-machine-schema:placed_lifecycle_origin_fence_test",
         "//crates/meerkat-machine-schema:queued_input_abandon_totality_test",
+        "//crates/meerkat-machine-schema:recovered_steer_delivery_test",
         "//crates/meerkat-machine-schema:runtime_authority_reconciliation_totality_test",
         "//crates/meerkat-machine-schema:runtime_completion_cleanup_rule_test",
         "//crates/meerkat-machine-schema:schema_construction_cache_test",

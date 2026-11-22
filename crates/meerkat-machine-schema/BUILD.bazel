@@ -1950,6 +1950,61 @@ rust_test(
 )
 
 rust_test(
+    name = "recovered_steer_delivery_test",
+    aliases = aliases(
+        package_name = "crates/meerkat-machine-schema",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "recovered_steer_delivery",
+    crate_root = "tests/recovered_steer_delivery.rs",
+    crate_features = [],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+        "src/catalog/dsl/meerkat_machine.rs",
+        "src/catalog/dsl/mob_machine.rs",
+    ],
+    srcs = [
+        "tests/recovered_steer_delivery.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.9.17",
+        "CARGO_BIN_NAME": "recovered_steer_delivery",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-schema",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "medium",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = [
+        "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
+    ] + all_crate_deps(
+        package_name = "crates/meerkat-machine-schema",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
+        "//crates/meerkat-core:meerkat_core",
+        "//crates/meerkat-machine-schema:meerkat_machine_schema",
+    ] + all_crate_deps(
+        package_name = "crates/meerkat-machine-schema",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
     name = "runtime_authority_reconciliation_totality_test",
     aliases = aliases(
         package_name = "crates/meerkat-machine-schema",
@@ -2704,6 +2759,7 @@ test_suite(
         ":phase_target_contract_test",
         ":placed_lifecycle_origin_fence_test",
         ":queued_input_abandon_totality_test",
+        ":recovered_steer_delivery_test",
         ":runtime_authority_reconciliation_totality_test",
         ":runtime_completion_cleanup_rule_test",
         ":schema_construction_cache_test",

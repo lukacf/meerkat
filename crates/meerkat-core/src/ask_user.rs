@@ -555,7 +555,7 @@ pub fn ask_user_unanswered(set: &AskUserQuestionSet) -> Vec<AskUserQuestionAnswe
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum AskUserOutcome {
-    /// A person is being asked: the answers arrive later.
+    /// The host holds the questions for a person: the answers arrive later.
     Asked,
     /// A person answered.
     Answered,
@@ -588,9 +588,10 @@ impl AskUserOutcome {
     fn note(self) -> &'static str {
         match self {
             Self::Asked => {
-                "A person is being asked. This call does not wait for them: the answers arrive \
-                 later as an `ask_user_result` input with this `request_id`, by `answer_by` at \
-                 the latest."
+                "The host holds your questions for a person. This call does not wait for an \
+                 answer: the answers arrive later as an `ask_user_result` input with this \
+                 `request_id`, by `answer_by` at the latest. If nobody has answered by then, \
+                 that input says `timed_out`."
             }
             Self::Answered => "A person answered. A question they skipped reads `unanswered`.",
             Self::Dismissed => {
@@ -830,7 +831,8 @@ fn ask_user_tool_def() -> ToolDef {
          The call returns at once and does not wait for the person: its result says `asked`, \
          with the `request_id` and the time the request ends (`answer_by`), and the answers \
          arrive later as an `{ASK_USER_RESULT_INPUT}` input with the same `request_id`. \
-         Outcomes: `asked` (a person is being asked); `answered` (a person answered; a \
+         Outcomes: `asked` (the host holds the questions for a person; it does not say that \
+         a person has seen them); `answered` (a person answered; a \
          question they skipped reads `unanswered`); `dismissed` (the person closed the \
          questions without answering); `timed_out` (nobody answered within \
          `timeout_seconds`); `withdrawn` (the request was withdrawn before an answer); \

@@ -514,9 +514,18 @@ async fn the_asked_result_has_its_documented_shape() {
             "note": note,
         })
     );
-    for names in ["does not wait", "`ask_user_result` input", "`request_id`"] {
+    for names in [
+        "holds your questions for a person",
+        "does not wait",
+        "`ask_user_result` input",
+        "`request_id`",
+        "`timed_out`",
+    ] {
         assert!(note.contains(names), "{names}: {note}");
     }
+    // `asked` says that the host holds the questions, never that a person
+    // has them: a host can hold them and show them to nobody.
+    assert!(!note.contains("is being asked"), "{note}");
     let typed: AskUserResult = serde_json::from_value(result).expect("the typed result");
     assert_eq!(
         typed,
@@ -640,6 +649,10 @@ fn the_description_names_use_batching_recommended_free_text_and_every_outcome() 
         ("the recommendation", "`recommended`"),
         ("written answers", "`allow_free_text`"),
         ("that it does not wait", "returns at once"),
+        (
+            "what `asked` says",
+            "`asked` (the host holds the questions for a person; it does not say that a person has seen them)",
+        ),
         ("how the answers arrive", "`ask_user_result` input"),
         ("a skipped question", "`unanswered`"),
         (

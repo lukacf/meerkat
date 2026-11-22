@@ -21791,7 +21791,10 @@ external_addressable = true
         tracing::warn!(
             "console requires app auth but trusts no signing key: every console request will be \
              refused with 401. Pass runtime_options.auth_config to trust an issuer, or set \
-             runtime_options.console_require_app_auth = false for an explicitly open local console"
+             runtime_options.console_require_app_auth = false for an explicitly open local \
+             console. As it stands nobody can answer a member's ask_user questions in the \
+             console: where they are held, only the host can answer them, over stdio, and they \
+             time out otherwise"
         );
     }
     if crate::gateway_composition::ConsoleAuthPosture::of(&decision_state)
@@ -22295,6 +22298,15 @@ external_addressable = true
             stdout_tx: stdout_tx.clone(),
         }),
     ));
+    // The connection tells its host of each open decision without waiting
+    // for a list: of those the runtime opens from here on, and once of those
+    // already open (Ready is on the pipe before any of these notices). On a
+    // launch that keeps no durable decisions, and on a candidate launch, it
+    // follows nothing and the task ends at once.
+    let decision_notices = tokio::spawn(
+        Arc::clone(&decision_connection)
+            .notice_openings(runtime.durable_decisions().owner().clone()),
+    );
     let mut gateway_shutdown = None;
     let dispatch_end = {
         let mut inflight = tokio::task::JoinSet::new();
@@ -22373,8 +22385,10 @@ external_addressable = true
             while inflight.try_join_next().is_some() {}
         };
         // The connection ended: no operator decide on it is eligible any
-        // more, one in flight included when it commits.
+        // more, one in flight included when it commits, and it tells its
+        // host of no further decision.
         decision_connection.close();
+        decision_notices.abort();
         // Name the branch that ended admission BEFORE the drain and the
         // shutdown sequence, so a wedge in either still leaves the reason in
         // the log. `reason=` is one of `DispatchLoopEnd`'s tokens; `signal=`

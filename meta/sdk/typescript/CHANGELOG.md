@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- `MetaRuntime.onDecisionNotice(handler)`: with a stdio gateway of this
+  release the handler is called for an open durable decision without a
+  `MobHandle.decisionsList` call: once when the gateway's runtime opens the
+  decision, or once when the connection starts for a decision already open.
+  A question set a member asked (`kind` `ask_user.questions`) arrives this
+  way; read it with `MobHandle.gatingQuestions`. A list still writes its
+  own notice, so a host with a handler that also lists is called with
+  `held` twice for one decision. A `held` notice that arrives before a
+  handler is registered is no longer dropped: the SDK keeps one per
+  decision, for the newest 1024 decisions, and calls the handler with them
+  when it registers; a `presented` notice is not kept. A host that
+  registers no handler sees no change. See Changed and Upgrade in Meta's
+  changelog.
+
 ## 0.9.18
 
 - `PersistedEvent` gains `mobId` and `mobIncarnation` (`string | null`).

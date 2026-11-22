@@ -51,9 +51,10 @@ import {
 
 /**
  * A host's handler of `meta/decisions/notice`: one open durable decision,
- * noticed once per stdio connection when the host lists it. `event` is
- * `held` (nothing of its content shown) or `presented` (shown to the stdio
- * operator, with the rendering).
+ * written once when the gateway's runtime opens it (or once when the
+ * connection starts, for a decision already open) and once at the host's
+ * first list of it. `event` is `held` (nothing of its content shown) or
+ * `presented` (shown to the stdio operator at a list, with the rendering).
  */
 export type DecisionNoticeHandler = (
   notice: Record<string, unknown>,
@@ -110,6 +111,13 @@ interface ActiveJobAttempt {
 }
 
 // -- CallbackDispatcher ---------------------------------------------------
+
+/**
+ * How many decisions' `held` notices are kept for a handler that is not
+ * registered yet. Past it the oldest decision's notice goes: the host's own
+ * list of decisions writes its notice again, whatever was kept or dropped.
+ */
+const EARLY_DECISION_NOTICES_MAX = 1024;
 
 /**
  * Routes incoming JSON-RPC callbacks from the Rust runtime to the
@@ -192,6 +200,16 @@ export class CallbackDispatcher {
     (output: LiveAssistantOutputAddress) => void
   >();
   private _decisionNoticeHandler: DecisionNoticeHandler | null = null;
+  /**
+   * The `held` notices that arrived while no handler was set, one per
+   * decision (a later one replaces the one kept for its decision), in order
+   * of arrival, for at most `EARLY_DECISION_NOTICES_MAX` decisions. The
+   * gateway writes a `held` notice when a decision opens, which can be
+   * before the host registers its handler on the connected runtime; the
+   * handler receives the kept ones when it registers. A `presented` notice
+   * carries a whole rendering and is not kept.
+   */
+  private readonly _earlyDecisionNotices = new Map<unknown, Record<string, unknown>>();
   private readonly _scheduleFireHandlers = new Map<string, ScheduleFireHandler>();
 
   registerBuilder(builder: SessionAgentBuilder): void {
@@ -202,9 +220,34 @@ export class CallbackDispatcher {
     this._errorCallback = callback;
   }
 
-  /** Receive each `meta/decisions/notice` the stdio gateway writes. */
+  /**
+   * Receive each `meta/decisions/notice` the stdio gateway writes, and those
+   * that arrived before a handler was registered.
+   */
   registerDecisionNoticeHandler(handler: DecisionNoticeHandler): void {
     this._decisionNoticeHandler = handler;
+    void this._handOverEarlyDecisionNotices();
+  }
+
+  /** Give the handler each kept notice once, in order of arrival. */
+  private async _handOverEarlyDecisionNotices(): Promise<void> {
+    while (this._earlyDecisionNotices.size > 0) {
+      const handler = this._decisionNoticeHandler;
+      if (handler === null) {
+        return;
+      }
+      const [key, notice] = this._earlyDecisionNotices.entries().next().value as [
+        unknown,
+        Record<string, unknown>,
+      ];
+      this._earlyDecisionNotices.delete(key);
+      try {
+        await handler(notice);
+      } catch (error) {
+        // The host's handler: one failure hides no other notice.
+        console.warn("decision notice handler failed:", error);
+      }
+    }
   }
 
   /** Register or replace the handler for a named host runnable. */
@@ -334,10 +377,28 @@ export class CallbackDispatcher {
       return result === undefined ? null : result;
     }
     if (method === "meta/decisions/notice") {
-      // One open durable decision, noticed once per gateway connection; a
-      // host without a handler is told nothing more.
-      if (this._decisionNoticeHandler !== null) {
-        await this._decisionNoticeHandler(params);
+      // One open durable decision: written when it opens, once when the
+      // connection starts, and once at the host's first list of it. A host
+      // without a handler is told nothing; a `held` notice is kept for a
+      // handler that registers later.
+      if (this._decisionNoticeHandler === null) {
+        if (params.event !== "held") {
+          return null;
+        }
+        const decisionId = params.decision_id;
+        const key: unknown = typeof decisionId === "string" ? decisionId : Symbol("notice");
+        this._earlyDecisionNotices.delete(key);
+        this._earlyDecisionNotices.set(key, params);
+        while (this._earlyDecisionNotices.size > EARLY_DECISION_NOTICES_MAX) {
+          const oldest = this._earlyDecisionNotices.keys().next().value;
+          this._earlyDecisionNotices.delete(oldest);
+        }
+        return null;
+      }
+      await this._handOverEarlyDecisionNotices();
+      const handler = this._decisionNoticeHandler;
+      if (handler !== null) {
+        await handler(params);
       }
       return null;
     }

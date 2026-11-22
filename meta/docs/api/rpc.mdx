@@ -3477,10 +3477,23 @@ of what the caller may see may follow.
 
 ### Notices on the stdio gateway
 
-Before a `meta/decisions/list` answers, the gateway writes one
-`meta/decisions/notice` notification for each open decision of the page this
-connection has not noticed yet. A host that never lists decisions receives no
-notices.
+The gateway tells the stdio host of each open decision with a
+`meta/decisions/notice` notification, without being asked: when a decision
+its own runtime opens is held (after the hold is stored), and, once the
+connection serves, for each decision that is already open then (one held
+before a restart, or by another process on the same store). A question set a
+member asked is such a decision (`kind` `ask_user.questions`), so a host
+hears of it with no list call. Before a `meta/decisions/list` answers, the
+gateway also writes one notice for each open decision of the page that no
+list on this connection has noticed yet, also for a decision it told the
+host of already. A host is so told of a decision at most twice per
+connection: once at its opening (or at the connection's start) and once at
+its own first list of it; `notice_id` differs, `decision_id` does not. (One
+case had two notices from lists before and has them still: a decision
+listed `held` while it waited for its review, and presented to the stdio
+operator at a later list.) A
+host that reads the pipe itself receives these notifications whether or not
+it lists decisions; a notification needs no answer.
 
 ```json
 {
@@ -3500,12 +3513,15 @@ notices.
 ```
 
 A `held` notice shows nothing of what the decision holds; `rendering_ref` is
-the digest of its rendering. A decision that waits for a person and whose
+the digest of its rendering. A notice written at a decision's opening or at
+the connection's start is always `held`: nothing is presented outside a
+list. At a list, a decision that waits for a person and whose
 approver id the approver map lets the stdio operator hold
 (`ingress_subjects = [{ ingress = "operator" }]`, see [approver
 identities](/concepts/access-control#approver-identities)) is presented
 instead: the notice's `event` is `presented` and its `presentation` carries the
-whole rendering and its parts. The gateway records that presentation once the
+whole rendering and its parts, so a `presented` notice can follow a `held`
+one for the same decision. The gateway records that presentation once the
 notice is written to the pipe, on the connection's own channel and under the
 notice's id.
 

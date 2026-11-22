@@ -83,9 +83,10 @@ Linux x86_64 verification results for example source `907c52c6ec` on
 | 038 (Python mob control) | Included in `make -C examples sdk` (41 tests passed across the SDK lane). | Two successful runs with `meerkat-sdk` and `rkat-rpc` 0.9.16, using Anthropic on the default realm. |
 | 039 (TypeScript mob control) | Included in the same SDK lane. | Two successful runs with `@rkat/sdk` and `rkat-rpc` 0.9.16, using Anthropic on the default realm. |
 
-Both examples observed `stopped`, then `not_current` on a repeated stop, and
-received `PONG` after cancellation. These runs do not cover other providers,
-Windows, macOS, or the JSONL realm.
+The [author's run record](https://github.com/lukacf/meerkat/pull/2386) reports
+`stopped`, then `not_current` on a repeated stop. After cancellation, the next
+send was answered. These runs do not cover other providers, Windows, macOS,
+or the JSONL realm.
 
 ## Finding ledger
 

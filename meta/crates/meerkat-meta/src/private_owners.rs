@@ -190,24 +190,189 @@ pub(crate) trait PrivateMemberEndFollower: Send + Sync {
     async fn member_ended(&self, ended: &EndedPrivateMember);
 }
 
-/// The follower of the ends of members private to a person, and the ends
-/// seen while none was installed.
+/// Which of a launch's followers of the ends of private members a follower
+/// is ([`PrivateOwners::follow_member_ends_as`]). Each seat has one
+/// follower, and its own hold of the ends seen before it was installed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum MemberEndSeat {
+    /// What becomes of the schedules that target the ended member.
+    Schedules,
+    /// What becomes of the question sets the ended member asked.
+    QuestionSets,
+}
+
+impl MemberEndSeat {
+    const ALL: [Self; 2] = [Self::Schedules, Self::QuestionSets];
+}
+
+/// One seat's follower of the ends of members private to a person, and the
+/// ends seen while it had none.
 #[derive(Default)]
-struct MemberEnds {
+struct SeatEnds {
     follower: Option<Arc<dyn PrivateMemberEndFollower>>,
     held: Vec<EndedPrivateMember>,
 }
 
-/// One page of a mob's member spawns: (mob id, roster member id, the labels
-/// of the spawn) for each, and the cursor to read on from.
-pub(crate) type MemberSpawnPage = (Vec<(String, String, BTreeMap<String, String>)>, u64);
+/// The followers of the ends of members private to a person, by seat.
+#[derive(Default)]
+struct MemberEnds {
+    seats: BTreeMap<MemberEndSeat, SeatEnds>,
+}
+
+/// What one row of a mob's journal says of who holds a member's name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum HolderStep {
+    /// A member was seated under the name: private to `owner`, or to no
+    /// one. `ephemeral` for a member that ends with its retirement (a side
+    /// chat, a helper, a fork); a member seated as a durable identity is
+    /// retired and seated again by rebuilds that keep its agent.
+    Seated {
+        owner: Option<String>,
+        ephemeral: bool,
+        seated_as: SeatedAs,
+    },
+    /// The member under the name was retired, by a retirement that seats no
+    /// next member under the name and records no cause: the end of an
+    /// ephemeral member, and a rebuild of a durable one.
+    Retired,
+    /// The identity entry of the member under the name ended: its
+    /// retirement records that the identity was removed or unlisted. The
+    /// end of a long-term agent. An archive leaves the agent, and a host's
+    /// adoption continues the identity: neither is an end.
+    Removed,
+}
+
+/// The role and the labels a member was seated with, as its seating's row
+/// of the journal recorded them. A record made while an earlier seating
+/// held a name is judged by what its member was seated as then, besides
+/// the member that holds the name now.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct SeatedAs {
+    pub(crate) role: String,
+    pub(crate) labels: BTreeMap<String, String>,
+}
+
+/// One row of a mob's journal that says who holds a member's name, with the
+/// journal's cursor and time of the row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MemberJournalStep {
+    pub(crate) mob_id: String,
+    /// The member, as its mob's roster names it.
+    pub(crate) member: String,
+    /// The journal's cursor of the row: the journal's own order.
+    pub(crate) cursor: u64,
+    /// When the journal recorded the row, in UNIX milliseconds.
+    pub(crate) at_ms: u64,
+    pub(crate) step: HolderStep,
+}
+
+impl MemberJournalStep {
+    /// The seating of `member` in mob `mob_id` with `labels`, the journal's
+    /// row `cursor`, recorded at `at_ms`.
+    pub(crate) fn seated(
+        mob_id: &str,
+        member: &str,
+        labels: &BTreeMap<String, String>,
+        ephemeral: bool,
+        cursor: u64,
+        at_ms: u64,
+    ) -> Self {
+        Self {
+            mob_id: mob_id.to_string(),
+            member: member.to_string(),
+            cursor,
+            at_ms,
+            step: HolderStep::Seated {
+                owner: crate::access::private_owner(labels).map(str::to_string),
+                ephemeral,
+                seated_as: SeatedAs {
+                    role: String::new(),
+                    labels: labels.clone(),
+                },
+            },
+        }
+    }
+
+    /// [`Self::seated`], of a member of the role `role`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn seated_as(
+        mob_id: &str,
+        member: &str,
+        role: &str,
+        labels: &BTreeMap<String, String>,
+        ephemeral: bool,
+        cursor: u64,
+        at_ms: u64,
+    ) -> Self {
+        let mut seated = Self::seated(mob_id, member, labels, ephemeral, cursor, at_ms);
+        if let HolderStep::Seated { seated_as, .. } = &mut seated.step {
+            seated_as.role = role.to_string();
+        }
+        seated
+    }
+
+    /// What `event`, a row of a mob's journal, says of who holds a member's
+    /// name. A spawn seats a member. A retirement start that carries no
+    /// rotation and keeps no topology for a successor retires it: with no
+    /// cause recorded (the test [`PrivateOwners::observe_mob_event`] applies
+    /// to an end), or as the end of its identity entry (removed, unlisted).
+    /// Every other row says nothing of it.
+    pub(crate) fn of_event(event: &meerkat_mob::MobEvent) -> Option<Self> {
+        let at_ms = u64::try_from(event.timestamp.timestamp_millis()).unwrap_or(0);
+        match &event.kind {
+            meerkat_mob::MobEventKind::MemberSpawned(spawned) => Some(Self::seated_as(
+                event.mob_id.as_str(),
+                spawned.agent_identity.as_str(),
+                spawned.role.as_ref(),
+                &spawned.labels,
+                matches!(
+                    spawned.continuity_intent,
+                    meerkat_mob::SpawnContinuityIntent::Ephemeral
+                ) || spawned
+                    .labels
+                    .contains_key(crate::side_chat::SIDE_CHAT_OF_LABEL),
+                event.cursor,
+                at_ms,
+            )),
+            meerkat_mob::MobEventKind::MemberRetirementStarted {
+                agent_identity,
+                rotation,
+                preserve_machine_topology,
+                cause,
+                ..
+            } if rotation.is_none() && !*preserve_machine_topology => {
+                let step = match cause {
+                    None => HolderStep::Retired,
+                    Some(
+                        meerkat_mob::MemberRetirementCause::Removed
+                        | meerkat_mob::MemberRetirementCause::Unlisted,
+                    ) => HolderStep::Removed,
+                    Some(_) => return None,
+                };
+                Some(Self {
+                    mob_id: event.mob_id.to_string(),
+                    member: agent_identity.to_string(),
+                    cursor: event.cursor,
+                    at_ms,
+                    step,
+                })
+            }
+            _ => None,
+        }
+    }
+}
+
+/// One page of a mob's journal: the rows that say who holds a member's name
+/// ([`MemberJournalStep`]), in the journal's order, and the cursor to read
+/// on from.
+pub(crate) type MemberSpawnPage = (Vec<MemberJournalStep>, u64);
 
 /// Where the seed reads the members a mob spawned, with the labels of each
-/// spawn: the mob's durable event log.
+/// spawn, and the members it retired: the mob's durable event log.
 #[async_trait::async_trait]
 pub(crate) trait MemberSpawnLog: Send + Sync {
-    /// The member spawns recorded past `cursor`, reading at most `limit`
-    /// events, or `None` once the log holds no event past it.
+    /// The member spawns and retirements recorded past `cursor`, reading at
+    /// most `limit` events, or `None` once the log holds no event past it.
     async fn spawns_after(
         &self,
         cursor: u64,
@@ -229,18 +394,394 @@ impl MemberSpawnLog for meerkat_mob::MobHandle {
         let Some(last) = events.last().map(|event| event.cursor) else {
             return Ok(None);
         };
-        let spawns = events
+        let steps = events
+            .iter()
+            .filter_map(MemberJournalStep::of_event)
+            .collect();
+        Ok(Some((steps, last)))
+    }
+}
+
+/// One step of a name's holders, as noted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NotedStep {
+    /// The journal's cursor of the step's row.
+    cursor: u64,
+    /// The time the journal recorded for the row.
+    recorded_ms: u64,
+    /// The step's time among the rows of its mob's journal
+    /// ([`JournalTimes`]): its recorded time, and later than every row
+    /// before it in the journal's order. The journal's order is the order
+    /// things happened in, also where the clock that stamped the rows
+    /// stepped back between two of them.
+    at_ms: u64,
+    step: HolderStep,
+}
+
+/// The times of the rows one mob's journal recorded for its members, by
+/// cursor: each row's recorded time, and its time among the rows, which is
+/// the recorded time lifted to be later than the row before it, with room
+/// for the moment between them: an entry written once a row was shown is
+/// stamped past it ([`Self::entry_floor`]) and before the next row. A pure
+/// function of the journal's rows, whatever order they are shown in, so a
+/// restart reads the same times.
+#[derive(Debug, Default)]
+struct JournalTimes(BTreeMap<u64, (u64, u64)>);
+
+impl JournalTimes {
+    /// Note the row `cursor`, recorded at `recorded_ms`. Answers the row's
+    /// time among the rows, and whether the times of rows after it changed
+    /// (a row shown out of the journal's order).
+    fn note(&mut self, cursor: u64, recorded_ms: u64) -> (u64, bool) {
+        if let Some((_, at_ms)) = self.0.get(&cursor) {
+            return (*at_ms, false);
+        }
+        let lifted = |recorded_ms: u64, before: Option<u64>| {
+            before.map_or(recorded_ms, |before| {
+                recorded_ms.max(before.saturating_add(2))
+            })
+        };
+        let before = self
+            .0
+            .range(..cursor)
+            .next_back()
+            .map(|(_, (_, at_ms))| *at_ms);
+        let at_ms = lifted(recorded_ms, before);
+        self.0.insert(cursor, (recorded_ms, at_ms));
+        let mut latest = at_ms;
+        let mut moved = false;
+        for (_, (recorded_ms, at_ms)) in self.0.range_mut((
+            std::ops::Bound::Excluded(cursor),
+            std::ops::Bound::Unbounded,
+        )) {
+            let now = lifted(*recorded_ms, Some(latest));
+            moved |= now != *at_ms;
+            *at_ms = now;
+            latest = now;
+        }
+        (at_ms, moved)
+    }
+
+    /// The time among the rows of the row `cursor`.
+    fn at(&self, cursor: u64) -> Option<u64> {
+        self.0.get(&cursor).map(|(_, at_ms)| *at_ms)
+    }
+
+    /// The time of the newest row.
+    fn newest(&self) -> Option<u64> {
+        self.0.values().next_back().map(|(_, at_ms)| *at_ms)
+    }
+
+    /// The floor of the times of entries written once the newest row was
+    /// shown: the moment after that row.
+    fn entry_floor(&self) -> Option<u64> {
+        self.newest().map(|newest| newest.saturating_add(1))
+    }
+}
+
+/// Who held one member name of one mob, over time: the steps the mob's
+/// journal recorded for the name, in the journal's order. In memory only:
+/// it is read again from the journal at each start.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct NameHolders(Vec<NotedStep>);
+
+/// The position, among `seatings` (each with its time and whether its
+/// member is private to a person, oldest first), of the seating that holds
+/// the moment `at_ms`: the last one at or before it. A seating private to a
+/// person holds every moment from its own up to the next seating's, that
+/// moment included: a seating at exactly `at_ms` takes the moment from a
+/// private one before it only when it is private itself.
+fn holding_seating(seatings: &[(u64, bool)], at_ms: u64) -> Option<usize> {
+    let private = |position: &usize| seatings.get(*position).is_some_and(|(_, private)| *private);
+    let before = seatings
+        .iter()
+        .take_while(|(seated_at, _)| *seated_at < at_ms)
+        .count()
+        .checked_sub(1);
+    let at = seatings
+        .iter()
+        .enumerate()
+        .filter(|(_, (seated_at, _))| *seated_at == at_ms)
+        .map(|(position, _)| position);
+    let (private_at, any_at) = at.fold((None, None), |(private_at, _), position| {
+        (
+            private_at.or(private(&position).then_some(position)),
+            Some(position),
+        )
+    });
+    private_at.or(before.filter(private)).or(any_at).or(before)
+}
+
+/// The members seated under one name in one mob, over time: each seating's
+/// time and the person its member is private to, if any, oldest first. What
+/// a console's access controller holds of who held a name
+/// ([`PrivateOwners::name_seatings`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct NameSeatings(Vec<(u64, Option<String>)>, Vec<SeatedAs>);
+
+/// Who held a name in one mob at a moment ([`NameSeatings::held_at`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HeldBy<'a> {
+    /// No member was seated under the name there at or before the moment.
+    NoKnownMember,
+    /// A member private to this person.
+    Private(&'a str),
+    /// A member private to no one.
+    Shared,
+    /// The moment is the one at which a member private to one person was
+    /// seated under the name after a member private to another person: what
+    /// was recorded at it may be either member's.
+    HandedOver,
+}
+
+/// Whether `at_ms` is the moment a member private to one person was seated
+/// after a member private to another person, among `seatings` (each with
+/// its time and the person its member is private to, oldest first).
+fn handed_over_at(seatings: &[(u64, Option<String>)], at_ms: u64) -> bool {
+    let before = seatings
+        .iter()
+        .take_while(|(seated_at, _)| *seated_at < at_ms)
+        .last()
+        .and_then(|(_, owner)| owner.as_deref());
+    before.is_some_and(|before| {
+        seatings
+            .iter()
+            .filter(|(seated_at, _)| *seated_at == at_ms)
+            .any(|(_, owner)| owner.as_deref().is_some_and(|owner| owner != before))
+    })
+}
+
+impl NameSeatings {
+    /// The seatings `seatings`, oldest first.
+    #[cfg(test)]
+    pub(crate) fn of(seatings: Vec<(u64, Option<String>)>) -> Self {
+        let seated_as = vec![SeatedAs::default(); seatings.len()];
+        Self(seatings, seated_as)
+    }
+
+    /// The seatings `seatings`, oldest first, each with what its member
+    /// was seated as.
+    #[cfg(test)]
+    pub(crate) fn of_seated(seatings: Vec<(u64, Option<String>, SeatedAs)>) -> Self {
+        let (times, seated_as) = seatings
             .into_iter()
-            .filter_map(|event| match event.kind {
-                meerkat_mob::MobEventKind::MemberSpawned(spawned) => Some((
-                    event.mob_id.to_string(),
-                    spawned.agent_identity.to_string(),
-                    spawned.labels,
-                )),
+            .map(|(at_ms, owner, seated_as)| ((at_ms, owner), seated_as))
+            .unzip();
+        Self(times, seated_as)
+    }
+
+    /// The member private to no one that held the name at `at_ms`, as it
+    /// was seated, where a later seating under the name follows its own:
+    /// another member that replaced it, or the same member seated again (a
+    /// respawn is a seating of its own). The seatings do not tell the two
+    /// apart, so a member seated again with another role or other labels is
+    /// answered here for what it recorded before. `None` for the seating
+    /// that is the name's last (the rule on the name's holder now decides
+    /// that one), for a member private to a person, and for a moment no
+    /// member holds.
+    pub(crate) fn earlier_shared_holder_at(&self, at_ms: u64) -> Option<&SeatedAs> {
+        if handed_over_at(&self.0, at_ms) {
+            return None;
+        }
+        let seatings: Vec<(u64, bool)> = self
+            .0
+            .iter()
+            .map(|(seated_at, owner)| (*seated_at, owner.is_some()))
+            .collect();
+        let position = holding_seating(&seatings, at_ms)?;
+        let (_, owner) = self.0.get(position)?;
+        if owner.is_some() || position + 1 >= self.0.len() {
+            return None;
+        }
+        self.1.get(position)
+    }
+
+    /// Whether a member private to a person was ever seated under the name.
+    pub(crate) fn ever_private(&self) -> bool {
+        self.0.iter().any(|(_, owner)| owner.is_some())
+    }
+
+    /// Who held the name at `at_ms` ([`holding_seating`]).
+    pub(crate) fn held_at(&self, at_ms: u64) -> HeldBy<'_> {
+        if handed_over_at(&self.0, at_ms) {
+            return HeldBy::HandedOver;
+        }
+        let seatings: Vec<(u64, bool)> = self
+            .0
+            .iter()
+            .map(|(seated_at, owner)| (*seated_at, owner.is_some()))
+            .collect();
+        match holding_seating(&seatings, at_ms).and_then(|position| self.0.get(position)) {
+            Some((_, Some(owner))) => HeldBy::Private(owner),
+            Some((_, None)) => HeldBy::Shared,
+            None => HeldBy::NoKnownMember,
+        }
+    }
+}
+
+impl NameHolders {
+    /// Note the journal's row `cursor`, recorded at `recorded_ms`, whose
+    /// time among its journal's rows is `at_ms`, once: the journal shows a
+    /// row to the seed's read and to the event pump alike, in either order.
+    /// Answers whether the row was new.
+    fn note(&mut self, cursor: u64, recorded_ms: u64, at_ms: u64, step: HolderStep) -> bool {
+        if self.0.iter().any(|noted| noted.cursor == cursor) {
+            return false;
+        }
+        let after = self.0.partition_point(|noted| noted.cursor < cursor);
+        self.0.insert(
+            after,
+            NotedStep {
+                cursor,
+                recorded_ms,
+                at_ms,
+                step,
+            },
+        );
+        true
+    }
+
+    /// Take each step's time among its journal's rows from `times` again:
+    /// a row shown out of the journal's order moved the times after it.
+    fn restamp(&mut self, times: &JournalTimes) {
+        for noted in &mut self.0 {
+            noted.at_ms = times.at(noted.cursor).unwrap_or(noted.recorded_ms);
+        }
+    }
+
+    /// The seating at `index`: the person its member is private to, if any,
+    /// and whether the member is ephemeral.
+    fn seated(&self, index: usize) -> Option<(Option<&str>, bool)> {
+        match self.0.get(index).map(|noted| &noted.step) {
+            Some(HolderStep::Seated {
+                owner, ephemeral, ..
+            }) => Some((owner.as_deref(), *ephemeral)),
+            _ => None,
+        }
+    }
+
+    /// The index of the seating that holds the name at `at_ms`
+    /// ([`holding_seating`]).
+    fn seating_at(&self, at_ms: u64) -> Option<usize> {
+        let (indices, seatings): (Vec<usize>, Vec<(u64, bool)>) = self
+            .0
+            .iter()
+            .enumerate()
+            .filter_map(|(index, noted)| match &noted.step {
+                HolderStep::Seated { owner, .. } => Some((index, (noted.at_ms, owner.is_some()))),
                 _ => None,
             })
-            .collect();
-        Ok(Some((spawns, last)))
+            .unzip();
+        holding_seating(&seatings, at_ms).and_then(|position| indices.get(position).copied())
+    }
+
+    /// The name's seatings, each with its time, its owner and what its
+    /// member was seated as.
+    fn seatings(&self) -> NameSeatings {
+        let (times, seated_as) = self
+            .0
+            .iter()
+            .filter_map(|noted| match &noted.step {
+                HolderStep::Seated {
+                    owner, seated_as, ..
+                } => Some(((noted.at_ms, owner.clone()), seated_as.clone())),
+                _ => None,
+            })
+            .unzip();
+        NameSeatings(times, seated_as)
+    }
+
+    /// The person the member seated at `index` is private to, if any.
+    fn owner_of(&self, index: usize) -> Option<&str> {
+        self.seated(index).and_then(|(owner, _)| owner)
+    }
+
+    /// When the member seated at `index` ended, if it has: the first step
+    /// after its seating and before the next one that ends it. A retirement
+    /// with no cause ends an ephemeral member; the end of its identity entry
+    /// ends any member.
+    fn ended(&self, index: usize) -> Option<u64> {
+        let (_, ephemeral) = self.seated(index)?;
+        self.0
+            .iter()
+            .skip(index + 1)
+            .take_while(|noted| !matches!(noted.step, HolderStep::Seated { .. }))
+            .find(|noted| match noted.step {
+                HolderStep::Removed => true,
+                HolderStep::Retired => ephemeral,
+                HolderStep::Seated { .. } => false,
+            })
+            .map(|noted| noted.at_ms)
+    }
+
+    /// The index of the seating the journal's row `cursor` follows.
+    fn seating_before(&self, cursor: u64) -> Option<usize> {
+        self.0
+            .iter()
+            .enumerate()
+            .take_while(|(_, noted)| noted.cursor < cursor)
+            .filter(|(_, noted)| matches!(noted.step, HolderStep::Seated { .. }))
+            .last()
+            .map(|(index, _)| index)
+    }
+
+    /// Whether the member that held the name at `at_ms` holds it now: no
+    /// member under the name has ended since, and the newest seating is
+    /// private to the same person (or, like it, to no one). A respawn, a
+    /// reset and a rebuild seat the same member again.
+    fn held_since(&self, at_ms: u64) -> bool {
+        // The moment one person's member follows another's is neither's.
+        if self.seatings().held_at(at_ms) == HeldBy::HandedOver {
+            return false;
+        }
+        let Some(then) = self.seating_at(at_ms) else {
+            return false;
+        };
+        let mut newest = then;
+        for (index, noted) in self.0.iter().enumerate().skip(then) {
+            if matches!(noted.step, HolderStep::Seated { .. }) {
+                if self.ended(newest).is_some() {
+                    return false;
+                }
+                newest = index;
+            }
+        }
+        self.ended(newest).is_none() && self.owner_of(newest) == self.owner_of(then)
+    }
+
+    /// Whether the member that held the name at `at_ms` is private to a
+    /// person and is the member last seated under the name, ended or not,
+    /// and the one an end at `ended_at_ms` is of: no member under the name
+    /// ended between that seating and the newest one, the newest is private
+    /// to the same person, and it was seated no later than the end (a
+    /// member seated after an end is not the member that ended). A respawn,
+    /// a reset and a rebuild seat the same member again.
+    fn held_by_the_last_private_member(&self, at_ms: u64, ended_at_ms: u64) -> bool {
+        let Some(then) = self.seating_at(at_ms) else {
+            return false;
+        };
+        let mut newest = then;
+        for (index, noted) in self.0.iter().enumerate().skip(then + 1) {
+            if matches!(noted.step, HolderStep::Seated { .. }) {
+                if self.ended(newest).is_some() {
+                    return false;
+                }
+                newest = index;
+            }
+        }
+        self.owner_of(then).is_some()
+            && self.owner_of(newest) == self.owner_of(then)
+            && self
+                .0
+                .get(newest)
+                .is_some_and(|seated| seated.at_ms <= ended_at_ms)
+    }
+
+    /// Whether the member that held the name at `at_ms` is private to a
+    /// person and its end is in the journal.
+    fn held_by_an_ended_private_member(&self, at_ms: u64) -> bool {
+        self.seating_at(at_ms)
+            .is_some_and(|index| self.owner_of(index).is_some() && self.ended(index).is_some())
     }
 }
 
@@ -258,11 +799,90 @@ impl Default for PrivateOwnerRecordId {
     }
 }
 
+/// What a create is refused with when a release it asks before its mob
+/// exists fails ([`MobCreateRelease`]): one sentence for every release. What
+/// the release itself said goes to the host's log.
+///
+/// It says nothing of whose the kept things were (a first create under an
+/// id is asked the same release) and nothing of a retry: the refusal's data
+/// says `retryable: false` for every reason, this one included.
+pub(crate) const CREATE_RELEASE_FAILED: &str = "what the host keeps under this mob id could not be released, so the mob is not created; \
+     the host's log has the cause";
+
+/// One release the host owes before a mob is created under an id
+/// ([`PrivateOwners::bind_create_release`]): what the host keeps under that
+/// id was not written for the new mob (it is of an earlier mob of the id,
+/// or was written before any mob held it), and the new mob is to find none
+/// of it.
+#[async_trait::async_trait]
+pub(crate) trait MobCreateRelease: Send + Sync {
+    /// What this releases, in a few words, for the host's log.
+    fn what(&self) -> &'static str;
+
+    /// Release what the host keeps under `mob_id`. Asked again, it releases
+    /// what is left. An error means some may be left; its text is for the
+    /// host's log, never for a caller.
+    async fn release_before_create(&self, mob_id: &meerkat_mob::MobId) -> Result<(), String>;
+}
+
+/// The schedules a launch keeps under a mob's id, as a release a create
+/// asks ([`crate::mob_schedules_release`]): a launch that declared no
+/// schedules has none to release; one that declared them and has not bound
+/// their release yet fails the release, so the create is refused; a bound
+/// release ends the schedules that name the id and says in the host's log
+/// how many it ended.
+#[async_trait::async_trait]
+impl MobCreateRelease for crate::mob_schedules_release::MobSchedulesSlot {
+    fn what(&self) -> &'static str {
+        "the schedules that name the mob"
+    }
+
+    async fn release_before_create(&self, mob_id: &meerkat_mob::MobId) -> Result<(), String> {
+        use crate::mob_schedules_release::MobSchedulesStanding;
+        match self.standing() {
+            MobSchedulesStanding::NotDeclared => Ok(()),
+            MobSchedulesStanding::Owed => Err(
+                "the launch declared its schedules and has not bound their release to the \
+                 runtime yet"
+                    .to_string(),
+            ),
+            MobSchedulesStanding::Bound(release) => {
+                let ended = release.release_mob(mob_id).await?;
+                if ended > 0 {
+                    tracing::warn!(
+                        mob_id = %mob_id,
+                        ended,
+                        "a create ended the schedules that named the mob's id"
+                    );
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
 /// The owner of each member of one runtime's mobs (see the module docs).
 /// Cheap to clone; clones share the record.
 #[derive(Clone, Default)]
 pub(crate) struct PrivateOwners {
     inner: Arc<Inner>,
+}
+
+/// Test builds only: a first read a test makes a record owe
+/// ([`PrivateOwners::owe_a_first_read_in_tests`]). Dropping it is the read
+/// succeeding.
+#[cfg(test)]
+pub(crate) struct OwedFirstReadInTests(PrivateOwners);
+
+#[cfg(test)]
+impl Drop for OwedFirstReadInTests {
+    fn drop(&mut self) {
+        self.0
+            .inner
+            .first_reads
+            .0
+            .send_modify(|reads| reads.in_flight = reads.in_flight.saturating_sub(1));
+    }
 }
 
 /// Who a mob a member created is private to, as far as its records say.
@@ -280,6 +900,9 @@ enum MobOwner {
 struct Inner {
     /// Which record this is among the records of the process.
     id: PrivateOwnerRecordId,
+    /// The releases a create asks before its mob exists, in the order they
+    /// were bound ([`PrivateOwners::bind_create_release`]).
+    create_releases: RwLock<Vec<Arc<dyn MobCreateRelease>>>,
     /// What each member build recorded: the member's owner, or `None` for a
     /// member private to no one. The newest truth about a member.
     built: RwLock<BTreeMap<MemberKey, Option<String>>>,
@@ -293,6 +916,14 @@ struct Inner {
     /// What is known of who each mob a member created is private to
     /// ([`MobOwner`]).
     mob_owners: RwLock<BTreeMap<String, MobOwner>>,
+    /// Who held each member name over time ([`NameHolders`]), keyed by the
+    /// mob and the identity the member's memory scope names it by.
+    holders: RwLock<BTreeMap<MemberKey, NameHolders>>,
+    /// The times of each mob's journal rows `holders` were noted from
+    /// ([`JournalTimes`]), by mob. Locked before `holders`.
+    journal_times: RwLock<BTreeMap<String, JournalTimes>>,
+    /// How many journal rows `holders` have noted: it changes with them.
+    holders_noted: std::sync::atomic::AtomicU64,
     /// Set once the seed landed: every event log and creation record read.
     seeded: tokio::sync::OnceCell<()>,
     /// The seed's stage among the first reads this record owes.
@@ -387,6 +1018,17 @@ fn creating_member(provenance: &meerkat_mob::MobProvenance) -> CreatingMember<'_
         // `MobProvenance` is open to new variants: one this release does
         // not know may name a member, so it is not taken to name none.
         _ => CreatingMember::Undecidable,
+    }
+}
+
+/// The member a mob's creation record names as the mob's creator: the id
+/// of the mob that member is seated in, and its roster member id. `None`
+/// for a record that names no member, and for one that does not say which
+/// member created the mob.
+pub(crate) fn named_creator(provenance: &meerkat_mob::MobProvenance) -> Option<(String, String)> {
+    match creating_member(provenance) {
+        CreatingMember::Named(mob, member) => Some((mob.to_string(), member.to_string())),
+        CreatingMember::NoMember | CreatingMember::Undecidable => None,
     }
 }
 
@@ -514,8 +1156,9 @@ impl PrivateOwners {
         }
     }
 
-    /// Record who mob `mob_id` is private to. The first record of a mob
-    /// stands: its creator's owner does not change.
+    /// Record who mob `mob_id` is private to, as a durable record read at
+    /// the seed says it. The first record of a mob stands: its creator's
+    /// owner does not change.
     fn record_mob(&self, mob_id: &str, owner: MobOwner) {
         self.inner
             .mob_owners
@@ -523,6 +1166,29 @@ impl PrivateOwners {
             .unwrap_or_else(PoisonError::into_inner)
             .entry(mob_id.to_string())
             .or_insert(owner);
+    }
+
+    /// Record who the mob the create admission admits under `mob_id` is
+    /// private to. It takes the place of a record that stands under the id:
+    /// the admission is asked only for an id no mob holds, so a record
+    /// there is not this mob's. What the record holds of members is left as
+    /// it is: each member is recorded by its own build.
+    fn record_created_mob(&self, mob_id: &str, owner: MobOwner) {
+        self.inner
+            .mob_owners
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(mob_id.to_string(), owner);
+    }
+
+    /// The releases a create asks before its mob exists, in the order they
+    /// were bound.
+    fn create_releases(&self) -> Vec<Arc<dyn MobCreateRelease>> {
+        self.inner
+            .create_releases
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     /// What this record holds of who mob `mob_id` is private to, for tests
@@ -587,6 +1253,18 @@ impl PrivateOwners {
     pub(crate) fn first_read_pending(&self) -> bool {
         let reads = *self.inner.first_reads.0.borrow();
         reads.in_flight + reads.overdue > 0
+    }
+
+    /// Test builds only: this record owes one more first read, on its first
+    /// attempt, until the value handed back is dropped: that read has then
+    /// succeeded.
+    #[cfg(test)]
+    pub(crate) fn owe_a_first_read_in_tests(&self) -> OwedFirstReadInTests {
+        self.inner
+            .first_reads
+            .0
+            .send_modify(|reads| reads.in_flight += 1);
+        OwedFirstReadInTests(self.clone())
     }
 
     /// Wait while an owed first read is still on its first attempt, at
@@ -702,12 +1380,19 @@ impl PrivateOwners {
             loop {
                 match store.private_retired_identities(&realm).await {
                     Ok(identities) => {
+                        // The store also marks the key of every identity
+                        // scope it keeps apart from the members of a name
+                        // (`crate::memory::records::IdentityScopeKey`) as
+                        // private. Such a key is a scope, not a member's
+                        // name: only plain names are members here.
                         owners
                             .inner
                             .retired
                             .write()
                             .unwrap_or_else(PoisonError::into_inner)
-                            .extend(identities);
+                            .extend(identities.into_iter().filter(|identity| {
+                                crate::memory::records::IdentityScopeKey::of(identity).is_named()
+                            }));
                         owners.inner.first_reads.0.send_modify(|reads| {
                             // On its first attempt unless it failed or a
                             // reader's wait made every read in flight overdue.
@@ -746,13 +1431,13 @@ impl PrivateOwners {
     async fn read_log(&self, log: &dyn MemberSpawnLog) -> Result<(), String> {
         let mut logged = BTreeMap::new();
         let mut cursor = 0;
-        while let Some((spawns, next)) = log.spawns_after(cursor, SEED_PAGE).await? {
+        while let Some((steps, next)) = log.spawns_after(cursor, SEED_PAGE).await? {
             cursor = next;
-            for (mob_id, member, labels) in spawns {
-                logged.insert(
-                    (mob_id, member),
-                    crate::access::private_owner(&labels).map(str::to_string),
-                );
+            for step in steps {
+                self.note_journal_step(&step);
+                if let HolderStep::Seated { owner, .. } = step.step {
+                    logged.insert((step.mob_id, step.member), owner);
+                }
             }
         }
         self.inner
@@ -832,55 +1517,96 @@ impl PrivateOwners {
         }
     }
 
+    /// Bind `release` as one of the releases a create asks before its mob
+    /// exists ([`Self::before_create_hook`]). They are asked in the order
+    /// they were bound.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "bound by the composition that owns what is released; none binds one yet"
+        )
+    )]
+    pub(crate) fn bind_create_release(&self, release: Arc<dyn MobCreateRelease>) {
+        self.inner
+            .create_releases
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(release);
+    }
+
     /// Install `follower` as what follows the end of a member private to a
-    /// person, and hand it the ends seen before it, oldest first. A
-    /// composition installs one follower; a later install replaces it.
+    /// person in the launch's schedules ([`MemberEndSeat::Schedules`]), and
+    /// hand it the ends seen before it, oldest first. A later install
+    /// replaces it.
     pub(crate) async fn follow_member_ends(&self, follower: Arc<dyn PrivateMemberEndFollower>) {
+        self.follow_member_ends_as(MemberEndSeat::Schedules, follower)
+            .await;
+    }
+
+    /// Install `follower` in `seat`, and hand it the ends the seat held
+    /// while it had no follower, oldest first. A launch installs one
+    /// follower in a seat; a later install in the seat replaces it.
+    pub(crate) async fn follow_member_ends_as(
+        &self,
+        seat: MemberEndSeat,
+        follower: Arc<dyn PrivateMemberEndFollower>,
+    ) {
         let held = {
             let mut ends = self
                 .inner
                 .ends
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
-            ends.follower = Some(Arc::clone(&follower));
-            std::mem::take(&mut ends.held)
+            let seat = ends.seats.entry(seat).or_default();
+            seat.follower = Some(Arc::clone(&follower));
+            std::mem::take(&mut seat.held)
         };
         for ended in &held {
             follower.member_ended(ended).await;
         }
     }
 
-    /// Hand `ended` to the installed follower, or hold it for the follower a
-    /// composition installs later ([`Self::follow_member_ends`]). The hold
-    /// is this process's and bounded ([`HELD_ENDS_MAX`]): a launch that
-    /// installs no follower keeps the newest ends and follows none. Answers
-    /// whether a follower took the end; `false` for one that is only held.
+    /// Hand `ended` to the follower of each seat, and hold it for each seat
+    /// that has none, for the follower a composition installs there later
+    /// ([`Self::follow_member_ends_as`]). A seat's hold is this process's
+    /// and bounded ([`HELD_ENDS_MAX`]): a launch that installs no follower
+    /// in it keeps the newest ends there. Answers whether a follower took
+    /// the end; `false` for one that every seat only holds.
     pub(crate) async fn member_ended(&self, ended: EndedPrivateMember) -> bool {
-        let follower = {
+        let followers: Vec<Arc<dyn PrivateMemberEndFollower>> = {
             let mut ends = self
                 .inner
                 .ends
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
-            match ends.follower.as_ref() {
-                Some(follower) => Arc::clone(follower),
-                None => {
-                    if ends.held.len() >= HELD_ENDS_MAX {
-                        let dropped = ends.held.remove(0);
-                        tracing::warn!(
-                            mob_id = %dropped.mob_id,
-                            member = %dropped.member,
-                            "more ends of members private to a person are held than the hold \
-                             keeps: the oldest is dropped, and what follows it is not done"
-                        );
+            let mut followers = Vec::new();
+            for seat in MemberEndSeat::ALL {
+                let seat_ends = ends.seats.entry(seat).or_default();
+                match seat_ends.follower.as_ref() {
+                    Some(follower) => followers.push(Arc::clone(follower)),
+                    None => {
+                        if seat_ends.held.len() >= HELD_ENDS_MAX {
+                            let dropped = seat_ends.held.remove(0);
+                            tracing::warn!(
+                                mob_id = %dropped.mob_id,
+                                member = %dropped.member,
+                                seat = ?seat,
+                                "more ends of members private to a person are held than the \
+                                 hold keeps: the oldest is dropped, and what follows it is not \
+                                 done"
+                            );
+                        }
+                        seat_ends.held.push(ended.clone());
                     }
-                    ends.held.push(ended);
-                    return false;
                 }
             }
+            followers
         };
-        follower.member_ended(&ended).await;
-        true
+        for follower in &followers {
+            follower.member_ended(&ended).await;
+        }
+        !followers.is_empty()
     }
 
     /// Show the record an event of the journal of `handle`'s mob, the
@@ -902,6 +1628,14 @@ impl PrivateOwners {
         handle: &meerkat_mob::MobHandle,
         event: &meerkat_mob::MobEvent,
     ) -> bool {
+        // Who holds a member's name is followed for every member: a later
+        // seating under a name starts another member's time.
+        if let Some(step) = MemberJournalStep::of_event(event) {
+            self.note_journal_step(&step);
+            if step.step == HolderStep::Removed {
+                self.private_agent_ended(&step, event.timestamp).await;
+            }
+        }
         let meerkat_mob::MobEventKind::MemberRetirementStarted {
             agent_identity,
             generation,
@@ -1012,9 +1746,15 @@ impl PrivateOwners {
     }
 
     /// The create admission of the agent mob tools: `then` (the host's own,
-    /// when there is one) decides first, then the mob is recorded as private
-    /// to its creator's owner. A creator whose owner cannot be read refuses
-    /// the create.
+    /// when there is one) decides first, then each release bound to this
+    /// record is asked ([`Self::bind_create_release`]), then the mob is
+    /// recorded as private to its creator's owner. A creator whose owner
+    /// cannot be read refuses the create, and so does a release that fails
+    /// ([`CREATE_RELEASE_FAILED`]).
+    ///
+    /// The record written here is the admitted mob's own: it takes the
+    /// place of a record that stands under the mob's id
+    /// ([`Self::record_created_mob`]).
     ///
     /// The creator is the member whose session the create names: the owner
     /// session, or, for the mob of a temporary council, the session that
@@ -1063,7 +1803,24 @@ impl PrivateOwners {
                     }
                     _ => None,
                 };
-                owners.record_mob(request.mob_id.as_str(), MobOwner::Known(owner));
+                // Each bound release goes before anything of the mob
+                // exists, and before the record below is written: a release
+                // that fails refuses the create, and the record stays as it
+                // was.
+                for release in owners.create_releases() {
+                    if let Err(error) = release.release_before_create(&request.mob_id).await {
+                        // The release's own words stay with the host: they
+                        // can name a file or a key of a store.
+                        tracing::warn!(
+                            mob_id = %request.mob_id,
+                            release = release.what(),
+                            error = %error,
+                            "a release owed before a create failed; the create is refused"
+                        );
+                        return Err(CREATE_RELEASE_FAILED.to_string());
+                    }
+                }
+                owners.record_created_mob(request.mob_id.as_str(), MobOwner::Known(owner));
                 Ok(())
             })
         })
@@ -1137,6 +1894,26 @@ impl PrivateOwners {
         }
     }
 
+    /// The person the member `spec` spawns in the runtime's own mob will be
+    /// private to once [`Self::apply`] has run, or `None` for a member
+    /// private to nobody: the owner [`Self::requested_owner`] names, else
+    /// the owner `spec` carries where it is kept ([`keeps_carried_owner`]);
+    /// a host's own spawn keeps what it carries.
+    /// For a customizer that runs before the owner is written on the spec.
+    pub(crate) fn owner_a_spawn_takes(
+        &self,
+        mob_id: &str,
+        spawner: Option<&meerkat_mob::AgentIdentity>,
+        spec: &SpawnMemberSpec,
+    ) -> Result<Option<String>, MobError> {
+        let carried = carried_owner(spec).filter(|_| keeps_carried_owner(spawner, spec));
+        let forks = matches!(spec.launch_mode, MemberLaunchMode::Fork { .. });
+        if spawner.is_none() && !forks {
+            return Ok(carried);
+        }
+        Ok(self.requested_owner(mob_id, spawner, spec)?.or(carried))
+    }
+
     /// The customizer body of the runtime's own mob, factored off the trait
     /// so tests can drive it. A spawn asked for by a member, `spawner` (the
     /// member whose turn spawns), or a prompt-context fork, carries no label
@@ -1154,7 +1931,7 @@ impl PrivateOwners {
         if spawner.is_none() && !forks {
             return Ok(());
         }
-        let owner = self.requested_owner(mob_id, spawner, spec)?;
+        let owner = self.owner_a_spawn_takes(mob_id, spawner, spec)?;
         give_owner(spec, owner);
         Ok(())
     }
@@ -1181,33 +1958,296 @@ impl PrivateOwners {
             }
             (mob_owner, requested) => mob_owner.or(requested),
         };
-        give_owner(spec, owner);
+        let carried = carried_owner(spec).filter(|_| keeps_carried_owner(spawner, spec));
+        give_owner(spec, owner.or(carried));
         Ok(())
     }
 }
 
-/// Strip the labels only Meta writes from `spec` and, for a member private
-/// to `owner`, write the owner and seat it exempt from the definition's
-/// wiring rules. A spawn whose owner no record names keeps the private
-/// owner it carries (a fork Meerkat made copies its source's labels): it
-/// holds that person's conversation.
-fn give_owner(spec: &mut SpawnMemberSpec, owner: Option<String>) {
-    let carried = spec
-        .labels
+/// Who held a member's name, and when: what the journals of the runtime's
+/// mobs say of it, as far as the seed has read them and the event pump has
+/// shown them. A record of a moment is its asking member's, whoever holds
+/// the name later.
+impl PrivateOwners {
+    /// Note what one row of a mob's journal says of who holds a name. The
+    /// row's time among its journal's rows ([`JournalTimes`]) is also the
+    /// floor of the times this process stamps its gating entries and
+    /// question sets with from here on
+    /// ([`crate::runtime::raise_entry_time_floor`]): an entry written after
+    /// the runtime was shown a seating is never stamped before it, and one
+    /// written before the next seating is shown is stamped before that
+    /// seating, also while the clock is behind the journal's newest time.
+    fn note_journal_step(&self, step: &MemberJournalStep) {
+        let mut journals = self
+            .inner
+            .journal_times
+            .write()
+            .unwrap_or_else(PoisonError::into_inner);
+        let times = journals.entry(step.mob_id.clone()).or_default();
+        let (at_ms, moved) = times.note(step.cursor, step.at_ms);
+        crate::runtime::raise_entry_time_floor(
+            times.entry_floor().unwrap_or(at_ms.saturating_add(1)),
+        );
+        let mut holders = self
+            .inner
+            .holders
+            .write()
+            .unwrap_or_else(PoisonError::into_inner);
+        let new = holders
+            .entry((
+                step.mob_id.clone(),
+                crate::member_comms_id::logical_memory_identity(&step.member),
+            ))
+            .or_default()
+            .note(step.cursor, step.at_ms, at_ms, step.step.clone());
+        if moved {
+            for ((mob_id, _), of_name) in holders.iter_mut() {
+                if *mob_id == step.mob_id {
+                    of_name.restamp(times);
+                }
+            }
+        }
+        if new || moved {
+            self.inner
+                .holders_noted
+                .fetch_add(1, std::sync::atomic::Ordering::Release);
+        }
+    }
+
+    /// How many journal rows the record has noted of who holds its members'
+    /// names: [`Self::name_seatings`] answers the same while this does.
+    pub(crate) fn name_seatings_noted(&self) -> u64 {
+        self.inner
+            .holders_noted
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// The members seated under each name over time, in every mob of the
+    /// runtime whose journal the record has been shown: for each name (as a
+    /// member's memory scope spells it), one list per mob.
+    pub(crate) fn name_seatings(&self) -> BTreeMap<String, Vec<NameSeatings>> {
+        let mut names: BTreeMap<String, Vec<NameSeatings>> = BTreeMap::new();
+        for ((_, name), holders) in self
+            .inner
+            .holders
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+        {
+            names
+                .entry(name.clone())
+                .or_default()
+                .push(holders.seatings());
+        }
+        names
+    }
+
+    fn with_holders<Answer>(
+        &self,
+        mob_id: &str,
+        name: &str,
+        read: impl FnOnce(Option<&NameHolders>) -> Answer,
+    ) -> Answer {
+        let key = (
+            mob_id.to_string(),
+            crate::member_comms_id::logical_memory_identity(name),
+        );
+        read(
+            self.inner
+                .holders
+                .read()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(&key),
+        )
+    }
+
+    /// When the member that held `name` in mob `mob_id` at `at_ms` ended,
+    /// if it was private to a person and has ended: an ephemeral member by
+    /// its retirement, a long-term agent by the end of its identity entry.
+    /// The member that held a name at a moment is the one last seated under
+    /// it at or before that moment; a member private to a person holds every
+    /// moment from its seating up to the next seating under the name, that
+    /// moment included, whether or not it ended in between: what was
+    /// recorded under a name nobody held is the member's that held it last.
+    pub(crate) fn private_holder_ended(&self, mob_id: &str, name: &str, at_ms: u64) -> Option<u64> {
+        self.with_holders(mob_id, name, |holders| {
+            let holders = holders?;
+            let index = holders.seating_at(at_ms)?;
+            holders.owner_of(index)?;
+            holders.ended(index)
+        })
+    }
+
+    /// Whether the record knows a member private to a person that has
+    /// ended.
+    pub(crate) fn knows_an_ended_private_member(&self) -> bool {
+        self.inner
+            .holders
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .values()
+            .any(|holders| {
+                (0..holders.0.len()).any(|index| {
+                    holders.owner_of(index).is_some() && holders.ended(index).is_some()
+                })
+            })
+    }
+
+    /// Whether the member that held `name` in mob `mob_id` at `at_ms` holds
+    /// it now: `None` for a name the record knows no seating of (it sees no
+    /// journal of that mob). A respawn, a reset and a rebuild seat the same
+    /// member again; the end of the member, and a later seating private to
+    /// another person or to no one, do not.
+    pub(crate) fn still_held_by(&self, mob_id: &str, name: &str, at_ms: u64) -> Option<bool> {
+        self.with_holders(mob_id, name, |holders| {
+            holders.map(|holders| holders.held_since(at_ms))
+        })
+    }
+
+    /// Whether a record made under `name` in mob `mob_id` at `at_ms` ends
+    /// with the member private to a person whose end at `ended_at_ms` is
+    /// being followed: the member that held the name then is private to a
+    /// person, and either its end is in the journal or it is the member
+    /// last seated under the name and was seated no later than that end
+    /// (the end is then its own; a member seated after the end is a later
+    /// one, and what it recorded stays). The record's time is read against
+    /// the seatings only. `None` where no seating says who held the name
+    /// then: a name the record knows no seating of, and a moment before the
+    /// name's first known seating.
+    pub(crate) fn ends_with_a_private_member(
+        &self,
+        mob_id: &str,
+        name: &str,
+        at_ms: u64,
+        ended_at_ms: u64,
+    ) -> Option<bool> {
+        self.with_holders(mob_id, name, |holders| {
+            let holders = holders?;
+            holders.seating_at(at_ms)?;
+            Some(
+                holders.held_by_the_last_private_member(at_ms, ended_at_ms)
+                    || holders.held_by_an_ended_private_member(at_ms),
+            )
+        })
+    }
+
+    /// Wait until every first read this record owes has landed: the seed
+    /// has read the journals. A record that owes none does not wait.
+    pub(crate) async fn journals_read(&self) {
+        let mut reads = self.inner.first_reads.0.subscribe();
+        let _ = reads
+            .wait_for(|reads| reads.in_flight + reads.overdue == 0)
+            .await;
+    }
+
+    /// Hand the end of a long-term agent private to a person to the
+    /// follower of the question sets' seat: `step` is the journal's row that
+    /// ends the agent's identity entry, recorded at `ended_at`. Its
+    /// schedules are the identity family's to follow, so no other seat is
+    /// handed it, and it is held for none: a set the end leaves open is
+    /// withdrawn when the runtime next serves its members' questions.
+    async fn private_agent_ended(
+        &self,
+        step: &MemberJournalStep,
+        ended_at: chrono::DateTime<chrono::Utc>,
+    ) {
+        let private = self.with_holders(&step.mob_id, &step.member, |holders| {
+            holders.is_some_and(|holders| {
+                holders
+                    .seating_before(step.cursor)
+                    .is_some_and(|index| holders.owner_of(index).is_some())
+            })
+        });
+        if !private {
+            return;
+        }
+        let follower = self
+            .inner
+            .ends
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .seats
+            .get(&MemberEndSeat::QuestionSets)
+            .and_then(|seat| seat.follower.clone());
+        if let Some(follower) = follower {
+            follower
+                .member_ended(&EndedPrivateMember {
+                    mob_id: step.mob_id.clone(),
+                    member: step.member.clone(),
+                    session: None,
+                    ended_at,
+                })
+                .await;
+        }
+    }
+}
+
+/// The private owner the labels of `spec` carry.
+fn carried_owner(spec: &SpawnMemberSpec) -> Option<String> {
+    spec.labels
         .as_ref()
         .and_then(crate::access::private_owner)
-        .map(str::to_string);
+        .map(str::to_string)
+}
+
+/// Whether a spawn whose owner no record names keeps the private owner its
+/// spec carries: a fork does (a fork Meerkat made copies its source's
+/// labels: it holds that person's conversation), and so does a spawn no
+/// member asked for (a host's own). A spawn a member asks for that is no
+/// fork takes its owner from the record alone: no caller path hands such a
+/// spawn an owner label, and one that did would not be believed.
+fn keeps_carried_owner(
+    spawner: Option<&meerkat_mob::AgentIdentity>,
+    spec: &SpawnMemberSpec,
+) -> bool {
+    spawner.is_none() || matches!(spec.launch_mode, MemberLaunchMode::Fork { .. })
+}
+
+/// Strip the labels only Meta writes from `spec` and, for a member private
+/// to `owner`, write the owner and seat it exempt from the definition's
+/// wiring rules.
+fn give_owner(spec: &mut SpawnMemberSpec, owner: Option<String>) {
     if let Some(labels) = spec.labels.as_mut() {
         labels.retain(|key, _| {
             !crate::member_comms_id::RESERVED_AUTHORITY_LABELS.contains(&key.as_str())
         });
     }
-    if let Some(owner) = owner.or(carried) {
+    if let Some(owner) = owner {
         spec.labels
             .get_or_insert_with(BTreeMap::new)
             .insert(crate::access::PRIVATE_TO_LABEL.to_string(), owner);
         spec.definition_wiring = meerkat_mob::DefinitionWiring::Exempt;
     }
+}
+
+/// The spawn on a mob of a member whose name lies under a key namespace
+/// agent memory reserves is refused
+/// ([`crate::member_comms_id::refuse_reserved_memory_name`]) wherever the
+/// mob's spawn customizer is asked about a spawn that creates a member: a
+/// host's own fresh spawn, a member's spawn or fork, a respawn under the
+/// name, and a member's spawn with a resume launch, which seats a member on
+/// an existing session (`spawner`, the member that asked for it, is what
+/// tells that spawn from a rebuild).
+///
+/// A `SpawnSource::Resume` request that names no spawner is not asked. It
+/// is the rebuild of a member already seated (a restart's restore, a wake,
+/// an explicit resume; a fork-derived member's rebuild asks through
+/// `customize_spawn` with that source too), which creates nothing, or a
+/// host's own spawn on the mob handle with a resume launch, which the
+/// request does not tell from such a rebuild. Core admits a resume only on
+/// a session whose own durable records name the same mob and the same
+/// member, so that spawn can only seat again, on its old session, a member
+/// that was seated under the very name before.
+fn admit_member_name(
+    source: meerkat_mob::SpawnSource,
+    spawner: Option<&meerkat_mob::ids::AgentIdentity>,
+    spec: &SpawnMemberSpec,
+) -> Result<(), MobError> {
+    if matches!(source, meerkat_mob::SpawnSource::Resume) && spawner.is_none() {
+        return Ok(());
+    }
+    crate::member_comms_id::refuse_reserved_memory_name(spec.identity.as_str())
+        .map_err(MobError::WiringError)
 }
 
 /// [`PrivateOwners::spawn_customizer`].
@@ -1279,6 +2319,7 @@ impl SpawnMemberCustomizer for PrivateOwnerPropagation {
         ctx: &SpawnCustomizationContext,
         spec: &mut SpawnMemberSpec,
     ) -> Result<(), MobError> {
+        admit_member_name(ctx.spawn_source, ctx.spawner_identity.as_ref(), spec)?;
         self.owners
             .apply(ctx.mob_id.as_str(), ctx.spawner_identity.as_ref(), spec)
     }
@@ -1290,6 +2331,7 @@ impl SpawnMemberCustomizer for ChildOwnerPropagation {
         ctx: &SpawnCustomizationContext,
         spec: &mut SpawnMemberSpec,
     ) -> Result<(), MobError> {
+        admit_member_name(ctx.spawn_source, ctx.spawner_identity.as_ref(), spec)?;
         self.owners
             .apply_child(ctx.mob_id.as_str(), ctx.spawner_identity.as_ref(), spec)
     }
@@ -1533,6 +2575,144 @@ mod tests {
         assert_eq!(owners.owner_of("other-mob", "side"), None);
     }
 
+    /// A spawn the customizer is asked about that creates a member is
+    /// refused a name under a key namespace agent memory reserves: a host's
+    /// fresh spawn, a member's spawn, a fork, a respawn under the name, with
+    /// and without a member that asked for it, and a spawn with a resume
+    /// launch that a member asked for. A resume request that names no
+    /// member that asked for it (the rebuild of a member already seated, or
+    /// a host's own resume spawn) is not refused. A name that holds a `/`
+    /// outside those namespaces is admitted. This row tests the function,
+    /// not which requests Core sends it.
+    #[test]
+    fn a_member_is_created_under_no_reserved_memory_name_and_a_rebuild_is_not_refused() {
+        use meerkat_mob::SpawnSource;
+        let named = |name: &str| {
+            SpawnMemberSpec::new("worker", crate::member_comms_id::mob_member_id(name))
+        };
+        let reserved = [
+            "private/console-caller:v1:aa/ledger-side",
+            "set-aside/ledger-side",
+        ];
+        let asking = meerkat_mob::ids::AgentIdentity::from("alpha");
+        for source in [
+            SpawnSource::Consumer,
+            SpawnSource::AgentSpawnMember,
+            SpawnSource::HelperSpawn,
+            SpawnSource::BatchItem,
+            SpawnSource::FlowProvisioning,
+            SpawnSource::PolicySpawn,
+            SpawnSource::Respawn,
+            SpawnSource::Fork,
+            SpawnSource::PersistedForkResume,
+        ] {
+            for spawner in [None, Some(&asking)] {
+                for name in reserved {
+                    assert!(
+                        matches!(
+                            admit_member_name(source, spawner, &named(name)),
+                            Err(MobError::WiringError(_))
+                        ),
+                        "{source:?} under '{name}' is refused"
+                    );
+                }
+                for name in ["ledger-side", "team/ledger-side", "privateer/ledger-side"] {
+                    assert!(
+                        admit_member_name(source, spawner, &named(name)).is_ok(),
+                        "{source:?} under '{name}' is admitted"
+                    );
+                }
+            }
+        }
+        for name in reserved {
+            assert!(
+                matches!(
+                    admit_member_name(SpawnSource::Resume, Some(&asking), &named(name)),
+                    Err(MobError::WiringError(_))
+                ),
+                "a resume spawn a member asked for under '{name}' is refused"
+            );
+            assert!(
+                admit_member_name(SpawnSource::Resume, None, &named(name)).is_ok(),
+                "a resume request under '{name}' that no member asked for is not refused"
+            );
+        }
+        assert!(
+            admit_member_name(SpawnSource::Resume, Some(&asking), &named("ledger-side")).is_ok(),
+            "a resume spawn a member asked for under a plain name is admitted"
+        );
+    }
+
+    /// A spawn a member asks for that is no fork takes its owner from this
+    /// record alone: an owner label its spec carries is not kept, in the
+    /// runtime's own mob and in a mob a member created. A fork keeps the
+    /// owner its spec carries (its source's), and a host's own spawn is left
+    /// as it is.
+    #[test]
+    fn a_spawn_that_is_no_fork_keeps_no_owner_label_it_carries() {
+        let owners = PrivateOwners::default();
+        owners.record("mob", "shared", Some(&BTreeMap::new()));
+        owners.record_mob("child-mob", MobOwner::Known(None));
+        let shared = meerkat_mob::AgentIdentity::from("shared");
+        let carrying = || {
+            SpawnMemberSpec::new("worker", meerkat_mob::AgentIdentity::from("helper"))
+                .with_labels(private_labels())
+        };
+        let owner_of = |spec: &SpawnMemberSpec| {
+            spec.labels
+                .as_ref()
+                .and_then(crate::access::private_owner)
+                .map(str::to_string)
+        };
+
+        let mut spawned = carrying();
+        owners
+            .apply("mob", Some(&shared), &mut spawned)
+            .expect("a spawn of a shared member");
+        assert_eq!(
+            owner_of(&spawned),
+            None,
+            "a shared member's spawn is private to nobody, whatever label it carries"
+        );
+        let mut spawned = carrying();
+        owners
+            .apply_child("child-mob", Some(&shared), &mut spawned)
+            .expect("a spawn of a shared member in a mob a member created");
+        assert_eq!(
+            owner_of(&spawned),
+            None,
+            "and so in a mob a member created that is private to nobody"
+        );
+
+        let mut forked = carrying();
+        forked.launch_mode = MemberLaunchMode::Fork {
+            source_member_id: meerkat_mob::AgentIdentity::from("unrecorded-source"),
+            fork_context: meerkat_mob::launch::ForkContext::default(),
+        };
+        owners
+            .apply("mob", Some(&shared), &mut forked)
+            .expect("a fork");
+        assert_eq!(
+            owner_of(&forked),
+            Some(OWNER.to_string()),
+            "a fork keeps the owner its source's labels carry"
+        );
+        for mob in ["mob", "child-mob"] {
+            let mut hosts = carrying();
+            let applied = if mob == "mob" {
+                owners.apply(mob, None, &mut hosts)
+            } else {
+                owners.apply_child(mob, None, &mut hosts)
+            };
+            applied.expect("a host's spawn");
+            assert_eq!(
+                owner_of(&hosts),
+                Some(OWNER.to_string()),
+                "a spawn no member asked for is left as it is in {mob}"
+            );
+        }
+    }
+
     /// The memory owners name each private member by its logical memory
     /// identity, and the newest build of a member wins over the log.
     #[test]
@@ -1577,7 +2757,14 @@ mod tests {
                 return Ok(None);
             }
             Ok(Some((
-                vec![("mob".to_string(), "side".to_string(), private_labels())],
+                vec![MemberJournalStep::seated(
+                    "mob",
+                    "side",
+                    &private_labels(),
+                    true,
+                    1,
+                    0,
+                )],
                 1,
             )))
         }
@@ -1890,6 +3077,456 @@ mod tests {
         );
     }
 
+    /// Each seat has its own follower and its own hold: an end goes to the
+    /// follower of every seat that has one and is held for the others, a
+    /// seat installed later is handed what it held, and an end is answered
+    /// as taken once a follower took it.
+    #[tokio::test]
+    async fn each_seat_follows_and_holds_ends_on_its_own() {
+        let owners = PrivateOwners::default();
+        let schedules = Arc::new(KeptEnds::default());
+        owners.follow_member_ends(schedules.clone()).await;
+        assert!(
+            owners.member_ended(ended("first")).await,
+            "the schedules' follower took the end"
+        );
+
+        let question_sets = Arc::new(KeptEnds::default());
+        owners
+            .follow_member_ends_as(MemberEndSeat::QuestionSets, question_sets.clone())
+            .await;
+        assert_eq!(
+            *question_sets.0.lock().unwrap(),
+            vec![ended("first")],
+            "the seat installed later is handed the end it held"
+        );
+        owners.member_ended(ended("second")).await;
+        for (seat, follower) in [("schedules", &schedules), ("question sets", &question_sets)] {
+            assert_eq!(
+                *follower.0.lock().unwrap(),
+                vec![ended("first"), ended("second")],
+                "{seat}"
+            );
+        }
+
+        // A later install in a seat replaces its follower and is handed
+        // nothing again.
+        let replaced = Arc::new(KeptEnds::default());
+        owners.follow_member_ends(replaced.clone()).await;
+        owners.member_ended(ended("third")).await;
+        assert_eq!(*replaced.0.lock().unwrap(), vec![ended("third")]);
+        assert_eq!(schedules.0.lock().unwrap().len(), 2);
+        assert_eq!(question_sets.0.lock().unwrap().len(), 3);
+    }
+
+    fn seated(owner: Option<&str>, ephemeral: bool) -> HolderStep {
+        HolderStep::Seated {
+            owner: owner.map(str::to_string),
+            ephemeral,
+            seated_as: SeatedAs::default(),
+        }
+    }
+
+    /// An earlier holder of a name that is private to no one is read as it
+    /// was seated; the member seated last, a member private to a person and
+    /// a moment no member holds are not.
+    #[test]
+    fn an_earlier_shared_holder_of_a_name_is_read_as_it_was_seated() {
+        let as_role = |role: &str| SeatedAs {
+            role: role.to_string(),
+            labels: BTreeMap::from([("team".to_string(), role.to_string())]),
+        };
+        let name = NameSeatings::of_seated(vec![
+            (100, None, as_role("planner")),
+            (300, None, as_role("worker")),
+        ]);
+        assert_eq!(name.earlier_shared_holder_at(99), None);
+        assert_eq!(
+            name.earlier_shared_holder_at(100),
+            Some(&as_role("planner"))
+        );
+        assert_eq!(
+            name.earlier_shared_holder_at(299),
+            Some(&as_role("planner"))
+        );
+        assert_eq!(
+            name.earlier_shared_holder_at(300),
+            None,
+            "the member seated last"
+        );
+        assert_eq!(
+            name.earlier_shared_holder_at(400),
+            None,
+            "the member seated last"
+        );
+
+        let after_a_private_member = NameSeatings::of_seated(vec![
+            (100, Some(OWNER.to_string()), as_role("planner")),
+            (300, None, as_role("worker")),
+        ]);
+        assert_eq!(after_a_private_member.earlier_shared_holder_at(200), None);
+
+        // The journal's row of a seating carries the role and the labels.
+        let owners = PrivateOwners::default();
+        let labels = BTreeMap::from([("team".to_string(), "blue".to_string())]);
+        owners.note_journal_step(&MemberJournalStep::seated_as(
+            "mob", "gamma", "planner", &labels, true, 1, 100,
+        ));
+        owners.note_journal_step(&MemberJournalStep::seated_as(
+            "mob",
+            "gamma",
+            "worker",
+            &BTreeMap::new(),
+            true,
+            2,
+            300,
+        ));
+        let seatings = owners.name_seatings();
+        let gamma = seatings.get("gamma").and_then(|lists| lists.first());
+        assert_eq!(
+            gamma.and_then(|name| name.earlier_shared_holder_at(200)),
+            Some(&SeatedAs {
+                role: "planner".to_string(),
+                labels,
+            })
+        );
+    }
+
+    /// The holders of a name whose journal recorded `steps`, in that order,
+    /// each at its time.
+    fn holders(steps: &[(u64, HolderStep)]) -> NameHolders {
+        let mut holders = NameHolders::default();
+        for (cursor, (at_ms, step)) in (1..).zip(steps) {
+            holders.note(cursor, *at_ms, *at_ms, step.clone());
+        }
+        holders
+    }
+
+    /// Who `holders` say held the name at `at_ms`: `None` for no known
+    /// member, else the person the member was private to, if any.
+    #[allow(clippy::option_option)]
+    fn held_by(holders: &NameHolders, at_ms: u64) -> Option<Option<&str>> {
+        holders
+            .seating_at(at_ms)
+            .map(|index| holders.owner_of(index))
+    }
+
+    /// A moment belongs to the member last seated under the name at or
+    /// before it. A member private to a person holds every moment from its
+    /// seating up to the next seating under the name, that moment included,
+    /// ended or not; a moment before the first seating belongs to no known
+    /// member.
+    #[test]
+    fn a_moment_is_held_by_the_member_last_seated_under_the_name() {
+        let private = Some(Some(OWNER));
+        let shared = Some(None);
+        let name = holders(&[
+            (100, seated(Some(OWNER), true)),
+            (200, HolderStep::Retired),
+            (300, seated(None, true)),
+        ]);
+        for (at_ms, expected) in [
+            (99, None),
+            (100, private),
+            (150, private),
+            (200, private),
+            (250, private),
+            (300, private),
+            (301, shared),
+        ] {
+            assert_eq!(held_by(&name, at_ms), expected, "at {at_ms}");
+        }
+        assert_eq!(name.ended(0), Some(200), "the private member ended");
+        assert_eq!(name.ended(2), None, "the later member lives");
+
+        // A private member whose end the journal does not hold: its time
+        // lasts until the next seating.
+        let no_end = holders(&[(100, seated(Some(OWNER), true)), (300, seated(None, true))]);
+        assert_eq!(held_by(&no_end, 299), private);
+        assert_eq!(held_by(&no_end, 301), shared);
+        assert_eq!(
+            held_by(&holders(&[(100, seated(Some(OWNER), true))]), u64::MAX),
+            private
+        );
+
+        // A shared member first: a moment at a later private seating is the
+        // private member's.
+        let shared_first = holders(&[(100, seated(None, true)), (300, seated(Some(OWNER), true))]);
+        assert_eq!(held_by(&shared_first, 299), shared);
+        assert_eq!(held_by(&shared_first, 300), private);
+    }
+
+    /// The member that held a name at a moment holds it still while no
+    /// member under the name ended since and the newest seating is private
+    /// to the same person, or like it to no one: a respawn and a rebuild
+    /// seat the same member again, and the member of a long-term agent does
+    /// not end with a retirement.
+    #[test]
+    fn a_name_is_held_still_until_its_member_ends_or_another_audience_takes_it() {
+        let ended_then_shared = holders(&[
+            (100, seated(Some(OWNER), true)),
+            (200, HolderStep::Retired),
+            (300, seated(None, true)),
+        ]);
+        assert!(!ended_then_shared.held_since(150), "it ended");
+        assert!(ended_then_shared.held_since(301), "the later member");
+        assert!(
+            !holders(&[(100, seated(Some(OWNER), true)), (200, HolderStep::Retired)])
+                .held_since(150),
+            "it ended and nobody holds the name"
+        );
+        assert!(
+            holders(&[
+                (100, seated(Some(OWNER), true)),
+                (150, seated(Some(OWNER), true)),
+            ])
+            .held_since(120),
+            "a respawn seats the same member again"
+        );
+        assert!(
+            holders(&[
+                (100, seated(None, false)),
+                (200, HolderStep::Retired),
+                (300, seated(None, false)),
+            ])
+            .held_since(150),
+            "a long-term agent's member is retired and seated again"
+        );
+        assert!(
+            !holders(&[
+                (100, seated(Some(OWNER), false)),
+                (300, seated(None, false))
+            ])
+            .held_since(150),
+            "a later seating private to no one"
+        );
+        assert!(
+            !holders(&[(300, seated(None, true))]).held_since(150),
+            "no member was seated then"
+        );
+    }
+
+    /// A row of the journal is noted once, whether the seed's read or the
+    /// event pump shows it first, and the steps keep the journal's order,
+    /// also where the clock that stamped the rows stepped back: a row is
+    /// never read as earlier than the row before it.
+    #[test]
+    fn a_journal_row_is_noted_once_in_the_journals_order() {
+        let owners = PrivateOwners::default();
+        let retired = |cursor: u64, at_ms: u64, step: HolderStep| MemberJournalStep {
+            mob_id: "mob".to_string(),
+            member: "side".to_string(),
+            cursor,
+            at_ms,
+            step,
+        };
+        let rows = [
+            MemberJournalStep::seated("mob", "side", &private_labels(), true, 7, 100),
+            retired(9, 200, HolderStep::Retired),
+            // A later seating, private to no one, stamped by a clock that
+            // stepped back.
+            MemberJournalStep::seated("mob", "side", &BTreeMap::new(), true, 12, 50),
+        ];
+        // The pump shows the end first, then the seed reads every row.
+        owners.note_journal_step(&rows[1]);
+        for row in &rows {
+            owners.note_journal_step(row);
+        }
+        assert_eq!(owners.private_holder_ended("mob", "side", 150), Some(200));
+        assert_eq!(owners.still_held_by("mob", "side", 150), Some(false));
+        assert_eq!(owners.still_held_by("mob", "other", 150), None);
+        assert_eq!(owners.private_holder_ended("other-mob", "side", 150), None);
+        assert!(owners.knows_an_ended_private_member());
+        let steps = owners
+            .inner
+            .holders
+            .read()
+            .unwrap()
+            .get(&("mob".to_string(), "side".to_string()))
+            .cloned()
+            .expect("the name's steps");
+        assert_eq!(
+            steps
+                .0
+                .iter()
+                .map(|noted| (noted.cursor, noted.at_ms))
+                .collect::<Vec<_>>(),
+            vec![(7, 100), (9, 200), (12, 202)],
+            "{steps:?}"
+        );
+        assert_eq!(held_by(&steps, 60), None, "before the first seating");
+        assert_eq!(held_by(&steps, 200), Some(Some(OWNER)));
+        assert_eq!(held_by(&steps, 201), Some(Some(OWNER)), "after its end");
+        assert_eq!(
+            held_by(&steps, 202),
+            Some(Some(OWNER)),
+            "the moment of the next seating is still the private member's"
+        );
+        assert_eq!(held_by(&steps, 203), Some(None), "the later member");
+    }
+
+    /// A row's time is its place among ALL the member rows of its mob's
+    /// journal, whatever name each is of and whatever order they are shown
+    /// in: later than the row before it, also where the clock that stamped
+    /// the rows stepped back. The newest such time is the floor of the
+    /// times entries are stamped with, so an entry written once a seating
+    /// was shown is not earlier than it, and one written before the next
+    /// seating is shown is earlier than that seating.
+    #[test]
+    fn a_journal_rows_time_is_later_than_the_row_before_it_in_its_mobs_journal() {
+        let row = |member: &str, owner: bool, cursor: u64, recorded_ms: u64| {
+            let labels = if owner {
+                private_labels()
+            } else {
+                BTreeMap::new()
+            };
+            MemberJournalStep::seated("mob", member, &labels, true, cursor, recorded_ms)
+        };
+        let end = |member: &str, cursor: u64, recorded_ms: u64| MemberJournalStep {
+            mob_id: "mob".to_string(),
+            member: member.to_string(),
+            cursor,
+            at_ms: recorded_ms,
+            step: HolderStep::Retired,
+        };
+        // The journal: the side chat is seated; another member's row is
+        // recorded much later; then the clock steps back, the side chat
+        // ends and a shared member is seated under its name.
+        let journal = [
+            row("side", true, 1, 100),
+            row("other", false, 2, 5_000),
+            end("side", 3, 40),
+            row("side", false, 4, 45),
+        ];
+        let times_of = |owners: &PrivateOwners| {
+            owners
+                .inner
+                .holders
+                .read()
+                .unwrap()
+                .get(&("mob".to_string(), "side".to_string()))
+                .map(|steps| {
+                    steps
+                        .0
+                        .iter()
+                        .map(|noted| (noted.cursor, noted.at_ms))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        };
+        let in_order = PrivateOwners::default();
+        // The private seating is shown; then the wall clock steps back
+        // behind it: an entry written now is not stamped before it.
+        in_order.note_journal_step(&journal[0]);
+        assert!(
+            crate::runtime::entry_time_ms(30) >= 100,
+            "a clock set back after a private seating does not move a new entry before it"
+        );
+        for row in &journal[1..] {
+            in_order.note_journal_step(row);
+        }
+        assert_eq!(
+            times_of(&in_order),
+            vec![(1, 100), (3, 5_002), (4, 5_004)],
+            "the rows after the step back follow the other member's row"
+        );
+        // An entry stamped at the floor while the side chat held the name
+        // (the floor was the other member's row then) is the side chat's.
+        assert_eq!(
+            in_order.private_holder_ended("mob", "side", 5_001),
+            Some(5_002)
+        );
+        assert!(
+            crate::runtime::entry_time_floor_ms() >= 5_005
+                && crate::runtime::entry_time_ms(46) >= 5_005,
+            "an entry written once the runtime was shown a seating is never earlier than it"
+        );
+        // The same journal read again gives the same times.
+        let again = PrivateOwners::default();
+        for row in &journal {
+            again.note_journal_step(row);
+        }
+        assert_eq!(times_of(&again), times_of(&in_order));
+        assert_eq!(again.name_seatings(), in_order.name_seatings());
+        // Shown in another order (the pump's rows before the seed's), the
+        // times are the same.
+        let out_of_order = PrivateOwners::default();
+        for row in [&journal[3], &journal[2], &journal[0], &journal[1]] {
+            out_of_order.note_journal_step(row);
+        }
+        assert_eq!(times_of(&out_of_order), times_of(&in_order));
+        assert_eq!(
+            out_of_order.name_seatings().get("side"),
+            in_order.name_seatings().get("side")
+        );
+        // Another mob's journal is its own.
+        let mut elsewhere = row("side", false, 1, 7);
+        elsewhere.mob_id = "other-mob".to_string();
+        in_order.note_journal_step(&elsewhere);
+        assert_eq!(in_order.still_held_by("other-mob", "side", 7), Some(true));
+    }
+
+    /// The moment a member private to one person is seated under a name a
+    /// member private to another person held before is held by neither:
+    /// what was recorded at that moment is not told to be the later
+    /// member's. The moment after is the later member's.
+    #[test]
+    fn the_moment_one_persons_member_follows_anothers_is_held_by_neither() {
+        let handed_over = holders(&[
+            (100, seated(Some(OWNER), true)),
+            (200, HolderStep::Retired),
+            (300, seated(Some("console-caller:v1:bb"), true)),
+        ]);
+        assert!(!handed_over.held_since(300));
+        assert!(handed_over.held_since(301));
+    }
+
+    /// A journal row's time leaves room after the row before it, and the
+    /// floor of the entries' times is past the newest row: an entry written
+    /// once a seating was shown is later than that seating and earlier than
+    /// the next row, also while the clock that stamps both is behind the
+    /// journal.
+    #[test]
+    fn an_entry_written_once_a_seating_was_shown_is_later_than_it_and_earlier_than_the_next_row() {
+        let mut times = JournalTimes::default();
+        let (seating, _) = times.note(1, 9_000);
+        let (next, _) = times.note(2, 8_001);
+        assert!(
+            next > seating + 1,
+            "the next row's time leaves a moment between: {seating} then {next}"
+        );
+
+        let owners = PrivateOwners::default();
+        owners.note_journal_step(&MemberJournalStep::seated(
+            "mob",
+            "side",
+            &private_labels(),
+            true,
+            1,
+            9_000,
+        ));
+        assert!(
+            crate::runtime::entry_time_ms(8_000) > 9_000,
+            "an entry written by a clock behind the journal is later than the seating shown"
+        );
+    }
+
+    /// A long-term agent private to a person ends with its identity entry,
+    /// not with a retirement that seats it again; an archive is no end.
+    #[test]
+    fn a_long_term_agent_ends_with_its_identity_entry() {
+        let agent = holders(&[
+            (100, seated(Some(OWNER), false)),
+            (200, HolderStep::Retired),
+            (300, seated(Some(OWNER), false)),
+            (400, HolderStep::Removed),
+        ]);
+        assert_eq!(agent.ended(0), None, "a rebuild seats it again");
+        assert_eq!(agent.ended(2), Some(400), "its identity entry ended");
+        assert!(!agent.held_since(150));
+        assert_eq!(agent.seating_before(4), Some(2));
+    }
+
     /// The log lines a row's own thread writes.
     #[derive(Clone, Default)]
     struct CapturedLog(Arc<std::sync::Mutex<Vec<u8>>>);
@@ -1981,6 +3618,65 @@ mod tests {
         assert_eq!(
             reads, HISTORY_READ_ATTEMPTS,
             "a store error that can pass is read again"
+        );
+    }
+
+    /// The memory store marks as private the plain names of the private
+    /// members whose end it recorded, and the key of every identity scope it
+    /// keeps apart from the members of a name. Only the plain names are
+    /// members to this record: a key is a scope, not a member's name.
+    #[tokio::test]
+    async fn the_private_rows_of_the_memory_store_name_members_by_plain_names_only() {
+        use crate::identity_first::agent_memory::AgentMemoryProvider as _;
+        use crate::memory::capabilities::StewardStore as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(
+            crate::memory::sqlite_store::SqliteAgentMemoryStore::open(dir.path()).unwrap(),
+        );
+        store
+            .record_private_retirement("default", "ledger-side", None, "retired", 5)
+            .await
+            .unwrap();
+        store
+            .remember_authored(
+                &crate::memory::records::MemoryScope::Identity {
+                    realm: "default".to_string(),
+                    identity: "private/console-caller:v1:aa/ledger-side".to_string(),
+                },
+                crate::memory::records::NewMemoryRecord {
+                    kind: crate::memory::records::MemoryKind::Fact,
+                    title: "Where the heron is".to_string(),
+                    description: String::new(),
+                    body: "The heron is at the north pond.".to_string(),
+                    tags: Vec::new(),
+                    evidence: Vec::new(),
+                    verification: None,
+                },
+                crate::memory::records::MemoryAuthor::Application,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store.private_retired_identities("default").await.unwrap(),
+            BTreeSet::from([
+                "ledger-side".to_string(),
+                "private/console-caller:v1:aa/ledger-side".to_string(),
+            ]),
+            "the store marks the name and the key"
+        );
+
+        let owners = PrivateOwners::default();
+        owners.bind_private_retirements(store, "default".to_string());
+        owners
+            .first_attempts_settled(std::time::Duration::from_secs(10))
+            .await;
+        assert_eq!(
+            owners.memory_members(),
+            BTreeMap::from([(
+                "ledger-side".to_string(),
+                Some(crate::access::UNKNOWN_PRIVATE_OWNER.to_string()),
+            )])
         );
     }
 }

@@ -144,6 +144,14 @@ pub(crate) struct MemberBuildWiring {
     /// (`MobBootstrapSpec::with_agent_customizer`), which the identity
     /// bootstrap installs.
     declared_customizer: Option<Arc<dyn AgentCustomizer>>,
+    /// The slot of the mob this wiring was installed on that binds a
+    /// private member's `memory` tool: it reads Core's identity entries
+    /// through the identity runtime's bridge once the wiring is bound to one
+    /// ([`Self::watch_member_memory_entries`]).
+    member_memory: std::sync::OnceLock<crate::memory::side_chat_memory::SideChatMemorySlot>,
+    /// Whether the composition knew at construction that an identity
+    /// runtime prepares its mob's member builds.
+    identity_layer: bool,
 }
 
 impl MemberBuildWiring {
@@ -159,6 +167,8 @@ impl MemberBuildWiring {
             preparer: prepares.then(|| IdentityBuildPreparer::new(registry.is_some())),
             registry,
             declared_customizer: None,
+            member_memory: std::sync::OnceLock::new(),
+            identity_layer: prepares,
         }
     }
 
@@ -191,6 +201,8 @@ impl MemberBuildWiring {
             spawn_customizer: Some(Arc::new(CustomizerToolsSpawnCustomizer::deferred())),
             preparer: Some(IdentityBuildPreparer::deferred()),
             declared_customizer: None,
+            member_memory: std::sync::OnceLock::new(),
+            identity_layer: false,
         }
     }
 
@@ -218,6 +230,17 @@ impl MemberBuildWiring {
         &self,
         spec: crate::mob_handle_runtime::MobBootstrapSpec,
     ) -> crate::mob_handle_runtime::MobBootstrapSpec {
+        // The mob's memory slot reads Core's identity entries once this
+        // wiring is bound to an identity runtime. A composition that knows
+        // at construction that an identity runtime prepares its member
+        // builds has an identity layer from the start: its slot waits for
+        // that reader before it decides where a private member's records
+        // are kept.
+        let slot = spec.side_chat_memory_slot();
+        if self.identity_layer {
+            slot.await_identity_entries();
+        }
+        let _ = self.member_memory.set(slot);
         let spec = match self.spawn_customizer.clone() {
             Some(customizer) => spec.with_spawn_member_customizer(customizer),
             None => spec,
@@ -249,9 +272,19 @@ impl MemberBuildWiring {
         runtime: &Arc<IdentityRuntime>,
         session_service: Option<Arc<dyn meerkat_mob::MobSessionService>>,
     ) {
+        self.watch_member_memory_entries(runtime);
         self.watch_identity_entries(runtime);
         if let Some(preparer) = self.preparer.as_ref() {
             preparer.bind(runtime, session_service).await;
+        }
+    }
+
+    /// From now on the mob's memory slot reads Core's identity entries
+    /// through `runtime`'s session bridge
+    /// ([`crate::memory::side_chat_memory::SideChatMemorySlot::watch_identity_entries`]).
+    fn watch_member_memory_entries(&self, runtime: &IdentityRuntime) {
+        if let (Some(slot), Some(bridge)) = (self.member_memory.get(), runtime.bridge()) {
+            slot.watch_identity_entries(bridge);
         }
     }
 
@@ -291,6 +324,7 @@ impl MemberBuildWiring {
         session_service: Option<Arc<dyn meerkat_mob::MobSessionService>>,
     ) -> Result<(), String> {
         let runtime = &context.runtime;
+        self.watch_member_memory_entries(runtime);
         let installed = runtime.installed_agent_customizer().await;
         let customizer = match self.declared_customizer.as_ref() {
             Some(declared) => {

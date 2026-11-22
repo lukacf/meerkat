@@ -2199,7 +2199,11 @@ impl RealmConnectionSet {
     /// binding's own auth profile
     /// ([`ProviderBindingError::CredentialCommandProfileOverride`]): a
     /// command's token goes only where the bindings that name it send it,
-    /// which the host administers in its config document.
+    /// which the host administers in its config document. The same holds
+    /// for a profile that holds an inline secret
+    /// ([`ProviderBindingError::InlineSecretProfileOverride`]): a secret
+    /// stored in the document goes only where the bindings that name its
+    /// profile send it.
     pub fn lookup_auth_binding(
         &self,
         auth_binding: &AuthBindingRef,
@@ -2223,13 +2227,22 @@ impl RealmConnectionSet {
             .auth_profiles
             .get(auth_profile_id)
             .ok_or_else(|| ProviderBindingError::UnknownAuth(auth_profile_id.to_string()))?;
-        if auth_profile_id != binding.auth_profile
-            && matches!(auth.source, CredentialSourceSpec::Command { .. })
-        {
-            return Err(ProviderBindingError::CredentialCommandProfileOverride {
-                binding: binding.id.clone().into_boxed_str(),
-                profile: auth_profile_id.into(),
-            });
+        if auth_profile_id != binding.auth_profile {
+            match auth.source {
+                CredentialSourceSpec::Command { .. } => {
+                    return Err(ProviderBindingError::CredentialCommandProfileOverride {
+                        binding: binding.id.clone().into_boxed_str(),
+                        profile: auth_profile_id.into(),
+                    });
+                }
+                CredentialSourceSpec::InlineSecret { .. } => {
+                    return Err(ProviderBindingError::InlineSecretProfileOverride {
+                        binding: binding.id.clone().into_boxed_str(),
+                        profile: auth_profile_id.into(),
+                    });
+                }
+                _ => {}
+            }
         }
         if let Some(account) = binding.credential_account.as_ref() {
             let configured_auth = self
@@ -2308,6 +2321,17 @@ pub enum ProviderBindingError {
         "binding '{binding}' cannot take auth profile '{profile}' as an override: its source is a credential command, which only a binding that names it as its own auth profile uses"
     )]
     CredentialCommandProfileOverride {
+        binding: Box<str>,
+        profile: Box<str>,
+    },
+    /// A request's auth binding overrides the binding's auth profile with a
+    /// profile that holds an inline secret, other than the binding's own.
+    /// A secret stored in the config document goes only where the bindings
+    /// that name its profile send it.
+    #[error(
+        "binding '{binding}' cannot take auth profile '{profile}' as an override: it holds an inline secret, which only a binding that names it as its own auth profile uses; give the secret a binding of its own on the backend it is for"
+    )]
+    InlineSecretProfileOverride {
         binding: Box<str>,
         profile: Box<str>,
     },
@@ -4637,6 +4661,138 @@ auth_profile = "plain"
                 ..
             })
         ));
+    }
+
+    /// A request's auth profile override cannot name a profile whose source
+    /// is an inline secret unless it is the binding's own: the secret would
+    /// otherwise go to the backend of whichever binding the request names.
+    /// The binding's own inline profile, and an override among profiles that
+    /// hold no secret in the document, still resolve; resolution reports the
+    /// refusal as the binding's, and its text holds no value.
+    #[test]
+    fn an_override_cannot_take_another_bindings_inline_secret() {
+        let stored = ["synthetic", "stored", "value"].join(" ");
+        let config: Config = toml::from_str(&format!(
+            r#"
+[realm.global.backend.vendor]
+provider = "openai"
+backend_kind = "openai_api"
+
+[realm.global.backend.elsewhere]
+provider = "openai"
+backend_kind = "openai_api"
+base_url = "http://other.synthetic.invalid/v1"
+
+[realm.global.auth.inline]
+provider = "openai"
+auth_method = "api_key"
+source = {{ kind = "inline_secret", secret = "{stored}" }}
+
+[realm.global.auth.plain]
+provider = "openai"
+auth_method = "api_key"
+source = {{ kind = "env", env = "OPENAI_API_KEY" }}
+
+[realm.global.auth.spare]
+provider = "openai"
+auth_method = "api_key"
+source = {{ kind = "env", env = "SYNTHETIC_NAME" }}
+
+[realm.global.binding.main]
+backend_profile = "vendor"
+auth_profile = "inline"
+
+[realm.global.binding.free]
+backend_profile = "elsewhere"
+auth_profile = "plain"
+"#
+        ))
+        .unwrap();
+        let realm = RealmConnectionSet::from_config("global", &config.realm["global"]).unwrap();
+        let reference = |binding: &str, profile: Option<&str>| AuthBindingRef {
+            realm: RealmId::global(),
+            binding: BindingId::parse(binding).unwrap(),
+            profile: profile.map(|profile| ProfileId::parse(profile).unwrap()),
+            origin: BindingOrigin::Configured,
+        };
+
+        let refused = realm
+            .lookup_auth_binding(&reference("free", Some("inline")))
+            .map(|(_, _, auth)| auth.id.clone())
+            .expect_err("an override to another binding's inline secret is refused");
+        let text = refused.to_string();
+        assert!(
+            text.contains("binding 'free' cannot take auth profile 'inline' as an override")
+                && text.contains("inline secret"),
+            "{text}"
+        );
+        assert!(!text.contains(&stored), "the refusal holds a stored value");
+        for (binding, profile, resolved) in [
+            ("main", Some("inline"), "inline"),
+            ("main", None, "inline"),
+            ("main", Some("plain"), "plain"),
+            ("free", Some("spare"), "spare"),
+            ("free", None, "plain"),
+        ] {
+            assert_eq!(
+                realm
+                    .lookup_auth_binding(&reference(binding, profile))
+                    .map(|(_, _, auth)| auth.id.clone()),
+                Ok(resolved.to_owned()),
+                "{binding} with {profile:?}"
+            );
+        }
+        assert!(matches!(
+            resolve_explicit_auth_binding_target(&config, &reference("free", Some("inline"))),
+            Err(ConnectionTargetError::BindingInvalid { .. })
+        ));
+    }
+
+    /// A request still chooses among several inline keys for one backend:
+    /// each key is an auth profile with a binding of its own on that
+    /// backend, and the request names the binding. No override is needed.
+    #[test]
+    fn a_request_chooses_among_inline_keys_by_naming_each_keys_binding() {
+        let config: Config = toml::from_str(
+            r#"
+[realm.global.backend.vendor]
+provider = "openai"
+backend_kind = "openai_api"
+
+[realm.global.auth.first]
+provider = "openai"
+auth_method = "api_key"
+source = { kind = "inline_secret", secret = "synthetic stored value 01" }
+
+[realm.global.auth.second]
+provider = "openai"
+auth_method = "api_key"
+source = { kind = "inline_secret", secret = "synthetic stored value 02" }
+
+[realm.global.binding.first]
+backend_profile = "vendor"
+auth_profile = "first"
+
+[realm.global.binding.second]
+backend_profile = "vendor"
+auth_profile = "second"
+"#,
+        )
+        .unwrap();
+        for key in ["first", "second"] {
+            let target = resolve_explicit_auth_binding_target(
+                &config,
+                &AuthBindingRef {
+                    realm: RealmId::global(),
+                    binding: BindingId::parse(key).unwrap(),
+                    profile: None,
+                    origin: BindingOrigin::Configured,
+                },
+            )
+            .expect("each key's binding resolves");
+            assert_eq!(target.auth_profile.id, key);
+            assert_eq!(target.backend.id, "vendor");
+        }
     }
 
     #[test]

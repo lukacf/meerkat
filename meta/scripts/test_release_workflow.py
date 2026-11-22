@@ -2272,6 +2272,81 @@ class MetaReleaseJobGraphTests(unittest.TestCase):
                 self.assertNotIn("persist-credentials", checkout)
 
 
+class MetaRegistryReadbackWaitTests(unittest.TestCase):
+    """meta-release.yml: a registry accepts an upload before it serves the
+    version. The job that published the SDK packages ends only when PyPI and
+    npm serve them, and the crate job's readback of every registry keeps the
+    verifier's own wait."""
+
+    WAIT = "Wait until PyPI and npm serve the exact SDK packages"
+    READBACK = "Verify exact packages are public on every registry"
+    TOOLS = "Checkout immutable workflow tools"
+    # The workflow's own copy: the workflow file is always main's, the
+    # checked-out source is the released commit, which can be older than
+    # the verifier's flags.
+    VERIFIER = ('python3 .release-tools/meta/scripts/verify-published-registries.py '
+                '--version "${RELEASE_VERSION}"')
+    SOURCE_COPY = " meta/scripts/verify-published-registries.py"
+
+    def assert_runs_the_workflows_own_verifier(self, job_name: str, step: str):
+        job = job_block(job_name, META_RELEASE_WORKFLOW)
+        steps = [line[len("      - name: "):] for line in job.splitlines()
+                 if line.startswith("      - name: ")]
+        # The tools arrive after every publish step, right before the read.
+        self.assertEqual(steps[-2:], [self.TOOLS, step])
+        tools = step_block(self.TOOLS, job_name, META_RELEASE_WORKFLOW)
+        self.assertEqual(scalar(tools, "ref", "          "), "${{ github.workflow_sha }}")
+        self.assertEqual(scalar(tools, "path", "          "), ".release-tools")
+        self.assertEqual(scalar(tools, "if", "        "),
+                         "needs.resolve_release.outputs.dry_run == 'false'")
+        self.assertNotIn(self.SOURCE_COPY, job)
+
+    def test_the_sdk_job_ends_only_when_pypi_and_npm_serve_the_packages(self):
+        job = job_block("publish_sdk_packages", META_RELEASE_WORKFLOW)
+        steps = [line for line in job.splitlines() if line.startswith("      - name: ")]
+        self.assertEqual(steps[-4:], [
+            "      - name: Publish Python SDK",
+            "      - name: Publish TypeScript SDK",
+            f"      - name: {self.TOOLS}",
+            f"      - name: {self.WAIT}",
+        ])
+        self.assert_runs_the_workflows_own_verifier("publish_sdk_packages", self.WAIT)
+        block = step_block(self.WAIT, "publish_sdk_packages", META_RELEASE_WORKFLOW)
+        condition = scalar(block, "if", "        ")
+        for dry in ("false", "true", ""):
+            with self.subTest(dry=dry):
+                self.assertEqual(
+                    evaluate_condition(condition, needs_resolve_release_outputs_dry_run=dry),
+                    dry == "false",
+                )
+        self.assertIn("          RELEASE_VERSION: ${{ needs.resolve_release.outputs.version }}", block)
+        script = step_script(self.WAIT, "publish_sdk_packages", META_RELEASE_WORKFLOW)
+        self.assertEqual(
+            [line.strip() for line in script.splitlines() if line.strip()],
+            ["set -euo pipefail", f"{self.VERIFIER} \\", "--only-registry PyPI --only-registry npm"],
+        )
+        # A read of public registries: no credential reaches it, and its
+        # failure fails the job.
+        self.assertNotIn("secrets.", block)
+        self.assertNotIn("continue-on-error:", job)
+
+    def test_the_crate_jobs_readback_keeps_every_registry_and_the_verifiers_own_wait(self):
+        script = step_script(self.READBACK, "publish_registries", META_RELEASE_WORKFLOW)
+        self.assertIn(self.VERIFIER, script)
+        self.assert_runs_the_workflows_own_verifier("publish_registries", self.READBACK)
+        for flag in ("--only-registry", "--only-crates", "--attempts", "--deadline-seconds",
+                     "--delay-seconds"):
+            with self.subTest(flag=flag):
+                self.assertNotIn(flag, script)
+        # The crate job runs after a failed SDK job too, so its readback is
+        # what fails the run when a registry never serves.
+        self.assertIn(
+            "(needs.publish_sdk_packages.result == 'success' ||\n"
+            "       needs.publish_sdk_packages.result == 'failure')",
+            job_block("publish_registries", META_RELEASE_WORKFLOW),
+        )
+
+
 # Runs a github-script body as actions/github-script does (an AsyncFunction of
 # require, github, context and core) against a scenario: the ci.yml runs the
 # runs API lists at each poll (the last list stays), Meta CI's runs per event

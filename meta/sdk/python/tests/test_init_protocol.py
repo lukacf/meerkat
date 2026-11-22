@@ -128,6 +128,23 @@ async def _startup_error_behind_failed_stop(
     return failure.startup_error
 
 
+async def _refusal_of_a_failed_settlement(runtime: MetaRuntime, exit_code: int) -> RpcError:
+    """A gateway whose init settled ``failed`` exits without waiting for a
+    shutdown request, so the runtime's stop makes none: it ends the gateway's
+    input and reaps it. The refusal is raised exactly, with no cleanup error
+    around it, and the stop's record says no shutdown was asked. Returns the
+    refusal."""
+    with pytest.raises(RpcError) as raised:
+        await runtime.connect()
+    error = raised.value
+    assert error.__cause__ is None
+    assert runtime.last_gateway_termination == TransportTermination(
+        "exited", exit_code, None, "none", "not_negotiated"
+    )
+    assert not runtime.is_running
+    return error
+
+
 def _runtime(script: Path, *, init_deadline: float | None = None) -> MetaRuntime:
     builder = Meta.builder().gateway(str(script))
     if init_deadline is not None:
@@ -184,7 +201,7 @@ async def test_failed_settlement_raises_typed_error_with_durable_effects(
                 durable_effects="{durable_effects}")
     """)
     runtime = _runtime(script)
-    error = await _startup_error_behind_failed_stop(runtime, 0)
+    error = await _refusal_of_a_failed_settlement(runtime, 0)
     assert isinstance(error, error_type)
     assert not isinstance(error, InitOutcomeUnknownError)
     assert error.code == code
@@ -203,12 +220,36 @@ async def test_failed_settlement_for_a_composition_refusal_carries_its_kind_and_
                       "fields": ["profiles.lead.tools.deny"]})
     """)
     runtime = _runtime(script)
-    error = await _startup_error_behind_failed_stop(runtime, 0)
+    error = await _refusal_of_a_failed_settlement(runtime, 0)
     assert isinstance(error, CompositionProvenanceError)
     assert error.code == COMPOSITION_PROVENANCE_CODE == -32019
     assert error.kind == "candidate_divergent"
     assert error.fields == ["profiles.lead.tools.deny"]
     assert error.data["durable_effects"] == "none"
+
+
+@pytest.mark.asyncio
+async def test_failed_settlement_asks_no_shutdown_of_a_gateway_still_running(tmp_path):
+    """The refusing gateway is still running when the runtime's stop begins,
+    and would exit without an answer to a shutdown request. The stop makes
+    none: it ends the gateway's input, and the refusal is raised exactly."""
+    script = _gateway(tmp_path, "refused_still_running", """
+        accepted()
+        progress("storage")
+        settled(outcome="failed", code=-32019, message="refused for the test",
+                durable_effects="possible",
+                data={"kind": "divergent", "fields": ["profiles.lead"]})
+        for raw in sys.stdin:  # exits, unanswered, on anything it is sent
+            log({"after_init": json.loads(raw)})
+            break
+        sys.exit(1)
+    """)
+    runtime = _runtime(script)
+    error = await _refusal_of_a_failed_settlement(runtime, 1)
+    assert type(error) is CompositionProvenanceError
+    assert error.kind == "divergent"
+    assert error.data["durable_effects"] == "possible"
+    assert [entry for entry in _records(script) if "after_init" in entry] == []
 
 
 class TestCompositionProvenanceError:
@@ -666,3 +707,46 @@ async def test_a_short_gateway_init_timeout_ends_init_and_still_cleans_up(tmp_pa
     assert ("meta/init", 0.5) in transport.timeouts
     # The existing failed-bootstrap cleanup still stopped the gateway.
     assert not transport.is_running()
+
+
+@pytest.mark.asyncio
+async def test_a_refused_start_says_which_convention_files_the_builder_applied(
+    tmp_path, monkeypatch, caplog
+):
+    import logging
+
+    # A program that named no access file is refused for the one the builder
+    # found in the working directory: the SDK says once that it applied it.
+    script = _gateway(tmp_path, "refuses_the_access_file", """
+        emit({"jsonrpc": "2.0", "id": init["id"], "error": {
+            "code": -32602,
+            "message": "runtime_options.access_config_path is invalid: refused"}})
+    """)
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "access.toml").write_text("enabled = true\n")
+    monkeypatch.chdir(tmp_path)
+
+    def said() -> list[str]:
+        return [
+            record.getMessage()
+            for record in caplog.records
+            if "by convention" in record.getMessage()
+        ]
+
+    with caplog.at_level(logging.WARNING, logger="meerkat_meta"):
+        with pytest.raises(RpcError):
+            await Meta.builder().gateway(str(script)).build()
+    (line,) = said()
+    assert "config/access.toml" in line
+
+    # A file the program named is no convention file: nothing is said.
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="meerkat_meta"):
+        with pytest.raises(RpcError):
+            await (
+                Meta.builder()
+                .gateway(str(script))
+                .access_control("config/access.toml")
+                .build()
+            )
+    assert said() == []

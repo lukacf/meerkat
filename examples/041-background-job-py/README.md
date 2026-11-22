@@ -4,7 +4,7 @@ One agent submits `expr 17 + 25` with `background: true`. The returned job ID is
 
 ## Run on Linux
 
-Use Python 3.10+ with `meerkat-sdk==0.9.16`, the matching checksum-verified `rkat-rpc`, and `expr` on the system path. Start a trusted **credential-free, loopback** OpenAI-compatible model server with tool calling; no cloud provider key is needed. Copy `config.toml` and set `base_url` and `remote_model` to your server and its loaded model. Leave the local alias `job-demo`, no-auth binding, and single-command shell allowlist intact. The sample port and remote model name are placeholders, not a bundled model.
+Use Python 3.10+ with matching releases of `meerkat-sdk` and checksum-verified `rkat-rpc`, and `expr` on the system path. Start a trusted **credential-free, loopback** OpenAI-compatible model server with tool calling; no cloud provider key is needed. Copy `config.toml` and set `base_url` and `remote_model` to your server and its loaded model. Leave the local alias `job-demo`, no-auth binding, and single-command shell allowlist intact. The sample port and remote model name are placeholders, not a bundled model.
 
 From this directory, set `PY` to your virtual environment's absolute Python executable, `RPC` to the absolute `rkat-rpc`, and `CONFIG` to the absolute path to your copy of `config.toml`. Run under an unprivileged account in a disposable workspace without credentials. A shell allowlist is not an OS sandbox.
 

@@ -1113,7 +1113,7 @@ export function AccessPanel({
           testId="access-rule-agents"
           value={ruleDraft.agents}
           onChange={(value) => setRuleDraft({ ...ruleDraft, agents: value })}
-          placeholder={agents.slice(0, 2).map((agent) => agent.identity).join(", ") || "identity:ops-lead"}
+          placeholder={agents.slice(0, 2).map((agent) => agent.identity).join(", ") || "ops-lead"}
         />
         <TextField
           label="Roles"

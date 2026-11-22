@@ -492,6 +492,47 @@ describe("createQuestionSetResource", () => {
     resource.dispose();
   });
 
+  it("words the line of a reply refused as not_open by the set's own deadline: past it, the set timed out", async () => {
+    // A reply after the deadline is refused `not_open` (the gateway's read
+    // finds the set ended), not `expired`. The console holds the set's
+    // deadline, and past it the true line is the one of a set that timed out.
+    const c = clock(); let reads = 0;
+    const resource = createQuestionSetResource({
+      scopeKey: "a", environment: c.environment,
+      load: async () => ({ question_sets: reads++ === 0 ? [wire(PENDING_ID, { deadline_at_ms: 2_000 })] : [] }),
+      decide: async () => { throw refusedError("not_open"); },
+    });
+    await tick();
+    const slot = questionSetEntries(resource.getSnapshot())[0].slot;
+    // The person replies a second after the deadline, before the next poll.
+    c.advance(3_000);
+    await resource.answer(PENDING_ID, { q1: { kind: "choice", choiceId: "eu" } });
+    const snapshot = resource.getSnapshot();
+    expect(snapshot.sets).toEqual([]);
+    expect(snapshot.decisions).toEqual({});
+    expect(snapshot.notices).toEqual([{ slot, kind: "expired", atMs: 3_000 }]);
+    expect(nothingKept(snapshot)).toBe(true);
+    resource.dispose();
+  });
+
+  it("keeps the line of a set that was closed before its deadline, and of a set that names no deadline", async () => {
+    for (const extra of [{ deadline_at_ms: 3_600_000 }, { deadline_at_ms: undefined }]) {
+      const c = clock(); let reads = 0;
+      const resource = createQuestionSetResource({
+        scopeKey: "a", environment: c.environment,
+        load: async () => ({ question_sets: reads++ === 0 ? [wire(PENDING_ID, extra)] : [] }),
+        // Someone else answered, dismissed or withdrew the set meanwhile.
+        decide: async () => { throw refusedError("not_open"); },
+      });
+      await tick();
+      const slot = questionSetEntries(resource.getSnapshot())[0].slot;
+      c.advance(3_000);
+      await resource.answer(PENDING_ID, { q1: { kind: "choice", choiceId: "eu" } });
+      expect(resource.getSnapshot().notices, JSON.stringify(extra)).toEqual([{ slot, kind: "not_open", atMs: 3_000 }]);
+      resource.dispose();
+    }
+  });
+
   it("reads a set that changed again and sends the next answer with the digest it then has", async () => {
     const c = clock(); const sent: Array<{ presented_digest: string }> = []; const changed = `sha256:${"e".repeat(64)}`;
     const resource = createQuestionSetResource({

@@ -152,6 +152,15 @@ pub(crate) fn private_owner(labels: &BTreeMap<String, String>) -> Option<&str> {
         .filter(|owner| !owner.is_empty())
 }
 
+/// Whether an agent whose labels are `labels` is private to a person other
+/// than the reader whose private-owner key is `reader`: the one comparison
+/// of the private-owner rule, for a caller's view and for a subscriber
+/// alike. An agent private to no one is private to no other person, and a
+/// reader with no key is no agent's person.
+pub(crate) fn private_to_another(labels: &BTreeMap<String, String>, reader: Option<&str>) -> bool {
+    private_owner(labels).is_some_and(|owner| reader != Some(owner))
+}
+
 /// The private owner of a member whose retirement the memory store recorded
 /// as private when no record names the person it was private to (it ended
 /// before this process read who its members belong to): a key no caller's

@@ -170,9 +170,32 @@ async fn gateway(mob: &str, access: AccessController) -> Result<Gateway, Failure
 
 /// [`gateway`] under `access`, or with the access rules off.
 async fn gateway_under(mob: &str, access: Option<AccessController>) -> Result<Gateway, Failure> {
+    let mut gw = gateway_over(tempfile::tempdir()?, mob, access).await?;
+    gw.alice_owner = console_rpc_as(&gw.app, Some(&gw.alice), "meta/console/whoami", json!({}))
+        .await["result"]["caller_scope"]
+        .as_str()
+        .ok_or("the first person's caller scope")?
+        .to_string();
+    // The registered agent's first turn: a side chat forks a member that
+    // has a session.
+    let (status, body) = gw.send(&gw.bob, SOURCE, &format!("{mob}-first"), "").await;
+    if !status.is_success() {
+        return Err(format!("the registered agent's first turn: {status} {body}").into());
+    }
+    Ok(gw)
+}
+
+/// The gateway composed over the state directory `state` under `access`,
+/// as a start of the gateway composes it: its first start, or a start
+/// after it was stopped. Nothing is asked of the console it composes, and
+/// the first person's private-owner key is left unread.
+async fn gateway_over(
+    state: tempfile::TempDir,
+    mob: &str,
+    access: Option<AccessController>,
+) -> Result<Gateway, Failure> {
     use crate::identity_first::{AgentAddressability, DurableAgentSpec, MutableRosterProvider};
 
-    let state = tempfile::tempdir()?;
     let model = Arc::new(RecordingModel::default());
     let definition = meerkat_mob::MobDefinition::from_toml(&format!(
         "[mob]\nid = '{mob}'\n[profiles.worker]\nmodel = 'gpt-5.5'\n\
@@ -225,31 +248,21 @@ async fn gateway_under(mob: &str, access: Option<AccessController>) -> Result<Ga
     optional.console.require_app_auth = false;
     let app = runtime.build_reference_app_router(decisions);
     let open = runtime.build_reference_app_router(optional);
-    let alice = bearer(alice_claims());
-    let alice_owner = console_rpc_as(&app, Some(&alice), "meta/console/whoami", json!({})).await
-        ["result"]["caller_scope"]
-        .as_str()
-        .ok_or("the first person's caller scope")?
-        .to_string();
     let gw = Gateway {
         _state: state,
         runtime,
         model,
         app,
         open,
-        alice,
+        alice: bearer(alice_claims()),
         bob: bearer(bob_claims()),
         carol: bearer(carol_claims()),
         root: bearer(root_claims()),
-        alice_owner,
+        // Read by `gateway_under`: this composition asks its console
+        // nothing.
+        alice_owner: String::new(),
         first_seat: Mutex::default(),
     };
-    // The registered agent's first turn: a side chat forks a member that
-    // has a session.
-    let (status, body) = gw.send(&gw.bob, SOURCE, &format!("{mob}-first"), "").await;
-    if !status.is_success() {
-        return Err(format!("the registered agent's first turn: {status} {body}").into());
-    }
     Ok(gw)
 }
 
@@ -1201,4 +1214,504 @@ fn a_session_whose_owner_cannot_be_read_is_not_seated() {
         stored_member_labels([named("one-person"), named("another-person")]),
         None
     );
+}
+
+/// A second shared worker of the rows on an ended worker's session.
+const TWIN: &str = "team-log";
+
+/// The access rules of the rows on an ended worker's session: everyone may
+/// do everything to every agent, the third person is denied `denied` on the
+/// workers, and the first person is denied `denied` on the member
+/// [`SHARED`] by its name.
+fn the_workers_denied_to_the_third_person(denied: &str) -> Result<AccessController, Failure> {
+    let rule = |id: &str, subject: &str| AccessRule {
+        id: id.to_string(),
+        subjects: vec![subject.to_string()],
+        actions: vec!["agent.*".to_string()],
+        ..AccessRule::default()
+    };
+    Ok(AccessController::new(crate::access::AccessControlConfig {
+        enabled: true,
+        admins: vec![ROOT.to_string()],
+        rules: vec![
+            AccessRule {
+                agents: vec!["*".to_string()],
+                ..rule("everyone-drives-every-agent", "*")
+            },
+            AccessRule {
+                effect: crate::access::AccessEffect::Deny,
+                actions: vec![denied.to_string()],
+                roles: vec!["worker".to_string()],
+                ..rule("the-third-person-is-denied-the-workers", CAROL)
+            },
+            AccessRule {
+                effect: crate::access::AccessEffect::Deny,
+                actions: vec![denied.to_string()],
+                agents: vec![SHARED.to_string()],
+                ..rule("the-first-person-is-denied-the-member-by-name", ALICE)
+            },
+        ],
+        ..crate::access::AccessControlConfig::default()
+    })?)
+}
+
+/// The shared worker `worker` seated on `gw` and run for one turn: the
+/// session it runs on.
+async fn a_shared_worker_after_one_turn(gw: &Gateway, worker: &str) -> Result<SessionId, Failure> {
+    let mob = gw.mob();
+    Box::pin(mob.spawn_spec(meerkat_mob::SpawnMemberSpec::new(
+        "worker",
+        AgentIdentity::from(worker),
+    )))
+    .await?;
+    let (status, body) = gw
+        .send(&gw.bob, worker, &format!("{worker}-first"), MARKER)
+        .await;
+    if !status.is_success() {
+        return Err(format!("the turn of {worker}: {status} {body}").into());
+    }
+    Ok(mob
+        .get_member(&AgentIdentity::from(worker))
+        .await?
+        .and_then(|entry| entry.bridge_session_id().cloned())
+        .ok_or("the shared worker has a session")?)
+}
+
+/// `gw` stopped and composed again over its state directory under `access`,
+/// as a restart of the gateway composes it.
+async fn restarted(gw: Gateway, mob: &str, access: AccessController) -> Result<Gateway, Failure> {
+    let Gateway {
+        _state: state,
+        runtime,
+        app,
+        open,
+        ..
+    } = gw;
+    drop(app);
+    drop(open);
+    let _ = runtime.shutdown().await;
+    drop(runtime);
+    gateway_over(state, mob, Some(access)).await
+}
+
+/// The answer of `meta/attach_existing_session` to the holder of `bearer`
+/// who seats `name` on `session`.
+async fn attach_answer(gw: &Gateway, bearer: &str, name: &str, session: &SessionId) -> Value {
+    let attach = Attach::AttachExistingSession;
+    console_rpc_as(
+        &gw.app,
+        Some(bearer),
+        attach.method(),
+        attach.params(name, session),
+    )
+    .await
+}
+
+/// Whether `answer` is the access refusal.
+fn is_the_access_refusal(answer: &Value) -> bool {
+    answer["error"]["code"] == json!(ACCESS_DENIED_RPC_CODE)
+        && answer["error"]["data"]["kind"] == json!("access_denied")
+}
+
+/// One row on the session of a shared worker that ended, on a gateway with
+/// the identity layer. The access rules decide who seats a member on such a
+/// session by the member the session belonged to, as Core's member history
+/// names it. While the worker lives, the person a rule denies `denied` on
+/// the workers and the person denied it on the worker's name are refused
+/// its session. After the worker's end (and, with `restart`, a restart of
+/// the gateway on the same state) the access decision does not refuse the
+/// person no rule refuses, the deny on the name still holds, and the person
+/// denied the workers, whose other rule allows every agent, is refused by
+/// the access decision: nobody is seated. With `own_name` each attach names
+/// the ended worker itself, and the person no rule refuses seats an ended
+/// worker again; else it names a member nobody held, which the runtime
+/// seats for no caller on a session bound to another member, and the
+/// refusal of the person denied the workers does not name that member.
+async fn an_ended_workers_session_is_refused_to_the_person_denied_the_workers(
+    mob_id: &str,
+    denied: &str,
+    own_name: bool,
+    restart: bool,
+) -> TestResult {
+    let mut gw = gateway(mob_id, the_workers_denied_to_the_third_person(denied)?).await?;
+    let shared = a_shared_worker_after_one_turn(&gw, SHARED).await?;
+    let twin = a_shared_worker_after_one_turn(&gw, TWIN).await?;
+    let (seat_on_shared, seat_on_twin) = if own_name {
+        (SHARED, TWIN)
+    } else {
+        ("second-seat", "third-seat")
+    };
+
+    // While the worker lives.
+    for (who, bearer) in [
+        ("the person denied the workers", &gw.carol),
+        ("the person denied the worker's name", &gw.alice),
+    ] {
+        let refused = attach_answer(&gw, bearer, seat_on_shared, &shared).await;
+        assert!(
+            is_the_access_refusal(&refused),
+            "control, while the worker lives: {who} is refused its session: {refused:#}"
+        );
+    }
+
+    // The workers end.
+    gw.ends(SHARED).await?;
+    gw.ends(TWIN).await?;
+    let when = if restart {
+        gw = restarted(gw, mob_id, the_workers_denied_to_the_third_person(denied)?).await?;
+        "the worker ended, after a restart of the gateway"
+    } else {
+        "the worker ended, the gateway still running"
+    };
+    let mob = gw.mob();
+    let unrefused = attach_answer(&gw, &gw.bob, seat_on_twin, &twin).await;
+    if own_name {
+        assert!(
+            unrefused["error"].is_null(),
+            "control, {when}: a person no rule refuses seats an ended worker again on its \
+             session: {unrefused:#}"
+        );
+    } else {
+        // The runtime seats no other member on a session bound to a member:
+        // a person no rule refuses is answered by the runtime.
+        assert!(
+            !unrefused["error"].is_null() && !is_the_access_refusal(&unrefused),
+            "control, {when}: a person no rule refuses is answered by the runtime, not by \
+             the access decision: {unrefused:#}"
+        );
+    }
+    let refused = attach_answer(&gw, &gw.alice, seat_on_shared, &shared).await;
+    assert!(
+        is_the_access_refusal(&refused),
+        "control, {when}: the person denied the worker's name stays refused its session: \
+         {refused:#}"
+    );
+    assert!(
+        mob.get_member(&AgentIdentity::from(seat_on_shared))
+            .await?
+            .is_none(),
+        "control, {when}: the refused attach seats nobody"
+    );
+
+    let refused = attach_answer(&gw, &gw.carol, seat_on_shared, &shared).await;
+    if own_name {
+        assert!(
+            is_the_access_refusal(&refused),
+            "{when}: the person denied the workers is served the ended worker's session: \
+             {refused:#}"
+        );
+    } else {
+        assert!(
+            is_the_access_refusal(&refused),
+            "{when}: the access decision does not refuse the person denied the workers the \
+             ended worker's session, and the runtime answers that person: {refused:#}"
+        );
+        assert!(
+            !refused.to_string().contains(SHARED),
+            "{when}: the refusal names the member the session belonged to: {refused:#}"
+        );
+    }
+    if own_name {
+        assert_eq!(
+            refused["error"]["message"],
+            json!("access denied: the caller may not attach this session"),
+            "{when}: the decision on the session is what refuses: {refused:#}"
+        );
+    }
+    assert!(
+        mob.get_member(&AgentIdentity::from(seat_on_shared))
+            .await?
+            .is_none(),
+        "{when}: nobody is seated on the ended worker's session"
+    );
+    mob.shutdown().await?;
+    Ok(())
+}
+
+/// A person a rule denies an ended member's role, whose other rule allows
+/// every agent, is refused by the access decision itself, before the
+/// runtime is asked, when the attach of the member's session names a new
+/// member: nobody is seated, and the refusal does not name the member the
+/// session belonged to. The gateway that seated the member still runs.
+#[tokio::test]
+async fn a_person_denied_an_ended_members_role_seats_no_member_on_its_session() -> TestResult {
+    an_ended_workers_session_is_refused_to_the_person_denied_the_workers(
+        "stored-seat-denied-role",
+        "agent.*",
+        false,
+        false,
+    )
+    .await
+}
+
+/// [`a_person_denied_an_ended_members_role_seats_no_member_on_its_session`]
+/// after a restart of the gateway on the same state.
+#[tokio::test]
+async fn a_person_denied_an_ended_members_role_seats_no_member_on_its_session_after_a_restart()
+-> TestResult {
+    an_ended_workers_session_is_refused_to_the_person_denied_the_workers(
+        "stored-seat-denied-role-restarted",
+        "agent.*",
+        false,
+        true,
+    )
+    .await
+}
+
+/// A person denied only the view of the workers is refused by the access
+/// decision on the session when the attach names the ended member itself,
+/// under its own name and role: the refusal is the session's, and the
+/// member is not seated again. A person no rule refuses seats an ended
+/// member again under its own name. The gateway that seated the member
+/// still runs.
+#[tokio::test]
+async fn a_person_denied_an_ended_members_role_does_not_seat_it_again_under_its_own_name()
+-> TestResult {
+    an_ended_workers_session_is_refused_to_the_person_denied_the_workers(
+        "stored-seat-denied-own-name",
+        "agent.view",
+        true,
+        false,
+    )
+    .await
+}
+
+/// [`a_person_denied_an_ended_members_role_does_not_seat_it_again_under_its_own_name`]
+/// after a restart of the gateway on the same state.
+#[tokio::test]
+async fn a_person_denied_an_ended_members_role_does_not_seat_it_again_under_its_own_name_after_a_restart()
+-> TestResult {
+    an_ended_workers_session_is_refused_to_the_person_denied_the_workers(
+        "stored-seat-denied-own-name-restarted",
+        "agent.view",
+        true,
+        true,
+    )
+    .await
+}
+
+/// A door of the console that shows or serves a living agent.
+#[derive(Clone, Copy, Debug)]
+enum LivingDoor {
+    /// The experience's sidebar.
+    Experience,
+    /// `GET /console/identities`.
+    IdentitiesRoute,
+    /// `meta/console/list_identities`.
+    IdentitiesRpc,
+    /// `GET /console/timeline` of the agent.
+    Timeline,
+    /// `meta/collect_completed`.
+    CollectCompleted,
+    /// `meta/wait_ready`.
+    WaitReady,
+    /// `meta/member_status` of the agent.
+    MemberStatus,
+    /// `POST /console/send` to the agent.
+    Send,
+}
+
+impl LivingDoor {
+    const ALL: [Self; 8] = [
+        Self::Experience,
+        Self::IdentitiesRoute,
+        Self::IdentitiesRpc,
+        Self::Timeline,
+        Self::CollectCompleted,
+        Self::WaitReady,
+        Self::MemberStatus,
+        Self::Send,
+    ];
+}
+
+/// The names under `key` of the rows of `rows`, in order.
+fn names_of(rows: Option<&Value>, key: &str) -> std::collections::BTreeSet<String> {
+    rows.and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|row| row[key].as_str().map(str::to_string))
+        .collect()
+}
+
+/// What `door` answers the holder of `bearer` about the registered agent
+/// [`SOURCE`], in a form the answers to two callers compare in, and, where
+/// the door names or serves the agent, whether it does. A send carries
+/// `nonce`.
+async fn living_door_answer(
+    gw: &Gateway,
+    door: LivingDoor,
+    bearer: &str,
+    nonce: &str,
+) -> (String, Option<bool>) {
+    use tower::ServiceExt;
+    match door {
+        LivingDoor::Experience => {
+            let rows = sidebar(&gw.app, Some(bearer)).await;
+            let names = names_of(Some(&Value::Array(rows)), "member_id");
+            (format!("{names:?}"), Some(names.contains(SOURCE)))
+        }
+        LivingDoor::IdentitiesRoute => {
+            let response = gw
+                .app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("GET")
+                        .uri("/console/identities")
+                        .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+                        .body(axum::body::Body::empty())
+                        .expect("identities request"),
+                )
+                .await
+                .expect("identities response");
+            let body = axum::body::to_bytes(response.into_body(), 1 << 22)
+                .await
+                .expect("identities body");
+            let listed: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+            let names = names_of(listed.pointer("/identities"), "identity");
+            (format!("{names:?}"), Some(names.contains(SOURCE)))
+        }
+        LivingDoor::IdentitiesRpc => {
+            let listed = console_rpc_as(
+                &gw.app,
+                Some(bearer),
+                "meta/console/list_identities",
+                json!({}),
+            )
+            .await;
+            let names = names_of(listed.pointer("/result/identities"), "identity");
+            (format!("{names:?}"), Some(names.contains(SOURCE)))
+        }
+        LivingDoor::Timeline => {
+            let page: Value =
+                serde_json::from_str(&gw.timeline(bearer, SOURCE).await).unwrap_or(Value::Null);
+            let frames = page["frames"].as_array().map(Vec::len);
+            (format!("frames {frames:?}"), None)
+        }
+        LivingDoor::CollectCompleted => {
+            let answer =
+                console_rpc_as(&gw.app, Some(bearer), "meta/collect_completed", json!({})).await;
+            let names = names_of(answer.pointer("/result/completed"), "member_id");
+            (format!("{names:?}, error {}", answer["error"]), None)
+        }
+        LivingDoor::WaitReady => {
+            let answer = console_rpc_as(
+                &gw.app,
+                Some(bearer),
+                "meta/wait_ready",
+                json!({ "timeout_ms": 2000 }),
+            )
+            .await;
+            let names = names_of(answer.pointer("/result/ready"), "agent_identity");
+            (
+                format!(
+                    "{names:?}, timeout {}, error {}",
+                    answer["result"]["timeout"], answer["error"]
+                ),
+                None,
+            )
+        }
+        LivingDoor::MemberStatus => {
+            let answer = console_rpc_as(
+                &gw.app,
+                Some(bearer),
+                "meta/member_status",
+                json!({ "member_id": SOURCE }),
+            )
+            .await;
+            (
+                format!(
+                    "status {}, error {}",
+                    answer["result"]["status"], answer["error"]["code"]
+                ),
+                Some(!answer["result"]["status"].is_null()),
+            )
+        }
+        LivingDoor::Send => {
+            let (status, _) = gw.send(bearer, SOURCE, nonce, "").await;
+            (status.to_string(), Some(status.is_success()))
+        }
+    }
+}
+
+/// A deny that matches no living agent changes nothing a door of the
+/// console shows or serves of the living agents. A person who may do
+/// everything to every agent and is denied the agents of a role no living
+/// agent has, and those carrying a label no living agent carries, is
+/// answered by each door as a person with allows only: the experience, both
+/// identity lists, the timeline, `meta/collect_completed`,
+/// `meta/wait_ready`, `meta/member_status` and the send. Each door is asked
+/// as the first request of a console that has just started, on its first
+/// start and after a restart on the same state.
+#[tokio::test]
+async fn a_deny_that_does_not_match_a_living_agent_leaves_it_on_every_door() -> TestResult {
+    let access = || -> Result<AccessController, Failure> {
+        let rule = |id: &str, subject: &str| AccessRule {
+            id: id.to_string(),
+            subjects: vec![subject.to_string()],
+            actions: vec!["agent.*".to_string()],
+            ..AccessRule::default()
+        };
+        Ok(AccessController::new(crate::access::AccessControlConfig {
+            enabled: true,
+            admins: vec![ROOT.to_string()],
+            rules: vec![
+                AccessRule {
+                    agents: vec!["*".to_string()],
+                    ..rule("everyone-drives-every-agent", "*")
+                },
+                AccessRule {
+                    effect: crate::access::AccessEffect::Deny,
+                    roles: vec!["auditor".to_string()],
+                    ..rule("the-third-person-is-denied-the-auditors", CAROL)
+                },
+                AccessRule {
+                    effect: crate::access::AccessEffect::Deny,
+                    match_labels: std::collections::BTreeMap::from([(
+                        "zone".to_string(),
+                        "sealed".to_string(),
+                    )]),
+                    ..rule("the-third-person-is-denied-the-sealed-zone", CAROL)
+                },
+            ],
+            ..crate::access::AccessControlConfig::default()
+        })?)
+    };
+    let mut wrong = Vec::new();
+    for (index, door) in LivingDoor::ALL.into_iter().enumerate() {
+        let mob_id = format!("living-doors-{index}");
+        // The first start: nothing has asked this console anything yet.
+        let mut gw = gateway_over(tempfile::tempdir()?, &mob_id, Some(access()?)).await?;
+        for (phase, restart) in [
+            ("right after the first start", false),
+            ("right after a restart", true),
+        ] {
+            if restart {
+                gw = restarted(gw, &mob_id, access()?).await?;
+            }
+            let nonce = format!("{mob_id}-{restart}");
+            let (under_the_deny, _) =
+                living_door_answer(&gw, door, &gw.carol, &format!("{nonce}-third")).await;
+            let (with_allows_only, shows) =
+                living_door_answer(&gw, door, &gw.bob, &format!("{nonce}-second")).await;
+            if under_the_deny != with_allows_only {
+                wrong.push(format!(
+                    "{door:?}, {phase}: the person under a deny that matches no living agent is \
+                     answered [{under_the_deny}], a person with allows only [{with_allows_only}]"
+                ));
+            }
+            if shows == Some(false) {
+                wrong.push(format!(
+                    "{door:?}, {phase}: the door does not show or serve the living agent to a \
+                     person with allows only: [{with_allows_only}]"
+                ));
+            }
+        }
+        let _ = gw.runtime.shutdown().await;
+    }
+    assert!(
+        wrong.is_empty(),
+        "a deny that matches no living agent: {wrong:#?}"
+    );
+    Ok(())
 }

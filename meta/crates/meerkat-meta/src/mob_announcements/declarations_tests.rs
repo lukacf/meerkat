@@ -2904,3 +2904,51 @@ async fn a_host_template_put_gives_its_children_its_delivery() {
         "{child}"
     );
 }
+
+/// The child a role template makes for a shared member in the capture of
+/// what a member private to a person announces captures nothing of it; the
+/// child is made, and captures the host's announcement on the topic.
+#[tokio::test]
+async fn a_role_child_takes_nothing_of_a_private_members_announcement() {
+    let harness = harness_with(native_serving(&["agent:b", "agent:p"]));
+    let service = &harness.service;
+    harness.native.set_roster_facts("agent:b", "reviewer", &[]);
+    harness.native.set_roster_facts(
+        "agent:p",
+        "author",
+        &[(crate::access::PRIVATE_TO_LABEL, "person-one")],
+    );
+    try_apply(
+        service,
+        1,
+        serde_json::json!([]),
+        serde_json::json!([declared_template("reviewers", "reviewer", &["deploy.done"])]),
+    )
+    .await
+    .unwrap();
+    let outcome = service
+        .announce(AnnounceRequest {
+            mob_id: mob(OWN_MOB),
+            announced_by: Announcer::Member {
+                identity: MemberIdentity::new("agent:p").unwrap(),
+            },
+            source_key: SourceKey::new("deploy-private").unwrap(),
+            topics: [Topic::new("deploy.done").unwrap()].into(),
+            body: "the draft of the offer is ready".to_string(),
+            correlation_id: None,
+            causes: Vec::new(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(outcome.captured_for, Vec::new(), "captured for no child");
+    assert_eq!(owed(&harness).await.get("agent:b"), None);
+    let children = role_children(&declared(service).await, "reviewers");
+    assert_eq!(children.len(), 1, "the child is made: {children:?}");
+
+    host_announces(service, "deploy-1", &["deploy.done"]).await;
+    assert_eq!(
+        owed(&harness).await.get("agent:b"),
+        Some(&1),
+        "the child captures the host's announcement"
+    );
+}

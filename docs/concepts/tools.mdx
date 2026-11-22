@@ -124,7 +124,7 @@ the CLI defaults to `--tools safe`).
 | Builtins | `task_create`, `task_list`, `task_get`, `task_update`, `datetime`, `apply_patch`, `view_image`, `blob_save_file`, `blob_load_file`, `blob_inspect` | `enable_builtins` |
 | Image generation | `generate_image` | inherited visibility when the normal runtime substrate is wired; explicit `override_image_generation` for independent minimal composition |
 | Web search | provider-native search or the Meerkat-owned `web_search` fallback | `override_web_search` (or a surface convenience flag) |
-| Shell | `shell`, `shell_jobs`, `shell_job_status`, `shell_job_cancel`; high-trust `monitor_start` is opt-in | `enable_shell` plus tool policy |
+| Shell | `shell`, `shell_jobs`, `shell_job_status`, `shell_job_cancel` and, where the session has a durable job store, `monitor_start` | `enable_shell` plus tool policy |
 | Memory | `memory_search` | `enable_memory` |
 | Scheduler | `meerkat_schedule_*` | `enable_schedule` |
 | WorkGraph | `workgraph_*` | `enable_workgraph` |
@@ -491,13 +491,13 @@ Tools can return rich content beyond plain text. The injected runtime shape is `
 - `ContentBlock::SkillContext { skill_key, text }` -- runtime-authored skill
   activation context with its canonical source identity preserved.
 
-The built-in `view_image` tool reads an image file from disk and returns a result containing image content blocks. It supports PNG, JPEG, GIF, WebP, and SVG formats up to 5 MB. The tool is automatically hidden from models that lack vision support via capability-aware tool visibility.
+The built-in `view_image` tool reads an image file from disk and returns a result containing image content blocks. It supports PNG, JPEG, GIF, and WebP formats up to 5 MB, and refuses a file whose content is not an image of one of these formats. The tool is automatically hidden from models that lack vision support via capability-aware tool visibility.
 
 The built-in `generate_image` tool is session-owned runtime dispatch. It lets a model request generated or edited images through universal fields plus provider-owned `provider_params`. Generated image bytes are stored as blobs and committed as `AssistantBlock::Image` transcript blocks, so every surface reads the same `image_id`/`blob_ref` history and fetches bytes through `blob/get` or model-facing `blob_save_file`.
 
 The blob file bridge tools are registered only when the session has a blob store. `blob_save_file` writes decoded blob bytes to a file inside the project root, `blob_load_file` reads a project file into the blob store, and `blob_inspect` returns blob metadata without raw payload bytes. They do not expose blob listing or deletion.
 
-`apply_patch` and `blob_save_file` run in the host process and never write the engine's own directory (a `.rkat` directory at or below the project root) or a path the host declares as its own state or input; see [paths the file tools never write](/reference/builtin-tools#paths-the-file-tools-never-write).
+`apply_patch` and `blob_save_file` run in the host process and never write the engine's own directory (a `.rkat` directory at or below the project root) or a path the host declares as its own state or input; see [paths the file tools never write](/reference/builtin-tools#paths-the-file-tools-never-write). `blob_load_file` and `view_image` do not read those paths either.
 
 Custom tools can return text, image, or structured content through
 `ToolResult::with_blocks(...)`. Video tool results are rejected, and

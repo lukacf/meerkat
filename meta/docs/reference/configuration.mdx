@@ -339,6 +339,17 @@ gateway, so a host whose definition already differs from the stored one
 reads the revision at its last ordinary start, or from the refusal's
 message. Run with both SDKs on 0.9.15.
 
+On an ordinary restart, compare the parsed definitions, not the spelling or
+order of the original TOML. In `profiles.<name>.tools.grant_gated`, the
+`families`, `tools` and `mcp_servers` lists are sets of names. Their stored
+form lists each name once in sorted order; changing only their order does
+not change the gate. `unconfigured_mcp_servers` is a boolean, not a list.
+Do not sort every list: for example, `profiles.<name>.tools.deny` is compared
+in order. If the canonical definitions match, omit the one-shot declaration.
+Declaring an update at the current revision when nothing changed is refused;
+it does not advance the revision. This is distinct from an exact retry of an
+already committed update using its original expected revision.
+
 Python hosts use the supported builder ceremony on the single activation
 authorized to change the durable definition:
 
@@ -1456,7 +1467,7 @@ schedule = true
 |-----|---------|--------|
 | `comms` | `false` | **Must be `true` for every profile a member spawns from.** A member's durable identity, roster occupancy check, wiring, peer messaging and supervisor bridge are all keyed on its comms name, and the peer-messaging tools are composed whenever a member has one, so there is no honest member without comms: Meerkat refuses `comms = false`, and an omitted key, at build time with `MobError::WiringError`: `profile '<name>' has tools.comms=false; mob meerkats require comms=true`. On the worker plane `meta/ensure_member` answers `-32602` with `ensure_member failed: wiring error: ...` and creates no roster entry; on the identity plane the identity reconciles to outcome `broken` (`EmbodimentFailed`, the message as its detail), `meta/status_identity_bootstrap` carries it as `error`, and the continuity repair task retries what is a static configuration error. To keep a member from messaging peers, leave `comms = true` and set `read_only = true` (`send_message` is denied, `peers` stays permitted) or list the tools in `deny` (or deny them through a per-spawn tool access policy). Mobpack validation does not flag this; it fails at spawn. |
 | `builtins` | `false` | Meerkat's built-in tools (task, blob, patch, datetime, web search and similar). When `workgraph` is `false` and `builtins` is `true`, the `task-workflow` skill is preloaded. |
-| `shell` | `false` | The shell execution tool. Never read-only: nothing classifies a command line, so `read_only = true` denies it outright. |
+| `shell` | `false` | The shell tool family: `shell`, its three job tools (`shell_jobs`, `shell_job_status`, `shell_job_cancel`) and the script monitor `monitor_start`, which can notify its own member and, with event delivery, start its turns. `deny = ["monitor_start"]` keeps the family without the monitor. Never read-only: nothing classifies a command line, so `read_only = true` denies `shell` and `monitor_start` outright. |
 | `memory` | `false` | Memory and semantic-search tools. On a gateway with agent memory and a roster, a member whose profile enables them also gets the memory it is given when it is built and, with the SQLite store and `agent_memory.recorder_tool` on (the default), the `memory` recorder tool; a Rust host can decide that per profile with `UnifiedRuntimeBuilder::agent_memory_for_profile`, and a realm-referenced profile gets them only that way. It does not stop the notes added to each turn, which `agent_memory.per_turn_injection: "off"` stops for every agent of the gateway. |
 | `workgraph` | `false` | The realm-scoped `workgraph_*` tools; preloads the `workgraph-workflow` skill. The namespace grant the tools need is issued by the gateway, not the host (see [WorkGraph](#workgraph)). |
 | `mob` | `false` | Mob management tools (spawn, retire, wire, unwire, list). Without a host-supplied authority context the member is granted spawn authority over every profile in the definition. |
@@ -1540,12 +1551,25 @@ A [source](/api/rpc#mob-announcement-sources) may name the collector that
 advances it: `"runner": {"host_runnable": "<name>", "every_seconds": <n>}`.
 The host owns the runnable's code: it registers the name in
 `runtime_options.host_runnables` and handles each fire (`host_runnables`
-and `on_schedule_fire` in the Python SDK). Meta schedules the runnable for
+and `on_schedule_fire` in the Python SDK; `hostRunnables` and
+`onScheduleFire` in the [TypeScript SDK](/sdks/typescript#host-runnables)).
+Register the handler on the builder (`MetaBuilder.on_schedule_fire` in Python,
+`MetaBuilder.onScheduleFire` in TypeScript), so that it is in place before the
+first connect: a runner's schedule can be due when the gateway starts. Meta
+schedules the runnable for
 every live source that names it, through the gateway's schedule service,
 first at the declaration and then every `every_seconds` (60 to 2,592,000).
 A changed cadence restarts the interval at the change. Each schedule Meta
 makes for a runner is labelled `mob_announcements.source_runner`, and Meta
-never changes or ends a schedule without that label. `sources/put` refuses a
+never changes or ends a schedule without that label. The label is the
+gateway's: an agent's schedule tools refuse a create or an update that
+carries it, and neither list nor change a schedule that carries it. At each
+start the gateway keeps the runner schedules it made, resumes one that is
+paused, sets its timing back to the source's, and deletes any other schedule
+that carries the label. A runner schedule made by an earlier version is
+rebuilt at the first start after an upgrade: the collector of every live
+source that names a runner runs once at that start and then at its interval.
+`sources/put` refuses a
 runner that names a blank runnable or the memory steward's (`-32602`).
 A runner on a gateway that schedules none, such as the console gateway or
 one without a schedule service, never fires there: such a source collects
@@ -1650,7 +1674,18 @@ without `persistent_state`, `runtime_options.runtime_store` and the builder's
 `ConflictingConfiguration` from the builder). Undeclared gaps are startup
 errors that SDKs surface as the typed `StorageResolutionError` (`-32014`). The sanctioned boot-without
 degradations (schedule or workgraph store open failure) disable the feature
-and appear as `degraded` slots.
+and appear as `degraded` slots. One more `degraded` slot has the domain
+`workgraph_attention`. It appears when a start that speaks for the mob's
+composition finds WorkGraph attention bindings whose target is a member
+private to a person and holds them paused; its `detail` names each held
+binding by its id. This entry is not a store that failed to open and
+disables nothing, although its `backend` field reads `disabled` and its
+resolution `non_persistent`, as the entry of a store that failed to open
+does: WorkGraph stays on. The entry is the start's snapshot: it stays in
+the summary until the next start, also after every binding it names was
+reassigned to another member or its goal was closed. A host that reads any
+`degraded` slot as a store that failed to open should tell this one by its
+domain.
 
 **Storage census surfaces.** The resolved picture rides the `storage` object
 on `meta/status`, `meta/capabilities`, and `meta/storage/doctor`:
@@ -2202,8 +2237,10 @@ ConsolePolicy {
 
 For standalone `meta_gateway` launches, pass `console_read_only: true` in the
 `meta/init` params or set `META_CONSOLE_READ_ONLY=true`. This setting is
-part of the gateway resume fingerprint, so toggling it creates or resumes the
-matching runtime instead of reusing a runtime launched with the opposite policy.
+part of the gateway resume fingerprint, so toggling it creates the matching
+runtime, or with the start flag `--resume-from-registry` (from 0.9.17)
+resumes a live one, instead of reusing a runtime launched with the opposite
+policy.
 
 `meta_gateway` takes the HTTP exposure knobs as top-level `meta/init`
 params rather than `runtime_options`: `http_listen` (`HOST:PORT`, default
@@ -2243,6 +2280,16 @@ allows them for every caller the route admits. It is launch-only, and on
 `meta_gateway` it joins the resume fingerprint. Rust hosts use
 `allow_flow_editor_host_deploy(true)` on `UnifiedRuntimeBuilder` or
 `UnifiedRuntime`. See [Flow Editor](/guides/flow-editor).
+
+`meta_gateway` also takes `--resume-from-registry` (from 0.9.17), a bare
+start flag with no init parameter and no environment variable. Only a launch
+started with it is answered `launch_state: "resumed"`: when the runtime
+registry lists an entry under the launch's resume key whose address answers
+`GET /healthz` with success, the launch reports that entry's runtime id and
+addresses and starts nothing. The flag is launch-only and does not join the
+resume fingerprint. Without it every launch binds and starts, or is refused;
+see [Deployment](/guides/deployment) and Breaking under 0.9.17 in Meta's
+changelog. `rpc_gateway` has no runtime registry.
 
 ### Console auth by surface
 

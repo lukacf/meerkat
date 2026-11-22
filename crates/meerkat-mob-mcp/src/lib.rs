@@ -49,7 +49,7 @@ pub use public_mcp::{
     public_tools_list_without_workgraph, wrap_public_tool_payload,
 };
 #[cfg(not(target_arch = "wasm32"))]
-pub use schedule_host::MobMcpScheduleHost;
+pub use schedule_host::{JudgedMobState, MobMcpScheduleHost, MobScheduleWriteJudge};
 pub use surface::wire_mob_tools;
 pub use temporary_council::{
     MergeBackPolicy, TEMPORARY_COUNCIL_CLAIM_LEASE, TEMPORARY_COUNCIL_CLEANUP_BUDGET,
@@ -2183,6 +2183,24 @@ pub const MOB_CREATE_REFUSED_KIND: &str = "mob_create_refused";
 const BEFORE_CREATE_PANICKED: &str =
     "the host's create admission panicked, so the create is refused";
 
+/// A create's hold of its mob's id ([`MobMcpState::hold_create_id`]). Dropping
+/// it frees the id: when the create has inserted its mob, and on every way
+/// a create ends without one.
+struct CreateIdHold<'a> {
+    state: &'a MobMcpState,
+    mob_id: MobId,
+}
+
+impl Drop for CreateIdHold<'_> {
+    fn drop(&mut self) {
+        self.state
+            .creates_in_flight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.mob_id);
+    }
+}
+
 pub struct MobMcpState {
     session_service: Arc<dyn MobSessionService>,
     runtime_adapter: Option<Arc<meerkat_runtime::MeerkatMachine>>,
@@ -2294,6 +2312,10 @@ pub struct MobMcpState {
     /// recovery sweep automatically instead of requiring a caller to run
     /// maintenance by hand.
     self_weak: std::sync::OnceLock<std::sync::Weak<MobMcpState>>,
+    /// The ids a create of this state holds, each from the create's first
+    /// step until its mob is inserted or the create ends without one
+    /// ([`Self::hold_create_id`]).
+    creates_in_flight: std::sync::Mutex<BTreeSet<MobId>>,
     /// Test seam: when set, a create parks after its native mob started and
     /// before the managed-set insertion.
     #[cfg(test)]
@@ -2504,6 +2526,7 @@ impl MobMcpState {
             ),
             temporary_council_inflight: std::sync::Mutex::new(HashMap::new()),
             self_weak: std::sync::OnceLock::new(),
+            creates_in_flight: std::sync::Mutex::new(BTreeSet::new()),
             #[cfg(test)]
             create_insert_hold: std::sync::Mutex::new(None),
             #[cfg(test)]
@@ -4359,6 +4382,23 @@ impl MobMcpState {
                 "retryable": false,
             }),
         })
+    }
+
+    /// Hold `mob_id` for one create, as the create's first step: before the
+    /// id is checked against the mobs this state hosts and before the host's
+    /// create admission is asked. `None` when a create in flight holds the
+    /// id already: that create is the one the admission is asked for, and
+    /// the caller is refused with nothing of its mob built. The hold ends
+    /// when the answer is dropped.
+    fn hold_create_id(&self, mob_id: &MobId) -> Option<CreateIdHold<'_>> {
+        self.creates_in_flight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(mob_id.clone())
+            .then(|| CreateIdHold {
+                state: self,
+                mob_id: mob_id.clone(),
+            })
     }
 
     /// Admit or refuse the create `request` describes, before anything of
@@ -7034,6 +7074,14 @@ impl MobMcpState {
         let mut definition = MobBuilder::lower_mobpack_definition(definition, &packed_skills)?;
         definition.source_identity = Some(source_identity);
         let mob_id = definition.id.clone();
+        // From here until this create has inserted its mob or ended without
+        // one, the id is this create's: a create of the same id that comes
+        // meanwhile is refused before the host is asked.
+        let Some(_id_hold) = self.hold_create_id(&mob_id) else {
+            return Err(MobError::Internal(format!(
+                "duplicate mobpack create raced for mob id '{mob_id}' before verified identity could be committed"
+            )));
+        };
         self.ensure_restored().await?;
         // A quarantined store is kept as found and a held child keeps its
         // store: no create takes the id of either (the hosted sets are read
@@ -7307,6 +7355,12 @@ impl MobMcpState {
         self.hydrate_definition_skill_sources(&mut definition)
             .await?;
         let mob_id = definition.id.clone();
+        // From here until this create has inserted its mob or ended without
+        // one, the id is this create's: a create of the same id that comes
+        // meanwhile is refused before the host is asked.
+        let Some(_id_hold) = self.hold_create_id(&mob_id) else {
+            return Err(MobError::Internal(format!("mob already exists: {mob_id}")));
+        };
         self.ensure_restored().await?;
         // The hosted sets, read as one: a quarantined store is kept as
         // found and a held child keeps its store, so no create takes the id
@@ -20253,9 +20307,11 @@ mod tests {
     }
 
     /// A member tools build binds only through the create that manages its
-    /// mob. Two creates of one id both build (the second passes the
-    /// existence check while the first waits at the insertion seam); only
-    /// the one that enters the managed set runs its on-managed hook.
+    /// mob. Of two creates of one id, the first holds the id from its first
+    /// step: the second is refused at once, while the first waits at the
+    /// insertion seam, before the host's create admission is asked for it
+    /// and before anything of its mob is built. The first enters the
+    /// managed set and runs its on-managed hook.
     #[tokio::test]
     async fn only_the_create_that_manages_its_mob_runs_its_member_tools_hook() {
         let built = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -20285,6 +20341,16 @@ mod tests {
         .expect("runtime custody")
         .with_member_external_tools_factory(factory)
         .into_shared();
+        let admissions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        state
+            .set_before_create(Arc::new({
+                let admissions = Arc::clone(&admissions);
+                move |_: MobCreateRequest| {
+                    admissions.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Box::pin(async { Ok(()) })
+                }
+            }))
+            .expect("bind the create hook");
         let hold = Arc::new(InsertHold::default());
         *state
             .create_insert_hold
@@ -20315,19 +20381,25 @@ mod tests {
                 .mob_create_definition(explicit_definition("hooked-once"))
                 .await
         });
-        // The second create builds too: it either fails its build or waits
-        // at the same seam.
-        tokio::time::timeout(Duration::from_secs(10), async {
-            while !second.is_finished() && !hold.reached.load(std::sync::atomic::Ordering::SeqCst) {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("the second create builds");
+        // The second create finds the id held: it is answered at once.
+        let refused = tokio::time::timeout(Duration::from_secs(10), second)
+            .await
+            .expect("the second create is answered while the first holds the id")
+            .expect("second create task")
+            .expect_err("a create under an id that a create in flight holds");
+        assert!(
+            refused.to_string().contains("mob already exists"),
+            "{refused}"
+        );
+        assert_eq!(
+            admissions.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the host's create admission is asked by the create that holds the id alone"
+        );
         assert_eq!(
             built.load(std::sync::atomic::Ordering::SeqCst),
-            2,
-            "both creates built member tools"
+            1,
+            "nothing of the refused create is built"
         );
         assert!(
             managed
@@ -20336,25 +20408,20 @@ mod tests {
                 .is_empty(),
             "no hook runs before a mob is managed"
         );
-        // Release every create parked at the seam; a permit stored before a
-        // create registers is taken by it.
+        // Release the create parked at the seam; a permit stored before it
+        // registers is taken by it.
         tokio::time::timeout(Duration::from_secs(20), async {
-            while !(first.is_finished() && second.is_finished()) {
+            while !first.is_finished() {
                 hold.release.notify_one();
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
         .await
-        .expect("both creates finish once released");
-        let outcomes = [
-            first.await.expect("first create task"),
-            second.await.expect("second create task"),
-        ];
-        assert_eq!(
-            outcomes.iter().filter(|outcome| outcome.is_ok()).count(),
-            1,
-            "exactly one create manages the mob: {outcomes:?}"
-        );
+        .expect("the first create finishes once released");
+        first
+            .await
+            .expect("first create task")
+            .expect("the create that holds the id manages the mob");
         assert_eq!(
             *managed
                 .lock()
@@ -20362,6 +20429,49 @@ mod tests {
             vec![MobId::from("hooked-once")],
             "only the managing create ran its hook"
         );
+        assert_eq!(
+            state.stand_down(far_deadline()).await,
+            MobStateStandDown::Clean
+        );
+    }
+
+    /// A create that ends without a mob frees the id it held: a later create
+    /// under the id is admitted and manages its mob.
+    #[tokio::test]
+    async fn a_create_that_fails_frees_the_id_for_a_later_create() {
+        let state = MobMcpState::new(
+            Arc::new(MockSessionSvc::new()),
+            meerkat_mob::MobControlPrincipal::Owner,
+        )
+        .expect("runtime custody")
+        .into_shared();
+        let refuse = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        state
+            .set_before_create(Arc::new({
+                let refuse = Arc::clone(&refuse);
+                move |_: MobCreateRequest| {
+                    let refused = refuse.swap(false, std::sync::atomic::Ordering::SeqCst);
+                    Box::pin(async move {
+                        if refused {
+                            Err("the host refuses this create".to_string())
+                        } else {
+                            Ok(())
+                        }
+                    })
+                }
+            }))
+            .expect("bind the create hook");
+
+        let refused = state
+            .mob_create_definition(explicit_definition("held-once"))
+            .await
+            .expect_err("the first create is refused by the host");
+        assert!(MobMcpState::is_create_refusal(&refused), "{refused}");
+        let created = state
+            .mob_create_definition(explicit_definition("held-once"))
+            .await
+            .expect("a later create under the id is admitted");
+        assert_eq!(created, MobId::from("held-once"));
         assert_eq!(
             state.stand_down(far_deadline()).await,
             MobStateStandDown::Clean
@@ -25069,18 +25179,21 @@ mod tests {
         error.structured_data().unwrap_or(serde_json::Value::Null)
     }
 
-    /// A restart over `root` with the two mobs `restore-unavailable`
-    /// (Running) and `restore-stopped` (Stopped): only the running mob's
-    /// resume reads the session catalog.
+    /// A restart over `root` with the two mobs `<label>-running` (Running)
+    /// and `<label>-stopped` (Stopped): only the running mob's resume reads
+    /// the session catalog. A mob's participant names are held for the whole
+    /// process, so each test passes a label of its own: two tests of this
+    /// binary that run at once must not share a mob id.
     async fn a_running_and_a_stopped_mob_before_a_restart(
         svc: &Arc<MockSessionSvc>,
         root: &std::path::Path,
+        label: &str,
     ) -> (MobId, MobId) {
         a_running_and_a_stopped_mob_before_a_restart_as(
             svc,
             root,
-            "restore-unavailable",
-            "restore-stopped",
+            &format!("{label}-running"),
+            &format!("{label}-stopped"),
         )
         .await
     }
@@ -25203,7 +25316,8 @@ mod tests {
         let svc = Arc::new(MockSessionSvc::new());
         let root = tempfile::tempdir().expect("tempdir");
         let (running, stopped) =
-            a_running_and_a_stopped_mob_before_a_restart(&svc, root.path()).await;
+            a_running_and_a_stopped_mob_before_a_restart(&svc, root.path(), "quarantine-heals")
+                .await;
 
         let restored = restored_state(&svc, root.path());
         // The first session listing (the running mob's resume) answers that
@@ -25281,7 +25395,7 @@ mod tests {
         let svc = Arc::new(MockSessionSvc::new());
         let root = tempfile::tempdir().expect("tempdir");
         let (running, _stopped) =
-            a_running_and_a_stopped_mob_before_a_restart(&svc, root.path()).await;
+            a_running_and_a_stopped_mob_before_a_restart(&svc, root.path(), "failed-resume").await;
         let restored = restored_state(&svc, root.path());
         let bound = bind_activated_mobs_refusing_live_rebinds(&restored);
         svc.fail_next_lists(1);
@@ -25360,7 +25474,8 @@ mod tests {
         let svc = Arc::new(MockSessionSvc::new());
         let root = tempfile::tempdir().expect("tempdir");
         let (running, stopped) =
-            a_running_and_a_stopped_mob_before_a_restart(&svc, root.path()).await;
+            a_running_and_a_stopped_mob_before_a_restart(&svc, root.path(), "single-flight-retry")
+                .await;
         let restored = restored_state(&svc, root.path());
         // The pass and the first on-demand re-attempt meet the outage.
         svc.fail_next_lists(2);
@@ -25564,7 +25679,8 @@ mod tests {
         let svc = Arc::new(MockSessionSvc::new());
         let root = tempfile::tempdir().expect("tempdir");
         let (running, _stopped) =
-            a_running_and_a_stopped_mob_before_a_restart(&svc, root.path()).await;
+            a_running_and_a_stopped_mob_before_a_restart(&svc, root.path(), "concurrent-verb")
+                .await;
         let restored = restored_state(&svc, root.path());
         // The pass meets the outage: the running mob is quarantined.
         svc.fail_next_lists(1);

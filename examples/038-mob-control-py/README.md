@@ -69,14 +69,13 @@ Three things to know before copying this:
   waiting. 0.9.15 fixed it; see
   [Cancel work](https://docs.rkat.ai/guides/mobs#cancel-work) in the mobs
   guide, which links the known issue.
-- After a cancel, the next piece of work of the member can fail once. The
-  [changelog](../../CHANGELOG.md) of 0.9.15 lists this under Known limitations
-  for a turn a client starts on the session of the member (`turn/start`). On
-  the default realm, which this example uses, the send after the cancel ran
-  in every run. On a realm created with the `jsonl` backend the first
-  `member.send` after a cancel ended in `run_failed` and the one after it
-  ran (one run each on 0.9.15 and on the 0.9.16 release build): on such a
-  realm, watch for that failure and send again.
+- [0.9.17 fixed a lost-result bug after `mob/cancel_all_work`](https://github.com/lukacf/meerkat/blob/v0.9.17/CHANGELOG.md#L477-L506).
+  On affected versions (0.9.5–0.9.16), if a run was cancelled at its boundary,
+  the first subsequent turn on a JSONL or in-memory store could make its model
+  call and then lose the result. The default SQLite backend was unaffected.
+  A missing result did not mean the work had not run; do not automatically
+  resend it. In one JSONL run each on 0.9.15 and the 0.9.16 release build,
+  the first `member.send` after cancellation ended in `run_failed`.
 
 ## Run
 

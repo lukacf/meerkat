@@ -126,3 +126,10 @@ second run remembers the first):
 ```bash
 ./008-typescript-quickstart/examples.sh
 ```
+
+Run the mob announcements example (Python and TypeScript, twice each on one
+state directory; with `OPENAI_API_KEY` set it also runs the agents):
+
+```bash
+./009-mob-announcements/examples.sh
+```

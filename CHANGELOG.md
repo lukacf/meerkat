@@ -78,6 +78,9 @@ them.
     retirement name the exact member the call seated; the caller's other
     work, another call's helper and a later member under the same id are
     not touched.
+    While a bounded delegation runs, its mob reads one foreground owner
+    and is not unloaded when idle; a last-owner close of that mob waits
+    for the run to end (its limit, then the retirement).
   - The result and every error of `delegate` name the helper's mob once
     that mob exists (`mob_id`, and `data.mob_id` with `data.member_id` on
     errors), so a model can address the helper in `implicit-<session id>`

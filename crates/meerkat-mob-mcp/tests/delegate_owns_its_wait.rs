@@ -530,7 +530,7 @@ fn assert_helper_ended(data: &Value, reason: &str, helper: &str) {
     assert_eq!(data["helper"], helper, "{data}");
 }
 
-/// T1: the call's own limit. The helper's run is cancelled, the helper is
+/// The call's own limit. The helper's run is cancelled, the helper is
 /// retired, and the error names the helper, its mob, its session and what
 /// was done. The calling turn goes on.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -712,7 +712,7 @@ async fn a_force_cancelled_caller_waits_inside_delegate_until_the_calls_wait_end
     rig.teardown().await;
 }
 
-/// R5: wherever the calling turn is interrupted (before the helper is
+/// Wherever the calling turn is interrupted (before the helper is
 /// seated, between its seat and its turn's admission, or after), no helper
 /// stays seated.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -781,7 +781,7 @@ async fn a_caller_interrupted_at_any_point_leaves_no_helper_seated() {
     rig.teardown().await;
 }
 
-/// R1: the helper finishes as the limit fires. The limit was observed first,
+/// The helper finishes as the limit fires. The limit was observed first,
 /// but the helper's turn completed before the cancel landed: the call is
 /// answered the completed result, and the helper is retired as after any
 /// completed call.
@@ -1011,7 +1011,7 @@ async fn a_lost_run_holds_its_mob_no_longer_once_its_helper_is_ended() {
     rig.teardown().await;
 }
 
-/// R2, and the stale fence: the helper is gone when the limit fires, and
+/// The stale fence: the helper is gone when the limit fires, and
 /// another member sits under its member id by then. The call says its
 /// helper was already gone; the later member, its run and its roster entry
 /// are untouched.
@@ -1870,7 +1870,7 @@ async fn a_delegate_takes_off_the_time_its_call_waited_for_a_dispatch_slot() {
     rig.teardown().await;
 }
 
-/// T7: the host dies while a `delegate` waits. Nothing process-local
+/// The host dies while a `delegate` waits. Nothing process-local
 /// survives, and the engine keeps no durable fact of the call, so nothing
 /// ends the helper: a restarted host finds it seated and idle. It does not
 /// run its interrupted turn again, by itself or when woken, and the same

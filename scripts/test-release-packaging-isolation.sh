@@ -392,4 +392,29 @@ fi
 [[ ! -f "$stale_state/facade-target" ]] ||
   fail "the facade smoke ran without this run's archives"
 
+# The space readings are observation only. With a `df` and a `du` that both
+# fail, each reading says it is unavailable and nothing else changes: the run
+# still passes and the facade smoke still runs.
+broken_tools="$TEST_ROOT/broken-space-tools"
+mkdir -p "$broken_tools"
+printf '%s\n' '#!/usr/bin/env bash' 'echo "broken space tool"' 'exit 1' > "$broken_tools/df"
+cp "$broken_tools/df" "$broken_tools/du"
+chmod +x "$broken_tools/df" "$broken_tools/du"
+reading_state="$TEST_ROOT/unavailable-readings"
+reading_log="$TEST_ROOT/unavailable-readings.log"
+status="$(run_checker "$CHECKER" "$reading_state" "$reading_log" PATH="$broken_tools:$PATH")"
+if [[ "$status" -ne 0 ]]; then
+  fail "a space reading that could not be taken changed the exit status" "$(cat "$reading_log")"
+fi
+for unavailable in \
+  "space reading [packaging start]: packaging target filesystem: unavailable" \
+  "space reading [packaging end]: packaging target: unavailable" \
+  "space reading [before the link smoke]: staged archive copies: unavailable"; do
+  grep -Fq "$unavailable" "$reading_log" ||
+    fail "a space reading that could not be taken was not reported as unavailable" \
+      "$unavailable" "$(cat "$reading_log")"
+done
+[[ -f "$reading_state/facade-target" ]] ||
+  fail "the facade smoke did not run after space readings that could not be taken"
+
 echo "release packaging isolation contract holds"

@@ -22,6 +22,163 @@ TARGET_ROOT="${CARGO_TARGET_DIR:-$tmp_dir/targets}"
 LOG_DIR="$tmp_dir/logs"
 mkdir -p "$LOG_DIR"
 
+# Space readings: the free space of the filesystems this run writes to and the
+# sizes of its own directories, printed before the first package build, after
+# the last one and before the facade link smoke, so a run that ends for lack
+# of space says how much there was and where it went. Observation only:
+# nothing is removed, no check reads a reading, and a reading that cannot be
+# taken prints "unavailable". Each boundary runs in a subshell whose errors
+# are not printed and whose status is discarded (space_reading below), so no
+# failure in it, a missing `df` or `du` included, reaches `set -e` or the
+# exit status. No reading writes a file: a here-string needs temporary space,
+# which a full disk does not have. Sizes come from `du -P`, which follows no
+# symbolic link: the link each per-crate package directory holds into the
+# checkout is counted as a link and never entered. Only this run's own
+# per-crate directories are measured, never the rest of a caller's
+# CARGO_TARGET_DIR. Lines carry labels and crate names, not paths.
+SPACE_TOP_CRATES=5
+
+# "<free KiB> <total KiB> <filesystem id>" of the filesystem that holds $1
+# (of its nearest existing ancestor while $1 does not exist), or nothing.
+space_fs_reading() {
+    local path="$1"
+    while [[ ! -e "$path" && "$path" == */* && "$path" != / ]]; do
+        path="${path%/*}"
+        [[ -n "$path" ]] || path=/
+    done
+    [[ -e "$path" ]] || path=.
+    df -Pk -- "$path" 2>/dev/null | awk '
+        NR == 2 && NF >= 6 && $(NF - 2) ~ /^[0-9]+$/ && $(NF - 4) ~ /^[0-9]+$/ {
+            print $(NF - 2), $(NF - 4), $1 ":" $NF
+        }'
+}
+
+# One line per label and path pair after the boundary's name: the free and
+# total space of the filesystem that holds the path. A filesystem an earlier
+# pair already named is said to be the same one.
+space_free_lines() {
+    local boundary="$1" label="" reading="" free="" total="" id="" rest="" note="" index=0
+    local -a seen_ids=() seen_labels=()
+    shift
+    while [[ "$#" -ge 2 ]]; do
+        label="$1"
+        reading="$(space_fs_reading "$2")" || reading=""
+        shift 2
+        free="${reading%% *}"
+        rest="${reading#* }"
+        total="${rest%% *}"
+        id="${rest#* }"
+        if [[ ! "$free" =~ ^[0-9]+$ || ! "$total" =~ ^[0-9]+$ ]]; then
+            printf 'space reading [%s]: %s filesystem: unavailable\n' "$boundary" "$label"
+            continue
+        fi
+        note=""
+        index=0
+        while [[ "$index" -lt "${#seen_ids[@]}" ]]; do
+            if [[ "${seen_ids[$index]}" == "$id" ]]; then
+                note=" (same filesystem as ${seen_labels[$index]})"
+                break
+            fi
+            index=$((index + 1))
+        done
+        if [[ -z "$note" ]]; then
+            seen_ids+=("$id")
+            seen_labels+=("$label")
+        fi
+        printf 'space reading [%s]: %s filesystem: %d MiB free of %d MiB%s\n' \
+            "$boundary" "$label" "$((free / 1024))" "$((total / 1024))" "$note"
+    done
+}
+
+# `du -skP` of the directories named: "<KiB><TAB><base name>" lines, largest
+# first. -P: no symbolic link is followed, on the command line or below it.
+space_du() {
+    du -skP -- "$@" 2>/dev/null |
+        awk -F '\t' 'NF >= 2 && $1 ~ /^[0-9]+$/ {
+            name = $2
+            sub(/\/+$/, "", name)
+            sub(/.*\//, "", name)
+            print $1 "\t" name
+        }' |
+        sort -rn
+}
+
+# The size of one directory of this run, under a label.
+space_dir_line() {
+    local boundary="$1" label="$2" dir="$3" sizes="" size="" note=""
+    if [[ -L "$dir" || ! -d "$dir" ]]; then
+        printf 'space reading [%s]: %s: no such directory\n' "$boundary" "$label"
+        return 0
+    fi
+    sizes="$(space_du "$dir")" || note=" (du reported an error: the figure may be partial)"
+    size="${sizes%%$'\t'*}"
+    if [[ ! "$size" =~ ^[0-9]+$ ]]; then
+        printf 'space reading [%s]: %s: unavailable\n' "$boundary" "$label"
+        return 0
+    fi
+    printf 'space reading [%s]: %s: %d MiB%s\n' "$boundary" "$label" "$((size / 1024))" "$note"
+}
+
+# The per-crate packaging directories of this run: their total and the
+# SPACE_TOP_CRATES largest, by crate name. One `du` over all of them.
+space_crate_lines() {
+    local boundary="$1" crate="" sizes="" note=""
+    local -a dirs=()
+    for crate in "${RELEASE_CRATES[@]}"; do
+        if [[ -d "$TARGET_ROOT/$crate" && ! -L "$TARGET_ROOT/$crate" ]]; then
+            dirs+=("$TARGET_ROOT/$crate")
+        fi
+    done
+    if [[ "${#dirs[@]}" -eq 0 ]]; then
+        printf 'space reading [%s]: packaging target: no per-crate directory\n' "$boundary"
+        return 0
+    fi
+    sizes="$(space_du "${dirs[@]}")" || note=" (du reported an error: the figures may be partial)"
+    if [[ -z "$sizes" ]]; then
+        printf 'space reading [%s]: packaging target: unavailable\n' "$boundary"
+        return 0
+    fi
+    printf '%s\n' "$sizes" | awk -F '\t' -v boundary="$boundary" -v top="$SPACE_TOP_CRATES" -v note="$note" '
+        NF == 2 {
+            total += $1
+            count += 1
+            if (count <= top) {
+                size[count] = $1
+                name[count] = $2
+            }
+        }
+        END {
+            printf "space reading [%s]: packaging target, %d per-crate directories: %d MiB%s\n", boundary, count, total / 1024, note
+            shown = count < top ? count : top
+            for (i = 1; i <= shown; i++) {
+                printf "space reading [%s]: crate %d of %d by size: %s %d MiB\n", boundary, i, shown, name[i], size[i] / 1024
+            }
+        }'
+}
+
+# One boundary: free space, then what the boundary's name selects, then the
+# seconds the readings took.
+space_boundary() {
+    local boundary="$1" started="$SECONDS"
+    space_free_lines "$boundary" "packaging target" "$TARGET_ROOT" "temporary directory" "$tmp_dir" "root" /
+    case "$boundary" in
+        "packaging end")
+            space_crate_lines "$boundary"
+            ;;
+        "before the link smoke")
+            space_dir_line "$boundary" "staged archive copies" "$package_target"
+            ;;
+    esac
+    printf 'space reading [%s]: took %d s\n' "$boundary" "$((SECONDS - started))"
+}
+
+# The readings of one boundary, guarded: in a subshell (a failure in it, a
+# fatal one included, ends only the subshell), without its error output (a
+# shell error message names a path), and with a status that is always 0.
+space_reading() {
+    (space_boundary "$1") 2>/dev/null || echo "space reading [$1]: unavailable" || true
+}
+
 run_package() {
     crate="$1"
     cfg="$LOG_DIR/$crate.config.toml"
@@ -54,10 +211,14 @@ export TARGET_ROOT
 export LANE_PREFIX
 export -f run_package
 
+space_reading "packaging start"
+
 # $1 expands in the child shell.
 # shellcheck disable=SC2016
 printf '%s\n' "${RELEASE_CRATES[@]}" |
     xargs -I{} -P "$JOBS" bash -lc 'run_package "$1"' _ "{}"
+
+space_reading "packaging end"
 
 fail=0
 for crate in "${RELEASE_CRATES[@]}"; do
@@ -137,6 +298,8 @@ done <<< "$license_map"
 # holds the manifests to the same rule; this reads what the archives ship.
 "$PYTHON" "$(dirname "${BASH_SOURCE[0]}")/check_packaged_internal_requirements.py" \
     "$version" "$package_target/package" "${RELEASE_CRATES[@]}"
+
+space_reading "before the link smoke"
 
 echo "Running published-style facade link smoke..."
 MEERKAT_PUBLISHED_FACADE_PACKAGE_TARGET="$package_target" \

@@ -229,7 +229,9 @@ turn. Its delegated authority may permit evidence, requesting closure,
 closing a review item, or closing when policy allows. The injected
 `workgraph_attention_reassign` and `workgraph_policy_escalate` tools require
 the current attention authority projection; they are not free-standing public
-RPC mutations.
+RPC mutations. Every WorkGraph call of a turn under a binding is served only
+while that projection is current; see
+[Goal Attention Bindings](/reference/workgraph-reference#goal-attention-bindings).
 
 Use `goal-status` and `attention-list` to observe bindings. Pause/resume
 changes attention delivery only - it does not pause the WorkItem. Stopping or

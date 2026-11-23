@@ -125,10 +125,41 @@ jobs:
       - name: Install this commit's Meta Python SDK
         run: python -m pip install ./sdk/python
       - run: python -m pip install -e './installer[test]'
+      # The package index refresh and the install are bounded. On a runner
+      # whose package mirror stalled, an unbounded `apt-get update` printed a
+      # few lines and then sat silent until the job's two hour limit; a
+      # sibling shard on another mirror finished this whole step in 12 s
+      # (refresh 7.4 s, install about 4.4 s). Each command now gets apt's own
+      # retry and connection timeouts, a wall bound (60 s and 90 s, about
+      # eight and twenty times its measured time), and one second attempt
+      # after a pause of 5 s; the step is bounded as a whole. The wall bound
+      # is what is relied on to end a stalled download: the observed stall
+      # outlasted apt's default connection timeout. A stall fails the step
+      # with one error line: nothing below runs without the packages, so no
+      # test of the shard runs and none is reported as run.
       - name: Prepare Linux acceptance isolation
+        timeout-minutes: 10
         run: |
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends -y bubblewrap libseccomp2 apparmor apparmor-profiles
+          apt_bounds=(-o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 -o DPkg::Lock::Timeout=60)
+          bounded() {
+            local what=$1 seconds=$2 attempt status
+            shift 2
+            for attempt in 1 2; do
+              status=0
+              sudo timeout --kill-after=10 "$seconds" "$@" || status=$?
+              if test "$status" -eq 0; then
+                return 0
+              fi
+              printf 'Attempt %s of 2 of the %s ended with status %s (124 or 137 means it ran into its bound of %s seconds).\n' "$attempt" "$what" "$status" "$seconds"
+              if test "$attempt" -eq 1; then
+                sleep 5
+              fi
+            done
+            printf '::error title=Linux acceptance isolation::The %s did not succeed in 2 attempts of at most %s seconds each (last status %s). The isolation packages are not in place, so this shard ran NO installer test.\n' "$what" "$seconds" "$status"
+            return 1
+          }
+          bounded 'package index refresh' 60 apt-get "${apt_bounds[@]}" update
+          bounded 'install of the isolation packages' 90 apt-get "${apt_bounds[@]}" install --no-install-recommends -y bubblewrap libseccomp2 apparmor apparmor-profiles
           bwrap_profile=
           for candidate in /etc/apparmor.d/bwrap /etc/apparmor.d/bwrap-userns-restrict /usr/share/apparmor/extra-profiles/bwrap-userns-restrict; do
             if test -f "$candidate"; then

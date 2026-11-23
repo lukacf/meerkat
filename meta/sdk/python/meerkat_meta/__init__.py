@@ -438,6 +438,7 @@ from .events import (
     Event,
     EventStream,
     MobEvent,
+    ProviderTokenAccounting,
     RunCompleted,
     RunFailed,
     RunStarted,
@@ -450,6 +451,7 @@ from .events import (
     TurnCompleted,
     TurnStarted,
     UnknownEvent,
+    Usage,
 )
 
 # Config modules (importable as meerkat_meta.auth, etc.)
@@ -866,6 +868,8 @@ __all__ = [
     "WorkGraphAttentionReassignResult",
     "WorkGraphEventEntry",
     # Typed events
+    "Usage",
+    "ProviderTokenAccounting",
     "Event",
     "MobEvent",
     "AgentEvent",

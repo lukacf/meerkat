@@ -780,6 +780,8 @@ export type {
   AgentEvent,
   RunStartedEvent,
   RunCompletedEvent,
+  Usage,
+  ProviderTokenAccounting,
   RunFailedEvent,
   AgentErrorReport,
   TurnStartedEvent,

@@ -1103,13 +1103,13 @@ publishes `run_resumed` instead.
 - If the connection can still write a reply, a JSON-RPC `turn/start` waiting
   on the kept input answers `-32003` (session not running) with `data.kind`
   and `data.reason` `requeued_across_stop`, `data.input_id`, `data.stopped_at`
-  and `data.resumable`. When the `rkat-rpc` stdio process itself stops
-  gracefully, it closes its response queue before shutting down the runtime.
-  The waiting caller gets neither that reply nor its input id, even if the
-  run was kept. A missing reply is not a reason to resend the prompt.
-  In two stops of `rkat-rpc` 0.9.16 on Linux (end of input and SIGTERM), a
-  second `turn/start` waiting behind the kept run also got no reply; that
-  second request had not been admitted and was not kept.
+  and `data.resumable`. In the 0.9.17 source, a graceful stop of the owning
+  `rkat-rpc` stdio process closes its response queue before runtime shutdown,
+  so a reply produced by that shutdown cannot reach stdout. In two stops of
+  the published Linux 0.9.16 binary (one EOF, one SIGTERM), neither waiting
+  `turn/start` received a reply. The first input was admitted and its run
+  kept; the second request had not been admitted and was not kept. A missing
+  reply alone does not tell you which happened and is not a reason to resend.
 - REST answers `409` with code `SESSION_NOT_RUNNING` and the same `details`.
   It is not a retryable `503`: an unkeyed retry after the restart would run
   the input twice.

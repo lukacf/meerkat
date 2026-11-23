@@ -490,9 +490,10 @@ test("when the every-mob experience read answers before the second start's read,
   const secondStream = s.start(streamOf(s, { query: "?mobs=*" })); await turns();
   assert.equal(ended, false);
   const third = s.start(seedOf(s, { body: everyMobSeed }));
-  s.fail(secondStream);
+  // The stream's answer is reported after the newer read began and before its own cancellation.
   answered(s, secondStream); await turns();
   assert.equal(ended, false, "a newer unscoped read began before that stream answered");
+  s.fail(secondStream);
   finish(s, third);
   answered(s, s.start(streamOf(s, { query: "?mobs=*" })));
   await action;

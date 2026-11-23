@@ -752,6 +752,7 @@ export type {
   WorkGraphAttentionListOptions,
   WorkGraphCreateOptions,
   WorkGraphUpdateOptions,
+  WorkFinishByUpdate,
   WorkGraphClaimOptions,
   WorkGraphCloseOptions,
   WorkGraphGoalTarget,

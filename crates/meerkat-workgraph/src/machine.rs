@@ -883,6 +883,7 @@ impl WorkGraphMachine {
             machine_state: dsl_state.clone(),
             revision: dsl_state.revision,
             due_at: dsl_state.due_at_utc_ms.and_then(millis_to_datetime),
+            finish_by: request.finish_by,
             not_before: dsl_state.not_before_utc_ms.and_then(millis_to_datetime),
             snoozed_until: dsl_state.snoozed_until_utc_ms.and_then(millis_to_datetime),
             created_at: now,
@@ -934,6 +935,12 @@ impl WorkGraphMachine {
         }
         if let Some(labels) = request.labels {
             item.labels = normalize_labels(labels)?;
+        }
+        if let Some(update) = request.finish_by {
+            item.finish_by = match update {
+                crate::types::WorkFinishByUpdate::Set(value) => Some(value),
+                crate::types::WorkFinishByUpdate::Clear => None,
+            };
         }
         item.machine_state = dsl_state;
         sync_item_from_machine_state(&mut item)?;
@@ -2267,6 +2274,7 @@ mod tests {
                 cancelled_child_join_policy: Default::default(),
                 labels: BTreeSet::new(),
                 due_at: None,
+                finish_by: None,
                 not_before: None,
                 snoozed_until: None,
                 external_refs: Vec::new(),
@@ -2301,6 +2309,7 @@ mod tests {
                 cancelled_child_join_policy: Default::default(),
                 labels: BTreeSet::new(),
                 due_at: None,
+                finish_by: None,
                 not_before: None,
                 snoozed_until: None,
                 external_refs: Vec::new(),
@@ -2528,6 +2537,7 @@ mod tests {
                 completion_policy: None,
                 labels: None,
                 due_at: Some(now + Duration::hours(1)),
+                finish_by: None,
                 not_before: None,
                 snoozed_until: None,
                 external_refs: Vec::new(),
@@ -2567,6 +2577,7 @@ mod tests {
                 completion_policy: None,
                 labels: None,
                 due_at: Some(now + Duration::hours(1)),
+                finish_by: None,
                 not_before: None,
                 snoozed_until: None,
                 external_refs: Vec::new(),
@@ -2720,6 +2731,7 @@ mod tests {
                 completion_policy: None,
                 labels: None,
                 due_at: None,
+                finish_by: None,
                 not_before: None,
                 snoozed_until: None,
                 external_refs: Vec::new(),

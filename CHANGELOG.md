@@ -48,6 +48,10 @@ them.
   Existing session models and explicit/configured session pins retain their
   precedence. The global and image defaults are unchanged. No wire/schema
   break is introduced.
+- Rust `WorkItem`, `CreateWorkItemRequest`, `GoalCreateRequest`,
+  `PublicGoalCreateRequest` and `UpdateWorkItemRequest` gain a `finish_by` field;
+  direct struct constructors must supply it. `WorkFinishByUpdate` provides tagged
+  Set/Clear updates; omission and null retain the current value.
 
 ### Added
 
@@ -58,6 +62,26 @@ them.
   `reasoning_effort` validation; an unsupported turn reasoning preference is
   instead not applied, preserving the existing level or provider default.
   Long decode is not added.
+- Optional, nonoperative `finish_by` item data is preserved by create, read,
+  event replay, realm copying and the generated SDK types. It gates no
+  readiness, claim, order, wake or close; a keyed create's identity covers it
+  (see the keyed create entry below). It changes no attention authority.
+  Setting or clearing it advances the item revision, so an older attention
+  projection becomes stale. An item in a terminal status takes no update, so
+  its target cannot be set or cleared there. The existing `due_at` remains
+  activation eligibility; its
+  omitted/null update semantics are unchanged and existing dates cannot be
+  cleared today.
+- `rkat workgraph goal-create --finish-by <RFC3339>` sets the target; item output
+  displays it. Update APIs/tools accept `{ "op": "set", "value": "<RFC3339>" }`
+  or `{ "op": "clear" }`. Old writers/rebuilders can drop this new data and old
+  servers may ignore it. No ledger version fence is added for this nonoperative
+  field.
+- Keyed create includes the encoded `finish_by` in its request identity: an
+  equal value replays, while a changed, added or removed value conflicts without
+  a write. When an older server ignored this field and admitted the key without
+  it, replaying the same field-bearing request to a newer server conflicts;
+  the reverse also conflicts after rollback.
 
 ### Changed
 

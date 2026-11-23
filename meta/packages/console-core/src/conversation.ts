@@ -257,6 +257,7 @@ export interface ConversationWorkGraphItemRow {
   alsoUnder?: string[];
   blocked?: boolean;
   dueAt?: string | null;
+  finishBy?: string | null;
   lastEventAt?: string | null;
   description?: string | null;
   labels?: string[];

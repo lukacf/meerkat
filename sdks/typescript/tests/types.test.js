@@ -1977,6 +1977,16 @@ describe("WorkGraph parsers", () => {
     evidence_refs: [{ kind: "message_draft", id: "draft-1" }],
   };
 
+  it("retains finish_by independently of legacy activation and accepts older rows", () => {
+    const target = "2030-01-02T03:04:05Z";
+    const item = parseWorkItem({ ...claimedItem, due_at: timestamp, finish_by: target });
+    assert.equal(item.finish_by, target);
+    assert.equal(item.due_at, timestamp);
+    assert.equal(parseWorkItem(claimedItem).finish_by, undefined);
+    assert.equal(parseWorkItem({ ...claimedItem, finish_by: null }).finish_by, undefined);
+    assert.throws(() => parseWorkItem({ ...claimedItem, finish_by: 42 }));
+  });
+
   it("parses typed owners and claims", () => {
     const item = parseWorkItem(claimedItem);
 

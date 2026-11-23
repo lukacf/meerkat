@@ -86,11 +86,11 @@ pub use types::{
     WorkAttentionTarget, WorkClaim, WorkCompletionPolicy, WorkEdge, WorkEdgeKind, WorkEvidenceKind,
     WorkEvidenceRef, WorkExecutionAuthority, WorkExecutionBinding, WorkExecutionBindingFilter,
     WorkExecutionBindingId, WorkExecutionEvidenceKind, WorkExecutionEvidenceProjection,
-    WorkExecutionMachineState, WorkExecutionTarget, WorkGraphEvent, WorkGraphEventKind,
-    WorkGraphEventsResponse, WorkGraphFact, WorkGraphIdParams, WorkGraphItemsResponse,
-    WorkGraphMachineState, WorkGraphSnapshot, WorkGraphSnapshotFilter, WorkItem,
-    WorkItemAdmissionState, WorkItemFilter, WorkItemId, WorkItemRef, WorkNamespace, WorkOwner,
-    WorkOwnerKey, WorkOwnerKind, WorkPriority, WorkStatus, mob_agent_owner_id_parts,
+    WorkExecutionMachineState, WorkExecutionTarget, WorkFinishByUpdate, WorkGraphEvent,
+    WorkGraphEventKind, WorkGraphEventsResponse, WorkGraphFact, WorkGraphIdParams,
+    WorkGraphItemsResponse, WorkGraphMachineState, WorkGraphSnapshot, WorkGraphSnapshotFilter,
+    WorkItem, WorkItemAdmissionState, WorkItemFilter, WorkItemId, WorkItemRef, WorkNamespace,
+    WorkOwner, WorkOwnerKey, WorkOwnerKind, WorkPriority, WorkStatus, mob_agent_owner_id_parts,
 };
 
 pub const WORKGRAPH_CAPABILITY_DISABLED_DESCRIPTION: &str =

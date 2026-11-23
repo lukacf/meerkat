@@ -3557,6 +3557,9 @@ enum WorkGraphCommands {
         /// Goal description
         #[arg(long, allow_hyphen_values = true)]
         description: Option<String>,
+        /// Nonoperative finish-by target (RFC3339); does not delay readiness
+        #[arg(long)]
+        finish_by: Option<chrono::DateTime<chrono::Utc>>,
         /// Attention mode of the session binding
         #[arg(long, value_enum, default_value = "pursue")]
         mode: WorkAttentionModeArg,
@@ -11519,6 +11522,7 @@ async fn handle_workgraph_command(
             title,
             namespace,
             description,
+            finish_by,
             mode,
             completion_policy,
             json,
@@ -11533,6 +11537,7 @@ async fn handle_workgraph_command(
                     priority: Default::default(),
                     labels: Default::default(),
                     due_at: None,
+                    finish_by,
                     not_before: None,
                     snoozed_until: None,
                     external_refs: Vec::new(),
@@ -11785,6 +11790,9 @@ fn print_workgraph_item(item: &meerkat::WorkItem) {
     println!("updated_at: {}", item.updated_at);
     if let Some(due_at) = item.due_at {
         println!("due_at: {due_at}");
+    }
+    if let Some(finish_by) = item.finish_by {
+        println!("finish_by: {finish_by}");
     }
     if let Some(not_before) = item.not_before {
         println!("not_before: {not_before}");
@@ -32154,6 +32162,7 @@ default_model = "gemma"
                 priority: Default::default(),
                 labels: Default::default(),
                 due_at: None,
+                finish_by: None,
                 not_before: None,
                 snoozed_until: None,
                 external_refs: Vec::new(),

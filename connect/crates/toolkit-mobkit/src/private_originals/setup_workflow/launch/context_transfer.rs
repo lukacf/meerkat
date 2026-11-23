@@ -1293,6 +1293,7 @@ fn validate_item_identity(
         cancelled_child_join_policy: item.cancelled_child_join_policy,
         labels: item.labels.clone(),
         due_at: item.due_at,
+        finish_by: item.finish_by,
         not_before: item.not_before,
         snoozed_until: item.snoozed_until,
         external_refs: item.external_refs.clone(),

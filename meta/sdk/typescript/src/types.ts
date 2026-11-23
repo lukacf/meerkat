@@ -4520,6 +4520,8 @@ export interface WorkGraphItem {
   readonly machineState: unknown;
   readonly revision: number;
   readonly dueAt: string | null;
+  /** Nonoperative finish-by target; does not gate readiness. */
+  readonly finishBy?: string | null;
   readonly notBefore: string | null;
   readonly snoozedUntil: string | null;
   readonly createdAt: string;
@@ -4546,6 +4548,7 @@ export function parseWorkGraphItem(raw: unknown): WorkGraphItem {
     machineState: d.machine_state,
     revision: Number(d.revision ?? 0),
     dueAt: typeof d.due_at === "string" ? d.due_at : null,
+    finishBy: typeof d.finish_by === "string" ? d.finish_by : null,
     notBefore: typeof d.not_before === "string" ? d.not_before : null,
     snoozedUntil: typeof d.snoozed_until === "string" ? d.snoozed_until : null,
     createdAt: String(d.created_at ?? ""),
@@ -4821,6 +4824,7 @@ export interface WorkGraphCreateOptions {
   readonly completionPolicy?: unknown;
   readonly labels?: readonly string[];
   readonly dueAt?: string;
+  readonly finishBy?: string | null;
   readonly notBefore?: string;
   readonly snoozedUntil?: string;
   readonly externalRefs?: readonly Record<string, unknown>[];
@@ -4842,6 +4846,7 @@ export function workGraphCreateOptionsToDict(
     result.labels = [...options.labels];
   }
   if (options.dueAt !== undefined) result.due_at = options.dueAt;
+  if (options.finishBy !== undefined) result.finish_by = options.finishBy;
   if (options.notBefore !== undefined) result.not_before = options.notBefore;
   if (options.snoozedUntil !== undefined) {
     result.snoozed_until = options.snoozedUntil;
@@ -4857,6 +4862,11 @@ export function workGraphCreateOptionsToDict(
   return result;
 }
 
+/** Absence/null keeps finish-by. Set and clear are explicit wire operations. */
+export type WorkFinishByUpdate =
+  | { readonly op: "set"; readonly value: string }
+  | { readonly op: "clear" };
+
 /** Options for `workgraphUpdate` beyond `id`/`expectedRevision`. */
 export interface WorkGraphUpdateOptions {
   readonly title?: string;
@@ -4865,6 +4875,7 @@ export interface WorkGraphUpdateOptions {
   /** Explicit `[]` clears labels; omit to leave labels untouched. */
   readonly labels?: readonly string[];
   readonly dueAt?: string;
+  readonly finishBy?: WorkFinishByUpdate | null;
   readonly notBefore?: string;
   readonly snoozedUntil?: string;
   readonly namespace?: string;
@@ -4879,6 +4890,7 @@ export function workGraphUpdateOptionsToDict(
   if (options.priority !== undefined) result.priority = options.priority;
   if (options.labels !== undefined) result.labels = [...options.labels];
   if (options.dueAt !== undefined) result.due_at = options.dueAt;
+  if (options.finishBy !== undefined) result.finish_by = options.finishBy;
   if (options.notBefore !== undefined) result.not_before = options.notBefore;
   if (options.snoozedUntil !== undefined) {
     result.snoozed_until = options.snoozedUntil;
@@ -4946,6 +4958,7 @@ export function workGraphGoalTargetToDict(
 
 export interface WorkGraphGoalCreateOptions {
   readonly description?: string;
+  readonly finishBy?: string | null;
   readonly mode?: string;
   /** Internally-tagged `WorkCompletionPolicy` enum, e.g. `{ kind: "self_attest" }`. */
   readonly completionPolicy?: unknown;
@@ -4958,6 +4971,7 @@ export function workGraphGoalCreateOptionsToDict(
 ): Record<string, unknown> {
   const result: Record<string, unknown> = {};
   if (options.description !== undefined) result.description = options.description;
+  if (options.finishBy !== undefined) result.finish_by = options.finishBy;
   if (options.mode !== undefined) result.mode = options.mode;
   if (options.completionPolicy !== undefined) {
     result.completion_policy = options.completionPolicy;

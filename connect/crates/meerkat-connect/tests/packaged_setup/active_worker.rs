@@ -410,6 +410,11 @@ pub(super) async fn run() -> Result {
             ..Default::default()
         },
     })?;
+    // Host side: only the preparation ceiling is in force here. This session
+    // is the positive control for the caller's ceiling of the composition
+    // acceptance: `enter` finds and loads `setup_catalog_entry`, which that
+    // ceiling hides.
+    require_setup_ceiling(&options, PREPARATION_DENIED)?;
     let session = ConnectSession::open_with_config(storage, Config::default(), options).await?;
     let entered = enter(&session, &fixture, &probe).await;
     let close = session.close();

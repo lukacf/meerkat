@@ -8623,6 +8623,18 @@ where
                                     )
                                     .into_iter()
                                     .filter(|name| !closed_by_grant_gate.contains(name))
+                                    // The notice names what a catalog search
+                                    // returns: a tool the session's filters
+                                    // do not allow is not named to the
+                                    // model. The scope's own predicate
+                                    // decides, as it does for the search;
+                                    // when it cannot be read, nothing is
+                                    // named.
+                                    .filter(|name| {
+                                        self.tool_scope
+                                            .staged_session_filters_allow_name(name.as_str())
+                                            .unwrap_or(false)
+                                    })
                                     .collect()
                                 })
                                 .unwrap_or_default()

@@ -362,8 +362,11 @@ deferred schemas:
 
 - `tool_catalog_search {query?, limit?}` (limit 1-50, default 10). Results
   carry `name`, `description`, `currently_callable` and `visibility_status`
-  (`loaded`, `deferred`, `blocked_by_filter`, `temporarily_unavailable`;
-  `pending_source` while a source is connecting).
+  (`loaded`, `deferred`, `temporarily_unavailable`;
+  `pending_source` while a source is connecting). A tool the session's tool
+  filters do not allow is not returned. A search whose tool scope cannot be
+  read returns no result, with `temporarily_unavailable` as its
+  `empty_result_status`.
 - `tool_catalog_load {names: [...]}`. Accepted names become callable at the
   next boundary. Rejections: `unknown_key`, `not_deferred_eligible`,
   `not_filterable`, `temporarily_unavailable`.

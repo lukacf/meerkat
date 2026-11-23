@@ -1913,7 +1913,11 @@ fn fresh_public_request_accepts_only_one_business_input_and_canonical_boundary_n
         ),
         (
             "results",
-            json!([{"name":OPERATION,"visibility_status":"blocked_by_filter"}]),
+            json!([{"name":OPERATION,"visibility_status":"temporarily_unavailable"}]),
+        ),
+        (
+            "results",
+            json!([{"name":OPERATION,"visibility_status":"not_a_status"}]),
         ),
     ] {
         let mut rejected = found.clone();

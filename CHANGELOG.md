@@ -35,6 +35,21 @@ them.
 
 ## [Unreleased]
 
+### Changed
+
+- Behaviour-only (not measured by the gate): `meerkat-tools`, `meerkat-core`:
+  session-filtered search and notices. `tool_catalog_search` returns no row
+  for a tool the session's tool filters do not allow and does not count it
+  in `total_matches` (it answered the tool's name and description with the
+  status `blocked_by_filter`, which is no longer produced), and the
+  deferred-catalog notice and its typed delta no longer name it. A search
+  whose tool scope cannot be read names no entry: it returns no result and
+  `temporarily_unavailable` as its `empty_result_status`, where it returned
+  one row per deferrable entry. This covers search and notices only. Tool
+  load and call behavior is unchanged. A reader of search results that
+  looked for a `blocked_by_filter` row to learn that a tool is denied finds
+  no row now; read a denial from the host's own tool policy.
+
 ## [0.9.18] - 2026-11-22
 
 ### Breaking

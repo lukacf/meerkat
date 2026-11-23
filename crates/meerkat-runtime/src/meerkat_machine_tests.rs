@@ -42986,13 +42986,25 @@ fn steer_prompt_from(text: &str, requester: Option<meerkat_core::PrincipalRef>) 
 }
 
 /// What a crash, or a graceful stop that kept the run, leaves of a person's
-/// durable run in `store`: the run's continuable tail (round zero's first
-/// commit, its staged call only in the run cursor, which binds the run's
-/// input) and the run's input, from `requester`, bound to the run and applied
-/// pending consumption. Returns the session and the run.
+/// durable run in `store`: the kept run of a prompt from `requester` (see
+/// [`a_kept_run_of`]). Returns the session and the run.
 async fn a_person_s_kept_run(
     store: &crate::store::InMemoryRuntimeStore,
     requester: meerkat_core::PrincipalRef,
+) -> (SessionId, RunId) {
+    let mut input = make_prompt("the person's prompt");
+    input.header_mut().requester = Some(requester);
+    a_kept_run_of(store, input).await
+}
+
+/// What a crash, or a graceful stop that kept the run, leaves of the durable
+/// run of `input` in `store`: the run's continuable tail (round zero's first
+/// commit, its staged call only in the run cursor, which binds the run's
+/// input) and the run's input, with its own requester, bound to the run and
+/// applied pending consumption. Returns the session and the run.
+async fn a_kept_run_of(
+    store: &crate::store::InMemoryRuntimeStore,
+    input: Input,
 ) -> (SessionId, RunId) {
     use meerkat_core::types::{
         AssistantBlock, BlockAssistantMessage, Message, StopReason, TranscriptMessageIdentity,
@@ -43019,8 +43031,6 @@ async fn a_person_s_kept_run(
         .cloned()
         .expect("the committed base has a WholeBlob authority");
 
-    let mut input = make_prompt("the person's prompt");
-    input.header_mut().requester = Some(requester.clone());
     let staged_call = BlockAssistantMessage {
         blocks: vec![AssistantBlock::ToolUse {
             id: "kept-call".to_string(),
@@ -43064,7 +43074,7 @@ async fn a_person_s_kept_run(
 
     let mut state = crate::input_state::InputState::new_accepted(input.id().clone());
     state.durability = Some(crate::input::InputDurability::Durable);
-    state.requester = Some(requester);
+    state.requester = input.header().requester.clone();
     let policy = crate::DefaultPolicyTable::resolve(&input, true);
     state.policy = Some(crate::input_state::PolicySnapshot {
         version: policy.policy_version,
@@ -43164,6 +43174,652 @@ async fn a_person_s_run_resumed_after_a_restart_keeps_the_person_s_key() {
             .driver_ingress()
             .live_boundary_joins_run_batch(&steer_id, &run_id),
         "a requester-less steer may not join the person's resumed run"
+    );
+}
+
+/// An attention continuation for `projection` of `binding`, as the host
+/// builds one.
+fn an_attention_continuation(projection: &str, binding: &str) -> Input {
+    use meerkat_core::lifecycle::run_primitive::{
+        ConversationAppend, ConversationAppendRole, CoreRenderable,
+    };
+
+    Input::Continuation(crate::input::ContinuationInput::workgraph_attention(
+        IdempotencyKey::new(projection),
+        crate::identifiers::SupersessionKey::new(binding),
+        meerkat_core::service::TurnToolOverlay {
+            dispatch_context: [(
+                "workgraph.attention_projection".to_string(),
+                serde_json::json!({ "projection": projection }),
+            )]
+            .into_iter()
+            .collect(),
+            ..meerkat_core::service::TurnToolOverlay::default()
+        },
+        ConversationAppend {
+            runtime_source: None,
+            role: ConversationAppendRole::SystemNotice,
+            content: CoreRenderable::Text {
+                text: format!("attention turn for {projection}"),
+            },
+            identity: None,
+        },
+    ))
+}
+
+/// A durable peer message of the queue lane: no prompt, and no turn
+/// settings of its own.
+fn a_peer_message_that_waits(label: &str) -> Input {
+    Input::Peer(crate::input::PeerInput {
+        directed_interaction_id: None,
+        objective_id: None,
+        system_prompts: Vec::new(),
+        injected_context: Vec::new(),
+        sender_taint: None,
+        header: crate::input::InputHeader {
+            ingress_context: None,
+            retained_resume: None,
+            authority_association: None,
+            id: InputId::new(),
+            timestamp: Utc::now(),
+            source: crate::input::InputOrigin::Peer {
+                peer_id: "peer-1".into(),
+                display_identity: None,
+                runtime_id: None,
+            },
+            durability: crate::input::InputDurability::Durable,
+            visibility: crate::input::InputVisibility::default(),
+            idempotency_key: None,
+            supersession_key: None,
+            correlation_id: None,
+            requester: None,
+        },
+        convention: Some(crate::input::PeerConvention::Message),
+        content: format!("a message from a peer: {label}").into(),
+        payload: None,
+        handling_mode: None,
+        in_reply_to: None,
+    })
+}
+
+/// A run in flight for `input`: a session accepted it, and the runtime
+/// loop's plan staged it alone into a run. Returns the machine (kept alive
+/// for the driver), the session's driver and the run.
+async fn a_run_in_flight_for(input: Input) -> (MeerkatMachine, SharedDriver, RunId) {
+    let adapter = MeerkatMachine::ephemeral();
+    let session_id = SessionId::new();
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
+    let input_id = input.id().clone();
+    assert!(
+        adapter
+            .accept_input(&session_id, input)
+            .await
+            .expect("the input is answered")
+            .is_accepted()
+    );
+    let driver = {
+        let sessions = adapter.sessions.read().await;
+        Arc::clone(
+            &sessions
+                .get(&session_id)
+                .expect("registered session")
+                .driver,
+        )
+    };
+    let run_id = RunId::new();
+    let batch = {
+        let entry = driver.lock().await;
+        machine_authorize_runtime_loop_batch(&entry).expect("the accepted input is a batch")
+    };
+    assert_eq!(batch.input_ids(), std::slice::from_ref(&input_id));
+    let outcome = prepare_runtime_loop_batch_start(
+        &driver,
+        run_id.clone(),
+        batch,
+        crate::meerkat_machine::RunlessTerminalAnnouncement::default(),
+    )
+    .await
+    .expect("the run's start is answered");
+    assert!(
+        matches!(
+            outcome,
+            crate::meerkat_machine::driver::RuntimeLoopBatchStart::Started
+        ),
+        "the run stages the accepted input, got {outcome:?}"
+    );
+    (adapter, driver, run_id)
+}
+
+/// A durable Steer arrives while the turn of `input` is parked at its model
+/// boundary: the machine's answer to the join, and the runtime's own
+/// predicate for it.
+async fn a_durable_steer_offered_to_the_turn_of(input: Input) -> (Result<(), String>, bool) {
+    let (_adapter, driver, run_id) = a_run_in_flight_for(input).await;
+    let steer = resumed_run_durable_steer();
+    let steer_id = steer.id().clone();
+    let mut driver = driver.lock().await;
+    assert!(
+        driver
+            .as_driver_mut()
+            .accept_input(steer)
+            .await
+            .expect("the durable Steer is accepted")
+            .is_accepted()
+    );
+    let authority = driver.shared_dsl_authority();
+    {
+        let mut owner = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        mm_dsl::MeerkatMachineMutator::apply(
+            &mut *owner,
+            mm_dsl::MeerkatMachineInput::StartConversationRun {
+                run_id: mm_dsl::RunId::from_domain(&run_id),
+                primitive_kind: mm_dsl::TurnPrimitiveKind::ConversationTurn,
+                admitted_content_shape: mm_dsl::ContentShape::Conversation,
+                vision_enabled: false,
+                image_tool_results_enabled: false,
+                max_extraction_retries: 0,
+            },
+        )
+        .expect("the turn starts");
+        mm_dsl::MeerkatMachineMutator::apply(
+            &mut *owner,
+            mm_dsl::MeerkatMachineInput::PrimitiveApplied {
+                run_id: mm_dsl::RunId::from_domain(&run_id),
+            },
+        )
+        .expect("the turn parks at its model boundary");
+        let state = owner.state();
+        assert_eq!(state.turn_phase, mm_dsl::TurnPhase::CallingLlm);
+        assert_eq!(
+            state
+                .input_live_boundary_delivery
+                .get(&steer_id.to_string()),
+            Some(&mm_dsl::LiveBoundaryDelivery::DurableAppend),
+            "the Steer is a durable join candidate"
+        );
+    }
+    let joined = MeerkatMachine::preview_dsl_input_on_shared_authority(
+        &authority,
+        mm_dsl::MeerkatMachineInput::JoinLiveBoundaryDurableAppend {
+            run_id: mm_dsl::RunId::from_domain(&run_id),
+            input_id: steer_id.to_string(),
+        },
+        "JoinLiveBoundaryDurableAppend",
+    )
+    .map(|_| ());
+    let shell_predicate = driver
+        .driver_ingress()
+        .live_boundary_joins_run_batch(&steer_id, &run_id);
+    (joined, shell_predicate)
+}
+
+/// The same Steer joins the turn of an input that carries no attention
+/// projection, as before.
+#[tokio::test]
+async fn a_steer_that_arrives_during_a_peer_message_s_turn_joins_it() {
+    let (joined, shell_predicate) =
+        a_durable_steer_offered_to_the_turn_of(a_peer_message_that_waits("the turn that runs"))
+            .await;
+    joined.expect("the machine takes the join into a peer message's turn");
+    assert!(
+        shell_predicate,
+        "the runtime offers the Steer to the peer message's turn"
+    );
+}
+
+/// Request-only context arrives while the turn of `input` is in flight: the
+/// machine's answer to its receipt, and the runtime's own predicate.
+async fn request_only_context_offered_to_the_turn_of(input: Input) -> (Result<(), String>, bool) {
+    let (_adapter, driver, run_id) = a_run_in_flight_for(input).await;
+    let completion =
+        Input::Continuation(crate::input::ContinuationInput::detached_background_op_completed());
+    let completion_id = completion.id().clone();
+    let mut driver = driver.lock().await;
+    assert!(
+        driver
+            .as_driver_mut()
+            .accept_input(completion)
+            .await
+            .expect("the background completion is accepted")
+            .is_accepted()
+    );
+    let receipt = MeerkatMachine::preview_dsl_input_on_shared_authority(
+        &driver.shared_dsl_authority(),
+        mm_dsl::MeerkatMachineInput::ResolveLiveBoundaryContextReceipt {
+            run_id: mm_dsl::RunId::from_domain(&run_id),
+            input_id: completion_id.to_string(),
+        },
+        "ResolveLiveBoundaryContextReceipt",
+    )
+    .map(|_| ());
+    let shell_predicate = driver
+        .driver_ingress()
+        .live_boundary_joins_run_batch(&completion_id, &run_id);
+    (receipt, shell_predicate)
+}
+
+/// The same context enters the turn of an input that carries no attention
+/// projection, as before.
+#[tokio::test]
+async fn request_only_context_enters_a_peer_message_s_turn() {
+    let (receipt, shell_predicate) =
+        request_only_context_offered_to_the_turn_of(a_peer_message_that_waits("the turn")).await;
+    receipt.expect("the machine takes the context into a peer message's turn");
+    assert!(
+        shell_predicate,
+        "the runtime offers the context to the peer message's turn"
+    );
+}
+
+/// The run of `input` was in flight at a restart and resumes: whether the
+/// runtime offers a Steer that arrives then to the resumed run.
+async fn a_steer_offered_to_the_run_resumed_after_a_restart(input: Input) -> bool {
+    let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
+    let (session_id, run_id) = a_kept_run_of(&store, input).await;
+    let machine = MeerkatMachine::persistent(
+        Arc::clone(&store) as Arc<dyn RuntimeStore>,
+        memory_blob_store(),
+    )
+    .expect("persistent machine");
+    machine
+        .register_session(session_id.clone())
+        .await
+        .expect("the restart recovers the run's durable state");
+    assert_eq!(
+        machine.resumable_run_id(&session_id).await,
+        Some(run_id.clone()),
+        "the restart keeps the run resumable"
+    );
+    let driver = {
+        let sessions = machine.sessions.read().await;
+        Arc::clone(
+            &sessions
+                .get(&session_id)
+                .expect("registered session")
+                .driver,
+        )
+    };
+    let mut entry = driver.lock().await;
+    assert!(
+        matches!(
+            crate::meerkat_machine::driver::machine_begin_resumed_run(&mut entry, &run_id)
+                .expect("the run resumes"),
+            crate::meerkat_machine::driver::ResumedRunStart::Started { .. }
+        ),
+        "the run resumes under its own id"
+    );
+    let steer = steer_prompt_from("a steer during the resumed turn", None);
+    let steer_id = steer.id().clone();
+    assert!(
+        entry
+            .as_driver_mut()
+            .accept_input(steer)
+            .await
+            .expect("the steer is accepted")
+            .is_accepted()
+    );
+    entry
+        .driver_ingress()
+        .live_boundary_joins_run_batch(&steer_id, &run_id)
+}
+
+/// The resumed run of an input that carries no attention projection takes
+/// the same Steer, as before.
+#[tokio::test]
+async fn a_peer_message_s_run_resumed_after_a_restart_takes_a_join() {
+    assert!(
+        a_steer_offered_to_the_run_resumed_after_a_restart(a_peer_message_that_waits(
+            "the turn in flight at the restart"
+        ))
+        .await,
+        "a steer may join the peer message's resumed run"
+    );
+}
+
+/// The recovery witness takes a stored row only with a pair of stamps an
+/// admission writes: a continuation stored as resume-pending; a
+/// continuation stored as a content turn at a run's start; any other kind
+/// stored as a content turn. A continuation stored as a content turn at
+/// another boundary, and another kind stored as resume-pending, are
+/// refused.
+#[test]
+fn the_recovery_witness_takes_a_stored_row_by_the_stamps_an_admission_writes() {
+    use mm_dsl::RecoveredInputKind as Kind;
+    use mm_dsl::RecoveredRunApplyBoundary as Boundary;
+    use mm_dsl::RecoveredRuntimeExecutionKind as Execution;
+
+    let driver = DriverEntry::Ephemeral(EphemeralRuntimeDriver::new(LogicalRuntimeId::new(
+        "recovery-witness-stamps",
+    )));
+    let witness = |input_kind: Kind, runtime_execution_kind: Execution, boundary: Boundary| {
+        MeerkatMachine::preview_dsl_input_on_shared_authority(
+            &driver.shared_dsl_authority(),
+            mm_dsl::MeerkatMachineInput::RecoverAdmittedInput {
+                input_id: InputId::new().to_string(),
+                input_kind,
+                runtime_boundary: boundary,
+                runtime_execution_kind,
+                runtime_peer_response_terminal_apply_intent: None,
+                // The Steer lane, so that the immediate boundary's own guard
+                // refuses nothing here.
+                lane: mm_dsl::InputLane::Steer,
+            },
+            "RecoverAdmittedInput",
+        )
+        .map(|_| ())
+    };
+    for (input_kind, runtime_execution_kind, boundary, taken) in [
+        (
+            Kind::Continuation,
+            Execution::ResumePending,
+            Boundary::RunStart,
+            true,
+        ),
+        // The stamps an ordinary continuation's admission writes.
+        (
+            Kind::Continuation,
+            Execution::ResumePending,
+            Boundary::RunCheckpoint,
+            true,
+        ),
+        (
+            Kind::Continuation,
+            Execution::ContentTurn,
+            Boundary::RunStart,
+            true,
+        ),
+        (
+            Kind::Continuation,
+            Execution::ContentTurn,
+            Boundary::RunCheckpoint,
+            false,
+        ),
+        (
+            Kind::Continuation,
+            Execution::ContentTurn,
+            Boundary::Immediate,
+            false,
+        ),
+        (
+            Kind::PeerMessage,
+            Execution::ContentTurn,
+            Boundary::RunStart,
+            true,
+        ),
+        (
+            Kind::PeerMessage,
+            Execution::ContentTurn,
+            Boundary::RunCheckpoint,
+            true,
+        ),
+        (
+            Kind::PeerMessage,
+            Execution::ResumePending,
+            Boundary::RunStart,
+            false,
+        ),
+    ] {
+        let answer = witness(input_kind, runtime_execution_kind, boundary);
+        assert_eq!(
+            answer.is_ok(),
+            taken,
+            "{input_kind:?} stored as {runtime_execution_kind:?} at {boundary:?}: {answer:?}"
+        );
+        if let Err(refusal) = answer {
+            assert!(
+                refusal.contains("guard rejected"),
+                "a generated guard refuses the witness: {refusal}"
+            );
+        }
+    }
+}
+
+/// What the machine answers and records when a continuation's admission
+/// plan is resolved with `named` as the earlier input of its key: the plan's
+/// existing action, target and queue mode, and the action and target the
+/// machine then holds authorized for the continuation.
+struct AttentionPlanAnswer {
+    emitted_action: mm_dsl::AdmissionExistingQueuedActionKind,
+    emitted_target: Option<String>,
+    queue_mode: mm_dsl::AdmissionPolicyQueueMode,
+    authorized_action: Option<mm_dsl::AdmissionExistingQueuedActionKind>,
+    authorized_target: Option<String>,
+}
+
+fn resolve_attention_plan_naming(
+    driver: &DriverEntry,
+    continuation: &Input,
+    named: Option<&InputId>,
+) -> AttentionPlanAnswer {
+    let authority = driver.shared_dsl_authority();
+    let mut owner = authority
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let running = owner.state().lifecycle_phase == mm_dsl::MeerkatPhase::Running;
+    let plan = crate::accept::MachineAdmissionAuthority::new(
+        continuation.id().to_string(),
+        mm_dsl::AdmissionInputKind::from(continuation.kind()),
+        continuation.handling_mode().map(mm_dsl::InputLane::from),
+        mm_dsl::AdmissionContinuationKind::from(continuation.continuation_kind()),
+        crate::input::admission_turn_append_shape(continuation),
+        false,
+        named.cloned(),
+        running,
+        false,
+        false,
+    )
+    .to_dsl_input();
+    let transition = mm_dsl::MeerkatMachineMutator::apply(&mut *owner, plan)
+        .expect("the attention arm resolves the plan");
+    let (emitted_action, emitted_target, queue_mode) = transition
+        .effects()
+        .iter()
+        .find_map(|effect| match effect {
+            mm_dsl::MeerkatMachineEffect::AdmissionResolved {
+                existing_action,
+                existing_input_id,
+                policy_queue_mode,
+                ..
+            } => Some((
+                *existing_action,
+                existing_input_id.clone(),
+                *policy_queue_mode,
+            )),
+            _ => None,
+        })
+        .expect("the resolved plan is emitted");
+    let key = continuation.id().to_string();
+    let state = owner.state();
+    AttentionPlanAnswer {
+        emitted_action,
+        emitted_target,
+        queue_mode,
+        authorized_action: state
+            .admission_authorized_existing_actions
+            .get(&key)
+            .copied(),
+        authorized_target: state
+            .admission_authorized_existing_targets
+            .get(&key)
+            .cloned(),
+    }
+}
+
+/// The attention arm authorizes superseding only for ANOTHER input that
+/// STILL WAITS. Named itself, named an input the machine does not track,
+/// named an input that was staged, or named nothing, a continuation is
+/// admitted and supersedes nothing: it is never refused for it. What the
+/// plan emits and what the machine holds authorized agree in every case.
+#[tokio::test]
+async fn the_attention_arm_supersedes_only_another_input_that_still_waits() {
+    use mm_dsl::AdmissionExistingQueuedActionKind as Action;
+
+    let mut driver = DriverEntry::Ephemeral(EphemeralRuntimeDriver::new(LogicalRuntimeId::new(
+        "attention-arm-supersede",
+    )));
+    let waiting = an_attention_continuation("projection-1", "binding-1");
+    let waiting_id = waiting.id().clone();
+    assert!(
+        driver
+            .as_driver_mut()
+            .accept_input(waiting.clone())
+            .await
+            .expect("the first continuation is answered")
+            .is_accepted()
+    );
+
+    // Another input that still waits: superseded.
+    let later = an_attention_continuation("projection-2", "binding-1");
+    let answer = resolve_attention_plan_naming(&driver, &later, Some(&waiting_id));
+    assert_eq!(answer.emitted_action, Action::Supersede);
+    assert_eq!(answer.emitted_target, Some(waiting_id.to_string()));
+    assert_eq!(answer.authorized_action, Some(Action::Supersede));
+    assert_eq!(answer.authorized_target, Some(waiting_id.to_string()));
+    assert_eq!(
+        answer.queue_mode,
+        mm_dsl::AdmissionPolicyQueueMode::Supersede,
+        "the plan states the continuation's queue mode"
+    );
+
+    // Named itself, an untracked input, or nothing: admitted, nothing
+    // superseded.
+    let untracked = InputId::new();
+    for (case, continuation, named) in [
+        ("itself", waiting.clone(), Some(&waiting_id)),
+        (
+            "an untracked input",
+            an_attention_continuation("projection-3", "binding-1"),
+            Some(&untracked),
+        ),
+        (
+            "nothing",
+            an_attention_continuation("projection-4", "binding-1"),
+            None,
+        ),
+    ] {
+        let answer = resolve_attention_plan_naming(&driver, &continuation, named);
+        assert_eq!(answer.emitted_action, Action::None, "named {case}");
+        assert_eq!(answer.emitted_target, None, "named {case}");
+        assert_eq!(answer.authorized_action, None, "named {case}");
+        assert_eq!(answer.authorized_target, None, "named {case}");
+    }
+
+    // An input that was staged: admitted beside it, nothing superseded.
+    let staged = an_attention_continuation("projection-5", "binding-2");
+    let staged_id = staged.id().clone();
+    let (_adapter, staged_driver, _run_id) = a_run_in_flight_for(staged).await;
+    let staged_driver = staged_driver.lock().await;
+    assert_eq!(
+        staged_driver
+            .shared_dsl_authority()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .state()
+            .input_phases
+            .get(&staged_id.to_string()),
+        Some(&mm_dsl::InputPhase::Staged),
+        "the named continuation is staged"
+    );
+    let answer = resolve_attention_plan_naming(
+        &staged_driver,
+        &an_attention_continuation("projection-6", "binding-2"),
+        Some(&staged_id),
+    );
+    assert_eq!(answer.emitted_action, Action::None, "named a staged input");
+    assert_eq!(answer.emitted_target, None, "named a staged input");
+    assert_eq!(answer.authorized_action, None, "named a staged input");
+    assert_eq!(answer.authorized_target, None, "named a staged input");
+}
+
+/// The machine supersedes only an input that still waits, whatever an
+/// earlier resolution authorized: once the named input is staged, the
+/// supersede is refused and the staged input keeps its turn.
+#[tokio::test]
+async fn supersede_is_refused_for_an_input_that_no_longer_waits() {
+    let adapter = MeerkatMachine::ephemeral();
+    let session_id = SessionId::new();
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
+    let earlier = an_attention_continuation("projection-1", "binding-1");
+    let earlier_id = earlier.id().clone();
+    assert!(
+        adapter
+            .accept_input(&session_id, earlier)
+            .await
+            .expect("the earlier continuation is answered")
+            .is_accepted()
+    );
+    let driver = {
+        let sessions = adapter.sessions.read().await;
+        Arc::clone(
+            &sessions
+                .get(&session_id)
+                .expect("registered session")
+                .driver,
+        )
+    };
+    let later = an_attention_continuation("projection-2", "binding-1");
+    let supersede = |entry: &DriverEntry| {
+        MeerkatMachine::preview_dsl_input_on_shared_authority(
+            &entry.shared_dsl_authority(),
+            mm_dsl::MeerkatMachineInput::SupersedeInput {
+                input_id: earlier_id.to_string(),
+                superseded_by: later.id().to_string(),
+            },
+            "SupersedeInput",
+        )
+        .map(|_| ())
+    };
+    {
+        let entry = driver.lock().await;
+        let answer = resolve_attention_plan_naming(&entry, &later, Some(&earlier_id));
+        assert_eq!(
+            answer.authorized_action,
+            Some(mm_dsl::AdmissionExistingQueuedActionKind::Supersede),
+            "the later continuation is authorized to supersede the one that waits"
+        );
+        supersede(&entry).expect("the supersede is taken while the earlier one waits");
+    }
+
+    let run_id = RunId::new();
+    let batch = {
+        let entry = driver.lock().await;
+        machine_authorize_runtime_loop_batch(&entry).expect("the earlier continuation is a batch")
+    };
+    assert_eq!(batch.input_ids(), std::slice::from_ref(&earlier_id));
+    let outcome = prepare_runtime_loop_batch_start(
+        &driver,
+        run_id,
+        batch,
+        crate::meerkat_machine::RunlessTerminalAnnouncement::default(),
+    )
+    .await
+    .expect("the run's start is answered");
+    assert!(
+        matches!(
+            outcome,
+            crate::meerkat_machine::driver::RuntimeLoopBatchStart::Started
+        ),
+        "the earlier continuation is staged, got {outcome:?}"
+    );
+
+    let entry = driver.lock().await;
+    let refusal =
+        supersede(&entry).expect_err("the machine refuses to supersede an input that was staged");
+    // A generated refusal names the transition's input, never the guard that
+    // refused. The guard this row pins is `superseded_input_is_queued`:
+    // without it the supersede is taken here, since every other guard of the
+    // transition still holds for the staged input.
+    assert!(
+        refusal.contains("guard rejected transition") && refusal.contains("input::SupersedeInput"),
+        "a guard of the supersede transition refuses it: {refusal}"
     );
 }
 

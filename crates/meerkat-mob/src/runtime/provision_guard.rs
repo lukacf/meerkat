@@ -1207,4 +1207,46 @@ mod tests {
         assert!(!provisioner.retired.load(Ordering::Acquire));
         assert!(!provisioner.restored.load(Ordering::Acquire));
     }
+
+    /// A provisioner that brings no way to admit a WorkGraph attention
+    /// continuation refuses one, typed, and says what it does not support.
+    #[cfg(feature = "runtime-adapter")]
+    #[tokio::test]
+    async fn a_provisioner_without_an_attention_continuation_admission_refuses_one() {
+        use meerkat_core::lifecycle::run_primitive::{
+            ConversationAppend, ConversationAppendRole, CoreRenderable,
+        };
+
+        let provisioner = MockProvisioner::new();
+        let continuation = meerkat_runtime::ContinuationInput::workgraph_attention(
+            meerkat_runtime::IdempotencyKey::new("a-projection"),
+            meerkat_runtime::SupersessionKey::new("a-binding"),
+            meerkat_core::service::TurnToolOverlay::default(),
+            ConversationAppend {
+                runtime_source: None,
+                role: ConversationAppendRole::SystemNotice,
+                content: CoreRenderable::Text {
+                    text: "attention turn".to_string(),
+                },
+                identity: None,
+            },
+        );
+        let (completion_tx, _completion_rx) = tokio::sync::oneshot::channel();
+
+        let refused = provisioner
+            .admit_attention_continuation(
+                &MemberRef::from_bridge_session_id(SessionId::new()),
+                continuation,
+                completion_tx,
+            )
+            .await;
+
+        match refused {
+            Err(MobError::UnsupportedForMode { reason, .. }) => assert_eq!(
+                reason,
+                "a WorkGraph attention continuation is not supported by this provisioner"
+            ),
+            other => panic!("the provisioner admits no continuation: {other:?}"),
+        }
+    }
 }

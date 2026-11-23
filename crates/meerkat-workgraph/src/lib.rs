@@ -46,7 +46,10 @@ pub use rest_contract::{
     WorkGraphRestRoute, workgraph_rest_path_catalog, workgraph_rest_request_response_schema,
     workgraph_rest_response_schema,
 };
-pub use service::{AttentionTargetRealmResolver, WorkExecutionBridge, WorkGraphService};
+pub use service::{
+    AttentionTargetRealmResolver, WorkExecutionBridge, WorkGraphCommitNotice,
+    WorkGraphCommitObserver, WorkGraphCommitOrigin, WorkGraphService,
+};
 pub use store::{
     DisabledWorkGraphStore, MemoryWorkGraphStore, WorkGraphAdmissionFence, WorkGraphEventFilter,
     WorkGraphNamespaceRead, WorkGraphStore, WorkGraphStoreKind, WorkItemAdmissionInsert,

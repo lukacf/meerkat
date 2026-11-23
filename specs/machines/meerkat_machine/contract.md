@@ -14172,6 +14172,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `SupersedeInput`(input_id, superseded_by)
 - Guards:
   - `input_tracked`
+  - `superseded_input_is_queued`
   - `input_not_live_boundary_joined`
   - `live_admission_authorized_supersede_target`
   - `same_input_authority`
@@ -14183,6 +14184,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `SupersedeInput`(input_id, superseded_by)
 - Guards:
   - `input_tracked`
+  - `superseded_input_is_queued`
   - `input_not_live_boundary_joined`
   - `live_admission_authorized_supersede_target`
   - `same_input_authority`
@@ -14194,6 +14196,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `SupersedeInput`(input_id, superseded_by)
 - Guards:
   - `input_tracked`
+  - `superseded_input_is_queued`
   - `input_not_live_boundary_joined`
   - `live_admission_authorized_supersede_target`
   - `same_input_authority`
@@ -14205,6 +14208,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `SupersedeInput`(input_id, superseded_by)
 - Guards:
   - `input_tracked`
+  - `superseded_input_is_queued`
   - `input_not_live_boundary_joined`
   - `live_admission_authorized_supersede_target`
   - `same_input_authority`
@@ -14216,6 +14220,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `SupersedeInput`(input_id, superseded_by)
 - Guards:
   - `input_tracked`
+  - `superseded_input_is_queued`
   - `input_not_live_boundary_joined`
   - `live_admission_authorized_supersede_target`
   - `same_input_authority`

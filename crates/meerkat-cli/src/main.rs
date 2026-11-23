@@ -13697,26 +13697,7 @@ async fn validate_cli_workgraph_attention_overlay(
     workgraph_service: Option<&meerkat::WorkGraphService>,
     overlay: Option<&meerkat_core::service::TurnToolOverlay>,
 ) -> Result<(), meerkat_core::lifecycle::core_executor::CoreExecutorError> {
-    let Some(workgraph_service) = workgraph_service else {
-        return Ok(());
-    };
-    let projection = meerkat::workgraph_attention_projection_from_overlay(overlay).map_err(
-        |error| {
-            meerkat_core::lifecycle::core_executor::CoreExecutorError::apply_failed_primitive_rejected(
-                error.to_string(),
-            )
-        },
-    )?;
-    let Some(projection) = projection else {
-        return Ok(());
-    };
-    meerkat::validate_workgraph_attention_projection_current(workgraph_service, &projection)
-        .await
-        .map_err(|error| {
-            meerkat_core::lifecycle::core_executor::CoreExecutorError::apply_failed_primitive_rejected(
-                error.to_string(),
-            )
-        })
+    meerkat::surface::validate_workgraph_attention_turn_overlay(workgraph_service, overlay).await
 }
 
 struct CliRuntimeBoundaryHandle {

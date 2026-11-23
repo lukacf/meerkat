@@ -2069,6 +2069,28 @@ pub trait MobProvisioner: Send + Sync {
             reason: "governed input is not supported by this provisioner".to_string(),
         })
     }
+    /// Admit one WorkGraph attention continuation to the member's session
+    /// through native admission, as a continuation: no turn request and no
+    /// prompt is built from it. A second handover of the same continuation
+    /// (the same idempotency key) is answered with the admission of the
+    /// first. Returns the session's canonical admission unchanged; a
+    /// refusal stays the runtime's typed verdict. An implementation that
+    /// admits no continuation refuses, and nothing is handed over: that is
+    /// this default.
+    #[cfg(feature = "runtime-adapter")]
+    async fn admit_attention_continuation(
+        &self,
+        member_ref: &MemberRef,
+        input: meerkat_runtime::ContinuationInput,
+        completion_tx: super::handle::ExactTurnCompletionSender,
+    ) -> Result<super::handle::MemberInputAdmission, MobError> {
+        let _ = (member_ref, input, completion_tx);
+        Err(MobError::UnsupportedForMode {
+            mode: crate::MobRuntimeMode::TurnDriven,
+            reason: "a WorkGraph attention continuation is not supported by this provisioner"
+                .to_string(),
+        })
+    }
     async fn admit_turn_for_operation(
         &self,
         member_ref: &MemberRef,
@@ -7686,6 +7708,20 @@ fn runtime_completion_to_exact_turn(
             terminal,
         });
     }
+    // A wait answered "a later input superseded this one" is a terminal of
+    // its own, typed from the answer; no error text is made from it.
+    let completion = match completion {
+        Err(meerkat_runtime::completion::CompletionWaitError::Superseded { superseded_by }) => {
+            return Ok(super::handle::ExactTurnCompletion {
+                session_id: session_id.clone(),
+                terminal: super::handle::ExactTurnTerminal::Superseded {
+                    input_id: input_id.clone(),
+                    superseded_by,
+                },
+            });
+        }
+        other => other,
+    };
     let outcome = completion.map_err(|error| {
         MobError::Internal(format!("runtime completion waiter failed: {error}"))
     })?;
@@ -12555,6 +12591,53 @@ mod tests {
         }
     }
 
+    /// A wait that was answered "a later input superseded this one while it
+    /// waited" reaches the exact-turn carrier as a terminal of its own that
+    /// names both inputs: never an internal error made from the wait
+    /// answer's text. The adapter of a plain mob result answers an internal
+    /// error that names neither input: no typed public answer is defined for
+    /// a superseded member turn.
+    #[test]
+    fn a_superseded_wait_reaches_the_exact_turn_carrier_as_a_value() {
+        use super::super::handle::ExactTurnTerminal;
+        let session_id = SessionId::new();
+        let input_id = meerkat_core::lifecycle::InputId::new();
+        let later = meerkat_core::lifecycle::InputId::new();
+        let superseded_wait = || {
+            Err(
+                meerkat_runtime::completion::CompletionWaitError::Superseded {
+                    superseded_by: later.clone(),
+                },
+            )
+        };
+        let superseded =
+            runtime_completion_to_exact_turn(&session_id, &input_id, superseded_wait(), None)
+                .expect("a superseded wait is carried typed, not as an internal error");
+        assert_eq!(superseded.session_id, session_id);
+        assert!(
+            matches!(
+                &superseded.terminal,
+                ExactTurnTerminal::Superseded { input_id: carried, superseded_by }
+                    if carried == &input_id && superseded_by == &later
+            ),
+            "the carrier names the superseded input and the one that replaced it: {superseded:?}"
+        );
+
+        match runtime_completion_to_mob_result(&session_id, &input_id, superseded_wait(), None) {
+            Err(MobError::Internal(text)) => {
+                assert!(
+                    !text.contains(&input_id.to_string()) && !text.contains(&later.to_string()),
+                    "the internal error names no input: {text}"
+                );
+                assert!(
+                    !text.contains("runtime completion waiter failed"),
+                    "the internal error is not made from the wait answer's text: {text}"
+                );
+            }
+            other => panic!("expected an internal error that names no input, got {other:?}"),
+        }
+    }
+
     #[test]
     fn committed_parent_projection_requires_fresh_successful_runtime_completion() {
         let success = Ok(meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult);
@@ -14039,6 +14122,20 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
                 self.bridge_session_id
             )));
         }
+        // An input stored with a WorkGraph attention projection is turned
+        // away when the store no longer holds that projection as current:
+        // the member's model is not called under a binding that was stopped,
+        // paused, reassigned or revised after the input was made. It is
+        // refused before the turn's context is taken, as the first check of
+        // this apply is. The overlay injected further down is read from the
+        // store at this apply and needs no such check.
+        meerkat::surface::validate_workgraph_attention_turn_overlay(
+            self.workgraph_service.as_ref(),
+            primitive
+                .turn_metadata()
+                .and_then(|meta| meta.turn_tool_overlay.as_ref()),
+        )
+        .await?;
 
         let contributing_input_ids = primitive.contributing_input_ids().to_vec();
         let queued_context = self
@@ -14294,9 +14391,19 @@ impl SessionBackend {
         ) && build.workgraph_tools.is_none()
         {
             build.workgraph_namespace_grant = Some(workgraph.namespace_grant().clone());
-            build.workgraph_tools = Some(Arc::new(meerkat::WorkGraphToolSurface::new(
-                workgraph.clone(),
-            )));
+            // The member's own copy of the service says who writes through
+            // it: its commit notices carry the member's key, lowered from
+            // the build's member binding, never from a tool argument. A
+            // build with no member binding writes unattributed.
+            let members_own = match build.mob_member_binding.as_ref().and_then(|binding| {
+                meerkat::WorkOwnerKey::mob_agent(&binding.mob_id, &binding.member).ok()
+            }) {
+                Some(key) => workgraph
+                    .clone()
+                    .with_commit_origin(meerkat::WorkGraphCommitOrigin::Member(key)),
+                None => workgraph.clone(),
+            };
+            build.workgraph_tools = Some(Arc::new(meerkat::WorkGraphToolSurface::new(members_own)));
         }
         // Every member build carries its external tools inside this runtime's
         // receiver for its session, whatever the member's mob tools: the
@@ -16565,6 +16672,46 @@ impl MobProvisioner for SessionBackend {
         .ok_or_else(|| {
             MobError::Internal(format!(
                 "governed input admission returned no canonical input: {session_id}"
+            ))
+        })
+    }
+
+    #[cfg(feature = "runtime-adapter")]
+    async fn admit_attention_continuation(
+        &self,
+        member_ref: &MemberRef,
+        input: meerkat_runtime::ContinuationInput,
+        completion_tx: super::handle::ExactTurnCompletionSender,
+    ) -> Result<super::handle::MemberInputAdmission, MobError> {
+        let session_id = Self::require_session(member_ref, "admit attention continuation")?;
+        if self.runtime_adapter.is_none() {
+            return Err(MobError::UnsupportedForMode {
+                mode: crate::MobRuntimeMode::TurnDriven,
+                reason: "a WorkGraph attention continuation requires a runtime-backed member"
+                    .to_string(),
+            });
+        }
+        if input.continuation_kind != meerkat_runtime::ContinuationKind::WorkgraphAttention {
+            return Err(MobError::UnsupportedForMode {
+                mode: crate::MobRuntimeMode::TurnDriven,
+                reason: "only a WorkGraph attention continuation is admitted here".to_string(),
+            });
+        }
+        // A second handover is matched by the continuation's own key: it
+        // names the projection the continuation was made from.
+        self.admit_runtime_input_with_replay_policy(
+            &session_id,
+            Input::Continuation(input),
+            None,
+            Some(completion_tx),
+            None,
+            meerkat_runtime::accept::InputReplayPolicy::KeyOnly,
+            None,
+        )
+        .await?
+        .ok_or_else(|| {
+            MobError::Internal(format!(
+                "attention continuation admission returned no canonical input: {session_id}"
             ))
         })
     }
@@ -21130,6 +21277,26 @@ impl MobProvisioner for MultiBackendProvisioner {
             MemberRef::BackendPeer { .. } => Err(MobError::UnsupportedForMode {
                 mode: crate::MobRuntimeMode::TurnDriven,
                 reason: "governed input requires a local session-backed member".to_string(),
+            }),
+        }
+    }
+
+    #[cfg(feature = "runtime-adapter")]
+    async fn admit_attention_continuation(
+        &self,
+        member_ref: &MemberRef,
+        input: meerkat_runtime::ContinuationInput,
+        completion_tx: super::handle::ExactTurnCompletionSender,
+    ) -> Result<super::handle::MemberInputAdmission, MobError> {
+        match member_ref {
+            MemberRef::Session { .. } => {
+                self.session
+                    .admit_attention_continuation(member_ref, input, completion_tx)
+                    .await
+            }
+            MemberRef::BackendPeer { .. } => Err(MobError::UnsupportedForMode {
+                mode: crate::MobRuntimeMode::TurnDriven,
+                reason: super::state::ATTENTION_CONTINUATION_NEEDS_LOCAL_SESSION.to_string(),
             }),
         }
     }

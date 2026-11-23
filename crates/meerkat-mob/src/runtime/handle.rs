@@ -3690,7 +3690,33 @@ pub(crate) enum ExactTurnTerminal {
     RequeueExpired {
         input_id: meerkat_core::lifecycle::InputId,
     },
+    /// A later input of the admitted input's supersession key replaced it
+    /// while it still waited: it ended superseded and does not run
+    /// ([`meerkat_runtime::completion::CompletionWaitError::Superseded`]).
+    /// Only a WorkGraph attention continuation ends this way, and the mob
+    /// admits one only through its crate-private hand-over. A governed-input
+    /// door admits through the exact-prompt replay contract, under which the
+    /// runtime refuses every input that is no prompt, so no turn a public
+    /// door hands out carries this terminal.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "nothing in this crate waits on a continuation it handed over yet"
+        )
+    )]
+    Superseded {
+        input_id: meerkat_core::lifecycle::InputId,
+        superseded_by: meerkat_core::lifecycle::InputId,
+    },
 }
+
+/// What the two public readers of an exact-turn completion answer for a
+/// superseded terminal: an internal error, because no typed public answer is
+/// defined for a superseded member turn. It is not a result of the turn and
+/// not a failure of its work. The text names no input.
+const SUPERSEDED_TURN_HAS_NO_PUBLIC_ANSWER: &str =
+    "the member turn's input was superseded by a later input while it waited; it does not run";
 
 pub(crate) type ExactTurnCompletionSender =
     tokio::sync::oneshot::Sender<Result<ExactTurnCompletion, MobError>>;
@@ -4141,6 +4167,7 @@ fn submit_work_payload(
         requester: spec.requester,
         sender_label: spec.sender_label,
         governed_input: None,
+        attention_continuation: None,
     }))
 }
 
@@ -5319,6 +5346,12 @@ fn bounded_exact_turn_result(
             session_id,
             input_id,
         }),
+        // A later input superseded this turn's input (see the terminal's
+        // doc). No typed public answer is defined for it.
+        ExactTurnTerminal::Superseded { .. } => Err(BoundedTurnFailure::CompletionPlumbing {
+            admitted_session_id: admitted_session_id.clone(),
+            error: MobError::Internal(SUPERSEDED_TURN_HAS_NO_PUBLIC_ANSWER.to_string()),
+        }),
         ExactTurnTerminal::PlacedBounded(result) => {
             let result_session_id = SessionId::parse(&result.session_id).map_err(|_| {
                 BoundedTurnFailure::ResultAttributionMismatch {
@@ -5549,6 +5582,13 @@ pub(crate) fn legacy_exact_turn_result(
                 session_id,
                 input_id,
             });
+        }
+        // A later input superseded this turn's input (see the terminal's
+        // doc). No typed public answer is defined for it.
+        ExactTurnTerminal::Superseded { .. } => {
+            return Err(MobError::Internal(
+                SUPERSEDED_TURN_HAS_NO_PUBLIC_ANSWER.to_string(),
+            ));
         }
     };
     match outcome {
@@ -14375,6 +14415,7 @@ impl MobHandle {
                 admission_tx,
                 custody,
             })),
+            attention_continuation: None,
         });
         self.send_actor_command(|reply_tx| MobCommand::SubmitWork { payload, reply_tx })
             .await??;
@@ -14382,6 +14423,124 @@ impl MobHandle {
         let admission = admission_rx.await.map_err(|_| {
             MobError::Internal(
                 "governed input was admitted without its canonical admission".to_string(),
+            )
+        })?;
+        Ok(MemberTurnHandle {
+            receipt: MemberDeliveryReceipt {
+                identity: identity.clone(),
+                agent_runtime_id: runtime_id,
+                fence_token,
+                handling_mode,
+                // The handle answers it (`MemberTurnHandle::admission`).
+                admission: None,
+            },
+            session_id: Some(session_id),
+            completion_rx,
+            llm_identity_applied_rx: None,
+            admission: Some(admission),
+        })
+    }
+
+    /// Hand one WorkGraph attention continuation to a member's current
+    /// session through its native admission, as internal work of the mob.
+    ///
+    /// It is ordinary internal work to the mob: the same MobMachine
+    /// SubmitWork admission and ingress effect, the same per-member
+    /// admission lane, ordering and wake (a member that is seated and not
+    /// materialized is woken for it, as for any delivery of content); only
+    /// the realization admits the continuation instead of building a turn
+    /// from content. No prompt is ever built from it. The answer comes once
+    /// the member's session admitted the continuation: the handle carries
+    /// the session's canonical admission, which says whether an earlier
+    /// handover of the same continuation was matched. Everything else is a
+    /// refusal and nothing was handed over: a member hosted elsewhere or
+    /// without a session binding ([`MobError::UnsupportedForMode`]), a wake
+    /// that was refused or failed, a provisioner that admits no
+    /// continuation, and the session's own refusal
+    /// ([`MobError::MemberInputRefused`]).
+    ///
+    /// Its one caller is the mob's idle pursuit, which exists on native
+    /// targets only.
+    #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+    pub(crate) async fn start_attention_continuation(
+        &self,
+        identity: &AgentIdentity,
+        input: meerkat_runtime::ContinuationInput,
+    ) -> Result<MemberTurnHandle, MobError> {
+        if input.continuation_kind != meerkat_runtime::ContinuationKind::WorkgraphAttention {
+            return Err(MobError::Internal(
+                "only a WorkGraph attention continuation is handed over through this door"
+                    .to_string(),
+            ));
+        }
+        let handling_mode = input.handling_mode;
+        let domain_identity = AgentIdentity::from(identity.as_str());
+        let machine_state = self.machine_state_watch_rx.borrow().clone();
+        let Some((runtime_id, fence_token)) = machine_state
+            .member_runtime_material_for_identity(&mob_dsl::AgentIdentity::from_domain(
+                &domain_identity,
+            ))
+            .map(|material| material.to_domain_for_identity(&domain_identity))
+        else {
+            return Err(self
+                .resolve_submit_work_missing_runtime_rejection(
+                    identity,
+                    WorkOrigin::Internal,
+                    "start_attention_continuation",
+                )
+                .await);
+        };
+        let session_id =
+            Self::machine_bridge_session_id_for_identity(&domain_identity, &machine_state)
+                .ok_or_else(|| MobError::UnsupportedForMode {
+                    mode: crate::MobRuntimeMode::TurnDriven,
+                    reason: super::state::ATTENTION_CONTINUATION_NEEDS_LOCAL_SESSION.to_string(),
+                })?;
+        let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+        let (admission_tx, admission_rx) = tokio::sync::oneshot::channel();
+        // The same SubmitWork admission, member lane and settlement as any
+        // internal work; only the realization carries the continuation.
+        let payload = Box::new(super::state::SubmitWorkPayload {
+            runtime_id: runtime_id.clone(),
+            fence_token,
+            work_ref: WorkRef::new(),
+            content: meerkat_core::types::ContentInput::Text(String::new()),
+            origin: WorkOrigin::Internal,
+            system_prompt: None,
+            injected_context: Vec::new(),
+            interaction_id: None,
+            objective_id: None,
+            handling_mode,
+            external_delivery_identity: None,
+            turn_metadata: None,
+            event_tx: None,
+            completion_tx: Some(completion_tx),
+            bounded_result_spec: None,
+            llm_identity_applied_tx: None,
+            // The continuation's delivery forwards its admission itself.
+            admission_tx: None,
+            ack_mode: crate::mob_machine::SubmitWorkAckMode::IngressAccepted,
+            // Not read for a continuation: no turn request is built from it,
+            // so nothing is lowered from this value.
+            content_attribution: crate::mob_machine::WorkContentAttribution::Conversational,
+            requester: None,
+            sender_label: None,
+            // Bound to the session read above: the admission refuses it if
+            // the member's binding moved since.
+            expected_session_id: Some(session_id.clone()),
+            governed_input: None,
+            attention_continuation: Some(Box::new(super::state::AttentionContinuationDelivery {
+                input,
+                admission_tx,
+            })),
+        });
+        self.send_actor_command(|reply_tx| MobCommand::SubmitWork { payload, reply_tx })
+            .await??;
+        // The member lane forwards the native admission before it answers.
+        let admission = admission_rx.await.map_err(|_| {
+            MobError::Internal(
+                "a WorkGraph attention continuation was admitted without its canonical admission"
+                    .to_string(),
             )
         })?;
         Ok(MemberTurnHandle {
@@ -25702,6 +25861,133 @@ mod tests {
                 }) if expired_session == &session_id && expired_input == &input_id
             ),
             "{expired:?}"
+        );
+    }
+
+    /// A superseded terminal is an internal error at the two public readers
+    /// of an exact-turn completion: no typed public answer is defined for it.
+    /// Each answers the same text, which names no input, the bounded one
+    /// inside its plumbing failure with the admitted session.
+    #[test]
+    fn a_superseded_terminal_is_an_internal_error_at_the_public_readers() {
+        let session_id = SessionId::new();
+        let input_id = meerkat_core::lifecycle::InputId::new();
+        let later = meerkat_core::lifecycle::InputId::new();
+        let superseded = || ExactTurnCompletion {
+            session_id: session_id.clone(),
+            terminal: ExactTurnTerminal::Superseded {
+                input_id: input_id.clone(),
+                superseded_by: later.clone(),
+            },
+        };
+        let names_no_input = |text: &str| {
+            !text.contains(&input_id.to_string()) && !text.contains(&later.to_string())
+        };
+
+        match legacy_exact_turn_result(superseded()) {
+            Err(MobError::Internal(text)) => {
+                assert_eq!(text, SUPERSEDED_TURN_HAS_NO_PUBLIC_ANSWER);
+                assert!(names_no_input(&text), "{text}");
+            }
+            other => panic!("expected an internal error, got {other:?}"),
+        }
+
+        let spec = BoundedResultSpec::new("superseded", 64).expect("bounded spec");
+        match bounded_exact_turn_result(superseded(), &session_id, &spec) {
+            Err(BoundedTurnFailure::CompletionPlumbing {
+                admitted_session_id,
+                error: MobError::Internal(text),
+            }) => {
+                assert_eq!(admitted_session_id, session_id);
+                assert_eq!(text, SUPERSEDED_TURN_HAS_NO_PUBLIC_ANSWER);
+                assert!(names_no_input(&text), "{text}");
+            }
+            other => panic!("expected a plumbing failure, got {other:?}"),
+        }
+    }
+
+    /// The superseded terminal is made in one place, the completion adapter,
+    /// from the typed wait answer; nothing else in the provisioner makes
+    /// one. Which doors can hand out a turn that ends this way is another
+    /// row's: only the mob's own hand-over of a continuation can, since a
+    /// governed input is admitted through the exact-prompt contract.
+    #[test]
+    fn the_superseded_terminal_is_made_in_one_place_from_the_typed_wait_answer() {
+        // The needles are built from parts so this row's own text is not
+        // what it finds.
+        let provisioner_source = include_str!("provisioner.rs");
+        let start = provisioner_source
+            .find("fn runtime_completion_to_exact_turn")
+            .expect("exact runtime completion adapter");
+        let end = provisioner_source[start..]
+            .find("fn runtime_completion_to_mob_result")
+            .map(|offset| start + offset)
+            .expect("next adapter boundary");
+        let exact_adapter = &provisioner_source[start..end];
+        let made = ["ExactTurnTerminal::", "Superseded {"].concat();
+        let answer = ["CompletionWaitError::", "Superseded {"].concat();
+        assert_eq!(
+            exact_adapter.matches(&made).count(),
+            1,
+            "the adapter makes the superseded terminal once"
+        );
+        assert!(
+            exact_adapter.contains(&answer),
+            "the superseded terminal is made from the typed wait answer"
+        );
+        // Product code names the terminal by its path from this module; the
+        // provisioner's own rows name it through an import. The file has
+        // product code after its first test module, so the whole file is
+        // read.
+        let made_by_path = ["super::handle::ExactTurnTerminal::", "Superseded {"].concat();
+        assert_eq!(
+            provisioner_source.matches(&made_by_path).count(),
+            1,
+            "the provisioner makes a superseded terminal at one place"
+        );
+        assert!(
+            exact_adapter.contains(&made_by_path),
+            "that place is the completion adapter"
+        );
+    }
+
+    /// A member's governed input is admitted through the exact-prompt replay
+    /// contract and through no other: every governed admission of the
+    /// provisioner that reaches the runtime's admission names that contract.
+    /// The runtime refuses every input that is no prompt under it, so a
+    /// governed-input door hands no continuation to a member.
+    #[test]
+    fn a_governed_input_is_admitted_through_the_exact_prompt_contract_only() {
+        // The whole file is read: its product code continues after its
+        // first test module. The needles are built from parts so this
+        // row's own text is not what it finds.
+        let provisioner_source = include_str!("provisioner.rs");
+        let governed = ["async fn admit_", "governed_input("].concat();
+        let admits = ["admit_runtime_input_with_", "replay_policy("].concat();
+        let exact_prompt = ["InputReplayPolicy::", "ExactPrompt"].concat();
+        let key_only = ["InputReplayPolicy::", "KeyOnly"].concat();
+        let mut admitting = 0;
+        for (start, _) in provisioner_source.match_indices(&governed) {
+            // One method: to the first closing brace at a method's depth.
+            let rest = &provisioner_source[start + governed.len()..];
+            let end = rest.find("\n    }\n").unwrap_or(rest.len());
+            let body = &rest[..end];
+            if !body.contains(&admits) {
+                continue;
+            }
+            admitting += 1;
+            assert!(
+                body.contains(&exact_prompt),
+                "a governed admission that reaches the runtime names the exact-prompt contract"
+            );
+            assert!(
+                !body.contains(&key_only),
+                "a governed admission never names the key-only contract"
+            );
+        }
+        assert_eq!(
+            admitting, 1,
+            "one governed admission of the provisioner reaches the runtime's admission"
         );
     }
 

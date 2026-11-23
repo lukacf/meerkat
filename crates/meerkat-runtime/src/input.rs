@@ -1000,6 +1000,61 @@ impl ContinuationInput {
             turn_append: None,
         }
     }
+
+    /// The continuation that gives a session a turn of its own under a
+    /// WorkGraph attention projection.
+    ///
+    /// `idempotency_key` names the projection: the same projection handed
+    /// over twice is one input. `supersession_key` names the binding the
+    /// projection is of: a later continuation of the same binding
+    /// supersedes an earlier one that still waits, and is admitted beside
+    /// one that was already staged or runs. `turn_tool_overlay` carries the
+    /// projection and the turn's tools, and `turn_append` is the notice the
+    /// turn starts from.
+    ///
+    /// Properties: `System` origin, the attention kind (admitted as a queued
+    /// content turn at a run's start), `Queue` handling mode, `Durable`,
+    /// invisible to transcript and operator.
+    ///
+    /// It is `Durable` where [`Self::detached_background_op_completed`] is
+    /// `Derived`, on purpose: nothing makes this continuation again once it
+    /// is handed over, so it is not derived from anything the runtime keeps.
+    /// The class does not decide what a restart keeps: a runtime that stores
+    /// its inputs recovers a queued continuation of either class after a
+    /// crash, and an orderly stop that keeps queued inputs for the next
+    /// start keeps prompts only, so it ends a queued continuation.
+    pub fn workgraph_attention(
+        idempotency_key: IdempotencyKey,
+        supersession_key: SupersessionKey,
+        turn_tool_overlay: TurnToolOverlay,
+        turn_append: ConversationAppend,
+    ) -> Self {
+        Self {
+            header: InputHeader {
+                ingress_context: None,
+                retained_resume: None,
+                authority_association: None,
+                id: meerkat_core::lifecycle::InputId::new(),
+                timestamp: chrono::Utc::now(),
+                source: InputOrigin::System,
+                durability: InputDurability::Durable,
+                visibility: InputVisibility {
+                    transcript_eligible: false,
+                    operator_eligible: false,
+                },
+                idempotency_key: Some(idempotency_key),
+                supersession_key: Some(supersession_key),
+                correlation_id: None,
+                requester: None,
+            },
+            reason: "workgraph_attention".to_string(),
+            continuation_kind: ContinuationKind::WorkgraphAttention,
+            handling_mode: HandlingMode::Queue,
+            request_id: None,
+            turn_tool_overlay: Some(turn_tool_overlay),
+            turn_append: Some(turn_append),
+        }
+    }
 }
 
 /// Explicit operation/lifecycle input admitted through runtime instead of

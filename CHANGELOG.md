@@ -271,7 +271,7 @@ them.
   compaction, a prompt update or an applied operator instruction (see
   Changed).
 
-## [0.9.18] - 2026-11-22
+## [0.9.18] - 2026-11-23
 
 ### Breaking
 

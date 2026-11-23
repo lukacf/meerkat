@@ -300,8 +300,11 @@ neither has one whose storage provider has no WorkGraph: there is no item
 and no claim to check, and its durable workers continue unchecked.
 
 The check knows the worker by its member owner key
-(`agent:mob/<mob_id>/agent/<identity>`) and by its session (`session:<id>`);
-a claim under any other key belongs to another owner. Two limits apply. A
+(`agent:mob/<mob_id>/agent/<member_id>`) and by its session (`session:<id>`);
+a claim under any other key belongs to another owner. The key's last segment
+is the worker's member id in the mob: the identity's name where the name is a
+valid member id, and its encoded form where it is not (`team:helper` is
+`mk--team_chelper`; see the member id codec below). Two limits apply. A
 run that named no item, whose lapsed claim another worker took while it was
 down, holds no claim any more, so the check cannot see the move and the run
 continues; its later WorkGraph writes are revision-checked and conflict. And

@@ -507,7 +507,7 @@ member reads it.
 Two consequences matter to an operator:
 
 - A goal, binding or reassignment whose target names a member of another mob
-  (an explicit `owner` key of the form `mob/<other>/agent/<identity>`) is
+  (an explicit `owner` key of the form `mob/<other>/agent/<member_id>`) is
   refused with JSON-RPC `-32602` and `data.kind =
   "attention_target_realm_mismatch"`. It is not stored anywhere. Create that
   work through the other mob's own runtime.

@@ -5446,10 +5446,18 @@ class MobHandle:
     ) -> WorkGraphGoalResult:
         """Create a goal work item plus its attention binding.
 
-        ``target`` is ``{"kind": "session", "session_id": ...}``,
-        ``{"kind": "identity", "identity": ...}`` (lowered server-side to an
-        owner key against the runtime's mob id), or
-        ``{"kind": "owner", "owner_key": {"kind": ..., "id": ...}}``.
+        ``target`` is one of three forms, each naming something different.
+        ``{"kind": "identity", "identity": name}`` takes an identity's name
+        and names the member seated for it in the runtime's mob (the gateway
+        stores that member's owner key; a name beginning with ``mk--`` is
+        refused). ``{"kind": "session", "session_id": ...}`` takes a session
+        id. ``{"kind": "owner", "owner_key": {"kind": ..., "id": ...}}``
+        takes an owner key and stores it as written; a member's key is
+        ``mob/<mob_id>/agent/<member_id>``. Read the stored target from the
+        result's ``attention.target``. The refusal of a target that is a
+        member private to a person names the member by its member id
+        (``data.member``, the encoded form ``mk--...`` for a name that is
+        not a valid member id as written), not by the name sent.
         """
         params: dict[str, Any] = {"title": title, "target": target, **kwargs}
         raw = await self._runtime._rpc("meta/workgraph/goal/create", params)

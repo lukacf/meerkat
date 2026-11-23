@@ -57,7 +57,7 @@ agent's turn calls workgraph tools. A light workbench panel is secondary.
   `GoalConfirmRequest.principal` is `#[serde(skip)]` — host promotes via
   `with_trusted_principal` (console: authenticated principal).
 - Owner-key lowering for identity-addressed attention:
-  `meerkat_mob::lower_agent_identity_attention_target` → `mob/<mob_id>/agent/<identity>`.
+  `meerkat_mob::lower_agent_identity_attention_target` → `mob/<mob_id>/agent/<member_id>`.
 - CAS: revision-checked mutations of existing work items or attention bindings
   require `expected_revision: u64`; conflicts are typed errors. `create`,
   `goal/create`, `link`, and `attention/prune` have no caller-supplied CAS token

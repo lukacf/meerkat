@@ -392,38 +392,196 @@ fi
 [[ ! -f "$stale_state/facade-target" ]] ||
   fail "the facade smoke ran without this run's archives"
 
-# The space readings are observation only. With a `df` and a `du` that both
-# fail, each reading says it is unavailable and nothing else changes: the run
-# still passes and the facade smoke still runs.
+# The space readings are observation only, and every measurement in them is
+# bounded. The rows below put their own `df` and `du` first on PATH, so no
+# figure they assert comes from the host: tools that print fixed figures,
+# tools that fail, and tools that never return.
+#
+# A bash older than 4.4 cannot bound a measurement and starts none: there
+# each boundary prints one line that says so, and that line is what a row
+# expects in place of its figures (expect_readings).
+readings_bounded=false
+if [[ "${BASH_VERSINFO[0]}" -gt 4 || ("${BASH_VERSINFO[0]}" -eq 4 && "${BASH_VERSINFO[1]}" -ge 4) ]]; then
+  readings_bounded=true
+fi
+
+# A directory $1 with a `df` and a `du` whose bodies are $2 and $3.
+space_tools() {
+  mkdir -p "$1"
+  printf '%s\n' '#!/usr/bin/env bash' "$2" > "$1/df"
+  printf '%s\n' '#!/usr/bin/env bash' "$3" > "$1/du"
+  chmod +x "$1/df" "$1/du"
+}
+# 1024 MiB free of 2048 MiB, on one filesystem whatever the path.
+fixed_df='printf "%s\n" "Filesystem 1024-blocks Used Available Capacity Mounted on" "/dev/fixed 2097152 1048576 1048576 50% /"'
+# 3 MiB for the first directory named, 2 MiB for the second, 1 MiB for the
+# third. The tool expands its variables when it runs.
+# shellcheck disable=SC2016
+fixed_du='size=4096; for arg in "$@"; do case "$arg" in -*) ;; *) size=$((size - 1024)); printf "%s\t%s\n" "$size" "$arg" ;; esac; done'
+fixed_tools="$TEST_ROOT/fixed-space-tools"
 broken_tools="$TEST_ROOT/broken-space-tools"
-mkdir -p "$broken_tools"
-printf '%s\n' '#!/usr/bin/env bash' 'echo "broken space tool"' 'exit 1' > "$broken_tools/df"
-cp "$broken_tools/df" "$broken_tools/du"
-chmod +x "$broken_tools/df" "$broken_tools/du"
+hanging_df="$TEST_ROOT/hanging-df"
+hanging_du="$TEST_ROOT/hanging-du"
+stubborn_df="$TEST_ROOT/stubborn-df"
+space_tools "$fixed_tools" "$fixed_df" "$fixed_du"
+space_tools "$broken_tools" 'echo "broken space tool"; exit 1' 'echo "broken space tool"; exit 1'
+# These never return within a row: the sleep is far past the bound and past
+# the seconds a row is given. The third also ignores SIGTERM.
+space_tools "$hanging_df" 'exec sleep 300' "$fixed_du"
+space_tools "$hanging_du" "$fixed_df" 'exec sleep 300'
+space_tools "$stubborn_df" 'trap "" TERM; exec sleep 300' "$fixed_du"
+
+# In log $1, under boundary $2, each further argument is a reading line that
+# must be there; where the host cannot bound a measurement, the boundary's
+# one line that says so must be there instead.
+expect_readings() {
+  local log="$1" boundary="$2" line
+  shift 2
+  if [[ "$readings_bounded" != true ]]; then
+    set -- "skipped: no bounded measurement available"
+  fi
+  for line in "$@"; do
+    grep -Fqx "space reading [$boundary]: $line" "$log" ||
+      fail "a space reading line is missing" "space reading [$boundary]: $line" "$(cat "$log")"
+  done
+}
+
+# The process ids of $1 and of every process below it.
+process_tree() {
+  local child
+  printf '%s\n' "$1"
+  for child in $(pgrep -P "$1" 2>/dev/null); do
+    process_tree "$child"
+  done
+}
+
+# Runs "$@" (a run_checker or run_facade call, which prints the status) for
+# at most $1 seconds. A call still running then is ended, with everything it
+# started, and "overdue" is printed in place of a status: a measurement that
+# never returns must not hold a script, and must not hold this test either.
+within_seconds() {
+  local limit="$1" started="$SECONDS" pid
+  shift
+  "$@" &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null; do
+    if [[ $((SECONDS - started)) -ge "$limit" ]]; then
+      # shellcheck disable=SC2046
+      kill -KILL $(process_tree "$pid") 2>/dev/null || true
+      printf 'overdue'
+      return 0
+    fi
+    sleep 0.1
+  done
+}
+
+# A directory $1 that holds the repository's scripts by link, so a script
+# run from it finds its helpers, with the packaging script and the facade
+# link script copied and their one line $2 changed to $3.
+changed_scripts() {
+  local dir="$1" script
+  mkdir -p "$dir"
+  ln -s "$REPO_ROOT"/scripts/* "$dir/"
+  for script in check-rust-release-packaging.sh check-published-facade-link.sh; do
+    rm -- "$dir/$script"
+    awk -v old="$2" -v new="$3" '$0 == old { print new; next } { print }' \
+      "$REPO_ROOT/scripts/$script" > "$dir/$script"
+    chmod +x "$dir/$script"
+    if cmp -s "$REPO_ROOT/scripts/$script" "$dir/$script"; then
+      fail "the line to change is not in $script" "$2"
+    fi
+  done
+}
+# The same scripts with a bound of 2 seconds, and with no way to bound.
+short_bound_scripts="$TEST_ROOT/scripts-short-bound"
+unbounded_host_scripts="$TEST_ROOT/scripts-unbounded-host"
+changed_scripts "$short_bound_scripts" 'SPACE_READING_BOUND=60' 'SPACE_READING_BOUND=2'
+changed_scripts "$unbounded_host_scripts" 'space_bounded_available() {' 'space_bounded_available() { return 1'
+short_bound_checker="$short_bound_scripts/check-rust-release-packaging.sh"
+unbounded_host_checker="$unbounded_host_scripts/check-rust-release-packaging.sh"
+
+# Fixed figures: every line of the three boundaries is what the tools said.
+figures_state="$TEST_ROOT/fixed-readings"
+figures_log="$TEST_ROOT/fixed-readings.log"
+status="$(run_checker "$CHECKER" "$figures_state" "$figures_log" PATH="$fixed_tools:$PATH")"
+if [[ "$status" -ne 0 ]]; then
+  fail "a packaging run with fixed space readings failed" "$(cat "$figures_log")"
+fi
+expect_readings "$figures_log" "packaging start" \
+  "packaging target filesystem: 1024 MiB free of 2048 MiB" \
+  "temporary directory filesystem: 1024 MiB free of 2048 MiB (same filesystem as packaging target)" \
+  "root filesystem: 1024 MiB free of 2048 MiB (same filesystem as packaging target)"
+expect_readings "$figures_log" "packaging end" \
+  "packaging target filesystem: 1024 MiB free of 2048 MiB" \
+  "packaging target, 3 per-crate directories of the release crates, whole contents: 6 MiB" \
+  "crate 1 of 3 by size: alpha 3 MiB" \
+  "crate 2 of 3 by size: beta 2 MiB" \
+  "crate 3 of 3 by size: gamma 1 MiB"
+expect_readings "$figures_log" "before the link smoke" \
+  "packaging target filesystem: 1024 MiB free of 2048 MiB" \
+  "staged archive copies: 3 MiB"
+
+# A `df` and a `du` that both fail: each reading says it is unavailable and
+# nothing else changes: the run still passes and the facade smoke still runs.
 reading_state="$TEST_ROOT/unavailable-readings"
 reading_log="$TEST_ROOT/unavailable-readings.log"
 status="$(run_checker "$CHECKER" "$reading_state" "$reading_log" PATH="$broken_tools:$PATH")"
 if [[ "$status" -ne 0 ]]; then
   fail "a space reading that could not be taken changed the exit status" "$(cat "$reading_log")"
 fi
-for unavailable in \
-  "space reading [packaging start]: packaging target filesystem: unavailable" \
-  "space reading [packaging end]: packaging target: unavailable" \
-  "space reading [before the link smoke]: staged archive copies: unavailable"; do
-  grep -Fq "$unavailable" "$reading_log" ||
-    fail "a space reading that could not be taken was not reported as unavailable" \
-      "$unavailable" "$(cat "$reading_log")"
-done
+expect_readings "$reading_log" "packaging start" "packaging target filesystem: unavailable"
+expect_readings "$reading_log" "packaging end" "packaging target: unavailable"
+expect_readings "$reading_log" "before the link smoke" "staged archive copies: unavailable"
 [[ -f "$reading_state/facade-target" ]] ||
   fail "the facade smoke did not run after space readings that could not be taken"
 
+# A `df` that never returns: each boundary gives it the bound, ends it, says
+# so, skips what was left of the boundary, and the run goes on to pass. The
+# whole run stays far inside the seconds the row gives it.
+hanging_state="$TEST_ROOT/hanging-readings"
+hanging_log="$TEST_ROOT/hanging-readings.log"
+status="$(within_seconds 60 run_checker "$short_bound_checker" "$hanging_state" "$hanging_log" \
+  PATH="$hanging_df:$PATH")"
+if [[ "$status" != 0 ]]; then
+  fail "a space reading that never returns held the packaging run or changed its status" \
+    "status: $status" "$(cat "$hanging_log")"
+fi
+for hanging_boundary in "packaging start" "packaging end" "before the link smoke"; do
+  expect_readings "$hanging_log" "$hanging_boundary" \
+    "packaging target filesystem: timed out after 2 s" \
+    "root filesystem: skipped: the time bound is used up"
+done
+expect_readings "$hanging_log" "packaging end" "packaging target: skipped: the time bound is used up"
+[[ -f "$hanging_state/facade-target" ]] ||
+  fail "the facade smoke did not run after space readings that never returned"
+
+# No way to bound a measurement: none is started, each boundary says so, and
+# nothing else changes. The tools here would never return if they were run.
+unbounded_state="$TEST_ROOT/unbounded-host-readings"
+unbounded_log="$TEST_ROOT/unbounded-host-readings.log"
+status="$(within_seconds 60 run_checker "$unbounded_host_checker" "$unbounded_state" "$unbounded_log" \
+  PATH="$hanging_df:$PATH")"
+if [[ "$status" != 0 ]]; then
+  fail "a host that cannot bound a measurement did not skip its space readings" \
+    "status: $status" "$(cat "$unbounded_log")"
+fi
+for unbounded_boundary in "packaging start" "packaging end" "before the link smoke"; do
+  grep -Fqx "space reading [$unbounded_boundary]: skipped: no bounded measurement available" "$unbounded_log" ||
+    fail "a boundary that could not be bounded did not say it was skipped" "$unbounded_boundary" \
+      "$(cat "$unbounded_log")"
+done
+[[ -f "$unbounded_state/facade-target" ]] ||
+  fail "the facade smoke did not run after skipped space readings"
+
 # The facade link script's exit readings, on the real script with a fake cargo
 # in place of the smoke's build. For a smoke that passes, one that fails and
-# an exit before the smoke (no archive staged), each with a working and with a
-# failing `df` and `du`: the script exits with the status it has without the
+# an exit before the smoke (no archive staged), each with fixed and with
+# failing tools: the script exits with the status it has without the
 # readings, removes its temporary directory, and prints its readings under
 # that status.
 FACADE="$REPO_ROOT/scripts/check-published-facade-link.sh"
+short_bound_facade="$short_bound_scripts/check-published-facade-link.sh"
+unbounded_host_facade="$unbounded_host_scripts/check-published-facade-link.sh"
 mkdir -p "$FIXTURE/crates/meerkat/tests/fixtures/agent_builder_policy"
 printf '%s\n' 'fn main() {}' \
   > "$FIXTURE/crates/meerkat/tests/fixtures/agent_builder_policy/downstream_public_facade_agentbuilder.rs"
@@ -445,88 +603,113 @@ exit 101
 EOF
 chmod +x "$FIXTURE/scripts/fake-smoke-cargo"
 facade_packages="$TEST_ROOT/facade-packages"
+facade_no_packages="$TEST_ROOT/facade-no-packages"
 mkdir -p "$facade_packages/package"
 cp "$success_state"/target/*/package/*-0.0.0.crate "$facade_packages/package/"
 
-# Runs the facade link script as case $1: smoke $2 (pass or fail), staged
-# archives $3, PATH $4. Its temporary directory is created under a directory
-# of the case's own. With a fifth argument its standard output is file
+# Runs facade link script $2 as case $1: smoke $3 (pass or fail), staged
+# archives $4, PATH $5. Its temporary directory is created under a directory
+# of the case's own. With a sixth argument its standard output is file
 # descriptor 8 and the log holds its error output only. Prints its status.
 run_facade() {
-  local name="$1" status
+  local name="$1" script="$2" status
   local -a facade_env=(
     ROOT="$FIXTURE"
     CARGO="$FIXTURE/scripts/fake-smoke-cargo"
-    FAKE_SMOKE="$2"
-    MEERKAT_PUBLISHED_FACADE_PACKAGE_TARGET="$3"
-    PATH="$4"
+    FAKE_SMOKE="$3"
+    MEERKAT_PUBLISHED_FACADE_PACKAGE_TARGET="$4"
+    PATH="$5"
     TMPDIR="$TEST_ROOT/facade-$name-tmp"
   )
   mkdir -p "$TEST_ROOT/facade-$name-tmp"
   set +e
-  if [[ "$#" -ge 5 ]]; then
-    env "${facade_env[@]}" "$FACADE" >&8 2> "$TEST_ROOT/facade-$name.log"
+  if [[ "$#" -ge 6 ]]; then
+    env "${facade_env[@]}" "$script" >&8 2> "$TEST_ROOT/facade-$name.log"
   else
-    env "${facade_env[@]}" "$FACADE" > "$TEST_ROOT/facade-$name.log" 2>&1
+    env "${facade_env[@]}" "$script" > "$TEST_ROOT/facade-$name.log" 2>&1
   fi
   status=$?
   set -e
   printf '%s' "$status"
 }
 
-# How many entries case $1 left in the directory its temporary directory was
-# created in.
-facade_left_behind() {
-  find "$TEST_ROOT/facade-$1-tmp" -mindepth 1 | wc -l | tr -d ' '
+# Case $1 ended with status $2 where $3 was expected, and left nothing in
+# the directory its temporary directory was created in.
+expect_facade_exit() {
+  local name="$1" log="$TEST_ROOT/facade-$1.log"
+  if [[ "$2" != "$3" ]]; then
+    fail "the facade link script's exit status is not what it is without its readings ($name)" \
+      "expected $3, got $2" "$(cat "$log")"
+  fi
+  if [[ "$(find "$TEST_ROOT/facade-$name-tmp" -mindepth 1 | wc -l | tr -d ' ')" -ne 0 ]]; then
+    fail "the facade link script did not remove its temporary directory ($name)" "$(cat "$log")"
+  fi
 }
 
 for facade_case in "pass pass 0" "fail fail 1" "early pass 1"; do
   read -r facade_scenario facade_smoke facade_expected <<< "$facade_case"
+  facade_boundary="link smoke exit, status $facade_expected"
   facade_staged="$facade_packages"
+  facade_size="smoke target: 3 MiB"
   if [[ "$facade_scenario" == early ]]; then
-    facade_staged="$TEST_ROOT/facade-no-packages"
+    facade_staged="$facade_no_packages"
+    facade_size="smoke target: no such directory"
   fi
-  for facade_tools in working failing; do
-    facade_path="$PATH"
-    if [[ "$facade_tools" == failing ]]; then
-      facade_path="$broken_tools:$PATH"
-    fi
-    facade_name="$facade_scenario-$facade_tools"
-    facade_log="$TEST_ROOT/facade-$facade_name.log"
-    facade_what="($facade_scenario, $facade_tools df and du)"
-    # An extended regular expression: the label's brackets are literal.
-    facade_label="space reading \\[link smoke exit, status $facade_expected\\]"
-    status="$(run_facade "$facade_name" "$facade_smoke" "$facade_staged" "$facade_path")"
-    if [[ "$status" -ne "$facade_expected" ]]; then
-      fail "the facade link script's exit status is not what it is without its readings $facade_what" \
-        "expected $facade_expected, got $status" "$(cat "$facade_log")"
-    fi
-    if [[ "$(facade_left_behind "$facade_name")" -ne 0 ]]; then
-      fail "the facade link script did not remove its temporary directory $facade_what" "$(cat "$facade_log")"
-    fi
-    if [[ "$facade_tools" == failing ]]; then
-      facade_free="temporary directory filesystem: unavailable"
-      facade_size="smoke target: unavailable"
-    else
-      facade_free="temporary directory filesystem: [0-9]+ MiB free of [0-9]+ MiB"
-      facade_size="smoke target: [0-9]+ MiB"
-    fi
-    if [[ "$facade_scenario" == early ]]; then
-      facade_size="smoke target: no such directory"
-    fi
-    for facade_line in "$facade_free" "$facade_size" "took [0-9]+ s"; do
-      grep -Eq "^$facade_label: $facade_line\$" "$facade_log" ||
-        fail "the facade link script's exit readings lack a line under its exit status $facade_what" \
-          "$facade_line" "$(cat "$facade_log")"
-    done
-  done
+
+  status="$(run_facade "$facade_scenario-fixed" "$FACADE" "$facade_smoke" "$facade_staged" "$fixed_tools:$PATH")"
+  expect_facade_exit "$facade_scenario-fixed" "$status" "$facade_expected"
+  expect_readings "$TEST_ROOT/facade-$facade_scenario-fixed.log" "$facade_boundary" \
+    "temporary directory filesystem: 1024 MiB free of 2048 MiB" \
+    "root filesystem: 1024 MiB free of 2048 MiB (same filesystem as temporary directory)" \
+    "$facade_size" \
+    "unpacked registry directory: 3 MiB"
+
+  if [[ "$facade_scenario" != early ]]; then
+    facade_size="smoke target: unavailable"
+  fi
+  status="$(run_facade "$facade_scenario-failing" "$FACADE" "$facade_smoke" "$facade_staged" "$broken_tools:$PATH")"
+  expect_facade_exit "$facade_scenario-failing" "$status" "$facade_expected"
+  expect_readings "$TEST_ROOT/facade-$facade_scenario-failing.log" "$facade_boundary" \
+    "temporary directory filesystem: unavailable" \
+    "$facade_size" \
+    "unpacked registry directory: unavailable"
 done
-grep -Fq "Published-style facade AgentBuilder link smoke passed" "$TEST_ROOT/facade-pass-working.log" ||
-  fail "the passing facade smoke did not print its verdict" "$(cat "$TEST_ROOT/facade-pass-working.log")"
-grep -Fq "error: intentional smoke failure" "$TEST_ROOT/facade-fail-working.log" ||
-  fail "the failing facade smoke's error was not surfaced" "$(cat "$TEST_ROOT/facade-fail-working.log")"
-grep -Fq "missing packaged crate archive" "$TEST_ROOT/facade-early-working.log" ||
-  fail "the facade link script did not name the missing archive" "$(cat "$TEST_ROOT/facade-early-working.log")"
+grep -Fq "Published-style facade AgentBuilder link smoke passed" "$TEST_ROOT/facade-pass-fixed.log" ||
+  fail "the passing facade smoke did not print its verdict" "$(cat "$TEST_ROOT/facade-pass-fixed.log")"
+grep -Fq "error: intentional smoke failure" "$TEST_ROOT/facade-fail-fixed.log" ||
+  fail "the failing facade smoke's error was not surfaced" "$(cat "$TEST_ROOT/facade-fail-fixed.log")"
+grep -Fq "missing packaged crate archive" "$TEST_ROOT/facade-early-fixed.log" ||
+  fail "the facade link script did not name the missing archive" "$(cat "$TEST_ROOT/facade-early-fixed.log")"
+
+# A measurement that never returns in the exit trap: a failing smoke with a
+# `df` that also ignores SIGTERM, and a passing smoke with a `du`. The trap
+# ends the measurement at the bound, says so, and still reaches the cleanup:
+# the status is the script's own and the temporary directory is removed, far
+# inside the seconds the case is given.
+status="$(within_seconds 60 run_facade fail-hanging-df "$short_bound_facade" fail "$facade_packages" \
+  "$stubborn_df:$PATH")"
+expect_facade_exit fail-hanging-df "$status" 1
+expect_readings "$TEST_ROOT/facade-fail-hanging-df.log" "link smoke exit, status 1" \
+  "temporary directory filesystem: timed out after 2 s" \
+  "root filesystem: skipped: the time bound is used up" \
+  "smoke target: skipped: the time bound is used up"
+status="$(within_seconds 60 run_facade pass-hanging-du "$short_bound_facade" pass "$facade_packages" \
+  "$hanging_du:$PATH")"
+expect_facade_exit pass-hanging-du "$status" 0
+expect_readings "$TEST_ROOT/facade-pass-hanging-du.log" "link smoke exit, status 0" \
+  "temporary directory filesystem: 1024 MiB free of 2048 MiB" \
+  "smoke target: timed out after 2 s" \
+  "unpacked registry directory: skipped: the time bound is used up"
+
+# No way to bound a measurement in the exit trap: none is started, the trap
+# says so and reaches the cleanup with the script's own status.
+status="$(within_seconds 60 run_facade fail-unbounded-host "$unbounded_host_facade" fail "$facade_packages" \
+  "$hanging_df:$PATH")"
+expect_facade_exit fail-unbounded-host "$status" 1
+grep -Fqx "space reading [link smoke exit, status 1]: skipped: no bounded measurement available" \
+  "$TEST_ROOT/facade-fail-unbounded-host.log" ||
+  fail "an exit trap that could not bound its readings did not say they were skipped" \
+    "$(cat "$TEST_ROOT/facade-fail-unbounded-host.log")"
 
 # With its standard output a pipe nobody reads, the script still exits with
 # its own status and still removes its temporary directory: the shell that
@@ -537,23 +720,10 @@ mkfifo "$TEST_ROOT/facade-dead-pipe"
 facade_reader=$!
 exec 8> "$TEST_ROOT/facade-dead-pipe"
 wait "$facade_reader"
-for facade_case in "fail fail 1" "early pass 1"; do
-  read -r facade_scenario facade_smoke facade_expected <<< "$facade_case"
-  facade_staged="$facade_packages"
-  if [[ "$facade_scenario" == early ]]; then
-    facade_staged="$TEST_ROOT/facade-no-packages"
-  fi
-  facade_name="$facade_scenario-dead-pipe"
-  status="$(run_facade "$facade_name" "$facade_smoke" "$facade_staged" "$PATH" dead-pipe)"
-  if [[ "$status" -ne "$facade_expected" ]]; then
-    fail "a standard output nobody reads changed the facade link script's exit status ($facade_scenario)" \
-      "expected $facade_expected, got $status" "$(cat "$TEST_ROOT/facade-$facade_name.log")"
-  fi
-  if [[ "$(facade_left_behind "$facade_name")" -ne 0 ]]; then
-    fail "a standard output nobody reads kept the facade link script from removing its temporary directory ($facade_scenario)" \
-      "$(cat "$TEST_ROOT/facade-$facade_name.log")"
-  fi
-done
+status="$(run_facade fail-dead-pipe "$FACADE" fail "$facade_packages" "$fixed_tools:$PATH" dead-pipe)"
+expect_facade_exit fail-dead-pipe "$status" 1
+status="$(run_facade early-dead-pipe "$FACADE" pass "$facade_no_packages" "$fixed_tools:$PATH" dead-pipe)"
+expect_facade_exit early-dead-pipe "$status" 1
 exec 8>&-
 
 echo "release packaging isolation contract holds"

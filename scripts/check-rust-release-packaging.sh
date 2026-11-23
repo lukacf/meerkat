@@ -39,34 +39,117 @@ mkdir -p "$LOG_DIR"
 # CARGO_TARGET_DIR they also hold what earlier runs left in them, so the
 # figure after the last package build is then not this run's alone. Lines
 # carry labels and crate names, not paths.
+#
+# Every `df` and `du` is bounded (space_bounded below): the measurements of
+# one boundary share SPACE_READING_BOUND seconds. One that is still running
+# when they are used up is ended and printed as "timed out", the ones after
+# it are printed as "skipped", and the script goes on: it never waits for a
+# measurement that does not return. Where the bound cannot be kept (a bash
+# older than 4.4) no measurement is started and the boundary prints
+# "skipped: no bounded measurement available".
 SPACE_TOP_CRATES=5
+# The seconds the measurements of one boundary may take in all. A boundary
+# adds at most this, SPACE_KILL_GRACE and a second of clock rounding to the
+# run.
+SPACE_READING_BOUND=60
+# The seconds a measurement that outlived the bound gets to end on SIGTERM
+# before it gets SIGKILL.
+SPACE_KILL_GRACE=1
 
-# "<free KiB> <total KiB> <filesystem id>" of the filesystem that holds $1
-# (of its nearest existing ancestor while $1 does not exist), or nothing.
-space_fs_reading() {
-    local path="$1"
-    while [[ ! -e "$path" && "$path" == */* && "$path" != / ]]; do
-        path="${path%/*}"
-        [[ -n "$path" ]] || path=/
+# Whether a measurement can be bounded here: space_bounded needs the process
+# id of a process substitution, which bash has from 4.4.
+space_bounded_available() {
+    [[ "${BASH_VERSINFO[0]}" -gt 4 || ("${BASH_VERSINFO[0]}" -eq 4 && "${BASH_VERSINFO[1]}" -ge 4) ]]
+}
+
+# Runs "$@", one external tool, for what is left of the boundary's seconds
+# and prints its standard output. 0: the tool ended in time (its own status
+# is not read: reading it means waiting for it). 124: it was still running
+# when the seconds were used up, and was ended. 125: none were left, and it
+# was not started.
+#
+# The tool's output comes through a descriptor of this shell, read line by
+# line with a timeout: no pipeline and no command substitution waits on the
+# tool itself. Past the bound the descriptor is closed first, the tool gets
+# SIGTERM, then SIGKILL after SPACE_KILL_GRACE, and nothing waits for it. A
+# tool that even SIGKILL does not end, or a child it left, stays behind
+# holding only a pipe nobody reads (its input and error output are
+# /dev/null), never this script's output.
+space_bounded() {
+    local fd="" pid="" line="" left=0 tries=0
+    left=$((space_deadline - SECONDS))
+    if [[ "$left" -le 0 ]]; then
+        return 125
+    fi
+    exec {fd}< <(exec "$@" 2>/dev/null </dev/null)
+    pid=$!
+    while :; do
+        left=$((space_deadline - SECONDS))
+        if [[ "$left" -le 0 ]]; then
+            exec {fd}<&-
+            kill -TERM "$pid" 2>/dev/null
+            while kill -0 "$pid" 2>/dev/null && [[ "$tries" -lt $((SPACE_KILL_GRACE * 10)) ]]; do
+                sleep 0.1
+                tries=$((tries + 1))
+            done
+            kill -KILL "$pid" 2>/dev/null
+            return 124
+        fi
+        if IFS= read -r -t "$left" -u "$fd" line; then
+            printf '%s\n' "$line"
+        elif [[ "$?" -le 128 ]]; then
+            # The end of the output; a last line may lack its newline.
+            [[ -z "$line" ]] || printf '%s\n' "$line"
+            break
+        fi
     done
-    [[ -e "$path" ]] || path=.
-    df -Pk -- "$path" 2>/dev/null | awk '
-        NR == 2 && NF >= 6 && $(NF - 2) ~ /^[0-9]+$/ && $(NF - 4) ~ /^[0-9]+$/ {
-            print $(NF - 2), $(NF - 4), $1 ":" $NF
-        }'
+    exec {fd}<&-
+    return 0
+}
+
+# For a measurement that was not taken ($3: space_bounded's status) prints
+# its line and returns 0; returns 1 for one that was taken.
+space_not_taken() {
+    case "$3" in
+        124)
+            printf 'space reading [%s]: %s: timed out after %d s\n' "$1" "$2" "$SPACE_READING_BOUND"
+            ;;
+        125)
+            printf 'space reading [%s]: %s: skipped: the time bound is used up\n' "$1" "$2"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
 }
 
 # One line per label and path pair after the boundary's name: the free and
-# total space of the filesystem that holds the path. A filesystem an earlier
-# pair already named is said to be the same one.
+# total space of the filesystem that holds the path (its nearest existing
+# ancestor while the path does not exist). A filesystem an earlier pair
+# already named is said to be the same one.
 space_free_lines() {
-    local boundary="$1" label="" reading="" free="" total="" id="" rest="" note="" index=0
+    local boundary="$1" label="" path="" raw="" outcome=0 reading=""
+    local free="" total="" id="" rest="" note="" index=0
     local -a seen_ids=() seen_labels=()
     shift
     while [[ "$#" -ge 2 ]]; do
         label="$1"
-        reading="$(space_fs_reading "$2")" || reading=""
+        path="$2"
         shift 2
+        while [[ ! -e "$path" && "$path" == */* && "$path" != / ]]; do
+            path="${path%/*}"
+            [[ -n "$path" ]] || path=/
+        done
+        [[ -e "$path" ]] || path=.
+        outcome=0
+        raw="$(space_bounded df -Pk -- "$path")" || outcome=$?
+        if space_not_taken "$boundary" "$label filesystem" "$outcome"; then
+            continue
+        fi
+        reading="$(printf '%s\n' "$raw" | awk '
+            NR == 2 && NF >= 6 && $(NF - 2) ~ /^[0-9]+$/ && $(NF - 4) ~ /^[0-9]+$/ {
+                print $(NF - 2), $(NF - 4), $1 ":" $NF
+            }')" || reading=""
         free="${reading%% *}"
         rest="${reading#* }"
         total="${rest%% *}"
@@ -93,40 +176,31 @@ space_free_lines() {
     done
 }
 
-# `du -skP` of the directories named: "<KiB><TAB><base name>" lines, largest
-# first. -P: no symbolic link is followed, on the command line or below it.
-space_du() {
-    du -skP -- "$@" 2>/dev/null |
-        awk -F '\t' 'NF >= 2 && $1 ~ /^[0-9]+$/ {
-            name = $2
-            sub(/\/+$/, "", name)
-            sub(/.*\//, "", name)
-            print $1 "\t" name
-        }' |
-        sort -rn
-}
-
-# The size of one directory of this run, under a label.
+# The size of one directory of this run, under a label. `du -skP`: no
+# symbolic link is followed, on the command line or below it.
 space_dir_line() {
-    local boundary="$1" label="$2" dir="$3" sizes="" size="" note=""
+    local boundary="$1" label="$2" dir="$3" raw="" outcome=0 size=""
     if [[ -L "$dir" || ! -d "$dir" ]]; then
         printf 'space reading [%s]: %s: no such directory\n' "$boundary" "$label"
         return 0
     fi
-    sizes="$(space_du "$dir")" || note=" (du reported an error: the figure may be partial)"
-    size="${sizes%%$'\t'*}"
+    raw="$(space_bounded du -skP -- "$dir")" || outcome=$?
+    if space_not_taken "$boundary" "$label" "$outcome"; then
+        return 0
+    fi
+    size="${raw%%$'\t'*}"
     if [[ ! "$size" =~ ^[0-9]+$ ]]; then
         printf 'space reading [%s]: %s: unavailable\n' "$boundary" "$label"
         return 0
     fi
-    printf 'space reading [%s]: %s: %d MiB%s\n' "$boundary" "$label" "$((size / 1024))" "$note"
+    printf 'space reading [%s]: %s: %d MiB\n' "$boundary" "$label" "$((size / 1024))"
 }
 
 # The per-crate packaging directories of this run's crates (with whatever a
 # persistent target already held in them): their total and the
-# SPACE_TOP_CRATES largest, by crate name. One `du` over all of them.
+# SPACE_TOP_CRATES largest, by crate name. One `du -skP` over all of them.
 space_crate_lines() {
-    local boundary="$1" crate="" sizes="" note=""
+    local boundary="$1" crate="" raw="" outcome=0 sizes=""
     local -a dirs=()
     for crate in "${RELEASE_CRATES[@]}"; do
         if [[ -d "$TARGET_ROOT/$crate" && ! -L "$TARGET_ROOT/$crate" ]]; then
@@ -137,12 +211,24 @@ space_crate_lines() {
         printf 'space reading [%s]: packaging target: no per-crate directory\n' "$boundary"
         return 0
     fi
-    sizes="$(space_du "${dirs[@]}")" || note=" (du reported an error: the figures may be partial)"
+    raw="$(space_bounded du -skP -- "${dirs[@]}")" || outcome=$?
+    if space_not_taken "$boundary" "packaging target" "$outcome"; then
+        return 0
+    fi
+    # "<KiB><TAB><crate name>" lines, largest first.
+    sizes="$(printf '%s\n' "$raw" |
+        awk -F '\t' 'NF >= 2 && $1 ~ /^[0-9]+$/ {
+            name = $2
+            sub(/\/+$/, "", name)
+            sub(/.*\//, "", name)
+            print $1 "\t" name
+        }' |
+        sort -rn)" || sizes=""
     if [[ -z "$sizes" ]]; then
         printf 'space reading [%s]: packaging target: unavailable\n' "$boundary"
         return 0
     fi
-    printf '%s\n' "$sizes" | awk -F '\t' -v boundary="$boundary" -v top="$SPACE_TOP_CRATES" -v note="$note" '
+    printf '%s\n' "$sizes" | awk -F '\t' -v boundary="$boundary" -v top="$SPACE_TOP_CRATES" '
         NF == 2 {
             total += $1
             count += 1
@@ -152,7 +238,7 @@ space_crate_lines() {
             }
         }
         END {
-            printf "space reading [%s]: packaging target, %d per-crate directories of the release crates, whole contents: %d MiB%s\n", boundary, count, total / 1024, note
+            printf "space reading [%s]: packaging target, %d per-crate directories of the release crates, whole contents: %d MiB\n", boundary, count, total / 1024
             shown = count < top ? count : top
             for (i = 1; i <= shown; i++) {
                 printf "space reading [%s]: crate %d of %d by size: %s %d MiB\n", boundary, i, shown, name[i], size[i] / 1024
@@ -164,6 +250,11 @@ space_crate_lines() {
 # seconds the readings took.
 space_boundary() {
     local boundary="$1" started="$SECONDS"
+    if ! space_bounded_available; then
+        printf 'space reading [%s]: skipped: no bounded measurement available\n' "$boundary"
+        return 0
+    fi
+    space_deadline=$((SECONDS + SPACE_READING_BOUND))
     space_free_lines "$boundary" "packaging target" "$TARGET_ROOT" "temporary directory" "$tmp_dir" "root" /
     case "$boundary" in
         "packaging end")

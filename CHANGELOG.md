@@ -93,7 +93,7 @@ them.
   looked for a `blocked_by_filter` row to learn that a tool is denied finds
   no row now; read a denial from the host's own tool policy.
 
-## [0.9.18] - 2026-11-22
+## [0.9.18] - 2026-11-23
 
 ### Breaking
 

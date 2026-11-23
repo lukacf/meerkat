@@ -19,7 +19,8 @@ use crate::identity_first::core_test_bridge::{CoreReadsBridge, register_live};
 const RUNTIME: &str = "runtime-a";
 
 /// Hides members labelled `org=secret` and the identity `concealed`, and
-/// lists implicit delegates' members only when asked to.
+/// lists implicit delegate members (the members with the role `delegate` of
+/// a mob nested under the primary mob) only when asked to.
 struct FixturePolicy {
     include_delegates: bool,
 }
@@ -39,8 +40,13 @@ impl ConsoleVisibilityPolicy for FixturePolicy {
 }
 
 fn spec(member: &str, labels: &[(&str, &str)]) -> SpawnMemberSpec {
+    spec_with_profile("worker", member, labels)
+}
+
+/// A member spec under `profile`, which is the member's role.
+fn spec_with_profile(profile: &str, member: &str, labels: &[(&str, &str)]) -> SpawnMemberSpec {
     SpawnMemberSpec::from_wire(
-        "worker".to_string(),
+        profile.to_string(),
         member.to_string(),
         Some(format!("You are {member}.").into()),
         None,
@@ -76,14 +82,17 @@ fn durable_spec(identity: &str) -> crate::identity_first::DurableAgentSpec {
 /// - a durable identity's stale incarnation row (`rt:review:singleton:0`)
 ///   beside its own row, hidden, which shadows it;
 /// - a durable identity named by its own row (`builder`);
-/// - an implicit delegate's member, and a delegate row that projects the
-///   identity `builder` from another source;
+/// - a nested mob's implicit delegate members (role `delegate`): one plain,
+///   and one that projects the identity `builder` from another source;
 /// - a durable identity (`relay`) whose stale primary row
-///   (`rt:relay:0`) has its own row only in a delegate mob: the binding
-///   check sees that row only while the policy lists the delegates;
+///   (`rt:relay:0`) has its own row only as an implicit delegate member:
+///   the binding check sees that row only while the policy lists the
+///   implicit delegate members;
 /// - a durable identity (`keeper`) whose only rows are its own primary
-///   row, hidden, and a delegate row projecting another identity: the
-///   wrong projection keeps its record visible;
+///   row, hidden, and an implicit delegate row projecting another identity:
+///   the wrong projection keeps its record visible;
+/// - a nested mob's member that is no implicit delegate (`teammate`, role
+///   `worker`), listed while the policy lists nested mob members;
 /// - durable identities with no live row: one concealed by the policy, one
 ///   dormant.
 struct Realm {
@@ -115,7 +124,7 @@ impl Realm {
             spawn_trusted_identity_projected_member(&primary, spec(member, labels)).await;
         }
         let delegate_id = unique_console_mob_id("member-cut-delegate");
-        let delegate = build_empty_runtime(&delegate_id).await;
+        let delegate = build_runtime_with_delegate_profile(&delegate_id).await;
         let delegate_members: [(&str, &[(&str, &str)]); 4] = [
             ("delegate", &[]),
             ("builder", &[("agent_identity", "other")]),
@@ -123,8 +132,13 @@ impl Realm {
             ("keeper", &[("agent_identity", "other")]),
         ];
         for (member, labels) in delegate_members {
-            spawn_trusted_identity_projected_member(&delegate, spec(member, labels)).await;
+            spawn_trusted_identity_projected_member(
+                &delegate,
+                spec_with_profile("delegate", member, labels),
+            )
+            .await;
         }
+        spawn_trusted_identity_projected_member(&delegate, spec("teammate", &[])).await;
         primary
             .mob_runtime()
             .agent_mob_mcp_state()
@@ -134,6 +148,20 @@ impl Realm {
                 delegate.mob_handle().clone(),
             )
             .await;
+        // The fixture puts the delegate mob into the gateway with no create
+        // admission. The record of who each mob is private to reads it here
+        // (a mob a host built, private to no one), as it reads every mob the
+        // gateway holds at its start. A listing of a mob that record has not
+        // read withholds the mob's members and starts the read in the
+        // background; the rows over this realm decide one member twice, one
+        // read after the other, and a read that landed between the two would
+        // give them two answers for the member.
+        primary
+            .mob_runtime()
+            .private_owners()
+            .read_mob(&delegate.mob_handle())
+            .await
+            .expect("the owner record reads the delegate mob");
 
         let core_bridge = Arc::new(CoreReadsBridge::default());
         let identity_runtime = Arc::new(crate::identity_first::IdentityRuntime::new(
@@ -173,6 +201,7 @@ impl Realm {
             .expect("the identity registers");
 
         let entry = RuntimeEntry {
+            mob: None,
             registration_id: uuid::Uuid::new_v4(),
             runtime_key: RUNTIME.to_string(),
             identity_namespace: String::new(),
@@ -218,6 +247,7 @@ fn record(
 
 fn frame(identity: &str, session_id: Option<&str>) -> ConsoleFrame {
     ConsoleFrame {
+        mob_id: None,
         id: format!("frame-{identity}-{session_id:?}"),
         cursor: ConsoleCursor::from_seq(1),
         dedupe_key: format!("frame-{identity}-{session_id:?}"),
@@ -305,8 +335,10 @@ fn child_of(parent: &str, session: Option<&str>) -> ConsoleIdentityRecord {
     child
 }
 
-/// The per-call decisions a read made before the cut, kept verbatim (only
-/// renamed) from the integration base: each call lists the members itself.
+/// The per-call decisions a read made before the cut, kept from the
+/// integration base (renamed, and following the same rule for a nested
+/// mob's member as the cut: it is named by its mob and name, never tied to a
+/// primary record by its bare name): each call lists the members itself.
 mod per_call {
     use super::*;
 
@@ -320,11 +352,7 @@ mod per_call {
         let mut bound_live_member_seen = false;
         let mut wrong_live_projection_seen = false;
         for resolved in Box::pin(member_sources_for_entry_including_hidden(entry)).await {
-            if !crate::member_comms_id::live_member_names_identity_or_incarnation(
-                &resolved.runtime_identity,
-                &record.identity,
-                Some(record.runtime_member_id.as_str()),
-            ) {
+            if !member_cut::live_member_names_record(&resolved, record) {
                 continue;
             }
             bound_live_member_seen = true;
@@ -349,7 +377,7 @@ mod per_call {
         resolved: &ResolvedConsoleMember,
         record: &ConsoleIdentityRecord,
     ) -> bool {
-        let Some(identity_runtime) = resolved.entry.identity_runtime.as_ref() else {
+        let Some(identity_runtime) = resolved.identity_runtime() else {
             return false;
         };
         let Ok(identity) = crate::identity_first::AgentIdentity::parse(&record.identity) else {
@@ -370,10 +398,12 @@ mod per_call {
             return false;
         }
         for candidate in Box::pin(member_sources_for_entry(&resolved.entry)).await {
-            if !crate::member_comms_id::live_member_is_identity(
-                &candidate.runtime_identity,
-                status.identity.as_str(),
-            ) {
+            if candidate.nested()
+                || !crate::member_comms_id::live_member_is_identity(
+                    &candidate.runtime_identity,
+                    status.identity.as_str(),
+                )
+            {
                 continue;
             }
             let Some(bound_record) = identity_record_for_resolved_member(&candidate).await else {
@@ -410,6 +440,7 @@ mod per_call {
         let frame_session_id = frame.session_id.as_deref();
         let mut saw_hidden = false;
         let mut saw_visible = false;
+        let mut named_bare_by_a_nested_member = false;
         for resolved in Box::pin(member_sources_for_entry_including_hidden(entry)).await {
             let Some(record) = identity_record_for_resolved_member(&resolved).await else {
                 continue;
@@ -419,9 +450,15 @@ mod per_call {
             let runtime_matches = record.runtime_member_id == runtime_member_id;
             let identity_matches = record.identity == frame.identity;
             if !session_matches && !runtime_matches && !identity_matches {
+                if resolved.nested() && resolved.runtime_identity == runtime_member_id {
+                    named_bare_by_a_nested_member = true;
+                }
                 continue;
             }
             if session_matches && !raw_resolved_member_visible(&resolved, &record) {
+                return true;
+            }
+            if session_matches && resolved.nested() && !runtime_matches && !identity_matches {
                 return true;
             }
             if Box::pin(resolved_member_visible(&resolved, &record)).await {
@@ -430,7 +467,7 @@ mod per_call {
                 saw_hidden = true;
             }
         }
-        saw_hidden && !saw_visible
+        (saw_hidden || named_bare_by_a_nested_member) && !saw_visible
     }
 
     pub(super) async fn capture_member_lineage(
@@ -442,6 +479,7 @@ mod per_call {
             record,
             namespace,
             resolved.member.role.as_str(),
+            resolved.member.labels.get("role").map(String::as_str),
         )];
         let mut visited = BTreeSet::from([record.identity.clone()]);
         let mut child_labels = record.labels.clone();
@@ -476,7 +514,11 @@ mod per_call {
                     let durable =
                         crate::member_comms_id::durable_identity_label(&candidate.member.labels)
                             .unwrap_or(alias);
-                    if roster_id != parent && alias != parent && durable != parent {
+                    if roster_id != parent
+                        && alias != parent
+                        && durable != parent
+                        && candidate.console_name().as_deref() != Some(parent.as_str())
+                    {
                         continue;
                     }
                     let Some(candidate_record) =
@@ -485,14 +527,23 @@ mod per_call {
                         continue;
                     };
                     if candidate_record.session_id.as_deref() == Some(bound_session) {
-                        confirmed = Some((candidate_record, candidate.member.role.to_string()));
+                        confirmed = Some((
+                            candidate_record,
+                            candidate.member.role.to_string(),
+                            candidate.member.labels.get("role").cloned(),
+                        ));
                         break;
                     }
                 }
             }
             match confirmed {
-                Some((parent_record, role)) => {
-                    lineage.push(lineage_link_for_record(&parent_record, namespace, &role));
+                Some((parent_record, role, own_role_label)) => {
+                    lineage.push(lineage_link_for_record(
+                        &parent_record,
+                        namespace,
+                        &role,
+                        own_role_label.as_deref(),
+                    ));
                     child_labels = parent_record.labels;
                 }
                 None => {
@@ -512,11 +563,12 @@ mod per_call {
 
 /// One cut per read decides every record, frame, member and lineage exactly
 /// as the per-call reads did, over a realm with visible, hidden, shadowed,
-/// delegate, labelled, dormant, retired and unknown identities, with the
-/// policy listing implicit delegates and without. It is an equivalence
-/// guard, green on the base by construction: a cut that kept a listing the
-/// base would not have read (a delegate the policy leaves out of the binding
-/// check), or reused a decision across members, turns it red.
+/// delegate, nested, labelled, dormant, retired and unknown identities, with
+/// the policy listing implicit delegate members and without. It is an
+/// equivalence guard, green on the base by construction: a cut that kept a
+/// listing the base would not have read (an implicit delegate member the
+/// policy leaves out of the binding check), or reused a decision across
+/// members, turns it red.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_read_cut_decides_every_record_and_frame_as_the_per_call_reads() {
     for include_delegates in [true, false] {
@@ -575,12 +627,15 @@ async fn a_read_cut_decides_every_record_and_frame_as_the_per_call_reads() {
             outcomes.insert(console_identity_record_visible_in(&cut, record).await);
         }
         assert_eq!(outcomes, BTreeSet::from([false, true]));
-        // The two outcomes that depend on which listing a decision reads,
-        // pinned: RED when the binding check reads every member (the stale
-        // `rt:relay:0` row is shadowed by its delegate-mob row) or when the
-        // record check reads only the unhidden members (`keeper` loses the
-        // delegate row that keeps it visible), while the policy leaves the
-        // delegates out.
+        // A nested mob's row is tied to no primary record by its bare name:
+        // `keeper`, whose own primary row the policy hides, stays hidden
+        // whatever a nested row of that name projects.
+        assert!(
+            !console_identity_record_visible_in(&cut, &record("keeper", "rt:keeper:0", None)).await
+        );
+        // The outcome that depends on which listing a decision reads, pinned:
+        // RED when the binding check ties the stale `rt:relay:0` row to a
+        // nested row of that name.
         if !include_delegates {
             let mut relay_stale_row = None;
             for member in cut.members().await {
@@ -591,10 +646,6 @@ async fn a_read_cut_decides_every_record_and_frame_as_the_per_call_reads() {
                 }
             }
             assert_eq!(relay_stale_row, Some(true));
-            assert!(
-                console_identity_record_visible_in(&cut, &record("keeper", "rt:keeper:0", None))
-                    .await
-            );
         }
         realm.stop().await;
     }
@@ -689,6 +740,7 @@ async fn identity_first_realm(count: usize) -> (UnifiedRuntime, RuntimeEntry) {
         .expect("a live durable identity registers");
     }
     let entry = RuntimeEntry {
+        mob: None,
         registration_id: uuid::Uuid::new_v4(),
         runtime_key: RUNTIME.to_string(),
         identity_namespace: String::new(),
@@ -758,19 +810,19 @@ async fn an_identities_read_lists_each_runtime_once() {
     let _ = runtime.mob_handle().stop().await;
 }
 
-/// Under a policy that hides implicit delegates, an identities read of an
-/// identity runtime's entry with no status record lists the primary mob's
-/// members once, inside the bounded live listing, and lists no delegate mob:
-/// the bound covers the same listing it covered before the cut. RED when the
-/// bounded branch reads `cut.members()` instead of `cut.unhidden()` (one
-/// delegate listing), as at the cut's first form.
+/// Under a policy that hides implicit delegate members, an identities read
+/// of an identity runtime's entry with no status record lists the primary
+/// mob's members once and the nested mobs' once, inside the bounded live
+/// listing, and lists the nested mob's member that is no implicit delegate.
+/// RED when a decision of the read lists a mob again.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_bounded_live_listing_lists_no_delegate_mob_the_policy_hides() {
+async fn a_bounded_live_listing_lists_the_primary_and_the_nested_mobs_once() {
     let primary = build_empty_runtime(&unique_console_mob_id("member-cut-bounded")).await;
     spawn_trusted_identity_projected_member(&primary, spec("worker", &[])).await;
     let delegate_id = unique_console_mob_id("member-cut-bounded-delegate");
-    let delegate = build_empty_runtime(&delegate_id).await;
-    spawn_trusted_identity_projected_member(&delegate, spec("helper", &[])).await;
+    // The nested mob is one the primary mob's `worker` made.
+    let delegate = MemberMadeMob::made_by(&primary, "worker", &delegate_id).await;
+    delegate.seat(spec("helper", &[])).await;
     primary
         .mob_runtime()
         .agent_mob_mcp_state()
@@ -780,6 +832,7 @@ async fn a_bounded_live_listing_lists_no_delegate_mob_the_policy_hides() {
             delegate.mob_handle().clone(),
         )
         .await;
+    delegate.read_by_the_owner_record_of(&primary).await;
     let identity_runtime = Arc::new(crate::identity_first::IdentityRuntime::new(
         crate::identity_first::IdentityRuntimeConfig {
             continuity_store: Arc::new(
@@ -794,6 +847,7 @@ async fn a_bounded_live_listing_lists_no_delegate_mob_the_policy_hides() {
         },
     ));
     let entry = RuntimeEntry {
+        mob: None,
         registration_id: uuid::Uuid::new_v4(),
         runtime_key: RUNTIME.to_string(),
         identity_namespace: String::new(),
@@ -818,14 +872,17 @@ async fn a_bounded_live_listing_lists_no_delegate_mob_the_policy_hides() {
     );
     assert_eq!(
         count(member_cut::listings::Listing::Delegates) - delegates_before,
-        0,
-        "no decision of this read reads the delegate mob the policy hides"
+        1,
+        "the bounded live listing lists the nested mobs once"
     );
     let listed: BTreeSet<_> = identities
         .iter()
-        .map(|record| record.identity.as_str())
+        .map(|record| record.identity.clone())
         .collect();
-    assert_eq!(listed, BTreeSet::from(["worker"]));
+    assert_eq!(
+        listed,
+        BTreeSet::from([format!("{delegate_id}/helper"), "worker".to_string()])
+    );
     let _ = delegate.mob_handle().stop().await;
     let _ = primary.mob_handle().stop().await;
 }
@@ -847,6 +904,7 @@ async fn a_timeline_page_lists_each_runtime_once() {
     let mut append = |identity: String| {
         sequence += 1;
         NewConsoleFrame {
+            mob_id: None,
             id: None,
             dedupe_key: format!("listing-frame-{sequence}"),
             timestamp_ms: sequence,
@@ -1110,6 +1168,7 @@ async fn a_read_takes_a_new_cut_when_its_runtime_registers_again() {
     spawn_trusted_identity_projected_member(&runtime, spec("agent-a", &[])).await;
     let first = runtime_entry_for_test(RUNTIME, &runtime);
     let second = RuntimeEntry {
+        mob: None,
         registration_id: uuid::Uuid::new_v4(),
         visibility_policy: Arc::new(HideMember("agent-a")),
         ..first.clone()
@@ -1184,6 +1243,7 @@ async fn a_stream_page_with_an_unknown_identity_refreshes_the_identity_read_mode
     aggregator
         .store()
         .append_if_absent(NewConsoleFrame {
+            mob_id: None,
             id: None,
             dedupe_key: "unknown-identity-frame".to_string(),
             timestamp_ms: 1,
@@ -1252,5 +1312,1208 @@ async fn a_stream_page_with_an_unknown_identity_refreshes_the_identity_read_mode
         );
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
+    let _ = runtime.mob_handle().stop().await;
+}
+
+/// A mob a seated member of a primary runtime's mob made, as a console's
+/// listing reads it: built over the primary's session service, with a
+/// creation record that names that member as it is seated there (at its
+/// generation, on its session). The primary's gateway holds it once a row
+/// puts it there.
+pub(super) struct MemberMadeMob {
+    handle: MobHandle,
+}
+
+impl MemberMadeMob {
+    /// The mob `mob_id`, offering the profiles `worker` and `delegate`,
+    /// made by `creator`, a seated member of `primary`'s mob.
+    pub(super) async fn made_by(primary: &UnifiedRuntime, creator: &str, mob_id: &str) -> Self {
+        let definition = meerkat_mob::MobDefinition::from_toml(&format!(
+            r#"
+[mob]
+id = "{mob_id}"
+
+[profiles.worker]
+model = "gpt-5.5"
+external_addressable = true
+
+[profiles.worker.tools]
+comms = true
+
+[profiles.delegate]
+model = "gpt-5.5"
+external_addressable = true
+
+[profiles.delegate.tools]
+comms = true
+"#
+        ))
+        .expect("definition parses");
+        let primary_handle = primary.mob_handle();
+        let creator = crate::member_comms_id::mob_member_id(creator);
+        let seated = primary_handle
+            .get_member(&creator)
+            .await
+            .expect("the roster reads")
+            .expect("the creating member is seated");
+        let state = primary
+            .mob_runtime()
+            .agent_mob_mcp_state()
+            .expect("the primary runtime exposes its mob state");
+        let handle = meerkat_mob::MobBuilder::new(definition, meerkat_mob::MobStorage::in_memory())
+            .with_session_service(state.session_service())
+            .allow_ephemeral_sessions(true)
+            .with_default_llm_client(Arc::new(meerkat_client::TestClient::for_provider(
+                meerkat_core::Provider::OpenAI,
+            )))
+            .with_provenance(meerkat_mob::MobProvenance::OperatorMember {
+                parent_mob_id: primary_handle.mob_id().clone(),
+                parent_incarnation: primary_handle.incarnation(),
+                creator_identity: creator,
+                creator_generation: seated.generation,
+                owner_session: seated
+                    .bridge_session_id()
+                    .cloned()
+                    .expect("the creating member has a session"),
+            })
+            .create()
+            .await
+            .expect("the member's mob is built");
+        Self { handle }
+    }
+
+    /// The mob's handle.
+    pub(super) fn mob_handle(&self) -> MobHandle {
+        self.handle.clone()
+    }
+
+    /// Seat a member as [`spawn_trusted_identity_projected_member`] seats one
+    /// in a runtime's own mob.
+    pub(super) async fn seat(&self, mut spec: SpawnMemberSpec) {
+        let alias = spec.identity.to_string();
+        spec.identity = crate::member_comms_id::mob_member_id(&alias);
+        self.handle
+            .spawn_spec(spec)
+            .await
+            .expect("trusted identity-projected member spawns");
+    }
+
+    /// Have the record of who each mob is private to read this mob, which
+    /// the row put into `primary`'s gateway with no create admission: a
+    /// listing of a mob that record has not read withholds the mob's
+    /// members and starts the read in the background.
+    pub(super) async fn read_by_the_owner_record_of(&self, primary: &UnifiedRuntime) {
+        primary
+            .mob_runtime()
+            .private_owners()
+            .read_mob(&self.handle)
+            .await
+            .expect("the owner record reads the member's mob");
+    }
+}
+
+/// A runtime whose mob offers the profile `worker` and `delegate`, the
+/// profile the helpers of the `delegate` tool run under.
+pub(super) async fn build_runtime_with_delegate_profile(mob_id: &str) -> UnifiedRuntime {
+    let definition = meerkat_mob::MobDefinition::from_toml(&format!(
+        r#"
+[mob]
+id = "{mob_id}"
+
+[profiles.worker]
+model = "gpt-5.5"
+external_addressable = true
+
+[profiles.worker.tools]
+comms = true
+
+[profiles.delegate]
+model = "gpt-5.5"
+external_addressable = true
+
+[profiles.delegate.tools]
+comms = true
+"#
+    ))
+    .expect("definition parses");
+    UnifiedRuntime::builder()
+        .definition(definition)
+        .default_llm_client(Arc::new(meerkat_client::TestClient::for_provider(
+            meerkat_core::Provider::OpenAI,
+        )))
+        .build()
+        .await
+        .expect("runtime builds")
+}
+
+/// A policy that does not include implicit delegate members hides, in a mob
+/// nested under the primary mob, the members with the role `delegate` and no
+/// other member: every read lists the nested mob's other members and decides
+/// them as it decides the primary mob's. Such a policy hides no other
+/// member of a nested mob.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_policy_hiding_implicit_delegates_hides_only_them_in_a_nested_mob() {
+    let primary = build_empty_runtime(&unique_console_mob_id("member-cut-nested")).await;
+    spawn_trusted_identity_projected_member(&primary, spec("worker", &[])).await;
+    let nested_id = unique_console_mob_id("member-cut-nested-team");
+    // The nested mob is one the primary mob's `worker` made.
+    let nested = MemberMadeMob::made_by(&primary, "worker", &nested_id).await;
+    nested.seat(spec("helper", &[])).await;
+    nested
+        .seat(SpawnMemberSpec::from_wire(
+            "delegate".to_string(),
+            "aide".to_string(),
+            Some("You are aide.".into()),
+            None,
+            None,
+        ))
+        .await;
+    primary
+        .mob_runtime()
+        .agent_mob_mcp_state()
+        .expect("the primary runtime exposes its mob state")
+        .mob_insert_handle(
+            meerkat_mob::ids::MobId::from(nested_id.as_str()),
+            nested.mob_handle().clone(),
+        )
+        .await;
+    nested.read_by_the_owner_record_of(&primary).await;
+    let entry = RuntimeEntry {
+        mob: None,
+        registration_id: uuid::Uuid::new_v4(),
+        runtime_key: RUNTIME.to_string(),
+        identity_namespace: String::new(),
+        runtime: primary.mob_runtime().clone(),
+        identity_runtime: None,
+        identity_owner: None,
+        memory_panel: None,
+        console_events: primary.console_events(),
+        visibility_policy: Arc::new(HideImplicitDelegateMembersConsoleVisibilityPolicy),
+    };
+    let names = |members: Vec<ResolvedConsoleMember>| -> BTreeSet<String> {
+        members
+            .into_iter()
+            .map(|member| member.runtime_identity)
+            .collect()
+    };
+    let owned = |names: &[&str]| -> BTreeSet<String> {
+        names.iter().map(|name| (*name).to_string()).collect()
+    };
+
+    assert_eq!(
+        names(member_sources_for_entry(&entry).await),
+        owned(&["helper", "worker"]),
+        "the member listing of sends, transcripts and streams"
+    );
+    assert_eq!(
+        names(member_sources_for_entry_including_hidden(&entry).await),
+        owned(&["aide", "helper", "worker"]),
+        "the listing with the hidden members"
+    );
+
+    let cut = MemberCut::new(&entry);
+    let mut decided = BTreeMap::new();
+    for member in cut.members().await {
+        let own = member.record().await.expect("a listed member's record");
+        decided.insert(
+            member.resolved.runtime_identity.clone(),
+            resolved_member_visible_in(&cut, &member.resolved, own).await,
+        );
+    }
+    assert_eq!(
+        decided,
+        BTreeMap::from([
+            ("aide".to_string(), false),
+            ("helper".to_string(), true),
+            ("worker".to_string(), true),
+        ]),
+        "each member as a read decides it"
+    );
+    assert!(
+        !frame_matches_hidden_member_in(&cut, &frame(&format!("{nested_id}/helper"), None)).await,
+        "a frame of the nested mob's member is not a hidden member's"
+    );
+    assert!(
+        frame_matches_hidden_member_in(&cut, &frame(&format!("{nested_id}/aide"), None)).await,
+        "a frame of the implicit delegate member is a hidden member's"
+    );
+    for bare in ["helper", "aide"] {
+        assert!(
+            frame_matches_hidden_member_in(&cut, &frame(bare, None)).await,
+            "a frame under the bare name {bare} of a nested member is not served"
+        );
+    }
+
+    let aggregator = aggregator_over(&entry);
+    let identities = aggregator.list_identities().await.expect("identities");
+    let listed: BTreeSet<_> = identities
+        .iter()
+        .map(|record| record.identity.clone())
+        .collect();
+    assert_eq!(
+        listed,
+        BTreeSet::from([format!("{nested_id}/helper"), "worker".to_string()])
+    );
+    let _ = nested.mob_handle().stop().await;
+    let _ = primary.mob_handle().stop().await;
+}
+
+/// A primary mob with `planner` and `researcher`, and a mob its `planner`
+/// made, which the same gateway holds beside it, with a `researcher` and a
+/// `helper` (both workers) and an `aide` (an implicit delegate member),
+/// read by a console with `policy`.
+struct Namesakes {
+    primary: UnifiedRuntime,
+    nested: MemberMadeMob,
+    nested_id: String,
+    entry: RuntimeEntry,
+}
+
+impl Namesakes {
+    async fn build(tag: &str, policy: Arc<dyn ConsoleVisibilityPolicy>) -> Self {
+        let primary = build_empty_runtime(&unique_console_mob_id(tag)).await;
+        for member in ["planner", "researcher"] {
+            spawn_trusted_identity_projected_member(&primary, spec(member, &[])).await;
+        }
+        let nested_id = unique_console_mob_id(&format!("{tag}-team"));
+        let nested = MemberMadeMob::made_by(&primary, "planner", &nested_id).await;
+        for member in ["researcher", "helper"] {
+            nested.seat(spec(member, &[])).await;
+        }
+        nested
+            .seat(spec_with_profile("delegate", "aide", &[]))
+            .await;
+        primary
+            .mob_runtime()
+            .agent_mob_mcp_state()
+            .expect("the primary runtime exposes its mob state")
+            .mob_insert_handle(
+                meerkat_mob::ids::MobId::from(nested_id.as_str()),
+                nested.mob_handle().clone(),
+            )
+            .await;
+        nested.read_by_the_owner_record_of(&primary).await;
+        let entry = RuntimeEntry {
+            mob: None,
+            registration_id: uuid::Uuid::new_v4(),
+            runtime_key: RUNTIME.to_string(),
+            identity_namespace: String::new(),
+            runtime: primary.mob_runtime().clone(),
+            identity_runtime: None,
+            identity_owner: None,
+            memory_panel: None,
+            console_events: primary.console_events(),
+            visibility_policy: policy,
+        };
+        Self {
+            primary,
+            nested,
+            nested_id,
+            entry,
+        }
+    }
+
+    /// The nested mob's member `name` as the console names it.
+    fn nested_identity(&self, name: &str) -> String {
+        format!("{}/{name}", self.nested_id)
+    }
+
+    /// Whether `handle`'s roster holds `name` as an active member.
+    async fn active(handle: &MobHandle, name: &str) -> bool {
+        handle
+            .list_members_observation_snapshot()
+            .await
+            .iter()
+            .any(|member| {
+                member.agent_identity.as_str() == name
+                    && member.status == meerkat_mob::MobMemberStatus::Active
+            })
+    }
+
+    async fn stop(self) {
+        let _ = self.nested.mob_handle().stop().await;
+        let _ = self.primary.mob_handle().stop().await;
+    }
+}
+/// A policy written for the release before this change that hides implicit
+/// delegate members (it answers that switch and no method added since) keeps
+/// hiding every member
+/// of every nested mob on every read: the member listing of sends,
+/// transcripts and streams, each member as a read decides it, frames written
+/// by a nested member, the identities read, and the actions that name one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_policy_written_before_this_change_hides_every_nested_member_on_every_read() {
+    let policy: Arc<dyn ConsoleVisibilityPolicy> = Arc::new(FixturePolicy {
+        include_delegates: false,
+    });
+    let realm = Namesakes::build("old-policy", policy.clone()).await;
+    let primary_mob_id = realm.primary.mob_handle().mob_id().to_string();
+
+    let listed: BTreeSet<String> = member_sources_for_entry(&realm.entry)
+        .await
+        .into_iter()
+        .map(|member| (member.source_mob_id, member.runtime_identity))
+        .map(|(mob, name)| format!("{mob}/{name}"))
+        .collect();
+    assert_eq!(
+        listed,
+        BTreeSet::from([
+            format!("{primary_mob_id}/planner"),
+            format!("{primary_mob_id}/researcher"),
+        ]),
+        "the member listing of sends, transcripts and streams"
+    );
+
+    let cut = MemberCut::new(&realm.entry);
+    for member in cut.members().await {
+        if member.resolved.source_mob_id == primary_mob_id {
+            continue;
+        }
+        let own = member.record().await.expect("a listed member's record");
+        assert!(
+            !resolved_member_visible_in(&cut, &member.resolved, own).await,
+            "{} is hidden as a read decides it",
+            member.resolved.runtime_identity
+        );
+        assert!(
+            !retained_member_visible(
+                policy.as_ref(),
+                &ConsoleFrameMemberProvenance {
+                    identity: own.clone(),
+                    member: console_member_for_resolved_member(&member.resolved, own),
+                    primary_mob_id: primary_mob_id.clone(),
+                    source_mob_id: member.resolved.source_mob_id.clone(),
+                    lineage: Vec::new(),
+                },
+            ),
+            "a frame {} wrote, earlier ones included, stays hidden",
+            member.resolved.runtime_identity
+        );
+        assert!(
+            frame_matches_hidden_member_in(&cut, &frame(&own.identity, None)).await,
+            "a frame under {} is a hidden member's",
+            own.identity
+        );
+    }
+
+    let aggregator = aggregator_over(&realm.entry);
+    let identities: BTreeSet<String> = aggregator
+        .list_identities()
+        .await
+        .expect("identities")
+        .into_iter()
+        .map(|record| record.identity)
+        .collect();
+    assert_eq!(
+        identities,
+        BTreeSet::from(["planner".to_string(), "researcher".to_string()])
+    );
+    for identity in [
+        "helper".to_string(),
+        realm.nested_identity("helper"),
+        realm.nested_identity("researcher"),
+    ] {
+        assert!(
+            aggregator
+                .inspect_identity(&identity)
+                .await
+                .expect("inspect answers")
+                .is_none(),
+            "inspect of {identity}"
+        );
+        assert!(
+            aggregator
+                .resolve_send_member(&identity)
+                .await
+                .expect("a send resolves")
+                .is_none(),
+            "a send to {identity}"
+        );
+        assert!(
+            !aggregator
+                .retire_identity(&identity)
+                .await
+                .expect("retire answers"),
+            "retire of {identity}"
+        );
+    }
+    for member in ["researcher", "helper", "aide"] {
+        assert!(
+            Namesakes::active(&realm.nested.mob_handle(), member).await,
+            "{member} is left alone"
+        );
+    }
+    realm.stop().await;
+}
+
+/// On the stock console a bare member name names the primary mob's member,
+/// as in the release before this change, whatever a nested mob holds under
+/// the same name: inspect, the
+/// member a send resolves and retire all reach the primary member, and none
+/// answers "ambiguous".
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_bare_name_names_the_primary_mobs_member_whatever_a_nested_mob_holds() {
+    let realm = Namesakes::build(
+        "bare-name",
+        Arc::new(HideImplicitDelegateMembersConsoleVisibilityPolicy),
+    )
+    .await;
+    let aggregator = aggregator_over(&realm.entry);
+    let primary_mob_id = realm.primary.mob_handle().mob_id().to_string();
+
+    let inspected = aggregator
+        .inspect_identity("researcher")
+        .await
+        .expect("inspect answers, not ambiguous")
+        .expect("the primary member is found");
+    assert_eq!(inspected.identity.identity, "researcher");
+    assert!(
+        !inspected.identity.labels.contains_key("source_mob_id"),
+        "the primary mob's member: {:?}",
+        inspected.identity.labels
+    );
+    let target = aggregator
+        .resolve_send_member("researcher")
+        .await
+        .expect("a send resolves, not ambiguous")
+        .expect("a send finds the primary member");
+    assert_eq!(target.source_mob_id, primary_mob_id);
+    assert!(
+        aggregator
+            .retire_identity("researcher")
+            .await
+            .expect("retire answers, not ambiguous"),
+        "retire reaches the primary member"
+    );
+    assert!(
+        !Namesakes::active(&realm.primary.mob_handle(), "researcher").await,
+        "the primary member is retired"
+    );
+    assert!(
+        Namesakes::active(&realm.nested.mob_handle(), "researcher").await,
+        "the nested namesake is left alone"
+    );
+    realm.stop().await;
+}
+
+/// A nested mob's member is addressed by its mob and name, the identity the
+/// console lists it under: inspect, the member a send resolves and retire
+/// reach that member and no namesake.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_nested_member_is_addressed_by_its_mob_and_name() {
+    let realm = Namesakes::build(
+        "mob-and-name",
+        Arc::new(HideImplicitDelegateMembersConsoleVisibilityPolicy),
+    )
+    .await;
+    let aggregator = aggregator_over(&realm.entry);
+    let namesake = realm.nested_identity("researcher");
+
+    let listed: BTreeSet<String> = aggregator
+        .list_identities()
+        .await
+        .expect("identities")
+        .into_iter()
+        .map(|record| record.identity)
+        .collect();
+    assert_eq!(
+        listed,
+        BTreeSet::from([
+            "planner".to_string(),
+            "researcher".to_string(),
+            namesake.clone(),
+            realm.nested_identity("helper"),
+        ]),
+        "each member once, the nested ones under their mob; the implicit delegate hidden"
+    );
+    let inspected = aggregator
+        .inspect_identity(&namesake)
+        .await
+        .expect("inspect answers")
+        .expect("the nested member is found");
+    assert_eq!(inspected.identity.identity, namesake);
+    assert_eq!(
+        inspected.identity.labels.get("source_mob_id"),
+        Some(&realm.nested_id)
+    );
+    let target = aggregator
+        .resolve_send_member(&namesake)
+        .await
+        .expect("a send resolves")
+        .expect("a send finds the nested member");
+    assert_eq!(target.source_mob_id, realm.nested_id);
+    assert!(
+        aggregator
+            .retire_identity(&namesake)
+            .await
+            .expect("retire answers"),
+        "retire reaches the nested member"
+    );
+    assert!(
+        !Namesakes::active(&realm.nested.mob_handle(), "researcher").await,
+        "the nested member is retired"
+    );
+    assert!(
+        Namesakes::active(&realm.primary.mob_handle(), "researcher").await,
+        "the primary namesake is left alone"
+    );
+    realm.stop().await;
+}
+
+/// A nested mob's member named by its bare name is unknown: a bare name
+/// names a primary member only, so no action reaches a nested member through
+/// one, also when no primary member has the name.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_nested_member_named_bare_is_unknown() {
+    let realm = Namesakes::build(
+        "bare-nested",
+        Arc::new(HideImplicitDelegateMembersConsoleVisibilityPolicy),
+    )
+    .await;
+    let aggregator = aggregator_over(&realm.entry);
+
+    assert!(
+        aggregator
+            .inspect_identity("helper")
+            .await
+            .expect("inspect answers")
+            .is_none(),
+        "inspect finds no member"
+    );
+    assert!(
+        aggregator
+            .resolve_send_member("helper")
+            .await
+            .expect("a send resolves")
+            .is_none(),
+        "a send finds no member"
+    );
+    assert!(
+        !aggregator
+            .retire_identity("helper")
+            .await
+            .expect("retire answers"),
+        "retire finds no member"
+    );
+    assert!(
+        Namesakes::active(&realm.nested.mob_handle(), "helper").await,
+        "the nested member is left alone"
+    );
+    realm.stop().await;
+}
+
+/// A temporary council's participant is reached by no read, on a console
+/// whose policy includes nested members too: the council seats it in a mob
+/// it creates for a fresh session, so the mob's creation record names no
+/// member and the mob is not listed. The participant is absent from the
+/// member listing and the identities read, is not found by inspect, by a
+/// send or by retire under any name, gets no history read, and a frame it
+/// wrote before (stored under its bare name, with or without its session) is
+/// not served. The member it was forked from is reached as before.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_council_participant_is_reached_by_no_read_on_a_console_that_lists_nested_members() {
+    let primary = build_empty_runtime(&unique_console_mob_id("council-source")).await;
+    spawn_trusted_identity_projected_member(&primary, spec("source", &[])).await;
+    let state = primary
+        .mob_runtime()
+        .agent_mob_mcp_state()
+        .expect("the primary runtime exposes its mob state");
+    let council_id = unique_console_mob_id("council-seats");
+    let definition = meerkat_mob::MobDefinition::from_toml(&format!(
+        r#"
+[mob]
+id = "{council_id}"
+
+[profiles.worker]
+model = "gpt-5.5"
+runtime_mode = "turn_driven"
+
+[profiles.worker.tools]
+comms = true
+"#
+    ))
+    .expect("definition parses");
+    // As the council coordinator creates its mob: for a fresh session no
+    // roster names.
+    let created = Box::pin(state.mob_create_definition_with_owner_bridge_session(
+        definition,
+        SessionId::new(),
+        false,
+        false,
+    ))
+    .await
+    .expect("the council's mob is created");
+    let council = Box::pin(state.handle_for(&created))
+        .await
+        .expect("the council's mob is held");
+    let mut participant = SpawnMemberSpec::new(
+        meerkat_mob::ProfileName::from("worker"),
+        meerkat_mob::AgentIdentity::from("panelist"),
+    );
+    participant.runtime_mode = Some(meerkat_mob::MobRuntimeMode::TurnDriven);
+    council
+        .ensure_member(participant)
+        .await
+        .expect("the participant is seated");
+    let policy: Arc<dyn ConsoleVisibilityPolicy> = Arc::new(AllowAllConsoleVisibilityPolicy);
+    let entry = RuntimeEntry {
+        mob: None,
+        registration_id: uuid::Uuid::new_v4(),
+        runtime_key: RUNTIME.to_string(),
+        identity_namespace: String::new(),
+        runtime: primary.mob_runtime().clone(),
+        identity_runtime: None,
+        identity_owner: None,
+        memory_panel: None,
+        console_events: primary.console_events(),
+        visibility_policy: policy.clone(),
+    };
+    let primary_mob_id = primary.mob_handle().mob_id().to_string();
+    let qualified = format!("{council_id}/panelist");
+
+    assert!(
+        member_sources_for_entry(&entry)
+            .await
+            .iter()
+            .all(|member| member.source_mob_id == primary_mob_id),
+        "the member listing of sends, transcripts and history reads"
+    );
+    let aggregator = aggregator_over(&entry);
+    let identities: BTreeSet<String> = aggregator
+        .list_identities()
+        .await
+        .expect("identities")
+        .into_iter()
+        .map(|record| record.identity)
+        .collect();
+    assert_eq!(identities, BTreeSet::from(["source".to_string()]));
+    for name in ["panelist", qualified.as_str()] {
+        assert!(
+            aggregator
+                .inspect_identity(name)
+                .await
+                .expect("inspect answers")
+                .is_none(),
+            "inspect of {name}"
+        );
+        assert!(
+            aggregator
+                .resolve_send_member(name)
+                .await
+                .expect("a send resolves")
+                .is_none(),
+            "a send to {name}"
+        );
+        assert!(
+            !aggregator
+                .retire_identity(name)
+                .await
+                .expect("retire answers"),
+            "retire of {name}"
+        );
+        assert!(
+            session_backfill_targets_for_identity_of(&aggregator.inner, None, name)
+                .await
+                .is_empty(),
+            "no history read of {name}"
+        );
+    }
+
+    // Frames a console that listed the participant stored before: under its
+    // bare name, captured with its mob.
+    let cut = MemberCut::new(&entry);
+    let mut participant_session = None;
+    for member in cut.members().await {
+        if member.resolved.source_mob_id != council_id {
+            continue;
+        }
+        let own = member.record().await.expect("the participant's record");
+        participant_session = own.session_id.clone();
+        let mut captured_before = own.clone();
+        captured_before.identity = "panelist".to_string();
+        captured_before.runtime_member_id = "panelist".to_string();
+        assert!(
+            !retained_member_visible(
+                policy.as_ref(),
+                &ConsoleFrameMemberProvenance {
+                    member: console_member_for_resolved_member(&member.resolved, &captured_before),
+                    identity: captured_before,
+                    primary_mob_id: primary_mob_id.clone(),
+                    source_mob_id: council_id.clone(),
+                    lineage: Vec::new(),
+                },
+            ),
+            "a stored frame captured with the participant is not served"
+        );
+    }
+    assert!(
+        participant_session.is_some(),
+        "the participant has a session"
+    );
+    for stored in [
+        frame("panelist", None),
+        frame("panelist", participant_session.as_deref()),
+        frame(&qualified, participant_session.as_deref()),
+    ] {
+        assert!(
+            frame_matches_hidden_member_in(&cut, &stored).await,
+            "a stored frame of {} (session {:?}) is a hidden member's",
+            stored.identity,
+            stored.session_id
+        );
+    }
+
+    // The member it was forked from is unaffected.
+    assert!(
+        aggregator
+            .inspect_identity("source")
+            .await
+            .expect("inspect answers")
+            .is_some()
+    );
+    assert!(
+        aggregator
+            .resolve_send_member("source")
+            .await
+            .expect("a send resolves")
+            .is_some()
+    );
+    assert!(!frame_matches_hidden_member_in(&cut, &frame("source", None)).await);
+    let _ = primary.mob_handle().stop().await;
+}
+
+/// A mob whose id is the identity namespace its runtime is served under is
+/// not listed: its members' identities (`<mob>/<name>`) would be the
+/// namespaced identities of the runtime's own members. Every read lists the
+/// runtime's own members alone, each once and as itself, no request reaches
+/// a member of that mob, and a frame such a member wrote is no frame of the
+/// runtime's own member of the same name. Under the stock empty namespace
+/// the same mob is listed as before.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_mob_whose_id_is_its_runtimes_namespace_is_not_listed() {
+    let policy: Arc<dyn ConsoleVisibilityPolicy> =
+        Arc::new(HideImplicitDelegateMembersConsoleVisibilityPolicy);
+    let mut realm = Namesakes::build("namespace-mob", policy.clone()).await;
+    let namespace = realm.nested_id.clone();
+    realm.entry.identity_namespace.clone_from(&namespace);
+    let primary_mob_id = realm.primary.mob_handle().mob_id().to_string();
+    let namespaced = |name: &str| format!("{namespace}/{name}");
+
+    assert!(
+        member_sources_for_entry(&realm.entry)
+            .await
+            .iter()
+            .all(|member| member.source_mob_id == primary_mob_id),
+        "the member listing of sends, transcripts and streams holds the runtime's own members \
+         alone"
+    );
+    let aggregator = aggregator_over(&realm.entry);
+    let records = aggregator.list_identities().await.expect("identities");
+    let mut listed: Vec<String> = records
+        .iter()
+        .map(|record| record.identity.clone())
+        .collect();
+    listed.sort();
+    assert_eq!(
+        listed,
+        vec![namespaced("planner"), namespaced("researcher")],
+        "each member of the runtime's own mob once, and no member of the mob named as the \
+         namespace"
+    );
+    assert!(
+        records
+            .iter()
+            .all(|record| !record.labels.contains_key("source_mob_id")),
+        "{records:#?}"
+    );
+    let inspected = aggregator
+        .inspect_identity(&namespaced("researcher"))
+        .await
+        .expect("inspect answers")
+        .expect("the runtime's own member is found");
+    assert!(
+        !inspected.identity.labels.contains_key("source_mob_id"),
+        "the runtime's own member: {:?}",
+        inspected.identity.labels
+    );
+    assert!(
+        aggregator
+            .inspect_identity(&namespaced("helper"))
+            .await
+            .expect("inspect answers")
+            .is_none(),
+        "a member of the mob named as the namespace is not found"
+    );
+    let target = aggregator
+        .resolve_send_member(&namespaced("researcher"))
+        .await
+        .expect("a send resolves")
+        .expect("a send finds the runtime's own member");
+    assert_eq!(target.source_mob_id, primary_mob_id);
+
+    // Frames under the one identity the two namesakes would share.
+    let cut = MemberCut::new(&realm.entry);
+    let mut sessions = BTreeMap::new();
+    for member in cut.members().await {
+        if member.resolved.runtime_identity == "researcher" {
+            let own = member.record().await.expect("a member's record");
+            sessions.insert(member.resolved.nested(), own.session_id.clone());
+        }
+    }
+    let own_session = sessions
+        .get(&false)
+        .cloned()
+        .flatten()
+        .expect("the runtime's own member has a session");
+    let nested_session = sessions
+        .get(&true)
+        .cloned()
+        .flatten()
+        .expect("the nested namesake has a session");
+    assert!(
+        !frame_matches_hidden_member_in(
+            &cut,
+            &frame(&namespaced("researcher"), Some(&own_session))
+        )
+        .await,
+        "a frame of the runtime's own member is served"
+    );
+    assert!(
+        frame_matches_hidden_member_in(
+            &cut,
+            &frame(&namespaced("researcher"), Some(&nested_session))
+        )
+        .await,
+        "a frame the nested namesake wrote is no frame of the runtime's own member"
+    );
+    realm.stop().await;
+
+    // The stock empty namespace: the same shape of mobs is listed as before.
+    let realm = Namesakes::build("namespace-mob-stock", policy).await;
+    let listed: BTreeSet<String> = aggregator_over(&realm.entry)
+        .list_identities()
+        .await
+        .expect("identities")
+        .into_iter()
+        .map(|record| record.identity)
+        .collect();
+    assert_eq!(
+        listed,
+        BTreeSet::from([
+            "planner".to_string(),
+            "researcher".to_string(),
+            realm.nested_identity("researcher"),
+            realm.nested_identity("helper"),
+        ])
+    );
+    realm.stop().await;
+}
+
+/// A member that a nested mob's member spawned carries its spawner as a
+/// confirmed ancestor: the spawn registry names the spawner by its mob and
+/// name, and the incarnation that spawned it is found under that name. Under
+/// an access configuration with a role deny that applies to the caller, the
+/// caller who is listed the member's row is served the member's frames too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_member_a_nested_member_spawned_carries_its_confirmed_spawner() {
+    let realm = Namesakes::build(
+        "nested-spawner",
+        Arc::new(HideImplicitDelegateMembersConsoleVisibilityPolicy),
+    )
+    .await;
+    // The fixture puts the nested mob into the gateway with no create
+    // admission: the record of who each mob is private to reads it here (a
+    // mob the `planner` made, private to no one), as it reads every mob the
+    // gateway holds at its start.
+    realm
+        .primary
+        .mob_runtime()
+        .private_owners()
+        .read_mob(&realm.nested.mob_handle())
+        .await
+        .expect("the owner record reads the nested mob");
+    let primary_mob_id = realm.primary.mob_handle().mob_id().to_string();
+    let spawner = realm.nested_identity("researcher");
+    let child = realm.nested_identity("helper");
+    let mut spawner_record = None;
+    {
+        let cut = MemberCut::new(&realm.entry);
+        for member in cut.members().await {
+            if member.resolved.console_name().as_deref() == Some(spawner.as_str()) {
+                spawner_record = member.record().await.cloned();
+            }
+        }
+    }
+    let spawner_record = spawner_record.expect("the nested spawner is listed");
+    let spawner_session = spawner_record
+        .session_id
+        .clone()
+        .expect("the nested spawner has a session");
+    // What the spawn registry holds for the child: its spawner, by its mob
+    // and name, and the session of the incarnation that spawned it.
+    realm
+        .entry
+        .console_events
+        .register_identity_labels(
+            &realm.nested_id,
+            &child,
+            "helper",
+            BTreeMap::from([
+                (
+                    crate::console_spawn::SPAWNED_BY_LABEL.to_string(),
+                    spawner.clone(),
+                ),
+                (
+                    crate::console_spawn::SPAWNED_BY_SESSION_LABEL.to_string(),
+                    spawner_session,
+                ),
+            ]),
+        )
+        .await;
+
+    let cut = MemberCut::new(&realm.entry);
+    let mut captured = None;
+    for member in cut.members().await {
+        if member.resolved.console_name().as_deref() == Some(child.as_str()) {
+            let own = member.record().await.expect("the child's record");
+            let lineage = capture_member_lineage_in(&cut, &member.resolved, own).await;
+            captured = Some((member.resolved.clone(), own.clone(), lineage));
+        }
+    }
+    let (resolved, own, lineage) = captured.expect("the child is listed");
+    assert_eq!(lineage.len(), 2, "{lineage:#?}");
+    assert_eq!(lineage[1].identity, spawner);
+    assert_eq!(
+        lineage[1].role.as_deref(),
+        Some("worker"),
+        "the spawner is captured with its attributes: {lineage:#?}"
+    );
+    assert_eq!(
+        lineage[1]
+            .labels
+            .as_ref()
+            .and_then(|labels| labels.get("source_mob_id")),
+        Some(&realm.nested_id),
+        "{lineage:#?}"
+    );
+
+    // Everyone may view every agent, and no one an agent with the role
+    // `auditor`: a deny the bare identity of an ancestor cannot decide.
+    let access = crate::access::AccessController::new(crate::access::AccessControlConfig {
+        enabled: true,
+        admins: vec!["root@example.test".to_string()],
+        rules: vec![
+            crate::access::AccessRule {
+                id: "everyone-views".to_string(),
+                subjects: vec!["*".to_string()],
+                actions: vec![crate::access::ACTION_AGENT_VIEW.to_string()],
+                agents: vec!["*".to_string()],
+                ..Default::default()
+            },
+            crate::access::AccessRule {
+                id: "no-one-views-an-auditor".to_string(),
+                effect: crate::access::AccessEffect::Deny,
+                subjects: vec!["*".to_string()],
+                actions: vec![crate::access::ACTION_AGENT_VIEW.to_string()],
+                roles: vec!["auditor".to_string()],
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    })
+    .expect("access controller");
+    // The roster priming's record of the two members.
+    for (record, role) in [(&spawner_record, "worker"), (&own, "worker")] {
+        access.record_agent_attributes(crate::access::AgentResourceAttributes {
+            identity: record.identity.clone(),
+            agent_id: Some(record.runtime_member_id.clone()),
+            role: Some(role.to_string()),
+            labels: record.labels.clone(),
+        });
+    }
+    let caller = access.view_for_caller(Some("carol@example.test"), Some("person:carol"));
+    assert!(
+        caller.can_view_agent(&child),
+        "the caller is listed the member's row"
+    );
+    let mut written = frame(&child, own.session_id.as_deref());
+    written.source.member_provenance = Some(ConsoleFrameMemberProvenance {
+        member: console_member_for_resolved_member(&resolved, &own),
+        identity: own,
+        primary_mob_id,
+        source_mob_id: realm.nested_id.clone(),
+        lineage,
+    });
+    assert!(
+        timeline_frame_visible_to(&caller, &written),
+        "the caller who is listed the member's row is served its frames"
+    );
+    realm.stop().await;
+}
+
+/// Which mob a member sits in and who created that mob are the console's
+/// own facts for an agent with no live member too: a `source_mob_id` or a
+/// `delegate_host_identity` its declaration carries is not in its record,
+/// so a rule that selects a nested mob's members by the mob label does not
+/// match it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_agent_with_no_live_member_keeps_no_console_mob_label() {
+    let (runtime, entry) = identity_first_realm(0).await;
+    let identity_runtime = entry.identity_runtime.as_ref().expect("identity runtime");
+    let mut declared = durable_spec("dormant");
+    declared.labels = BTreeMap::from([
+        ("source_mob_id".to_string(), "vault".to_string()),
+        ("delegate_host_identity".to_string(), "planner".to_string()),
+        ("tier".to_string(), "public".to_string()),
+    ]);
+    identity_runtime
+        .register(declared)
+        .await
+        .expect("the identity registers");
+    let statuses = identity_runtime.statuses().await.expect("statuses");
+    let status = statuses
+        .iter()
+        .find(|status| status.identity.as_str() == "dormant")
+        .expect("the dormant identity's status");
+    let record = identity_record_for_status(&entry, status);
+    assert_eq!(
+        record.labels.get("tier").map(String::as_str),
+        Some("public"),
+        "a declared label of its own stays: {:?}",
+        record.labels
+    );
+    for key in crate::console_spawn::CONSOLE_MOB_LABELS {
+        assert!(
+            !record.labels.contains_key(key),
+            "the record carries no `{key}`: {:?}",
+            record.labels
+        );
+    }
+    let _ = runtime.mob_handle().stop().await;
+}
+
+/// The [`Namesakes`] mobs read under a namespace of two components whose
+/// first is the nested mob's id, with one more member of that mob whose
+/// name starts with the namespace's second component (`east/x`). That
+/// member's console name is then the namespaced identity of a member `x` of
+/// the runtime's own mob, and a request can spell it a second way: the
+/// namespace, then its mob and name. Answers the realm and that spelling.
+async fn namesakes_under_a_namespace_that_starts_with_the_mob(tag: &str) -> (Namesakes, String) {
+    let mut realm = Namesakes::build(
+        tag,
+        Arc::new(HideImplicitDelegateMembersConsoleVisibilityPolicy),
+    )
+    .await;
+    realm.nested.seat(spec("east/x", &[])).await;
+    let namespace = format!("{}/east", realm.nested_id);
+    let spelled_through_the_namespace = format!("{namespace}/{}/east/x", realm.nested_id);
+    realm.entry.identity_namespace = namespace;
+    (realm, spelled_through_the_namespace)
+}
+
+/// A mob whose id is the first component of the namespace its runtime is
+/// served under is not listed, as a mob whose id is the whole namespace is
+/// not: no spelling of a member of it is found by an inspection, and the
+/// identities read names none.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn no_inspection_finds_a_member_of_a_mob_named_as_the_namespaces_first_component() {
+    let (realm, spelled) =
+        namesakes_under_a_namespace_that_starts_with_the_mob("namespace-head-inspect").await;
+    let aggregator = aggregator_over(&realm.entry);
+    for identity in [
+        spelled.clone(),
+        format!("{}/east/x", realm.nested_id),
+        format!(
+            "{}/{}",
+            realm.entry.identity_namespace,
+            realm.nested_identity("helper")
+        ),
+    ] {
+        assert!(
+            aggregator
+                .inspect_identity(&identity)
+                .await
+                .expect("inspect answers")
+                .is_none(),
+            "inspect of {identity}"
+        );
+    }
+    let records = aggregator.list_identities().await.expect("identities");
+    assert!(
+        records
+            .iter()
+            .all(|record| !record.labels.contains_key("source_mob_id")),
+        "the identities read lists the runtime's own members alone: {records:#?}"
+    );
+    realm.stop().await;
+}
+
+/// The same mob is reached by no send: a send to a member of it, spelled
+/// through the namespace or by its mob and name, resolves no member.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn no_send_reaches_a_member_of_a_mob_named_as_the_namespaces_first_component() {
+    let (realm, spelled) =
+        namesakes_under_a_namespace_that_starts_with_the_mob("namespace-head-send").await;
+    let aggregator = aggregator_over(&realm.entry);
+    for identity in [
+        spelled.clone(),
+        format!("{}/east/x", realm.nested_id),
+        format!(
+            "{}/{}",
+            realm.entry.identity_namespace,
+            realm.nested_identity("helper")
+        ),
+    ] {
+        assert!(
+            aggregator
+                .resolve_send_member(&identity)
+                .await
+                .expect("a send resolves")
+                .is_none(),
+            "a send to {identity}"
+        );
+    }
+    assert!(
+        Namesakes::active(&realm.nested.mob_handle(), "helper").await,
+        "the nested member is left alone"
+    );
+    realm.stop().await;
+}
+
+/// The labels a frame captures of its member are the member's own: a
+/// label named `role` that the member carries is captured as it is, beside
+/// the member's role in its mob, which the frame carries apart.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_frame_captures_its_members_own_label_named_role() {
+    let (runtime, entry) = identity_first_realm(0).await;
+    spawn_trusted_identity_projected_member(
+        &runtime,
+        spec(
+            "claimant",
+            &[("agent_identity", "claimant"), ("role", "auditor")],
+        ),
+    )
+    .await;
+    let cut = MemberCut::new(&entry);
+    let mut captured = None;
+    for member in cut.members().await {
+        let Some(own) = member.record().await else {
+            continue;
+        };
+        if own.identity == "claimant" {
+            captured = Some(capture_member_lineage_in(&cut, &member.resolved, own).await);
+        }
+    }
+    let lineage = captured.expect("the member is listed");
+    let own = lineage.first().expect("the member's own link");
+    assert_eq!(own.role.as_deref(), Some("worker"), "{own:#?}");
+    assert_eq!(
+        own.labels
+            .as_ref()
+            .and_then(|labels| labels.get("role"))
+            .map(String::as_str),
+        Some("auditor"),
+        "the captured labels are the member's own: {own:#?}"
+    );
     let _ = runtime.mob_handle().stop().await;
 }

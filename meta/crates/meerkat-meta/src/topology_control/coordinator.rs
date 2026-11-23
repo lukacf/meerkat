@@ -1693,16 +1693,16 @@ async fn prime_pair_access(left: &UnifiedRuntime, right: &UnifiedRuntime) {
 }
 
 fn view_allows(view: Option<&AuthorityView>, action: &str, identity: &str) -> bool {
-    view.is_none_or(|view| !view.enforced() || view.allows_agent(action, identity))
+    view.is_none_or(|view| !view.enforced() || view.allows_name(action, identity))
 }
 
 fn endpoint_visible(view: Option<&AuthorityView>, endpoint: &TopologyEndpoint) -> bool {
     view.is_none_or(|view| {
         !view.enforced()
             || (!view.withholds_unheld(endpoint)
-                && view.can_view_agent(&endpoint.identity)
-                && view.allows_agent(ACTION_AGENT_VIEW, &endpoint.identity)
-                && view.allows_agent(ACTION_TOPOLOGY_VIEW, &endpoint.identity))
+                && view.can_view_name(&endpoint.identity)
+                && view.allows_name(ACTION_AGENT_VIEW, &endpoint.identity)
+                && view.allows_name(ACTION_TOPOLOGY_VIEW, &endpoint.identity))
     })
 }
 

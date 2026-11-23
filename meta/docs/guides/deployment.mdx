@@ -40,9 +40,13 @@ on the same machine, a Kubernetes sidecar in the same pod, or a Docker
 container started with `--network container:<gateway>`. The port is ephemeral,
 so read it at runtime rather than configuring it.
 
-`meta_gateway` additionally records `http_base_url` in its runtime registry
-under the gateway state directory, so a same-host proxy can discover a resumed
-runtime without holding the init handshake.
+`meta_gateway` additionally records `http_base_url` in its runtime registry,
+the file `tux-runtimes.json` in the gateway home (`$XDG_STATE_HOME/meerkat-meta`,
+or `~/.local/state/meerkat-meta` when `XDG_STATE_HOME` is unset or empty), not
+in the state directory, so a same-host proxy can discover a registered runtime
+without holding the init handshake. Every process of the gateway's OS user can
+write that file: a proxy that has to trust the address takes it from the init
+answer of the launch its own host made.
 
 ### Separate containers: bind a non-loopback address
 
@@ -275,9 +279,45 @@ with a different `http_listen` or a different (or newly dropped)
 `http_public_base_url` creates a runtime with the values you declared instead
 of silently reporting a live runtime started with other ones; with a fixed
 port that new runtime cannot bind while the old one still holds the port, and
-init says so. A resumed launch (same fingerprint) reports the `http_base_url`
-and `http_public_base_url` the live runtime was started with, which are by
-construction the ones you declared.
+init says so. From 0.9.17 a launch is answered as resumed only when it
+carries the start flag `--resume-from-registry` and a live registered
+runtime of the same fingerprint answers its health check; it then reports
+the `http_base_url` and `http_public_base_url` that runtime was started
+with, which are by construction the ones you declared. Without the flag a
+launch of the same fingerprint is not attached to the live runtime: see
+Breaking and Security under 0.9.17 in Meta's changelog for what it is
+answered.
+
+`--resume-from-registry` is a bare start flag of `meta_gateway` (from
+0.9.17). It is not part of the fingerprint, and a `meta_gateway` of 0.9.9
+through 0.9.16 ignores it (earlier releases were not read). Under the flag
+the gateway trusts its runtime registry
+entry, which it keeps in the gateway home (`$XDG_STATE_HOME/meerkat-meta`,
+or `~/.local/state/meerkat-meta` when that variable is unset or empty):
+the address, the runtime id, the control address and the public base are
+taken from the entry, and the only checks are the resume key and a
+successful answer from the entry's `GET /healthz`.
+
+## Back up or move a gateway state directory
+
+Stop the gateway before copying its state. Copy the **whole state directory**,
+including every SQLite database and its adjacent `-wal` and `-shm` files if
+present. Restore them together from the same copy. A clean shutdown does not
+guarantee that all committed data has moved from the write-ahead log into the
+main database file.
+
+A successful restart is not proof that the backup is complete. After a clean
+SDK shutdown of `rpc_gateway` 0.9.15, a copy without the SQLite side files
+started without warning: the agents, their sessions and the Console timeline
+were present, but **all agent memory records were missing**. A copy of the
+whole directory retained those records. When checking a restored copy, verify
+an agent memory record you expect to find, not just that the gateway starts.
+
+The state directory is only part of a deployment backup. The credentials
+store, the session comms identity directory and any host store realm are kept
+outside it: back them up with it, and move them with it. A gateway started
+without the session comms identity directory brings every restored member up
+broken (see [Keeping a Meta realm in your own database](/guides/unified-runtime#keeping-a-meta-realm-in-your-own-database)).
 
 ## Lifecycle side effects across a restart
 

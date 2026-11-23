@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 pub mod archive;
+pub mod content_warnings;
 pub mod deploy_policy;
 pub mod digest;
 pub mod manifest;

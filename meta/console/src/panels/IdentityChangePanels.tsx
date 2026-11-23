@@ -510,14 +510,16 @@ function keepsForm(result: ShownResult | null): boolean {
   return result === null || result.kind === "refused" || result.kind === "failed" || result.kind === "note";
 }
 
-function useDirectory(api: IdentityChangesApi) {
+/** The directory a form offers from. `about` is the agent an edit is made
+ * for: the profiles and peers offered are the ones of that agent's team. */
+function useDirectory(api: IdentityChangesApi, about?: string) {
   const [directory, setDirectory] = React.useState<IdentityDirectory | null>(null);
   const [error, setError] = React.useState<Said | null>(null);
   const load = React.useRef(api.loadDirectory);
   load.current = api.loadDirectory;
   React.useEffect(() => {
     let active = true;
-    load.current().then(
+    (about ? load.current(about) : load.current()).then(
       (value) => { if (active) setDirectory(value); },
       (failure) => { if (active) setError(readFailure(failure)); },
     );
@@ -734,7 +736,7 @@ export function EditAgentForm({
   const [draft, setDraft] = React.useState<AgentEditDraft | null>(null);
   const [loadError, setLoadError] = React.useState<Said | null>(null);
   const [errors, setErrors] = React.useState<FieldErrors>({});
-  const { directory, error: directoryError } = useDirectory(api);
+  const { directory, error: directoryError } = useDirectory(api, name);
   const sender = useChangeSender(api, "update", displayName);
   const loadRecord = React.useRef(api.loadRecord);
   loadRecord.current = api.loadRecord;

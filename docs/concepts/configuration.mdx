@@ -27,7 +27,9 @@ For CLI commands, the normal non-global location is project-local:
 ```
 
 Here `project-root` is the nearest ancestor containing `.rkat`. Outside an
-existing project, it falls back to the exact invocation context. The invocation
+existing project, it falls back to the exact invocation context. A realm that
+already exists (has its manifest) under a farther ancestor's `.rkat/realms` is
+used where it lies; only a new realm goes to the nearest root. The invocation
 context itself is never walked up for workspace realm identity or MCP trust
 discovery, so identity and the local storage candidate are intentionally
 separate facts. An explicit `--state-root` bypasses candidate probing.
@@ -197,6 +199,32 @@ rkat --realm team-alpha config patch --json '{"agent":{"model":"gpt-5.5"}}' --ex
 Without `--realm`, CLI derives a stable workspace realm (`ws-...`) from the
 current directory, or from `--context-root` when supplied.
 
+## Secret values in config answers
+
+A config answer shows `<redacted>` in place of each stored secret value: an
+auth profile's inline secret, a credential command's `env` values, the `env`
+and `headers` values of MCP servers and hooks, and a skills repository's
+`env`, token or header value. That holds for `rkat config get` in every
+output form, for `GET /config`, `config/get` and the `meerkat_config` tool,
+and for the answer to a config write on REST, RPC and the tool
+(`rkat config set` and `rkat config patch` print only the generation). The
+document file holds the values.
+
+A write may send such an answer back. `<redacted>` in a place keeps the
+value stored at the same place; a list entry is matched by its own key (an
+MCP server's name, a hook's id, a skills repository's source id together
+with its stored name), in any order. Where nothing is stored for it, the
+write is refused as invalid and nothing is written, so `<redacted>` is never
+stored as a value: an entry under a new key, or a document written into
+another realm, takes the values themselves. An entry whose `url` the write
+changes takes its secret values again in that write.
+
+Argument lists, addresses (`url`, `base_url`) and free `options` values are
+shown whole. An error about a config document gives the place (line, column
+and key path) and what is wrong on one line. It never quotes the document's
+line, and for a value of the wrong type or an unknown choice it names the
+kind of value, not the value.
+
 ## What About `~/.rkat/config.toml` And `.rkat/config.toml`?
 
 `~/.rkat/config.toml` is the home-rooted config document for the reserved
@@ -204,11 +232,21 @@ current directory, or from `--context-root` when supplied.
 section here; once configured, it is the implicit chain tail for workspace
 realms.
 
-The project-root `.rkat/config.toml` still exists for `rkat init`, legacy
-single-file loading, and explicitly layered hook discovery. Do not confuse it
-with the active non-global realm document at
-`<state-root>/<realm>/config.toml`, which is the canonical raw head store used
-by CLI/RPC/REST/MCP runtime composition.
+For `rkat`, `rkat-rpc`, `rkat-rest` and `rkat-mcp` the project-root
+`.rkat/config.toml` is not a configuration layer. `rkat init` writes it as a
+copy of the user document, and these four hosts read one thing from the file
+under their context root: its hook entries (`[[hooks.entries]]`), layered
+after the active configuration's. No other table in it has an effect on what
+they run. They read models, tools, limits and every other setting from the
+active non-global realm document at `<state-root>/<realm>/config.toml` and the
+documents that realm inherits from; that document is the canonical raw head
+store used by CLI/RPC/REST/MCP runtime composition, and `rkat doctor` prints
+its path on the `config` line. They do not read `[confinement]` or
+`[governance]` from the project file either, and warn at start when the
+project file states one of them and it is not what is in effect; see
+[where the section goes](#where-the-section-goes). A Rust host that loads its
+configuration with the public `Config::load` is different: that call merges
+the project file whole, in place of the user's.
 
 ### File permissions
 
@@ -335,8 +373,8 @@ event re-arms the window, so long-but-alive responses are unaffected. Set
 (`"120s"`) for an explicit window for every model. Like `call_timeout`, an
 omitted value inherits from the model profile: a model whose provider
 documents responses that can stay silent for minutes has its own catalog
-window (`gemini-4-carbon`, `gemini-4-argon` and, from 0.9.15,
-`gemini-4-hydrogen`: 900 s,
+window (`gemini-4-carbon`, `gemini-4-argon`,
+`gemini-4-hydrogen`: 900 s; `gemini-4-neon`: 900 s in the unreleased catalog;
 `gpt-5.5-pro`: 7200 s), a self-hosted model
 can declare one with `stream_inactivity_timeout_secs` (at least 60 seconds;
 config validation refuses a shorter one), and every other model uses the
@@ -781,6 +819,36 @@ can bind an abstract socket name in the shared network namespace, taking
 that name from other processes, and pass descriptors between processes of
 the launch.
 
+### Where the section goes
+
+State `[confinement]` in the user document or select it with the flags:
+
+| Where | What it covers |
+|-------|----------------|
+| The user document, `~/.rkat/config.toml` | Every start of every realm of this user. `[confinement.all]` covers every launch kind |
+| The `--confinement` flags ([operator flags](#operator-flags)) | The one process that carries them, for every launch kind |
+
+On Linux a start that confines every launch kind is refused when its realm
+state lies inside a confinement write grant. For `rkat` that is so when the
+realm state would lie inside the directory the command is started in: that
+directory holds a `.rkat` entry, or no directory above it does. Start it then
+with `--state-root <dir>` outside every confinement write grant. See
+[the host's own inputs](#the-host%E2%80%99s-own-inputs).
+
+The other document a host reads the section from is the realm's own,
+`<state-root>/<realm>/config.toml` (`rkat doctor` prints its path on the
+`config` line); [Composition](#composition) says how the two fold.
+
+For these four hosts a project's `.rkat/config.toml` is not one of these
+places. They do not read a `[confinement]` or `[governance]` table there: it
+adds no requirement and removes none. When such a table is not what is in
+effect, the host says so at start, naming the file, the table and where it
+does read the section: `rkat` as a `warning:` line on stderr, `rkat-rpc`,
+`rkat-rest` and `rkat-mcp` (started with `--context-root`) in their log, and
+`rkat doctor` as a `warn config` line. A table that does not parse as the
+section is reported the same way. A project file that restates what is in
+effect is not mentioned.
+
 ### Composition
 
 A requirement only ever holds or is added across the documents a realm
@@ -853,6 +921,9 @@ protection does not cover another kind that writes the same place. On macOS
 the `workspace` preset protects `<root>/.rkat` (the CLI's default realm state
 and the project's convention files). The Linux backend has no deny lists, so
 there the host's realm state must live outside the workspace.
+A write grant outside the root takes the macOS protection away: a kind that
+can write the root and a place outside it is judged able to move the root
+away, so the host treats `<root>/.rkat` as changeable by that kind.
 
 A host that runs any launch kind as the trusted host claims none of this: its
 startup report says that a process the agent drives can still change the
@@ -925,6 +996,36 @@ document and nowhere else on the chain. Credentials that do not come from a
 command (the managed store, credential accounts, environment variables,
 platform defaults, external resolvers, file descriptors) are outside these
 rules: where they are sent stays ordinary config.
+
+An inline secret (an auth profile's `source = { kind = "inline_secret" }`)
+is a value stored in the config document, and it stays where its document
+sends it. A config write that changes where it is sent is refused as
+invalid unless the same write states the secret as a value: that is the
+profile's `provider` and `auth_method` and, for each binding of the same
+realm section that names the profile, the binding's backend, that backend's
+entry, the `[self_hosted.servers]` entry the backend names and the binding's
+`default_model`. A patch that makes a profile an inline secret states the
+secret in the same patch. The three rules above hold for it in this form. A binding
+that uses an inline secret on a self-hosted backend may leave the server
+undeclared; the `[self_hosted]` section then decides the server, so the
+whole section belongs to where the secret is sent and must be the one the
+binding's own document states. A request may not override a binding's auth
+profile with an inline secret profile other than the binding's own
+(`inline_secret_profile_override`): to choose among several keys for one
+backend, give each key a binding of its own and name the binding. And a
+composition in which the `[self_hosted.servers]` entry the binding's backend
+names, or with no declared server the `[self_hosted]` section, differs from
+what the binding's own document states is not refused: the realm composes
+without that one binding and reports a load warning that names the binding
+and its auth profile. A session that names the binding gets the binding of
+that id from an ancestor realm if one defines it, with that realm's
+credential and backend, and fails as an unknown binding otherwise; one that
+names no binding gets another binding of the realm, or of an ancestor, for
+the provider if there is one, so when the binding left out was the realm's
+default such a request goes by another binding. State the whole entry in the
+document that holds the secret and nowhere else on the chain; for an
+undeclared server, `server = "<id>"` on the backend narrows what must be
+that document's own to the one entry.
 
 The user document decides for other realms too: its `[realm.global]`
 section puts `global`, and with it the user document's `[governance]`, on

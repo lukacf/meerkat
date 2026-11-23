@@ -81,6 +81,172 @@ impl std::fmt::Display for MobQuarantineClass {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum MobStoreCreateOutcome {
+    #[default]
+    #[serde(rename = "Created")]
+    Created,
+    #[serde(rename = "Failed")]
+    Failed,
+}
+impl MobStoreCreateOutcome {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Created => "Created",
+            Self::Failed => "Failed",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MobStoreCreateOutcome {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Created" => Ok(Self::Created),
+            "Failed" => Ok(Self::Failed),
+            other => Err(format!("invalid MobStoreCreateOutcome value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MobStoreCreateOutcome {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MobStoreCreateOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum MobStoreLoadTrigger {
+    #[default]
+    #[serde(rename = "Lookup")]
+    Lookup,
+    #[serde(rename = "Pass")]
+    Pass,
+    #[serde(rename = "Launch")]
+    Launch,
+    #[serde(rename = "Demand")]
+    Demand,
+}
+impl MobStoreLoadTrigger {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Lookup => "Lookup",
+            Self::Pass => "Pass",
+            Self::Launch => "Launch",
+            Self::Demand => "Demand",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MobStoreLoadTrigger {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Lookup" => Ok(Self::Lookup),
+            "Pass" => Ok(Self::Pass),
+            "Launch" => Ok(Self::Launch),
+            "Demand" => Ok(Self::Demand),
+            other => Err(format!("invalid MobStoreLoadTrigger value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MobStoreLoadTrigger {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MobStoreLoadTrigger {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum MobStoreOrigin {
+    #[default]
+    #[serde(rename = "Persisted")]
+    Persisted,
+    #[serde(rename = "Volatile")]
+    Volatile,
+    #[serde(rename = "HostHandle")]
+    HostHandle,
+    #[serde(rename = "Declared")]
+    Declared,
+}
+impl MobStoreOrigin {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Persisted => "Persisted",
+            Self::Volatile => "Volatile",
+            Self::HostHandle => "HostHandle",
+            Self::Declared => "Declared",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MobStoreOrigin {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Persisted" => Ok(Self::Persisted),
+            "Volatile" => Ok(Self::Volatile),
+            "HostHandle" => Ok(Self::HostHandle),
+            "Declared" => Ok(Self::Declared),
+            other => Err(format!("invalid MobStoreOrigin value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MobStoreOrigin {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MobStoreOrigin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum MobStoreRestoreOutcome {
     #[default]
     #[serde(rename = "Managed")]
@@ -145,21 +311,78 @@ pub enum MobStoreRestoreRefusal {
     RetryInFlight,
     #[serde(rename = "NotQuarantined")]
     NotQuarantined,
-    #[serde(rename = "AlreadyClassified")]
-    AlreadyClassified,
     #[serde(rename = "NotRetrying")]
     NotRetrying,
     #[serde(rename = "NotRetryable")]
     NotRetryable,
+    #[serde(rename = "LoadInFlight")]
+    LoadInFlight,
+    #[serde(rename = "NotDormant")]
+    NotDormant,
+    #[serde(rename = "NotLoading")]
+    NotLoading,
+    #[serde(rename = "NotManaged")]
+    NotManaged,
+    #[serde(rename = "NotHeld")]
+    NotHeld,
+    #[serde(rename = "HoldKept")]
+    HoldKept,
+    #[serde(rename = "NotReloadable")]
+    NotReloadable,
+    #[serde(rename = "UnloadInFlight")]
+    UnloadInFlight,
+    #[serde(rename = "NotUnloading")]
+    NotUnloading,
+    #[serde(rename = "AlreadyHosted")]
+    AlreadyHosted,
+    #[serde(rename = "Gone")]
+    Gone,
+    #[serde(rename = "AwaitsLaunch")]
+    AwaitsLaunch,
+    #[serde(rename = "LaunchOwned")]
+    LaunchOwned,
+    #[serde(rename = "NotAwaitingLaunch")]
+    NotAwaitingLaunch,
+    #[serde(rename = "NotDeclared")]
+    NotDeclared,
+    #[serde(rename = "CreateInFlight")]
+    CreateInFlight,
+    #[serde(rename = "NotCreating")]
+    NotCreating,
+    #[serde(rename = "Stopped")]
+    Stopped,
+    #[serde(rename = "StopUnread")]
+    StopUnread,
+    #[serde(rename = "StopKnown")]
+    StopKnown,
 }
 impl MobStoreRestoreRefusal {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::RetryInFlight => "RetryInFlight",
             Self::NotQuarantined => "NotQuarantined",
-            Self::AlreadyClassified => "AlreadyClassified",
             Self::NotRetrying => "NotRetrying",
             Self::NotRetryable => "NotRetryable",
+            Self::LoadInFlight => "LoadInFlight",
+            Self::NotDormant => "NotDormant",
+            Self::NotLoading => "NotLoading",
+            Self::NotManaged => "NotManaged",
+            Self::NotHeld => "NotHeld",
+            Self::HoldKept => "HoldKept",
+            Self::NotReloadable => "NotReloadable",
+            Self::UnloadInFlight => "UnloadInFlight",
+            Self::NotUnloading => "NotUnloading",
+            Self::AlreadyHosted => "AlreadyHosted",
+            Self::Gone => "Gone",
+            Self::AwaitsLaunch => "AwaitsLaunch",
+            Self::LaunchOwned => "LaunchOwned",
+            Self::NotAwaitingLaunch => "NotAwaitingLaunch",
+            Self::NotDeclared => "NotDeclared",
+            Self::CreateInFlight => "CreateInFlight",
+            Self::NotCreating => "NotCreating",
+            Self::Stopped => "Stopped",
+            Self::StopUnread => "StopUnread",
+            Self::StopKnown => "StopKnown",
         }
     }
 }
@@ -169,9 +392,28 @@ impl std::convert::TryFrom<&str> for MobStoreRestoreRefusal {
         match value {
             "RetryInFlight" => Ok(Self::RetryInFlight),
             "NotQuarantined" => Ok(Self::NotQuarantined),
-            "AlreadyClassified" => Ok(Self::AlreadyClassified),
             "NotRetrying" => Ok(Self::NotRetrying),
             "NotRetryable" => Ok(Self::NotRetryable),
+            "LoadInFlight" => Ok(Self::LoadInFlight),
+            "NotDormant" => Ok(Self::NotDormant),
+            "NotLoading" => Ok(Self::NotLoading),
+            "NotManaged" => Ok(Self::NotManaged),
+            "NotHeld" => Ok(Self::NotHeld),
+            "HoldKept" => Ok(Self::HoldKept),
+            "NotReloadable" => Ok(Self::NotReloadable),
+            "UnloadInFlight" => Ok(Self::UnloadInFlight),
+            "NotUnloading" => Ok(Self::NotUnloading),
+            "AlreadyHosted" => Ok(Self::AlreadyHosted),
+            "Gone" => Ok(Self::Gone),
+            "AwaitsLaunch" => Ok(Self::AwaitsLaunch),
+            "LaunchOwned" => Ok(Self::LaunchOwned),
+            "NotAwaitingLaunch" => Ok(Self::NotAwaitingLaunch),
+            "NotDeclared" => Ok(Self::NotDeclared),
+            "CreateInFlight" => Ok(Self::CreateInFlight),
+            "NotCreating" => Ok(Self::NotCreating),
+            "Stopped" => Ok(Self::Stopped),
+            "StopUnread" => Ok(Self::StopUnread),
+            "StopKnown" => Ok(Self::StopKnown),
             other => Err(format!("invalid MobStoreRestoreRefusal value `{other}`")),
         }
     }
@@ -237,6 +479,110 @@ impl std::fmt::Display for MobStoreRetryTrigger {
         f.write_str(self.as_str())
     }
 }
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum MobStoreStop {
+    #[default]
+    #[serde(rename = "Unread")]
+    Unread,
+    #[serde(rename = "NotStopped")]
+    NotStopped,
+    #[serde(rename = "Stopped")]
+    Stopped,
+}
+impl MobStoreStop {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Unread => "Unread",
+            Self::NotStopped => "NotStopped",
+            Self::Stopped => "Stopped",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MobStoreStop {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Unread" => Ok(Self::Unread),
+            "NotStopped" => Ok(Self::NotStopped),
+            "Stopped" => Ok(Self::Stopped),
+            other => Err(format!("invalid MobStoreStop value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MobStoreStop {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MobStoreStop {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum MobStoreUnloadOutcome {
+    #[default]
+    #[serde(rename = "Closed")]
+    Closed,
+    #[serde(rename = "Busy")]
+    Busy,
+}
+impl MobStoreUnloadOutcome {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Closed => "Closed",
+            Self::Busy => "Busy",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MobStoreUnloadOutcome {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Closed" => Ok(Self::Closed),
+            "Busy" => Ok(Self::Busy),
+            other => Err(format!("invalid MobStoreUnloadOutcome value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MobStoreUnloadOutcome {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MobStoreUnloadOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 
 pub trait Context {}
 pub struct EmptyContext;
@@ -245,10 +591,15 @@ impl Context for EmptyContext {}
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Phase {
-    Unclassified,
+    Dormant,
+    Loading,
+    Managed,
+    Unloading,
+    Held,
     Quarantined,
     Retrying,
-    Released,
+    Gone,
+    Creating,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -256,6 +607,12 @@ pub struct State {
     pub phase: Phase,
     pub class: MobQuarantineClass,
     pub attempts: u64,
+    pub origin: MobStoreOrigin,
+    pub served: bool,
+    pub awaits_launch: bool,
+    pub vacant: bool,
+    pub stop: MobStoreStop,
+    pub known: bool,
 }
 impl Default for State {
     fn default() -> Self {
@@ -267,7 +624,24 @@ pub mod inputs {
     #[allow(unused_imports)]
     use super::*;
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct Quarantine {
+    pub struct Census {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct Register {
+        pub holder_ended: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct Declare {
+        pub vacant: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct EndLaunchWait {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RequestLoad {
+        pub trigger: MobStoreLoadTrigger,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveLoad {
+        pub outcome: MobStoreRestoreOutcome,
         pub class: MobQuarantineClass,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -279,33 +653,111 @@ pub mod inputs {
         pub outcome: MobStoreRestoreOutcome,
         pub class: MobQuarantineClass,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RequestUnload {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveUnload {
+        pub outcome: MobStoreUnloadOutcome,
+        pub stop: MobStoreStop,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ReleaseHeld {
+        pub outcome: MobStoreRestoreOutcome,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct Destroy {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RequestCreate {
+        pub launch: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveCreate {
+        pub outcome: MobStoreCreateOutcome,
+        pub in_memory: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ReadStop {
+        pub stopped: bool,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Input {
-    Quarantine(inputs::Quarantine),
+    Census(inputs::Census),
+    Register(inputs::Register),
+    Declare(inputs::Declare),
+    EndLaunchWait(inputs::EndLaunchWait),
+    RequestLoad(inputs::RequestLoad),
+    ResolveLoad(inputs::ResolveLoad),
     RequestRetry(inputs::RequestRetry),
     ResolveRetry(inputs::ResolveRetry),
+    RequestUnload(inputs::RequestUnload),
+    ResolveUnload(inputs::ResolveUnload),
+    ReleaseHeld(inputs::ReleaseHeld),
+    Destroy(inputs::Destroy),
+    RequestCreate(inputs::RequestCreate),
+    ResolveCreate(inputs::ResolveCreate),
+    ReadStop(inputs::ReadStop),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
         match self {
-            Self::Quarantine(_) => InputKind::Quarantine,
+            Self::Census(_) => InputKind::Census,
+            Self::Register(_) => InputKind::Register,
+            Self::Declare(_) => InputKind::Declare,
+            Self::EndLaunchWait(_) => InputKind::EndLaunchWait,
+            Self::RequestLoad(_) => InputKind::RequestLoad,
+            Self::ResolveLoad(_) => InputKind::ResolveLoad,
             Self::RequestRetry(_) => InputKind::RequestRetry,
             Self::ResolveRetry(_) => InputKind::ResolveRetry,
+            Self::RequestUnload(_) => InputKind::RequestUnload,
+            Self::ResolveUnload(_) => InputKind::ResolveUnload,
+            Self::ReleaseHeld(_) => InputKind::ReleaseHeld,
+            Self::Destroy(_) => InputKind::Destroy,
+            Self::RequestCreate(_) => InputKind::RequestCreate,
+            Self::ResolveCreate(_) => InputKind::ResolveCreate,
+            Self::ReadStop(_) => InputKind::ReadStop,
         }
     }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum InputKind {
-    Quarantine,
+    Census,
+    Register,
+    Declare,
+    EndLaunchWait,
+    RequestLoad,
+    ResolveLoad,
     RequestRetry,
     ResolveRetry,
+    RequestUnload,
+    ResolveUnload,
+    ReleaseHeld,
+    Destroy,
+    RequestCreate,
+    ResolveCreate,
+    ReadStop,
 }
 
 pub mod effects {
     #[allow(unused_imports)]
     use super::*;
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct StoreListed {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct StoreRegistered {
+        pub origin: MobStoreOrigin,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LaunchDeclared {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LaunchWaitEnded {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LoadAdmitted {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct StoreLoaded {
+        pub outcome: MobStoreRestoreOutcome,
+    }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct StoreQuarantined {
         pub class: MobQuarantineClass,
@@ -325,6 +777,26 @@ pub mod effects {
         pub attempts: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct UnloadAdmitted {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct StoreUnloaded {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct UnloadDeclined {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct HoldReleased {
+        pub outcome: MobStoreRestoreOutcome,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct StoreGone {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct CreateAdmitted {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct CreateReleased {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct StopRead {
+        pub stopped: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RequestRefused {
         pub reason: MobStoreRestoreRefusal,
     }
@@ -332,38 +804,232 @@ pub mod effects {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Effect {
+    StoreListed(effects::StoreListed),
+    StoreRegistered(effects::StoreRegistered),
+    LaunchDeclared(effects::LaunchDeclared),
+    LaunchWaitEnded(effects::LaunchWaitEnded),
+    LoadAdmitted(effects::LoadAdmitted),
+    StoreLoaded(effects::StoreLoaded),
     StoreQuarantined(effects::StoreQuarantined),
     RetryAdmitted(effects::RetryAdmitted),
     StoreReleased(effects::StoreReleased),
     StoreStillQuarantined(effects::StoreStillQuarantined),
+    UnloadAdmitted(effects::UnloadAdmitted),
+    StoreUnloaded(effects::StoreUnloaded),
+    UnloadDeclined(effects::UnloadDeclined),
+    HoldReleased(effects::HoldReleased),
+    StoreGone(effects::StoreGone),
+    CreateAdmitted(effects::CreateAdmitted),
+    CreateReleased(effects::CreateReleased),
+    StopRead(effects::StopRead),
     RequestRefused(effects::RequestRefused),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
+    StoreListed,
+    StoreRegistered,
+    LaunchDeclared,
+    LaunchWaitEnded,
+    LoadAdmitted,
+    StoreLoaded,
     StoreQuarantined,
     RetryAdmitted,
     StoreReleased,
     StoreStillQuarantined,
+    UnloadAdmitted,
+    StoreUnloaded,
+    UnloadDeclined,
+    HoldReleased,
+    StoreGone,
+    CreateAdmitted,
+    CreateReleased,
+    StopRead,
     RequestRefused,
 }
 
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TransitionId {
-    QuarantineUnclassified,
-    QuarantineQuarantined,
-    QuarantineRetrying,
-    QuarantineReleased,
-    RequestRetryUnclassified,
+    CensusDormant,
+    CensusQuarantined,
+    CensusLoading,
+    CensusManaged,
+    CensusHeld,
+    CensusRetrying,
+    CensusUnloading,
+    CensusGone,
+    CensusCreating,
+    RegisterDormant,
+    RegisterDormantLaunchOwned,
+    RegisterManagedHostHandle,
+    RegisterManagedHostHandleSetRun,
+    RegisterManagedHostHandleOverEnded,
+    RegisterManagedLaunchOwned,
+    RegisterLoading,
+    RegisterHeld,
+    RegisterQuarantined,
+    RegisterRetrying,
+    RegisterUnloading,
+    RegisterGone,
+    RegisterCreating,
+    DeclareDormant,
+    DeclareDormantDeclared,
+    DeclareLoading,
+    DeclareManaged,
+    DeclareUnloading,
+    DeclareHeld,
+    DeclareQuarantined,
+    DeclareRetrying,
+    DeclareGone,
+    DeclareCreating,
+    EndLaunchWaitDormant,
+    EndLaunchWaitDormantNotAwaited,
+    EndLaunchWaitLoading,
+    EndLaunchWaitLoadingNotAwaited,
+    EndLaunchWaitManaged,
+    EndLaunchWaitManagedNotAwaited,
+    EndLaunchWaitUnloading,
+    EndLaunchWaitHeld,
+    EndLaunchWaitHeldNotAwaited,
+    EndLaunchWaitQuarantined,
+    EndLaunchWaitQuarantinedNotAwaited,
+    EndLaunchWaitRetrying,
+    EndLaunchWaitRetryingNotAwaited,
+    EndLaunchWaitGone,
+    EndLaunchWaitCreating,
+    EndLaunchWaitCreatingNotAwaited,
+    RequestLoadDormant,
+    RequestLoadDormantAwaitsLaunch,
+    RequestLoadDormantVacant,
+    RequestLoadDormantLaunchOwned,
+    RequestLoadDormantDemand,
+    RequestLoadDormantStopped,
+    RequestLoadDormantStopUnread,
+    RequestLoadLoading,
+    RequestLoadManaged,
+    RequestLoadHeld,
+    RequestLoadQuarantined,
+    RequestLoadRetrying,
+    RequestLoadUnloading,
+    RequestLoadGone,
+    RequestLoadCreating,
+    ResolveLoadManaged,
+    ResolveLoadHeld,
+    ResolveLoadSettled,
+    ResolveLoadSettledDeclared,
+    ResolveLoadFailed,
+    ResolveLoadDormant,
+    ResolveLoadWhileManaged,
+    ResolveLoadWhileHeld,
+    ResolveLoadQuarantined,
+    ResolveLoadRetrying,
+    ResolveLoadUnloading,
+    ResolveLoadGone,
+    ResolveLoadCreating,
     RequestRetryQuarantined,
     RequestRetryQuarantinedNotRetryable,
+    RequestRetryQuarantinedAwaitsLaunch,
     RequestRetryRetrying,
-    RequestRetryReleased,
+    RequestRetryDormant,
+    RequestRetryLoading,
+    RequestRetryManaged,
+    RequestRetryHeld,
+    RequestRetryUnloading,
+    RequestRetryGone,
+    RequestRetryCreating,
     ResolveRetryFailed,
-    ResolveRetryRestored,
-    ResolveRetryUnclassified,
+    ResolveRetryManaged,
+    ResolveRetryHeld,
+    ResolveRetrySettled,
+    ResolveRetrySettledDeclared,
+    ResolveRetryDormant,
+    ResolveRetryLoading,
+    ResolveRetryWhileManaged,
+    ResolveRetryWhileHeld,
     ResolveRetryQuarantined,
-    ResolveRetryReleased,
+    ResolveRetryUnloading,
+    ResolveRetryGone,
+    ResolveRetryCreating,
+    RequestUnloadManaged,
+    RequestUnloadManagedNotReloadable,
+    RequestUnloadUnloading,
+    RequestUnloadDormant,
+    RequestUnloadLoading,
+    RequestUnloadHeld,
+    RequestUnloadQuarantined,
+    RequestUnloadRetrying,
+    RequestUnloadGone,
+    RequestUnloadCreating,
+    ResolveUnloadClosed,
+    ResolveUnloadBusy,
+    ResolveUnloadDormant,
+    ResolveUnloadLoading,
+    ResolveUnloadWhileManaged,
+    ResolveUnloadHeld,
+    ResolveUnloadQuarantined,
+    ResolveUnloadRetrying,
+    ResolveUnloadGone,
+    ResolveUnloadCreating,
+    ReleaseHeldManaged,
+    ReleaseHeldSettled,
+    ReleaseHeldSettledDeclared,
+    ReleaseHeldKept,
+    ReleaseHeldDormant,
+    ReleaseHeldLoading,
+    ReleaseHeldWhileManaged,
+    ReleaseHeldQuarantined,
+    ReleaseHeldRetrying,
+    ReleaseHeldUnloading,
+    ReleaseHeldGone,
+    ReleaseHeldCreating,
+    DestroyManaged,
+    DestroyManagedLaunchOwned,
+    DestroyDormant,
+    DestroyLoading,
+    DestroyHeld,
+    DestroyQuarantined,
+    DestroyRetrying,
+    DestroyUnloading,
+    DestroyGone,
+    DestroyCreating,
+    RequestCreateDormant,
+    RequestCreateDormantKnown,
+    RequestCreateDormantNotDeclared,
+    RequestCreateDormantLaunch,
+    RequestCreateDormantLaunchHoldsAMob,
+    RequestCreateDormantLaunchOwned,
+    RequestCreateLoading,
+    RequestCreateManaged,
+    RequestCreateUnloading,
+    RequestCreateHeld,
+    RequestCreateQuarantined,
+    RequestCreateRetrying,
+    RequestCreateGone,
+    RequestCreateCreating,
+    ResolveCreateCreated,
+    ResolveCreateCreatedInMemory,
+    ResolveCreateCreatedDeclared,
+    ResolveCreateFailed,
+    ResolveCreateFailedDeclared,
+    ResolveCreateDormant,
+    ResolveCreateLoading,
+    ResolveCreateManaged,
+    ResolveCreateUnloading,
+    ResolveCreateHeld,
+    ResolveCreateQuarantined,
+    ResolveCreateRetrying,
+    ResolveCreateGone,
+    ReadStopDormantStopped,
+    ReadStopDormantNotStopped,
+    ReadStopDormantKnown,
+    ReadStopLoading,
+    ReadStopManaged,
+    ReadStopUnloading,
+    ReadStopHeld,
+    ReadStopQuarantined,
+    ReadStopRetrying,
+    ReadStopGone,
+    ReadStopCreating,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -435,8 +1101,14 @@ pub mod helpers {
 
 pub fn initial_state() -> State {
     State {
-        phase: Phase::Unclassified,
+        phase: Phase::Dormant,
         class: MobQuarantineClass::StoreUnavailable,
         attempts: 0,
+        origin: MobStoreOrigin::Persisted,
+        served: false,
+        awaits_launch: false,
+        vacant: false,
+        stop: MobStoreStop::Unread,
+        known: false,
     }
 }

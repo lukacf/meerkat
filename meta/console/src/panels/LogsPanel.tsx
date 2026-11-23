@@ -54,7 +54,7 @@ import {
   type LogLevel,
 } from "./activity/logs-model";
 import { useVirtualRows } from "./activity/use-virtual-rows";
-import { useHistoryBackfill } from "./activity/use-history-backfill";
+import { useHistoryBackfill, type HistoryLoader } from "./activity/use-history-backfill";
 
 export { isLogFrameVisible, logIdentityLabel, sanitizeLogFrameData, summarizeLogFrame } from "./activity/logs-model";
 
@@ -69,7 +69,9 @@ interface LogsPanelProps {
   /** The roster: whose history to load. */
   agents?: readonly ConsoleAgent[];
   /** Loads one agent's history for the day (the console's identity log). */
-  loadHistory?: (identity: string) => Promise<void>;
+  loadHistory?: HistoryLoader;
+  /** A value that changes when the set of loaded mobs does: an agent not read while its mob was not loaded is asked again then. */
+  loadedMobs?: string;
   /** Opens an agent's chat or details while the console provides no
    * navigation context. */
   onOpenAgent?: (identity: string, how: "details" | "chat") => void;
@@ -131,11 +133,12 @@ export function LogsPanel({
   agentDirectory = EMPTY_AGENT_DIRECTORY,
   agents,
   loadHistory,
+  loadedMobs,
   onOpenAgent,
 }: LogsPanelProps): React.JSX.Element {
   const navigation = useConsoleNavigation();
   // The record of the day: the agents' history joins the live buffer.
-  const history = useHistoryBackfill(agents, loadHistory);
+  const history = useHistoryBackfill(agents, loadHistory, loadedMobs);
   const [density, setDensity] = usePanelDensity("logs");
   const [showTechnicalIds, setShowTechnicalIds] = useShowTechnicalIds("logs");
   const [grouped, setGrouped] = usePanelPreference<"on" | "off">("meta-console-logs-group", "off", ["on", "off"]);

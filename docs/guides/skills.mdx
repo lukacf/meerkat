@@ -264,24 +264,20 @@ it is truncated with a warning log.
 
 The following skills are embedded in component crates:
 
-<Warning>
-Known issue, noted 2026-11-13. The four binaries in the Linux x86_64 release
-archives (`rkat`, `rkat-rpc`, `rkat-rest`, `rkat-mcp`) start without the
-built-in skills below and report an empty capability list, with no error: `rkat skill list`
-reports 0 skills, and a built-in slug given to `rkat run --skill` is accepted
-and has no effect. A skill of your own (`.rkat/skills/`) still loads on them
-for a session, unless it declares `requires_capabilities`: one that does is
-dropped without a message. Mob members run by these binaries are built
-without the built-in skills a mob preloads (`mob-communication`, and
-`workgraph-workflow` or `task-workflow` by profile): the spawn succeeds and
-the member still has its communication tools. A project copy of those skills
-does not change this: the workaround on the release page restores a built-in
-skill for a session, not for mob members. Members of a mob run by the
-published Meta `rpc_gateway` are not affected. See the
-[known issue on the 0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/v0.9.14)
-for the releases and platforms that were checked, how each statement is
-known, and the workaround.
-</Warning>
+<Note>
+The Linux x86_64 release archives include built-in skills again as of 0.9.15.
+In an empty project with the default configuration, `rkat skill list` lists
+six active built-ins; other binaries can list a different set because their
+default capabilities differ.
+
+On affected older archives, the four binaries (`rkat`, `rkat-rpc`,
+`rkat-rest`, `rkat-mcp`) started without built-in skills and reported an empty capability list.
+The affected range was 0.8.23 through 0.9.14, with two exceptions: 0.8.50
+was unaffected (by source inspection); whether 0.8.30 was affected has not
+been established, so treat it as affected. For the checks and the session workaround,
+see the
+[known issue on the 0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/v0.9.14).
+</Note>
 
 | ID | Name | Crate | Required capabilities |
 |----|------|-------|----------------------|

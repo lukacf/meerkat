@@ -328,6 +328,7 @@ pub async fn seed_runtime(runtime: &UnifiedRuntime, scenario: &IncidentScenario)
     for route in &scenario.routes {
         runtime
             .add_runtime_route(RuntimeRoute {
+                mob_id: None,
                 route_key: route.route_key.clone(),
                 recipient: route.recipient.clone(),
                 channel: route.channel.clone(),
@@ -344,6 +345,7 @@ pub async fn seed_runtime(runtime: &UnifiedRuntime, scenario: &IncidentScenario)
     for delivery in &scenario.deliveries {
         let resolution = runtime
             .resolve_routing(meerkat_meta::runtime::RoutingResolveRequest {
+                mob_id: None,
                 recipient: delivery.recipient.clone(),
                 channel: Some(delivery.channel.clone()),
                 retry_max: None,
@@ -354,6 +356,7 @@ pub async fn seed_runtime(runtime: &UnifiedRuntime, scenario: &IncidentScenario)
             .with_context(|| format!("resolve delivery recipient {}", delivery.recipient))?;
         runtime
             .send_delivery(DeliverySendRequest {
+                mob_id: None,
                 resolution,
                 payload: delivery.payload.clone(),
                 idempotency_key: Some(delivery.idempotency_key.clone()),

@@ -64,6 +64,11 @@ pub enum ConfigEnvelopePolicy {
 }
 
 impl ConfigEnvelope {
+    /// The envelope of `snapshot`: the answer of a configuration API. It
+    /// shows a marker in place of every stored secret value
+    /// ([`crate::config_secrets::mask_config_secrets`]); a write may send
+    /// the marker back where the answer showed it. A caller in the process
+    /// that needs the values reads the snapshot, not the envelope.
     pub fn from_snapshot(snapshot: ConfigSnapshot, policy: ConfigEnvelopePolicy) -> Self {
         let metadata = snapshot.metadata;
         let resolved_paths = match policy {
@@ -72,8 +77,10 @@ impl ConfigEnvelope {
                 metadata.as_ref().and_then(|m| m.resolved_paths.clone())
             }
         };
+        let mut config = snapshot.config;
+        crate::config_secrets::mask_config_secrets(&mut config);
         Self {
-            config: snapshot.config,
+            config,
             generation: snapshot.generation,
             realm_id: metadata.as_ref().and_then(|m| m.realm_id.clone()),
             instance_id: metadata.as_ref().and_then(|m| m.instance_id.clone()),
@@ -271,10 +278,38 @@ impl ConfigRuntime {
 
     /// The config [`Self::patch`] would commit for `delta`, without writing
     /// it (see [`ConfigStore::patch_preview`]). Surfaces validate this preview
-    /// before committing, so it merges exactly as the store's patch does.
+    /// before committing, so it merges exactly as the store's patch does,
+    /// and a marker the delta carries in place of a stored secret value
+    /// ([`crate::config_secrets`]) is resolved as the write resolves it: the
+    /// preview holds the stored value, or the refusal the write would give.
     pub async fn patch_preview(&self, delta: &ConfigDelta) -> Result<Config, ConfigRuntimeError> {
         let _file_lock = ConfigReadLock::acquire(&self.lock_path).await?;
-        let (preview, _) = self.store.patch_preview(delta).await?;
+        let (mut preview, _) = self.store.patch_preview(delta).await?;
+        if crate::config_secrets::patch_reads_stored(&delta.0) {
+            let stored = self.store.get().await?;
+            crate::config_secrets::resolve_written_patch(
+                &mut delta.0.clone(),
+                &mut preview,
+                &stored,
+            )?;
+        }
+        Ok(preview)
+    }
+
+    /// The config [`Self::set`] would commit for `config`, without writing
+    /// it: `config` with each marker it carries in place of a stored secret
+    /// value ([`crate::config_secrets`]) resolved to the stored value, or
+    /// the refusal the write would give. Surfaces validate this preview
+    /// before committing, as they validate [`Self::patch_preview`], and
+    /// commit `config` as it was sent: the write resolves it again under
+    /// its own custody.
+    pub async fn set_preview(&self, config: &Config) -> Result<Config, ConfigRuntimeError> {
+        let mut preview = config.clone();
+        if crate::config_secrets::replace_reads_stored(config)? {
+            let _file_lock = ConfigReadLock::acquire(&self.lock_path).await?;
+            let stored = self.store.get().await?;
+            crate::config_secrets::resolve_written_config(&mut preview, &stored)?;
+        }
         Ok(preview)
     }
 
@@ -511,15 +546,25 @@ impl ConfigRuntime {
         let settled = crate::realm_admission::settle_entered(guard, async move {
             let mut custody = (custody, entered);
             let written = async {
+                // A marker the write carries in place of a stored secret
+                // value is resolved here, under the write's custody and
+                // before the store's own checks and its write: against the
+                // document as it is stored now, whatever a preview saw.
                 let written = match write {
-                    DocumentWrite::Set(config) => {
+                    DocumentWrite::Set(mut config) => {
+                        if crate::config_secrets::replace_reads_stored(&config)? {
+                            let stored = store.get().await?;
+                            crate::config_secrets::resolve_written_config(&mut config, &stored)?;
+                        }
                         store.set_held(&held, config.clone()).await?;
                         (config, Vec::new())
                     }
-                    DocumentWrite::Patch(delta) => {
+                    DocumentWrite::Patch(mut delta) => {
+                        resolve_patch_markers(store.as_ref(), &mut delta).await?;
                         (store.patch_held(&held, delta).await?, Vec::new())
                     }
-                    DocumentWrite::PatchWithWarnings(delta) => {
+                    DocumentWrite::PatchWithWarnings(mut delta) => {
+                        resolve_patch_markers(store.as_ref(), &mut delta).await?;
                         store.patch_held_with_warnings(&held, delta).await?
                     }
                 };
@@ -556,6 +601,22 @@ impl ConfigRuntime {
     async fn acquire_file_lock(&self) -> Result<ConfigWriterLock, ConfigRuntimeError> {
         ConfigWriterLock::acquire(&self.lock_path).await
     }
+}
+
+/// Resolve the markers `delta` carries in place of stored secret values
+/// ([`crate::config_secrets`]) against the document `store` holds now, in
+/// `delta` itself; a patch that carries none reads nothing.
+async fn resolve_patch_markers(
+    store: &dyn ConfigStore,
+    delta: &mut ConfigDelta,
+) -> Result<(), ConfigRuntimeError> {
+    if !crate::config_secrets::patch_reads_stored(&delta.0) {
+        return Ok(());
+    }
+    let (mut preview, _) = store.patch_preview(delta).await?;
+    let stored = store.get().await?;
+    crate::config_secrets::resolve_written_patch(&mut delta.0, &mut preview, &stored)?;
+    Ok(())
 }
 
 /// What a write of the document does.
@@ -1762,5 +1823,456 @@ tier = \"r2\"\n";
         );
         assert!(!sidecar.exists(), "no generation was published");
         assert!(!user_root.join("config_state.json").exists());
+    }
+
+    /// A stored secret value of the rows below: plain synthetic words, put
+    /// together at run time.
+    fn stored_secret(n: u8) -> String {
+        format!("synthetic stored value {n:02}")
+    }
+
+    /// A document that holds a header value of an HTTP MCP server and an
+    /// auth profile's inline secret.
+    fn document_with_secrets(header: &str, secret: &str) -> String {
+        format!(
+            "[[tools.mcp_servers]]\nname = \"remote\"\nurl = \"http://synthetic.invalid/mcp\"\n\
+             headers = {{ X-Synthetic = \"{header}\" }}\n\n\
+             [realm.team.auth.inline]\nprovider = \"openai\"\nauth_method = \"api_key\"\n\
+             source = {{ kind = \"inline_secret\", secret = \"{secret}\" }}\n"
+        )
+    }
+
+    /// A runtime over a document file that holds the two secret values.
+    async fn runtime_with_secrets(directory: &Path) -> (ConfigRuntime, PathBuf) {
+        let path = directory.join("config.toml");
+        tokio::fs::write(
+            &path,
+            document_with_secrets(&stored_secret(1), &stored_secret(2)),
+        )
+        .await
+        .unwrap();
+        let store = Arc::new(crate::config_store::FileConfigStore::new(
+            path.clone(),
+            *crate::model_profile::test_catalog::TEST_CATALOG,
+        ));
+        (
+            ConfigRuntime::new(store, directory.join("state.json")),
+            path,
+        )
+    }
+
+    /// The header value and the inline secret `config` holds.
+    fn secrets_of(config: &Config) -> (String, String) {
+        let document = serde_json::to_value(config).unwrap();
+        let text = |pointer: &str| {
+            document
+                .pointer(pointer)
+                .and_then(serde_json::Value::as_str)
+                .expect("the document holds the place")
+                .to_string()
+        };
+        (
+            text("/tools/mcp_servers/0/headers/X-Synthetic"),
+            text("/realm/team/auth/inline/source/secret"),
+        )
+    }
+
+    /// The patch that restates the server list with the marker in place of
+    /// the header value.
+    fn patch_with_marker() -> ConfigDelta {
+        ConfigDelta(json!({"max_tokens": 1024, "tools": {"mcp_servers": [{
+            "name": "remote",
+            "url": "http://synthetic.invalid/mcp",
+            "headers": {"X-Synthetic": crate::CONFIG_SECRET_MARKER},
+        }]}}))
+    }
+
+    /// A write that carries the marker in place of a stored secret value
+    /// commits the stored value: the snapshot it answers holds it, and so
+    /// does the document; the marker text is never written. By a full
+    /// replace and by a patch.
+    #[tokio::test]
+    async fn a_write_resolves_the_secret_marker_to_the_stored_value() {
+        let temp = tempfile::tempdir().unwrap();
+        let (runtime, path) = runtime_with_secrets(temp.path()).await;
+        let stored = runtime.get().await.unwrap();
+        let expected = (stored_secret(1), stored_secret(2));
+        assert_eq!(secrets_of(&stored.config), expected);
+
+        let mut shown = stored.config.clone();
+        crate::config_secrets::mask_config_secrets(&mut shown);
+        assert_eq!(
+            secrets_of(&shown),
+            (
+                crate::CONFIG_SECRET_MARKER.to_string(),
+                crate::CONFIG_SECRET_MARKER.to_string()
+            )
+        );
+        shown.max_tokens = Some(512);
+        let after_set = runtime.set(shown, Some(stored.generation)).await.unwrap();
+        assert_eq!(after_set.generation, stored.generation + 1);
+        assert_eq!(after_set.config.max_tokens, Some(512));
+        assert_eq!(secrets_of(&after_set.config), expected);
+
+        let after_patch = runtime.patch(patch_with_marker(), None).await.unwrap();
+        assert_eq!(after_patch.config.max_tokens, Some(1024));
+        assert_eq!(secrets_of(&after_patch.config), expected);
+
+        assert_eq!(secrets_of(&runtime.get().await.unwrap().config), expected);
+        let written = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(written.contains(&stored_secret(1)) && written.contains(&stored_secret(2)));
+        assert!(!written.contains(crate::CONFIG_SECRET_MARKER));
+    }
+
+    /// The same over a store with no document.
+    #[tokio::test]
+    async fn a_write_resolves_the_secret_marker_in_a_store_with_no_document() {
+        let temp = tempfile::tempdir().unwrap();
+        let config: Config =
+            toml::from_str(&document_with_secrets(&stored_secret(1), &stored_secret(2))).unwrap();
+        let store = Arc::new(MemoryConfigStore::new(
+            config,
+            *crate::model_profile::test_catalog::TEST_CATALOG,
+        ));
+        let runtime = ConfigRuntime::new(store, temp.path().join("state.json"));
+        let expected = (stored_secret(1), stored_secret(2));
+        let mut shown = runtime.get().await.unwrap().config;
+        crate::config_secrets::mask_config_secrets(&mut shown);
+        let after_set = runtime.set(shown, None).await.unwrap();
+        assert_eq!(secrets_of(&after_set.config), expected);
+        let after_patch = runtime.patch(patch_with_marker(), None).await.unwrap();
+        assert_eq!(secrets_of(&after_patch.config), expected);
+        assert_eq!(secrets_of(&runtime.get().await.unwrap().config), expected);
+    }
+
+    /// The write resolves the marker against the document as it is stored
+    /// when the write commits, under its custody, not as a preview saw it:
+    /// a value the host changes in the document after the preview is the
+    /// one the write keeps. By a full replace and by a patch.
+    #[tokio::test]
+    async fn a_write_resolves_the_secret_marker_against_the_document_at_its_commit() {
+        let temp = tempfile::tempdir().unwrap();
+        let (runtime, path) = runtime_with_secrets(temp.path()).await;
+        let mut shown = runtime.get().await.unwrap().config;
+        crate::config_secrets::mask_config_secrets(&mut shown);
+
+        let preview = runtime.set_preview(&shown).await.unwrap();
+        assert_eq!(
+            secrets_of(&preview),
+            (stored_secret(1), stored_secret(2)),
+            "the preview holds the stored values"
+        );
+        tokio::fs::write(
+            &path,
+            document_with_secrets(&stored_secret(3), &stored_secret(4)),
+        )
+        .await
+        .unwrap();
+        let after_set = runtime.set(shown, None).await.unwrap();
+        assert_eq!(
+            secrets_of(&after_set.config),
+            (stored_secret(3), stored_secret(4))
+        );
+
+        let preview = runtime.patch_preview(&patch_with_marker()).await.unwrap();
+        assert_eq!(secrets_of(&preview).0, stored_secret(3));
+        let changed = tokio::fs::read_to_string(&path)
+            .await
+            .unwrap()
+            .replace(&stored_secret(3), &stored_secret(5));
+        tokio::fs::write(&path, changed).await.unwrap();
+        let after_patch = runtime.patch(patch_with_marker(), None).await.unwrap();
+        assert_eq!(
+            secrets_of(&after_patch.config),
+            (stored_secret(5), stored_secret(4))
+        );
+        let written = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(written.contains(&stored_secret(5)) && !written.contains(&stored_secret(3)));
+        assert!(!written.contains(crate::CONFIG_SECRET_MARKER));
+    }
+
+    /// A write that carries the marker where the document holds no value
+    /// it can stand for is refused as invalid, by the write and by its
+    /// preview alike, and moves nothing: the document's bytes and the
+    /// generation are as before. By a full replace and by a patch.
+    #[tokio::test]
+    async fn a_secret_marker_with_no_stored_value_refuses_the_write_and_moves_nothing() {
+        let temp = tempfile::tempdir().unwrap();
+        let (runtime, path) = runtime_with_secrets(temp.path()).await;
+        let before = tokio::fs::read(&path).await.unwrap();
+        let stored = runtime.get().await.unwrap();
+        let added = json!({
+            "name": "added",
+            "url": "http://added.synthetic.invalid/mcp",
+            "headers": {"X-Synthetic": crate::CONFIG_SECRET_MARKER},
+        });
+        let mut with_added = stored.config.clone();
+        with_added
+            .tools
+            .mcp_servers
+            .push(serde_json::from_value(added.clone()).unwrap());
+        let delta = ConfigDelta(json!({"tools": {"mcp_servers": [added]}}));
+        let refusals = [
+            runtime.set_preview(&with_added).await.map(|_| ()),
+            runtime.set(with_added, None).await.map(|_| ()),
+            runtime.patch_preview(&delta).await.map(|_| ()),
+            runtime.patch(delta, None).await.map(|_| ()),
+        ];
+        for refusal in refusals {
+            let refusal = refusal.expect_err("the marker stands for nothing stored");
+            assert!(
+                matches!(
+                    &refusal,
+                    ConfigRuntimeError::Config(ConfigError::Validation(text))
+                        if text.contains("the MCP server `added`")
+                            && text.contains(crate::CONFIG_SECRET_MARKER)
+                ),
+                "{refusal}"
+            );
+        }
+        assert_eq!(tokio::fs::read(&path).await.unwrap(), before);
+        assert_eq!(
+            runtime.get().await.unwrap().generation,
+            stored.generation,
+            "no generation was published"
+        );
+    }
+
+    /// The document of the rows above with its inline secret's table left
+    /// open: a document that does not parse, broken on the line that holds
+    /// a stored value.
+    fn document_broken_on_a_secrets_line() -> String {
+        let whole = document_with_secrets(&stored_secret(1), &stored_secret(2));
+        let broken = whole.replace(
+            &format!("secret = \"{}\" }}", stored_secret(2)),
+            &format!("secret = \"{}\"", stored_secret(2)),
+        );
+        assert_ne!(broken, whole);
+        broken
+    }
+
+    /// What the text of an error about a document must be: it says where
+    /// (line and column) and holds no stored value.
+    fn assert_names_the_place_and_no_value(text: &str) {
+        assert!(
+            text.contains("line ") && text.contains(", column "),
+            "the error says where: {text}"
+        );
+        assert!(
+            !text.contains("synthetic stored value"),
+            "the error holds a stored value"
+        );
+    }
+
+    /// A stored document that does not parse is refused with an error that
+    /// says where the document is broken and what is wrong, and holds no
+    /// value of the document, in its text and in its `Debug` form alike:
+    /// neither the line the error sits on nor the document. The TOML
+    /// reader's own display quotes that line, which is why it is not used.
+    #[tokio::test]
+    async fn a_stored_document_that_does_not_parse_is_refused_without_its_text() {
+        let broken = document_broken_on_a_secrets_line();
+        let readers_own = toml::from_str::<Config>(&broken).unwrap_err();
+        assert!(
+            readers_own.to_string().contains(&stored_secret(2)),
+            "the reader's own display quotes the line"
+        );
+        assert_names_the_place_and_no_value(&crate::redact::toml_error_text(&readers_own));
+
+        for error in [
+            ConfigError::from(readers_own),
+            Config::from_persisted_toml(&broken).unwrap_err(),
+            Config::default().merge_toml_str(&broken).unwrap_err(),
+        ] {
+            assert!(matches!(error, ConfigError::Parse(_)), "{error}");
+            assert_names_the_place_and_no_value(&error.to_string());
+            assert!(
+                !format!("{error:?}").contains("synthetic stored value"),
+                "the error's Debug form holds the document"
+            );
+        }
+
+        // Through a runtime over the broken document file.
+        let temp = tempfile::tempdir().unwrap();
+        let (runtime, path) = runtime_with_secrets(temp.path()).await;
+        tokio::fs::write(&path, &broken).await.unwrap();
+        let refused = runtime.get().await.unwrap_err();
+        assert_names_the_place_and_no_value(&refused.to_string());
+        assert!(!format!("{refused:?}").contains("synthetic stored value"));
+
+        // The editing reader's error over the same text.
+        let editing = broken
+            .parse::<toml_edit::DocumentMut>()
+            .expect_err("the editing reader refuses it too");
+        assert!(editing.to_string().contains(&stored_secret(2)));
+        assert_names_the_place_and_no_value(&crate::config_document::edit_error_text(
+            &editing, &broken,
+        ));
+    }
+
+    /// A patch whose document would no longer load is refused with an
+    /// error that says where and what, and holds no value of the stored
+    /// document: an unknown kind of source written beside a stored inline
+    /// secret, on the secret's line. By the preview and by the write;
+    /// nothing is written.
+    #[tokio::test]
+    async fn a_patch_whose_document_does_not_load_is_refused_without_a_stored_value() {
+        let temp = tempfile::tempdir().unwrap();
+        let (runtime, path) = runtime_with_secrets(temp.path()).await;
+        let before = tokio::fs::read(&path).await.unwrap();
+        let delta = ConfigDelta(json!({"realm": {"team": {"auth": {"inline": {
+            "source": {"kind": "no_such_kind"},
+        }}}}}));
+        for refused in [
+            runtime.patch_preview(&delta).await.map(|_| ()),
+            runtime.patch(delta, None).await.map(|_| ()),
+        ] {
+            let refused = refused.expect_err("the patched document does not load");
+            assert!(
+                matches!(&refused, ConfigRuntimeError::Config(ConfigError::Json(_))),
+                "{refused}"
+            );
+            let text = refused.to_string();
+            assert_names_the_place_and_no_value(&text);
+            assert!(
+                text.contains("unknown variant, expected") && !text.contains("no_such_kind"),
+                "the error says what, without the value: {text}"
+            );
+        }
+        assert_eq!(tokio::fs::read(&path).await.unwrap(), before);
+    }
+
+    /// An error about a document renders no unexpected value: where a
+    /// value has another type than the schema expects, or is no variant,
+    /// the error keeps the kind of the value and what was expected, and
+    /// holds no byte of the value. A string where a table is expected, a
+    /// string where a number is expected and a string as an unknown
+    /// variant; in a stored document and in the document a patch would
+    /// write. The name of an unknown field is still named.
+    #[tokio::test]
+    async fn an_error_about_a_document_renders_no_unexpected_value() {
+        let value = stored_secret(7);
+        let profile = |source: &str| {
+            format!(
+                "[realm.team.auth.inline]\nprovider = \"openai\"\nauth_method = \"api_key\"\n\
+                 source = {source}\n"
+            )
+        };
+        let no_byte_of_the_value = |text: &str, says: &str| {
+            assert!(text.contains(says), "`{says}` is not in: {text}");
+            assert!(
+                text.contains("line ") && text.contains(", column "),
+                "the error says where: {text}"
+            );
+            assert!(
+                !text.contains("synthetic") && !text.contains("stored value"),
+                "the error holds the value"
+            );
+        };
+        for (document, says) in [
+            (
+                profile(&format!("\"{value}\"")),
+                "invalid type: string, expected",
+            ),
+            (
+                profile(&format!(
+                    "{{ kind = \"command\", program = \"/usr/bin/true\", \
+                     timeout_ms = \"{value}\" }}"
+                )),
+                "invalid type: string, expected",
+            ),
+            (
+                profile(&format!("{{ kind = \"{value}\" }}")),
+                "unknown variant, expected",
+            ),
+        ] {
+            let error = Config::from_persisted_toml(&document).unwrap_err();
+            no_byte_of_the_value(&error.to_string(), says);
+            assert!(!format!("{error:?}").contains("stored value"));
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let (runtime, _path) = runtime_with_secrets(temp.path()).await;
+        for (source, says) in [
+            (json!(value), "invalid type: string, expected"),
+            (
+                json!({"kind": "command", "program": "/usr/bin/true", "timeout_ms": value}),
+                "invalid type: string, expected",
+            ),
+            (json!({"kind": value}), "unknown variant, expected"),
+        ] {
+            let delta = ConfigDelta(json!({"realm": {"team": {"auth": {"inline": {
+                "source": source,
+            }}}}}));
+            let refused = runtime.patch_preview(&delta).await.unwrap_err();
+            no_byte_of_the_value(&refused.to_string(), says);
+        }
+
+        // A key's name is what the caller needs: it stays.
+        let unknown_field = Config::from_persisted_toml(
+            "[self_hosted.servers.local]\nbearer_token_env = \"OLLAMA_TOKEN\"\n",
+        )
+        .unwrap_err();
+        assert!(
+            unknown_field.to_string().contains("bearer_token_env"),
+            "{unknown_field}"
+        );
+    }
+
+    /// The text of a config parse error, word for word, for a document
+    /// with a string where a number is expected: one line with the line and
+    /// column, the path of keys, the kind of the value and what was
+    /// expected. The parser's own display, which the text used to carry,
+    /// holds the document's line and the value.
+    #[test]
+    fn the_text_of_a_config_parse_error_is_one_line_with_the_place() {
+        let own = toml::from_str::<Config>("[agent]\nmax_turns = \"ten\"\n").unwrap_err();
+        assert_eq!(
+            own.to_string(),
+            "TOML parse error at line 2, column 13\n  |\n2 | max_turns = \"ten\"\n  |             \
+             ^^^^^\ninvalid type: string \"ten\", expected u32\n"
+        );
+        assert_eq!(
+            crate::config_document::invalid_patched_document(&own).to_string(),
+            "JSON error: the patched config document is invalid: line 2, column 13, in \
+             `agent.max_turns`: invalid type: string, expected u32"
+        );
+        assert_eq!(
+            ConfigError::from(own).to_string(),
+            "Parse error: line 2, column 13, in `agent.max_turns`: invalid type: string, \
+             expected u32"
+        );
+    }
+
+    /// The envelope a configuration API answers shows the marker in place
+    /// of every stored secret value; the snapshot it is made from keeps the
+    /// values for the callers in the process.
+    #[tokio::test]
+    async fn the_envelope_shows_the_marker_and_the_snapshot_keeps_the_values() {
+        let temp = tempfile::tempdir().unwrap();
+        let (runtime, _path) = runtime_with_secrets(temp.path()).await;
+        let snapshot = runtime.get().await.unwrap();
+        assert_eq!(
+            secrets_of(&snapshot.config),
+            (stored_secret(1), stored_secret(2))
+        );
+        for envelope in [
+            ConfigEnvelope::from_snapshot(snapshot.clone(), ConfigEnvelopePolicy::Public),
+            ConfigEnvelope::from_snapshot(snapshot.clone(), ConfigEnvelopePolicy::Diagnostic),
+            ConfigEnvelope::from(snapshot),
+        ] {
+            assert_eq!(
+                secrets_of(&envelope.config),
+                (
+                    crate::CONFIG_SECRET_MARKER.to_string(),
+                    crate::CONFIG_SECRET_MARKER.to_string()
+                )
+            );
+            assert!(
+                !serde_json::to_string(&envelope)
+                    .unwrap()
+                    .contains("synthetic stored value")
+            );
+        }
     }
 }

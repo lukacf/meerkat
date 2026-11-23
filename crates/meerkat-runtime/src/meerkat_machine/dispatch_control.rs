@@ -1087,6 +1087,13 @@ impl MeerkatMachine {
                             attachment_id,
                         ) {
                         Some(RuntimeAcceptedLiveBoundaryPlan {
+                            pending_admission:
+                                RuntimeAcceptedLiveBoundaryPlan::announce_pending_boundary_admission(
+                                    &mutation_gate,
+                                    &driver,
+                                    input_id,
+                                )
+                                .await,
                             witness: RuntimeLiveBoundaryAttachmentWitness {
                                 mutation_gate: mutation_gate.clone(),
                                 driver: driver.clone(),

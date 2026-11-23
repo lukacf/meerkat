@@ -336,10 +336,12 @@ async fn query_with_empty_filter_match_still_advances_next_after_seq() {
     drive_a_flow(&fixture.runtime).await;
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    // Filter that matches nothing.
+    // Filter that matches nothing: a run no event of the ledger is of. A
+    // `mob_id` is not a filter: it names the mob the request is for (the
+    // row below).
     let response = query(
         &fixture.runtime,
-        json!({ "mob_id": "no-such-mob-anywhere", "limit": 32 }),
+        json!({ "run_id": "no-such-run-anywhere", "limit": 32 }),
     )
     .await;
     assert!(
@@ -361,6 +363,55 @@ async fn query_with_empty_filter_match_still_advances_next_after_seq() {
     assert!(
         next.unwrap() > 0,
         "next_after_seq must advance past 0 once events exist on the ledger"
+    );
+
+    let shutdown = fixture.runtime.shutdown().await;
+    assert!(
+        shutdown.mob_stop.is_ok(),
+        "mob stop failed at teardown: {:?}",
+        shutdown.mob_stop
+    );
+}
+
+#[tokio::test]
+async fn query_that_names_a_mob_the_gateway_does_not_serve_is_refused() {
+    // `mob_id` names the mob a request is for, here as on every other
+    // method. A gateway that does not serve that mob refuses the request
+    // before the ledger is read; it does not answer a page with no events,
+    // as a filter that matches nothing does.
+    let fixture = build_fixture().await;
+    drive_a_flow(&fixture.runtime).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let response = query(
+        &fixture.runtime,
+        json!({ "mob_id": "no-such-mob-anywhere", "limit": 32 }),
+    )
+    .await;
+    assert!(
+        response.result.is_none(),
+        "a request for a mob the gateway does not serve is answered a page: {:?}",
+        response.result
+    );
+    let error = response
+        .error
+        .expect("a request for a mob the gateway does not serve is refused");
+    assert_eq!(error.code, -32602, "the refusal's code: {error:?}");
+    let data = error.data.as_ref().expect("the refusal carries data");
+    assert_eq!(
+        data.get("kind").and_then(Value::as_str),
+        Some("foreign_mob_target"),
+        "the refusal's kind: {data}"
+    );
+    assert_eq!(
+        data.get("requested_mob_id").and_then(Value::as_str),
+        Some("no-such-mob-anywhere"),
+        "the refusal names the mob the request named: {data}"
+    );
+    assert_eq!(
+        data.get("gateway_mob_id").and_then(Value::as_str),
+        Some(fixture.mob_id.as_str()),
+        "the refusal names the mob the gateway serves: {data}"
     );
 
     let shutdown = fixture.runtime.shutdown().await;

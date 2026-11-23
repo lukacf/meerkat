@@ -1,6 +1,6 @@
 # Meerkat Examples Library
 
-35 examples covering Meerkat's shipping surfaces and major feature areas,
+Examples covering Meerkat's shipping surfaces and major feature areas,
 from "Hello World" to production-shaped multi-agent systems.
 
 ## Quick Start
@@ -67,7 +67,7 @@ npm --prefix sdks/typescript run build
 Setting an API key does not select its provider. The CLI examples 004 and 010
 pass `--model claude-sonnet-5-5` on every command that starts a session, so
 they need the Anthropic key. A `rkat run` without `--model` on a fresh
-configuration selects `gpt-6-astra` and needs an OpenAI key. Both scripts keep
+configuration selects the [CLI default](004-cli-one-liners-sh/README.md) and needs an OpenAI key. Both scripts keep
 their state, context and user-config roots under their own `.work/`
 directory, so a model pinned in your own project, user or realm configuration
 does not apply to them.
@@ -162,6 +162,8 @@ browser examples run in headless Chromium with every agent on
 What it does not cover: examples 034 and 035 (their flows are long), 028 to
 030 (they make no provider call), microphone and real-browser use of 036 and
 037, and anything beyond the first round, prompt or scenario of 031 to 033.
+It also skips 040, which waits about a minute for its scheduled follow-up.
+Example 041 calls a model server and is not run by this target.
 
 Standalone Rust examples own separate lockfiles. `make verify-lock-consistency`
 checks these as well as the root lock; release preparation refreshes and stages
@@ -208,6 +210,8 @@ resulting example locks, and commit them together with the relevant changes.
 | 017 | [mob-coding-swarm-rs](017-mob-coding-swarm-rs/) | Rust | Define, validate, spawn, and wire a lead + worker coding mob |
 | 018 | [mob-research-team-rs](018-mob-research-team-rs/) | Rust | Define, validate, spawn, and wire lead + specialist research profiles |
 | 019 | [mob-pipeline-rs](019-mob-pipeline-rs/) | Rust | Mob definition, validation, topology wiring, and manual lint/test dispatch |
+| 038 | [mob-control-py](038-mob-control-py/) | Python | Drive a mob over `rkat-rpc`: create, spawn, wire, send work, follow the members, stop one run and cancel the rest |
+| 039 | [mob-control-ts](039-mob-control-ts/) | TypeScript | The same mob driven from the TypeScript SDK |
 
 ### Expert — Production Patterns & Multi-Surface
 
@@ -230,6 +234,8 @@ resulting example locks, and commit them together with the relevant changes.
 | 035 | [mdm-tux-rs](035-mdm-tux-rs/) | Rust + TUI + Docker | Meerkat Device Manager: TUX terminal controller, kennel rendezvous, remote targets, hive coordination, peer comms, and scheduler wakeups |
 | 036 | [realtime-audio-py](036-realtime-audio-py/) | Python | Command-line OpenAI realtime audio app with live transcript, callback tools, inline mob skills, and helper sub-agents |
 | 037 | [live-webrtc-web](037-live-webrtc-web/) | Web + TypeScript | Browser WebRTC smoke-test cockpit with AEC microphone capture, live controls, note and text-pane callbacks, and real mob-mcp tools |
+| 040 | [One scheduled follow-up](040-one-shot-follow-up-py/) | Python | An agent schedules one turn for itself; the host verifies delivery and the resulting assistant message separately |
+| 041 | [Verify a background job](041-background-job-py/) | Python | Match an agent's shell receipt to its session and check the terminal calculation output |
 
 ## Examples by Feature
 
@@ -237,7 +243,7 @@ resulting example locks, and commit them together with the relevant changes.
 |---------|----------|
 | **Custom Tools** | 006, 025, 036, 037 |
 | **Built-in Tools** | 025 |
-| **Streaming** | 005, 007 |
+| **Streaming** | 005, 007, 038, 039 |
 | **Sessions** | 004, 007, 015, 022, 023 |
 | **Budget & Retry** | 009 |
 | **MCP Integration** | 010 |
@@ -246,20 +252,22 @@ resulting example locks, and commit them together with the relevant changes.
 | **Compaction** | 013 |
 | **Semantic Memory** | 014 |
 | **Persistence** | 015 |
-| **Mobs** | 017, 018, 019, 028, 029, 030, 031, 032, 033, 034, 035, 036, 037 |
+| **Mobs** | 017, 018, 019, 028, 029, 030, 031, 032, 033, 034, 035, 036, 037, 038, 039 |
 | **Mobpack** | 028, 029, 030, 031 |
 | **Browser WASM** | 029, 030, 031, 032, 033 |
-| **Comms** | 017-019, 028, 031-037 |
+| **Comms** | 017-019, 028, 031-039 |
 | **Standalone autonomous mob loops** | 031, 032, 033 |
 | **Runtime-backed long-lived sessions** | 035, 036, 037 |
 | **Multi-Provider** | 021, 032, 034, 035 |
 | **MCP Server** | 034 |
 | **Flow Engine** | 019, 031, 034 |
 | **Remote Computer Control** | 035 |
-| **Scheduling** | 035 |
+| **Background jobs** | 041 |
+| **Scheduling** | 035, 040 |
 | **Realtime Audio** | 036, 037 |
 | **REST API** | 022 |
-| **JSON-RPC** | 023, 035, 037 |
+| **JSON-RPC** | 023, 035, 037, 038, 039 |
+| **Stop and cancel** | 038, 039 |
 | **Structured Output** | 008, 031, 033 |
 
 ## Examples by Surface
@@ -267,8 +275,8 @@ resulting example locks, and commit them together with the relevant changes.
 | Surface | Examples |
 |---------|----------|
 | **Rust SDK** | 001, 005, 006, 009, 011-015, 017-019, 024, 025, 034, 035 |
-| **Python SDK** | 002, 007, 021, 026, 036 |
-| **TypeScript SDK** | 003, 008, 023, 027 |
+| **Python SDK** | 002, 007, 021, 026, 036, 038, 040, 041 |
+| **TypeScript SDK** | 003, 008, 023, 027, 039 |
 | **REST client** | 022 |
 | **CLI (Shell)** | 004, 010, 028, 029, 030, 031 |
 | **WASM (Browser)** | 029, 030, 031, 032, 033 |
@@ -355,3 +363,20 @@ The suffix indicates the primary language/surface:
 - `py` — Python SDK
 - `ts` — TypeScript SDK
 - `sh` — Shell/CLI
+
+## Model Names
+
+When choosing a model for an example, use the newest supported model in its
+line, such as `claude-sonnet-5-5`, `gpt-6.2-astra`, or `gemini-4-hydrogen`.
+Some existing examples still name older models. After a catalog change,
+list those references:
+
+```bash
+python3 examples/tests/model_names.py          # exit 1 and a list when a name is behind
+python3 examples/tests/model_names.py --lines  # each line and its newest model
+```
+
+It reads the catalog in `crates/meerkat-models/src/capabilities/` and every
+tracked text file under `examples/` and `meta/examples/`; it needs no build
+and no network. An example that names an older model on purpose carries a
+line `model-names: keep <model id> (<reason>)`.

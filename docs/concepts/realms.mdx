@@ -66,14 +66,32 @@ Meerkat resolves identity first, then looks for that realm under candidate
 roots:
 
 1. `--state-root` selects one explicit root and disables candidate probing.
-2. Otherwise, the resolver probes the project-local candidate and user-global
-   platform data root for the resolved realm ID.
+2. Otherwise, the resolver probes, for the resolved realm ID, the
+   `.rkat/realms` of the project root and of every farther ancestor that has
+   a `.rkat` directory, and the user-global platform data root. A realm
+   exists where its manifest (`realm_manifest.json`) names it; a realm
+   directory without one is not found.
 3. If the realm exists under exactly one candidate, Meerkat opens it where it
-   already lives.
-4. If it exists under both, startup refuses with a typed split-brain error
-   rather than choosing silently.
-5. If it exists nowhere, the surface creates it under its default root: local
-   for CLI and user-global for servers.
+   already lives, also when a nearer `.rkat` directory has appeared since
+   (for example after `rkat init` in a subdirectory).
+4. If it exists under more than one, startup refuses with a typed split-brain
+   error rather than choosing silently. The refusal names both realm
+   directories, says which is nearer and which farther, and gives the ways
+   out without preferring a copy: `rkat storage doctor` to look at both
+   first, `--state-root` for either one, or `rkat storage migrate` with both
+   roots and `--adopt-root` naming the one to keep. A copy you did not
+   create should not be adopted.
+5. If it exists nowhere, the surface creates it under its default root: the
+   nearest project-local root for CLI and user-global for servers.
+
+An existing realm is not left behind by a `.rkat` directory that appears
+nearer the context root. When a directory on the way from the context root up
+to the filesystem root cannot be searched, so that its `.rkat` entry cannot be
+examined, startup refuses and names that entry instead of passing it over. A
+farther ancestor's `.rkat/realms` that this user may not read is skipped with
+one warning naming it (a realm kept there is not used); the nearest candidate
+and the user-global root refuse when they cannot be read. `--state-root`
+examines no directory.
 
 Server surfaces include the project-local candidate only when started with an
 explicit context root.

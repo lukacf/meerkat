@@ -84,13 +84,14 @@ pub(crate) fn gating_questions_response(
 }
 
 /// The question set the `pending_id` of a decide's `params` names in the
-/// runtime's durable decisions, when it names one.
+/// durable decisions `slot` was filled with (the host's: the slot is the
+/// process's, whatever mob a request names), when it names one.
 fn named_question_set(
-    runtime: &crate::mob_handle_runtime::MobRuntime,
+    slot: &crate::ask_user::AskUserSlot,
     params: &Value,
 ) -> Option<(RuntimeDecisions, HeldQuestionSet)> {
     let pending_id = params.get("pending_id").and_then(Value::as_str)?.trim();
-    let decisions = runtime.ask_user_slot().decisions()?;
+    let decisions = slot.decisions()?;
     let set = held_question_set(&decisions, pending_id)?;
     Some((decisions, set))
 }
@@ -99,20 +100,20 @@ fn named_question_set(
 /// other id, a decision of another kind included, is the gating owner's to
 /// answer, as an unknown pending id.
 pub(crate) fn gating_decide_names_question_set(
-    runtime: &crate::mob_handle_runtime::MobRuntime,
+    slot: &crate::ask_user::AskUserSlot,
     params: &Value,
 ) -> bool {
-    named_question_set(runtime, params).is_some()
+    named_question_set(slot, params).is_some()
 }
 
 /// `meta/gating/decide` for a question set, as the host: `approve` with
 /// `answers` answers it, `reject` or `deny` dismisses it.
 pub(crate) fn gating_decide_question_set(
-    runtime: &crate::mob_handle_runtime::MobRuntime,
+    slot: &crate::ask_user::AskUserSlot,
     params: &Value,
     response_id: Value,
 ) -> JsonRpcResponse {
-    let Some((decisions, set)) = named_question_set(runtime, params) else {
+    let Some((decisions, set)) = named_question_set(slot, params) else {
         return invalid(response_id, "pending_id names no question set");
     };
     // The request is read as every gating decide is: `approver_id` is

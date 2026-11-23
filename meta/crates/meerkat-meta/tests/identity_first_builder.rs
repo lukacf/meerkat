@@ -3938,6 +3938,280 @@ async fn builder_rejects_both_blob_injection_forms() {
     Box::pin(assert_build_err_contains(builder, "binary_blob_store()")).await;
 }
 
+/// A build that takes its stores from Meta's own disk storage provider runs
+/// the agent memory store's first start's step, as a build over the bundled
+/// store does: that provider's agent memory is the same store under the
+/// same state directory. A store that holds notes under a temporary
+/// council participant's name and under a shared member's name, and no
+/// marker of the step (as an earlier release leaves it), is opened by such
+/// a build: when the build returns, the participant's name's notes are set
+/// aside and the shared member's are as they were.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_build_over_the_disk_storage_provider_sets_notes_aside_before_it_returns() {
+    fn files_named(root: &std::path::Path, name: &str, found: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(root) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                files_named(&path, name, found);
+            } else if path.file_name().is_some_and(|file| file == name) {
+                found.push(path);
+            }
+        }
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let state = tmp.path().join("state");
+    // One mob for both builds: the second build opens the first's state.
+    let mob_id = unique_builder_mob_id();
+    let build = |instance: &'static str| {
+        let state = state.clone();
+        let definition = test_definition_with_id(&mob_id);
+        async move {
+            Box::pin(
+                UnifiedRuntimeBuilder::default()
+                    .definition(definition)
+                    .storage_provider(Arc::new(meerkat_meta::DiskMetaStorageProvider))
+                    .persistent_state(state)
+                    .persistent_agent_memory_stack(
+                        AgentMemoryConfig::default(),
+                        meerkat_meta::memory_wiring::MemoryEnginesConfig::default(),
+                    )
+                    .roster_provider(Arc::new(StubRosterProvider::new(vec![])))
+                    .identity_runtime_instance_id(instance)
+                    .default_llm_client(Arc::new(meerkat_client::TestClient::default()))
+                    .build(),
+            )
+            .await
+            .expect("a build over the disk storage provider with agent memory")
+        }
+    };
+
+    let runtime = build("disk-provider-first-start-1").await;
+    let store = runtime
+        .memory_panel_store()
+        .expect("the build registers the memory panel's store");
+    for (name, title, body) in [
+        ("council-p1", "Participant fact", "PARTICIPANT-KEPT"),
+        ("helper", "Helper fact", "HELPER-KEPT"),
+    ] {
+        store
+            .remember_authored(
+                &meerkat_meta::MemoryScope::Identity {
+                    realm: "default".to_string(),
+                    identity: name.to_string(),
+                },
+                meerkat_meta::NewMemoryRecord {
+                    kind: meerkat_meta::MemoryKind::Fact,
+                    title: title.to_string(),
+                    description: String::new(),
+                    body: body.to_string(),
+                    tags: vec![],
+                    evidence: vec![],
+                    verification: None,
+                },
+                meerkat_meta::memory::MemoryAuthor::Agent {
+                    identity: name.to_string(),
+                },
+            )
+            .await
+            .expect("store a note");
+    }
+    drop(store);
+    runtime.shutdown().await;
+    drop(runtime);
+
+    // As an earlier release leaves the store: without the step's marker.
+    let mut realm_files = Vec::new();
+    files_named(&state, "default.sqlite3", &mut realm_files);
+    assert_eq!(
+        realm_files.len(),
+        1,
+        "one memory realm file: {realm_files:?}"
+    );
+    let db = rusqlite::Connection::open(&realm_files[0]).expect("the realm's store file");
+    let removed = db
+        .execute(
+            "DELETE FROM audit WHERE stage_token LIKE 'set-aside-first-start/%'",
+            [],
+        )
+        .expect("remove the marker");
+    assert_eq!(
+        removed, 1,
+        "the first build ran the step and left its marker"
+    );
+    drop(db);
+
+    let runtime = build("disk-provider-first-start-2").await;
+    let store = runtime
+        .memory_panel_store()
+        .expect("the build registers the memory panel's store");
+    let page = store
+        .records_page("default", None, None, None, 16, None)
+        .await
+        .expect("the store's records");
+    let mut notes: Vec<(String, &str, String)> = page
+        .records
+        .into_iter()
+        .map(|record| {
+            (
+                record.scope.key().to_string(),
+                record.status.kind_str(),
+                record.body,
+            )
+        })
+        .collect();
+    notes.sort();
+    assert_eq!(
+        notes,
+        [
+            ("helper".to_string(), "active", "HELPER-KEPT".to_string()),
+            (
+                "set-aside/council-p1".to_string(),
+                "tombstoned",
+                "PARTICIPANT-KEPT".to_string()
+            ),
+        ],
+        "the build returned with the participant's name's notes set aside"
+    );
+    drop(store);
+    runtime.shutdown().await;
+}
+
+/// A build whose first start's step cannot run fails, and nothing in the
+/// agent memory store is changed. Here the store refuses the step (a note
+/// under a temporary council participant's name whose stored provenance
+/// cannot be read): the build fails with "agent memory could not be
+/// prepared: the agent memory store refused the step (...); nothing was
+/// changed; start again, or start without agent memory (configure no
+/// `agent_memory`)", the note is where it was, and no marker is written.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_build_whose_first_start_step_cannot_run_fails_and_changes_nothing() {
+    fn files_named(root: &std::path::Path, name: &str, found: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(root) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                files_named(&path, name, found);
+            } else if path.file_name().is_some_and(|file| file == name) {
+                found.push(path);
+            }
+        }
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let state = tmp.path().join("state");
+    // One mob for both builds: the second build opens the first's state.
+    let mob_id = unique_builder_mob_id();
+    let builder = |instance: &'static str| {
+        UnifiedRuntimeBuilder::default()
+            .definition(test_definition_with_id(&mob_id))
+            .storage_provider(Arc::new(meerkat_meta::DiskMetaStorageProvider))
+            .persistent_state(state.clone())
+            .persistent_agent_memory_stack(
+                AgentMemoryConfig::default(),
+                meerkat_meta::memory_wiring::MemoryEnginesConfig::default(),
+            )
+            .roster_provider(Arc::new(StubRosterProvider::new(vec![])))
+            .identity_runtime_instance_id(instance)
+            .default_llm_client(Arc::new(meerkat_client::TestClient::default()))
+    };
+
+    let runtime = Box::pin(builder("refused-first-start-1").build())
+        .await
+        .expect("a build over the disk storage provider with agent memory");
+    let store = runtime
+        .memory_panel_store()
+        .expect("the build registers the memory panel's store");
+    let note = store
+        .remember_authored(
+            &meerkat_meta::MemoryScope::Identity {
+                realm: "default".to_string(),
+                identity: "council-p1".to_string(),
+            },
+            meerkat_meta::NewMemoryRecord {
+                kind: meerkat_meta::MemoryKind::Fact,
+                title: "Participant fact".to_string(),
+                description: String::new(),
+                body: "PARTICIPANT-KEPT".to_string(),
+                tags: vec![],
+                evidence: vec![],
+                verification: None,
+            },
+            meerkat_meta::memory::MemoryAuthor::Agent {
+                identity: "council-p1".to_string(),
+            },
+        )
+        .await
+        .expect("store a note")
+        .memory_id;
+    drop(store);
+    runtime.shutdown().await;
+    drop(runtime);
+
+    // As an earlier release leaves the store (no marker of the step), with
+    // one note the store cannot read back.
+    let mut realm_files = Vec::new();
+    files_named(&state, "default.sqlite3", &mut realm_files);
+    assert_eq!(
+        realm_files.len(),
+        1,
+        "one memory realm file: {realm_files:?}"
+    );
+    let db = rusqlite::Connection::open(&realm_files[0]).expect("the realm's store file");
+    db.execute(
+        "DELETE FROM audit WHERE stage_token LIKE 'set-aside-first-start/%'",
+        [],
+    )
+    .expect("remove the marker");
+    db.execute(
+        "UPDATE records SET provenance = 'not a provenance' WHERE memory_id = ?1",
+        [&note],
+    )
+    .expect("make the note unreadable");
+    let stored = |db: &rusqlite::Connection| -> (String, String, String, i64) {
+        let (scope_key, status, provenance): (String, String, String) = db
+            .query_row(
+                "SELECT scope_key, status_kind, provenance FROM records WHERE memory_id = ?1",
+                [&note],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("the note is in the store");
+        let audit_rows = db
+            .query_row("SELECT COUNT(*) FROM audit", [], |row| row.get(0))
+            .expect("count the audit rows");
+        (scope_key, status, provenance, audit_rows)
+    };
+    let before = stored(&db);
+    assert_eq!(before.0, "council-p1", "{before:?}");
+    drop(db);
+
+    let refused = match Box::pin(builder("refused-first-start-2").build()).await {
+        Err(error) => error.to_string(),
+        Ok(_) => panic!("the build whose step cannot run succeeded"),
+    };
+    assert!(
+        refused.contains(
+            "agent memory could not be prepared: the agent memory store refused the step ("
+        ) && refused.contains(
+            "; nothing was changed; start again, or start without agent memory (configure no \
+             `agent_memory`)"
+        ),
+        "{refused}"
+    );
+
+    let db = rusqlite::Connection::open(&realm_files[0]).expect("the realm's store file");
+    assert_eq!(
+        stored(&db),
+        before,
+        "the refused build changed nothing in the store"
+    );
+}
+
 /// The full provider-backed build: the disk bundle supplies the identity
 /// substrate and every Meta slot through the single seam, the runtime
 /// boots, and the per-slot census reports the provider's stores.

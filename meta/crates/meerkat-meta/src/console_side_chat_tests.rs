@@ -803,6 +803,7 @@ async fn a_side_chat_frame_is_decided_along_its_source() -> TestResult {
     let frame = aggregator
         .store()
         .append_if_absent(NewConsoleFrame {
+            mob_id: None,
             id: None,
             dedupe_key: "side-chat-frame".to_string(),
             timestamp_ms: 2_000,
@@ -3148,5 +3149,134 @@ async fn side_chat_creator_hidden_from_other_viewers() -> TestResult {
             "{viewer}'s experience: {side_chat:#}"
         );
     }
+    Ok(())
+}
+
+/// The labels of the member rows the console projects from `runtime`'s own
+/// roster, read as the given mob's (`host_identity`, `source_mob_id`) with
+/// the spawn registry `registered`, by member name.
+async fn projected_row_labels(
+    runtime: &MobRuntime,
+    host_identity: Option<&str>,
+    source_mob_id: Option<&str>,
+    registered: &crate::console_spawn::SpawnRegistry,
+) -> BTreeMap<String, BTreeMap<String, String>> {
+    let (members, _) = project_console_members_from_handle(
+        &runtime.handle(),
+        None,
+        None,
+        host_identity,
+        source_mob_id,
+        &ConsoleSnapshotReadModelState::default(),
+        registered,
+    )
+    .await;
+    members
+        .into_iter()
+        .map(|member| (member.agent_identity, member.labels))
+        .collect()
+}
+
+/// A member's row says which mob it sits in, and whose implicit delegate it
+/// is, from where the console read it, never from a label its roster row
+/// holds or a spawn registered: a member of the runtime's own mob names no
+/// mob and no host whatever those say, and a row read as another mob's names
+/// that mob and that host. Access rules match these two labels.
+#[tokio::test]
+async fn a_member_row_names_its_mob_and_host_from_where_it_was_read() -> TestResult {
+    let (_temp_dir, runtime) = persistent_console_runtime("console-row-own-keys", "", "").await?;
+    seeded_member(
+        &runtime,
+        "worker",
+        "alpha",
+        &[
+            ("source_mob_id", "another-mob"),
+            ("delegate_host_identity", "another-host"),
+            ("team", "ops"),
+        ],
+    )
+    .await?;
+    seeded_member(&runtime, "worker", "beta", &[("team", "ops")]).await?;
+    seeded_member(&runtime, "worker", "gamma", &[("team", "ops")]).await?;
+    // What a spawn registered for gamma names another mob and host too.
+    let mut registered = crate::console_spawn::SpawnRegistry::default();
+    registered.register(
+        runtime.handle().mob_id().as_str(),
+        "gamma",
+        "gamma",
+        BTreeMap::from([
+            ("source_mob_id".to_string(), "another-mob".to_string()),
+            (
+                "delegate_host_identity".to_string(),
+                "another-host".to_string(),
+            ),
+        ]),
+    );
+
+    let own = projected_row_labels(&runtime, None, None, &registered).await;
+    let beta = &own["beta"];
+    for name in ["alpha", "gamma"] {
+        let labels = &own[name];
+        assert_eq!(labels.get("team").map(String::as_str), Some("ops"));
+        assert_eq!(
+            labels.keys().collect::<Vec<_>>(),
+            beta.keys().collect::<Vec<_>>(),
+            "{name}, a member of the runtime's own mob, names no mob and no host: {labels:#?}"
+        );
+    }
+
+    let other =
+        projected_row_labels(&runtime, Some("a-host"), Some("a-child-mob"), &registered).await;
+    for name in ["alpha", "beta", "gamma"] {
+        // A row read as another mob's is named by that mob and its name.
+        let labels = &other[format!("a-child-mob/{name}").as_str()];
+        assert_eq!(
+            labels.get("source_mob_id").map(String::as_str),
+            Some("a-child-mob"),
+            "{name} names the mob it was read from: {labels:#?}"
+        );
+        assert_eq!(
+            labels.get("delegate_host_identity").map(String::as_str),
+            Some("a-host"),
+            "{name} names the host it was read for: {labels:#?}"
+        );
+    }
+    Ok(())
+}
+
+/// `meta/reset_all` acts on every member of the runtime's own mob alike,
+/// whatever a member's roster labels say of a mob: it is no other mob's
+/// member, and the reset answers for it as for its neighbour.
+#[tokio::test]
+async fn reset_all_acts_on_a_member_whose_roster_labels_name_a_mob() -> TestResult {
+    let (_temp_dir, runtime) =
+        persistent_console_runtime("console-reset-all-own-keys", "", "").await?;
+    seeded_member(
+        &runtime,
+        "worker",
+        "alpha",
+        &[("source_mob_id", "another-mob")],
+    )
+    .await?;
+    seeded_member(&runtime, "worker", "beta", &[]).await?;
+
+    let answer = call(&runtime, "meta/reset_all", json!({})).await;
+    assert!(answer["error"].is_null(), "nothing fails: {answer:#?}");
+    let retired = answer["result"]["retired_delegates"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(
+        retired
+            .iter()
+            .filter_map(|detail| detail["identity"].as_str())
+            .collect::<std::collections::BTreeSet<_>>(),
+        std::collections::BTreeSet::from(["alpha", "beta"]),
+        "both members are acted on alike: {answer:#?}"
+    );
+    assert!(
+        retired.iter().all(|detail| detail.get("mob_id").is_none()),
+        "neither is taken for another mob's member: {answer:#?}"
+    );
     Ok(())
 }

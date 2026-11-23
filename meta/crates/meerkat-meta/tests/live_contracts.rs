@@ -296,7 +296,7 @@ fn strict_experimental_surface_is_identity_only_and_provider_neutral() {
 
 #[test]
 fn feature_capabilities_are_typed_and_default_empty() {
-    let parsed: RpcCapabilities = serde_json::from_value(json!({"contract_version": "0.5.0"}))
+    let parsed: RpcCapabilities = serde_json::from_value(json!({"contract_version": "0.6.0"}))
         .expect("legacy capability payload must decode");
     assert!(parsed.feature_capabilities.is_empty());
     assert!(!parsed.supports_live_execution_identity_v1());
@@ -307,14 +307,14 @@ fn feature_capabilities_are_typed_and_default_empty() {
     assert_eq!(encoded, json!("live.execution_identity.v1"));
 
     let admitted: RpcCapabilities = serde_json::from_value(json!({
-        "contract_version": "0.5.0",
+        "contract_version": "0.6.0",
         "feature_capabilities": ["live.execution_identity.v1"]
     }))
     .expect("typed feature capability must decode");
     assert!(admitted.supports_live_execution_identity_v1());
 
     let modes: RpcCapabilities = serde_json::from_value(json!({
-        "contract_version": "0.5.0",
+        "contract_version": "0.6.0",
         "feature_capabilities": [
             "live.execution_identity.v1",
             "live.execution.function_bridge.v1"

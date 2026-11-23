@@ -1329,3 +1329,214 @@ async fn integration_real_cli_realm_mcp_installation_does_not_grant_every_agent(
         );
     }
 }
+
+/// The review rule for the sentinel's server as the realm's trusted host
+/// writes it into the realm's own document, with `tier_lines`: the tier and,
+/// for R3, the consent assurance an R3 rule must state.
+fn sentinel_review_rule(tier_lines: &str) -> String {
+    format!(
+        "\n[[governance.review.rules]]\n\
+         target = {{ kind = \"mcp_server\", server = \"{SENTINEL_SERVER}\" }}\n\
+         {tier_lines}\n"
+    )
+}
+
+/// A reviewer the realm's document names: the realm's own scripted model,
+/// so a reviewer `rkat` consulted would show as one more chat request.
+fn named_reviewer() -> String {
+    format!(
+        "\n[governance.review.reviewer]\n\
+         identity = {{ model = \"{MODEL}\", provider = \"self_hosted\" }}\n\
+         max_output_tokens = 64\n"
+    )
+}
+
+/// What one `rkat run` in the governed realm must show when a rule of the
+/// realm puts the sentinel's operation above R1: the run succeeds, the
+/// server was attached and never called, the first model turn was offered
+/// the operation and the one turn after it carries exactly `refusal` as that
+/// call's result, and the run went on to its final answer. Returns every
+/// expectation the run does not meet, each naming `cell`.
+fn ruled_call_violations(
+    cell: &str,
+    roots: &Roots,
+    output: &std::process::Output,
+    requests: &[ChatRequest],
+    refusal: &serde_json::Value,
+) -> Vec<String> {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let mut violations = Vec::new();
+    if !output.status.success() {
+        violations.push(format!(
+            "{cell}: the run fails (exit {:?})\nstdout:\n{stdout}\nstderr:\n{stderr}",
+            output.status.code()
+        ));
+    }
+    if !roots.marker("spawned") {
+        violations.push(format!(
+            "{cell}: the granted server was not attached\nstderr:\n{stderr}"
+        ));
+    }
+    if roots.marker("called") {
+        violations.push(format!("{cell}: the ruled call reached the server"));
+    }
+    if requests.len() != 2 {
+        violations.push(format!(
+            "{cell}: not one tool-calling model turn and one more model turn: {requests:?}"
+        ));
+    }
+    if !requests
+        .first()
+        .is_some_and(|first| offers(first, SENTINEL_TOOL))
+    {
+        violations.push(format!(
+            "{cell}: the granted operation was not offered: {requests:?}"
+        ));
+    }
+    let result = requests
+        .get(1)
+        .and_then(|request| request.tool_result.as_deref());
+    if result.and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
+        != Some(refusal.clone())
+    {
+        violations.push(format!(
+            "{cell}: the call's result is not the refusal {refusal}: {result:?}"
+        ));
+    }
+    if !stdout.contains("The sentinel answered.") {
+        violations.push(format!(
+            "{cell}: the run did not go on to the final model answer\nstdout:\n{stdout}"
+        ));
+    }
+    violations
+}
+
+/// In a governed realm `rkat` reads the realm's review rules and installs no
+/// reviewer and no human route, so it refuses an operation a rule of the
+/// realm puts above R1. Without a rule the granted read reaches the server.
+/// With an R2 rule the call returns the typed unavailable review ("operation
+/// reviewer is not installed"), also when the document names a reviewer;
+/// with an R3 rule it returns the typed unsatisfied review ("this action
+/// requires human consent") and no approval id. Each refusal is that call's
+/// result only: the server is attached and never called, and the run goes on
+/// to its final answer.
+#[tokio::test]
+#[ignore = "lane:e2e-system"]
+async fn integration_real_cli_realm_mcp_review_rule_refuses_above_r1() {
+    if cfg!(windows) {
+        eprintln!("Skipping: the sentinel MCP server is a POSIX sh script");
+        return;
+    }
+    let rkat = rkat_binary_path().expect("rkat binary (build with `cargo build -p rkat`)");
+    let roots = Roots::new().await;
+    let chat = ScriptedChatServer::start().await;
+    roots
+        .write_realm_doc("alpha", &chat.realm_doc("alpha", None))
+        .await;
+    roots
+        .write_realm_doc("beta", &chat.realm_doc("beta", None))
+        .await;
+    install_read_only_in_alpha(&roots, &rkat).await;
+
+    // Materialize and govern alpha, and grant the default agent the
+    // installation, the catalog and its controller's actual route.
+    let mut command = roots.rkat(&rkat, "alpha");
+    command.args(["realm", "create", "alpha"]);
+    let created = output_of(&mut command, "rkat realm create alpha").await;
+    expect_success("rkat realm create alpha", &created);
+    let mut command = roots.rkat(&rkat, "alpha");
+    command.args(["realm", "govern", "alpha"]);
+    let governed = output_of(&mut command, "rkat realm govern alpha").await;
+    expect_success("rkat realm govern alpha", &governed);
+    let sentinel_grant = format!("{SENTINEL_SERVER}={SENTINEL_TOOL}");
+    realm_grant(
+        &roots,
+        &rkat,
+        "alpha",
+        "rkat-agent",
+        &["--mcp", &sentinel_grant],
+    )
+    .await;
+    realm_grant(&roots, &rkat, "alpha", "rkat-agent", &["--catalog"]).await;
+    let route = discover_controller_route(&roots, &rkat, "alpha").await;
+    chat.take_requests();
+    realm_grant(
+        &roots,
+        &rkat,
+        "alpha",
+        "rkat-agent",
+        &["--controller", "--route", &route],
+    )
+    .await;
+
+    // No rule: the granted read reaches the server and answers.
+    clear_markers(&roots).await;
+    let unruled = run_turn(&roots, &rkat, "alpha").await;
+    expect_success("run without a rule", &unruled);
+    let requests = chat.take_requests();
+    assert_offered_read_only("run without a rule", &requests, &unruled);
+    assert!(
+        roots.marker("called"),
+        "without a rule the granted read reaches the server"
+    );
+    assert!(
+        requests
+            .iter()
+            .any(|request| request.tool_result.as_deref() == Some(SENTINEL_MARKER)),
+        "without a rule the read answered: {requests:?}"
+    );
+
+    // The trusted host administers the review section in the realm's own
+    // document (a config verb refuses it); each run's open reads it.
+    let document = tokio::fs::read_to_string(roots.realm_doc_path("alpha"))
+        .await
+        .expect("read alpha doc");
+    let reviewer_missing = serde_json::json!({
+        "error": "review_unavailable",
+        "message": "operation reviewer is not installed",
+        "data": { "kind": "reviewer_missing" },
+    });
+    let human_consent_required = serde_json::json!({
+        "error": "review_unsatisfied",
+        "message": "this action requires human consent",
+        "data": { "kind": "human_consent_required" },
+    });
+    let mut violations = Vec::new();
+    for (cell, tier_lines, reviewer, refusal) in [
+        (
+            "r2 without a reviewer",
+            "tier = \"r2\"",
+            String::new(),
+            &reviewer_missing,
+        ),
+        (
+            "r2 with a reviewer named",
+            "tier = \"r2\"",
+            named_reviewer(),
+            &reviewer_missing,
+        ),
+        (
+            "r3",
+            "tier = \"r3\"\nconsent_assurance = \"device_trusted\"",
+            String::new(),
+            &human_consent_required,
+        ),
+    ] {
+        let mut ruled = document.clone();
+        ruled.push_str(&sentinel_review_rule(tier_lines));
+        ruled.push_str(&reviewer);
+        roots.write_realm_doc("alpha", &ruled).await;
+        clear_markers(&roots).await;
+        let output = run_turn(&roots, &rkat, "alpha").await;
+        let requests = chat.take_requests();
+        violations.extend(ruled_call_violations(
+            cell, &roots, &output, &requests, refusal,
+        ));
+    }
+    assert!(
+        violations.is_empty(),
+        "a rule above R1 refuses the call in every cell:\n{}",
+        violations.join("\n")
+    );
+}

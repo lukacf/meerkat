@@ -536,7 +536,7 @@ impl UnifiedRuntime {
         // on every other one. The console's side chat fork writes them below
         // this entry, through the shared fork body.
         if let Some(labels) = spec.labels.as_ref() {
-            crate::member_comms_id::validate_member_creation_labels(labels)
+            crate::member_comms_id::validate_host_member_creation_labels(labels)
                 .map_err(ForkMemberError::InvalidRequest)?;
         }
         let identity_runtime = identity_runtime.or_else(|| self.identity_runtime_ref());

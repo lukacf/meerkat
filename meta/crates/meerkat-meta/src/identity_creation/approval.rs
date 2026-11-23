@@ -132,10 +132,29 @@ pub fn plan_approval(
 ) -> Result<ApprovalPlan, IdentityRefusal> {
     // The strictest outcomes over every change of every target, in change
     // class order, then target order, then declaration order.
+    //
+    // Under a policy as a mob beside the launch mob applies it, a rule
+    // that names agents only tightens. For each change of each target the
+    // rules that name no agent give an outcome first: the strictest of
+    // them, and the default when none governs, so a rule that selects by a
+    // name never stands in for the default. A rule that names agents takes
+    // part there only when its outcome is strictly stricter than that. One
+    // that is as strict takes no part: beside an equally strict rule that
+    // names no agent it would choose the approver, the time limit or, by
+    // stating another approver, the refusal, and none of these is a name's
+    // to choose in such a mob. The outcomes of the rules by name that take
+    // part are kept apart and join the others last: the equally strict
+    // outcomes are the whole request's, so a rule by name that tightened
+    // one change may equal a rule that names no agent of another change,
+    // and among such equals the one from the rule that names no agent goes
+    // first (the first of the equals gives the decision its time limit).
+    let names_only_tighten = policy.names_agents_only_to_tighten();
+    let names_no_agent = |rule: &ApprovalRule| !(names_only_tighten && rule.names_agents());
     let mut tied: Vec<(&OutcomeRule, ChangeClass)> = Vec::new();
+    let mut tied_by_name: Vec<(&OutcomeRule, ChangeClass)> = Vec::new();
     for change in request.classes {
         for target in request.targets {
-            let mut governing = policy
+            let governing: Vec<&ApprovalRule> = policy
                 .rules()
                 .iter()
                 .filter(|rule| {
@@ -147,15 +166,27 @@ pub fn plan_approval(
                         target.authority_labels,
                     )
                 })
-                .map(ApprovalRule::outcome)
-                .peekable();
-            if governing.peek().is_none() {
+                .collect();
+            let without_a_name = governing
+                .iter()
+                .filter(|rule| names_no_agent(rule))
+                .map(|rule| rule.outcome().kind())
+                .max();
+            if without_a_name.is_none() {
                 keep_strictest(&mut tied, policy.default_outcome(), *change);
             }
-            for outcome in governing {
-                keep_strictest(&mut tied, outcome, *change);
+            let without_a_name = without_a_name.unwrap_or_else(|| policy.default_outcome().kind());
+            for rule in governing {
+                if names_no_agent(rule) {
+                    keep_strictest(&mut tied, rule.outcome(), *change);
+                } else if rule.outcome().kind() > without_a_name {
+                    keep_strictest(&mut tied_by_name, rule.outcome(), *change);
+                }
             }
         }
+    }
+    for (outcome, change) in tied_by_name {
+        keep_strictest(&mut tied, outcome, change);
     }
     let Some(&(rule, change)) = tied.first() else {
         return Err(IdentityRefusal::new(IdentityRefusalKind::InvalidRequest {

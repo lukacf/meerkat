@@ -105,7 +105,27 @@ function assertNoLocalPaths(directory, files, label) {
   }
 }
 
+// The library an application mounts names the bundle the gateway's page
+// loads (the version of the app script in index.html), so a console of
+// another build than its gateway can tell (src/lib/console-bundle.ts).
+function assertLibraryNamesTheAppBundle() {
+  const html = read(path.join(distDir, "index.html")).toString("utf8");
+  const version = /console-app\.js\?v=([0-9a-f]+)/.exec(html)?.[1];
+  if (!version) {
+    process.stderr.write("console/dist/index.html names no versioned console-app.js\n");
+    process.exit(1);
+  }
+  const library = read(path.join(distDir, "index.cjs")).toString("utf8");
+  if (!library.includes(`"${version}"`)) {
+    process.stderr.write(
+      `console/dist/index.cjs does not name the app bundle it was built beside (${version}); run the console build\n`,
+    );
+    process.exit(1);
+  }
+}
+
 assertDirectoryFiles(distDir, DIST_GENERATED_FILES, "console/dist");
+assertLibraryNamesTheAppBundle();
 assertNoLocalPaths(distDir, DIST_GENERATED_FILES, "console/dist");
 assertNoLocalPaths(embeddedDir, EMBEDDED_GENERATED_FILES, "crates/meerkat-meta/console-dist");
 assertDirectoryFiles(embeddedDir, EMBEDDED_GENERATED_FILES, "crates/meerkat-meta/console-dist");

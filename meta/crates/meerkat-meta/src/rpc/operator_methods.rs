@@ -190,7 +190,7 @@ struct ResolvedOperatorTarget {
 /// exact identity-control gate the destructive identity verbs use, including
 /// the stale-live-alias refusal.
 async fn resolve_operator_target(
-    runtime: &UnifiedRuntime,
+    mob: &MobEntryRef<'_>,
     identity_rt: &crate::identity_first::IdentityRuntime,
     params: &Value,
     response_id: &Value,
@@ -199,20 +199,19 @@ async fn resolve_operator_target(
         .get("identity")
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    resolve_operator_identity(runtime, identity_rt, identity_str, response_id).await
+    resolve_operator_identity(mob, identity_rt, identity_str, response_id).await
 }
 
 /// [`resolve_operator_target`] for an identity a verb carries somewhere
 /// other than its top-level `identity` param (an operator instruction's
 /// member target).
 async fn resolve_operator_identity(
-    runtime: &UnifiedRuntime,
+    mob: &MobEntryRef<'_>,
     identity_rt: &crate::identity_first::IdentityRuntime,
     identity_str: &str,
     response_id: &Value,
 ) -> Result<ResolvedOperatorTarget, Box<JsonRpcResponse>> {
-    let target = match resolve_rpc_identity_control_target(runtime, identity_rt, identity_str).await
-    {
+    let target = match resolve_rpc_identity_control_target(mob, identity_rt, identity_str).await {
         Ok(target) => target,
         Err(error) => return Err(Box::new(error.into_response(response_id.clone()))),
     };
@@ -364,7 +363,7 @@ fn member_instruction_error_response(
 /// is `{identity, receipt}` with Meerkat's `InstructionActivationReceipt`
 /// (`disposition` is `applied` or `duplicate`).
 pub(super) async fn handle_member_activate_instruction(
-    runtime: &UnifiedRuntime,
+    mob: &MobEntryRef<'_>,
     ctx: &IdentityFirstContext,
     params: &Value,
     response_id: Value,
@@ -382,7 +381,7 @@ pub(super) async fn handle_member_activate_instruction(
             }
         };
     let target =
-        match resolve_operator_target(runtime, ctx.runtime.runtime(), params, &response_id).await {
+        match resolve_operator_target(mob, ctx.runtime.runtime(), params, &response_id).await {
             Ok(target) => target,
             Err(response) => return *response,
         };
@@ -390,7 +389,7 @@ pub(super) async fn handle_member_activate_instruction(
     let namespace = activation.revision.namespace.clone();
     let key = activation.revision.key.clone();
     let activation_id = activation.activation_id.clone();
-    match runtime
+    match mob
         .mob_handle()
         .activate_member_instruction(&member, activation)
         .await
@@ -445,7 +444,7 @@ pub(super) async fn handle_member_activate_instruction(
 /// `offset` and `limit` (default 100). The result is `{identity, page}` with
 /// Meerkat's `InstructionActivationReadPage`.
 pub(super) async fn handle_member_instruction_activations(
-    runtime: &UnifiedRuntime,
+    mob: &MobEntryRef<'_>,
     ctx: &IdentityFirstContext,
     params: &Value,
     response_id: Value,
@@ -464,12 +463,12 @@ pub(super) async fn handle_member_instruction_activations(
             }
         };
     let target =
-        match resolve_operator_target(runtime, ctx.runtime.runtime(), params, &response_id).await {
+        match resolve_operator_target(mob, ctx.runtime.runtime(), params, &response_id).await {
             Ok(target) => target,
             Err(response) => return *response,
         };
     let member = crate::member_comms_id::mob_member_id(target.identity.as_str());
-    match runtime
+    match mob
         .mob_handle()
         .read_member_instruction_activations(&member, query)
         .await
@@ -806,7 +805,7 @@ fn operator_instruction_receipt_response(
 /// members receive the instruction asynchronously, and
 /// `meta/instruction_status` reports it.
 pub(super) async fn handle_set_instruction(
-    runtime: &UnifiedRuntime,
+    mob: &MobEntryRef<'_>,
     ctx: &IdentityFirstContext,
     params: &Value,
     response_id: Value,
@@ -827,7 +826,7 @@ pub(super) async fn handle_set_instruction(
         }
         InstructionTargetParams::Member { identity } => {
             let resolved = match resolve_operator_identity(
-                runtime,
+                mob,
                 ctx.runtime.runtime(),
                 &identity,
                 &response_id,
@@ -859,7 +858,7 @@ pub(super) async fn handle_set_instruction(
     };
     let slot = write.slot.clone();
     let revision = write.revision;
-    match runtime.mob_handle().set_operator_instruction(write).await {
+    match mob.mob_handle().set_operator_instruction(write).await {
         Ok(receipt) => {
             tracing::info!(
                 actor = OPERATOR_INSTRUCTION_ACTOR,
@@ -895,7 +894,7 @@ pub(super) async fn handle_set_instruction(
 /// Params: `namespace`, `key` and `revision`. The result is Meerkat's write
 /// receipt.
 pub(super) async fn handle_revoke_instruction(
-    runtime: &UnifiedRuntime,
+    mob: &MobEntryRef<'_>,
     params: &Value,
     response_id: Value,
 ) -> JsonRpcResponse {
@@ -910,7 +909,7 @@ pub(super) async fn handle_revoke_instruction(
         namespace: params.namespace,
         key: params.key,
     };
-    match runtime
+    match mob
         .mob_handle()
         .revoke_operator_instruction(slot.clone(), params.revision)
         .await
@@ -954,7 +953,7 @@ pub(super) async fn handle_revoke_instruction(
 /// with each member named by its Meta `identity`, in the member rows and in
 /// a member target.
 pub(super) async fn handle_instruction_status(
-    runtime: &UnifiedRuntime,
+    mob: &MobEntryRef<'_>,
     ctx: &IdentityFirstContext,
     params: &Value,
     response_id: Value,
@@ -966,7 +965,7 @@ pub(super) async fn handle_instruction_status(
     let agent_identity = match params.identity.as_deref() {
         None => None,
         Some(identity) => {
-            match resolve_operator_identity(runtime, ctx.runtime.runtime(), identity, &response_id)
+            match resolve_operator_identity(mob, ctx.runtime.runtime(), identity, &response_id)
                 .await
             {
                 Ok(resolved) => Some(crate::member_comms_id::roster_member_id_for_identity(
@@ -988,11 +987,7 @@ pub(super) async fn handle_instruction_status(
             .limit
             .map(|limit| usize::try_from(limit).unwrap_or(usize::MAX)),
     };
-    match runtime
-        .mob_handle()
-        .operator_instruction_status(query)
-        .await
-    {
+    match mob.mob_handle().operator_instruction_status(query).await {
         Ok(page) => match serde_json::to_value(InstructionStatusView::from(page.to_wire())) {
             Ok(status) => rpc_result(response_id, status),
             Err(error) => rpc_error(
@@ -1009,7 +1004,7 @@ pub(super) async fn handle_instruction_status(
 /// a temporary profile-level threshold floor, then restore the original
 /// threshold.
 pub(super) async fn handle_compact_member(
-    runtime: &UnifiedRuntime,
+    mob: &MobEntryRef<'_>,
     ctx: &IdentityFirstContext,
     params: &Value,
     response_id: Value,
@@ -1039,11 +1034,11 @@ pub(super) async fn handle_compact_member(
         Ok(value) => value.unwrap_or(DEFAULT_COMPACT_TIMEOUT_MS),
         Err(message) => return rpc_error(response_id, -32602, message),
     };
-    let target = match resolve_operator_target(runtime, identity_rt, params, &response_id).await {
+    let target = match resolve_operator_target(mob, identity_rt, params, &response_id).await {
         Ok(target) => target,
         Err(response) => return *response,
     };
-    let Some(observer) = runtime
+    let Some(observer) = mob
         .mob_runtime()
         .committed_boundary_recoverer()
         .and_then(|owner| owner.runtime_completion_observer())
@@ -1597,7 +1592,7 @@ async fn rebuild_member_for_fresh_build(
 /// entries included. `dropped_completion_entries` in the response counts the
 /// completion entries that went with it.
 pub(super) async fn handle_bound_member_transcript(
-    runtime: &UnifiedRuntime,
+    mob: &MobEntryRef<'_>,
     ctx: &IdentityFirstContext,
     params: &Value,
     response_id: Value,
@@ -1628,7 +1623,7 @@ pub(super) async fn handle_bound_member_transcript(
             );
         }
     };
-    let target = match resolve_operator_target(runtime, identity_rt, params, &response_id).await {
+    let target = match resolve_operator_target(mob, identity_rt, params, &response_id).await {
         Ok(target) => target,
         Err(response) => return *response,
     };
@@ -1791,7 +1786,7 @@ pub(super) async fn handle_bound_member_transcript(
 /// bridge to carry the request. Every other failure is that catch-all
 /// `-32000` too, its message naming the cause.
 pub(super) async fn handle_prune_member_system_rows(
-    runtime: &UnifiedRuntime,
+    mob: &MobEntryRef<'_>,
     ctx: &IdentityFirstContext,
     params: &Value,
     response_id: Value,
@@ -1859,7 +1854,7 @@ pub(super) async fn handle_prune_member_system_rows(
             );
         }
     };
-    let target = match resolve_operator_target(runtime, identity_rt, params, &response_id).await {
+    let target = match resolve_operator_target(mob, identity_rt, params, &response_id).await {
         Ok(target) => target,
         Err(response) => return *response,
     };

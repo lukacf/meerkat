@@ -1020,6 +1020,41 @@ fn experience_identities(
     )
 }
 
+/// The access pass narrows what a row says and adds nothing. A pending row
+/// says whether it can be respawned and says nothing of a reset, a stop or
+/// a fork: for a caller who may only view agents its `can_respawn` turns
+/// false, and no `can_reset`, `can_stop_run` or `can_fork_side_chat`
+/// appears on it.
+#[test]
+fn the_access_pass_adds_no_affordance_a_row_does_not_state() {
+    let snapshot = pending_route_snapshot();
+    let pending = BTreeSet::from([KEEPER.to_string()]);
+    let controller = AccessController::new(AccessControlConfig {
+        enabled: true,
+        admins: vec!["root@example.test".to_string()],
+        rules: vec![AccessRule {
+            id: "view-all".to_string(),
+            actions: vec!["agent.view".to_string()],
+            agents: vec!["*".to_string()],
+            ..AccessRule::default()
+        }],
+        ..AccessControlConfig::default()
+    })
+    .expect("access controller");
+    let body = experience_body(&snapshot, &pending, Some(&controller));
+    let keeper = record_at(&body, "/agent_sidebar/live_snapshot/agents", KEEPER);
+    assert_eq!(
+        keeper["affordances"]["can_respawn"], false,
+        "the caller may not respawn the agent: {keeper}"
+    );
+    for unstated in ["can_reset", "can_stop_run", "can_fork_side_chat"] {
+        assert!(
+            keeper["affordances"].get(unstated).is_none(),
+            "a pending row states no {unstated}: {keeper}"
+        );
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_label_scoped_deny_still_hides_a_member_answered_pending() {
     let (runtime, _scratch) = identity_first_runtime(BTreeMap::from([(

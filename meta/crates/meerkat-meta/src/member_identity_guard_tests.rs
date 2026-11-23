@@ -233,6 +233,93 @@ fn a_member_resolves_by_its_label_else_by_core_s_identity_entry() {
     );
 }
 
+/// The production callers of the member creation label checks, by file:
+/// `(file, calls of the host's check, calls of the caller's check, calls of
+/// the agent spawn check, who calls)`.
+///
+/// [`crate::member_comms_id::validate_host_member_creation_labels`] is for
+/// the host's own doors; a door that a caller who is not the host reaches
+/// takes [`crate::member_comms_id::validate_caller_member_creation_labels`]
+/// (a person on the console) or
+/// [`crate::console_spawn::caller_reserved_label_refusal_in_spawn_args`] (an
+/// agent's spawn tools), which also refuse the label keys Core reserves. A
+/// new caller is listed here with who reaches it; one a caller who is not
+/// the host reaches must not take the host's check.
+const MEMBER_CREATION_LABEL_CHECK_CALLERS: &[(&str, usize, usize, usize, &str)] = &[
+    ("fork.rs", 1, 0, 0, "the host fork API: host code"),
+    (
+        "http_console.rs",
+        0,
+        1,
+        0,
+        "the console's `meta/ensure_member`: a person",
+    ),
+    (
+        "member_comms_id.rs",
+        1,
+        0,
+        0,
+        "the caller's check builds on the host's",
+    ),
+    (
+        "mob_handle_runtime.rs",
+        0,
+        0,
+        1,
+        "the agent mob tool wrapper: an agent's spawn tools",
+    ),
+    (
+        "rpc/mob_methods.rs",
+        1,
+        0,
+        0,
+        "the SDK gateway's `meta/ensure_member`: the host's own process",
+    ),
+    (
+        "unified_runtime/mob_ops.rs",
+        2,
+        0,
+        0,
+        "the Rust `spawn` and `spawn_many`: host code",
+    ),
+];
+
+#[test]
+fn the_member_creation_label_checks_are_called_only_by_their_listed_doors() {
+    // Calls of `name` in production code: every `name(` that is not the
+    // function's own `fn name(`.
+    fn calls(code: &str, name: &str) -> usize {
+        code.matches(&format!("{name}(")).count() - code.matches(&format!("fn {name}(")).count()
+    }
+    let sources = crate_production_sources();
+    assert!(
+        sources.len() > 100,
+        "suspiciously few production sources: {}",
+        sources.len()
+    );
+    let found: Vec<(String, usize, usize, usize)> = sources
+        .iter()
+        .map(|(file, source)| {
+            let (code, _) = production(source);
+            (
+                file.clone(),
+                calls(&code, "validate_host_member_creation_labels"),
+                calls(&code, "validate_caller_member_creation_labels"),
+                calls(&code, "caller_reserved_label_refusal_in_spawn_args"),
+            )
+        })
+        .filter(|(_, host, caller, agent)| host + caller + agent > 0)
+        .collect();
+    let listed: Vec<(String, usize, usize, usize)> = MEMBER_CREATION_LABEL_CHECK_CALLERS
+        .iter()
+        .map(|(file, host, caller, agent, _)| ((*file).to_string(), *host, *caller, *agent))
+        .collect();
+    assert_eq!(
+        found, listed,
+        "(file, host check calls, caller check calls, agent spawn check calls): a door that a          caller who is not the host reaches takes the caller's check or the agent spawn check,          never the host's; list a new caller in MEMBER_CREATION_LABEL_CHECK_CALLERS with who          reaches it"
+    );
+}
+
 /// Every production source of this crate: each `.rs` file under `src/` (its
 /// binaries included), by its path from `src/`, except the test files
 /// (`*_tests.rs`, `tests.rs`, and the files of a `tests` or `*_tests`
@@ -508,3 +595,8 @@ fn skip_whitespace(code: &[u8], at: usize) -> usize {
             .count()
     })
 }
+
+/// The census of the gating doors, on this module's reading of the crate's
+/// production sources.
+#[path = "gating_door_census_tests.rs"]
+mod gating_doors;

@@ -41,6 +41,7 @@ pub mod grant_authority;
 pub mod host_store_writer_fence;
 pub mod meerkat_machine;
 pub mod mob_host_binding_authority;
+pub mod mob_hosted_set_lifecycle;
 pub mod mob_machine;
 pub mod mob_store_restore_lifecycle;
 pub mod occurrence_lifecycle;
@@ -184,6 +185,9 @@ pub const DETACHED_JOB_PRODUCTION_RUST_MODULE: &str = "machines::detached_job";
 pub const FORKED_PARTICIPANT_LIFECYCLE_PRODUCTION_RUST_CRATE: &str = "meerkat-mob";
 pub const FORKED_PARTICIPANT_LIFECYCLE_PRODUCTION_RUST_MODULE: &str =
     "machines::forked_participant_lifecycle";
+pub const MOB_HOSTED_SET_LIFECYCLE_PRODUCTION_RUST_CRATE: &str = "meerkat-mob";
+pub const MOB_HOSTED_SET_LIFECYCLE_PRODUCTION_RUST_MODULE: &str =
+    "machines::mob_hosted_set_lifecycle";
 pub const MOB_STORE_RESTORE_LIFECYCLE_PRODUCTION_RUST_CRATE: &str = "meerkat-mob";
 pub const MOB_STORE_RESTORE_LIFECYCLE_PRODUCTION_RUST_MODULE: &str =
     "machines::mob_store_restore_lifecycle";
@@ -5327,6 +5331,7 @@ runtime_internal_inputs!(
         CleanupRetiringExternalPeerObservedAbsent,
         RestoreRetiringExternalPeerObservedAbsent,
         AuthorizeExternalPeerReciprocalTrust,
+        AuthorizeExternalPeerReciprocalTrustRemoval,
         AdmitSupervisorRotation,
         ProvisionSupervisorAuthority,
         RecordSupervisorPendingRotation,
@@ -6034,6 +6039,42 @@ pub fn host_store_writer_fence_schema_metadata() -> MachineSchemaMetadata {
     )
 }
 
+pub fn dsl_mob_hosted_set_lifecycle_machine() -> MachineSchema {
+    mob_hosted_set_lifecycle_schema_metadata()
+        .attach_to(mob_hosted_set_lifecycle::MobHostedSetLifecycleMachineState::schema())
+}
+
+pub fn dsl_mob_hosted_set_lifecycle_machine_production_schema() -> MachineSchema {
+    with_production_rust_binding(
+        dsl_mob_hosted_set_lifecycle_machine(),
+        MOB_HOSTED_SET_LIFECYCLE_PRODUCTION_RUST_CRATE,
+        MOB_HOSTED_SET_LIFECYCLE_PRODUCTION_RUST_MODULE,
+    )
+}
+
+/// Named-type bindings for the machine of a host's mob set as a whole.
+pub fn mob_hosted_set_lifecycle_schema_metadata() -> MachineSchemaMetadata {
+    machine_schema_metadata(
+        vec![
+            NamedTypeBinding::string_enum(
+                "MobHostedSetLifecyclePhase",
+                &["Unrestored", "Attempted", "Restored"],
+            ),
+            NamedTypeBinding::string_enum(
+                "MobHostedSetRefusal",
+                &[
+                    "PassAlreadyBegun",
+                    "NoCensusOwed",
+                    "AlreadyRestored",
+                    "NoPassBegun",
+                    "AlreadyComplete",
+                ],
+            ),
+        ],
+        vec![],
+    )
+}
+
 pub fn dsl_mob_store_restore_lifecycle_machine_production_schema() -> MachineSchema {
     with_production_rust_binding(
         dsl_mob_store_restore_lifecycle_machine(),
@@ -6042,13 +6083,23 @@ pub fn dsl_mob_store_restore_lifecycle_machine_production_schema() -> MachineSch
     )
 }
 
-/// Named-type bindings for the quarantined mob store record machine.
+/// Named-type bindings for the mob store record machine.
 pub fn mob_store_restore_lifecycle_schema_metadata() -> MachineSchemaMetadata {
     machine_schema_metadata(
         vec![
             NamedTypeBinding::string_enum(
                 "MobStoreRestoreLifecyclePhase",
-                &["Unclassified", "Quarantined", "Retrying", "Released"],
+                &[
+                    "Dormant",
+                    "Loading",
+                    "Managed",
+                    "Unloading",
+                    "Held",
+                    "Quarantined",
+                    "Retrying",
+                    "Gone",
+                    "Creating",
+                ],
             ),
             NamedTypeBinding::string_enum(
                 "MobQuarantineClass",
@@ -6060,13 +6111,43 @@ pub fn mob_store_restore_lifecycle_schema_metadata() -> MachineSchemaMetadata {
                 &["Managed", "Held", "Settled", "Failed"],
             ),
             NamedTypeBinding::string_enum(
+                "MobStoreOrigin",
+                &["Persisted", "Volatile", "HostHandle", "Declared"],
+            ),
+            NamedTypeBinding::string_enum(
+                "MobStoreLoadTrigger",
+                &["Lookup", "Pass", "Launch", "Demand"],
+            ),
+            NamedTypeBinding::string_enum("MobStoreUnloadOutcome", &["Closed", "Busy"]),
+            NamedTypeBinding::string_enum("MobStoreCreateOutcome", &["Created", "Failed"]),
+            NamedTypeBinding::string_enum("MobStoreStop", &["Unread", "NotStopped", "Stopped"]),
+            NamedTypeBinding::string_enum(
                 "MobStoreRestoreRefusal",
                 &[
                     "RetryInFlight",
                     "NotQuarantined",
-                    "AlreadyClassified",
                     "NotRetrying",
                     "NotRetryable",
+                    "LoadInFlight",
+                    "NotDormant",
+                    "NotLoading",
+                    "NotManaged",
+                    "NotHeld",
+                    "HoldKept",
+                    "NotReloadable",
+                    "UnloadInFlight",
+                    "NotUnloading",
+                    "AlreadyHosted",
+                    "Gone",
+                    "AwaitsLaunch",
+                    "LaunchOwned",
+                    "NotAwaitingLaunch",
+                    "NotDeclared",
+                    "CreateInFlight",
+                    "NotCreating",
+                    "Stopped",
+                    "StopUnread",
+                    "StopKnown",
                 ],
             ),
         ],

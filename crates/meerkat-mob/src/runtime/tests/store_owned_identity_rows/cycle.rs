@@ -1289,3 +1289,65 @@ async fn an_owned_edge_ended_after_an_import_stays_ended_after_a_restart() {
         edge_custody(&mob)
     );
 }
+
+/// Row (RED): an import that binds in place the record of an identity
+/// adopted from a roster spec sets its member's roster entry from the
+/// record at its own commit, as the adoption's commit did. Between the
+/// purge and the import the start reads no row and the entry reads the
+/// labels its member was seated with; from the import on it reads the
+/// record's, with no restart between, and the member's next build carries
+/// them.
+///
+/// RED on the old tree: after the import the entry still reads the labels
+/// its member was seated with, until the next start.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_import_that_binds_an_adopted_record_in_place_sets_its_roster_entry_from_the_record() {
+    let mut mob = StoreOwnedMob::new("cycle-adopted-entry").await;
+    mob.service.set_keep_alive_turns_complete_immediately(true);
+    mob.declare(&["listed"]).await;
+    let session = mob.session("listed").await;
+    let seated_with = seat(&mob, "listed").await.labels;
+    let adopted = spec("listed", "worker");
+    assert_ne!(
+        seated_with, adopted.labels,
+        "the roster spec declares other labels than the member was seated with"
+    );
+    committed(
+        tokio::time::timeout(
+            STEP,
+            mob.handle.adopt_identity(
+                IdentityAdoption::new(
+                    operation("adopt-listed"),
+                    IdentityChangeRequesterInput::host("console"),
+                    "listed",
+                    AdoptionSource::roster(adopted.clone()),
+                ),
+                ALLOW,
+            ),
+        )
+        .await
+        .expect("the adoption answers"),
+    );
+    let export = mob.export_and_purge("purge-adopted-entry").await;
+    mob.restart_as(MobCompositionAuthority::Authoritative).await;
+    mob.service.set_keep_alive_turns_complete_immediately(true);
+    assert_eq!(
+        seat(&mob, "listed").await.labels,
+        seated_with,
+        "with its row purged the start reads the labels of the member's seat row"
+    );
+
+    let receipt = committed(mob.import("import-adopted-entry", export).await);
+    assert_eq!(
+        outcome_of(&receipt, "listed"),
+        IdentityChangeEntryOutcome::Committed
+    );
+    assert!(mob.reads_store_owned("listed"));
+    assert_eq!(mob.session("listed").await, session, "bound in place");
+    assert_eq!(
+        seat(&mob, "listed").await.labels,
+        adopted.labels,
+        "the import's commit sets the roster entry from the record it bound in place"
+    );
+    builds_with_labels(&mob, "listed", &session, &adopted.labels).await;
+}

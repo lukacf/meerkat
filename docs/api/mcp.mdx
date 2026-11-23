@@ -241,7 +241,12 @@ Project config wins on name collisions.
 
 <Note>
 Supported transports: **stdio**, **streamable HTTP** (default for URLs), and **SSE**.
-Environment variables in config use `${VAR_NAME}` syntax.
+Environment variables in config use `${VAR_NAME}` syntax. A variable that is
+not set fails only the server that names it: the other servers load, and that
+server is reported unresolved with the field and the variable's name. Two
+cases are still refused as a whole, with a message naming that server: a run
+in a governed realm, and an unresolved file server that has the name of a
+realm server (the two definitions are compared after expansion).
 </Note>
 
 <Note>
@@ -384,7 +389,32 @@ ask its user.
   a host offers that mode only as the operator's explicit choice. `rkat mcp
   login` prints the exact `rkat mcp remove` and `rkat mcp add` commands for
   each.
-- **Discovery, registration and scopes.** The authorization server's metadata
+- **Discovery, registration and scopes.** The server's protected resource
+  metadata (RFC 9728), named by its `401` challenge or found at a well-known
+  URL, names the authorization server. A server that publishes none (the
+  2025-03-26 MCP authorization revision) is taken to be its own
+  authorization server: the metadata is then read from the origin of the
+  configured server URL, its `issuer` must be that origin (written with or
+  without one trailing slash, and nothing else), and the
+  configured URL is the resource. A server publishes none when its
+  challenge names no document and every location the document is looked
+  for says so: the two well-known URLs at the origin root (with and without
+  the server's path) by `404` or `410`, and the one under the server's own
+  endpoint path by `404`, `410`, `403`, `405` or a `401` whose challenge
+  names no resource metadata (the endpoint's own guard answers there). Any
+  other answer without a document (a server error, a redirect, `401` at the
+  origin root) refuses the login, unless
+  another of the candidate locations serves the document. A metadata
+  document is required either
+  way (no default endpoint paths are assumed), a document served at one of
+  these locations (the earliest that serves one), or named by the challenge
+  the host passes on, is always the one followed, and a host-registered
+  client is never discovered this way. A document served only behind the
+  endpoint's own guard is not seen. `rkat mcp login` passes the
+  endpoint's own challenge on; the RPC and REST login starts pass none, so a
+  document named only in that challenge is not seen by them. The
+  authorization server's
+  metadata
   is read from RFC 8414 discovery, falling back to OpenID Connect discovery.
   Dynamic client registration declares `application_type: "native"`. The
   attempt requires the scopes the server's `401` challenge names (its
@@ -1171,19 +1201,26 @@ extraction calls.
   the session is rebuilt, so on a busy session a level the model does not
   accept is answered busy first, and its typed refusal when the resume is
   sent again. With no turn running the resume rebuilds the session at once.
-  Two limits stay (read from the source, not run): a plain resume that
-  starts between the server's check and the level resume's own start runs,
-  but a request queued behind that plain resume can still be ended by the
-  rebuild; and a plain resume sent at the same moment as a level resume,
-  before either turn has started (also on a session that has no turn running),
-  runs or ends with `-32003` (`session_resume_required`), depending on which
-  of the two reaches the session first. Send the ended request again. A resume
+  Two limits stay. A plain resume that starts between the server's check
+  and the level resume's own start runs, but a request queued behind that
+  plain resume can still be ended by the rebuild (read from the source, not
+  run). And a plain resume sent at the same moment as a level resume, before
+  either turn has started (also on a session that has no turn running), is
+  answered Ok, with `-32003` (`session_resume_required`), or with one of two
+  errors that carry no kind: `-32603`
+  (`Agent error: agent error: Internal error: Runtime not ready: destroyed`)
+  or `-32005` (`request cancelled`). Whichever of these three comes, its
+  prompt may have run all the same, and is then in the session's history
+  with the model's answer once the level resume has answered. So after
+  anything but Ok on a resume that was sent beside another resume: wait
+  until the other resume has answered, read the session's history
+  (`meerkat_history`), and send the prompt again only if it is not there. A
+  resume
   that rebuilds the session for another field (`model`, `max_tokens`,
   `provider_params` without the level, and the other build fields) is
   unchanged from 0.9.14: it waits behind the running turn, rebuilds the
-  session and runs. A plain resume queued beside such a resume either runs or,
-  when the rebuild reaches the session first, ends with `-32003`
-  (`session_resume_required`) without running; send it again.
+  session and runs. A plain resume queued beside such a resume has the same
+  answers, and the same advice holds.
 </ParamField>
 
 <ParamField body="stream" type="bool" default="false">
@@ -1526,6 +1563,58 @@ A write that changes realm sections (a parent edge, or the user document's
 `[realm.global]`) so that a realm would compose a different section is
 refused with the same types, and its message names the change and the
 realm.
+This tool also refuses, with `confinement_administration_required`, a `set`
+or `patch` that adds an entry that launches a process on the host or changes
+what one runs: an MCP server with a stdio transport (`tools.mcp_servers`), a
+hook with a command runtime (`hooks.entries`), a skills repository with a
+stdio or a git transport (`skills.repositories`), or the shell program
+(`shell.program`). It compares the realm's own document, where an entry is
+unchanged only as the same whole entry, and what the realm composes along its
+parent chain: a write after which the realm would compose such an entry, or a
+shell program, that it does not compose now is refused too (a change of the
+realm's parent edge to a realm that holds one, the removal of an own entry
+that shadowed a parent's, or, because a realm takes its `[shell]` section
+whole, a write of another shell key that does not state the parent's program
+with it). Hooks are compared as a session layers them (the first entry of an
+id, then the convention files of the server's context root and user root), so
+a write that takes away an entry that hid a command hook of its id is refused
+as well. A write whose chain would not compose is refused as an invalid
+document. Any other removal passes, and the host writes such entries in the
+document itself or through its own writers (`rkat mcp add --scope realm`,
+JSON-RPC `config/patch`).
+It refuses in the same way a write after which the realm would compose a
+looser command policy for the shell tool (`shell.security_mode`,
+`shell.security_patterns`): under an allow list another mode or a pattern the
+list does not hold, under a deny list with patterns another mode or a pattern
+left out. Patterns are compared as exact strings: a restated policy, an allow
+list with fewer of its patterns and a deny list with more pass.
+The same refusal covers a write that changes where a credential the host
+supplies is read from or sent, in the realm's own document or in what the
+realm composes: an auth profile, a backend or a binding added or changed
+(`realm.<id>.auth`, `realm.<id>.backend`, `realm.<id>.binding`), a default
+binding set or changed, a Copilot account (`realm.<id>.copilot`), a connector
+client (`realm.<id>.connector_client`), a self-hosted server
+(`self_hosted.servers`), or a self-hosted model added or pointed at another
+server (`self_hosted.models`); removing one passes, except where a binding
+that stays would then name another server or none (a binding can name its
+server through the entry of its default model). Set up providers in the
+realm document, with `rkat auth`, or through JSON-RPC `config/patch`.
+
+A `set` or `patch` that would change a host's own listener settings is
+refused the same way, with `data.type` `confinement_administration_required`,
+and nothing is written. These are all keys of `[rest]` (the address the REST
+server binds and the origins and hosts it answers), of `[mob_host]` (the host
+acceptor's listener) and of `[comms]` (`mode`, `address`,
+`advertise_address`, `event_address`, `auth`, `require_peer_auth`), a key
+this server's version does not know included. A
+write that carries them unchanged commits. A write that changes realm
+sections so that the realm would compose another of these tables is refused
+too, and so is any write while the realm's parent chain does not compose (as
+an internal error; mend the chain in the configuration file). Set these keys
+in the configuration file or through the operator's commands. A `set` or
+`patch` commits only on the document the tool judged: with an
+`expected_generation` other than that document's, or when another write was
+committed after the tool read it, the write is a generation conflict.
 
 ### meerkat_capabilities
 
@@ -1538,7 +1627,7 @@ Returns the runtime capability set with status resolved against config.
 
 ```json Response
 {
-  "contract_version": {"major": 0, "minor": 9, "patch": 16},
+  "contract_version": {"major": 0, "minor": 9, "patch": 18},
   "capabilities": [
     {
       "id": "sessions",
@@ -1605,7 +1694,7 @@ Return the curated model catalog with provider profiles, capability metadata, an
 
 ```json Response
 {
-  "contract_version": {"major": 0, "minor": 9, "patch": 16},
+  "contract_version": {"major": 0, "minor": 9, "patch": 18},
   "providers": [
     {
       "provider": "anthropic",

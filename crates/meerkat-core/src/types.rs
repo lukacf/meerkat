@@ -2962,7 +2962,9 @@ enum SystemNoticeBlockKnown {
 
 /// Deserialize an optional JSON payload without collapsing an explicitly
 /// present `null` into the absent-field state selected by `#[serde(default)]`.
-fn deserialize_present_json_value<'de, D>(deserializer: D) -> Result<Option<Value>, D::Error>
+pub(crate) fn deserialize_present_json_value<'de, D>(
+    deserializer: D,
+) -> Result<Option<Value>, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -5236,7 +5238,14 @@ pub struct RunResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub terminal_cause_kind: Option<crate::turn_execution_authority::TurnTerminalCauseKind>,
     /// Structured output (if output_schema was provided and extraction succeeded).
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// A schema whose root admits null can extract JSON null: that is a
+    /// present value and reads back as one, since the digests stored beside a
+    /// run result are taken over it.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present_json_value"
+    )]
     pub structured_output: Option<Value>,
     /// Extraction failure details when output_schema extraction was configured
     /// and a post-main-turn extraction step failed after the main run

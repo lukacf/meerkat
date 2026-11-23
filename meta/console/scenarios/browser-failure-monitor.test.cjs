@@ -444,7 +444,7 @@ test("on a gateway that lists mob addressing an initializing action ends on the 
   const action = s.monitor.navigation(s.page, "initial host", async () => {
     s.commit();
     s.start(capabilities);
-    s.start(seedOf(s));
+    finish(s, s.start(seedOf(s)));
     stream = s.start(streamOf(s));
   }).then(() => { ended = true; });
   await turns();
@@ -499,6 +499,91 @@ test("when the every-mob experience read answers before the second start's read,
   await action;
   s.monitor.assertClean();
   assert.equal(s.monitor.expected.length, 2);
+});
+
+// The browser reports the request that replaces a start before the failure
+// of the start it replaces. An action does not end while an earlier request
+// of the same subscription is still in flight, so that failure is reported
+// inside the action whenever it comes.
+test("the action does not end while an earlier request of the subscription is still in flight", async () => {
+  for (const reported of ["after the last start's read is requested", "after the last start's stream has answered"]) {
+    const s = setup();
+    const capabilities = capabilitiesOf(s, listsMobAddressing);
+    const experience = everyMobExperienceOf(s);
+    let ended = false;
+    let replaced;
+    const action = s.monitor.during(s.page, "initial host", async () => {
+      // The second start begins before the every-mob experience read; its stream answers: the page shows live.
+      const second = s.start(seedOf(s));
+      s.start(capabilities); s.start(experience);
+      finish(s, capabilities); finish(s, experience);
+      finish(s, second);
+      replaced = s.start(streamOf(s, { query: "?mobs=*" }));
+      answered(s, replaced);
+    }, { priorRequests: () => false, initialize: true }).then(() => { ended = true; });
+    await turns();
+    const last = s.start(seedOf(s, { body: everyMobSeed }));
+    if (reported === "after the last start's read is requested") s.fail(replaced);
+    finish(s, last);
+    answered(s, s.start(streamOf(s, { query: "?mobs=*" }))); await turns();
+    if (reported === "after the last start's stream has answered") {
+      assert.equal(ended, false, "the replaced stream has not been reported cancelled");
+      s.fail(replaced);
+    }
+    await action;
+    s.monitor.assertClean();
+    assert.equal(s.monitor.expected.length, 1);
+  }
+});
+
+test("an earlier request whose end is never reported fails the action by name; another subscription or prefix holds nothing", async () => {
+  const never = setup({ initializationTimeoutMs: 20 });
+  const capabilities = capabilitiesOf(never, listsMobAddressing);
+  const experience = everyMobExperienceOf(never);
+  await assert.rejects(never.monitor.during(never.page, "initial host", async () => {
+    never.start(streamOf(never, { query: "?mobs=*" }));
+    never.start(capabilities); never.start(experience);
+    finish(never, capabilities); finish(never, experience);
+    finish(never, never.start(seedOf(never, { body: everyMobSeed })));
+    answered(never, never.start(streamOf(never, { query: "?mobs=*" })));
+  }, { priorRequests: () => false, initialize: true }), /initial host: the console's last initializing start was not seen: missing the end of an earlier request of its subscription that is still in flight/);
+
+  const other = setup({ initializationPrefixes: ["/scope-a", "/scope-b"], initializationTimeoutMs: 20 });
+  const asked = capabilitiesOf(other, listsMobAddressing, "/scope-b");
+  const read = everyMobExperienceOf(other, "/scope-b");
+  await other.monitor.during(other.page, "switch to B", async () => {
+    // In flight and never ended: a member's stream, a member's read, and the other prefix's unscoped stream and read.
+    other.start(streamOf(other, { prefix: "/scope-b", query: "?identity=router%3Amain" }));
+    other.start(other.request({ method: "POST", url: `${origin}/scope-b/console/rpc`, body: { ...seed, params: { ...seed.params, identity: "router:main" } } }));
+    other.start(streamOf(other, { prefix: "/scope-a", query: "?mobs=*" }));
+    other.start(seedOf(other, { prefix: "/scope-a" }));
+    other.start(asked); other.start(read);
+    finish(other, asked); finish(other, read);
+    finish(other, other.start(seedOf(other, { prefix: "/scope-b", body: everyMobSeed })));
+    answered(other, other.start(streamOf(other, { prefix: "/scope-b", query: "?mobs=*" })));
+  }, { priorRequests: () => false, initialize: ["/scope-b"] });
+  other.monitor.assertClean();
+});
+
+test("a held last start waits for the earlier held reads to be reported cancelled, and not for itself", async () => {
+  const s = setup();
+  const capabilities = capabilitiesOf(s, listsMobAddressing);
+  const experience = everyMobExperienceOf(s);
+  let ended = false;
+  let earlier;
+  const action = s.monitor.during(s.page, "initial host", async () => {
+    earlier = s.start(seedOf(s));
+    s.start(capabilities); s.start(experience);
+    finish(s, capabilities); finish(s, experience);
+    // The last start's read: the scenario holds it, it never finishes.
+    s.start(seedOf(s, { body: everyMobSeed }));
+  }, { priorRequests: () => false, initialize: true, lastStartHeld: true }).then(() => { ended = true; });
+  await turns();
+  assert.equal(ended, false, "the earlier held read has not been reported cancelled");
+  s.fail(earlier);
+  await action;
+  s.monitor.assertClean();
+  assert.equal(s.monitor.expected.length, 1);
 });
 
 test("two capabilities reads in one action: the action waits for both, and for the last start when either lists mob addressing", async () => {

@@ -28,6 +28,9 @@ const aborted = "net::ERR_ABORTED";
 // read, so that last step rests on the order in which the browser runs the
 // console's tasks, not on the read's shape. An action whose scenario holds
 // that read on purpose says so (`lastStartHeld`) and ends once it has begun.
+// The browser reports the request that replaces a start before the failure
+// of the start it replaces, so the action does not end either while an
+// earlier request of the same subscription is still in flight.
 // A start replaced before the witness is inside the action and judged by
 // the rule above; a cancellation after it is outside and unexpected. An
 // action that saw no capabilities read under a prefix waits for nothing
@@ -108,12 +111,15 @@ function browserFailureMonitor(context, { origin, initializationPrefixes = [""],
     const first = Math.min(...answered);
     const later = life.reads.filter(read => read.began > first);
     if (!later.length) return "the unscoped read that follows its experience read for every mob";
-    if (action.lastStartHeld) return null;
-    // The start that read opens has gone on unreplaced.
-    const unreplaced = later.some(read => Number.isFinite(read.finished) && life.streams.some(stream =>
+    // The start that read opens has gone on unreplaced; a held one has begun.
+    const unreplaced = read => Number.isFinite(read.finished) && life.streams.some(stream =>
       stream.began > read.began && Number.isFinite(stream.answered)
-      && !life.reads.some(newer => newer.began > read.began && newer.began < stream.answered)));
-    return unreplaced ? null : "the answer to the stream of that read with no newer unscoped read before it";
+      && !life.reads.some(newer => newer.began > read.began && newer.began < stream.answered));
+    const witness = action.lastStartHeld ? later[later.length - 1] : later.filter(unreplaced).pop();
+    if (!witness) return "the answer to the stream of that read with no newer unscoped read before it";
+    // Every earlier request of the subscription has finished or been reported cancelled.
+    const open = action.starts.get(prefix)?.open;
+    return open && [...open.values()].some(place => place < witness.place) ? "the end of an earlier request of its subscription that is still in flight" : null;
   }
   function settleLifecycle(request, finished) {
     const item = lifecycle.get(request);
@@ -193,7 +199,7 @@ function browserFailureMonitor(context, { origin, initializationPrefixes = [""],
     }
     const prefix = subscriptionPrefix(request, action.prefixes);
     if (prefix === undefined) return;
-    if (!action.starts.has(prefix)) action.starts.set(prefix, { replaced: 0, begun: 0, everyMob: 0, cancelled: [] });
+    if (!action.starts.has(prefix)) action.starts.set(prefix, { replaced: 0, begun: 0, everyMob: 0, cancelled: [], open: new Map() });
     const start = action.starts.get(prefix);
     const everyMob = asksEveryMob(request);
     start.begun += 1;
@@ -206,16 +212,25 @@ function browserFailureMonitor(context, { origin, initializationPrefixes = [""],
       return false;
     });
     bind(request, `${action.reason}: authority initialization`, aborted, action, false, { prefix, order: start.begun });
+    start.open.set(request, start.begun);
     if (fresh) {
       const read = request.method() === "POST";
-      const entry = read ? { began: ++order, finished: undefined } : { began: ++order, answered: undefined };
+      const entry = read ? { began: ++order, finished: undefined, place: start.begun } : { began: ++order, answered: undefined };
       lifeOf(action, prefix)[read ? "reads" : "streams"].push(entry);
       lifecycle.set(request, { action, kind: read ? "read" : "stream", entry });
       action.settle?.();
     }
   }
+  // A request of the unscoped subscription has ended, finished or failed.
+  function closeSubscriptionRequest(request) {
+    const allowance = allowances.get(request);
+    if (allowance?.subscription === undefined || !allowance.action) return;
+    allowance.action.starts.get(allowance.subscription.prefix)?.open.delete(request);
+    allowance.action.settle?.();
+  }
   function observeFinished(request) {
     settleLifecycle(request, true);
+    closeSubscriptionRequest(request);
     active.delete(request);
     for (const action of actions.values()) action.document?.candidates.delete(request);
     if (!allowances.get(request)?.required) allowances.delete(request);
@@ -223,6 +238,7 @@ function browserFailureMonitor(context, { origin, initializationPrefixes = [""],
   const errorText = failure => `${failure.method} ${failure.url}: ${failure.error} ${failure.postData || ""}`;
   function observeFailure(request) {
     settleLifecycle(request, false);
+    closeSubscriptionRequest(request);
     const allowance = allowances.get(request);
     const failure = { method: request.method(), url: request.url(), postData: request.postData(), error: request.failure()?.errorText };
     const matches = Boolean(allowance && failure.error === allowance.error);

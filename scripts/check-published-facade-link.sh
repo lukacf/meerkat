@@ -112,11 +112,14 @@ space_exit_reading() {
 
 # The exit readings, guarded: in a subshell (a failure in it, a fatal one
 # included, ends only the subshell), without its error output (a shell error
-# message names a path), and with a status that is always 0. $1: the status
-# the script is exiting with.
+# message names a path), and with a status that is always 0. The line that
+# says the readings could not be taken is written from a subshell too: the
+# shell that runs the exit trap writes nothing, so a standard output nobody
+# reads cannot end it before the cleanup. $1: the status the script is
+# exiting with.
 space_reading_on_exit() {
-  (space_exit_reading "$1") 2>/dev/null ||
-    echo "space reading [link smoke exit, status $1]: unavailable" || true
+  ( (space_exit_reading "$1") ||
+    echo "space reading [link smoke exit, status $1]: unavailable") 2>/dev/null || true
 }
 
 tmp_dir="$(mktemp -d)"

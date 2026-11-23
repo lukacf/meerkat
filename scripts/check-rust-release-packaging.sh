@@ -33,9 +33,12 @@ mkdir -p "$LOG_DIR"
 # exit status. No reading writes a file: a here-string needs temporary space,
 # which a full disk does not have. Sizes come from `du -P`, which follows no
 # symbolic link: the link each per-crate package directory holds into the
-# checkout is counted as a link and never entered. Only this run's own
-# per-crate directories are measured, never the rest of a caller's
-# CARGO_TARGET_DIR. Lines carry labels and crate names, not paths.
+# checkout is counted as a link and never entered. Only the per-crate
+# directories of this run's release crates are measured, never the rest of a
+# caller's CARGO_TARGET_DIR. They are this run's by name: under a persistent
+# CARGO_TARGET_DIR they also hold what earlier runs left in them, so the
+# figure after the last package build is then not this run's alone. Lines
+# carry labels and crate names, not paths.
 SPACE_TOP_CRATES=5
 
 # "<free KiB> <total KiB> <filesystem id>" of the filesystem that holds $1
@@ -119,7 +122,8 @@ space_dir_line() {
     printf 'space reading [%s]: %s: %d MiB%s\n' "$boundary" "$label" "$((size / 1024))" "$note"
 }
 
-# The per-crate packaging directories of this run: their total and the
+# The per-crate packaging directories of this run's crates (with whatever a
+# persistent target already held in them): their total and the
 # SPACE_TOP_CRATES largest, by crate name. One `du` over all of them.
 space_crate_lines() {
     local boundary="$1" crate="" sizes="" note=""
@@ -148,7 +152,7 @@ space_crate_lines() {
             }
         }
         END {
-            printf "space reading [%s]: packaging target, %d per-crate directories: %d MiB%s\n", boundary, count, total / 1024, note
+            printf "space reading [%s]: packaging target, %d per-crate directories of the release crates, whole contents: %d MiB%s\n", boundary, count, total / 1024, note
             shown = count < top ? count : top
             for (i = 1; i <= shown; i++) {
                 printf "space reading [%s]: crate %d of %d by size: %s %d MiB\n", boundary, i, shown, name[i], size[i] / 1024
@@ -174,9 +178,12 @@ space_boundary() {
 
 # The readings of one boundary, guarded: in a subshell (a failure in it, a
 # fatal one included, ends only the subshell), without its error output (a
-# shell error message names a path), and with a status that is always 0.
+# shell error message names a path), and with a status that is always 0. The
+# line that says a boundary could not be read is written from a subshell
+# too: this shell writes nothing here, so a reading cannot be the write that
+# ends the script on a standard output nobody reads.
 space_reading() {
-    (space_boundary "$1") 2>/dev/null || echo "space reading [$1]: unavailable" || true
+    ( (space_boundary "$1") || echo "space reading [$1]: unavailable") 2>/dev/null || true
 }
 
 run_package() {

@@ -417,4 +417,143 @@ done
 [[ -f "$reading_state/facade-target" ]] ||
   fail "the facade smoke did not run after space readings that could not be taken"
 
+# The facade link script's exit readings, on the real script with a fake cargo
+# in place of the smoke's build. For a smoke that passes, one that fails and
+# an exit before the smoke (no archive staged), each with a working and with a
+# failing `df` and `du`: the script exits with the status it has without the
+# readings, removes its temporary directory, and prints its readings under
+# that status.
+FACADE="$REPO_ROOT/scripts/check-published-facade-link.sh"
+mkdir -p "$FIXTURE/crates/meerkat/tests/fixtures/agent_builder_policy"
+printf '%s\n' 'fn main() {}' \
+  > "$FIXTURE/crates/meerkat/tests/fixtures/agent_builder_policy/downstream_public_facade_agentbuilder.rs"
+cat > "$FIXTURE/scripts/fake-smoke-cargo" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+# Stands in for `cargo run` of the downstream smoke: leaves a build output in
+# its target directory, then prints the smoke's sentence, or fails without it.
+: "${CARGO_TARGET_DIR:?}"
+: "${FAKE_SMOKE:?}"
+mkdir -p "$CARGO_TARGET_DIR/debug"
+printf 'object\n' > "$CARGO_TARGET_DIR/debug/smoke"
+if [[ "$FAKE_SMOKE" == pass ]]; then
+  echo "public facade AgentBuilder constructed an agent"
+  exit 0
+fi
+echo "error: intentional smoke failure" >&2
+exit 101
+EOF
+chmod +x "$FIXTURE/scripts/fake-smoke-cargo"
+facade_packages="$TEST_ROOT/facade-packages"
+mkdir -p "$facade_packages/package"
+cp "$success_state"/target/*/package/*-0.0.0.crate "$facade_packages/package/"
+
+# Runs the facade link script as case $1: smoke $2 (pass or fail), staged
+# archives $3, PATH $4. Its temporary directory is created under a directory
+# of the case's own. With a fifth argument its standard output is file
+# descriptor 8 and the log holds its error output only. Prints its status.
+run_facade() {
+  local name="$1" status
+  local -a facade_env=(
+    ROOT="$FIXTURE"
+    CARGO="$FIXTURE/scripts/fake-smoke-cargo"
+    FAKE_SMOKE="$2"
+    MEERKAT_PUBLISHED_FACADE_PACKAGE_TARGET="$3"
+    PATH="$4"
+    TMPDIR="$TEST_ROOT/facade-$name-tmp"
+  )
+  mkdir -p "$TEST_ROOT/facade-$name-tmp"
+  set +e
+  if [[ "$#" -ge 5 ]]; then
+    env "${facade_env[@]}" "$FACADE" >&8 2> "$TEST_ROOT/facade-$name.log"
+  else
+    env "${facade_env[@]}" "$FACADE" > "$TEST_ROOT/facade-$name.log" 2>&1
+  fi
+  status=$?
+  set -e
+  printf '%s' "$status"
+}
+
+# How many entries case $1 left in the directory its temporary directory was
+# created in.
+facade_left_behind() {
+  find "$TEST_ROOT/facade-$1-tmp" -mindepth 1 | wc -l | tr -d ' '
+}
+
+for facade_case in "pass pass 0" "fail fail 1" "early pass 1"; do
+  read -r facade_scenario facade_smoke facade_expected <<< "$facade_case"
+  facade_staged="$facade_packages"
+  if [[ "$facade_scenario" == early ]]; then
+    facade_staged="$TEST_ROOT/facade-no-packages"
+  fi
+  for facade_tools in working failing; do
+    facade_path="$PATH"
+    if [[ "$facade_tools" == failing ]]; then
+      facade_path="$broken_tools:$PATH"
+    fi
+    facade_name="$facade_scenario-$facade_tools"
+    facade_log="$TEST_ROOT/facade-$facade_name.log"
+    facade_what="($facade_scenario, $facade_tools df and du)"
+    # An extended regular expression: the label's brackets are literal.
+    facade_label="space reading \\[link smoke exit, status $facade_expected\\]"
+    status="$(run_facade "$facade_name" "$facade_smoke" "$facade_staged" "$facade_path")"
+    if [[ "$status" -ne "$facade_expected" ]]; then
+      fail "the facade link script's exit status is not what it is without its readings $facade_what" \
+        "expected $facade_expected, got $status" "$(cat "$facade_log")"
+    fi
+    if [[ "$(facade_left_behind "$facade_name")" -ne 0 ]]; then
+      fail "the facade link script did not remove its temporary directory $facade_what" "$(cat "$facade_log")"
+    fi
+    if [[ "$facade_tools" == failing ]]; then
+      facade_free="temporary directory filesystem: unavailable"
+      facade_size="smoke target: unavailable"
+    else
+      facade_free="temporary directory filesystem: [0-9]+ MiB free of [0-9]+ MiB"
+      facade_size="smoke target: [0-9]+ MiB"
+    fi
+    if [[ "$facade_scenario" == early ]]; then
+      facade_size="smoke target: no such directory"
+    fi
+    for facade_line in "$facade_free" "$facade_size" "took [0-9]+ s"; do
+      grep -Eq "^$facade_label: $facade_line\$" "$facade_log" ||
+        fail "the facade link script's exit readings lack a line under its exit status $facade_what" \
+          "$facade_line" "$(cat "$facade_log")"
+    done
+  done
+done
+grep -Fq "Published-style facade AgentBuilder link smoke passed" "$TEST_ROOT/facade-pass-working.log" ||
+  fail "the passing facade smoke did not print its verdict" "$(cat "$TEST_ROOT/facade-pass-working.log")"
+grep -Fq "error: intentional smoke failure" "$TEST_ROOT/facade-fail-working.log" ||
+  fail "the failing facade smoke's error was not surfaced" "$(cat "$TEST_ROOT/facade-fail-working.log")"
+grep -Fq "missing packaged crate archive" "$TEST_ROOT/facade-early-working.log" ||
+  fail "the facade link script did not name the missing archive" "$(cat "$TEST_ROOT/facade-early-working.log")"
+
+# With its standard output a pipe nobody reads, the script still exits with
+# its own status and still removes its temporary directory: the shell that
+# runs the exit trap writes nothing. The pipe's reader has exited before the
+# script starts, so every write to it fails.
+mkfifo "$TEST_ROOT/facade-dead-pipe"
+(: < "$TEST_ROOT/facade-dead-pipe") &
+facade_reader=$!
+exec 8> "$TEST_ROOT/facade-dead-pipe"
+wait "$facade_reader"
+for facade_case in "fail fail 1" "early pass 1"; do
+  read -r facade_scenario facade_smoke facade_expected <<< "$facade_case"
+  facade_staged="$facade_packages"
+  if [[ "$facade_scenario" == early ]]; then
+    facade_staged="$TEST_ROOT/facade-no-packages"
+  fi
+  facade_name="$facade_scenario-dead-pipe"
+  status="$(run_facade "$facade_name" "$facade_smoke" "$facade_staged" "$PATH" dead-pipe)"
+  if [[ "$status" -ne "$facade_expected" ]]; then
+    fail "a standard output nobody reads changed the facade link script's exit status ($facade_scenario)" \
+      "expected $facade_expected, got $status" "$(cat "$TEST_ROOT/facade-$facade_name.log")"
+  fi
+  if [[ "$(facade_left_behind "$facade_name")" -ne 0 ]]; then
+    fail "a standard output nobody reads kept the facade link script from removing its temporary directory ($facade_scenario)" \
+      "$(cat "$TEST_ROOT/facade-$facade_name.log")"
+  fi
+done
+exec 8>&-
+
 echo "release packaging isolation contract holds"

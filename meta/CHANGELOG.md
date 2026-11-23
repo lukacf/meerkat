@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+<!-- Draft entry for the mob profile key `tools.web_search`: its wording is not final. -->
+
+### Added
+
+- Before setting the key, read the limit on going back to 0.9.16 in the
+  Meerkat changelog's entry for it. A mob profile's optional
+  `tools.web_search` (see the Meerkat changelog)
+  is shown where a profile's tool configuration is shown: the rendering of a
+  held identity request has a `Web search: enabled` or `Web search:
+  disabled` line for a profile that states the key, and none for a profile
+  that omits it, whose rendering is unchanged. The profile's digest covers
+  the choice. A gateway launched with `runtime_options.member_auth_binding`
+  refuses, as before, a member whose enabled web search would be served by
+  Meerkat's helper and not by the provider's own search. A member whose
+  enabled web search is served by the provider's own search is reported in
+  the gateway's log, at each build, as a declared tool category missing
+  from its tool catalog: the line is expected, a warning only, and nothing
+  is refused. Rust API: the label constant
+  `meerkat_meta::identity_creation::render::labels::WEB_SEARCH` is new.
+  The gateway binaries bind no member host, so a gateway holds no member
+  placed on another host and the limit on a placed member's stored spec
+  does not arise there; a Rust host that embeds Meta and binds a member
+  host through the mob handle holds such specs.
+
 ## [0.9.18] - 2026-11-22
 
 Records that name a member carry the member's mob, so that one host can keep

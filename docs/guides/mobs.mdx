@@ -452,6 +452,100 @@ reaches every inline child profile without an opt-in.
 }
 ```
 
+### Web search
+
+`tools.web_search` states a profile's web search choice. It is optional, and a
+profile that omits it behaves exactly as before the key existed:
+
+```toml
+[profiles.researcher.tools]
+comms = true
+web_search = true
+```
+
+| `web_search` | What the member gets |
+|--------------|----------------------|
+| omitted | Nothing changes. The provider's own web search rides the member's requests where its model has one and the provider's switch is on (`provider_tools.anthropic.web_search`, `provider_tools.openai.web_search`, `provider_tools.gemini.google_search`, each on by default). A member whose tools are governed (below) has no web search: governance turns the provider's own tools off. |
+| `true` | The build's explicit enable. Where the provider's own search serves the member, it stays the provider's own and no second tool is added. Where it does not (a model without one, or a governed member), the member gets the ordinary `web_search` tool, served by a helper that runs the provider's default model through the realm's default binding for that provider. Where that helper is needed and cannot be provided, the member's build fails (`CapabilityUnavailable`, capability `web_search`). One case gives nothing without an error: a model with its own search while the provider's switch is off (see the table below). |
+| `false` | The build's explicit disable: no search of either kind. One exception: the profile's own tool grant gate that covers `web_search` mounts the tool closed whatever the switch says, and a grant then opens it. |
+
+A spawn's own web search override (`tool_category_overrides.web_search`) wins
+over the profile in both directions, and keeps winning when the member is
+revived. For a member placed on another host the spawn's choice travels in
+the overlay of the member's spec, as before, and the spec's profile states
+only what the profile states: the member host applies the choice at every
+build from that spec, and a respawn of the placed member, which compiles a
+new spec, does not carry it, a disabling choice included: after a respawn
+the member gets what its profile and the host's configuration give.
+
+Three conditions come with `true`:
+
+1. The helper is provided when the member's provider is Anthropic, OpenAI or
+   Gemini with its switch on, that provider's default model has web search,
+   and the member's realm resolves a default binding for that provider. It
+   does not use the member's own binding. Any miss fails the member's build
+   (`CapabilityUnavailable`).
+2. Under an application tool policy or a dispatch admission the `web_search`
+   tool is listed, and each call needs the host's grant or admission, like
+   any other tool.
+3. A Meerkat Meta gateway launched with `runtime_options.member_auth_binding`
+   builds every member on that one binding, and refuses at its build
+   (`member_auth_binding_uncarried`) a member whose enable would be served by
+   the helper, because the helper does not use that binding. The provider's
+   own search passes.
+
+The helper has not been verified over a GitHub Copilot binding: the build
+succeeds wherever the helper's connection resolves, and whether a search then
+works is decided at call time by what that route serves.
+
+The ordinary `web_search` tool is gated like any other tool. With
+`web_search = true`:
+
+| The member's tools are governed by | What `true` gives |
+|------------------------------------|-------------------|
+| nothing | The provider's own search where the model has one; otherwise the `web_search` tool, or a failed build where the helper cannot be provided. |
+| nothing, and the provider's web search switch is off | On a model that has its own search: no search and no error. The helper is not tried there, so the enable gives nothing; turn the provider's switch on. On a model without its own search the build fails. |
+| a read-only profile | The `web_search` tool. It declares itself read-only, so the read-only gate admits it. |
+| a deny list that does not name it | The `web_search` tool. |
+| a deny list that names `web_search` | The deny list wins: every call is refused. |
+| a restricted per-spawn tool access policy | The `web_search` tool, where that policy admits it. |
+| a dispatch admission | The `web_search` tool; the host's admission decides each call. |
+| an application tool policy | The `web_search` tool; the host's policy decides each call, so it must grant `web_search` to the member. |
+| a tool grant gate that covers `web_search` | The tool is mounted closed until a grant opens it. The profile's own gate does so whatever the switch says. |
+| a tool grant gate that does not cover it | As an ungoverned member. |
+| a GitHub Copilot binding | The `web_search` tool where the helper's connection resolves; not verified over such a binding (above). |
+
+A member's session records the choice it was built with, and removing the key
+states no choice, so the session's record then decides, in both directions. A
+member built while its profile said `true` keeps web search after the key is
+removed: set `web_search = false` to take it away. A member built while its
+profile said `false` keeps no web search after the key is removed: set
+`web_search = true` to give it back. Only a new session of the member returns
+to the unset behaviour.
+
+Before setting the key, note a limit on going back to 0.9.16, as observed
+there:
+
+- A JSON mob profile that names the key is accepted without a warning;
+  0.9.16 has no such key. Do not rely on `web_search=false` in a JSON mob
+  profile to keep search disabled after a downgrade to 0.9.16.
+- A placed member's stored spec written while its profile named the key is
+  refused by 0.9.16. The spec is stored on both hosts, in the controlling
+  host's placed spawn record and in the member host's binding record:
+  - on the controlling host the Meerkat CLI starts and holds the mob as
+    quarantined: every command on it answers
+    `mob '<id>' is quarantined (store_unreadable)`, naming the unknown field
+    `web_search` (see
+    [Quarantined mobs and degraded members](#quarantined-mobs-and-degraded-members));
+  - on the member host `rkat mob host` does not start: it exits with
+    `host binding record serde failed`, naming the same field.
+
+  A placed member of a profile without the key is not affected. After a
+  completed retire of the member, 0.9.16 starts on both hosts.
+- For an identity adopted through the member identity declaration API
+  (`mob/adopt_member_identity_declaration`) while its profile named the key,
+  no recovery on 0.9.16 was demonstrated.
+
 ### Profile model and provider fields
 
 Beyond `model`, a profile can pin provider identity and per-member behavior:

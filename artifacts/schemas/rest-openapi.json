@@ -16302,6 +16302,13 @@
             "default": false,
             "type": "boolean"
           },
+          "web_search": {
+            "description": "Profile-declared web search choice (`true` enables it for the member's\nbuild, `false` disables it), carried so a member materialized from\nthis profile is built with the same choice.\n\nOmitted when unset, like `read_only` below and for the same two\nreasons: a spec that states no choice keeps the exact digest-covered\nbytes it had before the field existed, and a spec that states one,\nsent to a host too old to know the field, is rejected by\n`deny_unknown_fields` instead of materializing a member with another\nweb search than its profile declares.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "workgraph": {
             "default": false,
             "type": "boolean"

@@ -35,6 +35,79 @@ them.
 
 ## [Unreleased]
 
+<!-- Draft entries for the mob profile key `tools.web_search`: their wording is not final. -->
+
+### Breaking
+
+- `meerkat-mob`: the public struct `ToolConfig` gains the public field `web_search: Option<bool>` (the profile key `tools.web_search`, see Added). `meerkat-contracts`: the public structs `wire::PortableToolConfig`, `WireMobToolConfig` and `wire::MobToolConfigInput` gain the same field. Code that builds one of them with a struct literal adds the field; `..Default::default()` covers it.
+
+### Added
+
+- **A mob profile can state web search for its members:** the optional key
+  `tools.web_search`, in a TOML or stored definition, a realm profile, the
+  public profile input and the wire profile. A profile that omits it behaves
+  exactly as before: the provider's own web search rides the member's requests
+  where its model has one and the provider's switch is on, and a member whose
+  tools are governed (a read-only profile, a deny list, a tool access or
+  application tool policy, a dispatch admission, a tool grant gate that covers
+  `web_search`) has none, since governance turns the provider's own tools off.
+  - Before setting the key, a limit on going back to 0.9.16, as observed
+    there. A JSON mob profile that names the key is accepted without a
+    warning; 0.9.16 has no such key. Do not rely on `web_search=false` in a
+    JSON mob profile to keep search disabled after a downgrade to 0.9.16.
+    A placed member's stored spec written while its profile named the key
+    is refused by 0.9.16: on the member host `rkat mob host` exits with
+    `host binding record serde failed`, naming the unknown field
+    `web_search`, and on the controlling host the mob is held as
+    quarantined (`store_unreadable`). A placed member of a profile without
+    the key is not affected, and after a completed retire of the member
+    0.9.16 starts on both hosts. For an identity adopted through
+    `mob/adopt_member_identity_declaration` while its profile named the
+    key, no recovery on 0.9.16 was demonstrated.
+  - `web_search = true` is the build's explicit enable. Where the provider's
+    own search serves the member, it stays the provider's own. Where it does
+    not (a model without one, or a governed member), the member gets the
+    ordinary `web_search` tool, served by a helper that runs the provider's
+    default model through the realm's default binding for that provider, and
+    gated like any other tool: a read-only profile admits it, a deny list
+    that names it refuses it, and a tool grant gate that covers it keeps it
+    closed until a grant. Where that helper cannot be provided (the member's
+    provider is not Anthropic, OpenAI or Gemini, the provider's web search
+    switch is off, its default model has no web search, or the realm
+    resolves no default binding for it), the member's build fails with
+    `BuildAgentError::CapabilityUnavailable` (capability `web_search`), as an
+    explicit enable always has. Not verified over a GitHub Copilot binding:
+    the build succeeds wherever the helper's connection resolves, and
+    whether a search then works is decided at call time by what that route
+    serves. One limit, unchanged from a spawn's or a session's explicit
+    enable: on an ungoverned member whose model has its own search, the
+    enable gives no search and no error while that provider's web search
+    switch is off; the helper is not tried there.
+  - `web_search = false` is the build's explicit disable: no search of
+    either kind. One exception: the profile's own tool grant gate that
+    covers `web_search` mounts the tool closed whatever the switch says,
+    and a grant then opens it.
+  - A spawn's own `tool_category_overrides.web_search` wins over the profile
+    in both directions, and keeps winning when the member is revived: the
+    spawn's choice now travels in the member's stored profile. A member
+    placed on another host is the exception: its spawn's choice stays in
+    the overlay of its spec, as before, and a respawn of it does not carry
+    the choice, a disabling one included.
+  - A member's session records the choice it was built with, and a removed
+    key states no choice. A member built while its profile said `true`
+    keeps web search after the key is removed (`web_search = false` takes
+    it away), and one built while it said `false` keeps none
+    (`web_search = true` gives it back); only a new session returns to the
+    unset behaviour.
+  - A placed member and a declared identity carry their profile's choice in
+    their portable profile (`PortableToolConfig.web_search`), omitted when
+    the profile states none, so the specs and stored material of profiles
+    that omit the key keep their bytes and digests. An adaptive layer's
+    inline profile may state it, and an enable counts as the `web_search`
+    tool class in the layer's policy evidence; the layer decision schema
+    bundled in adaptive packs is unchanged.
+  See [Web search](docs/guides/mobs.mdx#web-search).
+
 ## [0.9.18] - 2026-11-22
 
 ### Breaking

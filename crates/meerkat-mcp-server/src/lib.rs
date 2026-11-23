@@ -18433,6 +18433,19 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
             .as_str()
             .filter(|cursor| !cursor.is_empty())
             .expect("wrapped page continuation");
+        let continued = Box::pin(handle_tools_call(
+            &state,
+            "workgraph_get",
+            &json!({
+                "id": item["id"], "evidence_limit": 1, "evidence_cursor": cursor
+            }),
+        ))
+        .await
+        .expect("returned cursor is valid before the revision changes");
+        assert_eq!(
+            payload(continued)["evidence_page"]["entries"][0]["evidence"]["id"],
+            "one"
+        );
         Box::pin(handle_tools_call(
             &state,
             "workgraph_add_evidence",
@@ -18456,6 +18469,7 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
             stale.code,
             meerkat_contracts::ErrorCode::InvalidParams.jsonrpc_code()
         );
+        assert!(stale.message.contains("evidence cursor revision is stale"));
     }
 
     #[tokio::test]

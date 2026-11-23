@@ -1773,7 +1773,7 @@ member with a prewired, declared edge reported `converged`. The member
 whose declared edge had not been wired reported `repair_blocked`, despite
 an `adopted` reply and matching desired and active revision numbers. A
 prewired member with default custody and an empty list reported `converged`.
-The [0.9.15 release notes](https://github.com/lukacf/meerkat/releases/tag/v0.9.15)
+The [0.9.15 known limitations](https://github.com/lukacf/meerkat/blob/v0.9.15/CHANGELOG.md#L4053)
 also describe the reverse mismatch: if an existing edge to a larger-named
 member is missing from the declaration under `identity_owned`, reconciliation
 can report `repair_blocked`. That case was not part of the binary check.

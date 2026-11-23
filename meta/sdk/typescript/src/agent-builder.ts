@@ -17,6 +17,7 @@ import {
 import { ToolResultContent } from "./tool-content.js";
 import { parseToolCallRequester } from "./tool-requester.js";
 import { runAsToolCallback } from "./decisions.js";
+import { ContractMismatchError } from "./errors.js";
 import {
   DetachedJobContext,
   DetachedJobExecution,
@@ -117,14 +118,65 @@ interface ActiveJobAttempt {
  * Tool handlers are scoped by a build-level scope_id to prevent
  * cross-session handler bleed in concurrent sessions.
  */
+/**
+ * The mob a member-building callback names: its top-level `mob_id`. `null`
+ * when the host sent none (or null): a host of an earlier release, which
+ * serves its own mob only. A host that names mobs names them by text, so any
+ * other value is refused with `ContractMismatchError`: read as "none" it
+ * would stand for the host's own mob, the wrong one for a member of another.
+ */
+function callbackMob(params: Record<string, unknown>): string | null {
+  const mobId = params.mob_id;
+  if (mobId === undefined || mobId === null) return null;
+  if (typeof mobId !== "string") {
+    throw new ContractMismatchError("a callback's mob_id must be a string");
+  }
+  return mobId;
+}
+
+/**
+ * The incarnation of the mob a customize callback names: its top-level
+ * `mob_incarnation`. `null` when the host sent none (or null): a host of an
+ * earlier release. A host that names it names it by a non-empty text, so any
+ * other value is refused with `ContractMismatchError`: read as "none" it
+ * would keep the tools of a mob that may be gone.
+ */
+function callbackMobIncarnation(params: Record<string, unknown>): string | null {
+  const incarnation = params.mob_incarnation;
+  if (incarnation === undefined || incarnation === null) return null;
+  if (typeof incarnation !== "string" || incarnation === "") {
+    throw new ContractMismatchError("a callback's mob_incarnation must be a non-empty string");
+  }
+  return incarnation;
+}
+
+/** One key for a member: its mob (`null` for the host's own) and its identity. */
+function memberKey(mobId: string | null, identity: string): string {
+  return JSON.stringify([mobId, identity]);
+}
+
 export class CallbackDispatcher {
   private _builder: SessionAgentBuilder | null = null;
   private _errorCallback: ErrorCallback | null = null;
   private readonly _toolHandlers = new Map<string, ToolHandler>();
   private readonly _scopeTools = new Map<string, string[]>();
-  // Latest customizer scope per identity, so a restore can release the prior
-  // scope (the gateway has no scope-release signal — newest-wins semantics).
-  private readonly _customizerScopeByIdentity = new Map<string, string>();
+  // Latest customizer scope per member, so a restore can release the prior
+  // scope (the gateway has no scope-release signal: newest wins). A member is
+  // its mob and its identity: two mobs of one host can each have a member of
+  // the same name, and a build of one must not release the other's tools.
+  // Keyed by `memberKey`; the value keeps the member's mob beside its scope,
+  // so a mob's scopes are found without reading a key.
+  private readonly _customizerScopeByMember = new Map<
+    string,
+    { mobId: string | null; scopeId: string }
+  >();
+  // The incarnations the gateway named for each mob id, from the customize
+  // callback, in the order they were first named: the last is the mob's, the
+  // ones before it are of mobs that are gone. A mob created under the id of a
+  // destroyed one is another incarnation: its first build releases every
+  // scope kept under that mob id, which are the destroyed mob's. One entry
+  // per incarnation named in this process; nothing is stored.
+  private readonly _customizerIncarnationsByMob = new Map<string, string[]>();
   private _rosterProvider: RosterProvider | null = null;
   private _agentCustomizer: AgentCustomizer | null = null;
   private _topologyProvider: TopologyProvider | null = null;
@@ -207,6 +259,44 @@ export class CallbackDispatcher {
       }
       this._scopeTools.delete(scopeId);
     }
+  }
+
+  /**
+   * Record the incarnation a customize callback names for a mob, and answer
+   * whether the build is of the mob as it is named now.
+   *
+   * An incarnation named for the first time, for a mob id that was named by
+   * another: the mob of the earlier builds is gone (a mob keeps its
+   * incarnation for as long as it exists), so every customizer scope kept
+   * under that mob id is released and the later mob starts with none of them.
+   * An incarnation that was named before a later one: the build is of a mob
+   * that is gone and was handled late; it releases nothing and the answer is
+   * `false`.
+   */
+  private _noteMobIncarnation(mobId: string, incarnation: string): boolean {
+    let named = this._customizerIncarnationsByMob.get(mobId);
+    if (named === undefined) {
+      named = [];
+      this._customizerIncarnationsByMob.set(mobId, named);
+    }
+    if (named.length > 0 && named[named.length - 1] === incarnation) return true;
+    if (named.includes(incarnation)) return false;
+    if (named.length > 0) {
+      for (const [member, kept] of [...this._customizerScopeByMember]) {
+        if (kept.mobId === mobId) {
+          this.releaseScope(kept.scopeId);
+          this._customizerScopeByMember.delete(member);
+        }
+      }
+    }
+    named.push(incarnation);
+    return true;
+  }
+
+  /** Whether `incarnation` is the one last named for `mobId`. */
+  private _isMobIncarnation(mobId: string, incarnation: string): boolean {
+    const named = this._customizerIncarnationsByMob.get(mobId);
+    return named !== undefined && named.length > 0 && named[named.length - 1] === incarnation;
   }
 
   registerLiveOutputConsumer(
@@ -434,7 +524,13 @@ export class CallbackDispatcher {
       const targetIdentities = Array.isArray(params.target_identities)
         ? params.target_identities.map(String)
         : [];
-      const context = params.context ?? {};
+      const mobId = callbackMob(params);
+      const sent = params.context ?? {};
+      // The provider's context names the mob whose edges are asked.
+      const context =
+        mobId !== null && typeof sent === "object" && sent !== null && !Array.isArray(sent)
+          ? { ...(sent as Record<string, unknown>), mob_id: mobId }
+          : sent;
       const edges = await this._topologyProvider.computeEdges(
         targetIdentities,
         context,
@@ -449,25 +545,47 @@ export class CallbackDispatcher {
         throw new Error("no AgentCustomizer registered");
       }
       const scopeId = String(params.scope_id ?? "");
-      const context = parseAgentBuildContext(params.context);
+      const mobId = callbackMob(params);
+      const incarnation = callbackMobIncarnation(params);
+      // The context has a `mobId` only when the host names a mob.
+      const context = {
+        ...parseAgentBuildContext(params.context),
+        ...(mobId === null ? {} : { mobId }),
+      };
       const spec = parseDurableAgentSpec(params.spec);
       const draft = parseAgentBuildDraft(params.draft);
+      // Before the customizer is asked, and whatever it does with the build:
+      // a build that names another incarnation of its mob releases what was
+      // kept for the earlier one. A build of an incarnation that a later one
+      // superseded is of a mob that is gone: the customizer is asked and the
+      // draft answered, and its tools are not registered.
+      let ofTheMobAsNamed = true;
+      if (mobId !== null && incarnation !== null) {
+        ofTheMobAsNamed = this._noteMobIncarnation(mobId, incarnation);
+      }
       await this._agentCustomizer.customizeBuild(context, spec, draft);
+      // While the customizer ran, a build of a later incarnation of this mob
+      // may have been named: this build is then of a mob that is gone too.
+      if (ofTheMobAsNamed && mobId !== null && incarnation !== null) {
+        ofTheMobAsNamed = this._isMobIncarnation(mobId, incarnation);
+      }
       // Capture any tool handlers the customizer registered via
       // draft.registerTool(), keyed by this build's scope — the same
       // (scope, tool) map build_agent uses, so callback/call_tool dispatches
       // to them. Guard on scopeId for compat with a gateway not yet sending it.
-      if (scopeId && draft.toolHandlers.size > 0) {
-        // Release the previous scope for this identity before registering the
+      if (scopeId && draft.toolHandlers.size > 0 && ofTheMobAsNamed) {
+        // Release the previous scope for this member before registering the
         // new one: customize_build runs again at each seat, fresh life, role
         // migration and build of the identity, and the gateway never signals
-        // scope release, so this bounds growth to one live scope per identity
-        // (newest wins).
-        const prior = this._customizerScopeByIdentity.get(context.identity);
-        if (prior && prior !== scopeId) {
-          this.releaseScope(prior);
+        // scope release, so this bounds growth to one live scope per member
+        // (newest wins). The member of another mob with the same identity
+        // keeps its own.
+        const member = memberKey(mobId, context.identity);
+        const prior = this._customizerScopeByMember.get(member);
+        if (prior && prior.scopeId !== scopeId) {
+          this.releaseScope(prior.scopeId);
         }
-        this._customizerScopeByIdentity.set(context.identity, scopeId);
+        this._customizerScopeByMember.set(member, { mobId, scopeId });
         const toolNames: string[] = [];
         for (const [name, handler] of draft.toolHandlers) {
           this._toolHandlers.set(`${scopeId}:${name}`, handler);
@@ -479,6 +597,8 @@ export class CallbackDispatcher {
     }
 
     if (method === "callback/agent_customizer/after_create") {
+      // Read first: a mob_id that is not text is refused whoever listens.
+      const mobId = callbackMob(params);
       if (
         this._agentCustomizer !== null &&
         typeof this._agentCustomizer.afterCreate === "function"
@@ -494,6 +614,8 @@ export class CallbackDispatcher {
           model: String(params.model ?? ""),
           labels: rawLabels,
           systemPrompt: typeof params.system_prompt === "string" ? params.system_prompt : null,
+          // A `mobId` only when the host names a mob.
+          ...(mobId === null ? {} : { mobId }),
         };
         try {
           await this._agentCustomizer.afterCreate(

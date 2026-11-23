@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::{Arc, OnceLock};
 
+use meerkat_mob::MobId;
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, RwLock, broadcast};
 
@@ -46,6 +47,70 @@ pub(crate) struct ConsoleEventStore {
     /// Live tool-result images are written there and carried by reference,
     /// as history carries them.
     blob_store: Arc<OnceLock<Arc<dyn meerkat_core::BlobStore>>>,
+    /// The stores of the host this store is one of ([`Self::of_mob`]). Every
+    /// store of a host holds this one value, so whichever of them is asked
+    /// for a mob's store answers the same one.
+    host: Arc<HostStores>,
+}
+
+/// What one mob's store holds for itself: its state, the lock of its
+/// projection and its channel.
+#[derive(Clone)]
+struct MobStore {
+    state: Arc<RwLock<ConsoleEventReplayState>>,
+    projection_lock: Arc<Mutex<()>>,
+    event_tx: broadcast::Sender<ConsoleIdentityEventEnvelope>,
+}
+
+/// The console event stores of one host, by mob: the launch mob's, and one
+/// for each other mob that was named. Plain addressing: a store is made
+/// when its mob is first named, and this holds nothing of a mob's
+/// lifecycle.
+struct HostStores {
+    /// The launch mob's id, once the runtime that owns the stores told it
+    /// ([`ConsoleEventStore::bind_launch_mob`]). Until then no id names the
+    /// launch mob, and only `None` does.
+    launch_mob: OnceLock<MobId>,
+    /// The launch mob's store: the one the host was built with.
+    launch: MobStore,
+    /// The stores of the other mobs, by mob id.
+    others: std::sync::Mutex<BTreeMap<MobId, MobStore>>,
+}
+
+impl MobStore {
+    fn new(member_count: usize) -> Self {
+        let (event_tx, _) = broadcast::channel(event_channel_capacity_for_members(member_count));
+        let bootstrap = ConsoleIdentityEventEnvelope {
+            event_id: mint_console_event_id(),
+            interaction_id: None,
+            identity: SYSTEM_EVENT_IDENTITY.to_string(),
+            event_type: "runtime_bootstrapped".to_string(),
+            timestamp_ms: current_time_ms(),
+            data: json!({
+                "source": "unified_runtime",
+            }),
+        };
+        Self {
+            projection_lock: Arc::new(Mutex::new(())),
+            state: Arc::new(RwLock::new(ConsoleEventReplayState {
+                all_events: VecDeque::from([bootstrap]),
+                pending_by_identity: BTreeMap::new(),
+                active_interaction_by_identity: BTreeMap::new(),
+                active_run_by_identity: BTreeMap::new(),
+                observed_runs_by_identity: BTreeMap::new(),
+                callback_pending_by_identity: BTreeSet::new(),
+                runtime_to_identity: BTreeMap::new(),
+                response_phase_by_identity: BTreeMap::new(),
+                spawn_registry: crate::console_spawn::SpawnRegistry::default(),
+                spawn_journal_read_to: BTreeMap::new(),
+                spawn_journal_untold: BTreeSet::new(),
+                spawn_seats: BTreeMap::new(),
+                #[cfg(test)]
+                spawn_journal_reads: 0,
+            })),
+            event_tx,
+        }
+    }
 }
 
 struct ConsoleEventReplayState {
@@ -110,38 +175,130 @@ impl ConsoleEventStore {
     }
 
     pub(crate) fn with_member_capacity(member_count: usize) -> Self {
-        let (event_tx, _) = broadcast::channel(event_channel_capacity_for_members(member_count));
-        let bootstrap = ConsoleIdentityEventEnvelope {
-            event_id: mint_console_event_id(),
-            interaction_id: None,
-            identity: SYSTEM_EVENT_IDENTITY.to_string(),
-            event_type: "runtime_bootstrapped".to_string(),
-            timestamp_ms: current_time_ms(),
-            data: json!({
-                "source": "unified_runtime",
+        let launch = MobStore::new(member_count);
+        Self {
+            state: Arc::clone(&launch.state),
+            projection_lock: Arc::clone(&launch.projection_lock),
+            event_tx: launch.event_tx.clone(),
+            blob_store: Arc::new(OnceLock::new()),
+            host: Arc::new(HostStores {
+                launch_mob: OnceLock::new(),
+                launch,
+                others: std::sync::Mutex::new(BTreeMap::new()),
             }),
+        }
+    }
+
+    /// Tell the stores of this host which mob is the launch mob: the mob
+    /// the runtime that owns them was launched with. From then on its id
+    /// names the launch mob's store, as `None` does. The first word stands.
+    pub(crate) fn bind_launch_mob(&self, mob: &MobId) {
+        let _ = self.host.launch_mob.set(mob.clone());
+    }
+
+    /// The console events of one of the host's mobs.
+    ///
+    /// Every key of a store is an identity name, and identities are names
+    /// inside a mob, so each mob has a store of its own. The launch mob is
+    /// named by `None`, as a stored record names it by carrying no mob
+    /// ([`crate::member_key::DefaultMob::stored`]), or by its id once the
+    /// host told it ([`Self::bind_launch_mob`]): its store is the one the
+    /// host was built with, the same object, so what the launch mob's
+    /// writers and readers reach is what they reached before a host served
+    /// a second mob, and the launch mob never has a second store. Any other
+    /// mob has its own store, made when the mob is first named and answered
+    /// again for every later request: its pending interactions, run
+    /// tracking, response phases, labels and events never meet those of
+    /// another mob's identity of the same name, and each of its queues has
+    /// the bound a queue of the launch mob has.
+    ///
+    /// Any store of a host may be asked: each answers what the host's
+    /// store answers, and no store holds stores of its own. A store of
+    /// another mob lives until the runtime ends it with that mob's entry
+    /// ([`Self::end_of_mob`]); nothing reads it but what is handed it here.
+    pub(crate) fn of_mob(&self, mob: Option<&MobId>) -> Self {
+        let store = match mob.filter(|mob| self.host.launch_mob.get() != Some(*mob)) {
+            None => self.host.launch.clone(),
+            Some(mob) => self
+                .host
+                .others
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .entry(mob.clone())
+                .or_insert_with(|| MobStore::new(EVENT_CHANNEL_DEFAULT_MEMBER_BUDGET))
+                .clone(),
         };
         Self {
-            projection_lock: Arc::new(Mutex::new(())),
-            state: Arc::new(RwLock::new(ConsoleEventReplayState {
-                all_events: VecDeque::from([bootstrap]),
-                pending_by_identity: BTreeMap::new(),
-                active_interaction_by_identity: BTreeMap::new(),
-                active_run_by_identity: BTreeMap::new(),
-                observed_runs_by_identity: BTreeMap::new(),
-                callback_pending_by_identity: BTreeSet::new(),
-                runtime_to_identity: BTreeMap::new(),
-                response_phase_by_identity: BTreeMap::new(),
-                spawn_registry: crate::console_spawn::SpawnRegistry::default(),
-                spawn_journal_read_to: BTreeMap::new(),
-                spawn_journal_untold: BTreeSet::new(),
-                spawn_seats: BTreeMap::new(),
-                #[cfg(test)]
-                spawn_journal_reads: 0,
-            })),
-            event_tx,
-            blob_store: Arc::new(OnceLock::new()),
+            state: store.state,
+            projection_lock: store.projection_lock,
+            event_tx: store.event_tx,
+            // Images are carried by reference into the host's one blob
+            // store, whichever mob's event carries them.
+            blob_store: Arc::clone(&self.blob_store),
+            host: Arc::clone(&self.host),
         }
+    }
+
+    /// End the console events of the mob `mob`: its store goes, with the
+    /// pending interactions, run tracking, response phases, labels and
+    /// events it held. Whether a mob's console events end is not this map's
+    /// to say: the runtime ends them when the mob's entry goes (the mob set
+    /// no longer manages the mob: an unload, a destroy). A mob named again
+    /// afterwards, one created again under the same id included, gets a new
+    /// store ([`Self::of_mob`]). A handle to the ended store that something
+    /// still holds keeps its own state and reaches nobody else's. The
+    /// launch mob's store is the host's own and never ends here.
+    pub(crate) fn end_of_mob(&self, mob: &MobId) {
+        if self.host.launch_mob.get() == Some(mob) {
+            return;
+        }
+        self.host
+            .others
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(mob);
+    }
+
+    /// The console events of the mob `mob` begin anew: the store it had
+    /// goes, as with [`Self::end_of_mob`], and a new one takes its place in
+    /// the same step, so the mob is at no moment without console events of
+    /// its own with the host ([`Self::mobs_with_a_store`] names it
+    /// throughout). For a mob whose entry ends while the mob set is
+    /// building the mob again (a load that follows an unload). The launch
+    /// mob's store is the host's own and is left as it is.
+    pub(crate) fn renew_of_mob(&self, mob: &MobId) {
+        if self.host.launch_mob.get() == Some(mob) {
+            return;
+        }
+        self.host
+            .others
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                mob.clone(),
+                MobStore::new(EVENT_CHANNEL_DEFAULT_MEMBER_BUDGET),
+            );
+    }
+
+    /// Whether `other` is this very store: the same state, not an equal
+    /// one.
+    #[cfg(test)]
+    pub(crate) fn is_the_store(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.state, &other.state)
+    }
+
+    /// The mobs other than the launch mob that have a store, in id order:
+    /// the mobs the host serves beside its launch mob and has named here
+    /// (an entry, a door or a served request names a mob's store; nothing
+    /// names one for a mob a member made).
+    pub(crate) fn mobs_with_a_store(&self) -> Vec<MobId> {
+        self.host
+            .others
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .keys()
+            .cloned()
+            .collect()
     }
 
     /// Install the blob store live tool-result images are externalized into.
@@ -1005,6 +1162,21 @@ impl ConsoleEventStore {
         self.state.read().await.all_events.len()
     }
 
+    /// The console identity this store maps the runtime member id
+    /// `runtime_member_id` to, when one was registered for it.
+    #[cfg(test)]
+    pub(crate) async fn registered_runtime_identity(
+        &self,
+        runtime_member_id: &str,
+    ) -> Option<String> {
+        self.state
+            .read()
+            .await
+            .runtime_to_identity
+            .get(runtime_member_id)
+            .cloned()
+    }
+
     /// Snapshot known activity under one read lock. A present null phase is
     /// known quiet; an absent identity has no recorded activity observation.
     pub(crate) async fn response_phases_snapshot(&self) -> HashMap<String, Option<String>> {
@@ -1573,6 +1745,326 @@ mod tests {
             "text_complete",
             &json!({ "stop_reason": "end_turn" })
         ));
+    }
+
+    /// One store per mob. The launch mob's is the host's store itself; any
+    /// other mob's is its own, the same one each time it is asked for. An
+    /// identity of one name in two mobs keeps its own pending interactions,
+    /// response phase, labels and events, and a lifecycle record of one
+    /// leaves the other's as they were.
+    #[tokio::test]
+    async fn member_keyed_console_events_each_mob_has_a_store_of_its_own() {
+        let host = ConsoleEventStore::new();
+        let (second_mob, third_mob) = (MobId::from("second"), MobId::from("third"));
+        assert!(
+            host.of_mob(None).is_the_store(&host),
+            "the launch mob's store is the host's store itself"
+        );
+        let second = host.of_mob(Some(&second_mob));
+        assert!(
+            second.is_the_store(&host.of_mob(Some(&second_mob))),
+            "a mob's store is the same one each time"
+        );
+        assert!(!second.is_the_store(&host), "another mob has its own store");
+        assert!(
+            !second.is_the_store(&host.of_mob(Some(&third_mob))),
+            "two other mobs have two stores"
+        );
+
+        for (store, interaction) in [(&host, "of-the-launch"), (&second, "of-the-second")] {
+            store
+                .reserve_interaction_value(
+                    "desk",
+                    Some("rt:desk:1"),
+                    interaction,
+                    "row",
+                    json!("hi"),
+                )
+                .await
+                .expect("reserved");
+            store
+                .register_identity_labels(
+                    "a-mob",
+                    "desk",
+                    "rt:desk:1",
+                    BTreeMap::from([("mob".to_string(), interaction.to_string())]),
+                )
+                .await;
+        }
+        assert_eq!(
+            host.pending_interaction_ids("desk").await,
+            ["of-the-launch"]
+        );
+        assert_eq!(
+            second.pending_interaction_ids("desk").await,
+            ["of-the-second"]
+        );
+        assert_eq!(
+            host.identity_labels("a-mob", "desk").await,
+            Some(BTreeMap::from([(
+                "mob".to_string(),
+                "of-the-launch".to_string()
+            )]))
+        );
+
+        // A lifecycle record of the second mob's identity fails that mob's
+        // pending interaction and no other.
+        let before = host.replay_all(None).await.expect("replay").len();
+        second
+            .record_lifecycle("desk", "identity_retired", json!({}))
+            .await;
+        assert!(second.pending_interaction_ids("desk").await.is_empty());
+        assert_eq!(second.response_phase_for_identity("desk").await, None);
+        assert_eq!(
+            host.pending_interaction_ids("desk").await,
+            ["of-the-launch"]
+        );
+        assert_eq!(
+            host.response_phase_for_identity("desk").await.as_deref(),
+            Some("waiting")
+        );
+        assert_eq!(
+            host.replay_all(None).await.expect("replay").len(),
+            before,
+            "the launch mob's events gained none"
+        );
+        let of_the_second: Vec<String> = second
+            .replay_all(None)
+            .await
+            .expect("replay")
+            .into_iter()
+            .filter(|event| event.identity == "desk")
+            .map(|event| event.event_type)
+            .collect();
+        assert_eq!(of_the_second, ["interaction_failed", "identity_retired"]);
+
+        // And the other way.
+        host.record_lifecycle("desk", "identity_retired", json!({}))
+            .await;
+        assert!(host.pending_interaction_ids("desk").await.is_empty());
+        assert_eq!(
+            second.replay_all(None).await.expect("replay").len(),
+            3,
+            "the second mob's events gained none"
+        );
+    }
+
+    /// The queue of an identity's pending interactions has one bound in
+    /// every mob's store: the oldest reservation is evicted at the bound,
+    /// in the store that holds it.
+    #[tokio::test]
+    async fn member_keyed_console_events_a_queue_of_another_mob_has_the_same_bound() {
+        let host = ConsoleEventStore::new();
+        let second = host.of_mob(Some(&MobId::from("second")));
+        for index in 0..=PENDING_INTERACTION_CAP {
+            second
+                .reserve_interaction_value("desk", None, &format!("i-{index}"), "row", json!(""))
+                .await
+                .expect("reserved");
+        }
+        let pending = second.pending_interaction_ids("desk").await;
+        assert_eq!(pending.len(), PENDING_INTERACTION_CAP);
+        assert_eq!(pending.first().map(String::as_str), Some("i-1"));
+        assert!(host.pending_interaction_ids("desk").await.is_empty());
+    }
+
+    /// An identity of one name runs in two mobs. Each mob's store tracks its
+    /// own run, and a lifecycle record of one mob's identity ends that mob's
+    /// tracking alone: the other's active run, active interaction and
+    /// response phase stay as they were.
+    #[tokio::test]
+    async fn member_keyed_console_events_a_lifecycle_record_leaves_another_mobs_run_tracking() {
+        let host = ConsoleEventStore::new();
+        let second = host.of_mob(Some(&MobId::from("second")));
+        for (store, turn) in [
+            (&host, "turn-of-the-launch"),
+            (&second, "turn-of-the-second"),
+        ] {
+            store.register_runtime_identity("rt:desk:1", "desk").await;
+            store
+                .reserve_interaction_value(
+                    "desk",
+                    Some("rt:desk:1"),
+                    turn,
+                    "console",
+                    json!("a prompt"),
+                )
+                .await
+                .expect("reserved");
+            store
+                .project_unified_event(&agent_event_with_payload(
+                    &format!("start-{turn}"),
+                    "rt:desk:1",
+                    "run_started",
+                    json!({"input": {"kind": "content", "content": "a prompt"}}),
+                ))
+                .await;
+            store
+                .project_unified_event(&agent_event_with_payload(
+                    &format!("delta-{turn}"),
+                    "rt:desk:1",
+                    "text_delta",
+                    json!({"delta": "working"}),
+                ))
+                .await;
+            assert_eq!(
+                store.response_phase_for_identity("desk").await.as_deref(),
+                Some("generating"),
+                "{turn}"
+            );
+        }
+        let tracked = |store: &ConsoleEventStore| {
+            let store = store.clone();
+            async move {
+                let state = store.state.read().await;
+                (
+                    state.active_run_by_identity.contains_key("desk"),
+                    state.active_interaction_by_identity.get("desk").cloned(),
+                    state.pending_by_identity.get("desk").map(VecDeque::len),
+                )
+            }
+        };
+        let of_the_launch = tracked(&host).await;
+        let of_the_second = tracked(&second).await;
+        assert_ne!(of_the_launch, (false, None, None), "a run is tracked");
+        assert_ne!(of_the_second, (false, None, None), "a run is tracked");
+
+        second
+            .record_lifecycle("desk", "identity_reset", json!({}))
+            .await;
+        assert_eq!(tracked(&second).await, (false, None, None));
+        assert_eq!(tracked(&host).await, of_the_launch);
+        assert_eq!(
+            host.response_phase_for_identity("desk").await.as_deref(),
+            Some("generating")
+        );
+
+        // And the other way.
+        let second = host.of_mob(Some(&MobId::from("third")));
+        second.register_runtime_identity("rt:desk:1", "desk").await;
+        second
+            .reserve_interaction_value("desk", Some("rt:desk:1"), "turn", "console", json!("p"))
+            .await
+            .expect("reserved");
+        let of_the_third = tracked(&second).await;
+        host.record_lifecycle("desk", "identity_reset", json!({}))
+            .await;
+        assert_eq!(tracked(&host).await, (false, None, None));
+        assert_eq!(tracked(&second).await, of_the_third);
+    }
+
+    /// Whichever store of a host is asked, `of_mob` answers the same store:
+    /// asked of another mob's store, the launch mob's store is the host's,
+    /// a third mob's store is the one the host's store answers, and that
+    /// mob's own is itself. No store holds stores of its own beside the
+    /// host's.
+    #[test]
+    fn member_keyed_console_events_every_store_of_a_host_answers_the_same_stores() {
+        let host = ConsoleEventStore::new();
+        let (second_mob, third_mob) = (MobId::from("second"), MobId::from("third"));
+        let second = host.of_mob(Some(&second_mob));
+        assert!(
+            second.of_mob(None).is_the_store(&host),
+            "asked of another mob's store, the launch mob's store is the host's"
+        );
+        assert!(
+            second.of_mob(Some(&second_mob)).is_the_store(&second),
+            "asked of a mob's own store, that mob's store is itself"
+        );
+        assert!(
+            second
+                .of_mob(Some(&third_mob))
+                .is_the_store(&host.of_mob(Some(&third_mob))),
+            "asked of another mob's store, a third mob's store is the one the host answers"
+        );
+        assert_eq!(host.mobs_with_a_store(), [second_mob, third_mob]);
+        assert_eq!(second.mobs_with_a_store(), host.mobs_with_a_store());
+    }
+
+    /// The host's store knows its launch mob once it is told: asked for the
+    /// launch mob by its id, any store of the host answers the host's own
+    /// store, and the launch mob gets no second store. The first word on the
+    /// launch mob stands.
+    #[test]
+    fn member_keyed_console_events_the_launch_mob_by_its_id_is_the_hosts_own_store() {
+        let host = ConsoleEventStore::new();
+        let (launch_mob, second_mob) = (MobId::from("launch"), MobId::from("second"));
+        host.bind_launch_mob(&launch_mob);
+        let second = host.of_mob(Some(&second_mob));
+        for asked in [&host, &second] {
+            assert!(
+                asked.of_mob(Some(&launch_mob)).is_the_store(&host),
+                "the launch mob by its id is the host's own store"
+            );
+        }
+        assert_eq!(host.mobs_with_a_store(), std::slice::from_ref(&second_mob));
+        host.bind_launch_mob(&second_mob);
+        assert!(host.of_mob(Some(&launch_mob)).is_the_store(&host));
+        assert!(host.of_mob(Some(&second_mob)).is_the_store(&second));
+    }
+
+    /// The console events of a mob that begin anew are another store, and
+    /// the mob has console events of its own with the host throughout: the
+    /// earlier store keeps what it held and reaches nobody, the launch mob's
+    /// store is left as it is, and a mob that had none gets one.
+    #[tokio::test]
+    async fn member_keyed_console_events_a_mob_whose_events_begin_anew_stays_named() {
+        let host = ConsoleEventStore::new();
+        let (launch_mob, second_mob, third_mob) = (
+            MobId::from("launch"),
+            MobId::from("second"),
+            MobId::from("third"),
+        );
+        host.bind_launch_mob(&launch_mob);
+        let earlier = host.of_mob(Some(&second_mob));
+        earlier
+            .record_lifecycle("desk", "identity_respawned", json!({}))
+            .await;
+        host.renew_of_mob(&second_mob);
+        assert_eq!(host.mobs_with_a_store(), std::slice::from_ref(&second_mob));
+        let renewed = host.of_mob(Some(&second_mob));
+        assert!(
+            !renewed.is_the_store(&earlier),
+            "the mob's console events begin anew in another store"
+        );
+        assert_eq!(renewed.replay_all(None).await.map(|events| events.len()), {
+            let unspoken = ConsoleEventStore::new().of_mob(Some(&third_mob));
+            unspoken.replay_all(None).await.map(|events| events.len())
+        });
+        host.renew_of_mob(&launch_mob);
+        assert!(host.of_mob(Some(&launch_mob)).is_the_store(&host));
+        host.renew_of_mob(&third_mob);
+        assert_eq!(host.mobs_with_a_store(), [second_mob, third_mob]);
+    }
+
+    /// The store of another mob carries images as the host's store does: by
+    /// reference into the host's one blob store, whether the store was made
+    /// before the blob store was installed or after.
+    #[tokio::test]
+    async fn member_keyed_console_events_another_mobs_images_go_to_the_hosts_blob_store() {
+        let binary: Arc<dyn crate::blob_store::BinaryBlobStore> =
+            Arc::new(crate::blob_store::ObjectStoreBlobStore::memory());
+        let host = ConsoleEventStore::new();
+        let made_before = host.of_mob(Some(&MobId::from("second")));
+        host.install_blob_store(Arc::new(crate::blob_store::Base64BlobStoreAdapter::new(
+            Arc::clone(&binary),
+        )));
+        let made_after = host.of_mob(Some(&MobId::from("third")));
+        for store in [&made_before, &made_after] {
+            store.register_runtime_identity("rt:pilot:1", "pilot").await;
+            store
+                .project_unified_event(&screenshot_result("tool_result_received", "evt-received"))
+                .await;
+            let frames = tool_result_frames(store).await;
+            let image = &frame_of(&frames, "tool_result_received")["content"][1];
+            assert_eq!(image["source"], json!("blob"), "{frames:?}");
+            let blob_id = image["blob_id"].as_str().expect("blob id").to_string();
+            let stored = binary
+                .get_bytes(&meerkat_core::BlobId::new(blob_id))
+                .await
+                .expect("the image is in the host's blob store");
+            assert_eq!(stored.media_type, "image/png");
+        }
     }
 
     #[tokio::test]

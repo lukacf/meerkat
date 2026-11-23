@@ -68,6 +68,7 @@ use meerkat_live::{
     LiveWsTokenAuthority, live_input_chunk_from_wire,
 };
 use meerkat_runtime::MeerkatMachine;
+use meerkat_runtime::member_live::{MemberLiveError, MemberLiveHost};
 use meerkat_session::{PersistentSessionService, SessionAgentBuilder};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -560,7 +561,8 @@ pub fn attach_live<B: SessionAgentBuilder + 'static>(
         Arc::clone(&service),
         Arc::clone(&machine),
     ));
-    let dispatcher: Arc<dyn LiveToolDispatcher> = Arc::new(GatewayLiveToolDispatcher::new(service));
+    let dispatcher: Arc<dyn LiveToolDispatcher> =
+        Arc::new(GatewayLiveToolDispatcher::new(Arc::clone(&service)));
     let host = Arc::new(
         LiveAdapterHost::new(Arc::clone(&projection) as Arc<dyn LiveProjectionSink>)
             .with_live_tool_dispatcher(dispatcher),
@@ -581,7 +583,7 @@ pub fn attach_live<B: SessionAgentBuilder + 'static>(
     let session_factory = factory.build_openai_realtime_session_factory(
         Arc::clone(&config_source) as Arc<dyn RealtimeCurrentConfigSource>
     );
-    GatewayLiveContext {
+    let ctx = GatewayLiveContext {
         host,
         ws_state,
         #[cfg(feature = "openai-live")]
@@ -591,6 +593,102 @@ pub fn attach_live<B: SessionAgentBuilder + 'static>(
         ws_base_url,
         seed_max_chars,
         arbiter: Arc::new(live_owner_arbiter_for(&machine)),
+    };
+    // The runtime machine drops no session that still owns a live channel
+    // unless the host it runs in can close that channel. This composition
+    // is that host: a member retired or archived, a session destroyed, a
+    // mob torn down or the runtime stopped while a call is open closes the
+    // call instead of failing.
+    machine.set_member_live_host(live_disposal_cleanup_host(&ctx, &service, &machine));
+    ctx
+}
+
+/// The host's live cleanup for a member's disposal: what the runtime machine
+/// asks of its host when it is about to drop a session that still owns a
+/// live channel.
+///
+/// It serves a close of the named channel, whoever asks: the close the
+/// channel's own door runs (the channel's generated close on the live
+/// host). It serves nothing else: an open, an open under an execution
+/// identity, a status read, a control verb and the explicit close answer
+/// that this host has no live transport, as a machine without a member live
+/// host answers them.
+///
+/// The runtime's supervisor bridge calls the same close for a member that
+/// a mob on another host placed here. A Meta host takes no placed members,
+/// so here the disposal is the close's only caller.
+struct LiveDisposalCleanupHost<B: SessionAgentBuilder + 'static> {
+    host: ServiceMemberLiveHost<B>,
+}
+
+/// [`LiveDisposalCleanupHost`] over the live composition `ctx`.
+pub(crate) fn live_disposal_cleanup_host<B: SessionAgentBuilder + 'static>(
+    ctx: &GatewayLiveContext,
+    service: &Arc<PersistentSessionService<B>>,
+    machine: &Arc<MeerkatMachine>,
+) -> Arc<dyn MemberLiveHost> {
+    Arc::new(LiveDisposalCleanupHost {
+        host: shared_live_host(ctx, service, machine),
+    })
+}
+
+#[async_trait]
+impl<B: SessionAgentBuilder + 'static> MemberLiveHost for LiveDisposalCleanupHost<B> {
+    async fn open(
+        &self,
+        _session: &SessionId,
+        _turning_mode: Option<RealtimeTurningMode>,
+        _transport: Option<LiveOpenTransport>,
+    ) -> Result<meerkat_contracts::LiveOpenResult, MemberLiveError> {
+        Err(MemberLiveError::TransportUnavailable)
+    }
+
+    async fn open_with_execution_identity(
+        &self,
+        _session: &SessionId,
+        _execution_identity: &meerkat_contracts::WireLiveExecutionIdentityOverrideV1,
+        _turning_mode: Option<RealtimeTurningMode>,
+        _transport: Option<LiveOpenTransport>,
+    ) -> Result<meerkat_runtime::member_live::MemberLiveExecutionOpen, MemberLiveError> {
+        Err(MemberLiveError::TransportUnavailable)
+    }
+
+    /// A close of the named channel. The disposal calls it while it holds
+    /// the session's live lifecycle lease; the supervisor bridge's close of a
+    /// placed member's channel would call it too.
+    async fn close(
+        &self,
+        session: &SessionId,
+        channel_id: &str,
+    ) -> Result<meerkat_contracts::LiveCloseStatus, MemberLiveError> {
+        MemberLiveHost::close(&self.host, session, channel_id).await
+    }
+
+    /// The explicit close, the one a mob runs on its own member live host
+    /// for a member local to it, is not served.
+    async fn close_explicit(
+        &self,
+        _session: &SessionId,
+        _channel_id: &str,
+    ) -> Result<meerkat_contracts::LiveCloseStatus, MemberLiveError> {
+        Err(MemberLiveError::TransportUnavailable)
+    }
+
+    async fn status(
+        &self,
+        _session: &SessionId,
+        _channel_id: Option<String>,
+    ) -> Result<meerkat_runtime::member_live::MemberLiveStatus, MemberLiveError> {
+        Err(MemberLiveError::TransportUnavailable)
+    }
+
+    async fn control(
+        &self,
+        _session: &SessionId,
+        _channel_id: &str,
+        _verb: meerkat_contracts::BridgeLiveControlVerb,
+    ) -> Result<meerkat_contracts::BridgeLiveControlOutcome, MemberLiveError> {
+        Err(MemberLiveError::TransportUnavailable)
     }
 }
 

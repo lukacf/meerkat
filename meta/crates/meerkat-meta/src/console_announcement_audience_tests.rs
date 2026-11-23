@@ -31,6 +31,8 @@ const MOB: &str = SurfaceOwner::MOB;
 /// A console over an announcement owner, with Alice's private member.
 struct Scene {
     _state: tempfile::TempDir,
+    /// The runtime the console serves, with the private member on its roster.
+    runtime: MobRuntime,
     console: &'static str,
     enforced: bool,
     app: Router,
@@ -83,21 +85,34 @@ impl Scene {
 }
 
 /// An access configuration under which every signed-in caller may do
-/// everything to every agent and administer the runtime, with `root` its
-/// one admin.
+/// everything to every agent, administer the runtime and address every
+/// mob, with `root` its one admin. The mob the announcement owner of these
+/// rows names its members by is not the console's own mob, and some rows
+/// name a peer's mob and a mob a member created: a caller who works with
+/// a mob other than the console's own is given a separate allow rule that
+/// lists the mobs, and here it lists every mob.
 fn everyone_administers_the_runtime() -> AccessController {
     AccessController::new(crate::access::AccessControlConfig {
         enabled: true,
         admins: vec![ROOT.to_string()],
-        rules: vec![AccessRule {
-            id: "everyone-administers-the-runtime".to_string(),
-            subjects: vec!["*".to_string()],
-            actions: vec![
-                "agent.*".to_string(),
-                crate::access::ACTION_RUNTIME_ADMIN.to_string(),
-            ],
-            ..AccessRule::default()
-        }],
+        rules: vec![
+            AccessRule {
+                id: "everyone-administers-the-runtime".to_string(),
+                subjects: vec!["*".to_string()],
+                actions: vec![
+                    "agent.*".to_string(),
+                    crate::access::ACTION_RUNTIME_ADMIN.to_string(),
+                ],
+                ..AccessRule::default()
+            },
+            AccessRule {
+                id: "everyone-addresses-every-mob".to_string(),
+                subjects: vec!["*".to_string()],
+                actions: vec![crate::access::ACTION_AGENT_VIEW.to_string()],
+                mobs: vec!["*".to_string()],
+                ..AccessRule::default()
+            },
+        ],
         ..crate::access::AccessControlConfig::default()
     })
     .expect("access controller")
@@ -131,6 +146,7 @@ async fn scenes(row: &str) -> Result<Vec<Scene>, Box<dyn std::error::Error + Sen
         assert!(forked["error"].is_null(), "{console}: {forked:#}");
         scenes.push(Scene {
             _state: state,
+            runtime,
             console,
             enforced,
             app,
@@ -1159,6 +1175,49 @@ async fn a_private_members_announcement_reaches_no_other_persons_subscription() 
     Ok(())
 }
 
+/// What a member private to a person announced is read by key by its
+/// person, and reads as nothing announced for another person, while the
+/// member lives and after it has ended.
+#[tokio::test]
+async fn a_key_an_ended_private_member_announced_under_reads_as_nothing_announced() -> TestResult {
+    let mut scenes = scenes("ended-announcer").await?;
+    for scene in &mut scenes {
+        let (alice, bob) = (scene.alice.clone(), scene.bob.clone());
+        scene
+            .owner
+            .announce_as(PRIVATE, "k-private", "from the private member")
+            .await;
+        let read = json!({ "mob_id": MOB, "source_key": "k-private" });
+        let others = scene.expected(&bob, "get", read.clone()).await;
+        scene.check(others["announcement"].is_null(), || {
+            format!(
+                "while it lives the key reads {}",
+                brief(&others.to_string())
+            )
+        });
+
+        scene
+            .runtime
+            .handle()
+            .retire(meerkat_mob::AgentIdentity::from(PRIVATE))
+            .await?;
+        let others = scene.expected(&bob, "get", read.clone()).await;
+        scene.check(others["announcement"].is_null(), || {
+            format!(
+                "after it ended the key reads {}",
+                brief(&others.to_string())
+            )
+        });
+        let owners = scene.served(&alice, "get", read).await;
+        assert!(
+            owners["announcement"].is_object(),
+            "its person still reads it: {owners:#}"
+        );
+    }
+    nothing_found(scenes);
+    Ok(())
+}
+
 /// A role template's change lists its children: none of a member its
 /// caller may not see. A caller who may see the member is listed its child.
 #[tokio::test]
@@ -1942,4 +2001,877 @@ async fn a_host_lists_and_cancels_a_subscription_and_nothing_more_is_delivered()
     println!("subscriptions/list: {listed}");
     println!("subscriptions/cancel: {cancelled}");
     println!("announce: {again}");
+}
+
+/// An access configuration under which every signed-in caller may do
+/// everything to every agent and administer the runtime, and may address
+/// the announcement owner's own mob ([`MOB`]) and no other mob: a separate
+/// allow rule lists that mob, as the upgrade step for a caller who works
+/// with another mob says. `root` is its one admin, who may address every
+/// mob.
+fn everyone_addresses_the_owners_mob_alone() -> AccessController {
+    let everyone = |id: &str, actions: &[&str], mobs: &[&str]| AccessRule {
+        id: id.to_string(),
+        subjects: vec!["*".to_string()],
+        actions: actions.iter().map(|action| (*action).to_string()).collect(),
+        mobs: mobs.iter().map(|mob| (*mob).to_string()).collect(),
+        ..AccessRule::default()
+    };
+    AccessController::new(crate::access::AccessControlConfig {
+        enabled: true,
+        admins: vec![ROOT.to_string()],
+        rules: vec![
+            everyone(
+                "everyone-administers-the-runtime",
+                &["agent.*", crate::access::ACTION_RUNTIME_ADMIN],
+                &[],
+            ),
+            everyone("everyone-addresses-the-owners-mob", &["agent.view"], &[MOB]),
+        ],
+        ..crate::access::AccessControlConfig::default()
+    })
+    .expect("access controller")
+}
+
+/// Every row of the listing `verb` (its rows under `key`) as the holder of
+/// `bearer` pages it, `limit` rows at a time: each page is asked after the
+/// last row of the page before, until a page is not full.
+async fn paged(app: &Router, bearer: &str, verb: &str, key: &str, limit: usize) -> Vec<Vec<Value>> {
+    let mut pages: Vec<Vec<Value>> = Vec::new();
+    loop {
+        let mut params = json!({ "limit": limit });
+        if let Some(last) = pages.last().and_then(|page| page.last()) {
+            params["after"] = last["id"].clone();
+        }
+        let answer = console_rpc_as(
+            app,
+            Some(bearer),
+            &format!("meta/mob_announcements/{verb}"),
+            params,
+        )
+        .await;
+        assert!(answer["error"].is_null(), "{verb}: {answer:#}");
+        let page = answer["result"][key]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let full = page.len() == limit;
+        if !page.is_empty() {
+            pages.push(page);
+        }
+        if !full || pages.len() > 16 {
+            return pages;
+        }
+    }
+}
+
+/// A caller who may not address a second mob is listed no record of a
+/// member of that mob, by a listing that names no mob: neither the member's
+/// subscriptions nor its deliveries. The method itself leaves those rows
+/// out, so they take no place on a page: paged two at a time (and one at a
+/// time), the caller is listed exactly the rows of the mob it may address,
+/// in full pages, and the row a page ends on, which the next page is asked
+/// after, is the same as if the other mob's rows were not there. An admin,
+/// who may address every mob, is listed every row.
+#[tokio::test]
+async fn a_caller_is_listed_no_record_of_a_member_of_a_mob_it_may_not_address() -> TestResult {
+    const BUILDER: &str = "builder";
+    let (_state, runtime) = runtime("announcement-audience-second-mob").await?;
+    seeded_member(&runtime, "worker", SHARED, &[]).await?;
+    let owner = SurfaceOwner::serving(&[SHARED]);
+    owner.seat_in_hosted_mob(BUILDER);
+    let state_of_console =
+        enforced_console(&runtime, Some(everyone_addresses_the_owners_mob_alone()));
+    assert!(
+        state_of_console
+            .mob_announcements
+            .set(owner.service())
+            .is_ok(),
+        "the console takes the owner"
+    );
+    let app = console_json_router_with_state(state_of_console);
+    let (bob, root) = (bearer(bob_claims()), bearer(root_claims()));
+    let of_the_second_mob = json!({ "mob_id": SurfaceOwner::HOSTED_MOB, "identity": BUILDER });
+
+    // The admin files the records: three subscriptions of the member of the
+    // owner's mob and, between them in id order, two of the member of the
+    // second mob; then one announcement both members capture.
+    for (id, second) in [
+        ("s-1", false),
+        ("s-2", true),
+        ("s-3", false),
+        ("s-4", true),
+        ("s-5", false),
+    ] {
+        let mut request = subscription(id, SHARED);
+        if second {
+            request["member"] = of_the_second_mob.clone();
+        }
+        let put = console_rpc_as(
+            &app,
+            Some(&root),
+            "meta/mob_announcements/subscriptions/put",
+            request,
+        )
+        .await;
+        assert!(put["error"].is_null(), "{id}: {put:#}");
+    }
+    let announced = console_rpc_as(
+        &app,
+        Some(&root),
+        "meta/mob_announcements/announce",
+        news("k-1"),
+    )
+    .await;
+    assert!(announced["error"].is_null(), "{announced:#}");
+    owner.round_at(100_000).await;
+
+    let of_the_owners_mob = |row: &Value| row["member"]["mob_id"] == json!(MOB);
+    let ids = |rows: &[Value]| -> Vec<String> {
+        rows.iter()
+            .filter_map(|row| row["id"].as_str().map(str::to_string))
+            .collect()
+    };
+    let mut found = Vec::new();
+    for (verb, key) in [
+        ("subscriptions/list", "subscriptions"),
+        ("deliveries/list", "deliveries"),
+    ] {
+        let every: Vec<Value> = paged(&app, &root, verb, key, 100)
+            .await
+            .into_iter()
+            .flatten()
+            .collect();
+        assert!(
+            every.iter().any(|row| row["member"] == of_the_second_mob),
+            "{verb}: the admin is listed a record of the second mob's member: {every:#?}"
+        );
+        let addressable: Vec<Value> = every
+            .iter()
+            .filter(|row| of_the_owners_mob(row))
+            .cloned()
+            .collect();
+        assert!(
+            !addressable.is_empty(),
+            "{verb}: the admin is listed a record of the owner's mob: {every:#?}"
+        );
+        for limit in [2, 1] {
+            let pages = paged(&app, &bob, verb, key, limit).await;
+            let listed: Vec<Value> = pages.iter().flatten().cloned().collect();
+            if ids(&listed) != ids(&addressable) || !listed.iter().all(&of_the_owners_mob) {
+                found.push(format!(
+                    "{verb}, {limit} at a time: the caller is listed {:?}, the rows of the mob \
+                     it may address are {:?}",
+                    ids(&listed),
+                    ids(&addressable)
+                ));
+            }
+            let full = pages.iter().rev().skip(1).all(|page| page.len() == limit);
+            if !full {
+                found.push(format!(
+                    "{verb}, {limit} at a time: a page before the last is not full: {:?}",
+                    pages.iter().map(Vec::len).collect::<Vec<_>>()
+                ));
+            }
+        }
+    }
+    assert!(found.is_empty(), "{found:#?}");
+    Ok(())
+}
+
+/// `verb` of the mob announcement methods as the holder of `bearer`, which
+/// must succeed: its result.
+async fn served(app: &Router, bearer: &str, verb: &str, params: Value) -> Value {
+    let answer = console_rpc_as(
+        app,
+        Some(bearer),
+        &format!("meta/mob_announcements/{verb}"),
+        params,
+    )
+    .await;
+    assert!(answer["error"].is_null(), "{verb}: {answer:#}");
+    answer["result"].clone()
+}
+
+/// A subscription a caller is shown names no mob the caller may not
+/// address: not among the mobs it captures from, not among the mobs it
+/// holds a frontier for, not among the mobs that ended. The method itself
+/// leaves those entries out, in every answer that carries the subscription
+/// (read by its id, listed, and answered by a pause and a resume), so the
+/// caller reads it as it reads a subscription that never named the mob, and
+/// the listing holds the same rows in the same order. An admin, who may
+/// address every mob, reads every entry.
+#[tokio::test]
+async fn a_shown_subscription_names_no_mob_its_caller_may_not_address() -> TestResult {
+    const SECOND: &str = SurfaceOwner::HOSTED_MOB;
+    let (_state, runtime) = runtime("announcement-audience-shown-mobs").await?;
+    seeded_member(&runtime, "worker", SHARED, &[]).await?;
+    let owner = SurfaceOwner::serving(&[SHARED]);
+    let state_of_console =
+        enforced_console(&runtime, Some(everyone_addresses_the_owners_mob_alone()));
+    assert!(
+        state_of_console
+            .mob_announcements
+            .set(owner.service())
+            .is_ok(),
+        "the console takes the owner"
+    );
+    let app = console_json_router_with_state(state_of_console);
+    let (bob, root) = (bearer(bob_claims()), bearer(root_claims()));
+
+    // The admin announces into both mobs, so each has a sequence a frontier
+    // can name, then files two subscriptions of the one member: one that
+    // captures from both mobs, one from the owner's mob alone.
+    let mut in_the_second_mob = news("k-0");
+    in_the_second_mob["mob_id"] = json!(SECOND);
+    served(&app, &root, "announce", in_the_second_mob).await;
+    served(&app, &root, "announce", news("k-1")).await;
+    let mut of_both_mobs = subscription("s-both", SHARED);
+    of_both_mobs["mobs"] = json!([MOB, SECOND]);
+    served(&app, &root, "subscriptions/put", of_both_mobs).await;
+    served(
+        &app,
+        &root,
+        "subscriptions/put",
+        subscription("s-own", SHARED),
+    )
+    .await;
+
+    let by_id = |id: &str| json!({ "subscription_id": id });
+    let change = |verb: &str, id: &str, revision: &Value| {
+        json!({
+            "operation_id": format!("{verb}-{id}"),
+            "subscription_id": id,
+            "expected_revision": revision,
+        })
+    };
+    // The three places of a subscription that name mobs.
+    let mobs_named = |row: &Value| {
+        json!({
+            "mobs": row["selector"]["mobs"],
+            "frontier": row["frontier"],
+            "ended_mobs": row.get("ended_mobs").cloned().unwrap_or_else(|| json!([])),
+        })
+    };
+    let names_the_second_mob =
+        |answer: &Value| answer.to_string().contains(&format!("\"{SECOND}\""));
+    let mut found = Vec::new();
+
+    // What the admin reads: every entry.
+    let whole = served(&app, &root, "subscriptions/get", by_id("s-both")).await;
+    assert!(
+        whole["subscription"]["selector"]["mobs"]
+            .as_array()
+            .is_some_and(|mobs| mobs.contains(&json!(SECOND))),
+        "the admin reads the second mob among the mobs it captures from: {whole:#}"
+    );
+    assert!(
+        whole["subscription"]["frontier"].get(SECOND).is_some(),
+        "the admin reads a frontier for the second mob: {whole:#}"
+    );
+    let own = served(&app, &bob, "subscriptions/get", by_id("s-own")).await;
+    let as_never_named = mobs_named(&own["subscription"]);
+    assert_eq!(
+        as_never_named["mobs"],
+        json!([MOB]),
+        "the caller reads the mob it may address: {own:#}"
+    );
+
+    // Read by its id.
+    let read = served(&app, &bob, "subscriptions/get", by_id("s-both")).await;
+    if names_the_second_mob(&read) || mobs_named(&read["subscription"]) != as_never_named {
+        found.push(format!("subscriptions/get: {}", brief(&read.to_string())));
+    }
+
+    // Listed: the same rows in the same order as the admin's, none naming
+    // the second mob.
+    let ids = |rows: &Value| -> Vec<String> {
+        rows.as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|row| row["id"].as_str().map(str::to_string))
+            .collect()
+    };
+    let every = served(&app, &root, "subscriptions/list", json!({})).await;
+    let listed = served(&app, &bob, "subscriptions/list", json!({})).await;
+    assert_eq!(
+        ids(&every["subscriptions"]),
+        ["s-both", "s-own"],
+        "the admin is listed both: {every:#}"
+    );
+    if ids(&listed["subscriptions"]) != ids(&every["subscriptions"]) {
+        found.push(format!(
+            "subscriptions/list: the caller is listed {:?}",
+            ids(&listed["subscriptions"])
+        ));
+    }
+    if names_the_second_mob(&listed) {
+        found.push(format!(
+            "subscriptions/list: {}",
+            brief(&listed.to_string())
+        ));
+    }
+
+    // Answered by a pause and a resume.
+    let mut revision = read["subscription"]["revision"].clone();
+    for verb in ["pause", "resume"] {
+        let changed = served(
+            &app,
+            &bob,
+            &format!("subscriptions/{verb}"),
+            change(verb, "s-both", &revision),
+        )
+        .await;
+        revision = changed["subscription"]["revision"].clone();
+        if names_the_second_mob(&changed) || mobs_named(&changed["subscription"]) != as_never_named
+        {
+            found.push(format!(
+                "subscriptions/{verb}: {}",
+                brief(&changed.to_string())
+            ));
+        }
+    }
+
+    // The second mob is destroyed: it leaves the selector and is kept among
+    // the mobs that ended, which the admin reads and the caller does not.
+    owner.destroy_hosted_mob();
+    owner
+        .service()
+        .reconcile_mobs()
+        .await
+        .expect("the destroyed mob is reconciled");
+    let whole = served(&app, &root, "subscriptions/get", by_id("s-both")).await;
+    assert!(
+        whole["subscription"]["ended_mobs"]
+            .as_array()
+            .is_some_and(|mobs| mobs.contains(&json!(SECOND))),
+        "the admin reads the second mob among the mobs that ended: {whole:#}"
+    );
+    let read = served(&app, &bob, "subscriptions/get", by_id("s-both")).await;
+    if names_the_second_mob(&read) || mobs_named(&read["subscription"]) != as_never_named {
+        found.push(format!(
+            "subscriptions/get after the mob ended: {}",
+            brief(&read.to_string())
+        ));
+    }
+    assert!(found.is_empty(), "{found:#?}");
+    Ok(())
+}
+
+/// A role template of a mob its caller may not address is answered as an id
+/// nobody holds, read or changed, and stays as it was; an administrator
+/// reads and changes it. A role template of a mob the caller may address
+/// is read and changed by that caller, and names no other mob it may not
+/// address among the mobs its children capture from.
+#[tokio::test]
+async fn a_role_template_of_a_mob_its_caller_may_not_address_is_answered_as_an_id_nobody_holds()
+-> TestResult {
+    const SECOND: &str = SurfaceOwner::HOSTED_MOB;
+    const BUILDER: &str = "builder";
+    let (_state, runtime) = runtime("announcement-audience-template-mobs").await?;
+    seeded_member(&runtime, "worker", SHARED, &[]).await?;
+    let owner = SurfaceOwner::serving(&[SHARED]);
+    owner.seat_in_hosted_mob(BUILDER);
+    owner.give_role(SHARED, "crew");
+    let state_of_console =
+        enforced_console(&runtime, Some(everyone_addresses_the_owners_mob_alone()));
+    assert!(
+        state_of_console
+            .mob_announcements
+            .set(owner.service())
+            .is_ok(),
+        "the console takes the owner"
+    );
+    let app = console_json_router_with_state(state_of_console);
+    let (bob, root) = (bearer(bob_claims()), bearer(root_claims()));
+    let call = |bearer: String, verb: String, params: Value| {
+        let app = app.clone();
+        async move {
+            console_rpc_as(
+                &app,
+                Some(&bearer),
+                &format!("meta/mob_announcements/{verb}"),
+                params,
+            )
+            .await
+        }
+    };
+    let template = |id: &str, of: &str, mobs: &[&str]| {
+        json!({
+            "operation_id": format!("put-{id}"),
+            "subscription_id": id,
+            "members": { "mob_id": of, "role": "crew" },
+            "topics": ["news"],
+            "mobs": mobs,
+        })
+    };
+    served(
+        &app,
+        &root,
+        "subscriptions/put",
+        template("builds-news", SECOND, &[SECOND]),
+    )
+    .await;
+    served(
+        &app,
+        &root,
+        "subscriptions/put",
+        template("crew-news", MOB, &[MOB, SECOND]),
+    )
+    .await;
+    let read = |id: &str| json!({ "subscription_id": id });
+    // The control: an administrator reads the template of the second mob
+    // and changes it.
+    let made = served(&app, &root, "subscriptions/get", read("builds-news")).await;
+    assert_eq!(
+        made["template"]["members"]["mob_id"],
+        json!(SECOND),
+        "an administrator reads the template: {made:#}"
+    );
+    let mut revision = made["template"]["revision"].clone();
+    for (verb, state) in [("pause", "paused"), ("resume", "active")] {
+        let changed = served(
+            &app,
+            &root,
+            &format!("subscriptions/{verb}"),
+            json!({
+                "operation_id": format!("{verb}-builds-as-an-administrator"),
+                "subscription_id": "builds-news",
+                "expected_revision": revision,
+            }),
+        )
+        .await;
+        assert_eq!(
+            changed["template"]["state"],
+            json!(state),
+            "an administrator changes it: {changed:#}"
+        );
+        revision = changed["template"]["revision"].clone();
+    }
+    let before = served(&app, &root, "subscriptions/get", read("builds-news")).await;
+
+    let mut found = Vec::new();
+    for verb in ["get", "pause", "resume", "cancel"] {
+        let request = |id: &str| match verb {
+            "get" => json!({ "subscription_id": id }),
+            _ => json!({
+                "operation_id": format!("{verb}-{id}"),
+                "subscription_id": id,
+                "expected_revision": revision,
+            }),
+        };
+        let method = format!("subscriptions/{verb}");
+        let hidden = masked(
+            &call(bob.clone(), method.clone(), request("builds-news")).await,
+            &["builds-news"],
+        );
+        let absent = masked(
+            &call(bob.clone(), method.clone(), request("nobody-news")).await,
+            &["nobody-news"],
+        );
+        if hidden != absent {
+            found.push(format!(
+                "{method} tells the two ids apart: {} | {}",
+                brief(&hidden),
+                brief(&absent)
+            ));
+        }
+        let after = served(&app, &root, "subscriptions/get", read("builds-news")).await;
+        if after != before {
+            found.push(format!(
+                "{method} changed the template: {}",
+                brief(&after.to_string())
+            ));
+        }
+    }
+
+    // A template of the mob the caller may address: read and changed by the
+    // caller, and it names that mob alone.
+    let names_the_second_mob =
+        |answer: &Value| answer.to_string().contains(&format!("\"{SECOND}\""));
+    let whole = served(&app, &root, "subscriptions/get", read("crew-news")).await;
+    assert!(
+        whole["template"]["mobs"]
+            .as_array()
+            .is_some_and(|mobs| mobs.contains(&json!(MOB)) && mobs.contains(&json!(SECOND))),
+        "an administrator reads every mob: {whole:#}"
+    );
+    let shown = served(&app, &bob, "subscriptions/get", read("crew-news")).await;
+    if shown["template"]["mobs"] != json!([MOB]) || names_the_second_mob(&shown) {
+        found.push(format!("subscriptions/get: {}", brief(&shown.to_string())));
+    }
+    let paused = served(
+        &app,
+        &bob,
+        "subscriptions/pause",
+        json!({
+            "operation_id": "pause-crew",
+            "subscription_id": "crew-news",
+            "expected_revision": shown["template"]["revision"],
+        }),
+    )
+    .await;
+    if paused["template"]["mobs"] != json!([MOB]) || names_the_second_mob(&paused) {
+        found.push(format!(
+            "subscriptions/pause: {}",
+            brief(&paused.to_string())
+        ));
+    }
+
+    assert!(found.is_empty(), "{found:#?}");
+    Ok(())
+}
+
+/// An escalation about a source of a mob its caller may not address is not
+/// listed to that caller, open or as an event; an escalation about a source
+/// of a mob the caller may address is, and the events are read on from the
+/// same place. An administrator is listed both.
+#[tokio::test]
+async fn an_escalation_about_a_source_of_a_mob_its_caller_may_not_address_is_not_listed()
+-> TestResult {
+    const SECOND: &str = SurfaceOwner::HOSTED_MOB;
+    const BUILDER: &str = "builder";
+    let (_state, runtime) = runtime("announcement-audience-source-mobs").await?;
+    seeded_member(&runtime, "worker", SHARED, &[]).await?;
+    let owner = SurfaceOwner::serving(&[SHARED]);
+    owner.seat_in_hosted_mob(BUILDER);
+    let state_of_console =
+        enforced_console(&runtime, Some(everyone_addresses_the_owners_mob_alone()));
+    assert!(
+        state_of_console
+            .mob_announcements
+            .set(owner.service())
+            .is_ok(),
+        "the console takes the owner"
+    );
+    let app = console_json_router_with_state(state_of_console);
+    let (bob, root) = (bearer(bob_claims()), bearer(root_claims()));
+
+    // A source in each mob, neither ever collected, each stale after a
+    // minute without an advance.
+    let soon_stale = json!({ "stale_after_ms": 60_000 });
+    let mut of_the_owners_mob = source("feed", &[SHARED]);
+    of_the_owners_mob["health_policy"] = soon_stale.clone();
+    served(&app, &root, "sources/put", of_the_owners_mob).await;
+    let mut of_the_second_mob = source("feed-2", &[]);
+    of_the_second_mob["mob_id"] = json!(SECOND);
+    of_the_second_mob["audience"] = json!([{
+        "kind": "member",
+        "member": { "mob_id": SECOND, "identity": BUILDER },
+    }]);
+    of_the_second_mob["health_policy"] = soon_stale;
+    served(&app, &root, "sources/put", of_the_second_mob).await;
+    owner.round_at(10_000_000).await;
+    owner.round_at(10_000_000 + 61 * 60_000).await;
+
+    let subject_of =
+        |mob: &str, id: &str| json!({ "kind": "source", "mob_id": mob, "source_id": id });
+    let subjects = |answer: &Value, key: &str| -> Vec<Value> {
+        answer[key]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|row| row["subject"].clone())
+            .collect()
+    };
+    let mut found = Vec::new();
+    for (params, key) in [
+        (json!({ "open": true }), "escalations"),
+        (json!({}), "events"),
+    ] {
+        let every = served(&app, &root, "escalations/list", params.clone()).await;
+        let all = subjects(&every, key);
+        assert!(
+            all.contains(&subject_of(SECOND, "feed-2")) && all.contains(&subject_of(MOB, "feed")),
+            "{params}: an administrator is listed both sources' escalations: {every:#}"
+        );
+        let shown = served(&app, &bob, "escalations/list", params.clone()).await;
+        let seen = subjects(&shown, key);
+        if seen.contains(&subject_of(SECOND, "feed-2")) || shown.to_string().contains("feed-2") {
+            found.push(format!(
+                "{params}: the caller is listed {}",
+                brief(&shown.to_string())
+            ));
+        }
+        if !seen.contains(&subject_of(MOB, "feed")) {
+            found.push(format!(
+                "{params}: the caller lost the source of the mob it may address"
+            ));
+        }
+        if shown["next"] != every["next"] {
+            found.push(format!(
+                "{params}: the caller reads on from {}, an administrator from {}",
+                shown["next"], every["next"]
+            ));
+        }
+    }
+    assert!(found.is_empty(), "{found:#?}");
+    Ok(())
+}
+
+/// An announcement a caller is shown names no cause that is an announcement
+/// of a mob the caller may not address: read by its key, and in the answer
+/// that its key is taken. An administrator reads every cause.
+#[tokio::test]
+async fn a_shown_announcement_names_no_cause_in_a_mob_its_caller_may_not_address() -> TestResult {
+    const SECOND: &str = SurfaceOwner::HOSTED_MOB;
+    let (_state, runtime) = runtime("announcement-audience-cause-mobs").await?;
+    seeded_member(&runtime, "worker", SHARED, &[]).await?;
+    let owner = SurfaceOwner::serving(&[SHARED]);
+    let state_of_console =
+        enforced_console(&runtime, Some(everyone_addresses_the_owners_mob_alone()));
+    assert!(
+        state_of_console
+            .mob_announcements
+            .set(owner.service())
+            .is_ok(),
+        "the console takes the owner"
+    );
+    let app = console_json_router_with_state(state_of_console);
+    let (bob, root) = (bearer(bob_claims()), bearer(root_claims()));
+
+    let mut in_the_second_mob = news("k-0");
+    in_the_second_mob["mob_id"] = json!(SECOND);
+    served(&app, &root, "announce", in_the_second_mob).await;
+    served(&app, &root, "announce", news("k-1")).await;
+    let mut caused = news("k-2");
+    caused["causes"] = json!([
+        { "mob_id": SECOND, "source_key": "k-0" },
+        { "mob_id": MOB, "source_key": "k-1" },
+    ]);
+    served(&app, &root, "announce", caused).await;
+
+    let read = json!({ "mob_id": MOB, "source_key": "k-2" });
+    let of_the_owners_mob = json!([{ "mob_id": MOB, "source_key": "k-1" }]);
+    let whole = served(&app, &root, "get", read.clone()).await;
+    assert_eq!(
+        whole["announcement"]["causes"].as_array().map(Vec::len),
+        Some(2),
+        "an administrator reads both causes: {whole:#}"
+    );
+    let mut found = Vec::new();
+    let shown = served(&app, &bob, "get", read).await;
+    if shown["announcement"]["causes"] != of_the_owners_mob {
+        found.push(format!("get: {}", brief(&shown.to_string())));
+    }
+    let mut other = news("k-2");
+    other["body"] = json!("something else");
+    let taken = console_rpc_as(&app, Some(&bob), "meta/mob_announcements/announce", other).await;
+    assert!(
+        taken["error"]["data"]["existing"].is_object(),
+        "the key is answered as taken, with the announcement: {taken:#}"
+    );
+    if taken["error"]["data"]["existing"]["causes"] != of_the_owners_mob {
+        found.push(format!("announce: {}", brief(&taken.to_string())));
+    }
+    assert!(found.is_empty(), "{found:#?}");
+    Ok(())
+}
+
+/// A member of a mob held here that no member created is judged as a member
+/// of that mob, not as the agent of the console's own mob that holds its
+/// name. Where it is private to another person in its own mob, a caller who
+/// may address that mob is listed none of its records, and each method that
+/// names it, or a record of it, answers as for a name or an id nobody
+/// holds, though every caller may see the member of that name in the
+/// console's own mob. A member of such a mob that the console holds no
+/// attributes of is withheld the same way from a caller the console keeps
+/// apart from other people. Nothing such a caller asks changes a record of
+/// either, and an admin is listed every record.
+#[tokio::test]
+async fn a_member_of_a_mob_no_member_created_is_judged_in_its_own_mob() -> TestResult {
+    const SERVED: &str = SurfaceOwner::SERVED_MOB;
+    const GHOST: &str = "ghost";
+    let (_state, runtime) = runtime("announcement-audience-served-mob").await?;
+    seeded_member(&runtime, "worker", SHARED, &[]).await?;
+    let owner = SurfaceOwner::serving(&[SHARED]);
+    owner.seat_in_served_mob(SHARED);
+    owner.seat_in_served_mob(GHOST);
+    // Every signed-in caller may address every mob. In the served mob the
+    // member under the shared member's name is private to another person;
+    // of the other member there the console holds no attributes.
+    let access = everyone_administers_the_runtime();
+    access.record_agent_attributes_in(
+        &meerkat_mob::MobId::from(SERVED),
+        crate::access::AgentResourceAttributes {
+            identity: SHARED.to_string(),
+            agent_id: None,
+            role: Some("worker".to_string()),
+            labels: std::collections::BTreeMap::from([(
+                crate::access::PRIVATE_TO_LABEL.to_string(),
+                "person:dana".to_string(),
+            )]),
+        },
+    );
+    let state_of_console = enforced_console(&runtime, Some(access));
+    assert!(
+        state_of_console
+            .mob_announcements
+            .set(owner.service())
+            .is_ok(),
+        "the console takes the owner"
+    );
+    let app = console_json_router_with_state(state_of_console);
+    let (bob, root) = (bearer(bob_claims()), bearer(root_claims()));
+    let of_served = |identity: &str| json!({ "mob_id": SERVED, "identity": identity });
+
+    // The admin files the records: one subscription of the member of the
+    // owner's mob, one of each member of the served mob; then one
+    // announcement all three capture.
+    for (id, of) in [
+        ("s-1", member(SHARED)),
+        ("s-2", of_served(SHARED)),
+        ("s-3", of_served(GHOST)),
+    ] {
+        let mut request = subscription(id, SHARED);
+        request["member"] = of;
+        let put = console_rpc_as(
+            &app,
+            Some(&root),
+            "meta/mob_announcements/subscriptions/put",
+            request,
+        )
+        .await;
+        assert!(put["error"].is_null(), "{id}: {put:#}");
+    }
+    let announced = console_rpc_as(
+        &app,
+        Some(&root),
+        "meta/mob_announcements/announce",
+        news("k-1"),
+    )
+    .await;
+    assert!(announced["error"].is_null(), "{announced:#}");
+    owner.round_at(100_000).await;
+
+    let in_served = |row: &Value| row["member"]["mob_id"] == json!(SERVED);
+    let mut found = Vec::new();
+    for (verb, key) in [
+        ("subscriptions/list", "subscriptions"),
+        ("deliveries/list", "deliveries"),
+    ] {
+        let every: Vec<Value> = paged(&app, &root, verb, key, 100)
+            .await
+            .into_iter()
+            .flatten()
+            .collect();
+        assert_eq!(
+            every.iter().filter(|row| in_served(row)).count(),
+            2,
+            "{verb}: the admin is listed the records of both members of the served mob: {every:#?}"
+        );
+        let listed: Vec<Value> = paged(&app, &bob, verb, key, 100)
+            .await
+            .into_iter()
+            .flatten()
+            .collect();
+        if listed.is_empty() || listed.iter().any(in_served) {
+            found.push(format!(
+                "{verb}: the caller is listed {}",
+                brief(&json!(listed).to_string())
+            ));
+        }
+    }
+
+    // Each method that names such a member, or a record of it, answers as
+    // for a name and an id nobody holds.
+    let requests = |identity: &str, id: &str| {
+        vec![
+            ("members/get", json!({ "member": of_served(identity) })),
+            (
+                "subscriptions/list",
+                json!({ "member": of_served(identity) }),
+            ),
+            ("deliveries/list", json!({ "member": of_served(identity) })),
+            ("subscriptions/get", json!({ "subscription_id": id })),
+            (
+                "subscriptions/cancel",
+                json!({
+                    "operation_id": format!("cancel-{id}"),
+                    "subscription_id": id,
+                    "expected_revision": 1,
+                }),
+            ),
+        ]
+    };
+    for (name, id) in [(SHARED, "s-2"), (GHOST, "s-3")] {
+        for ((verb, hidden), (_, absent)) in requests(name, id)
+            .into_iter()
+            .zip(requests(NOBODY, "s-nobody"))
+        {
+            let method = format!("meta/mob_announcements/{verb}");
+            let hidden = masked(
+                &console_rpc_as(&app, Some(&bob), &method, hidden).await,
+                &[id, name],
+            );
+            let absent = masked(
+                &console_rpc_as(&app, Some(&bob), &method, absent).await,
+                &["s-nobody", NOBODY],
+            );
+            if hidden != absent {
+                found.push(format!(
+                    "{verb} tells {name} of the served mob from a name nobody holds: {} | {}",
+                    brief(&hidden),
+                    brief(&absent)
+                ));
+            }
+        }
+        let read = served(
+            &app,
+            &root,
+            "subscriptions/get",
+            json!({ "subscription_id": id }),
+        )
+        .await;
+        if read["subscription"]["state"] != json!("active") {
+            found.push(format!("{id} was changed: {}", brief(&read.to_string())));
+        }
+    }
+    assert!(found.is_empty(), "{found:#?}");
+    Ok(())
+}
+
+/// A mob held here whose origin cannot be read leaves every other mob
+/// judged as the records show it: a member of a mob below the console's own
+/// mob is still judged by the names of the console's own mob, so its owner
+/// files and reads its record, and another person is answered as for an id
+/// nobody holds.
+#[tokio::test]
+async fn a_mob_whose_origin_does_not_read_leaves_the_other_mobs_judged_as_before() -> TestResult {
+    let mut scenes = scenes("origin-unread").await?;
+    for scene in &mut scenes {
+        let (alice, bob) = (scene.alice.clone(), scene.bob.clone());
+        scene.owner.seat_in_hosted_mob(PRIVATE);
+        scene.owner.origin_does_not_read(SurfaceOwner::SERVED_MOB);
+        let mut request = subscription("sub-hosted", PRIVATE);
+        request["member"] = json!({ "mob_id": SurfaceOwner::HOSTED_MOB, "identity": PRIVATE });
+        scene.expected(&alice, "subscriptions/put", request).await;
+        let read = json!({ "subscription_id": "sub-hosted" });
+        let owners = scene
+            .expected(&alice, "subscriptions/get", read.clone())
+            .await;
+        scene.check(
+            owners["subscription"]["member"]["identity"] == json!(PRIVATE),
+            || format!("its owner reads it: {}", brief(&owners.to_string())),
+        );
+        let others = masked(
+            &scene.call(&bob, "subscriptions/get", read).await,
+            &["sub-hosted"],
+        );
+        let absent = masked(
+            &scene
+                .call(
+                    &bob,
+                    "subscriptions/get",
+                    json!({ "subscription_id": "sub-nobody" }),
+                )
+                .await,
+            &["sub-nobody"],
+        );
+        scene.check(others == absent, || {
+            format!("another person reads {}", brief(&others))
+        });
+    }
+    nothing_found(scenes);
+    Ok(())
 }

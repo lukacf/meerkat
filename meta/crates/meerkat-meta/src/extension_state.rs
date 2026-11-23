@@ -181,11 +181,14 @@ pub(crate) fn open_disk_store(
 fn mob_id_still_named(mob_id: &str) -> String {
     format!(
         "mob id '{mob_id}' is still named by extension documents of this realm, as their \
-         owner (Owner::Mob) or in an audience grant or deny (Audience::Mob): a new mob under \
-         it would inherit what they grant. Choose another mob id, or \
+         owner (Owner::Mob) or in an audience grant or deny (Audience::Mob), or through an \
+         identity of the mob that owns a document or that a grant or deny names \
+         (Principal::MobAgent): a new mob under it, and its identities of the same names, \
+         would inherit what they grant. Choose another mob id, or \
          have a host or operator with access to the extension store clear every reference \
          first: transfer each document the id owns to another owner, and remove or replace \
-         each Audience::Mob grant or deny naming it (an owner transfer leaves those). The \
+         each Audience::Mob grant or deny naming it (an owner transfer leaves those), and \
+         do the same for the documents its identities own or are named in. The \
          document tools alone cannot manage a document whose owning mob was destroyed."
     )
 }
@@ -202,30 +205,38 @@ fn unverifiable(error: documents::Error) -> MobIdQuarantineReason {
     }
 }
 
-/// One resolution's read of the identity bridge mob's member binding
-/// history: a lineage walk decides the principal of each ancestor, and every
-/// answer comes from the same fold of Core's journal. Taken at the first
-/// principal decided, which follows the first creation snapshot read, so it
-/// sees every binding that snapshot and its ancestors name.
+/// One resolution's reads of member binding histories: a lineage walk
+/// decides the principal of each ancestor, and every answer about a mob
+/// comes from the same fold of that mob's journal in Core. A mob's history
+/// is taken at the first principal decided in it, which follows the first
+/// creation snapshot read there, so it sees every binding that snapshot and
+/// its ancestors in the mob name.
 #[derive(Default)]
-struct BridgeHistoryRead(Option<meerkat_mob::MemberBindingHistory>);
+struct BridgeHistoryRead(BTreeMap<String, meerkat_mob::MemberBindingHistory>);
 
 impl BridgeHistoryRead {
     async fn get(
         &mut self,
         handle: &MobReadHandle,
     ) -> documents::Result<&meerkat_mob::MemberBindingHistory> {
-        if self.0.is_none() {
+        let mob_id = handle.mob_id().as_str();
+        if !self.0.contains_key(mob_id) {
             let history = handle
                 .member_binding_history()
                 .await
                 .map_err(|_| documents::Error::AuthorityUnavailable)?;
-            self.0 = Some(history);
+            self.0.insert(mob_id.to_owned(), history);
         }
         self.0
-            .as_ref()
+            .get(mob_id)
             .ok_or(documents::Error::AuthorityUnavailable)
     }
+}
+
+/// The identity plane of one mob: the identity-first runtime that registers
+/// the mob's identities, when one is bound and still there.
+struct IdentityPlane {
+    runtime: Option<std::sync::Weak<crate::identity_first::IdentityRuntime>>,
 }
 
 /// What a member binding's continuity intent says about an identity.
@@ -349,8 +360,10 @@ impl MobIdOrdering {
     }
 }
 
-/// The mob ids a mutation's new owner or access names: a create's, an access
-/// change's and a transfer's. A content replace and a delete name none.
+/// The mob ids a mutation's new owner or access names by the id alone
+/// ([`Owner::named_mob`], [`documents::Audience::named_mob`]): a create's,
+/// an access change's and a transfer's. A content replace and a delete name
+/// none.
 fn mob_ids_named_by(mutation: &documents::Mutation) -> impl Iterator<Item = &str> {
     use documents::{Audience, Mutation};
     let (owner, access) = match mutation {
@@ -359,10 +372,7 @@ fn mob_ids_named_by(mutation: &documents::Mutation) -> impl Iterator<Item = &str
         Mutation::Transfer { owner, access, .. } => (Some(owner), access.as_ref()),
         Mutation::Replace { .. } | Mutation::Delete { .. } => (None, None),
     };
-    let owner = owner.and_then(|owner| match owner {
-        Owner::Mob(id) => Some(id.as_str()),
-        Owner::Agent(_) | Owner::Realm => None,
-    });
+    let owner = owner.and_then(Owner::named_mob);
     let audiences = access
         .into_iter()
         .flat_map(|access| {
@@ -372,11 +382,115 @@ fn mob_ids_named_by(mutation: &documents::Mutation) -> impl Iterator<Item = &str
                 .map(|grant| &grant.audience)
                 .chain(access.denies.iter().map(|deny| &deny.audience))
         })
-        .filter_map(|audience| match audience {
-            Audience::Mob(id) => Some(id.as_str()),
-            Audience::Agent { .. } | Audience::Realm => None,
-        });
+        .filter_map(Audience::named_mob);
     owner.into_iter().chain(audiences)
+}
+
+/// The identity principal an owner names, if it names one.
+fn owner_identity(owner: &Owner) -> Option<&Principal> {
+    match owner {
+        Owner::Agent(principal @ (Principal::Agent(_) | Principal::MobAgent { .. })) => {
+            Some(principal)
+        }
+        Owner::Agent(Principal::Worker { .. }) | Owner::Mob(_) | Owner::Realm => None,
+    }
+}
+
+/// Whether an access names an identity in a grant or a deny.
+fn access_names_identity(access: &documents::DocumentAccess) -> bool {
+    access
+        .grants
+        .iter()
+        .map(|grant| &grant.audience)
+        .chain(access.denies.iter().map(|deny| &deny.audience))
+        .any(|audience| {
+            matches!(
+                audience,
+                documents::Audience::Agent {
+                    principal: Principal::Agent(_) | Principal::MobAgent { .. },
+                    ..
+                }
+            )
+        })
+}
+
+/// Whether a mutation's new owner or access names an identity. Only then
+/// does the mob its caller names in matter.
+fn mutation_names_identity(mutation: &documents::Mutation) -> bool {
+    use documents::Mutation;
+    let (owner, access) = match mutation {
+        Mutation::Create(new) => (new.owner.as_ref(), Some(&new.access)),
+        Mutation::SetAccess { access, .. } => (None, Some(access)),
+        Mutation::Transfer { owner, access, .. } => (Some(owner), access.as_ref()),
+        Mutation::Replace { .. } | Mutation::Delete { .. } => (None, None),
+    };
+    owner.and_then(owner_identity).is_some() || access.is_some_and(access_names_identity)
+}
+
+/// The mob whose identities a caller names without a mob: the caller's own
+/// mob. An identity names the identities of its own mob, and a worker of
+/// the default mob those of the default mob. For a worker of any other mob
+/// only the owner of its mob tells (`Err` with that mob): a helper mob, a
+/// council and an agent's own mob have no identities, and their workers
+/// name the identities of the mob their owner belongs to
+/// ([`NativeAuthorityRegistry::top_level_mob`]).
+fn callers_mob_without_owner_read<'a>(
+    default_mob: &'a str,
+    caller: &'a Principal,
+) -> Result<&'a str, &'a str> {
+    match caller {
+        Principal::Agent(_) => Ok(default_mob),
+        Principal::MobAgent { mob_id, .. } => Ok(mob_id.as_str()),
+        Principal::Worker { mob_id, .. } if mob_id == default_mob => Ok(default_mob),
+        Principal::Worker { mob_id, .. } => Err(mob_id.as_str()),
+    }
+}
+
+/// A stored document in the naming of its caller, the inverse of
+/// [`documents::Principal::stored_form`]. `callers_mob` is the caller's own
+/// mob when it is known: its identities read without a mob, and the default
+/// mob's identities with the default mob's id (a caller of the default mob
+/// reads the stored forms). When it is not known, every identity reads with
+/// its mob, the default mob's included: that spelling is stored the same way
+/// whichever mob its caller names in. Either way what a caller reads it can
+/// name back: reading a document and writing its owner or access back stores
+/// what was stored.
+fn in_callers_naming(
+    mut document: documents::Document,
+    default_mob: &str,
+    callers_mob: Option<&str>,
+) -> documents::Document {
+    if callers_mob == Some(default_mob) {
+        return document;
+    }
+    let named = |principal: &mut Principal| {
+        let stored = std::mem::replace(principal, Principal::Agent(String::new()));
+        *principal = match stored {
+            Principal::Agent(identity) => Principal::MobAgent {
+                mob_id: default_mob.to_owned(),
+                identity,
+            },
+            Principal::MobAgent { mob_id, identity } if callers_mob == Some(mob_id.as_str()) => {
+                Principal::Agent(identity)
+            }
+            other => other,
+        };
+    };
+    if let Owner::Agent(principal) = &mut document.owner {
+        named(principal);
+    }
+    let access = &mut document.access;
+    for audience in access
+        .grants
+        .iter_mut()
+        .map(|grant| &mut grant.audience)
+        .chain(access.denies.iter_mut().map(|deny| &mut deny.audience))
+    {
+        if let documents::Audience::Agent { principal, .. } = audience {
+            named(principal);
+        }
+    }
+    document
 }
 
 /// The document store behind every document service the composition builds,
@@ -387,9 +501,27 @@ fn mob_ids_named_by(mutation: &documents::Mutation) -> impl Iterator<Item = &str
 /// resolver did not resolve) or when a mob id the caller's authority names,
 /// or a write's new owner or access names, changed after the stamp. A host
 /// that needs unordered access uses its provider's store directly.
+///
+/// This is also the boundary where a caller's naming meets the stored
+/// forms. A write's owner and audiences come from tool input, where an
+/// identity named without a mob is an identity of the caller's own mob and
+/// the default mob's identity may be named with the mob's id: every write
+/// that names an identity is read into the stored form first
+/// ([`documents::Mutation::stored_form`]). A document a caller reads is
+/// given in the same naming ([`in_callers_naming`]), so what a caller reads
+/// it can write back unchanged.
+///
+/// The caller's own mob needs a read of its mob's owner only for a worker
+/// outside the default mob ([`callers_mob_without_owner_read`]). When that
+/// read fails, a write that names an identity is refused, since no mob is
+/// guessed for it, and a read gives every identity with its mob, which is
+/// stored the same way whichever mob the caller turns out to name in.
 pub(crate) struct OrderedDocumentStore {
     inner: Arc<dyn documents::ExtensionDocumentStore>,
     ordering: Arc<MobIdOrdering>,
+    default_mob: crate::member_key::DefaultMob,
+    /// The registry, for the owner of a worker's mob. Non-owning.
+    registry: std::sync::Weak<NativeAuthorityRegistry>,
 }
 
 impl OrderedDocumentStore {
@@ -411,6 +543,23 @@ impl OrderedDocumentStore {
         }
         Ok(gate)
     }
+
+    /// The mob whose identities `caller` names without a mob
+    /// ([`callers_mob_without_owner_read`]), read from the owner of its mob
+    /// where only that tells.
+    async fn callers_mob(&self, caller: &HostAccessContext) -> documents::Result<String> {
+        let default_mob = self.default_mob.mob_id().as_str();
+        match callers_mob_without_owner_read(default_mob, caller.principal()) {
+            Ok(mob_id) => Ok(mob_id.to_owned()),
+            Err(workers_mob) => {
+                let registry = self
+                    .registry
+                    .upgrade()
+                    .ok_or(documents::Error::AuthorityUnavailable)?;
+                Ok(registry.top_level_mob(workers_mob).await?.to_string())
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -421,8 +570,23 @@ impl documents::ExtensionDocumentStore for OrderedDocumentStore {
         caller: &HostAccessContext,
         id: &documents::DocumentId,
     ) -> documents::Result<documents::Document> {
-        let _gate = self.admit(caller, std::iter::empty()).await?;
-        self.inner.get(scope, caller, id).await
+        let document = {
+            let _gate = self.admit(caller, std::iter::empty()).await?;
+            self.inner.get(scope, caller, id).await?
+        };
+        if owner_identity(&document.owner).is_none() && !access_names_identity(&document.access) {
+            return Ok(document);
+        }
+        // A caller whose mob cannot be told reads every identity with its
+        // mob: that spelling is stored the same way whichever mob the
+        // caller turns out to name in, so writing it back changes nothing
+        // even when the owner can be read again by then.
+        let callers_mob = self.callers_mob(caller).await.ok();
+        Ok(in_callers_naming(
+            document,
+            self.default_mob.mob_id().as_str(),
+            callers_mob.as_deref(),
+        ))
     }
     async fn list(
         &self,
@@ -449,6 +613,12 @@ impl documents::ExtensionDocumentStore for OrderedDocumentStore {
         request: &documents::RequestIdentity,
         mutation: documents::Mutation,
     ) -> documents::Result<documents::MutationOutcome> {
+        let mutation = if mutation_names_identity(&mutation) {
+            let callers_mob = self.callers_mob(caller).await?;
+            mutation.stored_form(self.default_mob.mob_id().as_str(), &callers_mob)
+        } else {
+            mutation
+        };
         let _gate = self.admit(caller, mob_ids_named_by(&mutation)).await?;
         self.inner.mutate(scope, caller, request, mutation).await
     }
@@ -507,11 +677,15 @@ fn mob_id_holder_of(handle: &MobReadHandle) -> MobIdHolder {
         })
 }
 
-/// A mob bound in the registry: its read handle, and the quarantine its
-/// activation decided, if any.
+/// A mob bound in the registry: its read handle, the quarantine its
+/// activation decided, if any, and its identity plane, if one was bound for
+/// it ([`NativeAuthorityRegistry::bind_identity_plane`]). The plane is the
+/// bound mob's, not the mob id's: it goes when the binding goes, and a mob
+/// that takes the id later starts without it.
 struct BoundMob {
     handle: MobReadHandle,
     quarantine: Option<MobIdQuarantineReason>,
+    plane: Option<std::sync::Weak<crate::identity_first::IdentityRuntime>>,
 }
 
 impl BoundMob {
@@ -551,15 +725,27 @@ struct Admission {
 /// quarantined mob grants nothing either ([`MobIdQuarantine`]).
 pub(crate) struct NativeAuthorityRegistry {
     realm: String,
-    identity_bridge_mob: String,
+    /// The host's default mob: the mob the launch names. Its identities
+    /// are [`Principal::Agent`], the form a stored principal without a mob
+    /// has; an identity of any other mob carries its mob
+    /// ([`Self::agent_principal`]).
+    default_mob: crate::member_key::DefaultMob,
     /// Whether the composition runs the identity-first runtime: only then
-    /// is a member of [`Self::identity_bridge_mob`] ever an
-    /// [`Principal::Agent`] (see [`Self::principal`]).
+    /// does the default mob have an identity plane
+    /// ([`Self::identity_plane`]).
     identity_first: bool,
-    /// The composition's identity-first runtime, bound once it is built
-    /// (after this registry). [`Self::principal`] reads its registered
-    /// identities. Non-owning: the composition owns the runtime.
+    /// The composition's identity-first runtime, the default mob's identity
+    /// plane, bound once it is built (after this registry).
+    /// [`Self::principal`] reads its registered identities. Non-owning: the
+    /// composition owns the runtime.
     identity_runtime: std::sync::OnceLock<std::sync::Weak<crate::identity_first::IdentityRuntime>>,
+    /// Identity planes bound for mobs that have not activated yet, by mob
+    /// id ([`Self::bind_identity_plane`]): each waits for the next
+    /// activation under its id, which takes it. The plane of a mob that is
+    /// bound lives beside its handle ([`BoundMob`]). Non-owning, like the
+    /// default mob's. Locked after [`Self::handles`], never before.
+    pending_planes:
+        std::sync::Mutex<BTreeMap<String, std::sync::Weak<crate::identity_first::IdentityRuntime>>>,
     handles: std::sync::RwLock<BTreeMap<String, BoundMob>>,
     /// Creates [`Self::before_create`] admitted whose mob has not activated.
     admissions: std::sync::Mutex<BTreeMap<String, Admission>>,
@@ -582,9 +768,12 @@ impl NativeAuthorityRegistry {
     ) -> Arc<Self> {
         Arc::new(Self {
             realm,
-            identity_bridge_mob,
+            default_mob: crate::member_key::DefaultMob::new(meerkat_mob::MobId::from(
+                identity_bridge_mob,
+            )),
             identity_first,
             identity_runtime: std::sync::OnceLock::new(),
+            pending_planes: std::sync::Mutex::new(BTreeMap::new()),
             handles: std::sync::RwLock::new(BTreeMap::new()),
             admissions: std::sync::Mutex::new(BTreeMap::new()),
             sessions,
@@ -595,7 +784,7 @@ impl NativeAuthorityRegistry {
     }
 
     /// Bind the composition's identity-first runtime, built after this
-    /// registry. The first binding stays.
+    /// registry: the default mob's identity plane. The first binding stays.
     pub(crate) fn bind_identity_runtime(
         &self,
         runtime: &Arc<crate::identity_first::IdentityRuntime>,
@@ -603,18 +792,111 @@ impl NativeAuthorityRegistry {
         let _ = self.identity_runtime.set(Arc::downgrade(runtime));
     }
 
-    /// Whether the identity-first runtime registered `identity` from its
-    /// roster. While no runtime is bound (the build has not reached it) or
-    /// after it is gone (shutdown), nothing can say: no principal.
+    /// Bind the identity plane of the mob `mob_id`: the identity-first
+    /// runtime that registers that mob's identities, when that runtime is
+    /// built, at the mob's load. For the default mob this is
+    /// [`Self::bind_identity_runtime`].
+    ///
+    /// For any other mob the plane belongs to the mob it is bound for. When
+    /// a mob that is not destroyed is bound under the id, the plane is that
+    /// mob's, and the latest binding stands (a mob that is loaded again
+    /// brings a new runtime). Otherwise the plane waits for the next
+    /// activation under the id and is that mob's. It goes with the mob's
+    /// binding: a mob that takes the id of a destroyed one starts without
+    /// a plane, and a mob that restarts under its own id keeps its plane.
+    ///
+    /// Bind a mob's plane before its first member can dispatch: a member of
+    /// a mob without a plane is a worker, also one that carries Core's
+    /// durable-identity marker, and what it writes then lands under a
+    /// worker owner its identity never sees.
+    ///
+    /// No composition hosts a second mob with an identity plane yet, so
+    /// only the rows call this.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn bind_identity_plane(
+        &self,
+        mob_id: &meerkat_mob::MobId,
+        runtime: &Arc<crate::identity_first::IdentityRuntime>,
+    ) {
+        if self.default_mob.is(mob_id) {
+            self.bind_identity_runtime(runtime);
+            return;
+        }
+        let plane = Arc::downgrade(runtime);
+        let mut handles = self
+            .handles
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match handles
+            .get_mut(mob_id.as_str())
+            .filter(|bound| !is_destroyed(&bound.handle))
+        {
+            Some(bound) => bound.plane = Some(plane),
+            None => {
+                self.pending_planes().insert(mob_id.to_string(), plane);
+            }
+        }
+    }
+
+    fn pending_planes(
+        &self,
+    ) -> std::sync::MutexGuard<
+        '_,
+        BTreeMap<String, std::sync::Weak<crate::identity_first::IdentityRuntime>>,
+    > {
+        self.pending_planes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The identity plane of the mob `mob_id`, when it has one: the default
+    /// mob's in an identity-first composition, the plane of the mob bound
+    /// under the id for any other. A member of a mob without one is never
+    /// an identity.
+    fn identity_plane(&self, mob_id: &str) -> Option<IdentityPlane> {
+        if self.default_mob.mob_id().as_str() == mob_id {
+            return self.identity_first.then(|| IdentityPlane {
+                runtime: self.identity_runtime.get().cloned(),
+            });
+        }
+        self.handles
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(mob_id)
+            .filter(|bound| !is_destroyed(&bound.handle))
+            .and_then(|bound| bound.plane.clone())
+            .map(|runtime| IdentityPlane {
+                runtime: Some(runtime),
+            })
+    }
+
+    /// The principal of the identity `identity` of the mob `mob_id`: the
+    /// one place that spells it. The default mob's identity carries no mob,
+    /// the form every stored principal has, and an identity of another mob
+    /// carries its own.
+    fn agent_principal(
+        &self,
+        mob_id: &str,
+        identity: &crate::identity_first::AgentIdentity,
+    ) -> Principal {
+        let mob_id = meerkat_mob::MobId::from(mob_id);
+        Principal::agent(
+            self.default_mob
+                .stored(&mob_id)
+                .map(meerkat_mob::MobId::as_str),
+            identity.to_string(),
+        )
+    }
+
+    /// Whether `plane` registered `identity` from its roster. While no
+    /// runtime is bound (the build has not reached it) or after it is gone
+    /// (shutdown, or the mob was unloaded), nothing can say: no principal.
     async fn registered_identity(
         &self,
+        plane: &IdentityPlane,
         identity: &crate::identity_first::AgentIdentity,
     ) -> documents::Result<bool> {
-        match self
-            .identity_runtime
-            .get()
-            .and_then(std::sync::Weak::upgrade)
-        {
+        match plane.runtime.as_ref().and_then(std::sync::Weak::upgrade) {
             Some(runtime) => Ok(runtime.is_registered(identity).await),
             None => Err(documents::Error::AuthorityUnavailable),
         }
@@ -623,10 +905,12 @@ impl NativeAuthorityRegistry {
     /// The document store every document service of the composition uses:
     /// the composition's store, with each write ordered against the changes
     /// of which mob holds an id ([`OrderedDocumentStore`]).
-    pub(crate) fn document_store(&self) -> Arc<dyn documents::ExtensionDocumentStore> {
+    pub(crate) fn document_store(self: &Arc<Self>) -> Arc<dyn documents::ExtensionDocumentStore> {
         Arc::new(OrderedDocumentStore {
             inner: Arc::clone(&self.store),
             ordering: Arc::clone(&self.ordering),
+            default_mob: self.default_mob.clone(),
+            registry: Arc::downgrade(self),
         })
     }
 
@@ -675,7 +959,23 @@ impl NativeAuthorityRegistry {
                          document caller, it is no valid document owner and nobody manages it"
                     );
                 }
-                handles.insert(id, BoundMob { handle, quarantine });
+                // The mob's identity plane: one bound for it before it
+                // activated, or its own from before when it restarts under
+                // its id. A destroyed mob's plane is not this mob's.
+                let plane = registry.pending_planes().remove(&id).or_else(|| {
+                    handles
+                        .get(&id)
+                        .filter(|bound| !is_destroyed(&bound.handle))
+                        .and_then(|bound| bound.plane.clone())
+                });
+                handles.insert(
+                    id,
+                    BoundMob {
+                        handle,
+                        quarantine,
+                        plane,
+                    },
+                );
                 drop(handles);
                 drop(gate);
                 Ok(())
@@ -736,6 +1036,8 @@ impl NativeAuthorityRegistry {
                 .filter_map(|id| handles.remove(id))
                 .collect()
         };
+        // A destroyed mob's identity plane goes with its binding here. A
+        // plane that waits for the next mob under the id is not touched.
         drop(released);
     }
 
@@ -980,37 +1282,43 @@ impl NativeAuthorityRegistry {
 
     /// The principal a member session acts as.
     ///
-    /// In an identity-first composition, a member of the identity bridge mob
-    /// is the Meta identity its roster id encodes ([`Principal::Agent`]) when
-    /// Core's member binding history proves it: the binding that last named
-    /// the session, or the member's current life, carries Core's
-    /// durable-identity marker for that identity. Only identity-first spawns,
-    /// Core's identity reconciler and a host's materialization set the
-    /// marker; no raw member surface can. The current-life clause covers the
-    /// member's earlier sessions, which a lineage walk reaches through
+    /// A member of a mob with an identity plane ([`Self::identity_plane`]:
+    /// the default mob in an identity-first composition, another mob once
+    /// its plane is bound) is the identity its roster id encodes when
+    /// Core's member binding history of that mob proves it: the binding
+    /// that last named the session, or the member's current life, carries
+    /// Core's durable-identity marker for that identity. Only identity-first
+    /// spawns, Core's identity reconciler and a host's materialization set
+    /// the marker; no raw member surface can. The current-life clause covers
+    /// the member's earlier sessions, which a lineage walk reaches through
     /// successor links: the first sessions of a member that Meta 0.9.3
     /// spawned carry no marker.
+    ///
+    /// The identity of the default mob is [`Principal::Agent`]; the
+    /// identity of another mob carries its mob ([`Principal::MobAgent`]),
+    /// so two mobs' identities of one name are two principals
+    /// ([`Self::agent_principal`]).
     ///
     /// Every other member is a [`Principal::Worker`], except one that
     /// presents as an identity the history cannot prove: an unreadable
     /// identity intent row, an intent row without the marker, a member whose
-    /// id names an identity the identity-first runtime registered (live or
-    /// retired), or a live member that runtime labelled. Meta 0.9.3 spawned
-    /// such a member and nothing has respawned it since. Those resolve no
-    /// principal, so nothing they write lands under a worker owner that the
-    /// identity never sees.
+    /// id names an identity the mob's identity-first runtime registered
+    /// (live or retired), or a live member that runtime labelled. Meta 0.9.3
+    /// spawned such a member and nothing has respawned it since. Those
+    /// resolve no principal, so nothing they write lands under a worker
+    /// owner that the identity never sees.
     ///
-    /// `reads` holds the one history read a resolution takes.
+    /// `reads` holds the history reads a resolution takes, one per mob.
     async fn principal(
         &self,
         snapshot: &MemberCreationSnapshot,
         reads: &mut BridgeHistoryRead,
     ) -> documents::Result<Principal> {
-        if self.identity_first
-            && snapshot.member_binding.mob_id == self.identity_bridge_mob
-            && let Some(identity) = self.bridge_identity(snapshot, reads).await?
+        let mob_id = snapshot.member_binding.mob_id.as_str();
+        if let Some(plane) = self.identity_plane(mob_id)
+            && let Some(identity) = self.plane_identity(snapshot, reads, &plane).await?
         {
-            return Ok(Principal::Agent(identity.to_string()));
+            return Ok(self.agent_principal(mob_id, &identity));
         }
         Ok(Principal::Worker {
             mob_id: snapshot.member_binding.mob_id.clone(),
@@ -1023,14 +1331,15 @@ impl NativeAuthorityRegistry {
         })
     }
 
-    /// The Meta identity a session of the identity bridge mob acts as, or
-    /// `None` for a worker (see [`Self::principal`]).
-    async fn bridge_identity(
+    /// The identity a session of a mob with the identity plane `plane` acts
+    /// as, or `None` for a worker (see [`Self::principal`]).
+    async fn plane_identity(
         &self,
         snapshot: &MemberCreationSnapshot,
         reads: &mut BridgeHistoryRead,
+        plane: &IdentityPlane,
     ) -> documents::Result<Option<crate::identity_first::AgentIdentity>> {
-        let handle = self.handle(&self.identity_bridge_mob)?;
+        let handle = self.handle(&snapshot.member_binding.mob_id)?;
         let history = reads.get(&handle).await?;
         let member = meerkat_mob::AgentIdentity::from(snapshot.member_binding.member.as_str());
         // The creation snapshot came from the same journal, read earlier: a
@@ -1066,7 +1375,7 @@ impl NativeAuthorityRegistry {
                 // roster's registration tells an unmarked identity member
                 // from a worker once it is no longer live.
                 let registered = match identity.as_ref() {
-                    Some(identity) => self.registered_identity(identity).await?,
+                    Some(identity) => self.registered_identity(plane, identity).await?,
                     None => false,
                 };
                 if management != meerkat_mob::MemberIdentityManagement::CommandDriven
@@ -1081,18 +1390,23 @@ impl NativeAuthorityRegistry {
         }
     }
 
-    /// Whether an [`Principal::Agent`] owner names an identity whose current
-    /// life Core's member binding history knows: its last binding since the
-    /// latest mob reset carries the identity's durable-identity marker, or,
-    /// for a member Meta 0.9.3 spawned and has not respawned since, the live
-    /// member carries the identity-first runtime's label. Naming an owner
-    /// grants nothing, so the label may stand in for the marker here; it
-    /// never does in [`Self::principal`].
-    async fn validate_agent_owner(
-        &self,
-        identity: &crate::identity_first::AgentIdentity,
-    ) -> documents::Result<()> {
-        let handle = self.handle(&self.identity_bridge_mob)?;
+    /// Whether an identity owner ([`Principal::Agent`], or
+    /// [`Principal::MobAgent`] for another mob) names an identity of the mob
+    /// `mob_id` whose current life Core's member binding history of that mob
+    /// knows: its last binding since the latest mob reset carries the
+    /// identity's durable-identity marker, or, for a member Meta 0.9.3
+    /// spawned and has not respawned since, the live member carries the
+    /// identity-first runtime's label. Naming an owner grants nothing, so
+    /// the label may stand in for the marker here; it never does in
+    /// [`Self::principal`]. A mob without an identity plane has no
+    /// identities to name.
+    async fn validate_agent_owner(&self, mob_id: &str, identity: &str) -> documents::Result<()> {
+        if self.identity_plane(mob_id).is_none() {
+            return Err(documents::Error::AuthorityUnavailable);
+        }
+        let identity = &crate::identity_first::AgentIdentity::parse(identity)
+            .map_err(|_| documents::Error::NotFound)?;
+        let handle = self.handle(mob_id)?;
         let history = handle
             .member_binding_history()
             .await
@@ -1127,17 +1441,19 @@ impl NativeAuthorityRegistry {
         }
     }
 
+    /// Validate an owner a caller asks for, in its stored form
+    /// ([`Owner::stored_form`]): an identity owner is validated in its own
+    /// mob, the default mob's for [`Principal::Agent`].
     async fn validate_owner(&self, owner: &Owner) -> documents::Result<()> {
         match owner {
             Owner::Realm => Ok(()),
             Owner::Mob(id) => self.handle(id).map(|_| ()),
             Owner::Agent(Principal::Agent(identity)) => {
-                if !self.identity_first {
-                    return Err(documents::Error::AuthorityUnavailable);
-                }
-                let identity = crate::identity_first::AgentIdentity::parse(identity)
-                    .map_err(|_| documents::Error::NotFound)?;
-                self.validate_agent_owner(&identity).await
+                self.validate_agent_owner(self.default_mob.mob_id().as_str(), identity)
+                    .await
+            }
+            Owner::Agent(Principal::MobAgent { mob_id, identity }) => {
+                self.validate_agent_owner(mob_id, identity).await
             }
             Owner::Agent(Principal::Worker {
                 mob_id,
@@ -1174,6 +1490,44 @@ impl NativeAuthorityRegistry {
                 } else {
                     Err(documents::Error::NotFound)
                 }
+            }
+        }
+    }
+
+    /// The top-level mob the bound mob `mob_id` belongs to: the mob itself
+    /// when no member's session owns it (a mob the host created, or one a
+    /// session outside every mob created), else the top-level mob of the
+    /// mob its owner session is a member of. A helper mob, a council and a
+    /// mob an agent created are judged for host access as members of the
+    /// mob their owner belongs to; access rules name the host's mobs.
+    ///
+    /// An owner whose session or mob cannot be read is no answer: the
+    /// caller is not judged in a mob that was guessed.
+    async fn top_level_mob(&self, mob_id: &str) -> documents::Result<meerkat_mob::MobId> {
+        let mut current = mob_id.to_owned();
+        let mut visited = BTreeSet::new();
+        loop {
+            if visited.len() >= 128 || !visited.insert(current.clone()) {
+                return Err(documents::Error::AuthorityUnavailable);
+            }
+            let Some(owner) = self
+                .handle(&current)?
+                .owner_bridge_session_lifecycle_authority()
+            else {
+                return Ok(meerkat_mob::MobId::from(current));
+            };
+            let binding = self
+                .sessions
+                .load_retained_session_metadata(&owner.bridge_session_id)
+                .await
+                .map_err(|_| documents::Error::AuthorityUnavailable)?
+                .filter(|view| view.session_id == owner.bridge_session_id)
+                .and_then(|view| view.session_metadata)
+                .ok_or(documents::Error::AuthorityUnavailable)?
+                .mob_member_binding;
+            match binding {
+                Some(binding) => current = binding.mob_id,
+                None => return Ok(meerkat_mob::MobId::from(current)),
             }
         }
     }
@@ -1309,6 +1663,7 @@ impl ToolCallerResolver for NativeCallerResolver {
         // and every ancestor the walk below reaches.
         let mut reads = BridgeHistoryRead::default();
         let principal = registry.principal(&snapshot, &mut reads).await?;
+        let caller_creation_id = snapshot.creation.creation_id;
         let mut child = principal.clone();
         let mut links = Vec::new();
         let mut visited = BTreeSet::new();
@@ -1381,19 +1736,42 @@ impl ToolCallerResolver for NativeCallerResolver {
         let mut policy = self.policy(metadata.tooling.tool_access_policy.as_ref())?;
         let mut realm_admin = false;
         if let Some(access) = &registry.access {
+            // `agent:<identity>` is the default mob's identity. An identity
+            // of another mob has no subject of its own: it is judged under
+            // its member's creation subject, like a worker, so no rule or
+            // admin entry written for the default mob's identity of that
+            // name applies to it.
             let subject = match &principal {
                 Principal::Agent(identity) => format!("agent:{identity}"),
                 Principal::Worker { creation_id, .. } => format!("worker:{creation_id}"),
+                Principal::MobAgent { .. } => format!(
+                    "worker:{}",
+                    caller_creation_id.ok_or(documents::Error::AuthorityUnavailable)?
+                ),
             };
+            // The caller is judged in its own mob: the top-level mob its
+            // mob belongs to. The default mob's is the view as it was. A
+            // view that enforces nothing judges nobody, so it reads no mob:
+            // a caller whose mob's owner cannot be read resolves as it did
+            // without a controller.
             let view = access.view_for_subject(Some(&subject));
+            let view = if view.enforced() {
+                let mob = registry.top_level_mob(&binding.mob_id).await?;
+                view.in_stored_mob(registry.default_mob.stored(&mob))
+            } else {
+                view
+            };
             let resource = crate::access::AccessResource {
                 identity: match &principal {
-                    Principal::Agent(identity) => Some(identity.as_str()),
+                    Principal::Agent(identity) | Principal::MobAgent { identity, .. } => {
+                        Some(identity.as_str())
+                    }
                     Principal::Worker { .. } => None,
                 },
                 agent_id: Some(&binding.member),
                 role: Some(&binding.role),
                 labels: Some(&entry.labels),
+                mob: crate::access::AccessResourceMob::default(),
             };
             policy.read &= view.decide("extension.read", &resource).is_allow();
             policy.edit &= policy.read && view.decide("extension.edit", &resource).is_allow();
@@ -1424,8 +1802,23 @@ impl ToolCallerResolver for NativeCallerResolver {
                 .with_memberships(member_mobs, managed_mobs, realm_admin)?
                 .with_authority_generation(resolved_at);
         if let Some(owner) = requested_owner {
-            registry.validate_owner(owner).await?;
-            caller = caller.with_valid_owners(BTreeSet::from([owner.clone()]));
+            // The owner comes from tool input, in the caller's naming: an
+            // identity named without a mob is an identity of the caller's
+            // own mob. It is validated and admitted in its stored form, the
+            // form the write is read into as well.
+            let owner = if owner_identity(owner).is_some() {
+                let default_mob = registry.default_mob.mob_id().as_str();
+                let callers_mob =
+                    match callers_mob_without_owner_read(default_mob, caller.principal()) {
+                        Ok(mob_id) => mob_id.to_owned(),
+                        Err(workers_mob) => registry.top_level_mob(workers_mob).await?.to_string(),
+                    };
+                owner.clone().stored_form(default_mob, &callers_mob)
+            } else {
+                owner.clone()
+            };
+            registry.validate_owner(&owner).await?;
+            caller = caller.with_valid_owners(BTreeSet::from([owner]));
         }
         Ok(caller)
     }
@@ -2174,6 +2567,8 @@ comms = true
             Arc::new(OrderedDocumentStore {
                 inner: Arc::clone(&store),
                 ordering: Arc::clone(&ordering),
+                default_mob: crate::member_key::DefaultMob::new(meerkat_mob::MobId::from("launch")),
+                registry: std::sync::Weak::new(),
             }),
         )
         .unwrap();
@@ -2935,8 +3330,19 @@ model = "gpt-5.5"
         );
         let rostered = crate::identity_first::AgentIdentity::parse("durable:rostered").unwrap();
         let unlisted = crate::identity_first::AgentIdentity::parse("durable:unlisted").unwrap();
+        // The default mob's plane, read afresh for every answer.
+        let registered = |identity: &crate::identity_first::AgentIdentity| {
+            let registry = &registry;
+            let identity = identity.clone();
+            async move {
+                let plane = registry
+                    .identity_plane("registered-identity")
+                    .expect("the default mob of an identity-first composition has a plane");
+                registry.registered_identity(&plane, &identity).await
+            }
+        };
         assert!(matches!(
-            registry.registered_identity(&rostered).await,
+            registered(&rostered).await,
             Err(documents::Error::AuthorityUnavailable)
         ));
 
@@ -2970,18 +3376,12 @@ model = "gpt-5.5"
             })
             .await;
         registry.bind_identity_runtime(&runtime);
-        assert!(matches!(
-            registry.registered_identity(&rostered).await,
-            Ok(true)
-        ));
-        assert!(matches!(
-            registry.registered_identity(&unlisted).await,
-            Ok(false)
-        ));
+        assert!(matches!(registered(&rostered).await, Ok(true)));
+        assert!(matches!(registered(&unlisted).await, Ok(false)));
 
         drop(runtime);
         assert!(matches!(
-            registry.registered_identity(&rostered).await,
+            registered(&rostered).await,
             Err(documents::Error::AuthorityUnavailable)
         ));
     }
@@ -3133,5 +3533,1859 @@ comms = true
         ));
         assert!(worker(principal(&snapshots[1]).await, raw.as_str()));
         handle.stop().await.unwrap();
+    }
+
+    // Member-keyed principals: a host of two mobs.
+    //
+    // A host keeps the documents of all its mobs in one realm, and two mobs
+    // may each have an identity of the same name. The rows below run the
+    // registry over two mobs the host created: the launch mob `launch` (the
+    // default mob) and `second`, each with its own identity plane. Another
+    // mob's identity is built from its stored bytes
+    // (`{"kind":"mob_agent","value":{"mob_id":..,"identity":..}}`): the
+    // bytes are the contract a store keeps.
+
+    /// The stored form of the identity `identity` of the mob `mob_id`, a
+    /// mob other than the host's default mob.
+    fn mob_agent_json(mob_id: &str, identity: &str) -> serde_json::Value {
+        serde_json::json!({
+            "kind": "mob_agent",
+            "value": { "mob_id": mob_id, "identity": identity },
+        })
+    }
+
+    /// The identity `identity` of the mob `mob_id`, read from its stored
+    /// form.
+    fn mob_agent(mob_id: &str, identity: &str) -> Principal {
+        serde_json::from_value(mob_agent_json(mob_id, identity))
+            .expect("the stored form of another mob's identity decodes")
+    }
+
+    fn identity_plane(instance: &str) -> Arc<crate::identity_first::IdentityRuntime> {
+        Arc::new(crate::identity_first::IdentityRuntime::new(
+            crate::identity_first::IdentityRuntimeConfig {
+                continuity_store: Arc::new(
+                    crate::identity_first::LocalContinuityStore::in_memory().unwrap(),
+                ),
+                lease_provider: Arc::new(crate::identity_first::LocalLeaseProvider::new()),
+                runtime_instance_id: instance.to_string(),
+                has_runtime_store: true,
+                durability_policy: crate::identity_first::DurabilityPolicy::SyncWriteThrough,
+                bridge: None,
+                default_timeout: None,
+            },
+        ))
+    }
+
+    /// A host of two mobs it created itself: `<tag>-launch`, the default
+    /// mob, and `<tag>-second`. Each has an identity plane bound in the
+    /// registry. Every row runs its mobs under ids of its own: the rows of
+    /// one test process share the in-process comms names.
+    struct TwoMobHost {
+        launch: crate::MobRuntime,
+        second: meerkat_mob::MobHandle,
+        registry: Arc<NativeAuthorityRegistry>,
+        resolver: NativeCallerResolver,
+        documents: DocumentService,
+        store_path: std::path::PathBuf,
+        _planes: [Arc<crate::identity_first::IdentityRuntime>; 2],
+    }
+
+    impl TwoMobHost {
+        async fn start(
+            dir: &std::path::Path,
+            tag: &str,
+            access: Option<crate::access::AccessController>,
+        ) -> Self {
+            let (launch_id, second_id) = (format!("{tag}-launch"), format!("{tag}-second"));
+            let definition = meerkat_mob::MobDefinition::from_toml(&format!(
+                "[mob]\nid = \"{launch_id}\"\n[profiles.worker]\nmodel = \"gpt-5.5\"\n\
+                 runtime_mode = \"turn_driven\"\n[profiles.worker.tools]\ncomms = true\n"
+            ))
+            .unwrap();
+            let spec = crate::MobBootstrapSpec::persistent(
+                definition,
+                meerkat_mob::MobStorage::in_memory(),
+                crate::mob_composition_manifest::MobStorageProvenance::declared_ephemeral(),
+                dir.to_path_buf(),
+                // Member sessions of both mobs and of the mobs their members
+                // create share this session service.
+                16,
+            )
+            .await
+            .unwrap()
+            .with_options(crate::MobBootstrapOptions {
+                allow_ephemeral_sessions: false,
+                notify_orchestrator_on_resume: false,
+                default_llm_client: Some(Arc::new(meerkat_client::TestClient::default())),
+            });
+            let sessions = spec.session_service.clone();
+            let launch = crate::MobRuntime::bootstrap(spec).await.unwrap();
+            if let Some(access) = &access {
+                access.bind_default_mob(&crate::member_key::DefaultMob::new(
+                    launch.handle().mob_id().clone(),
+                ));
+            }
+            let registry = NativeAuthorityRegistry::new(
+                "test".into(),
+                launch_id.clone(),
+                sessions.clone(),
+                true,
+                access,
+                test_store(dir),
+            );
+            registry.before_activation()(launch.handle().read_handle())
+                .await
+                .unwrap();
+            let planes = [identity_plane(&launch_id), identity_plane(&second_id)];
+            registry.bind_identity_runtime(&planes[0]);
+            registry.bind_identity_plane(&meerkat_mob::MobId::from(second_id.as_str()), &planes[1]);
+            // The host creates the second mob with no owner session.
+            let mut definition = launch.handle().definition().clone();
+            definition.id = second_id.as_str().into();
+            let second =
+                meerkat_mob::MobBuilder::new(definition, meerkat_mob::MobStorage::in_memory())
+                    .with_session_service(sessions)
+                    .with_default_llm_client(Arc::new(meerkat_client::TestClient::default()))
+                    .before_activation(registry.before_activation())
+                    .create()
+                    .await
+                    .unwrap();
+            let resolver = NativeCallerResolver {
+                registry: Arc::downgrade(&registry),
+                child_availability: None,
+                requirements: ToolBundleRequirements::durable_documents(
+                    "notes",
+                    "documents_read",
+                    "documents_apply",
+                ),
+            };
+            let documents =
+                DocumentService::new("test", "notes", registry.document_store()).unwrap();
+            Self {
+                launch,
+                second,
+                registry,
+                resolver,
+                documents,
+                store_path: dir.join("documents.sqlite3"),
+                _planes: planes,
+            }
+        }
+
+        async fn resolve(
+            &self,
+            session: &meerkat_core::SessionId,
+            requested_owner: Option<&Owner>,
+        ) -> documents::Result<HostAccessContext> {
+            self.resolver
+                .resolve(
+                    &ToolDispatchContext::default().with_runtime_identity(session.clone(), None),
+                    requested_owner,
+                )
+                .await
+        }
+
+        async fn caller(&self, session: &meerkat_core::SessionId) -> HostAccessContext {
+            self.resolve(session, None).await.unwrap()
+        }
+
+        async fn create(
+            &self,
+            caller: &HostAccessContext,
+            request: &str,
+            access: documents::DocumentAccess,
+        ) -> documents::Result<documents::MutationOutcome> {
+            self.documents
+                .mutate(
+                    caller,
+                    &documents::RequestIdentity::new(request, request.as_bytes()).unwrap(),
+                    documents::Mutation::Create(documents::NewDocument {
+                        content: documents::DocumentContent {
+                            title: request.into(),
+                            content_type: "application/test".into(),
+                            schema_version: 1,
+                            payload: vec![1],
+                        },
+                        owner: None,
+                        access,
+                    }),
+                )
+                .await
+        }
+
+        /// The stored metadata of the document `id`.
+        fn stored(&self, id: &documents::DocumentId) -> serde_json::Value {
+            let metadata: String = rusqlite::Connection::open(&self.store_path)
+                .unwrap()
+                .query_row(
+                    "SELECT metadata FROM extension_documents WHERE id = ?1",
+                    [&id.0],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            serde_json::from_str(&metadata).unwrap()
+        }
+
+        async fn stop(self) {
+            self.second.stop().await.unwrap();
+            self.launch.handle().stop().await.unwrap();
+        }
+    }
+
+    async fn member_session(
+        handle: &meerkat_mob::MobHandle,
+        member: &meerkat_mob::AgentIdentity,
+    ) -> meerkat_core::SessionId {
+        handle
+            .get_member(member)
+            .await
+            .unwrap()
+            .unwrap()
+            .bridge_session_id()
+            .unwrap()
+            .clone()
+    }
+
+    /// Spawn the member of the identity `identity` in `handle`'s mob, the
+    /// way every identity-first materialization does: Core's
+    /// durable-identity marker and the identity label.
+    async fn identity_member(
+        handle: &meerkat_mob::MobHandle,
+        identity: &str,
+    ) -> meerkat_core::SessionId {
+        let member = crate::member_comms_id::mob_member_id(identity);
+        let mut spec =
+            meerkat_mob::SpawnMemberSpec::host_root("worker", member.clone()).with_labels(
+                BTreeMap::from([("agent_identity".to_string(), identity.to_string())]),
+            );
+        spec.continuity_intent = meerkat_mob::SpawnContinuityIntent::DurableIdentity {
+            continuity_key: identity.to_string(),
+        };
+        handle.spawn_spec(spec).await.unwrap();
+        member_session(handle, &member).await
+    }
+
+    /// Spawn a plain worker `name` in `handle`'s mob.
+    async fn worker_member(handle: &meerkat_mob::MobHandle, name: &str) -> meerkat_core::SessionId {
+        let member = meerkat_mob::AgentIdentity::from(name);
+        handle
+            .spawn_spec(meerkat_mob::SpawnMemberSpec::host_root(
+                "worker",
+                member.clone(),
+            ))
+            .await
+            .unwrap();
+        member_session(handle, &member).await
+    }
+
+    fn reader_grant(principal: Principal) -> documents::Grant {
+        documents::Grant {
+            audience: documents::Audience::Agent {
+                principal,
+                reach: documents::Reach::SelfOnly,
+            },
+            role: Role::Reader,
+        }
+    }
+
+    /// Two mobs' identities of one name are two principals: the default
+    /// mob's keeps the stored form it always had, the other mob's carries
+    /// its mob. Each keeps its own documents and its own receipts under one
+    /// request id, and the other mob's identity keeps them across a respawn
+    /// of its member, as an identity does.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn extension_member_keyed_two_mobs_agents_of_one_name_keep_their_own_documents_and_receipts()
+     {
+        let dir = tempfile::tempdir().unwrap();
+        let host = TwoMobHost::start(dir.path(), "docs", None).await;
+        let launch_session = identity_member(&host.launch.handle(), "durable:alice").await;
+        let second_session = identity_member(&host.second, "durable:alice").await;
+        let launch_alice = host.caller(&launch_session).await;
+        let second_alice = host.caller(&second_session).await;
+        assert_eq!(
+            serde_json::to_value(launch_alice.principal()).unwrap(),
+            serde_json::json!({ "kind": "agent", "value": "durable:alice" })
+        );
+        assert_eq!(
+            serde_json::to_value(second_alice.principal()).unwrap(),
+            mob_agent_json("docs-second", "durable:alice"),
+            "an identity of another mob carries its mob"
+        );
+
+        let launch_book = host
+            .create(
+                &launch_alice,
+                "create",
+                documents::DocumentAccess::default(),
+            )
+            .await
+            .unwrap();
+        let second_book = host
+            .create(
+                &second_alice,
+                "create",
+                documents::DocumentAccess::default(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            !second_book.replayed,
+            "the other mob's alice replays no receipt of the default mob's"
+        );
+        assert_ne!(
+            launch_book.receipt.document_id,
+            second_book.receipt.document_id
+        );
+        for (caller, own, other) in [
+            (&launch_alice, &launch_book, &second_book),
+            (&second_alice, &second_book, &launch_book),
+        ] {
+            assert!(
+                host.documents
+                    .get(caller, &own.receipt.document_id)
+                    .await
+                    .is_ok()
+            );
+            assert!(matches!(
+                host.documents.get(caller, &other.receipt.document_id).await,
+                Err(documents::Error::NotFound)
+            ));
+            assert_eq!(
+                host.documents
+                    .lookup_receipt(
+                        caller,
+                        &documents::RequestIdentity::new("create", b"create").unwrap()
+                    )
+                    .await
+                    .unwrap(),
+                Some(own.receipt.clone())
+            );
+        }
+
+        // The identity owns the document, not the member's incarnation.
+        let member = crate::member_comms_id::mob_member_id("durable:alice");
+        host.second.retire(member).await.unwrap();
+        let respawned = identity_member(&host.second, "durable:alice").await;
+        assert_ne!(respawned, second_session);
+        let respawned = host.caller(&respawned).await;
+        assert_eq!(respawned.principal(), second_alice.principal());
+        assert!(
+            host.documents
+                .get(&respawned, &second_book.receipt.document_id)
+                .await
+                .is_ok()
+        );
+        host.stop().await;
+    }
+
+    /// A principal that tool input spells as the default mob's identity by
+    /// the mob's id is the default mob's identity: a grant and a deny that
+    /// name it so reach that identity, an owner named so is that identity,
+    /// and the store holds the one form the default mob's identities always
+    /// had.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn extension_member_keyed_a_principal_naming_the_default_mob_by_id_is_the_default_mobs() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = TwoMobHost::start(dir.path(), "by-id", None).await;
+        let launch_session = identity_member(&host.launch.handle(), "durable:alice").await;
+        let second_session = identity_member(&host.second, "durable:alice").await;
+        let launch_alice = host.caller(&launch_session).await;
+        let second_alice = host.caller(&second_session).await;
+        let by_id = || mob_agent("by-id-launch", "durable:alice");
+        let stored_form = serde_json::json!({ "kind": "agent", "value": "durable:alice" });
+
+        // A grant.
+        let book = host
+            .create(
+                &second_alice,
+                "create",
+                documents::DocumentAccess {
+                    grants: vec![reader_grant(by_id())],
+                    ..documents::DocumentAccess::default()
+                },
+            )
+            .await
+            .unwrap()
+            .receipt;
+        assert_eq!(
+            host.stored(&book.document_id)["access"]["grants"][0]["audience"]["value"]["principal"],
+            stored_form
+        );
+        assert!(
+            host.documents
+                .get(&launch_alice, &book.document_id)
+                .await
+                .is_ok(),
+            "a grant naming the default mob by its id reaches its identity"
+        );
+
+        // A deny.
+        let denied = host
+            .documents
+            .mutate(
+                &second_alice,
+                &documents::RequestIdentity::new("deny", b"deny").unwrap(),
+                documents::Mutation::SetAccess {
+                    id: book.document_id.clone(),
+                    expected_revision: book.revision.clone(),
+                    access: documents::DocumentAccess {
+                        grants: vec![reader_grant(by_id())],
+                        denies: vec![documents::Deny {
+                            audience: documents::Audience::Agent {
+                                principal: by_id(),
+                                reach: documents::Reach::SelfOnly,
+                            },
+                            operation: documents::DeniedOperation::Read,
+                        }],
+                        ..documents::DocumentAccess::default()
+                    },
+                },
+            )
+            .await
+            .unwrap()
+            .receipt;
+        assert!(
+            matches!(
+                host.documents.get(&launch_alice, &book.document_id).await,
+                Err(documents::Error::NotFound)
+            ),
+            "a deny naming the default mob by its id holds on its identity"
+        );
+
+        // An owner.
+        let owner = Owner::Agent(by_id());
+        let transferring = host
+            .resolve(&second_session, Some(&owner))
+            .await
+            .expect("the default mob's identity, named by the mob's id, is a valid owner");
+        host.documents
+            .mutate(
+                &transferring,
+                &documents::RequestIdentity::new("transfer", b"transfer").unwrap(),
+                documents::Mutation::Transfer {
+                    id: book.document_id.clone(),
+                    expected_revision: denied.revision,
+                    owner,
+                    access: Some(documents::DocumentAccess::default()),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            host.stored(&book.document_id)["owner"]["value"],
+            stored_form
+        );
+        assert!(
+            host.documents
+                .get(&launch_alice, &book.document_id)
+                .await
+                .is_ok(),
+            "the default mob's identity owns the transferred document"
+        );
+        host.stop().await;
+    }
+
+    /// An owner that names another mob's identity is validated in that mob:
+    /// the identity must be one of that mob's, an identity of the same name
+    /// in the default mob does not stand in for it, and a mob without an
+    /// identity plane has no identities to name.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn extension_member_keyed_another_mobs_agent_owner_is_validated_in_its_own_mob() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = TwoMobHost::start(dir.path(), "owner", None).await;
+        let launch_session = identity_member(&host.launch.handle(), "durable:alice").await;
+        identity_member(&host.launch.handle(), "durable:bob").await;
+        identity_member(&host.second, "durable:alice").await;
+        let resolve = |owner: Owner| {
+            let host = &host;
+            let session = &launch_session;
+            async move { host.resolve(session, Some(&owner)).await.map(|_| ()) }
+        };
+
+        assert!(
+            resolve(Owner::Agent(mob_agent("owner-second", "durable:alice")))
+                .await
+                .is_ok()
+        );
+        assert!(
+            resolve(Owner::Agent(Principal::Agent("durable:bob".into())))
+                .await
+                .is_ok()
+        );
+        assert!(
+            matches!(
+                resolve(Owner::Agent(mob_agent("owner-second", "durable:bob"))).await,
+                Err(documents::Error::NotFound)
+            ),
+            "the default mob's bob is no identity of the other mob"
+        );
+        assert!(matches!(
+            resolve(Owner::Agent(mob_agent("nowhere", "durable:alice"))).await,
+            Err(documents::Error::AuthorityUnavailable)
+        ));
+        // A bound mob without an identity plane has no identities to name.
+        let helper_mob = child_of(
+            &host.launch,
+            &host.registry,
+            "owner-helper",
+            &launch_session,
+        )
+        .await;
+        identity_member(&helper_mob, "durable:alice").await;
+        assert!(matches!(
+            resolve(Owner::Agent(mob_agent("owner-helper", "durable:alice"))).await,
+            Err(documents::Error::AuthorityUnavailable)
+        ));
+        helper_mob.stop().await.unwrap();
+        host.stop().await;
+    }
+
+    fn extension_rule(
+        id: &str,
+        effect: crate::access::AccessEffect,
+        mobs: &[&str],
+    ) -> crate::access::AccessRule {
+        crate::access::AccessRule {
+            id: id.into(),
+            effect,
+            actions: vec!["extension.*".into()],
+            mobs: mobs.iter().map(|mob| (*mob).to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    fn access_with(rules: Vec<crate::access::AccessRule>) -> crate::access::AccessController {
+        crate::access::AccessController::new(crate::access::AccessControlConfig {
+            enabled: true,
+            admins: vec!["operator".into()],
+            rules,
+            ..Default::default()
+        })
+        .unwrap()
+    }
+
+    /// Whether `caller`'s host policy lets it create a document.
+    async fn may_create(
+        host: &TwoMobHost,
+        session: &meerkat_core::SessionId,
+        request: &str,
+    ) -> bool {
+        let caller = host.caller(session).await;
+        match host
+            .create(&caller, request, documents::DocumentAccess::default())
+            .await
+        {
+            Ok(_) => true,
+            Err(documents::Error::NotFound) => false,
+            Err(error) => panic!("{request}: {error:?}"),
+        }
+    }
+
+    /// Host access to documents is judged in the caller's own mob. An allow
+    /// that lists no mobs is the default mob's and grants nothing to a
+    /// member of another mob the host created, nor to a worker of a mob one
+    /// of that mob's members created; a rule that lists the mob reaches
+    /// both, an allow and a deny alike.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn extension_member_keyed_access_is_judged_in_the_callers_own_mob() {
+        use crate::access::AccessEffect;
+        let dir = tempfile::tempdir().unwrap();
+        let access = access_with(vec![extension_rule("default", AccessEffect::Allow, &[])]);
+        let host = TwoMobHost::start(dir.path(), "access", Some(access.clone())).await;
+        let launch_worker = worker_member(&host.launch.handle(), "worker").await;
+        let second_worker = worker_member(&host.second, "worker").await;
+        let second_agent = identity_member(&host.second, "durable:alice").await;
+        let helper_mob = child_of(
+            &host.launch,
+            &host.registry,
+            "access-helper",
+            &second_worker,
+        )
+        .await;
+        let helper = worker_member(&helper_mob, "helper").await;
+
+        assert!(may_create(&host, &launch_worker, "launch-1").await);
+        for (session, who) in [
+            (&second_worker, "a worker of the other mob"),
+            (&second_agent, "an identity of the other mob"),
+            (&helper, "a worker of a mob the other mob's member created"),
+        ] {
+            assert!(
+                !may_create(&host, session, &format!("{who} 1")).await,
+                "an allow that lists no mobs grants {who} nothing"
+            );
+        }
+
+        access
+            .upsert_rule(extension_rule(
+                "second",
+                AccessEffect::Allow,
+                &["access-second"],
+            ))
+            .unwrap();
+        for (session, who) in [
+            (&second_worker, "a worker of the other mob"),
+            (&second_agent, "an identity of the other mob"),
+            (&helper, "a worker of a mob the other mob's member created"),
+        ] {
+            assert!(
+                may_create(&host, session, &format!("{who} 2")).await,
+                "an allow that lists the mob reaches {who}"
+            );
+        }
+
+        access
+            .upsert_rule(extension_rule(
+                "second-deny",
+                AccessEffect::Deny,
+                &["access-second"],
+            ))
+            .unwrap();
+        for (session, who) in [
+            (&second_worker, "a worker of the other mob"),
+            (&second_agent, "an identity of the other mob"),
+            (&helper, "a worker of a mob the other mob's member created"),
+        ] {
+            assert!(
+                !may_create(&host, session, &format!("{who} 3")).await,
+                "a deny that lists the mob holds on {who}"
+            );
+        }
+        assert!(
+            may_create(&host, &launch_worker, "launch-2").await,
+            "a deny that lists another mob leaves the default mob's member alone"
+        );
+        helper_mob.stop().await.unwrap();
+        host.stop().await;
+    }
+
+    /// A host that serves one mob judges as it always did: the default
+    /// mob's member, and a worker of a mob that member created, are judged
+    /// in the default mob, so an allow that lists no mobs reaches both and
+    /// a deny that lists another mob reaches neither.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn extension_member_keyed_the_default_mobs_members_and_their_helpers_are_judged_in_it() {
+        use crate::access::AccessEffect;
+        let dir = tempfile::tempdir().unwrap();
+        let access = access_with(vec![
+            extension_rule("default", AccessEffect::Allow, &[]),
+            extension_rule("second-deny", AccessEffect::Deny, &["guard-second"]),
+        ]);
+        let host = TwoMobHost::start(dir.path(), "guard", Some(access)).await;
+        let launch_worker = worker_member(&host.launch.handle(), "worker").await;
+        let launch_agent = identity_member(&host.launch.handle(), "durable:alice").await;
+        let helper_mob =
+            child_of(&host.launch, &host.registry, "guard-helper", &launch_worker).await;
+        let helper = worker_member(&helper_mob, "helper").await;
+
+        for (session, who) in [
+            (&launch_worker, "worker"),
+            (&launch_agent, "identity"),
+            (&helper, "helper"),
+        ] {
+            assert!(may_create(&host, session, who).await, "{who}");
+        }
+        helper_mob.stop().await.unwrap();
+        host.stop().await;
+    }
+
+    /// `agent:<identity>` is the access subject of the default mob's
+    /// identity. An identity of the same name in another mob is not that
+    /// subject: a rule and an admin entry written for the subject do not
+    /// apply to it. A rule that selects it as an agent of its own mob, by
+    /// its identity, does.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn extension_member_keyed_another_mobs_agent_is_not_the_default_mobs_access_subject() {
+        let dir = tempfile::tempdir().unwrap();
+        let access = crate::access::AccessController::new(crate::access::AccessControlConfig {
+            enabled: true,
+            admins: vec!["operator".into(), "agent:durable:admin".into()],
+            rules: vec![crate::access::AccessRule {
+                id: "subject".into(),
+                subjects: vec!["agent:durable:alice".into()],
+                actions: vec!["extension.*".into()],
+                mobs: vec!["*".into()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .unwrap();
+        let host = TwoMobHost::start(dir.path(), "subject", Some(access.clone())).await;
+        let launch_alice = identity_member(&host.launch.handle(), "durable:alice").await;
+        let second_alice = identity_member(&host.second, "durable:alice").await;
+        let launch_admin = identity_member(&host.launch.handle(), "durable:admin").await;
+        let second_admin = identity_member(&host.second, "durable:admin").await;
+
+        // A rule written for the subject.
+        assert!(may_create(&host, &launch_alice, "launch-alice").await);
+        assert!(
+            !may_create(&host, &second_alice, "second-alice").await,
+            "a rule for the default mob's alice is no rule for another mob's"
+        );
+
+        // An admin entry written for the subject: only a realm
+        // administrator creates a document the realm owns.
+        let realm_owned = |session: &meerkat_core::SessionId, request: &'static str| {
+            let host = &host;
+            let session = session.clone();
+            async move {
+                let caller = host.resolve(&session, Some(&Owner::Realm)).await.unwrap();
+                host.documents
+                    .mutate(
+                        &caller,
+                        &documents::RequestIdentity::new(request, request.as_bytes()).unwrap(),
+                        documents::Mutation::Create(documents::NewDocument {
+                            content: documents::DocumentContent {
+                                title: request.into(),
+                                content_type: "application/test".into(),
+                                schema_version: 1,
+                                payload: vec![1],
+                            },
+                            owner: Some(Owner::Realm),
+                            access: documents::DocumentAccess::default(),
+                        }),
+                    )
+                    .await
+            }
+        };
+        assert!(realm_owned(&launch_admin, "launch-realm").await.is_ok());
+        assert!(
+            matches!(
+                realm_owned(&second_admin, "second-realm").await,
+                Err(documents::Error::NotFound)
+            ),
+            "an admin entry for the default mob's identity makes no admin of another mob's"
+        );
+
+        // A rule that selects the other mob's identity by its name.
+        access
+            .upsert_rule(crate::access::AccessRule {
+                id: "second-alice".into(),
+                actions: vec!["extension.*".into()],
+                agents: vec!["durable:alice".into()],
+                mobs: vec!["subject-second".into()],
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(
+            may_create(&host, &second_alice, "second-alice-selected").await,
+            "a rule selects another mob's identity by its name, in its mob"
+        );
+        host.stop().await;
+    }
+
+    /// Binding the default mob's identity plane by its mob id is binding
+    /// the composition's identity-first runtime: the default mob has one
+    /// plane, whichever way it is bound. A mob no plane was bound for has
+    /// none, and a member of it is a worker, also one that carries Core's
+    /// durable-identity marker.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn extension_member_keyed_a_mob_has_the_identity_plane_bound_for_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (runtime, _registry, store, owner_session) =
+            bound_runtime(dir.path(), "plane-launch").await;
+        let handle = runtime.handle();
+        let registry = NativeAuthorityRegistry::new(
+            "test".into(),
+            "plane-launch".into(),
+            runtime.session_service().unwrap().clone(),
+            true,
+            None,
+            store,
+        );
+        registry.before_activation()(handle.read_handle())
+            .await
+            .unwrap();
+        let rostered = crate::identity_first::AgentIdentity::parse("durable:rostered").unwrap();
+        let registered = |mob_id: &'static str| {
+            let registry = &registry;
+            let rostered = &rostered;
+            async move {
+                let plane = registry.identity_plane(mob_id)?;
+                Some(registry.registered_identity(&plane, rostered).await)
+            }
+        };
+        // The default mob of an identity-first composition has a plane
+        // before its runtime is bound, and nothing answers through it yet.
+        assert!(matches!(
+            registered("plane-launch").await,
+            Some(Err(documents::Error::AuthorityUnavailable))
+        ));
+        assert!(registered("plane-second").await.is_none());
+
+        let launch_plane = identity_plane("plane-launch");
+        registry.bind_identity_plane(handle.mob_id(), &launch_plane);
+        assert!(matches!(registered("plane-launch").await, Some(Ok(false))));
+        assert!(
+            registered("plane-second").await.is_none(),
+            "binding the default mob's plane binds no other mob's"
+        );
+
+        // A member of a mob without a plane is a worker, marker or not.
+        let unbound = child_of(&runtime, &registry, "plane-second", &owner_session).await;
+        let session = identity_member(&unbound, "durable:alice").await;
+        let snapshot = unbound
+            .member_creation_for_session(&session)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            registry
+                .principal(&snapshot, &mut BridgeHistoryRead::default())
+                .await,
+            Ok(Principal::Worker { mob_id, .. }) if mob_id == "plane-second"
+        ));
+
+        // Once its plane is bound, the same member is the mob's identity.
+        // The latest binding stands: a mob that is loaded again brings a
+        // new runtime.
+        let earlier_plane = identity_plane("plane-second-earlier");
+        earlier_plane
+            .register_locked(crate::identity_first::DurableAgentSpec {
+                identity: rostered.clone(),
+                profile: meerkat_mob::ProfileName::from("worker"),
+                addressability: crate::identity_first::AgentAddressability::Addressable,
+                display_name: None,
+                labels: BTreeMap::new(),
+                context: None,
+                additional_instructions: Vec::new(),
+                initial_message: None,
+                runtime_mode_override: None,
+                backend: None,
+                binding: None,
+                placement: None,
+            })
+            .await;
+        registry.bind_identity_plane(unbound.mob_id(), &earlier_plane);
+        assert!(matches!(registered("plane-second").await, Some(Ok(true))));
+        let second_plane = identity_plane("plane-second");
+        registry.bind_identity_plane(unbound.mob_id(), &second_plane);
+        assert!(
+            matches!(registered("plane-second").await, Some(Ok(false))),
+            "the latest plane bound for a mob answers for it"
+        );
+        assert_eq!(
+            registry
+                .principal(&snapshot, &mut BridgeHistoryRead::default())
+                .await
+                .unwrap(),
+            mob_agent("plane-second", "durable:alice")
+        );
+        unbound.stop().await.unwrap();
+        handle.stop().await.unwrap();
+    }
+
+    /// A destroyed mob's identity plane goes with its handle: a later mob
+    /// under the id starts without one, so its members are workers until
+    /// its own plane is bound.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn extension_member_keyed_a_destroyed_mobs_identity_plane_goes_with_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = TwoMobHost::start(dir.path(), "gone", None).await;
+        assert!(host.registry.identity_plane("gone-second").is_some());
+        host.second.destroy().await.unwrap();
+        host.registry.after_destroy()(host.second.mob_id());
+        assert!(host.registry.identity_plane("gone-second").is_none());
+        assert!(
+            host.registry.identity_plane("gone-launch").is_some(),
+            "the default mob keeps its plane"
+        );
+        host.launch.handle().stop().await.unwrap();
+    }
+
+    /// A write that names another mob's identity names that mob's id, like
+    /// a write that names the mob: once which mob holds the id changes, a
+    /// caller resolved before is refused and resolves again. A write that
+    /// names the default mob's identity names no mob id.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn extension_member_keyed_a_write_naming_another_mobs_agent_is_ordered_against_its_mob_id()
+     {
+        let dir = tempfile::tempdir().unwrap();
+        let host = TwoMobHost::start(dir.path(), "order", None).await;
+        let launch_session = identity_member(&host.launch.handle(), "durable:alice").await;
+        identity_member(&host.second, "durable:alice").await;
+        let granting = |principal: Principal| documents::DocumentAccess {
+            grants: vec![reader_grant(principal)],
+            ..documents::DocumentAccess::default()
+        };
+
+        let stale = host.caller(&launch_session).await;
+        host.registry.ordering.changed("order-second");
+        let refused = host
+            .create(
+                &stale,
+                "stale",
+                granting(mob_agent("order-second", "durable:alice")),
+            )
+            .await;
+        assert!(
+            matches!(refused, Err(documents::Error::AuthorityUnavailable)),
+            "a caller resolved before the id changed is refused: {refused:?}"
+        );
+        assert!(
+            host.create(
+                &stale,
+                "plain",
+                granting(Principal::Agent("durable:alice".into()))
+            )
+            .await
+            .is_ok(),
+            "a grant to the default mob's identity names no mob id"
+        );
+        let fresh = host.caller(&launch_session).await;
+        assert!(
+            host.create(
+                &fresh,
+                "fresh",
+                granting(mob_agent("order-second", "durable:alice"))
+            )
+            .await
+            .is_ok()
+        );
+        host.stop().await;
+    }
+
+    /// A caller whose mob's owner cannot be read is judged in no guessed
+    /// mob: under rules that are enforced it resolves no caller. A
+    /// controller that enforces nothing judges nobody and reads no owner,
+    /// so the same caller resolves as it does without a controller.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn extension_member_keyed_an_unreadable_owner_refuses_only_under_enforced_rules() {
+        use crate::access::AccessEffect;
+        let dir = tempfile::tempdir().unwrap();
+        let access = access_with(vec![extension_rule(
+            "every-mob",
+            AccessEffect::Allow,
+            &["*"],
+        )]);
+        let host = TwoMobHost::start(dir.path(), "orphan", Some(access.clone())).await;
+        // A mob whose owner session nothing recorded.
+        let orphan_mob = child_of(
+            &host.launch,
+            &host.registry,
+            "orphan-owned",
+            &meerkat_core::SessionId::new(),
+        )
+        .await;
+        let orphan = worker_member(&orphan_mob, "worker").await;
+        assert!(matches!(
+            host.resolve(&orphan, None).await,
+            Err(documents::Error::AuthorityUnavailable)
+        ));
+
+        access
+            .replace_config(crate::access::AccessControlConfig::default())
+            .unwrap();
+        assert!(
+            host.resolve(&orphan, None).await.is_ok(),
+            "a controller that enforces nothing reads no owner"
+        );
+        orphan_mob.stop().await.unwrap();
+        host.stop().await;
+    }
+
+    /// A mob that a session outside every mob owns belongs to no other mob:
+    /// it is a top-level mob, and its member is judged in it, like a member
+    /// of a mob the host created. The fixture's owner session starts as a
+    /// member of the default mob, where its mob's worker is judged, and is
+    /// then recorded without a mob binding, the form a session outside
+    /// every mob has.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn extension_member_keyed_a_mob_owned_outside_every_mob_is_judged_as_itself() {
+        use crate::access::AccessEffect;
+        let dir = tempfile::tempdir().unwrap();
+        let definition = meerkat_mob::MobDefinition::from_toml(
+            "[mob]\nid = \"outside-launch\"\n[profiles.worker]\nmodel = \"gpt-5.5\"\n\
+             runtime_mode = \"turn_driven\"\n[profiles.worker.tools]\ncomms = true\n",
+        )
+        .unwrap();
+        let spec = crate::MobBootstrapSpec::persistent(
+            definition,
+            meerkat_mob::MobStorage::in_memory(),
+            crate::mob_composition_manifest::MobStorageProvenance::declared_ephemeral(),
+            dir.path().to_path_buf(),
+            4,
+        )
+        .await
+        .unwrap()
+        .with_options(crate::MobBootstrapOptions {
+            allow_ephemeral_sessions: false,
+            notify_orchestrator_on_resume: false,
+            default_llm_client: Some(Arc::new(meerkat_client::TestClient::default())),
+        });
+        let runtime_store = spec.durable_runtime_store.clone().unwrap();
+        let sessions = spec.session_service.clone();
+        let launch = crate::MobRuntime::bootstrap(spec).await.unwrap();
+        let access = access_with(vec![extension_rule("default", AccessEffect::Allow, &[])]);
+        access.bind_default_mob(&crate::member_key::DefaultMob::new(
+            launch.handle().mob_id().clone(),
+        ));
+        let registry = NativeAuthorityRegistry::new(
+            "test".into(),
+            "outside-launch".into(),
+            sessions.clone(),
+            false,
+            Some(access.clone()),
+            test_store(dir.path()),
+        );
+        registry.before_activation()(launch.handle().read_handle())
+            .await
+            .unwrap();
+        let resolver = NativeCallerResolver {
+            registry: Arc::downgrade(&registry),
+            child_availability: None,
+            requirements: ToolBundleRequirements::durable_documents(
+                "notes",
+                "documents_read",
+                "documents_apply",
+            ),
+        };
+        let owner = worker_member(&launch.handle(), "owner").await;
+        let owned = child_of(&launch, &registry, "owned-outside", &owner).await;
+        let worker = worker_member(&owned, "worker").await;
+        let context = ToolDispatchContext::default().with_runtime_identity(worker, None);
+        // Whether the worker's host policy lets it create a document of its
+        // own.
+        let may_create = || {
+            let (resolver, context) = (&resolver, &context);
+            async move {
+                let caller = resolver.resolve(context, None).await.unwrap();
+                documents::can_create(&caller, &Owner::Agent(caller.principal().clone()))
+            }
+        };
+        assert!(
+            may_create().await,
+            "the worker of a mob a default mob's member owns is judged in the default mob"
+        );
+
+        // Record the owner session without a mob binding. No turn runs and
+        // no checkpoint is written while the record is replaced: the row
+        // waits for the session to have no turn, however long that takes.
+        sessions
+            .subscribe_session_activity(&owner)
+            .await
+            .unwrap()
+            .wait_inactive()
+            .await;
+        sessions.cancel_all_checkpointers().await;
+        let mut source = sessions
+            .load_persisted_session(&owner)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut metadata = source.try_session_metadata().unwrap().unwrap();
+        metadata.mob_member_binding = None;
+        source.set_session_metadata(metadata).unwrap();
+        let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&owner);
+        let observed = runtime_store
+            .load_session_boundary_authority(&runtime_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .head_canonical()
+            .unwrap()
+            .boundary_head()
+            .clone();
+        let mutation = meerkat_core::session_store::PreparedHeadCanonicalMutation::prepare(
+            &source,
+            Some(observed),
+        )
+        .unwrap();
+        runtime_store
+            .commit_prepared_session_boundary(
+                &runtime_id,
+                meerkat_runtime::PreparedRuntimeSessionCommit::snapshot_only(
+                    meerkat_core::lifecycle::core_executor::BoundSessionCommit::head_canonical_from_session(
+                        &source, mutation,
+                    )
+                    .unwrap(),
+                ),
+            )
+            .await
+            .unwrap();
+        let recorded = sessions
+            .load_retained_session_metadata(&owner)
+            .await
+            .unwrap()
+            .unwrap()
+            .session_metadata
+            .unwrap();
+        assert!(
+            recorded.mob_member_binding.is_none(),
+            "the fixture's owner session is recorded outside every mob"
+        );
+
+        assert!(
+            !may_create().await,
+            "an allow that lists no mobs grants nothing in a mob no member owns"
+        );
+        access
+            .upsert_rule(extension_rule(
+                "owned-outside",
+                AccessEffect::Allow,
+                &["owned-outside"],
+            ))
+            .unwrap();
+        assert!(
+            may_create().await,
+            "a rule that lists the mob reaches its member"
+        );
+        sessions.rearm_all_checkpointers().await;
+        owned.stop().await.unwrap();
+        launch.handle().stop().await.unwrap();
+    }
+
+    /// A mob the host creates with no owner session under `mob_id`,
+    /// activated through the registry.
+    async fn host_mob(
+        launch: &crate::MobRuntime,
+        registry: &Arc<NativeAuthorityRegistry>,
+        mob_id: &str,
+    ) -> meerkat_mob::MobHandle {
+        let mut definition = launch.handle().definition().clone();
+        definition.id = mob_id.into();
+        meerkat_mob::MobBuilder::new(definition, meerkat_mob::MobStorage::in_memory())
+            .with_session_service(launch.session_service().unwrap().clone())
+            .with_default_llm_client(Arc::new(meerkat_client::TestClient::default()))
+            .before_activation(registry.before_activation())
+            .create()
+            .await
+            .unwrap()
+    }
+
+    fn granting(principal: Principal) -> documents::DocumentAccess {
+        documents::DocumentAccess {
+            grants: vec![reader_grant(principal)],
+            ..documents::DocumentAccess::default()
+        }
+    }
+
+    /// The stored principal of the first grant of the document `id`.
+    fn stored_grant(host: &TwoMobHost, id: &documents::DocumentId) -> serde_json::Value {
+        host.stored(id)["access"]["grants"][0]["audience"]["value"]["principal"].clone()
+    }
+
+    async fn reads(
+        host: &TwoMobHost,
+        session: &meerkat_core::SessionId,
+        id: &documents::DocumentId,
+    ) -> bool {
+        let caller = host.caller(session).await;
+        match host.documents.get(&caller, id).await {
+            Ok(_) => true,
+            Err(documents::Error::NotFound) => false,
+            Err(error) => panic!("{error:?}"),
+        }
+    }
+
+    /// A bare name is an identity of the caller's own mob. Two mobs each
+    /// have a `bob`: named bare by the second mob's caller it is the second
+    /// mob's, named bare by the default mob's caller it is the default
+    /// mob's, and neither reaches the other. Another mob's identity takes
+    /// the explicit spelling with its mob, and the default mob's identity,
+    /// however it is named, is stored in the bytes it always had. A worker
+    /// of a mob that a member created names the identities of the mob its
+    /// owner belongs to.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn extension_member_keyed_a_bare_name_is_an_identity_of_the_callers_own_mob() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = TwoMobHost::start(dir.path(), "bare", None).await;
+        let launch_alice = identity_member(&host.launch.handle(), "durable:alice").await;
+        let launch_bob = identity_member(&host.launch.handle(), "durable:bob").await;
+        identity_member(&host.launch.handle(), "durable:carol").await;
+        let second_alice = identity_member(&host.second, "durable:alice").await;
+        let second_bob = identity_member(&host.second, "durable:bob").await;
+        let bare_bob = || Principal::Agent("durable:bob".into());
+        let default_bytes = serde_json::json!({ "kind": "agent", "value": "durable:bob" });
+        let second_bytes = mob_agent_json("bare-second", "durable:bob");
+        // (the session that writes, the principal it names, the stored
+        // bytes, whether the default mob's bob reads the document)
+        let cases = [
+            (&second_alice, bare_bob(), &second_bytes, false),
+            (&launch_alice, bare_bob(), &default_bytes, true),
+            (
+                &second_alice,
+                mob_agent("bare-launch", "durable:bob"),
+                &default_bytes,
+                true,
+            ),
+            (
+                &launch_alice,
+                mob_agent("bare-second", "durable:bob"),
+                &second_bytes,
+                false,
+            ),
+            (
+                &launch_alice,
+                mob_agent("bare-launch", "durable:bob"),
+                &default_bytes,
+                true,
+            ),
+            (
+                &second_alice,
+                mob_agent("bare-second", "durable:bob"),
+                &second_bytes,
+                false,
+            ),
+        ];
+        for (index, (writer, named, stored, default_mobs)) in cases.into_iter().enumerate() {
+            let caller = host.caller(writer).await;
+            let book = host
+                .create(&caller, &format!("grant-{index}"), granting(named))
+                .await
+                .unwrap()
+                .receipt;
+            assert_eq!(
+                &stored_grant(&host, &book.document_id),
+                stored,
+                "case {index}"
+            );
+            assert_eq!(
+                reads(&host, &launch_bob, &book.document_id).await,
+                default_mobs,
+                "case {index}: the default mob's bob"
+            );
+            assert_eq!(
+                reads(&host, &second_bob, &book.document_id).await,
+                !default_mobs,
+                "case {index}: the second mob's bob"
+            );
+        }
+
+        // A deny alone names an identity the same way.
+        let denied = host
+            .create(
+                &host.caller(&second_alice).await,
+                "deny-only",
+                documents::DocumentAccess {
+                    denies: vec![documents::Deny {
+                        audience: documents::Audience::Agent {
+                            principal: bare_bob(),
+                            reach: documents::Reach::SelfOnly,
+                        },
+                        operation: documents::DeniedOperation::Read,
+                    }],
+                    ..documents::DocumentAccess::default()
+                },
+            )
+            .await
+            .unwrap()
+            .receipt;
+        assert_eq!(
+            host.stored(&denied.document_id)["access"]["denies"][0]["audience"]["value"]["principal"],
+            second_bytes
+        );
+
+        // An owner named bare is validated in the caller's own mob: carol
+        // is an identity of the default mob only.
+        let carol = Owner::Agent(Principal::Agent("durable:carol".into()));
+        assert!(host.resolve(&launch_alice, Some(&carol)).await.is_ok());
+        assert!(matches!(
+            host.resolve(&second_alice, Some(&carol)).await,
+            Err(documents::Error::NotFound)
+        ));
+        let owned = host
+            .create(
+                &host.caller(&second_alice).await,
+                "to-transfer",
+                documents::DocumentAccess::default(),
+            )
+            .await
+            .unwrap()
+            .receipt;
+        let bob = Owner::Agent(bare_bob());
+        let transferring = host.resolve(&second_alice, Some(&bob)).await.unwrap();
+        host.documents
+            .mutate(
+                &transferring,
+                &documents::RequestIdentity::new("transfer", b"transfer").unwrap(),
+                documents::Mutation::Transfer {
+                    id: owned.document_id.clone(),
+                    expected_revision: owned.revision,
+                    owner: bob,
+                    access: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            host.stored(&owned.document_id)["owner"]["value"],
+            second_bytes
+        );
+        assert!(reads(&host, &second_bob, &owned.document_id).await);
+        assert!(!reads(&host, &launch_bob, &owned.document_id).await);
+
+        // A transfer to the mob itself names an identity only in its new
+        // access: that bare name is the second mob's identity as well.
+        let pooled = host
+            .create(
+                &host.caller(&second_alice).await,
+                "to-the-mob",
+                documents::DocumentAccess::default(),
+            )
+            .await
+            .unwrap()
+            .receipt;
+        let the_mob = Owner::Mob("bare-second".into());
+        let transferring = host.resolve(&second_alice, Some(&the_mob)).await.unwrap();
+        host.documents
+            .mutate(
+                &transferring,
+                &documents::RequestIdentity::new("to-the-mob-transfer", b"to-the-mob-transfer")
+                    .unwrap(),
+                documents::Mutation::Transfer {
+                    id: pooled.document_id.clone(),
+                    expected_revision: pooled.revision,
+                    owner: the_mob,
+                    access: Some(granting(bare_bob())),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(stored_grant(&host, &pooled.document_id), second_bytes);
+        assert!(reads(&host, &second_bob, &pooled.document_id).await);
+        assert!(!reads(&host, &launch_bob, &pooled.document_id).await);
+
+        // A worker of a mob the second mob's identity created.
+        let helper_mob = child_of(&host.launch, &host.registry, "bare-helper", &second_alice).await;
+        let helper = worker_member(&helper_mob, "worker").await;
+        let shared = host
+            .create(
+                &host.caller(&helper).await,
+                "helper-grant",
+                granting(bare_bob()),
+            )
+            .await
+            .unwrap()
+            .receipt;
+        assert_eq!(stored_grant(&host, &shared.document_id), second_bytes);
+        assert!(reads(&host, &second_bob, &shared.document_id).await);
+        assert!(!reads(&host, &launch_bob, &shared.document_id).await);
+        // An owner that worker names is an identity of the second mob too.
+        assert!(
+            host.resolve(&helper, Some(&Owner::Agent(bare_bob())))
+                .await
+                .is_ok()
+        );
+        assert!(matches!(
+            host.resolve(&helper, Some(&carol)).await,
+            Err(documents::Error::NotFound)
+        ));
+        helper_mob.stop().await.unwrap();
+        host.stop().await;
+    }
+
+    /// A caller reads a document in its own naming, so reading a document
+    /// and writing its access back changes nothing. To a caller of the
+    /// second mob the default mob's identity reads with the default mob's
+    /// id and the second mob's own identity reads bare; to a caller of the
+    /// default mob both read as they are stored. Either way the stored
+    /// bytes are the same before and after the write.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn extension_member_keyed_reading_then_writing_access_back_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = TwoMobHost::start(dir.path(), "trip", None).await;
+        let launch_alice = identity_member(&host.launch.handle(), "durable:alice").await;
+        identity_member(&host.launch.handle(), "durable:bob").await;
+        let second_alice = identity_member(&host.second, "durable:alice").await;
+        identity_member(&host.second, "durable:bob").await;
+        // The three spellings of a bob: without a mob (the default mob's
+        // stored bytes, and how a caller reads its own mob's bob), and with
+        // each mob's id.
+        let bob_without_a_mob = serde_json::json!({ "kind": "agent", "value": "durable:bob" });
+        let bob_of_launch = mob_agent_json("trip-launch", "durable:bob");
+        let bob_of_second = mob_agent_json("trip-second", "durable:bob");
+        // Each writer's document grants both mobs' bob, one of them denied.
+        let access = |default_mobs: Principal, second_mobs: Principal| documents::DocumentAccess {
+            grants: vec![
+                reader_grant(default_mobs.clone()),
+                reader_grant(second_mobs),
+            ],
+            denies: vec![documents::Deny {
+                audience: documents::Audience::Agent {
+                    principal: default_mobs,
+                    reach: documents::Reach::SelfOnly,
+                },
+                operation: documents::DeniedOperation::Edit,
+            }],
+            ..documents::DocumentAccess::default()
+        };
+        // (the session, the bytes it reads for the default mob's bob, the
+        // bytes it reads for the second mob's bob)
+        for (writer, reads_default, reads_second) in [
+            (&second_alice, &bob_of_launch, &bob_without_a_mob),
+            (&launch_alice, &bob_without_a_mob, &bob_of_second),
+        ] {
+            let caller = host.caller(writer).await;
+            let book = host
+                .create(
+                    &caller,
+                    "create",
+                    access(
+                        mob_agent("trip-launch", "durable:bob"),
+                        mob_agent("trip-second", "durable:bob"),
+                    ),
+                )
+                .await
+                .unwrap()
+                .receipt;
+            let stored = host.stored(&book.document_id);
+            assert_eq!(
+                stored["access"]["grants"][0]["audience"]["value"]["principal"],
+                bob_without_a_mob
+            );
+            assert_eq!(
+                stored["access"]["grants"][1]["audience"]["value"]["principal"],
+                bob_of_second
+            );
+
+            let read = host
+                .documents
+                .get(&caller, &book.document_id)
+                .await
+                .unwrap();
+            let read_access = serde_json::to_value(&read.access).unwrap();
+            assert_eq!(
+                &read_access["grants"][0]["audience"]["value"]["principal"],
+                reads_default
+            );
+            assert_eq!(
+                &read_access["grants"][1]["audience"]["value"]["principal"],
+                reads_second
+            );
+            assert_eq!(
+                &read_access["denies"][0]["audience"]["value"]["principal"],
+                reads_default
+            );
+            // The owner is the writer, an identity of the caller's own mob:
+            // it reads without a mob, whatever its stored form.
+            assert_eq!(
+                serde_json::to_value(&read.owner).unwrap()["value"],
+                serde_json::json!({ "kind": "agent", "value": "durable:alice" })
+            );
+
+            host.documents
+                .mutate(
+                    &caller,
+                    &documents::RequestIdentity::new("write-back", b"write-back").unwrap(),
+                    documents::Mutation::SetAccess {
+                        id: book.document_id.clone(),
+                        expected_revision: read.revision,
+                        access: read.access,
+                    },
+                )
+                .await
+                .unwrap();
+            let after = host.stored(&book.document_id);
+            assert_eq!(after["access"], stored["access"]);
+            assert_eq!(after["owner"], stored["owner"]);
+        }
+        host.stop().await;
+    }
+
+    /// Which mob a worker names is read from the owner of its mob, and only
+    /// where it matters: a worker of the default mob names the default
+    /// mob's identities with no owner read at all, and a write that names
+    /// no identity needs none from anybody. A worker outside the default
+    /// mob whose mob's owner cannot be read is refused the write that names
+    /// an identity, since no mob is guessed for it; it still reads, with
+    /// every identity's mob spelled out, the default mob's included, which
+    /// stores the same forms whichever mob the worker belongs to. Here
+    /// nothing can be read: the registry is gone.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn extension_member_keyed_only_a_worker_outside_the_default_mob_needs_its_owner_to_name_an_identity()
+     {
+        let dir = tempfile::tempdir().unwrap();
+        let host = TwoMobHost::start(dir.path(), "walk", None).await;
+        identity_member(&host.launch.handle(), "durable:bob").await;
+        let launch_worker = worker_member(&host.launch.handle(), "worker").await;
+        let helper_mob =
+            child_of(&host.launch, &host.registry, "walk-helper", &launch_worker).await;
+        let helper_worker = worker_member(&helper_mob, "worker").await;
+        let inside = host.caller(&launch_worker).await;
+        let outside = host.caller(&helper_worker).await;
+        let TwoMobHost {
+            launch,
+            second,
+            registry,
+            documents,
+            ..
+        } = host;
+        drop(registry);
+        let create = |caller: &HostAccessContext,
+                      request: &'static str,
+                      access: documents::DocumentAccess| {
+            let documents = documents.clone();
+            let caller = caller.clone();
+            async move {
+                documents
+                    .mutate(
+                        &caller,
+                        &documents::RequestIdentity::new(request, request.as_bytes()).unwrap(),
+                        documents::Mutation::Create(documents::NewDocument {
+                            content: documents::DocumentContent {
+                                title: request.into(),
+                                content_type: "application/test".into(),
+                                schema_version: 1,
+                                payload: vec![1],
+                            },
+                            owner: None,
+                            access,
+                        }),
+                    )
+                    .await
+            }
+        };
+        let bare_bob = || granting(Principal::Agent("durable:bob".into()));
+
+        let shared = create(&inside, "inside-names", bare_bob())
+            .await
+            .expect("a worker of the default mob names an identity with no owner read")
+            .receipt;
+        assert!(
+            create(
+                &outside,
+                "outside-plain",
+                documents::DocumentAccess::default()
+            )
+            .await
+            .is_ok(),
+            "a write that names no identity reads no owner"
+        );
+        assert!(matches!(
+            create(&outside, "outside-names", bare_bob()).await,
+            Err(documents::Error::AuthorityUnavailable)
+        ));
+
+        // The outside worker still reads a document that names an identity:
+        // the default mob's identity with the default mob's id.
+        let regranted = documents
+            .mutate(
+                &inside,
+                &documents::RequestIdentity::new("share", b"share").unwrap(),
+                documents::Mutation::SetAccess {
+                    id: shared.document_id.clone(),
+                    expected_revision: shared.revision,
+                    access: documents::DocumentAccess {
+                        grants: vec![
+                            reader_grant(Principal::Agent("durable:bob".into())),
+                            reader_grant(outside.principal().clone()),
+                        ],
+                        ..documents::DocumentAccess::default()
+                    },
+                },
+            )
+            .await
+            .unwrap()
+            .receipt;
+        let read = documents
+            .get(&outside, &regranted.document_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(&read.access.grants[0].audience).unwrap()["value"]["principal"],
+            mob_agent_json("walk-launch", "durable:bob")
+        );
+        helper_mob.stop().await.unwrap();
+        second.stop().await.unwrap();
+        launch.handle().stop().await.unwrap();
+    }
+
+    /// An identity plane belongs to the mob it was bound for, not to the
+    /// mob's id. A mob that takes the id of a destroyed one starts without
+    /// its plane, also when the destroyed mob's binding was never released;
+    /// and a plane bound for a mob before it activates is still that mob's
+    /// when the release of another destroyed mob sweeps its predecessor.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn extension_member_keyed_a_plane_belongs_to_the_mob_it_was_bound_for() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = TwoMobHost::start(dir.path(), "swap", None).await;
+        let principal_of = |handle: &meerkat_mob::MobHandle, session: &meerkat_core::SessionId| {
+            let registry = Arc::clone(&host.registry);
+            let (handle, session) = (handle.clone(), session.clone());
+            async move {
+                let snapshot = handle
+                    .member_creation_for_session(&session)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                registry
+                    .principal(&snapshot, &mut BridgeHistoryRead::default())
+                    .await
+                    .unwrap()
+            }
+        };
+
+        // The second mob is destroyed and nothing releases its binding: a
+        // destroyed mob has no plane. A mob that takes its id binds no
+        // plane and has none.
+        host.second.destroy().await.unwrap();
+        assert!(host.registry.identity_plane("swap-second").is_none());
+        let successor = host_mob(&host.launch, &host.registry, "swap-second").await;
+        assert!(
+            host.registry.identity_plane("swap-second").is_none(),
+            "a mob that bound no plane does not get its predecessor's"
+        );
+        let session = identity_member(&successor, "durable:alice").await;
+        assert!(matches!(
+            principal_of(&successor, &session).await,
+            Principal::Worker { .. }
+        ));
+
+        // That mob is destroyed too, unreleased. The next mob under the id
+        // binds its plane before it activates; another mob's destroy then
+        // releases every destroyed binding.
+        successor.destroy().await.unwrap();
+        let plane = identity_plane("swap-second-next");
+        host.registry
+            .bind_identity_plane(&meerkat_mob::MobId::from("swap-second"), &plane);
+        let other = host_mob(&host.launch, &host.registry, "swap-other").await;
+        other.destroy().await.unwrap();
+        host.registry.after_destroy()(other.mob_id());
+        let next = host_mob(&host.launch, &host.registry, "swap-second").await;
+        assert!(
+            host.registry.identity_plane("swap-second").is_some(),
+            "the plane bound for the mob is still its plane"
+        );
+        let session = identity_member(&next, "durable:alice").await;
+        assert_eq!(
+            principal_of(&next, &session).await,
+            mob_agent("swap-second", "durable:alice")
+        );
+        next.stop().await.unwrap();
+        host.launch.handle().stop().await.unwrap();
+    }
+
+    /// A mob that restarts under its own id keeps its identity plane: the
+    /// binding that replaces a stopped mob's binding is the same mob's.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn extension_member_keyed_a_mob_that_restarts_under_its_id_keeps_its_plane() {
+        let dir = tempfile::tempdir().unwrap();
+        let (runtime, registry, _store, owner_session) =
+            bound_runtime(dir.path(), "plane-restart").await;
+        let child_id = "plane-restart-child";
+        meerkat_mob::fail_stop_next_actor_start_for_test(&meerkat_mob::MobId::from(child_id));
+        let child = child_of(&runtime, &registry, child_id, &owner_session).await;
+        // Waits for the actor's end, however long that takes.
+        let ended = child.actor_task_watch().wait().await;
+        assert_eq!(ended, meerkat_mob::MobActorTaskWait::Returned);
+        let plane = identity_plane(child_id);
+        registry.bind_identity_plane(child.mob_id(), &plane);
+        assert!(registry.identity_plane(child_id).is_some());
+
+        registry.before_activation()(child.read_handle())
+            .await
+            .expect("a restart under the id binds");
+        assert!(
+            registry.identity_plane(child_id).is_some(),
+            "the restarted mob still has the plane bound for it"
+        );
+        runtime.handle().stop().await.unwrap();
+    }
+
+    /// The owner walk goes to the top: a worker of a mob that a worker of a
+    /// mob that the second mob's member created is judged in the second
+    /// mob, and the same chain under the default mob in the default mob. A
+    /// chain that passes a destroyed mob ends nowhere: its caller is
+    /// refused, not judged in a mob beyond the destroyed one.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn extension_member_keyed_a_helper_of_a_helper_is_judged_in_its_top_level_mob() {
+        use crate::access::AccessEffect;
+        let dir = tempfile::tempdir().unwrap();
+        let access = access_with(vec![extension_rule(
+            "second",
+            AccessEffect::Allow,
+            &["chain-second"],
+        )]);
+        let host = TwoMobHost::start(dir.path(), "chain", Some(access)).await;
+        let mut ends = Vec::new();
+        let mut mobs = Vec::new();
+        for (top, root) in [("second", &host.second), ("launch", &host.launch.handle())] {
+            let mut session = worker_member(root, "worker").await;
+            for depth in 1..=2 {
+                let mob = child_of(
+                    &host.launch,
+                    &host.registry,
+                    &format!("chain-{top}-helper-{depth}"),
+                    &session,
+                )
+                .await;
+                session = worker_member(&mob, "worker").await;
+                mobs.push(mob);
+            }
+            ends.push(session);
+        }
+        assert!(
+            may_create(&host, &ends[0], "under-second").await,
+            "a rule that lists the second mob reaches a helper of its helper"
+        );
+        assert!(
+            !may_create(&host, &ends[1], "under-launch").await,
+            "and it reaches no helper of a helper of the default mob"
+        );
+
+        // The mob in the middle of the first chain is destroyed and its
+        // binding stays: the chain no longer leads to the second mob.
+        mobs[0].destroy().await.unwrap();
+        assert!(!is_destroyed(&mobs[1].read_handle()));
+        assert!(matches!(
+            host.resolve(&ends[0], None).await,
+            Err(documents::Error::AuthorityUnavailable)
+        ));
+        for mob in &mobs[1..] {
+            mob.stop().await.unwrap();
+        }
+        host.stop().await;
+    }
+
+    /// Another mob's identity is judged under the creation subject of its
+    /// own member: a rule for that subject reaches it, and neither the
+    /// identity that spawned it nor any other is reached by the same rule.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn extension_member_keyed_another_mobs_agent_is_judged_under_its_own_creation_subject() {
+        let dir = tempfile::tempdir().unwrap();
+        let access = access_with(Vec::new());
+        let host = TwoMobHost::start(dir.path(), "token", Some(access.clone())).await;
+        let alice = identity_member(&host.second, "durable:alice").await;
+        // Bob is spawned from alice's session, so alice is his ancestor.
+        let source = host
+            .second
+            .capture_member_creation_source(&alice)
+            .await
+            .unwrap();
+        let member = crate::member_comms_id::mob_member_id("durable:bob");
+        let mut spec = meerkat_mob::SpawnMemberSpec::host_root("worker", member.clone())
+            .with_labels(BTreeMap::from([(
+                "agent_identity".to_string(),
+                "durable:bob".to_string(),
+            )]))
+            .with_creation_source(source);
+        spec.continuity_intent = meerkat_mob::SpawnContinuityIntent::DurableIdentity {
+            continuity_key: "durable:bob".to_string(),
+        };
+        host.second.spawn_spec(spec).await.unwrap();
+        let bob = member_session(&host.second, &member).await;
+        assert_eq!(
+            host.caller(&bob).await.principal(),
+            &mob_agent("token-second", "durable:bob")
+        );
+        let creation = host
+            .second
+            .member_creation_for_session(&bob)
+            .await
+            .unwrap()
+            .unwrap()
+            .creation
+            .creation_id
+            .unwrap();
+
+        assert!(!may_create(&host, &bob, "before").await);
+        access
+            .upsert_rule(crate::access::AccessRule {
+                id: "bobs-subject".into(),
+                subjects: vec![format!("worker:{creation}")],
+                actions: vec!["extension.*".into()],
+                mobs: vec!["*".into()],
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(
+            may_create(&host, &bob, "after").await,
+            "a rule for the member's creation subject reaches the identity"
+        );
+        assert!(
+            !may_create(&host, &alice, "alice").await,
+            "and it reaches no other identity"
+        );
+        host.stop().await;
+    }
+
+    /// The first write of another mob's identity moves no schema: the
+    /// store's ledger stays at the version an earlier build opens, no table
+    /// or index changes, and the store opens again under the same domain.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn extension_member_keyed_another_mobs_agent_keeps_the_store_at_schema_version_1() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("extension_state.sqlite3");
+        let ledger = |path: &std::path::Path| -> Vec<(String, i64)> {
+            let connection = rusqlite::Connection::open(path).unwrap();
+            let mut statement = connection
+                .prepare("SELECT domain, version FROM meerkat_schema ORDER BY domain")
+                .unwrap();
+            statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .map(|row| row.unwrap())
+                .collect()
+        };
+        let schema = |path: &std::path::Path| -> Vec<(String, Option<String>)> {
+            let connection = rusqlite::Connection::open(path).unwrap();
+            let mut statement = connection
+                .prepare("SELECT name, sql FROM sqlite_master ORDER BY name")
+                .unwrap();
+            statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .map(|row| row.unwrap())
+                .collect()
+        };
+        let create = |caller: Principal, request: &'static str| {
+            let path = path.clone();
+            async move {
+                DocumentService::new("test", "notes", Arc::new(open_disk_store(path).unwrap()))
+                    .unwrap()
+                    .mutate(
+                        &HostAccessContext::new(
+                            "test",
+                            caller,
+                            VerifiedLineage::root(),
+                            HostPolicy::ALLOW,
+                        )
+                        .unwrap(),
+                        &documents::RequestIdentity::new(request, request.as_bytes()).unwrap(),
+                        documents::Mutation::Create(documents::NewDocument {
+                            content: documents::DocumentContent {
+                                title: request.into(),
+                                content_type: "application/test".into(),
+                                schema_version: 1,
+                                payload: vec![1],
+                            },
+                            owner: None,
+                            access: documents::DocumentAccess::default(),
+                        }),
+                    )
+                    .await
+                    .unwrap()
+                    .receipt
+            }
+        };
+        create(Principal::Agent("alice".into()), "default-create").await;
+        let (ledger_before, schema_before) = (ledger(&path), schema(&path));
+        assert_eq!(ledger_before, vec![("meta-extension-state".to_string(), 1)]);
+
+        let written = create(mob_agent("second", "alice"), "second-create").await;
+        assert_eq!(ledger(&path), ledger_before);
+        assert_eq!(schema(&path), schema_before);
+        // The store opens again under the same domain, and the document is
+        // there for its owner.
+        let reopened =
+            DocumentService::new("test", "notes", Arc::new(open_disk_store(path).unwrap()))
+                .unwrap();
+        let owner = HostAccessContext::new(
+            "test",
+            mob_agent("second", "alice"),
+            VerifiedLineage::root(),
+            HostPolicy::ALLOW,
+        )
+        .unwrap();
+        assert_eq!(
+            reopened
+                .get(&owner, &written.document_id)
+                .await
+                .unwrap()
+                .revision,
+            written.revision
+        );
     }
 }

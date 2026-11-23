@@ -65,6 +65,7 @@ fn text(key: &str, identity: &str, timestamp_ms: u64) -> NewConsoleFrame {
         timestamp_ms,
         runtime_key: RUNTIME.to_string(),
         identity: identity.to_string(),
+        mob_id: None,
         conversation_id: Some(identity.to_string()),
         session_id: Some("session-1".to_string()),
         kind: "text_delta".to_string(),
@@ -881,5 +882,83 @@ async fn a_version_5_log_is_refused() -> TestResult {
     assert_eq!(ledger_version(&path)?, Some(5));
     assert_eq!(catalog(&path)?, declared);
     assert_eq!(rows(&path, "1 = 1")?, stored);
+    Ok(())
+}
+
+/// The six operations that name a mob, naming a mob beside the default
+/// mob, on a log of schema version 3 (no mob column, so every frame is the
+/// default mob's): each finds nothing and changes nothing, and the log is
+/// not moved; named for the default mob, the reads find its send and the
+/// status change reaches it.
+#[tokio::test]
+async fn the_operations_that_name_a_hosted_mob_find_nothing_on_a_version_3_log() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("console.sqlite3");
+    let stored = version_3_log(&path).await?;
+    let send = stored
+        .iter()
+        .find(|frame| frame.dedupe_key == "alice-send")
+        .ok_or("the launch mob's send")?
+        .clone();
+    let store = SqliteConsoleLogStore::open(&path)?;
+    let hosted = Some(meerkat_mob::MobId::from("crew"));
+    let hosted = hosted.as_ref();
+
+    let found = [
+        store
+            .frame_by_dedupe_key_of_mob(hosted, "alice-send")
+            .await?
+            .is_some(),
+        store
+            .send_frame_by_interaction_of_mob(hosted, INTERACTION)
+            .await?
+            .is_some(),
+        !store
+            .unsettled_send_frames_of_mob(hosted, 100, 100)
+            .await?
+            .is_empty(),
+        store
+            .update_frame_status_of_mob(hosted, &send.id, ConsoleFrameStatus::Delivered)
+            .await?
+            .is_some(),
+        store
+            .transition_send_frame_of_mob(hosted, &send.id, SendTransition::StartDispatch, None)
+            .await?
+            .is_some(),
+        store
+            .take_send_frame_hold_of_mob(hosted, &send.id)
+            .await?
+            .is_some(),
+    ];
+    let unchanged = store
+        .frame_by_dedupe_key_of_mob(None, "alice-send")
+        .await?
+        .ok_or("the launch mob's send by its key")?;
+    let by_interaction = store
+        .send_frame_by_interaction_of_mob(None, INTERACTION)
+        .await?
+        .map(|frame| frame.id);
+    let marked = store
+        .update_frame_status_of_mob(None, &send.id, ConsoleFrameStatus::Delivered)
+        .await?
+        .map(|frame| frame.status);
+    drop(store);
+
+    assert_eq!(
+        found, [false; 6],
+        "a hosted mob finds nothing on a version 3 log"
+    );
+    assert_eq!(
+        (
+            unchanged.status,
+            unchanged.frame_version,
+            &unchanged.payload
+        ),
+        (send.status, send.frame_version, &send.payload),
+        "the launch mob's send is as it was"
+    );
+    assert_eq!(by_interaction, Some(send.id.clone()));
+    assert_eq!(marked, Some(ConsoleFrameStatus::Delivered));
+    assert_eq!(ledger_version(&path)?, Some(3), "the log is not moved");
     Ok(())
 }

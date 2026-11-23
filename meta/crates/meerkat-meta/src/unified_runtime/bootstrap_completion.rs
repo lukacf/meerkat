@@ -243,6 +243,7 @@ impl UnifiedRuntime {
         &self,
     ) -> Result<RuntimeBootstrapCompleted, BootstrapCompletionUnavailable> {
         let mut slot = self
+            .default_mob()
             .bootstrap_completion
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
@@ -260,13 +261,14 @@ impl UnifiedRuntime {
     /// mint after the take, changes nothing.
     pub(super) fn mint_bootstrap_completion(&self) {
         let mut slot = self
+            .default_mob()
             .bootstrap_completion
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         if matches!(*slot, CompletionSlot::Pending) {
             *slot = CompletionSlot::Minted(Box::new(RuntimeBootstrapCompleted {
                 gate: Arc::clone(&self.close_gate),
-                observer: self.mob_runtime.handle().observer(),
+                observer: self.default_mob().mob_runtime.handle().observer(),
             }));
         }
     }
@@ -275,6 +277,7 @@ impl UnifiedRuntime {
     /// so the bootstrap it attested is no longer the whole one.
     pub(super) fn withdraw_bootstrap_completion(&self) {
         let mut slot = self
+            .default_mob()
             .bootstrap_completion
             .lock()
             .unwrap_or_else(PoisonError::into_inner);

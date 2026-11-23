@@ -242,6 +242,12 @@ impl IdentityRuntime {
         self.identity_family.changes_enabled()
     }
 
+    /// The holder of the changes of this mob's agents that a person
+    /// decides, when the family attached here holds changes.
+    pub(crate) fn held_changes(&self) -> Option<crate::identity_creation::IdentityDecisions> {
+        self.identity_family.held_changes()
+    }
+
     /// Detach the family: the mob stopped.
     pub(crate) fn detach_identity_family(&self) {
         self.identity_family.clear();

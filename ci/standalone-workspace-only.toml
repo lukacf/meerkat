@@ -82,6 +82,7 @@ tests = [
     "agent::durable_boundary_tests::durable_peer_reply_capabilities_are_keyed_by_sender_and_id",
     "agent::durable_boundary_tests::durable_persisted_background_job_keeps_exact_notice_origin_through_refresh",
     "agent::durable_boundary_tests::request_only_boundary_context_stays_request_local",
+    "agent::durable_boundary_tests::several_durable_deliveries_published_at_one_boundary_all_join_the_next_request_in_order",
     "agent::runner::skill_activation_effect_tests::a_closed_run_scope_withdraws_the_consent_it_admitted",
     "agent::runner::skill_activation_effect_tests::a_start_dropped_mid_send_owes_the_stream_no_terminal",
     "agent::runner::skill_activation_effect_tests::a_terminal_dropped_mid_send_is_owed_to_the_stream_only",

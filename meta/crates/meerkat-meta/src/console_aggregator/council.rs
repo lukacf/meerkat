@@ -96,12 +96,21 @@ impl CouncilSeats {
     /// frame's member was), or its captured member has a seat's name, or it
     /// runs on a seat's fork session. Any one is enough, so a seat whose
     /// session the record never came to hold is still decided by its name.
+    /// A seat's name is its name within the council's mob: the console
+    /// captures a member of a mob other than its own by its mob and name,
+    /// and the frame's source mob is that mob.
     fn wrote(&self, frame: &ConsoleFrame, provenance: &ConsoleFrameMemberProvenance) -> bool {
         let before_settled = frame.timestamp_ms <= self.settled_at_ms;
-        let named = self.names.iter().any(|name| {
-            *name == provenance.member.agent_identity
-                || *name == provenance.identity.runtime_member_id
-        });
+        let source_mob = Some(provenance.source_mob_id.as_str());
+        let captured = [
+            provenance.member.agent_identity.as_str(),
+            provenance.identity.runtime_member_id.as_str(),
+        ]
+        .map(|name| crate::console_member_ref::member_name_in_mob(name, source_mob));
+        let named = self
+            .names
+            .iter()
+            .any(|name| captured.contains(&name.as_str()));
         let on_seat_session = [
             frame.session_id.as_ref(),
             provenance.member.session_id.as_ref(),

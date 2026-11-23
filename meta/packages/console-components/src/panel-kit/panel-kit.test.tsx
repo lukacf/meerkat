@@ -30,6 +30,7 @@ import {
   TechnicalId,
   agentDisplayName,
   agentInitial,
+  agentOpenable,
   createAgentDirectory,
   formatDuration,
   formatRelativeTime,
@@ -189,6 +190,18 @@ describe("agent names", () => {
     expect(agentDisplayName(undefined, directory)).toBe("");
     expect(stripAgentKeyPrefix("identity:agent:x")).toBe("x");
     expect(stripAgentKeyPrefix("identity:")).toBe("identity:");
+  });
+
+  it("writes the words a host shows for a key that names no agent as they are, and offers no opening for them", () => {
+    // A host that was not told whose agent a name is hands on words in place of a key.
+    const withWords = { ...directory, plainWords: (key: string) => (key.endsWith(" (team not named)") ? key : undefined) };
+    expect(agentDisplayName("reviewer (team not named)", withWords)).toBe("reviewer (team not named)");
+    // Also where every key is offered an opening: the words name nobody to open.
+    expect(agentOpenable("reviewer (team not named)", withWords)).toBe(false);
+    // Any other key is named and offered as before.
+    expect(agentDisplayName("identity:support-triage", withWords)).toBe("Support triage");
+    expect(agentDisplayName("coordinator", withWords)).toBe("Coordinator");
+    expect(agentOpenable("identity:support-triage", withWords)).toBe(true);
   });
 
   it("draws one initial for avatars", () => {

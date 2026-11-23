@@ -6,7 +6,8 @@ import {
   type LivePlaybackOwnerReadiness,
   type PendingLiveChannelHandle,
 } from "../../../sdk/typescript/src/live";
-import { callConsoleRpc, callerScopeParam } from "./network";
+import type { MemberDoor } from "../../../packages/console-core/src/mob-door";
+import { callConsoleRpc, callerScopeParam, mobIdParam } from "./network";
 import { errorMessage, httpStatusCode, jsonRpcErrorCode } from "./errors";
 import { CONSOLE_RPC_PATHS } from "./contract";
 import { parseVoiceContextStatus, type VoiceContextPreparation } from "./voice-context";
@@ -145,8 +146,23 @@ export async function queryVoiceAvailability(
   baseUrl: string,
   identity: string,
   signal?: AbortSignal,
+  memberDoor?: VoiceMemberDoor,
 ): Promise<VoiceAvailability> {
-  return (await queryVoiceReadiness(baseUrl, identity, signal)).availability;
+  return (await queryVoiceReadiness(baseUrl, identity, signal, memberDoor)).availability;
+}
+
+/** The door of a member, as the console's connection knows it (see mob-door). */
+export type VoiceMemberDoor = (identity: string) => MemberDoor;
+
+/**
+ * A voice request's params with their member named by its door: a member
+ * of a mob the host created beside the launch mob is named by that mob
+ * (`mob_id`) and by the member as that mob's door knows it. Any other
+ * member, and params that name none, are returned as they are.
+ */
+export function voiceParamsByDoor<P extends Record<string, unknown>>(params: P, memberDoor?: VoiceMemberDoor): P {
+  const door = typeof params.identity === "string" ? memberDoor?.(params.identity) : undefined;
+  return door?.mobId ? { ...params, identity: door.identity, ...mobIdParam(door.mobId) } : params;
 }
 
 /**
@@ -172,8 +188,12 @@ export async function queryVoiceReadiness(
   baseUrl: string,
   identity: string,
   signal?: AbortSignal,
+  memberDoor?: VoiceMemberDoor,
 ): Promise<VoiceReadinessDetail> {
   if (!identity?.trim()) return { availability: "unavailable" };
+  // Voice is the launch mob's until the live path is served per mob: for a
+  // member behind another door nothing is asked, and voice is not offered.
+  if (memberDoor?.(identity).mobId) return { availability: "unavailable" };
   let readiness: ReadinessWire;
   try {
     readiness = await callConsoleRpc<ReadinessWire>(
@@ -244,12 +264,14 @@ export function createVoiceRpc(
   baseUrl: string,
   callerScope?: VoiceCallerScope,
   reportFailure?: (error: unknown) => void,
+  /** Names a request's member by its door. Without it a request names no mob. */
+  memberDoor?: VoiceMemberDoor,
 ): VoiceSessionEnvironment["rpc"] {
   let named: { scope: string | undefined } | undefined;
   return async (method, params, timeoutMs) => {
     named ??= { scope: await callerScope?.() };
     try {
-      return await callConsoleRpc(baseUrl, method, { ...params, ...callerScopeParam(named.scope) }, timeoutMs);
+      return await callConsoleRpc(baseUrl, method, { ...voiceParamsByDoor(params, memberDoor), ...callerScopeParam(named.scope) }, timeoutMs);
     } catch (error) {
       reportFailure?.(error);
       throw error;
@@ -257,9 +279,14 @@ export function createVoiceRpc(
   };
 }
 
-function browserEnvironment(baseUrl: string, callerScope?: VoiceCallerScope, reportFailure?: (error: unknown) => void): VoiceSessionEnvironment {
+function browserEnvironment(
+  baseUrl: string,
+  callerScope?: VoiceCallerScope,
+  reportFailure?: (error: unknown) => void,
+  memberDoor?: VoiceMemberDoor,
+): VoiceSessionEnvironment {
   return {
-    voiceAvailable: (identity) => queryVoiceAvailability(baseUrl, identity),
+    voiceAvailable: (identity) => queryVoiceAvailability(baseUrl, identity, undefined, memberDoor),
     createAudioContext: () => {
       if (typeof AudioContext === "undefined") {
         throw new VoiceError("Voice requires a browser with Web Audio and WebRTC support.");
@@ -278,14 +305,14 @@ function browserEnvironment(baseUrl: string, callerScope?: VoiceCallerScope, rep
     createPeerConnection: () => new RTCPeerConnection(),
     createMediaStream: (tracks) => new MediaStream(tracks ?? []),
     createAudioElement: () => document.createElement("audio"),
-    rpc: createVoiceRpc(baseUrl, callerScope, reportFailure),
+    rpc: createVoiceRpc(baseUrl, callerScope, reportFailure, memberDoor),
     pagehideClose: (params) => {
       // Keepalive is needed specifically during document unloading, unlike ordinary console RPC.
       void fetch(`${baseUrl}${CONSOLE_RPC_PATHS.jsonRpc}`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          jsonrpc: "2.0", id: "voice-pagehide", method: "meta/console/voice/close", params,
+          jsonrpc: "2.0", id: "voice-pagehide", method: "meta/console/voice/close", params: voiceParamsByDoor(params, memberDoor),
         }),
         keepalive: true,
       }).catch(() => {});
@@ -449,8 +476,10 @@ export function createVoiceSession(
   callerScope?: VoiceCallerScope,
   /** Hears the browser environment's refused requests (`createVoiceRpc`). */
   reportFailure?: (error: unknown) => void,
+  /** Names a request's member by its door, for the browser environment's requests. */
+  memberDoor?: VoiceMemberDoor,
 ): VoiceSession {
-  const env = environment ?? browserEnvironment(baseUrl, callerScope, reportFailure);
+  const env = environment ?? browserEnvironment(baseUrl, callerScope, reportFailure, memberDoor);
   const listeners = new Set<() => void>();
   let snapshot: VoiceSessionSnapshot = {
     phase: "idle", target: null, microphoneMuted: false, speakerMuted: false,

@@ -1782,6 +1782,409 @@ For connectivity, `mob/members` shows the recorded `wired_to` edges; ask the
 member to use its `peers` tool to see which peers it can address. Neither list
 is a delivery receipt.
 
+### Restoring mobs on demand
+
+A Rust host of `MobMcpState` with a persistent root chooses how the mob set
+restores its persisted mobs with `with_mob_restore_policy`:
+
+- `MobRestorePolicy::Eager` (the default, and what the CLI, `rkat-rpc`,
+  `rkat-rest` and `rkat-mcp` use) restores every mob store when the set is
+  first used.
+- `MobRestorePolicy::OnDemand` takes a census instead: the store files are
+  listed, every mob is known and dormant, and no store is opened. The first
+  lookup of a dormant mob (a request, a delivery to one of its members, a
+  completion owed to one of its members, a flow that targets it) loads that
+  mob alone; lookups that arrive together share one load. At start only the
+  mobs whose members hold recovery work or pending deliveries are loaded.
+  Every ten minutes each mob that has been loaded at least that long is
+  asked whether it is idle: an idle mob is unloaded and is dormant again; a
+  mob with work in flight, a member being spawned, or a held owner lease
+  (`MobHandle::acquire_owner`) stays loaded. A member that waits for a
+  detached job holds no work in its mob by waiting: a member that convened
+  a detached council over members of other mobs leaves its own mob idle, so
+  that mob can be unloaded while the council runs, and the council's
+  outcome loads it again. A mob with
+  in-memory storage, and a mob whose handle the host inserted itself, is
+  never unloaded: the set could not load it again. A host's default mob is
+  never asked either (see "Host mobs and the default mob" below).
+
+  The idle question is a step of its own. From the moment it is put until
+  the mob's actor answered, the mob's handle is not handed out, also when
+  the actor then answers that it is busy: a lookup by id, a destroy and a
+  completion owed to a member wait for the answer and are then served by
+  the same mob (busy) or by the mob loaded again (idle). A member lookup
+  does not wait: it hands out no handle, and it reads the roster of that
+  mob from its actor, which still runs. The
+  mob is not hidden meanwhile: `mob_list` and `MobInventory::managed` list
+  it until its actor closed, and it is `dormant` only once that actor has
+  ended. The question is bounded at 30 seconds; an actor that gives no
+  answer in that time is read as busy and its mob is served again.
+
+Under either policy every persisted mob is hosted from the first verb on:
+its id is taken (a create of a mob from a definition under it is refused
+with `MobError::MobAlreadyExists`, whose structured data names the kind
+`mob_already_exists` and the id; a create from a mobpack answers the mob
+for the same pack and its own refusal otherwise; under the id of a held
+or quarantined mob either create answers that mob's own error), and
+`MobInventory`
+lists it,
+as `managed` (also while its idle question is open), `held`, `quarantined`,
+or, when it is known and no actor runs for it, `dormant`. A dormant mob has
+no lifecycle to report until something loads
+it. Who created it is listed beside it (`MobInventory::dormant_creation`,
+the `MobProvenance` of its creation) once the set has read that without
+loading the mob: in the sweep described next, which opens each dormant
+store once anyway, or because the set created or loaded the mob before it
+was unloaded. Until then, and for a store whose creation record cannot be
+read, the mob is listed without it; a listing never opens a store. The
+mob's own incarnation is listed the same way
+(`MobInventory::dormant_incarnation`): read in the same opens, kept for a
+mob the set created or loaded, and absent for a mob whose store was not
+read. A host that needs who created one mob before the sweep reached that
+mob's store asks `MobMcpState::unloaded_mob_creation`: it answers from the
+store's record when the record keeps it, and otherwise opens that one
+dormant store once, without loading the mob, and the record keeps the
+answer. It never opens a quarantined store: for such a mob it answers what
+the record kept before the store failed, or nothing. That read keeps the
+mob's incarnation and whether it is stopped from the same open. A mob
+whose idle unload is admitted and not answered yet is answered from its
+record as well: its store is not opened and the read does not wait for the
+unload.
+
+A mob an operator stopped stays stopped while it is not loaded.
+`MobInventory::dormant_stopped` names the dormant mobs that are stopped
+(each is also in `dormant`): the idle unload keeps the mob's own word when
+it closes a stopped mob, and after a restart the set reads it where it
+opens the store anyway, in the sweep and in the read above, or at the first
+send below. A stopped mob whose store was not read yet is listed as
+`dormant` only. A send to a member of such a mob and a run of one of its
+flows (`mob_member_send`, `mob_member_send_with_external_identity`,
+`mob_run_flow_with_stream`, `mob_run_flow_with_external_identity`; a host's
+own call asks `MobMcpState::handle_for_work`) are refused as the loaded
+stopped mob refuses them, `MobError::InvalidTransition` from `Stopped` to
+`Running`, and do not load it. Every other call loads it, and the stopped
+mob answers for itself: a read, an operator's verb (only a resume starts
+it), a keyed send, a turn start, an ingress interaction, submitted work,
+the begin of an external delivery, an agent's mob tools. The refusal is
+given without a load where the mob set's console principal is the owner;
+for any other principal the mob is loaded and its own grants decide the
+answer. So a schedule that fires for a member of a stopped mob that is not
+loaded loads the mob: the delivery begins as it does for a loaded stopped
+mob, the send is refused, the occurrence ends with its delivery failed,
+and the mob is unloaded again when it is idle. The
+work the eager restore does for every store (tearing down a child
+mob whose owner was archived while the process was down, sweeping an empty
+store, quarantining an unreadable one) runs under `OnDemand` as a sweep over
+the dormant stores after the set is ready, one store at a time; a store
+that owes none of it stays dormant. The scavenge of child mobs whose owner
+session was archived (`scavenge_orphaned_bridge_session_scoped_mobs`) runs
+the same sweep, so a dormant child of an owner archived while the process
+runs is torn down too. A store that cannot be read is quarantined when it is
+first read, by a request that names its mob or by that sweep, never by the
+census. The wire surfaces do not show `dormant`: they use the eager policy.
+
+#### Limits in this release
+
+`OnDemand` is offered to Rust hosts that can accept the limits below. Read
+them before selecting it. "Not served" below means a mob that is dormant,
+and also a mob whose idle question is open: any loaded mob, a busy one
+included, for the moment its actor takes to answer, once every ten minutes.
+
+- **No Core surface selects it.** The CLI, `rkat-rpc`, `rkat-rest` and
+  `rkat-mcp` use `Eager`, and no configuration key changes that. A Rust
+  host that builds its own `MobMcpState` can choose `OnDemand`; Meta's
+  gateways do, for a launch that declares its default mob (see the Meta
+  changelog).
+- **The idle period is a constant.** Ten minutes, both for how long a mob
+  stays loaded before it is asked and for how often the set asks. No option
+  sets it, nor the 30 second bound of the question.
+- **An open event stream does not keep its mob loaded.** A subscription to
+  a mob's or a member's events is not work the idle unload sees: the mob
+  can be unloaded under it, which ends the stream. Hold an owner lease
+  (`MobHandle::acquire_owner`) for as long as a stream must stay attached.
+- **Some reads see served mobs only.** A mob that is not served is served
+  again by a request that names its mob id, by a destroy, by a delivery to
+  one of its members, by a completion owed to one of its members, by a
+  delivery to a session whose implicit delegation mob it is, and by a
+  WorkGraph flow that targets it. A member lookup loads the dormant mob its
+  session's stored member binding names, and reads a mob whose idle
+  question is open without waiting. The reads below load nothing:
+  - `mob_handles_snapshot`, and what is built on it (the live delegation
+    views), holds no mob that is not served. A mob whose idle question is
+    open is missing from it for that moment, and the change signal
+    (`mob_set_changes`) does not fire for the question: a caller that took
+    its snapshot in that moment sees the mob again only at its next
+    snapshot. `mob_list` lists the mob throughout; `mob_inventory` is the
+    read that also names dormant mobs. A host that stands down by closing
+    the state's admission, taking this snapshot and shutting down the mobs
+    in it misses a mob whose idle question was open at the snapshot: it
+    looks again once `stand_down` has returned, when that question has
+    been answered and the mob is in the snapshot again or dormant.
+  - The reads that start from a session instead of a mob id answer "no
+    such member" or "not owned" for a dormant mob:
+    `find_mobs_for_bridge_session` (a dormant child mob of that owner is
+    not listed; the owner's implicit delegation mob is found, since its id
+    derives from the session), retiring a member by its bridge session,
+    the member handle and the objective principal of a bridge session,
+    whether a session owns a live bridge session, and whether a mob is a
+    session's implicit delegation mob. A mob whose idle question is open
+    is seen by all of them, and those that go on to the mob wait for the
+    answer.
+  - The continuation resolver's read of the member a session belongs to,
+    and its check of external work committed to a member, answer from the
+    served mobs: for a mob that is not served the first finds no member,
+    and the second leaves the row waiting. A completion owed to a member,
+    and a continuation addressed to a member's delivery address, serve the
+    member's mob first; a completion whose job no served mob holds waits
+    while any mob is not served and is never refused as absent.
+  - The fork_off re-link after a restart, which runs for the mobs loaded
+    then and for each other mob when it is loaded.
+  - The agent tool `mob_list` names a mob that is not loaded to the
+    session that created it with `mob_create` and to a caller that holds
+    a manage grant over it (the mob its `delegate` calls use among them),
+    as `Dormant`, or `Stopped` for a mob that was stopped before it was
+    unloaded, from what the set's records keep: who created the mob, and
+    the incarnation a grant is bound to. A mob whose record the set has
+    not read yet is listed once it is loaded; naming the mob by its id in
+    another tool loads it.
+- **A handle taken just before the idle question can be refused.** A
+  mutating call on it that reaches the mob after its actor closed idle
+  answers `AdmissionClosed` with the reason `IdleClose` and did nothing.
+  Nothing retries it: look the mob up again and repeat the call, which
+  waits for the unload and is served by the mob loaded again. A read on
+  such a handle (the roster, the lifecycle) is not refused: it answers
+  from the last state of the mob that was unloaded. A handle kept across
+  an unload reaches an actor that has ended; a host that keeps handles
+  holds an owner lease or looks the mob up per call.
+- **An actor that is deciding the idle question when its bound passes can
+  close after its mob was returned to service.** A question that is
+  abandoned at its bound before the actor reached it closes nothing: the
+  actor skips a question nobody waits for. Only an actor that was already
+  deciding it at that moment can still close idle. The mob then refuses
+  new work with the same `AdmissionClosed` until the next unload pass,
+  which unloads it.
+- **A mob whose actor does not end stays not served.** The unload gives
+  an actor that closed idle ten minutes to answer its shutdown and then
+  ten minutes to end. An actor that misses either bound keeps its store:
+  the mob is not dormant, no second actor is loaded over the store, and
+  `mob_list` still lists it. A lookup of it takes the unload up again,
+  waits through both bounds, twenty minutes at most, and then answers an
+  error. The mob is served again when the actor has ended, or by a
+  restart.
+- **A session without a stored member binding names no mob.** A member
+  session written before member bindings were stored (it gets one at its
+  next build) is not found in a dormant mob by a member lookup, and its
+  recovery work does not load its mob at start. It is found once something
+  else loads that mob.
+- **Held and quarantined mobs read as gone to a continuation**, as under
+  `Eager`, once the set is complete. `OnDemand` adds one way into a
+  quarantine: a load that ended without an outcome (its task was cancelled
+  or panicked) quarantines its store as `store_unavailable`, and the next
+  lookup re-attempts it.
+- **The archive scavenge reads every dormant store.** Each call of
+  `scavenge_orphaned_bridge_session_scoped_mobs` runs the whole sweep: one
+  open and a few reads per dormant store.
+- **A mob that was closed idle by its host is not held by its destroy.** A
+  destroy holds its mob against the idle unload with an owner lease, which
+  a mob whose admission is already closed cannot give. Such a mob (the
+  host called `close_if_idle` itself, or a late answer closed it) can be
+  unloaded while its destroy runs; destroy it before, or after, the idle
+  pass has unloaded it.
+- **A host's handle under an id the persistent root also holds: the first
+  holder keeps the id.** A handle a host inserts (`mob_insert_handle`)
+  before the first verb of the set, or under the id of a mob that is
+  dormant after the census, holds the id for this process. The set files
+  no record for the root's store under that id, never loads it beside the
+  handle and leaves the store exactly as it was found; the mob stored
+  there is not served in this process, and the next process lists it
+  again. A handle inserted under the id of a mob the set itself runs (a
+  store it loaded, or a mob it created), or of a store the set is
+  loading, holds before activation or keeps quarantined, is refused
+  (`try_mob_insert_handle`) with the answer a create under that id gets:
+  the id is taken while the mob runs or its store loads, and a held or
+  quarantined store answers its own refusal. A handle replaces the
+  handle of a mob a host inserted before, and takes the id of a mob the
+  set ran once that mob has ended (it was shut down and its actor is
+  over): nothing is left running that the handle would leave unheld. A
+  mob that is being destroyed keeps its id until its destroy is recorded
+  in the set, also in the moment after its actor has ended: a handle
+  under it is refused until then. No
+  collision of ids destroys a
+  stored mob: a store whose mob turns out to be a second mob of one id is
+  shut down again and kept as found.
+- **A create takes its mob's id before the mob is built.** From the first
+  step of a create, before the host's create admission is asked and before
+  any storage exists, the id is that create's until it ends. A second
+  create under the id made meanwhile (by a host or by a member through its
+  mob tools) is refused at once with `MobAlreadyExists` and builds nothing,
+  and a host's handle under it is refused the same way. A create from a
+  mobpack waits for the create in flight instead: when that one ends it
+  answers the mob's id for the same pack, refuses a different pack, or,
+  when the create ended without a mob, takes the id itself. A create that
+  is refused or fails frees the id in the same step.
+
+### Host mobs and the default mob (Rust hosts)
+
+A `MobMcpState` builds every mob it creates or restores with one state-wide
+configuration. A Rust host that builds the mobs it creates itself in its own
+way installs a host composition, and a host whose launch names one mob
+declares it as the default mob. Both are set when the state is built; the
+CLI, `rkat-rpc`, `rkat-rest` and `rkat-mcp` set neither.
+
+**The host composition.** `with_host_mob_composition` installs a
+`HostMobComposition`. The set asks it for every build of a mob whose
+creation records `MobProvenance::Host` (a mob created with
+`mob_create_definition` or from a mobpack, with no owner session), and for
+the default mob: once at the create, and again at each load of the mob's
+store (a restart, a load after an idle unload, a re-attempt of a quarantined
+store). Such a build starts clean: `compose` gets a builder over the
+definition and the storage with nothing of the set's state-wide
+configuration on it, and gives it everything the mob needs: the session
+service, the runtime adapter, the member build preparer, the members held
+pending, the composition authority, the resume gate, the spawn customizer.
+The realm's skill sources are state-wide configuration too: a host mob's
+definition defines every skill its profiles name. A definition that does
+not is refused at the create: one whose inline profile names a skill only
+the realm knows by the definition's own validation, and one whose profile
+refers to a realm profile that names such a skill with
+`profile '...' references skill '...' that is not defined in the mob
+definition` (the set resolves the realm profile at the create for this).
+Define, in a host mob's definition, every skill the realm profiles it
+refers to name. The default mob's own create is not checked this way: it
+keeps the realm profiles of its own store.
+`resume_expectation`, asked first at a load, can name the stored definition
+the load must find; a store whose definition moved since then refuses the
+load before the mob runs. An error from either refuses the build: a create
+fails with it and leaves no mob behind (the store file of a further host
+mob is removed again), and a load quarantines the store with it as the
+cause. A mob created for an owner session (an agent's `mob_create`, the
+implicit delegation mob, a temporary council) is never given to the
+composition: it is built with the state-wide configuration, and a child mob
+keeps the child application tool policy.
+
+A composition must be able to build a mob that is not the default mob from
+the moment the state is built. It may take its time: when the eager restore,
+the start of an on-demand set or the sweep over the dormant mobs meets a
+host mob, the build runs on as the state's own task and the pass goes on,
+so the set's first verb does not wait for it. That build is the one load of
+its store: a lookup of the mob waits for it, a restore pass that runs again
+starts no second one and does not wait for it, and it holds the state's
+admission until it ends, so a close of the state's admission waits for it.
+(A state that was not shared with `into_shared` owns no tasks and builds
+inline.)
+
+**The default mob.** `with_default_mob(DefaultMobDeclaration::persistent(id, store))`
+tells the set the id of the launch's mob and the file of its store (any
+path, also one under the set's persistent root;
+`DefaultMobDeclaration::in_memory(id)` keeps it in memory). The declared file exists
+from the declaration on: the set opens the host's forked-participant table
+in it, and that is the one such table of the host. Temporary councils,
+every other mob, the set's own reads and the default mob use it, and it
+takes precedence over the table of the persistent root and over
+`with_forked_participant_store`. (A default mob in memory uses the set's
+own table.) A file whose table cannot be opened at the declaration is tried
+again before the set's first pass; when that fails too, the set runs with
+its own table and the default mob is not served in that process (the serve
+answers a typed error), so a host never has two such tables. The set then
+owns the default mob like every mob it hosts:
+
+- `serve_default_mob(definition)` creates the mob in that store when the
+  store holds no mob, with provenance `Host`, and loads it when it does (the
+  stored definition stands). The create is the launch's own act: the create
+  hook (`set_before_create`) is not asked for it, and a create the
+  composition refuses leaves the declared file with no mob in it. The serve
+  never changes the mob's phase: a mob that was stopped is served stopped,
+  and stays stopped until the launch resumes it on the handle it was
+  served. Nothing resumes a stopped mob without a resume request, the
+  default mob included.
+- `serve_default_mob(DefaultMobServe::new(definition).declaring_update(revision))`
+  also declares an update of the stored definition: the serve advances the
+  store's definition to the given one, compare-and-swapped on the revision
+  the launch read, before the mob is loaded, and answers the revision it
+  committed. A declaration the store does not admit refuses the serve and
+  changes nothing. An update the serve committed stays committed when the
+  load after it fails: the serve's error, `DefaultMobServeError`, carries
+  the failure (`error`) and the revision the serve committed
+  (`declared_update`), so the launch can account for it.
+- `default_mob_stored_definition()` reads what the store holds before
+  anything is built. It opens the store as a launch opens its own store,
+  for reading and writing, and the serve then loads through that same open
+  (a stand-down with no serve releases it). A read that fails answers its
+  error and quarantines nothing.
+- **The set waits for the launch.** Until the launch's first serve has
+  ended, a lookup, a delivery or a completion that names the default mob or
+  one of its members waits, and nothing loads the mob or asks the
+  composition for it: the eager restore, the start's load of the mobs whose
+  members hold work and the sweep over the dormant mobs leave it alone too.
+  So the composition is never asked for the default mob before the launch
+  is ready. Meanwhile `mob_inventory` lists the mob as `dormant`, under
+  either restore policy, and `mob_list` does not list it. The wait has no
+  time limit of its own: the serve ends it, however the serve ends (also
+  when it panics or its caller drops it), and a stand-down releases the
+  waiters with its own error. The dropped caller is covered for a state
+  shared with `into_shared`, which runs the serve as its own task, as
+  every host here does; a state that is not shared runs the serve in its
+  caller, and a caller that drops it there leaves the wait standing
+  until a later serve or a stand-down. A serve refused on its arguments (another
+  mob's definition, a declaration the store does not admit) releases
+  nobody. What is refused under the default mob's id (a create, a handle, a
+  destroy) is refused at once. A default mob in memory is held the same
+  way: a lookup of it waits for the launch's first serve, which creates
+  it.
+- A store that cannot be opened or read, that holds another mob, or whose
+  build the composition refuses, is quarantined under the default mob's id,
+  and the serve answers the typed quarantine; the file is kept as found.
+  The next serve re-attempts a quarantined default store once, with its
+  declared update applied first when it declares one. A file at that place
+  with no mob in it is never removed.
+- The default mob's id is the launch's: every other create under it is
+  refused (`MobError::MobAlreadyExists`, before the default mob exists
+  too), and so are a handle the host inserts under it
+  (`mob_insert_handle`) and a destroy of the mob through the set
+  (`mob_destroy`, the lifecycle verb, the agent tool). Another store of the
+  root that names the same id is quarantined as a conflict under its
+  file's name and never served as the default mob.
+- The default mob keeps the realm profiles of its own store; the set's
+  realm profile store serves every other mob.
+- The idle unload never asks the default mob, and a host that declares its
+  default mob does not call `declare_mob_set_restored`: the set's census
+  covers the declared store.
+
+A completion owed to a member of a mob (a council's outcome, a `fork_off`
+result) is committed against the set. A set that has not taken its census
+yet, because no verb ran, cannot say whether a store of the host holds the
+mob: it answers such a commit an error, for every mob id, and the
+completion stays owed. The caller asks again; the set's own deliveries
+after a restart take the census before they ask. Only a mob verb (which
+takes the census) or, for a host that inserts handles,
+`declare_mob_set_restored` ends that state: a host on which neither ever
+happens keeps such a commit owed. What is owed stays with its producer: the
+caller sees `Unavailable`, and a council's job stays unsettled on its
+custody record, where `relink_detached_councils` reports it.
+
+A council's outcome owed to a member of a mob that is not served is never
+committed to that member's session as a plain session. The re-link after a
+restart loads an ordinary dormant mob for the delivery and commits the
+outcome for the member. For the default mob that awaits its launch's serve,
+and for a mob that is held or quarantined, it leaves the outcome owed
+(`CouncilRelinkAction::AwaitingMob`) and delivers it once that mob is
+served. A convener with no stored member binding may be a member of the
+default mob (a session written before bindings were stored), so on a host
+with a default mob its outcome stays owed in the same states, and is a
+plain session's only once the served default mob does not seat it. A
+default store that stays quarantined therefore keeps such outcomes owed
+for as long as it does: the inventory lists the mob as quarantined, the
+council's job stays unsettled on its custody record, and the recovery
+sweep logs, at each pass, one line per mob it leaves outcomes owed to
+(the mob, how many, and the state that holds them: the default mob awaits
+its serve, the mob is held, quarantined or not loaded; a mob that was
+served or went away after the pass decided is named so, and the next pass
+decides again). An
+unfinished council over the default mob's members is recovered after the
+serve. A default mob in memory is held the same way: the set knows it from
+the declaration on, names it as not loaded, and a lookup of it waits for
+the launch's first serve, which creates it.
+
 ### Quarantined mobs and degraded members
 
 A host that restores its persisted mobs when it starts (the CLI, `rkat-rpc`,

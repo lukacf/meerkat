@@ -621,6 +621,16 @@ pub enum MobError {
     #[error("mob not found: {0}")]
     MobNotFound(MobId),
 
+    /// An id the mob set already knows was named again: by a create of a
+    /// mob from a definition, when a mob is managed, not loaded or being
+    /// unloaded under it; or, for the id a host declared for its default
+    /// mob, by any create and by a handle the host inserts under it.
+    /// Nothing was created or inserted. Its structured data names the
+    /// kind ([`Self::MOB_ALREADY_EXISTS_KIND`]) and the id, so a surface
+    /// tells the refusal without reading its text.
+    #[error("mob already exists: {0}")]
+    MobAlreadyExists(MobId),
+
     /// The requested profile does not exist in the mob definition.
     #[error("profile not found: {0}")]
     ProfileNotFound(ProfileName),
@@ -2790,6 +2800,9 @@ impl MobError {
     /// Structured-data `kind` of [`Self::MobQuarantined`].
     pub const MOB_QUARANTINED_KIND: &'static str = "mob_quarantined";
 
+    /// Structured-data `kind` of [`Self::MobAlreadyExists`].
+    pub const MOB_ALREADY_EXISTS_KIND: &'static str = "mob_already_exists";
+
     /// The quarantine class of a persisted mob whose restore failed with
     /// this error ([`MobQuarantineClass`]): a store that could not serve a
     /// read now (a typed store read classed unavailable, the mob's own store
@@ -2984,6 +2997,10 @@ impl MobError {
                 }
                 Some(data)
             }
+            Self::MobAlreadyExists(mob_id) => Some(serde_json::json!({
+                "kind": Self::MOB_ALREADY_EXISTS_KIND,
+                "mob_id": mob_id.as_str(),
+            })),
             Self::MemberSendIdempotency { refusal, .. } => Some(refusal.structured_data()),
             Self::FlowRoleTargetsRefused { flow_id, refusal } => Some(serde_json::json!({
                 "kind": "flow_role_targets_refused",

@@ -1383,8 +1383,8 @@ boundary of the same run. If the run ends first (the model answered without
 another tool call), or the boundary refuses Session writes (structured-output
 extraction), the input takes the ordinary follow-up turn, which writes the same
 transcript rows. It keeps its admitted `steer` lane, so the runtime serves it
-first after the run, ahead of queued work. Exactly one of the two paths writes
-them:
+first after the run, ahead of queued work. Only one path contributes the rows
+to retained history:
 
 - The input joins the running run as a late contributor before its payload
   reaches the runner. Persistent runtimes make that binding durable first.
@@ -1407,13 +1407,134 @@ them:
   a later application in another run; canonical retained history remains
   authoritative.
 
-Durable steers are delivered one per boundary, in arrival order: a durable
-steer admitted while an earlier one still waits for its boundary joins the
-boundary after that one, in the same run. When the run ends first, or a
-boundary refuses the earlier one (for example a structured-output extraction
-boundary), the waiting steers keep their place in the steer lane and the
-follow-up turn delivers them in arrival order, ahead of queued work. Each steer
-is written exactly once. Arrival order holds within each delivery class: a
+Unreleased (after 0.9.17): at a boundary where a durable steer has registered
+its claim, the eligible prefix of the durable steers that wait in the steer
+lane joins, in admission order, and the model request that follows the
+boundary is the first one that carries them. An acknowledged admission is
+not inclusion in a request: the cutoff below decides that, and a steer that
+is not eligible keeps its own path (the delivery classes above and the
+follow-up turn are unchanged). The oldest waiting steer holds
+the boundary's one claim. Once the runner has parked at the boundary, the
+runtime joins that steer and the eligible prefix of the durable steers behind
+it in the lane to the run, each join durable on a persistent runtime, and
+then publishes the claim. Where a claim is registered, that publication is
+the cutoff of the request: one step under the session mutation gate, before
+the runner writes the rows and composes the request. Admission and recall
+take the same gate, so each is ordered before or after the cutoff. A steer
+admitted before it, also one admitted after the runner parked, joins this
+request when it is in the eligible prefix. A steer admitted after it is
+retained and waits for the next eligible boundary of the run or for the
+follow-up turn. A steer that still waits when the session is loaded again
+from the store joins the resumed run's next request (below). No model
+request in flight is cancelled for a steer.
+
+The request's input is fixed in one of two ways. At a boundary with no
+durable steer (none has registered with it, or the runner is parked there on
+request-only context alone), it is fixed at the one check in which the
+runner finds that every delivery it is parked on is resolved, that no
+durable steer has registered, and that no acknowledged steer is still on
+its way; the runner then closes the boundary and awaits nothing before it
+composes the request. An eligible steer whose admission was acknowledged
+before that check is in the request, unless it is recalled or its
+preparation fails first: the runner keeps the boundary open until the steer
+has registered or its preparation has ended. Once a durable steer has
+entered the boundary, the
+cutoff is that steer's publication under the session mutation gate, as at
+any boundary.
+
+The cutoff is the instant the request's input is fixed, not the later
+composing or sending of the request. A steer admitted after it waits for
+the next boundary, even when its admission was acknowledged before the
+request was composed or sent. A caller cannot tell the two instants apart,
+so an admission acknowledged before the request left does not mean the
+steer is in that request.
+
+The joins follow the lane and stop at the first durable steer that cannot
+join this run: a steer of another requester than the run's, one the run's
+bound of 256 contributors refuses, one whose rows cannot be written in-turn,
+or one whose join could not be made durable. That steer keeps its place and
+no steer behind it overtakes it.
+
+What changed is timing; each steer keeps its own input id. Three facts are
+kept apart:
+
+- Delivery. A successful in-turn application that the run retains is exactly
+  once per steer: its own join to the run, its own delivery witness, its own
+  transcript rows and its own `boundary_append_applied`, which names the
+  `run_id` and the `input_id`. Steers that join one boundary have
+  adjacent rows in admission order and publish their events in that order:
+  three steers are three deliveries and three events, not one for the group.
+  `boundary_append_applied` is a live signal of the write. It is neither the
+  model's response nor the durable consumption of the input: the input is
+  consumed with the run's terminal, and an application the run discards
+  returns the input to its lane (`boundary_appends_discarded`). The run's
+  round commit is separate evidence: what a host reads of it is retained
+  history, not the applied event.
+- First request. The request that follows the boundary is the first to carry
+  the steer. A steer is never added to a request that was already composed.
+- Retained history. Rows the run commits or keeps stay in the transcript,
+  so every later request carries them as history, like tool results. A later
+  request that carries a row is not a second delivery and publishes no event.
+
+So no model decision is guaranteed between consecutive eligible steers. A
+caller that needs a separate decision for each matches the earlier steer to
+a model decision before it sends the next one. `boundary_append_applied`
+with the steer's `input_id` names the run (`run_id`) whose turn applied it;
+it is published after the runner has written the steer's rows, before the
+request that first carries them is sent. That run's next successful
+`turn_completed` then says that the model has answered a request that
+carried the steer: `turn_completed` is published after the response of each
+model call that succeeds, and for a call that returned tool calls after
+their results are written. The match is by stream order: `turn_completed`
+carries no run id and no success flag, so it is the next `turn_completed`
+on the session's stream after the applied event and before that run ends
+(`run_completed` or `run_failed`). A steer that takes the
+follow-up turn publishes
+no `boundary_append_applied`: it is part of the input that turn starts
+with. For it, `session/input_status` names the follow-up run in the input's
+`last_run_id`, and that run's first successful `turn_completed` is the
+observed boundary.
+
+That `turn_completed` may not come: the call can fail, the run can discard
+what it applied, and the run can reach its terminal or be replayed without
+it having been observed. Then do not wait without a limit and do not send
+the steer a second time on your own. Reconcile with `session/input_status`
+(the input's state and its `last_run_id`), with `boundary_appends_discarded`
+for that run and input, and with retained history, which stays
+authoritative.
+
+Baseline: 0.9.17 joined one durable steer per model boundary, and a steer
+admitted while an earlier one waited joined the boundary after it (read from
+the source at tag `v0.9.17`: `DurableSteerOrder`,
+`crates/meerkat-runtime/src/driver/ephemeral.rs` lines 306-320). In our
+held-tool test, 0.9.3 put the first steer in the next request and the rest
+in a follow-up turn; 0.9.4 and the tested revision of `main` delivered one
+per request. Other releases were not measured.
+
+When the run ends first, or the boundary refuses Session writes (for example
+a structured-output extraction boundary), the waiting steers keep their place
+in the steer lane and the follow-up turn delivers them in arrival order, ahead
+of queued work. Each steer's rows are in the retained history once.
+
+A durable steer that was admitted and still waits for its run's next
+boundary when its session is loaded again from the store is not left to a
+follow-up turn when that run resumes. It joins the resumed run's next model
+request, once, and the steers that waited with it join in admission order.
+A durable steer admitted after the session is loaded again and before the
+work of the steers that waited has begun joins the same request behind
+them, in admission order, once, with no follow-up turn.
+A recalled steer reaches no request, and the steers that waited behind it
+join the resumed run's request.
+The limits of a live boundary hold here too: when the resumed run's boundary
+refuses Session writes, or the run ends before a boundary, one follow-up turn
+delivers them in admission order. A steer whose stored row counts a stage
+attempt takes the follow-up turn. A steer whose join to the resumed run is
+still open when its session is loaded once more, before a round commit held
+its rows, takes one follow-up turn after the run, once. With no run to
+resume, the steer
+that waited starts the next run as its own input.
+
+Arrival order holds within each delivery class: a
 follow-up-only steer (for example a directed peer message) admitted before a
 plain peer message still lands after it, because the plain one joins the
 running turn and the directed one takes the follow-up turn.
@@ -1440,6 +1561,19 @@ interrupts a run.
   no attempt was counted, which is not proof that no run ever saw the input:
   a steer that joined a running turn and went back to the queue because the
   turn discarded what it had appended counts no attempt.
+  A recall of a durable steer that waits for its model boundary withdraws
+  this queued delivery: from then on the steer joins no request and gets no
+  transcript row. It does not undo an earlier observation: a steer that an
+  earlier turn applied and returned to the queue may already have been seen
+  by the model. The recalled steer does not delay the durable
+  steers behind it in the steer lane: they join the request they would have
+  joined, in admission order. That holds before and after the runner parks
+  at the boundary. When the recalled steer was the oldest one, the claim it
+  held stays with the lane: only its own delivery is withdrawn, and the
+  steers behind it are joined and published at that boundary. The session
+  mutation gate orders a recall against the steer's join: before it the recall
+  withdraws the steer; after it the recall answers `NotQueued` while the run
+  holds the steer, and `AlreadyTerminal` once the input has ended.
 - `QueuedInputRecall::NotQueued { phase, run_id }`: a run holds the input
   (`Staged`, `Applied` or `AppliedPendingConsumption`). Nothing changes.
   `run_id` is the run that holds it, when the runtime has one.

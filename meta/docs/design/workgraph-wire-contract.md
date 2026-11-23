@@ -215,10 +215,13 @@ namespace restriction below are superseded by the
   target aliasing through the roster/shared-session-store (upstream
   uniqueness keys the literal target), Paused-occupancy, and friendlier
   pre-write conflicts on the RPC and tool planes. The check-then-act is
-  serialized per runtime, and — for SQLite-backed stores, which two
-  processes may share — cross-process via a `workgraph.admission.sqlite3`
-  sidecar lock beside the store (candidate for removal in 0.7.31 now that
-  the store owns the invariant for literal targets).
+  serialized per runtime, and - for SQLite-backed stores - cross-process
+  via a `workgraph.admission.sqlite3` sidecar lock beside the store
+  (candidate for removal in 0.7.31 now that the store owns the invariant
+  for literal targets). Two runtimes of the gateways or of the builder's
+  persistent state on one state directory are refused before a store opens
+  (the state directory claim); the sidecar serializes a process that takes
+  the lock file without that claim.
 - `goal/create`, `attention/*`, and `policy/escalate` reject non-default
   `namespace` (`-32602`) — upstream turn-overlay resolution only reads the
   service default namespace, so goals elsewhere would be silently inert.

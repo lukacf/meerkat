@@ -14,25 +14,25 @@
 //! of this process has its own part. A link is one committed edge of a local
 //! member's row to an in-process member of another mob. A part is a
 //! projection of its mob's rows, and is written from them only:
-//! - by every wire and unwire of this runtime that changes such an edge:
+//! - by every wire and unwire of the mob that changes such an edge:
 //!   after a wire committed, and before an unwire commits, with the row read
 //!   again when the unwire fails ([`sync_member_links`],
 //!   [`drop_member_link`]; called by `wire_local_edge` / `unwire_local_edge`
 //!   and by `mutate_member_unchecked`, the one body of the bilateral wires);
-//! - once when the runtime starts ([`restore_from_roster`]): one member
+//! - once when the mob starts ([`restore_from_roster`]): one member
 //!   listing, then one row read for each member that names a member of
 //!   another mob. Nobody is built and no store is read.
-//! - a runtime's whole part goes when the runtime begins to shut down or
-//!   stops its mob ([`close_part`]); when its shutdown ran to its end the
-//!   inbox routes of its links go too ([`clear_part`]). A part that was
-//!   closed, or that a later runtime of the mob replaced, takes no link
-//!   again.
+//! - a mob's whole part goes when its runtime begins to shut down or stops
+//!   the mob ([`close_part`]); when the shutdown ran to its end the inbox
+//!   routes of its links go too ([`clear_part`]). A part that was closed,
+//!   or that a later entry of the mob replaced, takes no link again.
 //!
-//! A part belongs to the runtime whose start-time read created it. Nothing
-//! else creates one: a wire on a runtime that never ran the read (a launch
-//! that does not speak for the composition) holds no link. Only its own
-//! runtime closes a part, so the late teardown of a runtime that was
-//! dropped cannot clear the part of the runtime built after it.
+//! A part belongs to the entry of its mob whose start-time read created it
+//! (the mob's `MobEntry`, which keeps it to close it). Nothing else creates
+//! one: a wire on a mob whose entry never ran the read (a launch that does
+//! not speak for the composition) holds no link. Only its own entry closes
+//! a part, so the late teardown of an entry that was dropped cannot clear
+//! the part of the entry built after it.
 //!
 //! **What is forwarded.** Only a content send, and only for a link BOTH mobs
 //! hold: the sender's mob names the recipient, and the recipient's mob names
@@ -95,6 +95,7 @@ use super::cross_mob::{
     CrossMobError, RouteNotInstalled, inproc_peer_namespace, install_route_alias,
     mob_inproc_namespace_for_id,
 };
+use super::mob_entry::MobEntry;
 
 type WakeResult = Result<PeerWakeAnswer, PeerWakeDenial>;
 type SharedWake = Shared<BoxFuture<'static, WakeResult>>;
@@ -771,7 +772,7 @@ pub(super) async fn sync_member_links(handle: &MobHandle, member: &AgentIdentity
     let Ok(namespace) = mob_inproc_namespace_for_id(&mob_id) else {
         return;
     };
-    // A part is created by its runtime's start-time read only.
+    // A part is created by the start-time read of its mob's entry only.
     let Some(routes) = routes_of(&namespace) else {
         // A launch that holds no part (it does not speak for the
         // composition) records the edge and holds no link for it.
@@ -816,7 +817,7 @@ pub(super) fn drop_member_link(mob_id: &str, member: &AgentIdentity, remote: &st
 
 /// The start-time roster read: the mob's part of the link table is built
 /// from its rows, once, on a part that starts empty. Returns the part, which
-/// the runtime keeps to close it.
+/// the mob's entry keeps to close it.
 ///
 /// Cost: one member listing (the machine's current state, no store read),
 /// and one row read for each member that is wired to a member of another
@@ -893,37 +894,86 @@ pub(super) fn clear_part(part: &Arc<CrossMobWakeRoutes>) {
     }
 }
 
-impl UnifiedRuntime {
+/// Test builds only: whether `part` is the part of the link table its mob's
+/// namespace holds now. A part that was closed is not.
+#[cfg(test)]
+pub(super) fn is_the_part_of_its_mob(part: &Arc<CrossMobWakeRoutes>) -> bool {
+    routes_of(&part.namespace).is_some_and(|current| Arc::ptr_eq(&current, part))
+}
+
+/// Test builds only: whether the namespace of the mob `mob_id` holds a part
+/// of the link table now.
+#[cfg(test)]
+pub(super) fn holds_a_part_in_tests(mob_id: &str) -> bool {
+    mob_inproc_namespace_for_id(mob_id)
+        .ok()
+        .and_then(|namespace| routes_of(&namespace))
+        .is_some()
+}
+
+impl MobEntry {
     /// The start-time read of this mob's links to members of other mobs of
-    /// this process ([`restore_from_roster`]), once per runtime, when its
-    /// mob runs. A launch that does not speak for the composition holds no
+    /// this process ([`restore_from_roster`]), once per entry, when its mob
+    /// runs. A launch that does not speak for the composition holds no
     /// link: it wakes nobody.
+    ///
+    /// The close of an entry is final. Whether the mob is gone from this
+    /// process is its actor's own fact: once the actor closed its admission
+    /// (an unload, a destroy, a shutdown) the read starts no part, and a
+    /// read that was under way while the actor closed takes its part down
+    /// again. So a wire in flight when its mob goes leaves no part that
+    /// nothing closes.
     pub(super) async fn restore_cross_mob_wake_routes(&self) {
-        if !self.speaks_for_composition() || self.cross_mob_routes.get().is_some() {
+        if !self.mob_runtime.speaks_for_composition()
+            || self.cross_mob_routes.get().is_some()
+            || self.actor_closed()
+        {
             return;
         }
         let handle = self.mob_runtime.handle();
-        if let Some(part) = restore_from_roster(&handle).await
-            && let Err(second) = self.cross_mob_routes.set(part)
-        {
-            // Another start-time read of this runtime won: this one's part
-            // is not kept.
-            close_part(&second);
+        if let Some(part) = restore_from_roster(&handle).await {
+            match self.cross_mob_routes.set(part) {
+                // Another start-time read of this entry won: this one's
+                // part is not kept.
+                Err(second) => close_part(&second),
+                // The actor closed while the read ran: what closed this
+                // entry found no part to close, so the part goes here.
+                Ok(()) if self.actor_closed() => self.clear_cross_mob_wake_routes(),
+                Ok(()) => {}
+            }
         }
     }
 
-    /// See [`close_part`].
+    /// This mob's part goes: see [`close_part`].
     pub(super) fn close_cross_mob_links(&self) {
         if let Some(part) = self.cross_mob_routes.get() {
             close_part(part);
         }
     }
 
-    /// See [`clear_part`].
+    /// The inbox routes of this mob's links go: see [`clear_part`].
     pub(super) fn clear_cross_mob_wake_routes(&self) {
         if let Some(part) = self.cross_mob_routes.get() {
             clear_part(part);
         }
+    }
+}
+
+impl UnifiedRuntime {
+    /// The default mob's start-time read: see
+    /// [`MobEntry::restore_cross_mob_wake_routes`].
+    pub(super) async fn restore_cross_mob_wake_routes(&self) {
+        self.default_mob().restore_cross_mob_wake_routes().await;
+    }
+
+    /// The default mob's part goes: see [`close_part`].
+    pub(super) fn close_cross_mob_links(&self) {
+        self.default_mob().close_cross_mob_links();
+    }
+
+    /// The inbox routes of the default mob's links go: see [`clear_part`].
+    pub(super) fn clear_cross_mob_wake_routes(&self) {
+        self.default_mob().clear_cross_mob_wake_routes();
     }
 }
 

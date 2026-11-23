@@ -686,3 +686,35 @@ model = "gpt-5.5"
     following.abort();
     runtime.shutdown().await;
 }
+
+/// The seed step of the SDK row that needs a question set pending before a
+/// gateway process starts
+/// (`meta/sdk/python/tests/test_held_question_at_opening_real_gateway.py`):
+/// no SDK call opens a question set. It holds one question set, as the stock
+/// tool's host does, in the state directory `META_SDK_HELD_QUESTION_STATE`
+/// names, through another owner on that store, and leaves it open. It is not
+/// a row of this file and runs by name only.
+#[test]
+#[ignore = "the seed step of an SDK row: run by name with META_SDK_HELD_QUESTION_STATE set"]
+fn seed_a_pending_question_set_for_an_sdk_row() {
+    let state = PathBuf::from(
+        std::env::var_os("META_SDK_HELD_QUESTION_STATE")
+            .expect("META_SDK_HELD_QUESTION_STATE names the state directory to seed"),
+    );
+    std::fs::create_dir_all(&state).expect("the state directory");
+    let owner = owner_of(&state);
+    let held = hold_question_set(&owner, "sdk-row-call-1");
+    assert_eq!(held.descriptor.kind.as_str(), ASK_USER_QUESTIONS_KIND);
+    let open = owner
+        .list(
+            &DecisionListFilter::default().with_phase(DecisionPhase::Open),
+            None,
+            DECISION_PAGE_MAX,
+        )
+        .expect("the owner lists the open decisions");
+    let kept = open
+        .decisions
+        .iter()
+        .any(|row| row.decision_id.to_string() == held.decision_id.to_string());
+    assert!(kept, "the question set is open in the store");
+}

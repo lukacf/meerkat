@@ -1607,6 +1607,127 @@ mod tests {
         );
     }
 
+    /// The comms tools are five, and exactly two of them answer a peer. A
+    /// comms tool added later fails this row until it is placed on one side:
+    /// kept in every request, or allowed to wait behind the deferred catalog.
+    #[test]
+    fn the_peer_answer_tools_are_two_of_the_five_comms_tools() {
+        assert_eq!(
+            crate::PEER_ANSWER_TOOL_NAMES,
+            ["reply_to_peer", "send_response"]
+        );
+        let names = comms_tool_defs()
+            .iter()
+            .map(|tool| tool.name.as_str().to_string())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            names,
+            [
+                "peers",
+                "reply_to_peer",
+                "send_message",
+                "send_request",
+                "send_response"
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<std::collections::BTreeSet<_>>()
+        );
+        for name in crate::PEER_ANSWER_TOOL_NAMES {
+            assert!(names.contains(name), "{name} is a comms tool");
+        }
+    }
+
+    /// On the comms tools themselves: under a host's comms deferral
+    /// policy with the peer answer tools pinned, `send_message`,
+    /// `send_request` and `peers` are deferred-eligible, owned by the comms
+    /// provenance; `reply_to_peer` and `send_response` keep the inline
+    /// declaration they have without the policy; the tools composed under
+    /// the comms dispatcher are untouched.
+    #[test]
+    fn comms_policy_defers_only_unpinned_comms_tools() {
+        use meerkat_core::{StockDeferralDispatcher, StockToolDeferralPolicy, StockToolSourceKind};
+
+        let (router, trusted_peers) = test_router();
+        let comms: Arc<dyn AgentToolDispatcher> = Arc::new(CommsToolDispatcher::with_inner(
+            router,
+            trusted_peers,
+            Arc::new(DeclaringInnerDispatcher),
+        ));
+        let inline = comms.tool_catalog();
+        let wrapped = StockDeferralDispatcher::new(
+            comms,
+            StockToolDeferralPolicy::none().deferring(StockToolSourceKind::Comms),
+            crate::PEER_ANSWER_TOOL_NAMES,
+        );
+        let catalog = wrapped.tool_catalog();
+        let comms_provenance = ToolProvenance {
+            kind: ToolSourceKind::Comms,
+            source_id: "comms".into(),
+            artifact: None,
+        };
+        let digest = |catalog: &[ToolCatalogEntry], name: &str| {
+            let entry = catalog
+                .iter()
+                .find(|entry| entry.tool.name == name)
+                .unwrap_or_else(|| panic!("no catalog entry named {name}"));
+            meerkat_core::ToolBindingDigest::of_catalog_entry(entry)
+        };
+
+        assert_eq!(catalog.len(), inline.len());
+        for name in ["send_message", "send_request", "peers"] {
+            let entry = catalog
+                .iter()
+                .find(|entry| entry.tool.name == name)
+                .expect("a comms tool entry");
+            assert_eq!(
+                entry.deferred_eligibility,
+                ToolCatalogDeferredEligibility::DeferredEligible {
+                    provenance: comms_provenance.clone()
+                },
+                "{name} may wait behind the catalog"
+            );
+            assert_ne!(digest(&catalog, name), digest(&inline, name));
+        }
+        for name in [
+            "reply_to_peer",
+            "send_response",
+            "inner_read",
+            "inner_write",
+        ] {
+            let entry = catalog
+                .iter()
+                .find(|entry| entry.tool.name == name)
+                .expect("a catalog entry");
+            assert_eq!(
+                entry.deferred_eligibility,
+                ToolCatalogDeferredEligibility::InlineOnly,
+                "{name} stays in every request"
+            );
+            assert_eq!(
+                digest(&catalog, name),
+                digest(&inline, name),
+                "{name} keeps the declaration it has without the policy"
+            );
+        }
+
+        // The three comms tools that may wait, against the deferred
+        // catalog's rule: on their own they reach its tool count, so a
+        // session with the comms policy and an exact catalog defers them.
+        let waiting = meerkat_core::deferred_session_entry_count(&catalog);
+        assert_eq!(waiting, 3, "the comms tools that may wait");
+        assert!(waiting >= meerkat_core::tool_catalog::DEFERRED_CATALOG_TOOL_COUNT_THRESHOLD);
+        assert_eq!(
+            meerkat_core::select_catalog_mode_from_snapshot(true, &catalog, &[]),
+            meerkat_core::ToolCatalogMode::Deferred
+        );
+        assert_eq!(
+            meerkat_core::select_catalog_mode_from_snapshot(true, &inline, &[]),
+            meerkat_core::ToolCatalogMode::Inline,
+            "without the policy the same catalog defers nothing"
+        );
+    }
+
     #[tokio::test]
     async fn comms_wrapper_preserves_exact_deferred_catalog_contract() {
         let (router, trusted_peers) = test_router();

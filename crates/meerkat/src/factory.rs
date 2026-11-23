@@ -4342,6 +4342,10 @@ pub struct AgentFactory {
     pub enable_schedule: bool,
     pub enable_workgraph: bool,
     pub enable_mob: bool,
+    /// Which stock tool families wait behind the deferred tool catalog in
+    /// the sessions this factory builds ([`Self::stock_tool_deferral`]). The
+    /// default names none.
+    stock_tool_deferral: meerkat_core::StockToolDeferralPolicy,
     /// Optional skill source override. When set, bypasses config-driven
     /// repository resolution. For SDK users who wire sources programmatically.
     #[cfg(feature = "skills")]
@@ -5657,6 +5661,7 @@ impl AgentFactory {
             enable_schedule: false,
             enable_workgraph: false,
             enable_mob: false,
+            stock_tool_deferral: meerkat_core::StockToolDeferralPolicy::none(),
             #[cfg(feature = "skills")]
             skill_source: None,
             custom_store: None,
@@ -5871,6 +5876,7 @@ impl AgentFactory {
             enable_schedule: false,
             enable_workgraph: false,
             enable_mob: false,
+            stock_tool_deferral: meerkat_core::StockToolDeferralPolicy::none(),
             #[cfg(feature = "skills")]
             skill_source: None,
             custom_store: None,
@@ -6495,6 +6501,66 @@ impl AgentFactory {
         factory: Arc<dyn meerkat_core::service::MobToolsFactory>,
     ) -> Self {
         self.mob_tools = Some(factory);
+        self
+    }
+
+    /// Let the stock tool families `policy` names wait behind the deferred
+    /// tool catalog in the sessions this factory builds, instead of being
+    /// sent in every model request. The comms family is the only one a
+    /// policy can name.
+    ///
+    /// The tools of a named family become deferred-eligible in the
+    /// session's composed catalog, each owned by its own provenance. Whether
+    /// a session then defers them follows the ordinary rule: an exact
+    /// catalog with
+    /// [`meerkat_core::tool_catalog::DEFERRED_CATALOG_TOOL_COUNT_THRESHOLD`]
+    /// deferred-eligible tools, or
+    /// [`meerkat_core::tool_catalog::DEFERRED_CATALOG_SCHEMA_VOLUME_THRESHOLD`]
+    /// bytes of their definitions. A deferred tool is found with
+    /// `tool_catalog_search`, loaded with `tool_catalog_load`, and stays
+    /// loaded for the session.
+    ///
+    /// In practice opting in changes the first model request of a session
+    /// with an exact catalog that mounts the comms tools. The comms tools
+    /// that may wait (`send_message`, `send_request`, `peers`) reach the
+    /// tool count on their own: such a session starts in the deferred mode,
+    /// with the two catalog control tools in their place, and its model
+    /// loads a tool before the first call of it (two more model requests
+    /// for that tool, once). Its system prompt says that the comms tools
+    /// are loaded first, in place of the comms usage section.
+    ///
+    /// A session whose catalog is not exact defers nothing, and the policy
+    /// is not applied to it: it is built exactly as without the policy.
+    /// Today that is every session that mounts the agent mob tools or
+    /// memory search, and every session one of whose other tool sources
+    /// reports no exact catalog (a host's own source, or the empty base
+    /// source of a session with neither builtin nor external tools).
+    ///
+    /// Two tools never wait, pinned by name because they answer a peer:
+    /// `reply_to_peer` and `send_response`
+    /// (`meerkat_comms::PEER_ANSWER_TOOL_NAMES`), so an agent woken by a
+    /// peer can answer in its first request. A tool whose execution
+    /// contract is not the default one never waits either (no comms tool
+    /// has one). A load of a tool that never waits answers
+    /// `not_deferred_eligible`.
+    ///
+    /// Nothing else changes: what a tool does, who may call it, its
+    /// deadlines and session tool filters are as without the policy. A tool
+    /// of another kind that carries a stock tool's name is judged by its own
+    /// provenance.
+    ///
+    /// The policy is this factory value's build configuration, like
+    /// `comms` and [`Self::mob`]: set it once, before the factory
+    /// builds sessions, on every factory a host constructs. Only Rust host
+    /// code can set it. The default,
+    /// [`meerkat_core::StockToolDeferralPolicy::none`], leaves every
+    /// catalog, tool binding digest and request as it is.
+    ///
+    /// A session that already ran with a named family's tools inline (a
+    /// resumed session after its host opts in) starts with the tools it
+    /// never loaded behind the catalog and loads each once.
+    pub fn stock_tool_deferral(mut self, policy: meerkat_core::StockToolDeferralPolicy) -> Self {
+        self.stock_tool_deferral = policy;
         self
     }
 
@@ -10727,6 +10793,9 @@ impl AgentFactory {
                 }
             };
         let mut tool_usage_instructions = String::new();
+        // Where step 9a puts the comms usage section in the instructions.
+        #[cfg(feature = "comms")]
+        let mut comms_usage_section: Option<std::ops::Range<usize>> = None;
 
         tracing::debug!(
             base_tool_count = tools.tools().len(),
@@ -10797,6 +10866,9 @@ impl AgentFactory {
             .map_err(|e| BuildAgentError::Config(format!("Failed to compose comms tools: {e}")))?;
             tools = composed.0;
             tool_usage_instructions = composed.1;
+            let end = tool_usage_instructions.len();
+            comms_usage_section =
+                Some(end - meerkat_tools::CommsToolSurface::usage_instructions().len()..end);
         }
 
         tracing::debug!(
@@ -11047,6 +11119,47 @@ impl AgentFactory {
                     BuildAgentError::Config(format!("Ops lifecycle binding failed: {e}"))
                 })?;
             tools = outcome.into_dispatcher();
+        }
+
+        // 9e. The host's stock tool deferral policy, over the bound final
+        // shape and before anything reads the composed catalog: the system
+        // prompt's announcement below, the control-plane check, the mode
+        // selection and every boundary's projection read this one catalog.
+        //
+        // An empty policy builds no wrapper, and neither does a session
+        // whose catalog will not be exact: such a session defers nothing,
+        // so it is built exactly as without the policy. The catalog is not
+        // exact when a source composed so far reports none (the agent mob
+        // tools), or when memory search, which reports none, is composed
+        // over this shape in step 12b.
+        let effective_memory = effective_memory_for_realm(
+            build_config.override_memory,
+            self.enable_memory,
+            build_config.backend,
+        );
+        let stock_tool_deferral_applies = !self.stock_tool_deferral.is_empty()
+            && !effective_memory
+            && tools.tool_catalog_capabilities().exact_catalog;
+        if stock_tool_deferral_applies {
+            tools = Arc::new(meerkat_core::StockDeferralDispatcher::new(
+                tools,
+                self.stock_tool_deferral.clone(),
+                stock_tool_deferral_pins(),
+            ));
+        }
+        // A session that starts with its comms tools behind the catalog is
+        // told to load them. The comms usage section names `send_message`,
+        // `send_request` and `peers` as tools to call, which they are not
+        // until they are loaded.
+        #[cfg(feature = "comms")]
+        if let Some(section) = comms_usage_section
+            && stock_tool_deferral_applies
+            && self
+                .stock_tool_deferral
+                .allows(meerkat_core::StockToolSourceKind::Comms)
+            && CatalogControlDispatcher::should_enable_for(tools.as_ref())
+        {
+            tool_usage_instructions.replace_range(section, deferred_comms_guidance());
         }
         tracing::debug!(
             final_tool_count = tools.tools().len(),
@@ -11785,12 +11898,8 @@ impl AgentFactory {
             builder = builder.with_hook_engine(engine);
         }
 
-        // 12b. Wire memory store + memory_search tool (when feature compiled + enabled)
-        let effective_memory = effective_memory_for_realm(
-            build_config.override_memory,
-            self.enable_memory,
-            build_config.backend,
-        );
+        // 12b. Wire memory store + memory_search tool (when feature compiled + enabled).
+        // `effective_memory` was resolved in step 9e.
         #[cfg(feature = "memory-store-session")]
         if effective_memory {
             let memory_dir = self.store_path.join("memory");
@@ -13221,6 +13330,9 @@ mod reasoning_effort_build_tests;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod resume_provider_override_binding_tests;
+#[cfg(all(test, feature = "comms", not(target_arch = "wasm32")))]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod stock_tool_deferral_tests;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
@@ -28796,6 +28908,26 @@ impl AgentFactory {
 
         Ok(dispatcher)
     }
+}
+
+/// The stock tools a host's deferral policy never lets wait, by name: the
+/// comms tools that answer a peer.
+fn stock_tool_deferral_pins() -> Vec<&'static str> {
+    #[cfg(feature = "comms")]
+    {
+        meerkat_comms::PEER_ANSWER_TOOL_NAMES.to_vec()
+    }
+    #[cfg(not(feature = "comms"))]
+    {
+        Vec::new()
+    }
+}
+
+/// What a session that starts with its comms tools behind the deferred
+/// catalog is told in place of the comms usage section.
+#[cfg(feature = "comms")]
+fn deferred_comms_guidance() -> &'static str {
+    "# Inter-agent Communication\n\nYou can communicate with other agents: `reply_to_peer` and `send_response` answer a peer and are always available, and `send_message`, `send_request` and `peers` are in the deferred tool catalog, so load the one you need with `tool_catalog_load` before you call it."
 }
 
 fn deferred_catalog_guidance() -> &'static str {

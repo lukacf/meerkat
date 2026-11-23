@@ -246,6 +246,35 @@ selector enters deferred mode when a source is still pending, at least two
 eligible tools exist, or their combined name, description, and schema volume
 reaches 160 bytes. These tools are not part of the general builtins gate.
 
+A Rust host can let the stock comms tools wait behind the catalog too.
+`AgentFactory::stock_tool_deferral` takes a `StockToolDeferralPolicy` that
+names the family (`StockToolSourceKind::Comms`; both types are also exported
+by the `meerkat` crate). The default policy names no family, and then every
+catalog and request is as without it. In a session that factory builds whose
+catalog is exact, `send_message`, `send_request` and `peers` are
+deferred-eligible and follow the rule above, which the three reach on their
+own: the session starts in deferred mode, its first request carries the two
+control tools in their place, the model loads a tool with `tool_catalog_load`
+before it calls it, and the system prompt says that the comms tools are
+loaded first, in place of the comms usage section. `reply_to_peer` and
+`send_response` never wait, so an agent a peer wakes can answer in its first
+request, and a load of one answers `not_deferred_eligible`. The session's
+tool filters apply as without the policy.
+
+What this does not include. No other tool family can be named, so the mob
+tools stay in every request. A session whose catalog is not exact defers
+nothing and is built exactly as without the policy. Today that is every
+session that mounts the agent mob tools or memory search, and every session
+one of whose other tool sources reports no exact catalog (a host's own
+source, or the empty base source of a session with neither builtin nor
+external tools). Only Rust host code can set the policy: no RPC or REST
+parameter, config file, SDK option, mob definition, profile or tool call
+sets it, and the `rkat` binaries do not set it. This policy has not been
+exercised with realtime conversations. One limit: a resumed session keeps
+the system prompt it was created with, so a session created before its host
+opted in still carries the comms usage section while those tools wait; the
+deferred-catalog notice at its next boundary names the tools that wait.
+
 A Rust host can read this projection for a live session without a model
 request: `EphemeralSessionService::tool_catalog_view` and
 `PersistentSessionService::tool_catalog_view` (and the

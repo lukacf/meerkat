@@ -297,6 +297,17 @@ pub fn requires_runtime_command_authority(name: &str) -> bool {
     matches!(name, "send_request" | "send_response")
 }
 
+/// The comms tools that answer a peer: `reply_to_peer` answers a peer
+/// message delivered in the current turn, and `send_response` answers a
+/// typed request whose sender is waiting for the correlated reply.
+///
+/// A host that lets the comms tools wait behind the deferred tool catalog
+/// (`meerkat_core::StockToolDeferralPolicy`) keeps these two in every model
+/// request, so an agent woken by a peer can answer in its first request
+/// without a search and a load. The other comms tools start an exchange and
+/// may wait.
+pub const PEER_ANSWER_TOOL_NAMES: [&str; 2] = ["reply_to_peer", "send_response"];
+
 pub fn comms_tool_unavailable_reason(
     ctx: &ToolContext,
     name: &str,

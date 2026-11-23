@@ -1185,20 +1185,38 @@ jobs:
           cache-targets: "false"
           cache-on-failure: true
 
-      # The row that names meerkat-meta and lints every target: a push's
-      # meta+2 row. On hosted runners this row's lint ended without a
-      # verdict (the runner lost, the compile killed by signal 9, the runner
-      # shut down) while it checked meerkat-meta. On another machine the same
-      # command is clean, and its two meerkat-meta checks, the library and
-      # the library test target, held 18.6 GiB while they ran side by side
-      # (the library test target alone 13.1 GiB). That is consistent with a
+      # On hosted runners the lint of a push's meta+2 row, which names
+      # meerkat-meta and lints every target, ended without a verdict (the
+      # runner lost, the compile killed by signal 9, the runner shut down)
+      # while it checked meerkat-meta. On another machine the same command
+      # is clean, and its two meerkat-meta checks, the library and the
+      # library test target, held 18.6 GiB while they ran side by side (the
+      # library test target alone 13.1 GiB). That is consistent with a
       # runner of 15 GiB of memory and 3 GiB of swap running out; the hosted
-      # cause is not established. So this row gets the unit lanes' swap step
-      # (see main-unit) with one more condition, and ONE build job in the
-      # lint step, so that the two checks cannot overlap. A row that lints
-      # only the library and binaries of meerkat-meta has no library test
-      # target and runs as before. The lint command is unchanged, and
+      # cause is not established. So every row that names meerkat-meta and
+      # lints every target gets the unit lanes' swap step (see main-unit)
+      # with one more condition, and ONE build job in the lint step, so that
+      # the two checks cannot overlap. The lint command is unchanged, and
       # neither added step can fail a lane or pass one.
+      #
+      # The condition below selects two kinds of rows. The row names here
+      # are examples; the planner (scripts/ci-cargo-lanes.mjs) plans them.
+      # Kind A: every push row that names meerkat-meta, because the planner
+      # gives every Clippy row of a push all targets. For example meta+2 in
+      # the whole-workspace plan, meta when only meerkat-meta changed, and
+      # meta+1 when meerkat-meta changed together with meta-extension-state.
+      # The job's bound there is 120 minutes.
+      # Kind B: a pull request's downstream row that names meerkat-meta,
+      # because the planner gives a downstream row all targets. For example
+      # downstream meta+1 (meerkat-meta and meta-store-conformance), planned
+      # when a pull request changes meerkat-mob-mcp,
+      # meerkat-store-conformance or mcp-test-server and no Meta crate. The
+      # job's bound there is 90 minutes.
+      # Not selected: a pull request's own Meta row, which lints only the
+      # library and binaries (for example meta, or meta+1 when meerkat-meta
+      # and meta-store-conformance changed). It has no library test target
+      # to keep apart from the library, and runs as before. A row that does
+      # not name meerkat-meta is never selected.
       - name: Show the runner's size and add swap (meerkat-meta rows)
         if: ${{ contains(matrix.packages, '-p meerkat-meta') && contains(matrix.targets, '--all-targets') }}
         continue-on-error: true
@@ -1351,7 +1369,27 @@ jobs:
           cache-targets: "false"
           cache-on-failure: true
 
-      # The meerkat-meta row's swap, as in the clippy job.
+      # The meerkat-meta rows' swap, as in the clippy job, whose comment gives
+      # the reason.
+      #
+      # The condition below selects two kinds of rows. The row names here
+      # are examples; the planner (scripts/ci-cargo-lanes.mjs) plans them.
+      # Kind A: every push row that names meerkat-meta, because the planner
+      # gives every Clippy row of a push all targets. For example meta+2 in
+      # the whole-workspace plan, meta when only meerkat-meta changed, and
+      # meta+1 when meerkat-meta changed together with meta-extension-state.
+      # The job's bound there is 120 minutes.
+      # Kind B: a pull request's downstream row that names meerkat-meta,
+      # because the planner gives a downstream row all targets. For example
+      # downstream meta+1 (meerkat-meta and meta-store-conformance), planned
+      # when a pull request changes meerkat-mob-mcp,
+      # meerkat-store-conformance or mcp-test-server and no Meta crate. The
+      # job's bound there is 90 minutes.
+      # Not selected: a pull request's own Meta row, which lints only the
+      # library and binaries (for example meta, or meta+1 when meerkat-meta
+      # and meta-store-conformance changed). It has no library test target
+      # to keep apart from the library, and runs as before. A row that does
+      # not name meerkat-meta is never selected.
       - name: Show the runner's size and add swap (meerkat-meta rows)
         if: ${{ contains(matrix.packages, '-p meerkat-meta') && contains(matrix.targets, '--all-targets') }}
         continue-on-error: true

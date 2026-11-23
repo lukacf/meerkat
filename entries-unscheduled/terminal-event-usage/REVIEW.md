@@ -1,0 +1,1 @@
+DRAFT ONLY — do not pack. Three proposed Unreleased/Added entries, no release assigned. Await the independent review and focused checks at 8760d5fee3 for gateway forwarding, turn versus session semantics, SDK exports, missing/null/zero and malformed usage, warning count and Python constructor order. Omit or correct unsupported clauses.

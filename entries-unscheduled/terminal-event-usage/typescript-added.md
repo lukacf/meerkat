@@ -1,0 +1,1 @@
+`RunCompletedEvent` and `TurnCompletedEvent` gain an optional `usage` field. The SDK also exports the `Usage` and `ProviderTokenAccounting` types. See the Meta changelog for the difference between turn counters and session totals.

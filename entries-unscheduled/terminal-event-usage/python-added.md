@@ -1,0 +1,1 @@
+`RunCompleted` and `TurnCompleted` gain an optional `usage` field. It is the last field in each class, so existing positional arguments keep their meaning. The SDK also exports `Usage` and `ProviderTokenAccounting`. See the Meta changelog for the difference between turn counters and session totals.

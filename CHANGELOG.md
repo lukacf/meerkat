@@ -106,7 +106,7 @@ them.
     loop's 10. Meta's mob tool wrapper forwards the plan in this release.
   See [`delegate`: its wait and how it ends](docs/reference/builtin-tools.mdx).
 
-## [0.9.18] - 2026-11-22
+## [0.9.18] - 2026-11-23
 
 ### Breaking
 

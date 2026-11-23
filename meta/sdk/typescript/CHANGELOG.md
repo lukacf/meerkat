@@ -28,6 +28,10 @@
   contract; callers, defaults, wire schemas and stored forms are unchanged.
   On upgrade or restart, declare stored schedules' runnable names and
   register their handlers on the builder before `build()` connects.
+- `RunCompletedEvent` and `TurnCompletedEvent` gain an optional `usage`
+  field. The SDK also exports the `Usage` and `ProviderTokenAccounting`
+  types. See the Meta changelog for the difference between turn counters and
+  session totals.
 
 ## 0.9.17
 

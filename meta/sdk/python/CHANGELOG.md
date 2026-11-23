@@ -4,6 +4,12 @@ All notable changes to the Python SDK are documented here.
 
 ## Unreleased
 
+- `RunCompleted` and `TurnCompleted` gain an optional `usage` field. It is
+  the last field in each class, so existing positional arguments keep their
+  meaning. The SDK also exports `Usage` and `ProviderTokenAccounting`. See
+  the Meta changelog for the difference between turn counters and session
+  totals.
+
 ## 0.9.17
 
 - Added `Meta.builder().on_schedule_fire(name, handler)`: the handler for a

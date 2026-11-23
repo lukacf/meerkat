@@ -366,9 +366,10 @@ The suffix indicates the primary language/surface:
 
 ## Model Names
 
-The examples name the newest model of each line in the catalog (for example
-`claude-sonnet-5-5`, `gpt-6.2-astra`, `gemini-4-hydrogen`), because they are
-copied. After a change of the catalog, list the names that have fallen behind:
+When choosing a model for an example, use the newest supported model in its
+line, such as `claude-sonnet-5-5`, `gpt-6.2-astra`, or `gemini-4-hydrogen`.
+Some existing examples still name older models. After a catalog change,
+list those references:
 
 ```bash
 python3 examples/tests/model_names.py          # exit 1 and a list when a name is behind

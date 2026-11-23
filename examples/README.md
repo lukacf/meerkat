@@ -67,7 +67,7 @@ npm --prefix sdks/typescript run build
 Setting an API key does not select its provider. The CLI examples 004 and 010
 pass `--model claude-sonnet-5-5` on every command that starts a session, so
 they need the Anthropic key. A `rkat run` without `--model` on a fresh
-configuration selects `gpt-6-astra` and needs an OpenAI key. Both scripts keep
+configuration selects the [CLI default](004-cli-one-liners-sh/README.md) and needs an OpenAI key. Both scripts keep
 their state, context and user-config roots under their own `.work/`
 directory, so a model pinned in your own project, user or realm configuration
 does not apply to them.
@@ -366,9 +366,10 @@ The suffix indicates the primary language/surface:
 
 ## Model Names
 
-The examples name the newest model of each line in the catalog (for example
-`claude-sonnet-5-5`, `gpt-6-astra`, `gemini-4-hydrogen`), because they are
-copied. After a change of the catalog, list the names that have fallen behind:
+When choosing a model for an example, use the newest supported model in its
+line, such as `claude-sonnet-5-5`, `gpt-6.2-astra`, or `gemini-4-hydrogen`.
+Some existing examples still name older models. After a catalog change,
+list those references:
 
 ```bash
 python3 examples/tests/model_names.py          # exit 1 and a list when a name is behind

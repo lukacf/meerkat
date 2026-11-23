@@ -79,7 +79,19 @@ function assertScopeCancellation(value) {
 // experience read for every mob that the console makes once it has that
 // answer. Returns the live held reads of the last start: none while the
 // console has not got that far, every live held read on a gateway that
-// hosts one mob. `held` and `observations` are the scope proxy's records.
+// hosts one mob. A held read that a newer unscoped read of the scope
+// followed is of a start the console replaces. While reads are held no
+// stream follows, so the newest held read can still be the storage-scope
+// start's, which the capability's start then replaces: the two send the
+// same read. `held` and `observations` are the scope proxy's records.
+function unscopedRecentRead(item) {
+  if (item.path !== "/console/rpc" || item.method !== "POST") return false;
+  try {
+    const { method, params } = JSON.parse(item.request);
+    return method === "meta/console/query_timeline" && params?.mode === "recent" && params.limit === 200
+      && params.identity === undefined && params.before === undefined && params.after === undefined;
+  } catch { return false; }
+}
 function heldReadsOfLastStart({ observations, held, scope }) {
   const live = held.filter(item => item.scope === scope && !Number.isFinite(item.abortedAt));
   const answer = observations.filter(item => {
@@ -93,7 +105,9 @@ function heldReadsOfLastStart({ observations, held, scope }) {
   const everyMobRead = observations.filter(item => item.scope === scope && item.method === "GET"
     && item.path === "/console/experience?mobs=*" && item.startedAt >= answer.endedAt && Number.isFinite(item.endedAt))
     .sort((left, right) => left.endedAt - right.endedAt)[0];
-  return everyMobRead ? live.filter(item => item.startedAt >= everyMobRead.endedAt) : [];
+  if (!everyMobRead) return [];
+  const reads = observations.filter(item => item.scope === scope && unscopedRecentRead(item));
+  return live.filter(item => item.startedAt >= everyMobRead.endedAt && !reads.some(read => read.startedAt > item.startedAt));
 }
 
 module.exports = { assertScopeCancellation, heldReadsOfLastStart };

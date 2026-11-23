@@ -119,7 +119,9 @@ async function scopeCancellation(host, phase) {
       // the action ends once the read of its last start is held.
       else if (host === "stock") await eventually(() => heldReadsOfLastStart({ observations: proxy.observations, held: proxy.held.map(item => item.observation), scope: "scope-a" }).length > 0, "initial successful owner history of the console's last start is held");
       else await eventually(() => proxy.held.some(item => !item.observation.abortedAt), "initial successful owner history is held");
-    }, { priorRequests: () => false, initialize: ["/scope-a"] });
+      // The seed phase holds the last start's read on purpose, so it never
+      // finishes inside this action: the action ends once that read has begun.
+    }, { priorRequests: () => false, initialize: ["/scope-a"], lastStartHeld: phase === "seed" });
     if (phase === "repair") {
       await page.locator('[data-testid="console-transport-status"][data-phase="live"]').waitFor();
       await openConversation(page, host);

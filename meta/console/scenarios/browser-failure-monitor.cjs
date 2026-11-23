@@ -19,13 +19,20 @@ const aborted = "net::ERR_ABORTED";
 //
 // An initializing action ends on the console's own last initializing start,
 // as the browser's requests show it, whatever the action itself awaited: the
-// answer to the capabilities read the console made in it and, where that
-// answer lists mob addressing, the answer to the experience read for every
-// mob and then the next unscoped read. A start replaced before that is
-// inside the action and judged by the rule above; a cancellation after it is
-// outside and unexpected. An action that saw no capabilities read under a
-// prefix waits for nothing there. The wait is bounded: an action whose
-// witness does not come fails and names what is missing.
+// answers to the capabilities reads the console made in it and, where one
+// lists mob addressing, the answer to the experience read for every mob and
+// then the start that follows it having gone on unreplaced: an unscoped read
+// that began after that answer has finished, and the stream begun after it
+// has answered before any newer unscoped read began (a newer read takes its
+// place). The storage-scope start and the capability's start send the same
+// read, so that last step rests on the order in which the browser runs the
+// console's tasks, not on the read's shape. An action whose scenario holds
+// that read on purpose says so (`lastStartHeld`) and ends once it has begun.
+// A start replaced before the witness is inside the action and judged by
+// the rule above; a cancellation after it is outside and unexpected. An
+// action that saw no capabilities read under a prefix waits for nothing
+// there. The wait is bounded: an action whose witness does not come fails
+// and names what is missing.
 const replacedStarts = 2;
 const mobAddressing = "mob_addressing";
 // The unscoped stream: no query, or the one that asks for every mob.
@@ -87,7 +94,7 @@ function browserFailureMonitor(context, { origin, initializationPrefixes = [""],
     } catch { return undefined; }
   }
   function lifeOf(action, prefix) {
-    if (!action.life.has(prefix)) action.life.set(prefix, { capabilities: [], experiences: [], reads: [] });
+    if (!action.life.has(prefix)) action.life.set(prefix, { capabilities: [], experiences: [], reads: [], streams: [] });
     return action.life.get(prefix);
   }
   // What the action has not yet seen of the console's last initializing start under the prefix.
@@ -99,12 +106,24 @@ function browserFailureMonitor(context, { origin, initializationPrefixes = [""],
     const answered = life.experiences.map(entry => entry.answered).filter(Number.isFinite);
     if (!answered.length) return "the answer to its experience read for every mob";
     const first = Math.min(...answered);
-    return life.reads.some(began => began > first) ? null : "the unscoped read that follows its experience read for every mob";
+    const later = life.reads.filter(read => read.began > first);
+    if (!later.length) return "the unscoped read that follows its experience read for every mob";
+    if (action.lastStartHeld) return null;
+    // The start that read opens has gone on unreplaced.
+    const unreplaced = later.some(read => Number.isFinite(read.finished) && life.streams.some(stream =>
+      stream.began > read.began && Number.isFinite(stream.answered)
+      && !life.reads.some(newer => newer.began > read.began && newer.began < stream.answered)));
+    return unreplaced ? null : "the answer to the stream of that read with no newer unscoped read before it";
   }
   function settleLifecycle(request, finished) {
     const item = lifecycle.get(request);
     if (!item) return;
     lifecycle.delete(request);
+    if (item.kind === "stream") return;
+    if (item.kind === "read") {
+      if (finished) { item.entry.finished = ++order; item.action.settle?.(); }
+      return;
+    }
     if (item.kind === "experience") { item.entry.answered = ++order; item.action.settle?.(); return; }
     const conclude = lists => { item.entry.lists = lists; item.action.settle?.(); };
     if (!finished) { conclude(false); return; }
@@ -112,6 +131,14 @@ function browserFailureMonitor(context, { origin, initializationPrefixes = [""],
       body => conclude(Array.isArray(body?.result?.feature_capabilities) && body.result.feature_capabilities.includes(mobAddressing)),
       () => conclude(false),
     );
+  }
+  // The unscoped stream of an initializing action has answered.
+  function observeResponse(response) {
+    let item;
+    try { item = lifecycle.get(response.request()); } catch { return; }
+    if (item?.kind !== "stream" || Number.isFinite(item.entry.answered) || !response.ok()) return;
+    item.entry.answered = ++order;
+    item.action.settle?.();
   }
   async function initialized(action) {
     const missing = () => action.prefixes.map(prefix => [prefix, missingWitness(action, prefix)]).filter(([, what]) => what);
@@ -179,8 +206,11 @@ function browserFailureMonitor(context, { origin, initializationPrefixes = [""],
       return false;
     });
     bind(request, `${action.reason}: authority initialization`, aborted, action, false, { prefix, order: start.begun });
-    if (fresh && request.method() === "POST") {
-      lifeOf(action, prefix).reads.push(++order);
+    if (fresh) {
+      const read = request.method() === "POST";
+      const entry = read ? { began: ++order, finished: undefined } : { began: ++order, answered: undefined };
+      lifeOf(action, prefix)[read ? "reads" : "streams"].push(entry);
+      lifecycle.set(request, { action, kind: read ? "read" : "stream", entry });
       action.settle?.();
     }
   }
@@ -267,9 +297,9 @@ function browserFailureMonitor(context, { origin, initializationPrefixes = [""],
       assert(active.has(request), "deliberate failure must identify an observed in-flight request");
       bind(request, reason, error, null, true);
     },
-    async during(page, reason, action, { priorRequests = () => true, initialize = false, documentNavigation = false } = {}) {
+    async during(page, reason, action, { priorRequests = () => true, initialize = false, documentNavigation = false, lastStartHeld = false } = {}) {
       assert(!actions.has(page), "failure action scopes must not overlap on a page");
-      const scope = { reason, prefixes: actionPrefixes(initialize), starts: new Map(), life: new Map(), settle: null };
+      const scope = { reason, prefixes: actionPrefixes(initialize), starts: new Map(), life: new Map(), settle: null, lastStartHeld };
       if (documentNavigation) {
         // Requests can begin after the action snapshot while the old document
         // is still running, even after navigation begins. Stop collecting at
@@ -320,6 +350,7 @@ function browserFailureMonitor(context, { origin, initializationPrefixes = [""],
     stop() {
       context.off("request", observeRequest); context.off("requestfinished", observeFinished);
       context.off("requestfailed", observeFailure); context.off("page", attachPage);
+      context.off("response", observeResponse);
       context.off("weberror", observeWebError);
       for (const page of pages) pageMonitors.delete(page);
       pages.clear();
@@ -329,6 +360,7 @@ function browserFailureMonitor(context, { origin, initializationPrefixes = [""],
   context.on("page", attachPage); context.on("request", observeRequest);
   context.on("weberror", observeWebError);
   context.on("requestfinished", observeFinished); context.on("requestfailed", observeFailure);
+  context.on("response", observeResponse);
   return monitor;
 }
 

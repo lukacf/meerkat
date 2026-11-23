@@ -150,3 +150,17 @@ test("on a gateway that hosts one mob every live held read is of the last start"
   otherScope.held[0].scope = "scope-b";
   assert.deepEqual(heldReadsOfLastStart(otherScope), []);
 });
+
+test("a held read that a newer unscoped read of the scope followed is of a start the console replaces", () => {
+  const read = (startedAt, extra = {}) => ({
+    scope: "scope-a", path: "/console/rpc", method: "POST", status: 200, startedAt, heldAt: startedAt + 1,
+    request: JSON.stringify({ method: "meta/console/query_timeline", params: { mode: "recent", limit: 200, mobs: "*" } }), ...extra,
+  });
+  const evidence = startEvidence({ features: ["mob_addressing"], everyMobRead: { startedAt: 5, endedAt: 6 }, reads: [] });
+  // Both began after the every-mob read ended; the proxy has not yet seen the first one cancelled.
+  const second = read(7), third = read(11);
+  const memberRead = read(12, { request: JSON.stringify({ method: "meta/console/query_timeline", params: { mode: "recent", limit: 200, identity: "router:main" } }) });
+  const held = [second, third];
+  assert.deepEqual(heldReadsOfLastStart({ observations: [...evidence.observations, second, third, memberRead], held, scope: "scope-a" }), [third]);
+  assert.deepEqual(heldReadsOfLastStart({ observations: [...evidence.observations, second], held: [second], scope: "scope-a" }), [second]);
+});

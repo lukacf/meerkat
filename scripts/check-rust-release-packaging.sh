@@ -257,7 +257,7 @@ space_crate_lines() {
             printf "space reading [%s]: packaging target, %d of %d per-crate directories of the release crates, whole contents: %d MiB as reported by du (unverified)\n", boundary, count, named, total / 1024
             shown = count < top ? count : top
             for (i = 1; i <= shown; i++) {
-                printf "space reading [%s]: crate %d of %d by size: %s %d MiB\n", boundary, i, shown, name[i], size[i] / 1024
+                printf "space reading [%s]: crate %d of %d by size: %s %d MiB as reported by du (unverified)\n", boundary, i, shown, name[i], size[i] / 1024
             }
         }'
 }

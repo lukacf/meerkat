@@ -592,9 +592,9 @@ expect_readings "$figures_log" "packaging start" \
 expect_readings "$figures_log" "packaging end" \
   "packaging target filesystem: 1024 MiB free of 2048 MiB" \
   "packaging target, 3 of 3 per-crate directories of the release crates, whole contents: 6 MiB as reported by du (unverified)" \
-  "crate 1 of 3 by size: alpha 3 MiB" \
-  "crate 2 of 3 by size: beta 2 MiB" \
-  "crate 3 of 3 by size: gamma 1 MiB"
+  "crate 1 of 3 by size: alpha 3 MiB as reported by du (unverified)" \
+  "crate 2 of 3 by size: beta 2 MiB as reported by du (unverified)" \
+  "crate 3 of 3 by size: gamma 1 MiB as reported by du (unverified)"
 expect_readings "$figures_log" "before the link smoke" \
   "packaging target filesystem: 1024 MiB free of 2048 MiB" \
   "staged archive copies: 3 MiB as reported by du (unverified)"
@@ -610,8 +610,8 @@ if [[ "$status" -ne 0 ]]; then
 fi
 expect_readings "$partial_log" "packaging end" \
   "packaging target, 2 of 3 per-crate directories of the release crates, whole contents: 5 MiB as reported by du (unverified)" \
-  "crate 1 of 2 by size: alpha 3 MiB" \
-  "crate 2 of 2 by size: beta 2 MiB"
+  "crate 1 of 2 by size: alpha 3 MiB as reported by du (unverified)" \
+  "crate 2 of 2 by size: beta 2 MiB as reported by du (unverified)"
 
 # A `df` and a `du` that both fail: each reading says it is unavailable and
 # nothing else changes: the run still passes and the facade smoke still runs.

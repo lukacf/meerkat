@@ -108,7 +108,7 @@ them.
     bundled in adaptive packs is unchanged.
   See [Web search](docs/guides/mobs.mdx#web-search).
 
-## [0.9.18] - 2026-11-22
+## [0.9.18] - 2026-11-23
 
 ### Breaking
 

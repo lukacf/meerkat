@@ -687,21 +687,117 @@ model = "gpt-5.5"
     runtime.shutdown().await;
 }
 
+/// The file the seed step leaves in the directory it seeded, for the SDK row
+/// to read: the decision id of the held question set and when it was held.
+const SEED_CARRIER: &str = "sdk-held-question-seed.json";
+
+/// How long the seeded question set waits for its answers, in seconds: the
+/// timeout `hold_question_set` gives a set.
+const SEED_EXPIRES_AFTER_SECONDS: u64 = 3600;
+
+/// The directory the seed step may write: the one
+/// `META_SDK_HELD_QUESTION_STATE` names, when it is fresh and the fixture's
+/// own. It panics, before anything is written, unless the value is an
+/// absolute path, neither the path nor its existing parent holds a symbolic
+/// link or a relative part, the directory is absent or empty (so it holds no
+/// store of any kind), and it is neither the home directory nor inside a
+/// state or configuration home of the user (`$HOME/.local/state`,
+/// `$HOME/.config`, `$XDG_STATE_HOME`, `$XDG_CONFIG_HOME`).
+fn fresh_seed_directory() -> PathBuf {
+    let named = std::env::var_os("META_SDK_HELD_QUESTION_STATE").unwrap_or_default();
+    assert!(
+        !named.is_empty(),
+        "META_SDK_HELD_QUESTION_STATE is unset or empty: it names the fresh directory to seed"
+    );
+    let state = PathBuf::from(named);
+    assert!(
+        state.is_absolute(),
+        "the directory to seed must be named by an absolute path, and this one is not: {}",
+        state.display()
+    );
+    let is_link =
+        std::fs::symlink_metadata(&state).is_ok_and(|found| found.file_type().is_symlink());
+    assert!(
+        !is_link,
+        "the directory to seed must not be a symbolic link, and this one is: {}",
+        state.display()
+    );
+    let parent = state.parent().expect("the directory to seed has a parent");
+    let canonical_parent = parent
+        .canonicalize()
+        .expect("the parent of the directory to seed exists and can be resolved");
+    assert!(
+        canonical_parent.as_path() == parent,
+        "the path of the directory to seed must hold no symbolic link and no relative part: {}",
+        state.display()
+    );
+    if state.exists() {
+        assert!(
+            state.is_dir(),
+            "the path to seed exists and is not a directory, so it is not seeded: {}",
+            state.display()
+        );
+        let holds_something = std::fs::read_dir(&state)
+            .expect("the directory to seed can be read")
+            .next()
+            .is_some();
+        assert!(
+            !holds_something,
+            "the directory to seed must be absent or empty, and this one holds something: {}",
+            state.display()
+        );
+    }
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let mut kept: Vec<PathBuf> = Vec::new();
+    if let Some(home) = &home {
+        assert!(
+            state != *home,
+            "the directory to seed must not be the home directory, and this one is: {}",
+            state.display()
+        );
+        kept.push(home.join(".local/state"));
+        kept.push(home.join(".config"));
+    }
+    for name in ["XDG_STATE_HOME", "XDG_CONFIG_HOME"] {
+        if let Some(value) = std::env::var_os(name).filter(|value| !value.is_empty()) {
+            kept.push(PathBuf::from(value));
+        }
+    }
+    for location in &kept {
+        assert!(
+            !state.starts_with(location),
+            "the directory to seed must not lie in a state or configuration home of the user: {}",
+            state.display()
+        );
+    }
+    state
+}
+
 /// The seed step of the SDK row that needs a question set pending before a
 /// gateway process starts
 /// (`meta/sdk/python/tests/test_held_question_at_opening_real_gateway.py`):
-/// no SDK call opens a question set. It holds one question set, as the stock
-/// tool's host does, in the state directory `META_SDK_HELD_QUESTION_STATE`
-/// names, through another owner on that store, and leaves it open. It is not
-/// a row of this file and runs by name only.
+/// no SDK call opens a question set.
+///
+/// The order is: this step, by name, on a fresh directory; then a gateway
+/// built from the same revision; then the SDK row on that directory, within
+/// the hour the set waits for its answers.
+///
+/// It holds one question set, as the stock tool's host does, in the directory
+/// `META_SDK_HELD_QUESTION_STATE` names (see `fresh_seed_directory` for what
+/// it refuses), through another owner on that store, and leaves it open.
+/// Only after the hold succeeded it writes the carrier file `SEED_CARRIER`
+/// into that directory: the set's decision id, its kind, when it was seeded
+/// and after how many seconds it expires. It starts no process.
+///
+/// It is not a row of this file and runs by name only. It shows nothing of a
+/// notice, of a restart, of how often a notice is delivered or of what a
+/// person is shown.
 #[test]
 #[ignore = "the seed step of an SDK row: run by name with META_SDK_HELD_QUESTION_STATE set"]
 fn seed_a_pending_question_set_for_an_sdk_row() {
-    let state = PathBuf::from(
-        std::env::var_os("META_SDK_HELD_QUESTION_STATE")
-            .expect("META_SDK_HELD_QUESTION_STATE names the state directory to seed"),
-    );
+    let state = fresh_seed_directory();
     std::fs::create_dir_all(&state).expect("the state directory");
+    let seeded_at_ms = now_ms();
     let owner = owner_of(&state);
     let held = hold_question_set(&owner, "sdk-row-call-1");
     assert_eq!(held.descriptor.kind.as_str(), ASK_USER_QUESTIONS_KIND);
@@ -717,4 +813,13 @@ fn seed_a_pending_question_set_for_an_sdk_row() {
         .iter()
         .any(|row| row.decision_id.to_string() == held.decision_id.to_string());
     assert!(kept, "the question set is open in the store");
+    let carrier = json!({
+        "decision_id": held.decision_id.to_string(),
+        "kind": ASK_USER_QUESTIONS_KIND,
+        "seeded_at_ms": seeded_at_ms,
+        "expires_after_seconds": SEED_EXPIRES_AFTER_SECONDS,
+        "seed": "seed_a_pending_question_set_for_an_sdk_row",
+    });
+    let written = std::fs::write(state.join(SEED_CARRIER), carrier.to_string());
+    written.expect("the seed step writes its carrier file");
 }

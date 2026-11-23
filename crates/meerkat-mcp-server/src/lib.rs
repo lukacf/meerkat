@@ -18396,6 +18396,69 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
     }
 
     #[tokio::test]
+    async fn test_handle_tools_call_workgraph_evidence_page_envelope_and_stale_cursor() {
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let state = MeerkatMcpState::new_with_store(store).await;
+        let payload = |wrapped: Value| -> Value {
+            serde_json::from_str(
+                wrapped["content"][0]["text"]
+                    .as_str()
+                    .expect("MCP payload text"),
+            )
+            .expect("MCP payload JSON")
+        };
+        let created = Box::pin(handle_tools_call(
+            &state,
+            "workgraph_create",
+            &json!({
+                "title": "MCP evidence envelope fixture",
+                "evidence_refs": [{"kind": "note", "id": "one"}, {"kind": "note", "id": "two"}]
+            }),
+        ))
+        .await
+        .expect("create synthetic item");
+        let item = payload(created)["item"].clone();
+        let paged = Box::pin(handle_tools_call(
+            &state,
+            "workgraph_get",
+            &json!({
+                "id": item["id"], "evidence_limit": 1
+            }),
+        ))
+        .await
+        .expect("bounded MCP read");
+        let page = payload(paged);
+        assert_eq!(page["evidence_page"]["returned"], 1);
+        let cursor = page["evidence_page"]["next_cursor"]
+            .as_str()
+            .filter(|cursor| !cursor.is_empty())
+            .expect("wrapped page continuation");
+        Box::pin(handle_tools_call(
+            &state,
+            "workgraph_add_evidence",
+            &json!({
+                "id": item["id"], "expected_revision": item["revision"],
+                "evidence": {"kind": "note", "id": "three"}
+            }),
+        ))
+        .await
+        .expect("advance item revision");
+        let stale = Box::pin(handle_tools_call(
+            &state,
+            "workgraph_get",
+            &json!({
+                "id": item["id"], "evidence_limit": 1, "evidence_cursor": cursor
+            }),
+        ))
+        .await
+        .expect_err("stale cursor is a protocol error, not wrapped success");
+        assert_eq!(
+            stale.code,
+            meerkat_contracts::ErrorCode::InvalidParams.jsonrpc_code()
+        );
+    }
+
+    #[tokio::test]
     async fn test_handle_tools_call_rejects_attention_scoped_workgraph_tool_without_projection() {
         let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
         let state = MeerkatMcpState::new_with_store(store).await;

@@ -40,17 +40,31 @@ mkdir -p "$LOG_DIR"
 # figure after the last package build is then not this run's alone. Lines
 # carry labels and crate names, not paths.
 #
-# Every `df` and `du` is bounded (space_bounded below): the measurements of
-# one boundary share SPACE_READING_BOUND seconds. One that is still running
-# when they are used up is ended and printed as "timed out", the ones after
-# it are printed as "skipped", and the script goes on: it never waits for a
-# measurement that does not return. Where the bound cannot be kept (a bash
+# The script's wait for every `df` and `du` is bounded (space_bounded below):
+# the measurements of one boundary share SPACE_READING_BOUND seconds. One
+# that is still running when they are used up is signalled and printed as
+# "timed out", the ones after it are printed as "skipped", and the script
+# goes on without waiting for it. Where the bound cannot be kept (a bash
 # older than 4.4) no measurement is started and the boundary prints
 # "skipped: no bounded measurement available".
+#
+# What the bound does not say:
+# - The signals go to the tool's own process id. A process the tool started
+#   is not signalled, and when the tool has ended while such a process still
+#   holds its output open, the id that is signalled is no longer the tool's.
+# - "timed out after N s" names the bound of the boundary, not the seconds
+#   that measurement ran: one that started late in its boundary had fewer.
+# - The shell's own file tests on the paths it measures are not bounded, and
+#   the short processes that format a line are not in the seconds named.
+#
+# A figure from `du` is what the tool printed. Its exit status is not read
+# (reading it means waiting for the tool), so the script cannot tell a total
+# of everything from one `du` cut short on something it could not read: such
+# figures are printed "as reported by du (unverified)", and the total over
+# the per-crate directories names how many of them `du` reported.
 SPACE_TOP_CRATES=5
-# The seconds the measurements of one boundary may take in all. A boundary
-# adds at most this, SPACE_KILL_GRACE and a second of clock rounding to the
-# run.
+# The seconds the script waits for the measurements of one boundary in all,
+# before SPACE_KILL_GRACE and a second of clock rounding.
 SPACE_READING_BOUND=60
 # The seconds a measurement that outlived the bound gets to end on SIGTERM
 # before it gets SIGKILL.
@@ -63,18 +77,18 @@ space_bounded_available() {
 }
 
 # Runs "$@", one external tool, for what is left of the boundary's seconds
-# and prints its standard output. 0: the tool ended in time (its own status
-# is not read: reading it means waiting for it). 124: it was still running
-# when the seconds were used up, and was ended. 125: none were left, and it
-# was not started.
+# and prints its standard output. 0: the tool's output ended in time (its own
+# status is not read: reading it means waiting for it). 124: it was still
+# running when the seconds were used up, and was signalled. 125: none were
+# left, and it was not started.
 #
 # The tool's output comes through a descriptor of this shell, read line by
 # line with a timeout: no pipeline and no command substitution waits on the
-# tool itself. Past the bound the descriptor is closed first, the tool gets
-# SIGTERM, then SIGKILL after SPACE_KILL_GRACE, and nothing waits for it. A
-# tool that even SIGKILL does not end, or a child it left, stays behind
-# holding only a pipe nobody reads (its input and error output are
-# /dev/null), never this script's output.
+# tool itself. Past the bound the descriptor is closed first, the tool's
+# process gets SIGTERM, then SIGKILL after SPACE_KILL_GRACE, and nothing
+# waits for it. A tool that even SIGKILL does not end, or a process it
+# started, stays behind holding only a pipe nobody reads (its input and
+# error output are /dev/null), never this script's output.
 space_bounded() {
     local fd="" pid="" line="" left=0 tries=0
     left=$((space_deadline - SECONDS))
@@ -193,12 +207,13 @@ space_dir_line() {
         printf 'space reading [%s]: %s: unavailable\n' "$boundary" "$label"
         return 0
     fi
-    printf 'space reading [%s]: %s: %d MiB\n' "$boundary" "$label" "$((size / 1024))"
+    printf 'space reading [%s]: %s: %d MiB as reported by du (unverified)\n' "$boundary" "$label" "$((size / 1024))"
 }
 
 # The per-crate packaging directories of this run's crates (with whatever a
-# persistent target already held in them): their total and the
-# SPACE_TOP_CRATES largest, by crate name. One `du -skP` over all of them.
+# persistent target already held in them): how many of the directories named
+# to `du` it reported, their total, and the SPACE_TOP_CRATES largest by
+# crate name, all as `du` reported them. One `du -skP` over all of them.
 space_crate_lines() {
     local boundary="$1" crate="" raw="" outcome=0 sizes=""
     local -a dirs=()
@@ -228,7 +243,8 @@ space_crate_lines() {
         printf 'space reading [%s]: packaging target: unavailable\n' "$boundary"
         return 0
     fi
-    printf '%s\n' "$sizes" | awk -F '\t' -v boundary="$boundary" -v top="$SPACE_TOP_CRATES" '
+    printf '%s\n' "$sizes" |
+        awk -F '\t' -v boundary="$boundary" -v top="$SPACE_TOP_CRATES" -v named="${#dirs[@]}" '
         NF == 2 {
             total += $1
             count += 1
@@ -238,7 +254,7 @@ space_crate_lines() {
             }
         }
         END {
-            printf "space reading [%s]: packaging target, %d per-crate directories of the release crates, whole contents: %d MiB\n", boundary, count, total / 1024
+            printf "space reading [%s]: packaging target, %d of %d per-crate directories of the release crates, whole contents: %d MiB as reported by du (unverified)\n", boundary, count, named, total / 1024
             shown = count < top ? count : top
             for (i = 1; i <= shown; i++) {
                 printf "space reading [%s]: crate %d of %d by size: %s %d MiB\n", boundary, i, shown, name[i], size[i] / 1024

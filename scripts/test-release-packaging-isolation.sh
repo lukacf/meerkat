@@ -392,14 +392,18 @@ fi
 [[ ! -f "$stale_state/facade-target" ]] ||
   fail "the facade smoke ran without this run's archives"
 
-# The space readings are observation only, and every measurement in them is
-# bounded. The rows below put their own `df` and `du` first on PATH, so no
-# figure they assert comes from the host: tools that print fixed figures,
-# tools that fail, and tools that never return.
+# The space readings are observation only, and the scripts' wait for every
+# measurement in them is bounded. The rows below put their own `df` and `du`
+# first on PATH, so no figure they assert comes from the host: tools that
+# print fixed figures, tools that fail, and tools that never return.
 #
 # A bash older than 4.4 cannot bound a measurement and starts none: there
 # each boundary prints one line that says so, and that line is what a row
-# expects in place of its figures (expect_readings).
+# expects in place of its figures (expect_readings). The bash that runs this
+# test decides which the rows expect, while each script runs under the bash
+# its own first line finds. Started by its first line (the Makefile target,
+# the hook, the workflow step) the two are the same bash; a test started by
+# hand under another bash can expect the wrong lines.
 readings_bounded=false
 if [[ "${BASH_VERSINFO[0]}" -gt 4 || ("${BASH_VERSINFO[0]}" -eq 4 && "${BASH_VERSINFO[1]}" -ge 4) ]]; then
   readings_bounded=true
@@ -418,18 +422,24 @@ fixed_df='printf "%s\n" "Filesystem 1024-blocks Used Available Capacity Mounted 
 # third. The tool expands its variables when it runs.
 # shellcheck disable=SC2016
 fixed_du='size=4096; for arg in "$@"; do case "$arg" in -*) ;; *) size=$((size - 1024)); printf "%s\t%s\n" "$size" "$arg" ;; esac; done'
+# The same figures for the first two directories named, then it fails.
+# shellcheck disable=SC2016
+partial_du='size=4096; seen=0; for arg in "$@"; do case "$arg" in -*) ;; *) seen=$((seen + 1)); [[ "$seen" -le 2 ]] || exit 1; size=$((size - 1024)); printf "%s\t%s\n" "$size" "$arg" ;; esac; done; exit 1'
 fixed_tools="$TEST_ROOT/fixed-space-tools"
 broken_tools="$TEST_ROOT/broken-space-tools"
-hanging_df="$TEST_ROOT/hanging-df"
+partial_tools="$TEST_ROOT/partial-du"
 hanging_du="$TEST_ROOT/hanging-du"
 stubborn_df="$TEST_ROOT/stubborn-df"
+stubborn_pids="$TEST_ROOT/stubborn-df.pids"
 space_tools "$fixed_tools" "$fixed_df" "$fixed_du"
 space_tools "$broken_tools" 'echo "broken space tool"; exit 1' 'echo "broken space tool"; exit 1'
+space_tools "$partial_tools" "$fixed_df" "$partial_du"
 # These never return within a row: the sleep is far past the bound and past
-# the seconds a row is given. The third also ignores SIGTERM.
-space_tools "$hanging_df" 'exec sleep 300' "$fixed_du"
+# the seconds a row is given. The `df` of the second also ignores SIGTERM,
+# and first adds its own process id to a file: the sleep it becomes keeps
+# that id, so a row can ask whether that very process is still there.
 space_tools "$hanging_du" "$fixed_df" 'exec sleep 300'
-space_tools "$stubborn_df" 'trap "" TERM; exec sleep 300' "$fixed_du"
+space_tools "$stubborn_df" "trap \"\" TERM; echo \"\$\$\" >> \"$stubborn_pids\"; exec sleep 300" "$fixed_du"
 
 # In log $1, under boundary $2, each further argument is a reading line that
 # must be there; where the host cannot bound a measurement, the boundary's
@@ -446,7 +456,75 @@ expect_readings() {
   done
 }
 
-# The process ids of $1 and of every process below it.
+# What the rows with a tool that never returns allow one boundary, in
+# seconds: the 2 of the copies' bound and the 1 of the grace before SIGKILL,
+# plus a tolerance of 10. Besides the wait a boundary starts about ten short
+# processes (the tool, the polls of the grace, the formatting of a line) and
+# its clock counts whole seconds; the tolerance is for a host that stalls on
+# those. A script that waited 20 seconds too long prints at least 22, which
+# is 9 past the limit, so the limit tells that script from a slow host.
+#
+# The time read is the scripts' own "took N s" line of each boundary, which
+# counts that boundary's readings alone. A facade row also takes its whole
+# run on this test's clock: there the run is the trap's wait and a smoke
+# that does nothing, so a wait added outside the readings' own count shows
+# too. A packaging row's whole run holds the fixture's packaging as well and
+# is not timed.
+hanging_limit=13
+
+# In log $1, boundary $2 printed how long its readings took, and that was at
+# most hanging_limit seconds.
+expect_took_within_limit() {
+  local log="$1" boundary="$2" took
+  if [[ "$readings_bounded" != true ]]; then
+    return 0
+  fi
+  took="$(sed -n "s/^space reading \[$boundary\]: took \([0-9][0-9]*\) s\$/\1/p" "$log")"
+  if [[ ! "$took" =~ ^[0-9]+$ ]]; then
+    fail "a boundary did not print how long its readings took" "$boundary" "$(cat "$log")"
+  fi
+  if [[ "$took" -gt "$hanging_limit" ]]; then
+    fail "a boundary waited past the bound, the grace and the tolerance for a tool that never returns" \
+      "$boundary: took $took s, limit $hanging_limit s" "$(cat "$log")"
+  fi
+}
+
+# Whether process $1 is still there (one that has ended and only waits to be
+# collected is not).
+tool_alive() {
+  kill -0 "$1" 2>/dev/null && [[ "$(ps -o stat= -p "$1" 2>/dev/null)" != Z* ]]
+}
+
+# Every process the SIGTERM-ignoring `df` recorded in $stubborn_pids is gone
+# once the script has gone on (case $1). The script sent its last signal
+# before it returned; each process gets up to 5 seconds here to be taken
+# away by the system, and those still there are ended before the row fails.
+# This is the tool's own process, one per run of the tool: the row says
+# nothing about a process a tool might start.
+expect_stubborn_tools_gone() {
+  local pid tries left_running=""
+  if [[ "$readings_bounded" != true ]]; then
+    return 0
+  fi
+  [[ -s "$stubborn_pids" ]] ||
+    fail "the tool that ignores SIGTERM was never started ($1)"
+  while read -r pid; do
+    tries=0
+    while tool_alive "$pid" && [[ "$tries" -lt 50 ]]; do
+      sleep 0.1
+      tries=$((tries + 1))
+    done
+    if tool_alive "$pid"; then
+      kill -KILL "$pid" 2>/dev/null || true
+      left_running="$left_running $pid"
+    fi
+  done < "$stubborn_pids"
+  [[ -z "$left_running" ]] ||
+    fail "a measuring tool that ignored SIGTERM was still running after the script went on ($1)" \
+      "processes:$left_running"
+}
+
+# The process ids of $1 and of the processes pgrep finds below it.
 process_tree() {
   local child
   printf '%s\n' "$1"
@@ -456,9 +534,9 @@ process_tree() {
 }
 
 # Runs "$@" (a run_checker or run_facade call, which prints the status) for
-# at most $1 seconds. A call still running then is ended, with everything it
-# started, and "overdue" is printed in place of a status: a measurement that
-# never returns must not hold a script, and must not hold this test either.
+# at most $1 seconds. A call still running then is ended with the processes
+# found below it, and "overdue" is printed in place of a status: a script
+# that waits for a measurement must fail its row, not hold this test.
 within_seconds() {
   local limit="$1" started="$SECONDS" pid
   shift
@@ -513,13 +591,27 @@ expect_readings "$figures_log" "packaging start" \
   "root filesystem: 1024 MiB free of 2048 MiB (same filesystem as packaging target)"
 expect_readings "$figures_log" "packaging end" \
   "packaging target filesystem: 1024 MiB free of 2048 MiB" \
-  "packaging target, 3 per-crate directories of the release crates, whole contents: 6 MiB" \
+  "packaging target, 3 of 3 per-crate directories of the release crates, whole contents: 6 MiB as reported by du (unverified)" \
   "crate 1 of 3 by size: alpha 3 MiB" \
   "crate 2 of 3 by size: beta 2 MiB" \
   "crate 3 of 3 by size: gamma 1 MiB"
 expect_readings "$figures_log" "before the link smoke" \
   "packaging target filesystem: 1024 MiB free of 2048 MiB" \
-  "staged archive copies: 3 MiB"
+  "staged archive copies: 3 MiB as reported by du (unverified)"
+
+# A `du` that reports two of the three directories and then fails: the total
+# is of those two and the line says how many were reported. The scripts do
+# not read the tool's status, so the figure is the tool's report, unverified.
+partial_state="$TEST_ROOT/partial-readings"
+partial_log="$TEST_ROOT/partial-readings.log"
+status="$(run_checker "$CHECKER" "$partial_state" "$partial_log" PATH="$partial_tools:$PATH")"
+if [[ "$status" -ne 0 ]]; then
+  fail "a packaging run whose du reported part of its directories failed" "$(cat "$partial_log")"
+fi
+expect_readings "$partial_log" "packaging end" \
+  "packaging target, 2 of 3 per-crate directories of the release crates, whole contents: 5 MiB as reported by du (unverified)" \
+  "crate 1 of 2 by size: alpha 3 MiB" \
+  "crate 2 of 2 by size: beta 2 MiB"
 
 # A `df` and a `du` that both fail: each reading says it is unavailable and
 # nothing else changes: the run still passes and the facade smoke still runs.
@@ -535,13 +627,17 @@ expect_readings "$reading_log" "before the link smoke" "staged archive copies: u
 [[ -f "$reading_state/facade-target" ]] ||
   fail "the facade smoke did not run after space readings that could not be taken"
 
-# A `df` that never returns: each boundary gives it the bound, ends it, says
-# so, skips what was left of the boundary, and the run goes on to pass. The
-# whole run stays far inside the seconds the row gives it.
+# A `df` that never returns and ignores SIGTERM: each boundary waits the
+# bound for it, signals it, says so, skips what was left of the boundary,
+# and the run goes on to pass. Each boundary's readings took no more than
+# hanging_limit, and each of the tool's processes is gone afterwards. The
+# run is given 120 seconds, so a script that waits 20 seconds too long at
+# each of its three boundaries still ends and is told by its own lines.
 hanging_state="$TEST_ROOT/hanging-readings"
 hanging_log="$TEST_ROOT/hanging-readings.log"
-status="$(within_seconds 60 run_checker "$short_bound_checker" "$hanging_state" "$hanging_log" \
-  PATH="$hanging_df:$PATH")"
+: > "$stubborn_pids"
+status="$(within_seconds 120 run_checker "$short_bound_checker" "$hanging_state" "$hanging_log" \
+  PATH="$stubborn_df:$PATH")"
 if [[ "$status" != 0 ]]; then
   fail "a space reading that never returns held the packaging run or changed its status" \
     "status: $status" "$(cat "$hanging_log")"
@@ -550,17 +646,21 @@ for hanging_boundary in "packaging start" "packaging end" "before the link smoke
   expect_readings "$hanging_log" "$hanging_boundary" \
     "packaging target filesystem: timed out after 2 s" \
     "root filesystem: skipped: the time bound is used up"
+  expect_took_within_limit "$hanging_log" "$hanging_boundary"
 done
 expect_readings "$hanging_log" "packaging end" "packaging target: skipped: the time bound is used up"
 [[ -f "$hanging_state/facade-target" ]] ||
   fail "the facade smoke did not run after space readings that never returned"
+expect_stubborn_tools_gone "the packaging script"
 
 # No way to bound a measurement: none is started, each boundary says so, and
-# nothing else changes. The tools here would never return if they were run.
+# nothing else changes. The `df` here would never return if it were run, and
+# would record its process: it records none.
 unbounded_state="$TEST_ROOT/unbounded-host-readings"
 unbounded_log="$TEST_ROOT/unbounded-host-readings.log"
+: > "$stubborn_pids"
 status="$(within_seconds 60 run_checker "$unbounded_host_checker" "$unbounded_state" "$unbounded_log" \
-  PATH="$hanging_df:$PATH")"
+  PATH="$stubborn_df:$PATH")"
 if [[ "$status" != 0 ]]; then
   fail "a host that cannot bound a measurement did not skip its space readings" \
     "status: $status" "$(cat "$unbounded_log")"
@@ -570,6 +670,8 @@ for unbounded_boundary in "packaging start" "packaging end" "before the link smo
     fail "a boundary that could not be bounded did not say it was skipped" "$unbounded_boundary" \
       "$(cat "$unbounded_log")"
 done
+[[ ! -s "$stubborn_pids" ]] ||
+  fail "a script that cannot bound a measurement started one" "$(cat "$stubborn_pids")"
 [[ -f "$unbounded_state/facade-target" ]] ||
   fail "the facade smoke did not run after skipped space readings"
 
@@ -650,7 +752,7 @@ for facade_case in "pass pass 0" "fail fail 1" "early pass 1"; do
   read -r facade_scenario facade_smoke facade_expected <<< "$facade_case"
   facade_boundary="link smoke exit, status $facade_expected"
   facade_staged="$facade_packages"
-  facade_size="smoke target: 3 MiB"
+  facade_size="smoke target: 3 MiB as reported by du (unverified)"
   if [[ "$facade_scenario" == early ]]; then
     facade_staged="$facade_no_packages"
     facade_size="smoke target: no such directory"
@@ -662,7 +764,7 @@ for facade_case in "pass pass 0" "fail fail 1" "early pass 1"; do
     "temporary directory filesystem: 1024 MiB free of 2048 MiB" \
     "root filesystem: 1024 MiB free of 2048 MiB (same filesystem as temporary directory)" \
     "$facade_size" \
-    "unpacked registry directory: 3 MiB"
+    "unpacked registry directory: 3 MiB as reported by du (unverified)"
 
   if [[ "$facade_scenario" != early ]]; then
     facade_size="smoke target: unavailable"
@@ -683,33 +785,53 @@ grep -Fq "missing packaged crate archive" "$TEST_ROOT/facade-early-fixed.log" ||
 
 # A measurement that never returns in the exit trap: a failing smoke with a
 # `df` that also ignores SIGTERM, and a passing smoke with a `du`. The trap
-# ends the measurement at the bound, says so, and still reaches the cleanup:
-# the status is the script's own and the temporary directory is removed, far
-# inside the seconds the case is given.
+# waits the bound for it, signals it, says so, and still reaches the
+# cleanup: the status is the script's own and the temporary directory is
+# removed. The readings took no more than hanging_limit, and so did the
+# whole run on this test's clock; the tool's own process is gone afterwards.
+: > "$stubborn_pids"
+facade_started="$SECONDS"
 status="$(within_seconds 60 run_facade fail-hanging-df "$short_bound_facade" fail "$facade_packages" \
   "$stubborn_df:$PATH")"
+facade_elapsed=$((SECONDS - facade_started))
 expect_facade_exit fail-hanging-df "$status" 1
 expect_readings "$TEST_ROOT/facade-fail-hanging-df.log" "link smoke exit, status 1" \
   "temporary directory filesystem: timed out after 2 s" \
   "root filesystem: skipped: the time bound is used up" \
   "smoke target: skipped: the time bound is used up"
+expect_took_within_limit "$TEST_ROOT/facade-fail-hanging-df.log" "link smoke exit, status 1"
+if [[ "$facade_elapsed" -gt "$hanging_limit" ]]; then
+  fail "the facade link script's exit waited past the bound, the grace and the tolerance (fail-hanging-df)" \
+    "the run took $facade_elapsed s, limit $hanging_limit s" "$(cat "$TEST_ROOT/facade-fail-hanging-df.log")"
+fi
+expect_stubborn_tools_gone "the facade link script"
+facade_started="$SECONDS"
 status="$(within_seconds 60 run_facade pass-hanging-du "$short_bound_facade" pass "$facade_packages" \
   "$hanging_du:$PATH")"
+facade_elapsed=$((SECONDS - facade_started))
 expect_facade_exit pass-hanging-du "$status" 0
 expect_readings "$TEST_ROOT/facade-pass-hanging-du.log" "link smoke exit, status 0" \
   "temporary directory filesystem: 1024 MiB free of 2048 MiB" \
   "smoke target: timed out after 2 s" \
   "unpacked registry directory: skipped: the time bound is used up"
+expect_took_within_limit "$TEST_ROOT/facade-pass-hanging-du.log" "link smoke exit, status 0"
+if [[ "$facade_elapsed" -gt "$hanging_limit" ]]; then
+  fail "the facade link script's exit waited past the bound, the grace and the tolerance (pass-hanging-du)" \
+    "the run took $facade_elapsed s, limit $hanging_limit s" "$(cat "$TEST_ROOT/facade-pass-hanging-du.log")"
+fi
 
 # No way to bound a measurement in the exit trap: none is started, the trap
 # says so and reaches the cleanup with the script's own status.
+: > "$stubborn_pids"
 status="$(within_seconds 60 run_facade fail-unbounded-host "$unbounded_host_facade" fail "$facade_packages" \
-  "$hanging_df:$PATH")"
+  "$stubborn_df:$PATH")"
 expect_facade_exit fail-unbounded-host "$status" 1
 grep -Fqx "space reading [link smoke exit, status 1]: skipped: no bounded measurement available" \
   "$TEST_ROOT/facade-fail-unbounded-host.log" ||
   fail "an exit trap that could not bound its readings did not say they were skipped" \
     "$(cat "$TEST_ROOT/facade-fail-unbounded-host.log")"
+[[ ! -s "$stubborn_pids" ]] ||
+  fail "an exit trap that cannot bound a measurement started one" "$(cat "$stubborn_pids")"
 
 # With its standard output a pipe nobody reads, the script still exits with
 # its own status and still removes its temporary directory: the shell that

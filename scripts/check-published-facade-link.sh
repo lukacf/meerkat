@@ -32,16 +32,30 @@ fi
 # space, which a full disk does not have). Sizes come from `du -P`, which
 # follows no symbolic link. Lines carry labels, not paths.
 #
-# Every `df` and `du` is bounded (space_bounded below): the measurements
-# share SPACE_READING_BOUND seconds. One that is still running when they are
-# used up is ended and printed as "timed out", the ones after it are printed
-# as "skipped", and the trap goes on to the cleanup: it never waits for a
-# measurement that does not return. Where the bound cannot be kept (a bash
-# older than 4.4) no measurement is started and the readings print
+# The script's wait for every `df` and `du` is bounded (space_bounded below):
+# the measurements share SPACE_READING_BOUND seconds. One that is still
+# running when they are used up is signalled and printed as "timed out", the
+# ones after it are printed as "skipped", and the trap goes on to the cleanup
+# without waiting for it. Where the bound cannot be kept (a bash older than
+# 4.4) no measurement is started and the readings print
 # "skipped: no bounded measurement available".
+#
+# What the bound does not say:
+# - The signals go to the tool's own process id. A process the tool started
+#   is not signalled, and when the tool has ended while such a process still
+#   holds its output open, the id that is signalled is no longer the tool's.
+# - "timed out after N s" names the bound of the readings, not the seconds
+#   that measurement ran: one that started late had fewer.
+# - The shell's own file tests on the paths it measures are not bounded, and
+#   the short processes that format a line are not in the seconds named.
+#
+# A figure from `du` is what the tool printed. Its exit status is not read
+# (reading it means waiting for the tool), so the script cannot tell a total
+# of everything from one `du` cut short on something it could not read: such
+# figures are printed "as reported by du (unverified)".
 
-# The seconds the measurements may take in all. The exit readings delay the
-# cleanup by at most this, SPACE_KILL_GRACE and a second of clock rounding.
+# The seconds the script waits for the measurements in all, before
+# SPACE_KILL_GRACE and a second of clock rounding.
 SPACE_READING_BOUND=60
 # The seconds a measurement that outlived the bound gets to end on SIGTERM
 # before it gets SIGKILL.
@@ -54,18 +68,18 @@ space_bounded_available() {
 }
 
 # Runs "$@", one external tool, for what is left of the boundary's seconds
-# and prints its standard output. 0: the tool ended in time (its own status
-# is not read: reading it means waiting for it). 124: it was still running
-# when the seconds were used up, and was ended. 125: none were left, and it
-# was not started.
+# and prints its standard output. 0: the tool's output ended in time (its own
+# status is not read: reading it means waiting for it). 124: it was still
+# running when the seconds were used up, and was signalled. 125: none were
+# left, and it was not started.
 #
 # The tool's output comes through a descriptor of this shell, read line by
 # line with a timeout: no pipeline and no command substitution waits on the
-# tool itself. Past the bound the descriptor is closed first, the tool gets
-# SIGTERM, then SIGKILL after SPACE_KILL_GRACE, and nothing waits for it. A
-# tool that even SIGKILL does not end, or a child it left, stays behind
-# holding only a pipe nobody reads (its input and error output are
-# /dev/null), never this script's output.
+# tool itself. Past the bound the descriptor is closed first, the tool's
+# process gets SIGTERM, then SIGKILL after SPACE_KILL_GRACE, and nothing
+# waits for it. A tool that even SIGKILL does not end, or a process it
+# started, stays behind holding only a pipe nobody reads (its input and
+# error output are /dev/null), never this script's output.
 space_bounded() {
   local fd="" pid="" line="" left=0 tries=0
   left=$((space_deadline - SECONDS))
@@ -184,7 +198,7 @@ space_dir_line() {
     printf 'space reading [%s]: %s: unavailable\n' "$boundary" "$label"
     return 0
   fi
-  printf 'space reading [%s]: %s: %d MiB\n' "$boundary" "$label" "$((size / 1024))"
+  printf 'space reading [%s]: %s: %d MiB as reported by du (unverified)\n' "$boundary" "$label" "$((size / 1024))"
 }
 
 # $1: the status the script is exiting with.

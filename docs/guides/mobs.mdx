@@ -1758,22 +1758,29 @@ adopted member does not need sessions that outlive the process: a mob in a
 ### Choose who manages wiring before adoption
 
 Leave `wiring_custody` at its default, `external_managed`, if your host
-manages the mob’s wiring. The identity reconciler does not compare those
-edges with the member’s declaration.
+manages the wiring. You must still send `"owned_wiring": []`: the adoption
+request requires the field, and this custody rejects a nonempty list.
 
-With `identity_owned`, wire the members first (`mob/wire`). In `owned_wiring`,
-list exactly the edges for which the member being adopted has the
-lexicographically smaller identity name. For example, if `a` and `b` are
-wired, `a` declares `[{"a":"a","b":"b"}]`; `b` does not declare that edge.
-Declaring an edge does not create it. An unrealized declared edge, or an
-existing edge to a larger-named member missing from the declaration, can
-leave the adopting member in `repair_blocked` at reconciliation.
+From 0.9.15, with `identity_owned`, wire the members first (`mob/wire`).
+In `owned_wiring`, list exactly the edges for which the member being adopted
+has the lexicographically smaller identity name. For example, for one edge
+between `a` and `b`, send `[{"a":"a","b":"b"}]` when adopting `a` and
+`[]` when adopting `b`. Declaring an edge does not create it.
 
-After adoption, read `convergence.condition` with
-`mob/member_tool_declaration`. An `adopted` reply or matching desired and
-active revision numbers alone do not establish `converged`. For connectivity,
-`mob/members` shows the roster’s `wired_to` edges; use the member’s `peers`
-tool to see which peers it can address. Neither list is a delivery receipt.
+Read `convergence.condition` with `mob/member_tool_declaration` after
+adoption. In a check on the released 0.9.15 Linux x86_64 `rkat-rpc`, the
+member with a prewired, declared edge reported `converged`. The member
+whose declared edge had not been wired reported `repair_blocked`, despite
+an `adopted` reply and matching desired and active revision numbers. A
+prewired member with default custody and an empty list reported `converged`.
+The [0.9.15 release notes](https://github.com/lukacf/meerkat/releases/tag/v0.9.15)
+also describe the reverse mismatch: if an existing edge to a larger-named
+member is missing from the declaration under `identity_owned`, reconciliation
+can report `repair_blocked`. That case was not part of the binary check.
+
+For connectivity, `mob/members` shows the recorded `wired_to` edges; ask the
+member to use its `peers` tool to see which peers it can address. Neither list
+is a delivery receipt.
 
 ### Quarantined mobs and degraded members
 

@@ -55,10 +55,10 @@ use super::staged::{
     validate_batch,
 };
 
+pub(crate) mod purge;
 mod set_aside;
 
 pub(crate) use set_aside::SetAsideOutcome;
-#[cfg(test)]
 pub(crate) use set_aside::set_aside_scope_key;
 
 /// Per-scope retention floors (§7.3): exceeded floors WARN the steward via
@@ -2809,6 +2809,30 @@ impl AgentMemoryProvider for SqliteAgentMemoryStore {
         true
     }
 
+    async fn purge_authored(
+        &self,
+        scope: &MemoryScope,
+        memory_id: &str,
+        author: MemoryAuthor,
+    ) -> Result<
+        crate::identity_first::agent_memory::AgentMemoryPurgeResult,
+        crate::identity_first::agent_memory::AgentMemoryPurgeError,
+    > {
+        let memory_id = memory_id.trim().to_string();
+        if memory_id.is_empty() {
+            return Err(
+                AgentMemoryError::InvalidRecord("memory_id must not be empty".to_string()).into(),
+            );
+        }
+        let store = self.clone();
+        let scope = scope.clone();
+        run_blocking(move || store.purge_in_scope_blocking(&scope, &memory_id, &author)).await?
+    }
+
+    fn supports_purge(&self) -> bool {
+        true
+    }
+
     fn as_taintable(&self) -> Option<Arc<dyn TaintableStore>> {
         Some(Arc::new(self.clone()))
     }
@@ -4256,7 +4280,13 @@ fn apply_batch_tx(
 }
 
 /// The §10.1 gate's verdict for one whole batch (see [`apply_batch_tx`]),
-/// with the quarantined-write warn and timeline event when it fires.
+/// with the log line and timeline event that say what the verdict did.
+///
+/// Only a create or an update can land quarantined. A batch that holds
+/// neither (a forget's tombstone, a retier, a rank) is applied at once,
+/// whatever the author's session: it is logged as applied, and no
+/// quarantined write is reported for it. The verdict returned is the gate's
+/// either way; the audit rows keep it.
 fn batch_quarantine_reason(
     batch: &StagedMutationBatch,
     gate: Option<&dyn LlmWriteGate>,
@@ -4275,6 +4305,22 @@ fn batch_quarantine_reason(
     let quarantine =
         gate.and_then(|gate| gate.quarantine_reason(&batch.author, batch.kind, &evidence));
     if let Some(reason) = quarantine.as_deref() {
+        let lands_quarantined = batch
+            .ops
+            .iter()
+            .any(|op| matches!(op, StagedOp::Create { .. } | StagedOp::Supersede { .. }));
+        if !lands_quarantined {
+            let applied: Vec<&'static str> = batch.ops.iter().map(StagedOp::kind_str).collect();
+            tracing::info!(
+                realm = %batch.realm,
+                author = ?batch.author,
+                reason,
+                applied = ?applied,
+                "agent memory: LLM-authored change applied at once (the write gate fired, but \
+                 only a create or an update lands quarantined)"
+            );
+            return quarantine;
+        }
         tracing::warn!(
             realm = %batch.realm,
             author = ?batch.author,
@@ -5481,6 +5527,8 @@ mod tests {
     use super::*;
     use crate::identity_first::agent_memory::{AgentMemorySelection, markdown_import_file_path};
     use std::error::Error;
+
+    mod forget_log;
 
     fn identity() -> Result<AgentIdentity, Box<dyn Error>> {
         AgentIdentity::parse("identity:luka").map_err(|err| {

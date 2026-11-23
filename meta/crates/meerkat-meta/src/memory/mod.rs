@@ -79,6 +79,7 @@ pub use steward::{
     DreamOutcome, DreamRun, FactoryStewardHandle, MemoryConflictBridge, MemoryGatingBridge,
     MobPurposeSource, PromotionGateResolver, SessionStoreEvidenceResolver, StewardClientHandle,
     StewardConfig, StewardEngine, StewardError, StewardProfile, StewardTriggers,
+    StewardWriteScopes,
 };
 pub use taint::{
     CompactionResetSink, ContentTrustConfig, LlmWriteGate, MemberAgentEventSink,

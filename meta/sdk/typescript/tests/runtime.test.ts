@@ -2387,6 +2387,74 @@ describe("MobHandle.forgetAgentMemory()", () => {
   });
 });
 
+describe("MobHandle.forgetAgentMemoryInScope()", () => {
+  it("sends meta/agent_memory/forget_in_scope with the scope it names", async () => {
+    const { handle, calls, setResponse } = createMockRuntime();
+    setResponse(() => ({
+      memory_id: "mem-7",
+      deleted: true,
+    }));
+
+    const result = await handle.forgetAgentMemoryInScope(
+      { kind: "mob", key: "mob:main" },
+      "mem-7",
+      { realm: "example" },
+    );
+    await handle.forgetAgentMemoryInScope({ kind: "realm" }, "mem-7");
+
+    assert.equal(calls[0].method, "meta/agent_memory/forget_in_scope");
+    assert.deepEqual(calls[0].params, {
+      scope: { kind: "mob", key: "mob:main" },
+      memory_id: "mem-7",
+      realm: "example",
+    });
+    assert.deepEqual(calls[1].params, {
+      scope: { kind: "realm" },
+      memory_id: "mem-7",
+    });
+    assert.equal(result.deleted, true);
+  });
+
+  it("does not admit an identity's scope, which the gateway refuses", () => {
+    const { handle } = createMockRuntime();
+    const refused = (): Promise<unknown> =>
+      // @ts-expect-error an identity's record is retired with forgetAgentMemory
+      handle.forgetAgentMemoryInScope({ kind: "identity", key: "identity:a" }, "mem-7");
+    assert.equal(typeof refused, "function");
+  });
+});
+
+describe("MobHandle.purgeAgentMemory()", () => {
+  it("sends meta/agent_memory/purge and parses the blanked ids", async () => {
+    const { handle, calls, setResponse } = createMockRuntime();
+    setResponse(() => ({
+      memory_id: "mem-9",
+      purged: true,
+      purged_ids: ["mem-9", "mem-8"],
+    }));
+
+    const result = await handle.purgeAgentMemory(
+      { kind: "identity", key: "identity:luka" },
+      "mem-9",
+      { realm: "example" },
+    );
+    await handle.purgeAgentMemory({ kind: "mob", key: "mob:main" }, "mem-9");
+
+    assert.equal(calls[0].method, "meta/agent_memory/purge");
+    assert.deepEqual(calls[0].params, {
+      identity: "identity:luka",
+      memory_id: "mem-9",
+      realm: "example",
+    });
+    assert.deepEqual(calls[1].params, {
+      memory_id: "mem-9",
+      scope: { kind: "mob", key: "mob:main" },
+    });
+    assert.equal(result.purged, true);
+    assert.deepEqual(result.purgedIds, ["mem-9", "mem-8"]);
+  });
+});
+
 describe("MobHandle.updateAgentMemory()", () => {
   it("sends meta/agent_memory/update and parses the result", async () => {
     const { handle, calls, setResponse } = createMockRuntime();

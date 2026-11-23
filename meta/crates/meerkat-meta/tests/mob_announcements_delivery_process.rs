@@ -2867,6 +2867,8 @@ fn candidate_refused_operator_mutations() -> Vec<(&'static str, Value)> {
             "meta/agent_memory/remember",
             "meta/agent_memory/update",
             "meta/agent_memory/forget",
+            "meta/agent_memory/forget_in_scope",
+            "meta/agent_memory/purge",
             "meta/mob_labels/set",
             "meta/mob_labels/delete",
             "meta/run_labels/set",

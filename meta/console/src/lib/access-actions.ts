@@ -16,6 +16,7 @@ const ACCESS_ACTION_WORDS: Readonly<Record<string, string>> = {
   "mob.memory.read": "Read team memory",
   "mob.memory.propose": "Propose team memory",
   "mob.memory.commit": "Commit team memory",
+  "mob.memory.delete": "Remove team memory",
   "memory.quarantine.review": "Review quarantined memory",
   "agent.spawn": "Create agents",
   "agent.respawn": "Restart agents",

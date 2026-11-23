@@ -52,6 +52,8 @@ import {
   quarantineRationaleProblem,
   type QuarantineNotice,
 } from "./quarantine";
+import { REMOVAL_NOTE, canPurgeRecord, canRemoveSharedRecord } from "./removal";
+import { errorMessage } from "../../lib/errors";
 import { VersionsGraph, versionsModel } from "./versions";
 import { DAY_MS, binCounts, trustLevel } from "./viz-model";
 import {
@@ -174,6 +176,73 @@ function QuarantineDecisionBlock({
   );
 }
 
+/// The removal of a shared record, or the purge of a retired record's
+/// content, on its Biography. Each asks once more before it acts: a removal
+/// changes what every agent of the mob is given, and a purge cannot be
+/// undone. A refusal or denial is shown in place.
+function RecordRemovalBlock({
+  action,
+  onConfirm,
+}: {
+  action: "remove" | "purge";
+  onConfirm: () => Promise<void>;
+}): React.JSX.Element {
+  const [confirming, setConfirming] = React.useState(false);
+  const [pending, setPending] = React.useState(false);
+  const [failure, setFailure] = React.useState<string | null>(null);
+  async function run(): Promise<void> {
+    setPending(true);
+    setFailure(null);
+    try {
+      await onConfirm();
+      setConfirming(false);
+    } catch (err) {
+      setFailure(errorMessage(err));
+    } finally {
+      setPending(false);
+    }
+  }
+  return (
+    <section className="memory-review" data-testid={`memory-record-${action}`}>
+      <p className="memory-review__note">{REMOVAL_NOTE[action]}</p>
+      <div className="cc-btn-row memory-review__actions">
+        {confirming ? (
+          <>
+            <Button
+              variant="danger"
+              data-testid={`memory-record-${action}-confirm`}
+              disabled={pending}
+              onClick={() => void run()}
+            >
+              {pending ? "Working…" : action === "remove" ? "Remove from shared memory" : "Purge for good"}
+            </Button>
+            <Button
+              data-testid={`memory-record-${action}-cancel`}
+              disabled={pending}
+              onClick={() => setConfirming(false)}
+            >
+              Cancel
+            </Button>
+          </>
+        ) : (
+          <Button
+            variant="danger"
+            data-testid={`memory-record-${action}-start`}
+            onClick={() => setConfirming(true)}
+          >
+            {action === "remove" ? "Remove" : "Purge content"}
+          </Button>
+        )}
+      </div>
+      {failure ? (
+        <Notice tone="crit" testId={`memory-record-${action}-error`}>
+          {failure}
+        </Notice>
+      ) : null}
+    </section>
+  );
+}
+
 /// One step of the biography story: a mark on the spine, a micro-label and
 /// its content.
 function StoryStep({
@@ -211,6 +280,8 @@ export function Biography({
   onLoadEvidence,
   onDecideQuarantine,
   decisionNotice,
+  onRemoveShared,
+  onPurgeRecord,
 }: {
   detail: MemoryRecordDetail;
   dreams: MemoryDreamRun[];
@@ -225,6 +296,11 @@ export function Biography({
     rationale: string | undefined,
   ) => Promise<void>;
   decisionNotice?: QuarantineNotice | null;
+  /// Retire an active record of a shared scope
+  /// (meta/agent_memory/forget_in_scope). Absent, the record is read-only.
+  onRemoveShared?: (record: MemoryFullRecord) => Promise<void>;
+  /// Blank the content of a retired record (meta/agent_memory/purge).
+  onPurgeRecord?: (record: MemoryFullRecord) => Promise<void>;
 }): React.JSX.Element {
   const nameOf = useNameOf();
   const now = useNow();
@@ -400,6 +476,18 @@ export function Biography({
           record={record}
           onDecide={(verdict, rationale) => onDecideQuarantine(record, verdict, rationale)}
         />
+      ) : null}
+
+      {record.purged === true ? (
+        <Notice testId="memory-record-purged" className="memory-detail__notice">
+          The content of this record was purged. Its place in the record's history is kept.
+        </Notice>
+      ) : null}
+
+      {onRemoveShared && canRemoveSharedRecord(record) ? (
+        <RecordRemovalBlock key={`remove:${record.id}`} action="remove" onConfirm={() => onRemoveShared(record)} />
+      ) : onPurgeRecord && canPurgeRecord(record) ? (
+        <RecordRemovalBlock key={`purge:${record.id}`} action="purge" onConfirm={() => onPurgeRecord(record)} />
       ) : null}
 
       {record.description && !(record.body ?? "").trim().startsWith(record.description.trim()) ? (

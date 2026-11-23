@@ -1342,7 +1342,10 @@ Agent memory is configured with `.agent_memory()` and requires
 store. Options include `realm`, `selection`, `max_entries`,
 `recall_timeout_ms`, `recall_failure_policy`, and `instruction_header`; the SDK
 serializes them to the gateway wire contract. Automatic injection defaults to a
-500 ms timeout and skips the memory block if recall fails.
+500 ms timeout and skips the memory block if recall fails. The memory steward's
+write limit is `.agent_memory(steward={"enabled": True, "write_scopes": "identity"})`
+(`"all"`, `"identity"` or `"own_identity"`); see
+[Where the memory steward writes](/concepts/memory#where-the-memory-steward-writes).
 
 `recall_agent_memory` selects records and does not list them (see
 [Reading agent memory](/concepts/memory#reading-agent-memory)). To see
@@ -2122,6 +2125,8 @@ Most apps should use `send`, `subscribe_agent`/`subscribe_mob`, and `status`/`re
 | `manifest_agent_memory(identity, *, tier, k, realm)` | `list[AgentMemoryRecordMeta]` | List the identity's active records as metadata, never bodies: `tier="full"` returns all of them, `"working_set"` (default) a bounded set |
 | `update_agent_memory(identity, memory_id, *, title, body, tags, realm)` | `AgentMemoryUpdateResult` | Replace an active record; the result names the new record (`memory_id`) and the one it replaced (`supersedes`) |
 | `forget_agent_memory(identity, memory_id)` | `AgentMemoryForgetResult` | Withdraw a record from the agent: it is no longer recalled, injected or listed. Not an erasure: the bundled store keeps the record's text (see [`meta/agent_memory/forget`](/api/rpc#meta%2Fagent_memory%2Fforget)) |
+| `forget_agent_memory_in_scope(scope_kind, memory_id, scope_key=...)` | `AgentMemoryForgetResult` | Retire a record of a shared scope (`"mob"` with the mob id as `scope_key`, or `"realm"`) |
+| `purge_agent_memory(scope_kind, memory_id, scope_key=...)` | `AgentMemoryPurgeResult` | Blank the content of a retired record and of the earlier versions it replaced (`"identity"`, `"mob"` or `"realm"`) |
 | `memory_stores()` | `list[MemoryStoreInfo]` | List available memory stores |
 | `memory_index(...)` | `MemoryIndexResult` | Index an operational memory assertion |
 
@@ -2303,6 +2308,7 @@ from meerkat_meta import (
     # Memory
     MemoryQueryResult, MemoryStoreInfo, MemoryIndexResult,
     AgentMemoryRecord, AgentMemoryRecallResult, AgentMemoryForgetResult,
+    AgentMemoryPurgeResult,
     # Events
     MobEvent, AgentEvent, EventStream,
     # Structural mob events + flow runs

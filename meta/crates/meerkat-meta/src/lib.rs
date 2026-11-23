@@ -280,8 +280,9 @@ pub use memory::{
     QuarantineReviewRefusal, QuarantineReviewRequest, QuarantineReviewer, RecordMeta,
     ReviewDecision, ReviewedRecordReceipt, SessionStoreEvidenceResolver, SessionTaintTracker,
     SqliteAgentMemoryStore, StagedMemoryStore, StagedMutationBatch, StagedOp, StewardConfig,
-    StewardEngine, StewardStore, StewardTriggers, TaintLlmWriteGate, TaintObserverGuard,
-    TaintableStore, TrustTier, spawn_member_event_observer, spawn_taint_observer,
+    StewardEngine, StewardStore, StewardTriggers, StewardWriteScopes, TaintLlmWriteGate,
+    TaintObserverGuard, TaintableStore, TrustTier, spawn_member_event_observer,
+    spawn_taint_observer,
 };
 pub use mob_handle_runtime::{
     AfterCreateHook, CapabilityFlags, MobBootstrapOptions, MobBootstrapSpec, MobRuntime,

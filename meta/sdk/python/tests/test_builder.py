@@ -845,6 +845,20 @@ class TestBuilderChain:
         params = MetaRuntime(b._config)._build_init_params()
         assert params["runtime_options"]["agent_memory"] == {"steward": True}
 
+    def test_agent_memory_steward_passes_the_write_limit_through(self):
+        for key in ("write_scopes", "writeScopes"):
+            b = Meta.builder().agent_memory(steward={key: "own_identity"})
+            params = MetaRuntime(b._config)._build_init_params()
+            assert params["runtime_options"]["agent_memory"] == {
+                "steward": {"write_scopes": "own_identity"},
+            }
+
+        b = Meta.builder().agent_memory(steward={"enabled": True})
+        params = MetaRuntime(b._config)._build_init_params()
+        assert params["runtime_options"]["agent_memory"] == {
+            "steward": {"enabled": True},
+        }
+
     def test_agent_memory_operator_scope_serializes_to_gateway_wire_key(self):
         b = Meta.builder().agent_memory(store="sqlite", operator_scope="provisional")
         params = MetaRuntime(b._config)._build_init_params()

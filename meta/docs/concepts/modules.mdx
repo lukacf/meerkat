@@ -80,7 +80,7 @@ The following related runtime surfaces are not module tools:
 - Delivery history and idempotency
 - All gating evaluate, pending, decide, and audit operations
 - The operational assertion and conflict ledger: `meta/memory/stores`, `meta/memory/index`, and `meta/memory/query`
-- The separate identity agent-memory API: `meta/agent_memory/recall` when a provider is configured, plus `meta/agent_memory/remember`, `meta/agent_memory/forget`, `meta/agent_memory/update`, and `meta/agent_memory/manifest` when the provider supports each capability
+- The separate identity agent-memory API: `meta/agent_memory/recall` when a provider is configured, plus `meta/agent_memory/remember`, `meta/agent_memory/forget`, `meta/agent_memory/forget_in_scope`, `meta/agent_memory/update`, `meta/agent_memory/purge`, and `meta/agent_memory/manifest` when the provider supports each capability
 - Agent-memory record-engine surfaces for quarantine review and steward consolidation
 
 The operational ledger and the identity agent-memory record layer are distinct authorities. The ledger owns assertion and conflict index/query state consumed by gating. Quarantine review and steward consolidation belong to the agent-memory record-engine layer.

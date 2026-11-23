@@ -58,11 +58,18 @@ const ADDRESSED_METHODS: &[(&str, bool, bool, UnknownMob)] = &[
     ),
     ("meta/agent_memory/forget", true, true, UnknownMob::Foreign),
     (
+        "meta/agent_memory/forget_in_scope",
+        true,
+        true,
+        UnknownMob::Foreign,
+    ),
+    (
         "meta/agent_memory/manifest",
         true,
         true,
         UnknownMob::Foreign,
     ),
+    ("meta/agent_memory/purge", true, true, UnknownMob::Foreign),
     ("meta/agent_memory/recall", true, true, UnknownMob::Foreign),
     (
         "meta/agent_memory/remember",
@@ -1666,7 +1673,9 @@ async fn the_stdio_decision_door_takes_the_mob_a_request_names() {
 /// launch mob's own wiring (the list the console's file keeps).
 const CONSOLE_METHODS_THAT_SERVE_ONE_MOB: &[&str] = &[
     "meta/agent_memory/forget",
+    "meta/agent_memory/forget_in_scope",
     "meta/agent_memory/manifest",
+    "meta/agent_memory/purge",
     "meta/agent_memory/recall",
     "meta/agent_memory/remember",
     "meta/agent_memory/update",
@@ -2524,7 +2533,9 @@ const GATING_METHODS_OF_THE_HOST: &[&str] = &[
 /// mob a request names.
 const AGENT_MEMORY_METHODS: &[&str] = &[
     "meta/agent_memory/forget",
+    "meta/agent_memory/forget_in_scope",
     "meta/agent_memory/manifest",
+    "meta/agent_memory/purge",
     "meta/agent_memory/recall",
     "meta/agent_memory/remember",
     "meta/agent_memory/update",
@@ -2715,7 +2726,9 @@ pub(super) const STDIO_METHODS_NEVER_REFUSED_FOR_AN_IDENTITY_CONTEXT: &[&str] = 
 /// the source rows keep it equal to the arms.
 pub(super) const STDIO_METHODS_WORKING_WITH_AN_IDENTITY_CONTEXT: &[&str] = &[
     "meta/agent_memory/forget",
+    "meta/agent_memory/forget_in_scope",
     "meta/agent_memory/manifest",
+    "meta/agent_memory/purge",
     "meta/agent_memory/recall",
     "meta/agent_memory/remember",
     "meta/agent_memory/update",
@@ -5708,6 +5721,280 @@ async fn an_agent_memory_forget_without_a_realm_is_for_the_memory_realm_of_the_m
     let left = memories.both().await;
     if left != (vec!["Of the launch mob".to_string()], Vec::new()) {
         wrong.push(format!("after the second mob's forget: {left:?}"));
+    }
+    memories.shutdown().await;
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// The scope key the two-mob rows of the shared memory calls seed their
+/// records under, in both realms.
+const SHARED_SCOPE_KEY: &str = "mob:shared";
+
+/// The ids those rows seed, each in both realms.
+const SHARED_IDS: [&str; 2] = ["mem-one", "mem-two"];
+
+/// Two records of one shared scope in each of the two realms of
+/// [`TwoMemories`]: the same scope key and the same two ids in the launch
+/// mob's realm and in the second mob's. A store value of its own over the
+/// same directory writes and reads them, as a host's own code would, so
+/// that nothing here goes through the arms the rows ask.
+struct SharedRecords {
+    store: Arc<crate::memory::SqliteAgentMemoryStore>,
+    /// The launch mob's realm, then the second mob's.
+    realms: [String; 2],
+}
+
+impl SharedRecords {
+    async fn seeded(dir: &std::path::Path, realm_of_the_second: &str) -> Self {
+        use crate::memory::records::{MemoryAuthor, MemoryKind, NewMemoryRecord, TrustTier};
+        use crate::memory::staged::{
+            StagedBatchKind, StagedMemoryStore, StagedMutationBatch, StagedOp,
+        };
+        let store = Arc::new(
+            crate::memory::SqliteAgentMemoryStore::open(dir.join("agent-memory"))
+                .expect("agent memory store"),
+        );
+        let realms = ["default".to_string(), realm_of_the_second.to_string()];
+        for realm in &realms {
+            for id in SHARED_IDS {
+                let batch = StagedMutationBatch {
+                    kind: StagedBatchKind::FreshWrite,
+                    realm: realm.clone(),
+                    author: MemoryAuthor::Application,
+                    ops: vec![StagedOp::Create {
+                        id: Some(id.to_string()),
+                        scope: Self::scope(realm),
+                        record: NewMemoryRecord {
+                            kind: MemoryKind::Fact,
+                            title: Self::title(realm, id),
+                            description: "a shared note".to_string(),
+                            body: "The team keeps the standup notes.".to_string(),
+                            tags: vec!["standup".to_string()],
+                            evidence: Vec::new(),
+                            verification: None,
+                        },
+                        trust: TrustTier::AgentObserved,
+                        derived_from: Vec::new(),
+                        rationale: Some("seeded".to_string()),
+                        created_at_ms: None,
+                        updated_at_ms: None,
+                    }],
+                };
+                let token = store.stage(batch).await.expect("stage");
+                store.commit(token).await.expect("commit");
+            }
+        }
+        Self { store, realms }
+    }
+
+    /// The shared scope of the rows' key in `realm`.
+    fn scope(realm: &str) -> crate::memory::records::MemoryScope {
+        crate::memory::records::MemoryScope::Mob {
+            realm: realm.to_string(),
+            mob: SHARED_SCOPE_KEY.to_string(),
+        }
+    }
+
+    /// The title the record `id` of `realm` is seeded with.
+    fn title(realm: &str, id: &str) -> String {
+        format!("Shared {id} of {realm}")
+    }
+
+    /// Retire all four records through the store, as the application.
+    async fn retire_all(&self) {
+        use crate::identity_first::AgentMemoryProvider;
+        for realm in &self.realms {
+            for id in SHARED_IDS {
+                let retired = self
+                    .store
+                    .forget_authored(
+                        &Self::scope(realm),
+                        id,
+                        crate::memory::records::MemoryAuthor::Application,
+                    )
+                    .await
+                    .expect("retire");
+                assert!(retired.deleted, "{id} of {realm} is retired");
+            }
+        }
+    }
+
+    /// The four records as they stand, the launch mob's realm first and
+    /// then the second mob's, each realm's two ids in order: the record's
+    /// status word, and whether its title is the one it was seeded with.
+    async fn read(&self) -> Vec<(&'static str, bool)> {
+        use crate::memory::capabilities::StewardStore;
+        let mut read = Vec::new();
+        for realm in &self.realms {
+            for id in SHARED_IDS {
+                let record = self
+                    .store
+                    .records_by_ids(realm, &[id.to_string()])
+                    .await
+                    .expect("read")
+                    .remove(0);
+                read.push((
+                    record.status.kind_str(),
+                    record.title == Self::title(realm, id),
+                ));
+            }
+        }
+        read
+    }
+}
+
+/// The params of a shared memory call that names `mob`, the rows' scope
+/// key and `memory_id`, and no realm.
+fn shared_call(mob: &str, memory_id: &str) -> Value {
+    json!({
+        "mob_id": mob,
+        "scope": {"kind": "mob", "key": SHARED_SCOPE_KEY},
+        "memory_id": memory_id,
+    })
+}
+
+/// `meta/agent_memory/forget_in_scope` without a `realm` is for the memory
+/// realm of the mob it names. Each realm holds a record of the same shared
+/// scope key under each of two ids. A removal that names the second mob
+/// retires that mob's record and leaves the launch mob's record of the same
+/// key and id as it was; a removal that names the launch mob retires the
+/// launch mob's record and leaves the second mob's.
+#[tokio::test]
+async fn a_forget_in_scope_without_a_realm_is_for_the_memory_realm_of_the_mob_it_names() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let memories = TwoMemories::new(dir.path()).await;
+    let shared = SharedRecords::seeded(dir.path(), &memories.realm_of_the_second).await;
+    let launch_mob = memories.host.mob_id();
+    let mut wrong = Vec::new();
+
+    let of_the_second = memories
+        .ask(
+            "meta/agent_memory/forget_in_scope",
+            shared_call(&memories.second_mob, "mem-one"),
+        )
+        .await;
+    if of_the_second
+        .as_ref()
+        .is_none_or(|answer| answer["result"]["deleted"] != json!(true))
+    {
+        wrong.push(format!(
+            "the second mob's shared record is not retired: {of_the_second:?}"
+        ));
+    }
+    let after_the_second = shared.read().await;
+    if after_the_second
+        != [
+            ("active", true),
+            ("active", true),
+            ("tombstoned", true),
+            ("active", true),
+        ]
+    {
+        wrong.push(format!(
+            "after the removal for the second mob: {after_the_second:?}"
+        ));
+    }
+
+    let of_the_launch = memories
+        .ask(
+            "meta/agent_memory/forget_in_scope",
+            shared_call(&launch_mob, "mem-two"),
+        )
+        .await;
+    if of_the_launch
+        .as_ref()
+        .is_none_or(|answer| answer["result"]["deleted"] != json!(true))
+    {
+        wrong.push(format!(
+            "the launch mob's shared record is not retired: {of_the_launch:?}"
+        ));
+    }
+    let after_the_launch = shared.read().await;
+    if after_the_launch
+        != [
+            ("active", true),
+            ("tombstoned", true),
+            ("tombstoned", true),
+            ("active", true),
+        ]
+    {
+        wrong.push(format!(
+            "after the removal for the launch mob: {after_the_launch:?}"
+        ));
+    }
+    memories.shutdown().await;
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// `meta/agent_memory/purge` without a `realm` is for the memory realm of
+/// the mob it names. Each realm holds a retired record of the same shared
+/// scope key under each of two ids. A purge that names the second mob
+/// blanks that mob's record and leaves the launch mob's record of the same
+/// key and id with its text; a purge that names the launch mob blanks the
+/// launch mob's record and leaves the second mob's.
+#[tokio::test]
+async fn a_purge_without_a_realm_is_for_the_memory_realm_of_the_mob_it_names() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let memories = TwoMemories::new(dir.path()).await;
+    let shared = SharedRecords::seeded(dir.path(), &memories.realm_of_the_second).await;
+    shared.retire_all().await;
+    let launch_mob = memories.host.mob_id();
+    let mut wrong = Vec::new();
+
+    let of_the_second = memories
+        .ask(
+            "meta/agent_memory/purge",
+            shared_call(&memories.second_mob, "mem-one"),
+        )
+        .await;
+    if of_the_second
+        .as_ref()
+        .is_none_or(|answer| answer["result"]["purged"] != json!(true))
+    {
+        wrong.push(format!(
+            "the second mob's shared record is not purged: {of_the_second:?}"
+        ));
+    }
+    let after_the_second = shared.read().await;
+    if after_the_second
+        != [
+            ("tombstoned", true),
+            ("tombstoned", true),
+            ("tombstoned", false),
+            ("tombstoned", true),
+        ]
+    {
+        wrong.push(format!(
+            "after the purge for the second mob: {after_the_second:?}"
+        ));
+    }
+
+    let of_the_launch = memories
+        .ask(
+            "meta/agent_memory/purge",
+            shared_call(&launch_mob, "mem-two"),
+        )
+        .await;
+    if of_the_launch
+        .as_ref()
+        .is_none_or(|answer| answer["result"]["purged"] != json!(true))
+    {
+        wrong.push(format!(
+            "the launch mob's shared record is not purged: {of_the_launch:?}"
+        ));
+    }
+    let after_the_launch = shared.read().await;
+    if after_the_launch
+        != [
+            ("tombstoned", true),
+            ("tombstoned", false),
+            ("tombstoned", false),
+            ("tombstoned", true),
+        ]
+    {
+        wrong.push(format!(
+            "after the purge for the launch mob: {after_the_launch:?}"
+        ));
     }
     memories.shutdown().await;
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));

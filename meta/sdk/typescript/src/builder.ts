@@ -87,6 +87,7 @@ const STEWARD_KEYS = new Set([
   "minSignals",
   "maxOutputTokens",
   "max_output_tokens",
+  "writeScopes",
 ]);
 
 const HYGIENIST_KEYS = new Set([
@@ -975,6 +976,15 @@ export class MetaBuilder {
         minSignals?: number;
         /** Output-token ceiling for the dream call. Unset keeps the profile default. */
         maxOutputTokens?: number;
+        /**
+         * Where the steward may write. `"all"` (the default) is no limit.
+         * `"identity"`: it changes nothing in a mob or realm scope.
+         * `"own_identity"`: as `"identity"`, and a create or supersede must
+         * name source records that are all in the scope it writes. Not a
+         * privacy boundary between identities: one dream still reads the
+         * records of every identity it covers.
+         */
+        writeScopes?: "all" | "identity" | "own_identity";
       };
       /**
        * PARKED. Only disabled compatibility forms are accepted. The internal
@@ -1113,6 +1123,9 @@ export class MetaBuilder {
         }
         if (config.steward.minSignals !== undefined) {
           steward.min_signals = config.steward.minSignals;
+        }
+        if (config.steward.writeScopes !== undefined) {
+          steward.write_scopes = config.steward.writeScopes;
         }
         wire.steward = steward;
       }

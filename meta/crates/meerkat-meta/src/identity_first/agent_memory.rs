@@ -281,6 +281,60 @@ pub struct AgentMemoryForgetResult {
     pub deleted: bool,
 }
 
+/// The answer to a purge of a tombstoned record's content. `purged` is
+/// false when nothing was blanked: the id is unknown, is a record of another
+/// scope, or was purged before. `purged_ids` names every record whose
+/// content was blanked, newest first: the record and the earlier versions
+/// it replaced.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentMemoryPurgeResult {
+    pub memory_id: String,
+    pub purged: bool,
+    pub purged_ids: Vec<String>,
+}
+
+/// Why a purge did not run.
+#[derive(Debug)]
+pub enum AgentMemoryPurgeError {
+    /// The record named is not tombstoned: retiring a record and erasing it
+    /// are two decisions. `status` is the kind of the status it has
+    /// (`active`, `superseded` or `quarantined`). A caller that wants the
+    /// content gone forgets the record first and purges it then.
+    NotTombstoned {
+        memory_id: String,
+        status: &'static str,
+    },
+    /// The store could not do it.
+    Memory(AgentMemoryError),
+}
+
+impl AgentMemoryPurgeError {
+    /// The kind the RPC surfaces carry in the refusal's `data` for
+    /// [`Self::NotTombstoned`].
+    pub const NOT_TOMBSTONED_KIND: &'static str = "record_not_tombstoned";
+}
+
+impl std::fmt::Display for AgentMemoryPurgeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotTombstoned { memory_id, status } => write!(
+                f,
+                "invalid agent memory record: record '{memory_id}' is {status}; only a \
+                 tombstoned record can be purged (forget it first)"
+            ),
+            Self::Memory(err) => std::fmt::Display::fmt(err, f),
+        }
+    }
+}
+
+impl std::error::Error for AgentMemoryPurgeError {}
+
+impl From<AgentMemoryError> for AgentMemoryPurgeError {
+    fn from(err: AgentMemoryError) -> Self {
+        Self::Memory(err)
+    }
+}
+
 /// Receipt for an authored (LLM-principal) write: the landed status is part
 /// of the contract so callers can report quarantine truthfully instead of
 /// re-deriving the gate's decision (§8.2 — "stored but quarantined pending
@@ -549,6 +603,30 @@ pub trait AgentMemoryProvider: Send + Sync {
     }
 
     fn supports_authored_writes(&self) -> bool {
+        false
+    }
+
+    /// Blank the content of the tombstoned record `memory_id` of `scope`
+    /// and of the earlier versions it replaced, keeping the rows. A record
+    /// that is not tombstoned is refused
+    /// ([`AgentMemoryPurgeError::NotTombstoned`]); an unknown id and a
+    /// record of another scope answer `purged: false` alike. What a purge
+    /// leaves (copies that are records of their own, proposals, staged
+    /// batches) is the caller's to purge or accept.
+    async fn purge_authored(
+        &self,
+        _scope: &MemoryScope,
+        _memory_id: &str,
+        _author: crate::memory::records::MemoryAuthor,
+    ) -> Result<AgentMemoryPurgeResult, AgentMemoryPurgeError> {
+        Err(AgentMemoryPurgeError::Memory(
+            AgentMemoryError::Unsupported(
+                "provider does not support purging a record's content".to_string(),
+            ),
+        ))
+    }
+
+    fn supports_purge(&self) -> bool {
         false
     }
 

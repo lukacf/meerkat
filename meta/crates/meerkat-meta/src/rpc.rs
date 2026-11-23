@@ -25,14 +25,17 @@ use crate::runtime::{
 use crate::unified_runtime::{EventQuery, MobEntryRef, UnifiedRuntime};
 
 mod console_ingress;
+pub(crate) mod forget_methods;
 mod gating_methods;
 pub(crate) mod identity_methods;
 pub(crate) mod memory_methods;
+pub(crate) mod memory_scope_methods;
 pub(crate) mod mob_addressing;
 pub(crate) mod mob_hosting;
 pub(crate) mod mob_methods;
 pub(crate) mod operator_methods;
 pub(crate) mod params;
+pub(crate) mod purge_methods;
 pub(crate) mod question_set_methods;
 pub(crate) mod realm_mcp_methods;
 mod routing_delivery_methods;
@@ -2234,9 +2237,11 @@ pub(crate) const CANDIDATE_LAUNCH_REFUSED_METHODS: &[&str] = &[
     "meta/routing/routes/delete",
     "meta/memory/index",
     "meta/memory/quarantine/decide",
+    "meta/agent_memory/purge",
     "meta/agent_memory/remember",
     "meta/agent_memory/update",
     "meta/agent_memory/forget",
+    "meta/agent_memory/forget_in_scope",
     "meta/mob_labels/set",
     "meta/mob_labels/delete",
     "meta/run_labels/set",
@@ -3290,6 +3295,16 @@ async fn handle_unified_rpc_json_inner(
                 {
                     methods.push("meta/agent_memory/forget");
                 }
+                // A record of a shared scope is retired through the
+                // provider's authored forget.
+                if identity_ctx
+                    .and_then(|ctx| ctx.agent_memory_provider.as_ref())
+                    .is_some_and(|provider| {
+                        provider.supports_forget() && provider.supports_authored_writes()
+                    })
+                {
+                    methods.push(memory_scope_methods::FORGET_IN_SCOPE_METHOD);
+                }
                 if identity_ctx
                     .and_then(|ctx| ctx.agent_memory_provider.as_ref())
                     .is_some_and(|provider| provider.supports_supersede())
@@ -3301,6 +3316,12 @@ async fn handle_unified_rpc_json_inner(
                     .is_some_and(|provider| provider.supports_manifest())
                 {
                     methods.push("meta/agent_memory/manifest");
+                }
+                if identity_ctx
+                    .and_then(|ctx| ctx.agent_memory_provider.as_ref())
+                    .is_some_and(|provider| provider.supports_purge())
+                {
+                    methods.push(purge_methods::PURGE_METHOD);
                 }
             }
             // Cross-mob directory always advertised when configured
@@ -4232,27 +4253,24 @@ async fn handle_unified_rpc_json_inner(
                 agent_memory_params_for(for_the_launch_mob, identity_runtime, &request.params)
                     .await;
             match parse_agent_memory_forget_params(&params) {
-                Ok(forget_request) => match identity_runtime
-                    .forget_agent_memory(
-                        &forget_request.realm,
-                        &forget_request.identity,
-                        &forget_request.memory_id,
-                    )
-                    .await
-                {
-                    Ok(result) => JsonRpcResponse {
-                        jsonrpc: JSONRPC_VERSION.to_string(),
-                        id: response_id,
-                        result: Some(serde_json::to_value(result).unwrap_or(Value::Null)),
-                        error: None,
-                    },
-                    Err(err) => JsonRpcResponse {
-                        jsonrpc: JSONRPC_VERSION.to_string(),
-                        id: response_id,
-                        result: None,
-                        error: Some(agent_memory_rpc_error("forget", err)),
-                    },
-                },
+                Ok(forget_request) => {
+                    match forget_methods::forget_as_the_host(identity_runtime, &forget_request)
+                        .await
+                    {
+                        Ok(result) => JsonRpcResponse {
+                            jsonrpc: JSONRPC_VERSION.to_string(),
+                            id: response_id,
+                            result: Some(serde_json::to_value(result).unwrap_or(Value::Null)),
+                            error: None,
+                        },
+                        Err(err) => JsonRpcResponse {
+                            jsonrpc: JSONRPC_VERSION.to_string(),
+                            id: response_id,
+                            result: None,
+                            error: Some(agent_memory_rpc_error("forget", err)),
+                        },
+                    }
+                }
                 Err(err) => JsonRpcResponse {
                     jsonrpc: JSONRPC_VERSION.to_string(),
                     id: response_id,
@@ -4264,6 +4282,25 @@ async fn handle_unified_rpc_json_inner(
                     }),
                 },
             }
+        }
+        "meta/agent_memory/forget_in_scope" => {
+            let identity_ctx = request_identity!();
+            let identity_runtime = match identity_ctx.map(|ctx| &*ctx.runtime) {
+                Some(identity_runtime) => identity_runtime,
+                None => {
+                    return maybe_error_response(
+                        is_notification,
+                        response_id,
+                        -32601,
+                        "agent memory is not configured".to_string(),
+                    );
+                }
+            };
+            let params =
+                agent_memory_params_for(for_the_launch_mob, identity_runtime, &request.params)
+                    .await;
+            memory_scope_methods::handle_forget_in_scope(identity_runtime, &params, response_id)
+                .await
         }
         "meta/agent_memory/recall" => {
             let identity_ctx = request_identity!();
@@ -4366,6 +4403,24 @@ async fn handle_unified_rpc_json_inner(
                     }),
                 },
             }
+        }
+        "meta/agent_memory/purge" => {
+            let identity_ctx = request_identity!();
+            let identity_runtime = match identity_ctx.map(|ctx| &*ctx.runtime) {
+                Some(identity_runtime) => identity_runtime,
+                None => {
+                    return maybe_error_response(
+                        is_notification,
+                        response_id,
+                        -32601,
+                        "agent memory is not configured".to_string(),
+                    );
+                }
+            };
+            let params =
+                agent_memory_params_for(for_the_launch_mob, identity_runtime, &request.params)
+                    .await;
+            purge_methods::handle_purge(identity_runtime, &params, response_id).await
         }
         "meta/agent_memory/manifest" => {
             let identity_ctx = request_identity!();
@@ -9426,6 +9481,8 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    mod scoped_memory;
+
     /// A candidate launch refuses each roster change, each member input and
     /// each operator mutation typed, with the refusal a candidate answers
     /// for an announcement change; a launch that speaks for its composition,
@@ -10276,6 +10333,10 @@ mod tests {
         }
     }
 
+    mod forget_owner_kept;
+    mod purge;
+    mod set_aside_reach;
+
     #[derive(Debug, Default)]
     struct EmptyRosterProvider;
 
@@ -10610,6 +10671,9 @@ mod tests {
             NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         )
     }
+
+    mod forget_in_scope_realm;
+    mod purge_realm;
 
     pub(super) fn rpc_test_mob_spec(
         temp_dir: &tempfile::TempDir,

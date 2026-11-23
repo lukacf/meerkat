@@ -7247,6 +7247,51 @@ comms = true
     }
 
     #[test]
+    fn gateway_steward_write_scopes_parses_each_value_and_refuses_an_unknown_one() {
+        use crate::memory::steward::StewardWriteScopes;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let parse = |steward| {
+            parse_gateway_runtime_options(
+                &json!({
+                    "runtime_options": { "agent_memory": { "steward": steward } }
+                }),
+                Some(tmp.path()),
+            )
+            .map(|options| options.agent_memory.expect("agent memory").steward)
+        };
+
+        // The key absent, in either form of the block, is no limit.
+        for steward in [json!(true), json!({ "enabled": true })] {
+            assert_eq!(
+                parse(steward).expect("parses").write_scopes,
+                StewardWriteScopes::All
+            );
+        }
+        for (value, expected) in [
+            ("all", StewardWriteScopes::All),
+            ("identity", StewardWriteScopes::Identity),
+            ("own_identity", StewardWriteScopes::OwnIdentity),
+        ] {
+            let config = parse(json!({ "write_scopes": value })).expect("parses");
+            assert_eq!(config.write_scopes, expected);
+            assert!(config.enabled, "an object block without `enabled` opts in");
+        }
+        // Anything else is refused, never read as "no limit".
+        for bad in [
+            json!("mob"),
+            json!("Identity"),
+            json!(["identity"]),
+            json!(true),
+        ] {
+            let err = match parse(json!({ "write_scopes": bad })) {
+                Ok(_) => panic!("a write_scopes outside the set must fail at the host boundary"),
+                Err(err) => err,
+            };
+            assert!(err.contains("write_scopes must be one of"), "{bad}: {err}");
+        }
+    }
+
+    #[test]
     fn gateway_steward_max_output_tokens_reaches_effective_memory_profile() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let parse = |steward| {
@@ -11785,6 +11830,7 @@ fn parse_gateway_steward_config(
         "runs_per_day",
         "min_signals",
         "max_output_tokens",
+        "write_scopes",
     ];
     let unsupported = object
         .keys()
@@ -11796,6 +11842,18 @@ fn parse_gateway_steward_config(
             "unsupported runtime_options.agent_memory.steward fields: {}",
             unsupported.join(", ")
         ));
+    }
+    // Where the steward may write. A closed set: an unknown value is an
+    // error, never read as "no limit".
+    if let Some(value) = object.get("write_scopes") {
+        config.write_scopes = value
+            .as_str()
+            .and_then(crate::memory::steward::StewardWriteScopes::parse)
+            .ok_or_else(|| {
+                "runtime_options.agent_memory.steward.write_scopes must be one of \"all\", \
+                 \"identity\", \"own_identity\""
+                    .to_string()
+            })?;
     }
     if let Some(enabled) = object.get("enabled") {
         config.enabled = enabled.as_bool().ok_or_else(|| {

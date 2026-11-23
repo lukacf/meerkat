@@ -214,6 +214,73 @@ async def test_agent_memory_rpc_names_and_params():
 
 
 @pytest.mark.asyncio
+async def test_agent_memory_forget_in_scope_rpc_name_and_params():
+    """Retiring a record of a shared scope names the scope, never an identity."""
+    handle, calls = make_mock_mob_handle({
+        "meta/agent_memory/forget_in_scope": {
+            "memory_id": "mem-7",
+            "deleted": True,
+        },
+    })
+
+    mob = await handle.forget_agent_memory_in_scope(
+        "mob", "mem-7", scope_key="mob:main", realm="example"
+    )
+    realm = await handle.forget_agent_memory_in_scope("realm", "mem-7")
+
+    assert calls == [
+        (
+            "meta/agent_memory/forget_in_scope",
+            {
+                "scope": {"kind": "mob", "key": "mob:main"},
+                "memory_id": "mem-7",
+                "realm": "example",
+            },
+        ),
+        (
+            "meta/agent_memory/forget_in_scope",
+            {"scope": {"kind": "realm"}, "memory_id": "mem-7"},
+        ),
+    ]
+    assert mob.deleted is True
+    assert realm.memory_id == "mem-7"
+
+
+@pytest.mark.asyncio
+async def test_agent_memory_purge_rpc_name_params_and_result():
+    """Purging names the scope and answers every record whose text was blanked."""
+    handle, calls = make_mock_mob_handle({
+        "meta/agent_memory/purge": {
+            "memory_id": "mem-9",
+            "purged": True,
+            "purged_ids": ["mem-9", "mem-8"],
+        },
+    })
+
+    purged = await handle.purge_agent_memory(
+        "identity", "mem-9", scope_key="identity:luka", realm="example"
+    )
+    await handle.purge_agent_memory("mob", "mem-9", scope_key="mob:main")
+
+    assert calls == [
+        (
+            "meta/agent_memory/purge",
+            {
+                "identity": "identity:luka",
+                "memory_id": "mem-9",
+                "realm": "example",
+            },
+        ),
+        (
+            "meta/agent_memory/purge",
+            {"memory_id": "mem-9", "scope": {"kind": "mob", "key": "mob:main"}},
+        ),
+    ]
+    assert purged.purged is True
+    assert purged.purged_ids == ("mem-9", "mem-8")
+
+
+@pytest.mark.asyncio
 async def test_agent_memory_update_and_manifest_rpc_names_and_params():
     """update/manifest must hit the v2 durable-memory RPCs with exact params."""
     handle, calls = make_mock_mob_handle({

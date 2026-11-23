@@ -228,6 +228,8 @@ import type {
   MemoryPanelRecordsResult,
   MemoryPendingPromotion,
   MemoryProposalEntry,
+  MemoryForgetInScopeResult,
+  MemoryPurgeResult,
   MemoryQuarantineDecideResult,
   MemoryQuarantineVerdict,
   WorkGraphEventsResult,
@@ -253,6 +255,7 @@ import {
   memoryFramePivot,
   memoryListingOutcome,
   memoryNotSetUp,
+  memoryScopeParam,
   memorySectionOutcome,
   teamName,
   type MemoryRecordDetail,
@@ -412,6 +415,11 @@ type MemoryPanelData = {
   /// grant, mutable console). Per-identity grants are still enforced per
   /// call.
   canDecideQuarantine: boolean;
+  /// The caller is advertised meta/agent_memory/forget_in_scope and
+  /// meta/agent_memory/purge (mutable console). The grants are enforced per
+  /// call.
+  canRemoveSharedMemory: boolean;
+  canPurgeMemory: boolean;
 };
 type DockPresetId = "single" | "two_columns" | "two_rows" | "grid";
 
@@ -982,6 +990,8 @@ function emptyMemoryPanelData(): MemoryPanelData {
     auditVerdicts: [],
     auditVerdictsDenied: false,
     canDecideQuarantine: false,
+    canRemoveSharedMemory: false,
+    canPurgeMemory: false,
   };
 }
 
@@ -4335,18 +4345,28 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
 
       let quarantineRecords: MemoryPanelRecord[] = [];
       let pendingPromotions: MemoryPendingPromotion[] = [];
+      // The removal of a shared record, the purge of a retired record's
+      // content and the quarantine decision are offered only where the
+      // console advertises their methods; a capabilities failure leaves the
+      // records and the queue read-only. One read serves the three.
+      let advertisedMethods: readonly string[] = [];
+      try {
+        advertisedMethods = (await consoleTransport.capabilities()).methods;
+      } catch {
+        advertisedMethods = [];
+      }
+      const canRemoveSharedMemory = advertisedMethods.includes(
+        consoleCommandMethod(CONSOLE_COMMAND_NAMES.forgetMemoryInScope),
+      );
+      const canPurgeMemory = advertisedMethods.includes(
+        consoleCommandMethod(CONSOLE_COMMAND_NAMES.purgeMemoryRecord),
+      );
       let canDecideQuarantine = false;
       if (experience?.memory?.can_review_quarantine === true) {
-        // The decision is advertised only to reviewers on a mutable console;
-        // a capabilities failure leaves the queue read-only.
-        try {
-          const capabilities = await consoleTransport.capabilities();
-          canDecideQuarantine = capabilities.methods.includes(
-            consoleCommandMethod(CONSOLE_COMMAND_NAMES.decideMemoryQuarantine),
-          );
-        } catch {
-          canDecideQuarantine = false;
-        }
+        // The decision is advertised only to reviewers on a mutable console.
+        canDecideQuarantine = advertisedMethods.includes(
+          consoleCommandMethod(CONSOLE_COMMAND_NAMES.decideMemoryQuarantine),
+        );
         try {
           const quarantineResult = (await executeHeadlessCommand(
             CONSOLE_COMMAND_NAMES.listMemoryQuarantine,
@@ -4460,6 +4480,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         auditVerdicts: auditVerdicts.value,
         auditVerdictsDenied: auditVerdicts.denied,
         canDecideQuarantine,
+        canRemoveSharedMemory,
+        canPurgeMemory,
         unavailable: false,
         error: null,
         loaded: true,
@@ -4679,6 +4701,56 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       )) as MemoryQuarantineDecideResult;
       void refreshMemoryData();
       return result;
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [baseUrl, refreshMemoryData],
+  );
+
+  /// Retire one record of a shared scope (meta/agent_memory/forget_in_scope).
+  /// Rejects with the transport's typed error; a record the store did not
+  /// retire (already retired, or no longer there) is reported as such. The
+  /// panel's data is re-read afterwards.
+  const removeSharedMemoryRecord = React.useCallback(
+    async (realm: string, record: MemoryFullRecord): Promise<void> => {
+      const scope = memoryScopeParam(record);
+      if (scope === null || scope.kind === "identity") {
+        throw new Error("This record is not in shared memory.");
+      }
+      const result = (await executeHeadlessCommand(
+        CONSOLE_COMMAND_NAMES.forgetMemoryInScope,
+        controlWorkbenchTarget("memory"),
+        { realm, scope, memory_id: record.id },
+      )) as MemoryForgetInScopeResult;
+      void refreshMemoryData();
+      if (!result.deleted) {
+        throw new Error("Nothing was removed: the record is already retired or no longer exists.");
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [baseUrl, refreshMemoryData],
+  );
+
+  /// Blank the content of one retired record (meta/agent_memory/purge), with
+  /// the same error and refresh behaviour.
+  const purgeMemoryRecord = React.useCallback(
+    async (realm: string, record: MemoryFullRecord): Promise<void> => {
+      const scope = memoryScopeParam(record);
+      if (scope === null) {
+        throw new Error("This record's content cannot be purged here.");
+      }
+      // An identity's record is named as forget names it; a shared record
+      // by its scope.
+      const result = (await executeHeadlessCommand(
+        CONSOLE_COMMAND_NAMES.purgeMemoryRecord,
+        controlWorkbenchTarget("memory"),
+        scope.kind === "identity"
+          ? { realm, identity: scope.key, memory_id: record.id }
+          : { realm, scope, memory_id: record.id },
+      )) as MemoryPurgeResult;
+      void refreshMemoryData();
+      if (!result.purged) {
+        throw new Error("Nothing was purged: the record's content is already gone.");
+      }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [baseUrl, refreshMemoryData],
@@ -7677,6 +7749,20 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
             !frontendReadOnly &&
             experience?.console_policy?.read_only !== true
               ? decideMemoryQuarantine
+              : undefined
+          }
+          onRemoveSharedRecord={
+            memoryData.canRemoveSharedMemory &&
+            !frontendReadOnly &&
+            experience?.console_policy?.read_only !== true
+              ? removeSharedMemoryRecord
+              : undefined
+          }
+          onPurgeRecord={
+            memoryData.canPurgeMemory &&
+            !frontendReadOnly &&
+            experience?.console_policy?.read_only !== true
+              ? purgeMemoryRecord
               : undefined
           }
           onOpenGating={

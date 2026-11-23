@@ -1185,6 +1185,59 @@ jobs:
           cache-targets: "false"
           cache-on-failure: true
 
+      # The row that names meerkat-meta and lints every target: a push's
+      # meta+2 row. On hosted runners this row's lint ended without a
+      # verdict (the runner lost, the compile killed by signal 9, the runner
+      # shut down) while it checked meerkat-meta. On another machine the same
+      # command is clean, and its two meerkat-meta checks, the library and
+      # the library test target, held 18.6 GiB while they ran side by side
+      # (the library test target alone 13.1 GiB). That is consistent with a
+      # runner of 15 GiB of memory and 3 GiB of swap running out; the hosted
+      # cause is not established. So this row gets the unit lanes' swap step
+      # (see main-unit) with one more condition, and ONE build job in the
+      # lint step, so that the two checks cannot overlap. A row that lints
+      # only the library and binaries of meerkat-meta has no library test
+      # target and runs as before. The lint command is unchanged, and
+      # neither added step can fail a lane or pass one.
+      - name: Show the runner's size and add swap (meerkat-meta rows)
+        if: ${{ contains(matrix.packages, '-p meerkat-meta') && contains(matrix.targets, '--all-targets') }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          show_resources() {
+            nproc
+            free -m
+            if [[ -d /mnt ]]; then
+              df -h / /mnt
+            else
+              df -h /
+            fi
+            swapon --show || true
+          }
+          show_resources
+          vmstat -t 30 >"${RUNNER_TEMP}/meta-unit-vmstat.log" 2>&1 </dev/null &
+          swapfile=/meta-unit-swapfile
+          need_gib=40
+          if mountpoint -q /mnt; then
+            mnt_avail_kib="$(df --output=avail -k /mnt | tail -n 1 | tr -d ' ')"
+            if ((mnt_avail_kib >= 20 * 1024 * 1024)); then
+              swapfile=/mnt/meta-unit-swapfile
+              need_gib=20
+            fi
+          fi
+          avail_kib="$(df --output=avail -k "$(dirname "${swapfile}")" | tail -n 1 | tr -d ' ')"
+          if ((avail_kib < need_gib * 1024 * 1024)); then
+            echo "::warning title=Meta unit row swap::under ${need_gib} GiB free for ${swapfile}: no swap added"
+            exit 0
+          fi
+          echo "Adding 12 GiB of swap at ${swapfile}"
+          sudo fallocate -l 12GiB "${swapfile}"
+          sudo chmod 600 "${swapfile}"
+          sudo mkswap "${swapfile}"
+          sudo swapon "${swapfile}"
+          show_resources
+
       - name: Clippy (changed packages, the shard's targets, all features)
         shell: bash
         env:
@@ -1193,6 +1246,11 @@ jobs:
           # their lib and bin targets (--lib --bins), since their tests run
           # on the push, which lints every target.
           TARGETS: ${{ matrix.targets }}
+          # One build job for the row that names meerkat-meta and lints every
+          # target (see the swap step above): its library and its library
+          # test target are then checked one after the other, never side by
+          # side.
+          META_ROW: ${{ contains(matrix.packages, '-p meerkat-meta') && contains(matrix.targets, '--all-targets') }}
         run: |
           set -euo pipefail
           [[ -n "${PACKAGES}" ]] || { echo "::error::empty package list in a clippy lane"; exit 1; }
@@ -1200,8 +1258,47 @@ jobs:
             "--all-targets"|"--lib"|"--bins"|"--lib --bins") ;;
             *) echo "::error::unexpected clippy targets '${TARGETS}'"; exit 1 ;;
           esac
+          if [[ "${META_ROW}" == "true" ]]; then
+            export CARGO_BUILD_JOBS=1
+          fi
           # shellcheck disable=SC2086
           ./scripts/repo-cargo clippy ${PACKAGES} --no-deps ${TARGETS} --all-features -- -D warnings
+
+      # Memory, swap and disk after the meerkat-meta row's lint (see main-unit).
+      - name: Show memory after the lint (meerkat-meta rows)
+        if: ${{ always() && contains(matrix.packages, '-p meerkat-meta') && contains(matrix.targets, '--all-targets') }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          nproc
+          free -m
+          if [[ -d /mnt ]]; then
+            df -h / /mnt
+          else
+            df -h /
+          fi
+          swapon --show || true
+          echo "Since boot, in pages of $(getconf PAGESIZE) bytes:"
+          grep -E '^(pswpin|pswpout|oom_kill) ' /proc/vmstat || true
+          if [[ -r /proc/pressure/memory ]]; then
+            cat /proc/pressure/memory
+          fi
+          vmstat_log="${RUNNER_TEMP}/meta-unit-vmstat.log"
+          if [[ -f "${vmstat_log}" ]]; then
+            awk '
+              $1 ~ /^[0-9]+$/ {
+                if (line == "" || $3 + 0 > peak) { peak = $3 + 0; line = $0 }
+                if (low == "" || $4 + 0 < low) low = $4 + 0
+              }
+              END {
+                if (line != "") printf "Most swap in use: %d KiB. Least free memory: %d KiB. The sample with the most swap:\n%s\n", peak, low, line
+              }
+            ' "${vmstat_log}"
+            echo "::group::vmstat every 30 seconds"
+            cat "${vmstat_log}"
+            echo "::endgroup::"
+          fi
 
       - name: Upload sccache server log
         if: ${{ always() }}
@@ -1254,11 +1351,56 @@ jobs:
           cache-targets: "false"
           cache-on-failure: true
 
+      # The meerkat-meta row's swap, as in the clippy job.
+      - name: Show the runner's size and add swap (meerkat-meta rows)
+        if: ${{ contains(matrix.packages, '-p meerkat-meta') && contains(matrix.targets, '--all-targets') }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          show_resources() {
+            nproc
+            free -m
+            if [[ -d /mnt ]]; then
+              df -h / /mnt
+            else
+              df -h /
+            fi
+            swapon --show || true
+          }
+          show_resources
+          vmstat -t 30 >"${RUNNER_TEMP}/meta-unit-vmstat.log" 2>&1 </dev/null &
+          swapfile=/meta-unit-swapfile
+          need_gib=40
+          if mountpoint -q /mnt; then
+            mnt_avail_kib="$(df --output=avail -k /mnt | tail -n 1 | tr -d ' ')"
+            if ((mnt_avail_kib >= 20 * 1024 * 1024)); then
+              swapfile=/mnt/meta-unit-swapfile
+              need_gib=20
+            fi
+          fi
+          avail_kib="$(df --output=avail -k "$(dirname "${swapfile}")" | tail -n 1 | tr -d ' ')"
+          if ((avail_kib < need_gib * 1024 * 1024)); then
+            echo "::warning title=Meta unit row swap::under ${need_gib} GiB free for ${swapfile}: no swap added"
+            exit 0
+          fi
+          echo "Adding 12 GiB of swap at ${swapfile}"
+          sudo fallocate -l 12GiB "${swapfile}"
+          sudo chmod 600 "${swapfile}"
+          sudo mkswap "${swapfile}"
+          sudo swapon "${swapfile}"
+          show_resources
+
       - name: Clippy (changed packages, the shard's targets, all features)
         shell: bash
         env:
           PACKAGES: ${{ matrix.packages }}
           TARGETS: ${{ matrix.targets }}
+          # One build job for the row that names meerkat-meta and lints every
+          # target (see the swap step above): its library and its library
+          # test target are then checked one after the other, never side by
+          # side.
+          META_ROW: ${{ contains(matrix.packages, '-p meerkat-meta') && contains(matrix.targets, '--all-targets') }}
         run: |
           set -euo pipefail
           [[ -n "${PACKAGES}" ]] || { echo "::error::empty package list in a clippy lane"; exit 1; }
@@ -1266,8 +1408,47 @@ jobs:
             "--all-targets"|"--lib"|"--bins"|"--lib --bins") ;;
             *) echo "::error::unexpected clippy targets '${TARGETS}'"; exit 1 ;;
           esac
+          if [[ "${META_ROW}" == "true" ]]; then
+            export CARGO_BUILD_JOBS=1
+          fi
           # shellcheck disable=SC2086
           ./scripts/repo-cargo clippy ${PACKAGES} --no-deps ${TARGETS} --all-features -- -D warnings
+
+      # Memory, swap and disk after the meerkat-meta row's lint (see main-unit).
+      - name: Show memory after the lint (meerkat-meta rows)
+        if: ${{ always() && contains(matrix.packages, '-p meerkat-meta') && contains(matrix.targets, '--all-targets') }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          nproc
+          free -m
+          if [[ -d /mnt ]]; then
+            df -h / /mnt
+          else
+            df -h /
+          fi
+          swapon --show || true
+          echo "Since boot, in pages of $(getconf PAGESIZE) bytes:"
+          grep -E '^(pswpin|pswpout|oom_kill) ' /proc/vmstat || true
+          if [[ -r /proc/pressure/memory ]]; then
+            cat /proc/pressure/memory
+          fi
+          vmstat_log="${RUNNER_TEMP}/meta-unit-vmstat.log"
+          if [[ -f "${vmstat_log}" ]]; then
+            awk '
+              $1 ~ /^[0-9]+$/ {
+                if (line == "" || $3 + 0 > peak) { peak = $3 + 0; line = $0 }
+                if (low == "" || $4 + 0 < low) low = $4 + 0
+              }
+              END {
+                if (line != "") printf "Most swap in use: %d KiB. Least free memory: %d KiB. The sample with the most swap:\n%s\n", peak, low, line
+              }
+            ' "${vmstat_log}"
+            echo "::group::vmstat every 30 seconds"
+            cat "${vmstat_log}"
+            echo "::endgroup::"
+          fi
 
       - name: Upload sccache server log
         if: ${{ always() }}

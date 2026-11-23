@@ -17,9 +17,10 @@ was seeded before the gateway starts. Three steps, in this order:
    ``seed_a_pending_question_set_for_an_sdk_row`` of the Meta crate's
    ``decision_notice_at_opening`` test target, run by name. It holds one
    question set through another owner on the store, as the stock tool's host
-   does, and writes the carrier file ``sdk-held-question-seed.json`` (the
-   set's decision id and when it was seeded) into the directory. With the
-   repository's cargo wrapper::
+   does, and writes a carrier file (the set's decision id, when it was
+   seeded and after how many seconds it expires) BESIDE the directory, not
+   in it: in the directory's parent, named as the directory with the suffix
+   ``.sdk-held-question-seed.json``. With the repository's cargo wrapper::
 
        META_SDK_HELD_QUESTION_STATE=<a fresh directory> \\
            cargo test -p meerkat-meta --test decision_notice_at_opening \\
@@ -27,8 +28,9 @@ was seeded before the gateway starts. Three steps, in this order:
 
 2. A gateway built from the same revision (``rpc_gateway``).
 
-3. This row, from ``meta``, within the hour the seeded set waits for its
-   answers::
+3. This row, from ``meta``, before the seeded set expires (the carrier file
+   says when it was seeded and after how long it expires; the row holds no
+   number of its own for that)::
 
        META_GATEWAY_BIN=<path to that rpc_gateway> \\
            META_SDK_HELD_QUESTION_STATE=<that directory> \\
@@ -37,13 +39,22 @@ was seeded before the gateway starts. Three steps, in this order:
 
 The directory is the fixture's own and disposable. The seed step refuses a
 path that is not absolute, a symbolic link or a path through one, a
-directory that is not absent or empty, the home directory, and a directory
-inside a state or configuration home of the user. This row refuses the same
-paths, a directory without the carrier file, and a seed older than the hour.
+directory that is not absent or empty, a carrier file that already exists,
+any path in the home directory's tree (the home directory and everything
+under it, compared in resolved form), and a directory inside
+``$XDG_STATE_HOME`` or ``$XDG_CONFIG_HOME``. This row refuses the same
+paths, a directory without its carrier file beside it, and an expired seed.
 The gateway takes the directory as its persistent state, which is intended:
 the decision store it must read lives there. It also writes the rest of its
-own state there (its mob, sessions and logs). ``HOME`` and the XDG homes of
-the gateway process are directories of this test.
+own state there (its mob, sessions and logs). The carrier file is outside
+the directory, so the gateway is given only what the store wrote.
+
+The gateway process gets an environment built from an allow list, not this
+process's environment with names removed: ``HOME`` and the four XDG homes
+are directories of this test, and ``PATH``, the locale variables, ``TMPDIR``
+and the SDK transport's two stderr switches are passed on when set (see
+``_PASSED_ON``). Nothing else is inherited, so no provider key reaches the
+gateway whatever its name.
 
 What this row does not show
 ---------------------------
@@ -74,7 +85,7 @@ _SEEDED_STATE = os.environ.get("META_SDK_HELD_QUESTION_STATE", "").strip()
 
 _QUESTION_KIND = "ask_user.questions"
 _SEED_STEP = "seed_a_pending_question_set_for_an_sdk_row"
-_SEED_CARRIER = "sdk-held-question-seed.json"
+_SEED_CARRIER_SUFFIX = ".sdk-held-question-seed.json"
 
 # How long the row waits for an observation it expects.
 _WAIT_SECONDS = 30.0
@@ -88,16 +99,27 @@ _SKIP_REASON = (
     "run by name with --ignored)"
 )
 
-# Provider keys the gateway process must not inherit.
-_PROVIDER_KEYS = (
-    "ANTHROPIC_API_KEY",
-    "OPENAI_API_KEY",
-    "GEMINI_API_KEY",
-    "GOOGLE_API_KEY",
-    "RKAT_ANTHROPIC_API_KEY",
-    "RKAT_OPENAI_API_KEY",
-    "RKAT_GEMINI_API_KEY",
+# The whole environment of the gateway process is an allow list: the names
+# below, passed on from this process when set, and the homes the row sets.
+# Nothing else is inherited, so no provider key reaches the gateway whatever
+# its name.
+_PASSED_ON = (
+    # Programs the gateway starts by name are found as on the host.
+    "PATH",
+    # The locale: the text encoding of the gateway's own output.
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    # Where the gateway's temporary files go.
+    "TMPDIR",
+    # The SDK transport's own switches for where the gateway's stderr goes;
+    # the transport reads them from the same mapping.
+    "META_GATEWAY_STDERR",
+    "META_GATEWAY_STDERR_FILE",
 )
+# Set by the row to directories of its own, so the gateway writes nothing to
+# the user's home or XDG homes.
+_OWN_HOMES = ("HOME", "XDG_STATE_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME")
 
 _MOB_TOML = """\
 [mob]
@@ -106,6 +128,11 @@ id = "held-question-at-opening-real-gateway"
 [profiles.default]
 model = "gpt-5.5"
 """
+
+
+def _carrier_of(state: Path) -> Path:
+    """The carrier file of a seeded directory: beside it, never inside it."""
+    return state.parent / (state.name + _SEED_CARRIER_SUFFIX)
 
 
 def _seeded_state() -> Path:
@@ -117,18 +144,19 @@ def _seeded_state() -> Path:
         f"the path of the seeded directory holds a symbolic link or a relative part: {state}"
     )
     assert state.is_dir(), f"the seeded directory does not exist: {state}; run {_SEED_STEP} first"
-    home = os.environ.get("HOME", "")
-    kept = [os.environ.get("XDG_STATE_HOME", ""), os.environ.get("XDG_CONFIG_HOME", "")]
-    if home:
-        assert state != Path(home), f"the seeded directory is the home directory: {state}"
-        kept += [os.path.join(home, ".local", "state"), os.path.join(home, ".config")]
-    for location in kept:
-        assert not (location and state.is_relative_to(location)), (
-            f"the seeded directory lies in a state or configuration home of the user: {state}"
+    resolved_state = Path(os.path.realpath(state))
+    for name in ("HOME", "XDG_STATE_HOME", "XDG_CONFIG_HOME"):
+        location = os.environ.get(name, "")
+        if not location:
+            continue
+        resolved_location = os.path.realpath(location)
+        assert not resolved_state.is_relative_to(resolved_location), (
+            f"the seeded directory lies in the tree of {name} ({resolved_location}): {state}"
         )
-    assert (state / _SEED_CARRIER).is_file(), (
-        f"{state} holds no {_SEED_CARRIER}: it was not seeded by {_SEED_STEP} "
-        "(run that step by name with --ignored on a fresh directory)"
+    carrier = _carrier_of(state)
+    assert carrier.is_file() and not carrier.is_symlink(), (
+        f"there is no carrier file {carrier} beside {state}: it was not seeded by "
+        f"{_SEED_STEP} (run that step by name with --ignored on a fresh directory)"
     )
     return state
 
@@ -136,16 +164,17 @@ def _seeded_state() -> Path:
 def _seed(state: Path) -> tuple[str, str]:
     """The seeded decision id and a note of the seed's age.
 
-    Fails, before anything is started, when the seeded set has expired.
+    Fails, before anything is started, when the seeded set has expired. The
+    expiry is the carrier's own; the row holds no number for it.
     """
-    carrier = json.loads((state / _SEED_CARRIER).read_text(encoding="utf-8"))
+    carrier = json.loads(_carrier_of(state).read_text(encoding="utf-8"))
     decision_id = carrier["decision_id"]
     assert carrier["kind"] == _QUESTION_KIND, carrier
     age_seconds = time.time() - carrier["seeded_at_ms"] / 1000.0
     expires_minutes = carrier["expires_after_seconds"] // 60
     note = (
         f"seeded {int(age_seconds // 60)} minutes ago; "
-        f"the question set expires after {expires_minutes}"
+        f"the question set expires {expires_minutes} minutes after its seed"
     )
     print(note)
     assert age_seconds < carrier["expires_after_seconds"], (
@@ -185,15 +214,20 @@ async def test_a_question_set_pending_at_the_gateways_start_is_noticed_before_an
     state = _seeded_state()
     seeded_id, note = _seed(state)
 
-    # The gateway process inherits this process's environment when its
-    # transport is built: give it a home and XDG homes inside this test's
-    # own directory, and no provider key.
-    for name in ("HOME", "XDG_STATE_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME"):
+    # The gateway process takes this process's environment when its
+    # transport is built, which happens after this point. Make that
+    # environment the allow list first: remove every name that is not passed
+    # on, then set the homes to directories of this test. The names removed
+    # here come back when the test ends.
+    for name in list(os.environ):
+        if name not in _PASSED_ON:
+            monkeypatch.delenv(name)
+    for name in _OWN_HOMES:
         home = tmp_path / name.lower()
         home.mkdir()
         monkeypatch.setenv(name, str(home))
-    for name in _PROVIDER_KEYS:
-        monkeypatch.delenv(name, raising=False)
+    not_allowed = sorted(set(os.environ) - set(_PASSED_ON) - set(_OWN_HOMES))
+    assert not not_allowed, f"names outside the allow list would be inherited: {not_allowed}"
 
     notices: list[dict[str, Any]] = []
     runtime = MetaRuntime(

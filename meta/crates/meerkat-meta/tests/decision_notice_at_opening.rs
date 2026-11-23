@@ -132,6 +132,11 @@ fn hold(owner: &DurableDecisionService, subject: &str) -> StoredDecision {
         .expect("hold")
 }
 
+/// How long a question set held by `hold_question_set` waits for its
+/// answers, in seconds. The seed step writes the same number into its carrier
+/// file as the set's expiry.
+const QUESTION_SET_WAITS_SECONDS: u64 = 3600;
+
 /// Hold one question set a member asked, as the stock tool's host does.
 fn hold_question_set(owner: &DurableDecisionService, call_id: &str) -> StoredDecision {
     let questions: AskUserQuestionSet = serde_json::from_value(json!({
@@ -150,7 +155,7 @@ fn hold_question_set(owner: &DurableDecisionService, call_id: &str) -> StoredDec
             asker: "agent-a".to_string(),
             requester: agent_requester("agent-a"),
             questions,
-            timeout: Duration::from_hours(1),
+            timeout: Duration::from_secs(QUESTION_SET_WAITS_SECONDS),
             run_id: RunId::new(),
             call_id: call_id.to_string(),
         },
@@ -687,22 +692,35 @@ model = "gpt-5.5"
     runtime.shutdown().await;
 }
 
-/// The file the seed step leaves in the directory it seeded, for the SDK row
-/// to read: the decision id of the held question set and when it was held.
-const SEED_CARRIER: &str = "sdk-held-question-seed.json";
+/// What the seed step appends to the name of the directory it seeded to name
+/// its carrier file.
+const SEED_CARRIER_SUFFIX: &str = ".sdk-held-question-seed.json";
 
-/// How long the seeded question set waits for its answers, in seconds: the
-/// timeout `hold_question_set` gives a set.
-const SEED_EXPIRES_AFTER_SECONDS: u64 = 3600;
+/// The carrier file of a seeded directory: the file beside the directory (in
+/// the directory's parent, never inside the directory) whose name is the
+/// directory's name followed by `SEED_CARRIER_SUFFIX`. The seed step leaves
+/// there, for the SDK row to read, the decision id of the held question set,
+/// when it was held and after how many seconds it expires. The gateway is
+/// given the directory only, so it never meets the file.
+fn seed_carrier_of(state: &Path) -> PathBuf {
+    let mut name = state
+        .file_name()
+        .expect("the directory to seed has a name")
+        .to_os_string();
+    name.push(SEED_CARRIER_SUFFIX);
+    state.with_file_name(name)
+}
 
 /// The directory the seed step may write: the one
 /// `META_SDK_HELD_QUESTION_STATE` names, when it is fresh and the fixture's
 /// own. It panics, before anything is written, unless the value is an
-/// absolute path, neither the path nor its existing parent holds a symbolic
-/// link or a relative part, the directory is absent or empty (so it holds no
-/// store of any kind), and it is neither the home directory nor inside a
-/// state or configuration home of the user (`$HOME/.local/state`,
-/// `$HOME/.config`, `$XDG_STATE_HOME`, `$XDG_CONFIG_HOME`).
+/// absolute path that ends in a name, neither the path nor its existing
+/// parent holds a symbolic link or a relative part, the directory is absent
+/// or empty (so it holds no store of any kind), nothing exists yet at its
+/// carrier file's path (`seed_carrier_of`), and the directory lies nowhere in
+/// the home directory's tree (the home directory itself and every path under
+/// it, compared in resolved form) and in no state or configuration home of
+/// the user (`$XDG_STATE_HOME`, `$XDG_CONFIG_HOME`).
 fn fresh_seed_directory() -> PathBuf {
     let named = std::env::var_os("META_SDK_HELD_QUESTION_STATE").unwrap_or_default();
     assert!(
@@ -747,26 +765,26 @@ fn fresh_seed_directory() -> PathBuf {
             state.display()
         );
     }
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    let mut kept: Vec<PathBuf> = Vec::new();
-    if let Some(home) = &home {
+    let carrier = seed_carrier_of(&state);
+    assert!(
+        std::fs::symlink_metadata(&carrier).is_err(),
+        "the carrier file of the directory to seed must not exist yet, and something is there: {}",
+        carrier.display()
+    );
+    // The resolved form of the directory: its resolved parent and its name
+    // (the directory is not a symbolic link, and may not exist yet).
+    let own_name = state.file_name().expect("the directory to seed has a name");
+    let resolved_state = canonical_parent.join(own_name);
+    for name in ["HOME", "XDG_STATE_HOME", "XDG_CONFIG_HOME"] {
+        let Some(value) = std::env::var_os(name).filter(|value| !value.is_empty()) else {
+            continue;
+        };
+        let location = PathBuf::from(value);
+        let resolved_location = location.canonicalize().unwrap_or(location);
         assert!(
-            state != *home,
-            "the directory to seed must not be the home directory, and this one is: {}",
-            state.display()
-        );
-        kept.push(home.join(".local/state"));
-        kept.push(home.join(".config"));
-    }
-    for name in ["XDG_STATE_HOME", "XDG_CONFIG_HOME"] {
-        if let Some(value) = std::env::var_os(name).filter(|value| !value.is_empty()) {
-            kept.push(PathBuf::from(value));
-        }
-    }
-    for location in &kept {
-        assert!(
-            !state.starts_with(location),
-            "the directory to seed must not lie in a state or configuration home of the user: {}",
+            !resolved_state.starts_with(&resolved_location),
+            "the directory to seed must lie nowhere in the tree of {name} ({}), and this one does: {}",
+            resolved_location.display(),
             state.display()
         );
     }
@@ -779,15 +797,16 @@ fn fresh_seed_directory() -> PathBuf {
 /// no SDK call opens a question set.
 ///
 /// The order is: this step, by name, on a fresh directory; then a gateway
-/// built from the same revision; then the SDK row on that directory, within
-/// the hour the set waits for its answers.
+/// built from the same revision; then the SDK row on that directory, before
+/// the set expires (`QUESTION_SET_WAITS_SECONDS` after this step).
 ///
 /// It holds one question set, as the stock tool's host does, in the directory
 /// `META_SDK_HELD_QUESTION_STATE` names (see `fresh_seed_directory` for what
 /// it refuses), through another owner on that store, and leaves it open.
-/// Only after the hold succeeded it writes the carrier file `SEED_CARRIER`
-/// into that directory: the set's decision id, its kind, when it was seeded
-/// and after how many seconds it expires. It starts no process.
+/// Only after the hold succeeded it writes the carrier file beside that
+/// directory, not in it (`seed_carrier_of`): the set's decision id, its
+/// kind, when it was seeded and after how many seconds it expires. The
+/// directory then holds only what the store wrote. It starts no process.
 ///
 /// It is not a row of this file and runs by name only. It shows nothing of a
 /// notice, of a restart, of how often a notice is delivered or of what a
@@ -817,9 +836,9 @@ fn seed_a_pending_question_set_for_an_sdk_row() {
         "decision_id": held.decision_id.to_string(),
         "kind": ASK_USER_QUESTIONS_KIND,
         "seeded_at_ms": seeded_at_ms,
-        "expires_after_seconds": SEED_EXPIRES_AFTER_SECONDS,
+        "expires_after_seconds": QUESTION_SET_WAITS_SECONDS,
         "seed": "seed_a_pending_question_set_for_an_sdk_row",
     });
-    let written = std::fs::write(state.join(SEED_CARRIER), carrier.to_string());
+    let written = std::fs::write(seed_carrier_of(&state), carrier.to_string());
     written.expect("the seed step writes its carrier file");
 }

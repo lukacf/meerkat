@@ -1,5 +1,5 @@
 /**
- * Fields follow Core AgentEvent/Usage/TurnUsage at public 1fdc00e69b.
+ * Fields follow Core's AgentEvent/Usage/TurnUsage on the two terminal events.
  * Meta's console_agent_event_payload preserves those usage objects.
  */
 import assert from "node:assert/strict";

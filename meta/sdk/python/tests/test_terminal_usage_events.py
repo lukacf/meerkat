@@ -1,7 +1,7 @@
 """Terminal usage comes from the Meta SSE payload, never reconstructed totals.
 
-The payload fields follow meerkat-core AgentEvent::{RunCompleted,TurnCompleted}
-and Usage/TurnUsage at public release 1fdc00e69b. Meta's
+The payload fields follow meerkat-core's serialized usage on the two terminal
+events, AgentEvent::{RunCompleted,TurnCompleted} with Usage/TurnUsage. Meta's
 console_agent_event_payload forwards those usage objects unchanged.
 """
 

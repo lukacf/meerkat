@@ -122,6 +122,125 @@ fn escape_scope_ref_part(part: &str) -> String {
     escaped
 }
 
+/// The reverse of [`escape_scope_ref_part`]: `%25` as `%` and `%2F` as `/`.
+/// `None` for a text that holds any other `%` sequence or a bare `/`: it is
+/// not the escaped form of any part.
+fn unescape_scope_ref_part(part: &str) -> Option<String> {
+    let mut unescaped = String::with_capacity(part.len());
+    let mut rest = part;
+    while let Some(at) = rest.find(['%', '/']) {
+        unescaped.push_str(&rest[..at]);
+        let tail = &rest[at..];
+        let (ch, after) = tail
+            .strip_prefix("%25")
+            .map(|after| ('%', after))
+            .or_else(|| tail.strip_prefix("%2F").map(|after| ('/', after)))?;
+        unescaped.push(ch);
+        rest = after;
+    }
+    unescaped.push_str(rest);
+    Some(unescaped)
+}
+
+/// The first segment of the identity scope key of a member that is private
+/// to a person ([`IdentityScopeKey::PrivateMember`]). A stored contract.
+const PRIVATE_MEMBER_KEY_SEGMENT: &str = "private";
+
+/// The first segment of the identity scope keys under which records are set
+/// aside from every member. A stored contract; a key under it is
+/// [`IdentityScopeKey::Reserved`].
+const SET_ASIDE_KEY_SEGMENT: &str = "set-aside";
+
+/// Whether `name`, the memory name of a member or of an agent, lies under
+/// a key namespace this module reserves (`private/...`, `set-aside/...`).
+/// No member is created under such a name: the text is the key of a scope
+/// that is no member's by name. Another name that holds a `/` is not
+/// refused; it is the key of no member's memory either
+/// ([`IdentityScopeKey::Reserved`]) and gets no memory work.
+pub(crate) fn names_reserved_key_namespace(name: &str) -> bool {
+    [PRIVATE_MEMBER_KEY_SEGMENT, SET_ASIDE_KEY_SEGMENT]
+        .iter()
+        .any(|segment| {
+            name.strip_prefix(segment)
+                .is_some_and(|rest| rest.starts_with('/'))
+        })
+}
+
+/// What the key of an identity scope names (the `identity` of
+/// [`MemoryScope::Identity`]). This is the one reader of the key's shape:
+/// every site that binds, reads, lists or judges an identity scope asks
+/// here, and none parses the text itself.
+///
+/// No name of a member or of an agent is a key that holds a `/`: every path
+/// from a name to an identity scope either parses the name as an
+/// `AgentIdentity`, which refuses `/`, or asks this reader and does no
+/// memory work for a name that is not [`Self::Named`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum IdentityScopeKey<'a> {
+    /// A plain name: the memory of the member or agent of that name.
+    Named(&'a str),
+    /// `private/<owner>/<member>`: the memory of the member named `member`
+    /// that is private to the person `owner`. `owner` is the member's
+    /// private-owner label value as the label holds it; the key holds it
+    /// with `%` written `%25` and `/` written `%2F`.
+    PrivateMember { owner: String, member: &'a str },
+    /// Any other key that holds a `/`. No member is bound to it; access
+    /// administrators alone read it, and no steward dream covers it.
+    Reserved,
+}
+
+impl<'a> IdentityScopeKey<'a> {
+    /// Read the shape of the identity scope key `key`.
+    pub(crate) fn of(key: &'a str) -> Self {
+        if !key.contains('/') {
+            return Self::Named(key);
+        }
+        let mut segments = key.split('/');
+        match (
+            segments.next(),
+            segments.next(),
+            segments.next(),
+            segments.next(),
+        ) {
+            (Some(PRIVATE_MEMBER_KEY_SEGMENT), Some(owner), Some(member), None)
+                if !owner.is_empty() && !member.is_empty() =>
+            {
+                match unescape_scope_ref_part(owner) {
+                    Some(owner) => Self::PrivateMember { owner, member },
+                    None => Self::Reserved,
+                }
+            }
+            _ => Self::Reserved,
+        }
+    }
+
+    /// Whether the key is a plain name.
+    pub(crate) fn is_named(&self) -> bool {
+        matches!(self, Self::Named(_))
+    }
+}
+
+/// The identity scope key of the member named `member` that is private to
+/// the person `owner` ([`IdentityScopeKey::PrivateMember`]). `member` is a
+/// name that holds no `/` (an `AgentIdentity`); `owner` is the member's
+/// private-owner label value.
+pub(crate) fn private_member_scope_key(owner: &str, member: &str) -> String {
+    format!(
+        "{PRIVATE_MEMBER_KEY_SEGMENT}/{}/{member}",
+        escape_scope_ref_part(owner)
+    )
+}
+
+impl MemoryScope {
+    /// Whether this is an identity scope whose key is no plain name
+    /// ([`IdentityScopeKey::PrivateMember`] or
+    /// [`IdentityScopeKey::Reserved`]): the memory of a member private to a
+    /// person, or of no member.
+    pub(crate) fn kept_apart_by_its_key(&self) -> bool {
+        matches!(self, Self::Identity { identity, .. } if !IdentityScopeKey::of(identity).is_named())
+    }
+}
+
 /// Closed record taxonomy (§7.1). `OpenLoop` is the prospective-memory kind:
 /// unfinished intentions with an explicit resolution condition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -844,5 +963,65 @@ mod tests {
         assert!(validate_record_fields(&"t".repeat(201), "", "b").is_err());
         assert!(validate_record_fields("t", &"d".repeat(401), "b").is_err());
         assert!(validate_record_fields("t", "", &"b".repeat(64 * 1024 + 1)).is_err());
+    }
+
+    /// The one reader of an identity scope key: a plain name; the key of a
+    /// member private to a person, whose owner round-trips through the
+    /// key's escaping; and, for every other key that holds a `/`, no
+    /// member's memory.
+    #[test]
+    fn an_identity_scope_key_names_a_plain_name_a_private_member_or_no_member() {
+        for name in ["ledger-side", "agent:alice", "private", "private%2Fa", ""] {
+            assert_eq!(IdentityScopeKey::of(name), IdentityScopeKey::Named(name));
+        }
+        for owner in ["console-caller:v1:aa", "a/b%c", "%2F", "100%", " spaced "] {
+            let key = private_member_scope_key(owner, "ledger-side");
+            assert_eq!(
+                IdentityScopeKey::of(&key),
+                IdentityScopeKey::PrivateMember {
+                    owner: owner.to_string(),
+                    member: "ledger-side",
+                },
+                "{key}"
+            );
+            assert_eq!(key.matches('/').count(), 2, "{key}");
+        }
+        assert_eq!(
+            private_member_scope_key("a/b%c", "ledger-side"),
+            "private/a%2Fb%25c/ledger-side"
+        );
+        for key in [
+            "private/ledger-side",
+            "private//ledger-side",
+            "private/owner/",
+            "private/owner/ledger/side",
+            "private/50%/ledger-side",
+            "private/a%2fb/ledger-side",
+            "Private/owner/ledger-side",
+            "set-aside/ledger-side",
+            "team/ledger-side",
+            "/",
+        ] {
+            assert_eq!(
+                IdentityScopeKey::of(key),
+                IdentityScopeKey::Reserved,
+                "{key}"
+            );
+            assert!(
+                MemoryScope::Identity {
+                    realm: "default".to_string(),
+                    identity: key.to_string(),
+                }
+                .kept_apart_by_its_key(),
+                "{key}"
+            );
+        }
+        assert!(
+            !MemoryScope::Mob {
+                realm: "default".to_string(),
+                mob: "private/owner/team".to_string(),
+            }
+            .kept_apart_by_its_key()
+        );
     }
 }

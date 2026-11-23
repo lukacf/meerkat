@@ -93,6 +93,7 @@ pub mod config;
 mod config_document;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod config_runtime;
+pub mod config_secrets;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod config_store;
 pub mod confinement;
@@ -305,6 +306,7 @@ pub use config_runtime::{
     ConfigEnvelope, ConfigEnvelopePolicy, ConfigRuntime, ConfigRuntimeError, ConfigSnapshot,
     EnteredConfigWriteError,
 };
+pub use config_secrets::CONFIG_SECRET_MARKER;
 #[cfg(not(target_arch = "wasm32"))]
 pub use config_store::{
     ConfigResolvedPaths, ConfigStore, ConfigStoreMetadata, EffectiveConfigReader, FileConfigStore,
@@ -558,9 +560,9 @@ pub use retry::{
 };
 pub use runtime_bootstrap::{
     ContextConfig, DualRootResolution, REALM_MANIFEST_FILE_NAME, RealmConfig, RealmLocator,
-    RealmRootChoice, RealmRootDefault, RealmSelection, RuntimeBootstrap, RuntimeBootstrapError,
-    default_state_root, derive_workspace_realm_id, fnv1a64_hex, generate_realm_id,
-    realm_exists_under, sanitize_realm_id,
+    RealmRootChoice, RealmRootDefault, RealmRootResolution, RealmSelection, RuntimeBootstrap,
+    RuntimeBootstrapError, default_state_root, derive_workspace_realm_id, fnv1a64_hex,
+    generate_realm_id, realm_exists_under, sanitize_realm_id,
 };
 pub use runtime_epoch::{
     EpochCursorSnapshot, EpochCursorState, RuntimeBuildMode, RuntimeEpochId, SessionRuntimeBindings,
@@ -603,8 +605,9 @@ pub use session::{
     InstructionActivationReadQuery, InstructionActivationReceipt, InstructionActivationRecord,
     InstructionActivationRequest, InvalidSessionLineageId,
     MAX_INSTRUCTION_ACTIVATION_LINEAGE_BYTES, MAX_INSTRUCTION_BODY_BYTES,
-    ModelBoundaryProjectionError, PendingDeferredPrompt, PendingToolResultsMessage,
-    PersistedSessionMetadataView, PredecessorRestrictionsError, PredecessorToolRestrictions,
+    ModelBoundaryProjectionError, PendingBoundaryAdmission, PendingBoundaryAdmissions,
+    PendingDeferredPrompt, PendingToolResultsMessage, PersistedSessionMetadataView,
+    PredecessorRestrictionsError, PredecessorToolRestrictions,
     PreparedTransientTurnContextBoundary, ProviderNativeToolPolicy,
     RETIRED_INSTRUCTION_RENDER_VERSION_V1, Released0810ImportError, Released0810ImportEvidence,
     Released0810ImportReceipt, RetainedTranscriptRevisionRows, RetiredTranscriptGraphBase,
@@ -687,6 +690,7 @@ pub use storage_diagnostics::{
 pub use storage_durability::{DurabilityClass, DurabilityDeclaration, DurabilityResolution};
 pub use storage_layout::{
     ResolvedStorage, StorageLayout, StorageLayoutInputs, find_project_root, local_realms_candidate,
+    local_realms_candidates,
 };
 pub use streaming_tool::{
     ToolCancellationToken, ToolProgressFrame, ToolProgressFrameError, ToolProgressReportError,

@@ -3320,7 +3320,10 @@ comms = true
         .as_ref()
         .ok_or("the fixture keeps its owner")?;
     let registry = crate::schedule_wiring::ScheduleMobTargetRegistry::default();
-    registry.adopt_mob_runtime(&fixture.runtime);
+    registry.adopt_mob_runtime(
+        &fixture.runtime,
+        &crate::member_key::DefaultMob::new(fixture.runtime.handle().mob_id().clone()),
+    );
     let policy = IdentityCreationPolicy::parse(&json!({
         "enabled": true,
         "approval": {"rules": [{
@@ -3841,6 +3844,22 @@ async fn schedule_tool_call(
     name: &str,
     args: Value,
 ) -> Result<Value, meerkat_core::ToolError> {
+    schedule_tool_call_in(
+        tools,
+        &meerkat_core::ToolDispatchContext::default(),
+        name,
+        args,
+    )
+    .await
+}
+
+/// A schedule tool call as the turn `context` describes makes it.
+async fn schedule_tool_call_in(
+    tools: &Arc<dyn meerkat_core::AgentToolDispatcher>,
+    context: &meerkat_core::ToolDispatchContext,
+    name: &str,
+    args: Value,
+) -> Result<Value, meerkat_core::ToolError> {
     let args = serde_json::value::RawValue::from_string(args.to_string())
         .map_err(|error| meerkat_core::ToolError::invalid_arguments(name, error.to_string()))?;
     let outcome = tools
@@ -3850,7 +3869,7 @@ async fn schedule_tool_call(
                 name,
                 args: &args,
             },
-            &meerkat_core::ToolDispatchContext::default(),
+            context,
         )
         .await?;
     let text = outcome
@@ -4019,6 +4038,89 @@ async fn the_schedule_tools_point_no_schedule_at_an_archived_agent() -> TestResu
     Ok(())
 }
 
+/// An agent's own turn that names an archived agent it is not wired to is
+/// answered as its turn that names an agent nobody holds: the same code
+/// (`schedule_target_not_a_peer`) and the same sentence, by a create and by
+/// an update that retargets its own schedule, and nothing is written. The
+/// answer does not say that the name is an archived agent's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_archived_agent_out_of_an_agents_reach_answers_as_a_name_no_agent_holds() -> TestResult {
+    let agents = created_agents("schedule-tools-archived-out-of-reach").await?;
+    let mob = agents.mob.mob_id().to_string();
+    let service = agents.fixture.service.clone();
+    let tools = crate::schedule_wiring::agent_schedule_tools_over_registry_for_test(
+        service.clone(),
+        agents.registry.clone(),
+    );
+    let ledger_identity = AgentIdentity::from("ledger");
+    agents.mob.ensure_member_live(&ledger_identity).await?;
+    let ledger = agents
+        .mob
+        .get_member(&ledger_identity)
+        .await?
+        .and_then(|entry| entry.bridge_session_id().cloned())
+        .ok_or("ledger has a session")?;
+    let as_ledger =
+        meerkat_core::ToolDispatchContext::default().with_runtime_identity(ledger, None);
+
+    // The agent's own schedule, for itself, written by its own turn.
+    let own = schedule_tool_call_in(
+        &tools,
+        &as_ledger,
+        "meerkat_schedule_create",
+        tool_schedule("own", member_tool_target(&mob, "ledger")),
+    )
+    .await
+    .map_err(|error| format!("an agent schedules for itself: {error:?}"))?;
+    let own = own["schedule_id"]
+        .as_str()
+        .ok_or("the schedule has an id")?
+        .to_string();
+    agents.archive("archive-1", "scout").await;
+    let before = service.list().await?;
+
+    let mut created = Vec::new();
+    let mut retargeted = Vec::new();
+    for member in ["scout", "nobody"] {
+        for (name, args, answers) in [
+            (
+                "meerkat_schedule_create",
+                tool_schedule("late", member_tool_target(&mob, member)),
+                &mut created,
+            ),
+            (
+                "meerkat_schedule_update",
+                json!({ "schedule_id": own, "target": member_tool_target(&mob, member) }),
+                &mut retargeted,
+            ),
+        ] {
+            let answer = schedule_tool_call_in(&tools, &as_ledger, name, args)
+                .await
+                .err();
+            assert!(
+                matches!(
+                    &answer,
+                    Some(meerkat_core::ToolError::PolicyDenied { denial })
+                        if denial.code == meerkat::SCHEDULE_TARGET_NOT_A_PEER
+                ),
+                "{name} for {member}, out of the agent's reach, is refused as one: {answer:?}"
+            );
+            answers.push(format!("{answer:?}").replace(member, "<member>"));
+        }
+    }
+    assert_eq!(
+        created[0], created[1],
+        "a create for an archived agent out of reach answers as one for a name no agent holds"
+    );
+    assert_eq!(
+        retargeted[0], retargeted[1],
+        "an update to an archived agent out of reach answers as one to a name no agent holds"
+    );
+    assert_eq!(service.list().await?, before, "nothing was written");
+    agents.stop().await;
+    Ok(())
+}
+
 /// A schedule that names an agent's session follows the agent's archive and
 /// unarchive as a schedule that names the agent does: Core's entry of the
 /// agent records the session its member was bound to, and its unarchive
@@ -4085,6 +4187,87 @@ async fn a_schedule_that_names_an_agents_session_follows_its_archive_and_unarchi
     assert_eq!(agents.state(&scouts).await, (Active, false));
     assert_eq!(agents.state(&ledgers).await, (Active, false));
     agents.stop().await;
+    Ok(())
+}
+
+/// A schedule that is no Console schedule and whose target names an agent (a
+/// member target, as the agents' schedule tools and a host write one) is
+/// listed on that agent's view, beside its Console schedules and never among
+/// them, and on no other agent's view.
+#[tokio::test]
+async fn the_console_lists_a_schedule_another_writer_aimed_at_the_agent() -> TestResult {
+    let fixture = fixture(
+        "console-other-schedules",
+        Some(ScheduleFiringHostBinding::external_driver()),
+    )
+    .await?;
+    let mob = fixture.runtime.handle().mob_id().to_string();
+    let schedule = fixture
+        .service
+        .create(meerkat::CreateScheduleRequest {
+            name: Some("a note".to_owned()),
+            description: None,
+            trigger: meerkat::TriggerSpec::Once {
+                due_at_utc: chrono::Utc::now() + chrono::Duration::days(1),
+            },
+            target: meerkat::TargetBinding::Mob(Box::new(meerkat::MobTargetBinding::Member {
+                mob_id: mob,
+                member_id: "beta".to_string(),
+                action: meerkat::ScheduledMobAction::Send {
+                    content: meerkat_core::ContentInput::Text("Say hello.".into()),
+                    render_metadata: None,
+                },
+            })),
+            misfire_policy: meerkat::MisfirePolicy::default(),
+            overlap_policy: meerkat::OverlapPolicy::default(),
+            missing_target_policy: meerkat::MissingTargetPolicy::default(),
+            labels: BTreeMap::new(),
+            planning_horizon_days: None,
+            planning_horizon_occurrences: None,
+        })
+        .await
+        .map_err(|error| error.to_string())?
+        .schedule_id;
+
+    let listed = call(
+        &fixture,
+        Caller::human(FRANK),
+        "meta/schedule/list",
+        json!({ "identity": "beta" }),
+    )
+    .await;
+    assert_eq!(
+        listed["result"]["schedules"],
+        json!([]),
+        "it is no Console schedule: {listed:#?}"
+    );
+    let others = listed["result"]["other_schedules"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(
+        others
+            .iter()
+            .map(|other| other["schedule_id"].clone())
+            .collect::<Vec<_>>(),
+        vec![json!(schedule.to_string())],
+        "the agent's view lists the schedule aimed at it: {listed:#?}"
+    );
+    assert_eq!(others[0]["content"], json!("Say hello."), "{listed:#?}");
+
+    let other_agent = call(
+        &fixture,
+        Caller::human(FRANK),
+        "meta/schedule/list",
+        json!({ "identity": "alpha" }),
+    )
+    .await;
+    assert_eq!(
+        other_agent["result"]["other_schedules"],
+        json!([]),
+        "another agent's view does not list it: {other_agent:#?}"
+    );
+    fixture.stop().await;
     Ok(())
 }
 
@@ -4258,7 +4441,10 @@ comms = true
         .as_ref()
         .ok_or("the fixture keeps its owner")?;
     let registry = crate::schedule_wiring::ScheduleMobTargetRegistry::default();
-    registry.adopt_mob_runtime(&fixture.runtime);
+    registry.adopt_mob_runtime(
+        &fixture.runtime,
+        &crate::member_key::DefaultMob::new(fixture.runtime.handle().mob_id().clone()),
+    );
     let policy = IdentityCreationPolicy::parse(&json!({
         "enabled": true,
         "approval": {"rules": [{
@@ -4738,5 +4924,1465 @@ async fn a_session_schedule_resumed_by_name_for_an_archived_agent_runs_nothing()
         (meerkat::SchedulePhase::Active, false),
         "the schedule stays active"
     );
+    Ok(())
+}
+
+/// A console schedule is one agent's: its send names the agent by its mob
+/// and its identity. A schedule of the agent `alpha` of another mob is not
+/// this mob's `alpha`'s: it is not listed for it, it is answered by its id
+/// as another agent's schedule is, and its fire reaches no agent here, while
+/// this mob's own schedule lists and fires.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn member_keyed_schedule_of_another_mobs_agent_is_never_this_mobs() -> TestResult {
+    let fixture = delivering_fixture("console-schedules-member-key").await?;
+    let default_mob = crate::member_key::DefaultMob::new(fixture.runtime.handle().mob_id().clone());
+    // As a write for the agent `alpha` of the mob `second` stores it.
+    let other = ConsoleScheduledSend::new(
+        &default_mob,
+        &meerkat_mob::MobId::from("second"),
+        "alpha".to_string(),
+        "The other mob's summary.".to_string(),
+        ConsoleScheduleSender::Anonymous,
+        100,
+    );
+    let other_id = fixture
+        .service
+        .create(meerkat::CreateScheduleRequest {
+            name: None,
+            description: None,
+            trigger: serde_json::from_value(hourly())?,
+            target: other.target()?,
+            misfire_policy: meerkat::MisfirePolicy::default(),
+            overlap_policy: meerkat::OverlapPolicy::default(),
+            missing_target_policy: meerkat::MissingTargetPolicy::default(),
+            labels: std::collections::BTreeMap::new(),
+            planning_horizon_days: None,
+            planning_horizon_occurrences: None,
+        })
+        .await?
+        .schedule_id
+        .to_string();
+    let own_id = create_as(&fixture, Caller::open_console()).await?;
+
+    let listed = call(
+        &fixture,
+        Caller::open_console(),
+        "meta/schedule/list",
+        json!({ "identity": "alpha" }),
+    )
+    .await;
+    let ids = listed["result"]["schedules"]
+        .as_array()
+        .ok_or("the list answers schedules")?
+        .iter()
+        .filter_map(|schedule| schedule["schedule_id"].as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(ids, [own_id.as_str()], "{listed:#?}");
+
+    let pause = |identity: &'static str, schedule_id: String| {
+        call(
+            &fixture,
+            Caller::open_console(),
+            "meta/schedule/pause",
+            json!({ "identity": identity, "schedule_id": schedule_id }),
+        )
+    };
+    let of_another_mob = pause("alpha", other_id.clone()).await;
+    let of_another_agent = pause("beta", own_id.clone()).await;
+    assert!(!of_another_mob["error"].is_null(), "{of_another_mob:#?}");
+    assert_eq!(
+        error_of(&of_another_mob),
+        error_of(&of_another_agent),
+        "a schedule of the agent of that name in another mob is another agent's"
+    );
+    assert_eq!(
+        fixture
+            .service
+            .get(&ScheduleId::parse(&other_id)?)
+            .await?
+            .phase,
+        meerkat::SchedulePhase::Active,
+        "the refused pause changed nothing"
+    );
+
+    let open = doors(
+        &fixture,
+        open_decisions(false),
+        None,
+        crate::auth::session_fence::ConsoleSessionFences::detached(),
+        ungoverned(),
+    );
+    refused_because(
+        fire(&fixture, &open, &other_id, "key-of-the-other-mob").await,
+        "a member of mob second",
+    );
+    assert!(
+        sends_under(&fixture, "alpha", "key-of-the-other-mob")
+            .await
+            .is_empty(),
+        "nothing was sent to this mob's agent of the same name"
+    );
+    fire(&fixture, &open, &own_id, "key-of-this-mob").await?;
+    assert_eq!(
+        sends_under(&fixture, "alpha", "key-of-this-mob")
+            .await
+            .len(),
+        1
+    );
+    fixture.stop().await;
+    Ok(())
+}
+
+/// One host with two mobs: its launch mob, which is the host's default mob,
+/// and a second mob, each with the agents `alpha` and `beta`. Both mobs'
+/// console schedules live in the host's one schedule service.
+struct TwoMobHost {
+    launch: Fixture,
+    second: Fixture,
+    /// The host's default mob, as the host states it: its launch mob.
+    default_mob: crate::member_key::DefaultMob,
+}
+
+/// A [`TwoMobHost`] whose mob ids start with `name`. With `delivering`, the
+/// launch mob's agents take console sends.
+async fn two_mob_host(
+    name: &str,
+    delivering: bool,
+) -> Result<TwoMobHost, Box<dyn std::error::Error + Send + Sync>> {
+    let launch_id = format!("{name}-launch");
+    let launch = if delivering {
+        delivering_fixture(&launch_id).await?
+    } else {
+        fixture(
+            &launch_id,
+            Some(ScheduleFiringHostBinding::external_driver()),
+        )
+        .await?
+    };
+    let second = fixture(&format!("{name}-second"), None).await?;
+    second.runtime.console_schedules().attach(
+        launch.service.clone(),
+        ScheduleFiringHostBinding::external_driver(),
+    );
+    let default_mob = crate::member_key::DefaultMob::new(launch.runtime.handle().mob_id().clone());
+    Ok(TwoMobHost {
+        launch,
+        second,
+        default_mob,
+    })
+}
+
+/// A [`TwoMobHost`] whose second mob has an identity plane of its own
+/// ([`identity_plane_fixture`]) that knows `agents`, each with whether it
+/// takes console sends. Its launch mob is a light console runtime.
+async fn two_mob_host_with_an_identity_plane(
+    name: &str,
+    agents: &[(&str, bool)],
+) -> Result<TwoMobHost, Box<dyn std::error::Error + Send + Sync>> {
+    let launch = fixture(
+        &format!("{name}-launch"),
+        Some(ScheduleFiringHostBinding::external_driver()),
+    )
+    .await?;
+    let second = identity_plane_fixture(&format!("{name}-second"), agents).await?;
+    second.runtime.console_schedules().attach(
+        launch.service.clone(),
+        ScheduleFiringHostBinding::external_driver(),
+    );
+    let default_mob = crate::member_key::DefaultMob::new(launch.runtime.handle().mob_id().clone());
+    Ok(TwoMobHost {
+        launch,
+        second,
+        default_mob,
+    })
+}
+
+/// A console runtime with an identity plane of its own, as an
+/// identity-first gateway builds one: its identity runtime knows `agents`
+/// (each with whether it takes console sends) and no other name. A request
+/// the console's door resolves to this mob is handed that identity runtime.
+async fn identity_plane_fixture(
+    mob_id: &str,
+    agents: &[(&str, bool)],
+) -> Result<Fixture, Box<dyn std::error::Error + Send + Sync>> {
+    use crate::identity_first::{
+        AgentAddressability, AgentIdentity, DurableAgentSpec, MutableRosterProvider,
+    };
+    let temp_dir = tempfile::tempdir_in(std::env::current_dir()?)?;
+    let mut roster = Vec::with_capacity(agents.len());
+    for (identity, takes_sends) in agents {
+        roster.push(DurableAgentSpec {
+            identity: AgentIdentity::parse(identity).map_err(|error| format!("{error:?}"))?,
+            profile: "agent".into(),
+            addressability: if *takes_sends {
+                AgentAddressability::Addressable
+            } else {
+                AgentAddressability::InternalOnly
+            },
+            display_name: None,
+            labels: BTreeMap::new(),
+            context: None,
+            additional_instructions: Vec::new(),
+            initial_message: None,
+            runtime_mode_override: Some(meerkat_mob::MobRuntimeMode::AutonomousHost),
+            backend: None,
+            binding: None,
+            placement: None,
+        });
+    }
+    let owner = crate::unified_runtime::UnifiedRuntimeBuilder::default()
+        .definition(meerkat_mob::MobDefinition::from_toml(&format!(
+            r#"
+[mob]
+id = "{mob_id}"
+[profiles.agent]
+model = "gpt-5.5"
+external_addressable = true
+runtime_mode = "autonomous_host"
+[profiles.agent.tools]
+comms = true
+"#
+        ))?)
+        .persistent_state(temp_dir.path())
+        .comms(true)
+        .roster_provider(Arc::new(MutableRosterProvider::new(roster)))
+        .identity_runtime_instance_id(format!("{mob_id}-instance"))
+        .default_llm_client(Arc::new(meerkat_client::TestClient::default()))
+        .build()
+        .await
+        .map_err(|error| error.to_string())?;
+    let identity_runtime = owner
+        .identity_runtime_ref()
+        .cloned()
+        .ok_or("a runtime built with a roster has an identity runtime")?;
+    let runtime = owner.mob_runtime().clone();
+    Ok(fixture_over(
+        temp_dir,
+        Some(owner),
+        runtime,
+        Some(identity_runtime),
+        Some(ScheduleFiringHostBinding::external_driver()),
+    ))
+}
+
+/// A schedule of the agent `alpha` of the mob `mob_id` in the schedule
+/// service `service` of a host whose default mob is `default_mob`, stored
+/// as a create for that agent stores it. The door refuses the create for
+/// an agent of a mob no fire reaches, so the rows that read such a schedule
+/// store it themselves.
+async fn stored_for_alpha_of(
+    service: &ScheduleService,
+    default_mob: &crate::member_key::DefaultMob,
+    mob_id: &meerkat_mob::MobId,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let send = ConsoleScheduledSend::new(
+        default_mob,
+        mob_id,
+        "alpha".to_string(),
+        "Post the morning summary.".to_string(),
+        ConsoleScheduleSender::Anonymous,
+        100,
+    );
+    Ok(service
+        .create(meerkat::CreateScheduleRequest {
+            name: Some("Morning summary".to_string()),
+            description: None,
+            trigger: serde_json::from_value(hourly())?,
+            target: send.target()?,
+            misfire_policy: meerkat::MisfirePolicy::default(),
+            overlap_policy: meerkat::OverlapPolicy::default(),
+            missing_target_policy: meerkat::MissingTargetPolicy::default(),
+            labels: std::collections::BTreeMap::new(),
+            planning_horizon_days: None,
+            planning_horizon_occurrences: None,
+        })
+        .await?
+        .schedule_id
+        .to_string())
+}
+
+/// `method` with `params` at the schedule door, as the open Console's shared
+/// account, for the mob `of` wraps, on a host whose default mob is
+/// `default_mob` and whose console reads its agents from `aggregator`.
+async fn at_the_schedule_door(
+    default_mob: &crate::member_key::DefaultMob,
+    of: &Fixture,
+    aggregator: &MetaConsoleAggregator,
+    method: &str,
+    params: Value,
+) -> Value {
+    let governance = ConsoleSendGovernance {
+        scope: ConsoleSendScope::Anonymous,
+        ..ConsoleSendGovernance::default()
+    };
+    Box::pin(schedules::handle_for(
+        schedules::ScheduleMob::on_host(default_mob, &of.runtime),
+        &request(method, params),
+        of.identity_runtime.as_ref(),
+        Some(aggregator),
+        None,
+        None,
+        &governance,
+    ))
+    .await
+}
+
+impl TwoMobHost {
+    /// `method` with `params` at the schedule door, as the open Console's
+    /// shared account, for the mob `of` wraps: the call of a request the
+    /// console's door resolved to that mob, on this host. The door is handed
+    /// what the console's dispatch hands it: the resolved mob's wrapper and
+    /// identity runtime, and the console's one aggregator, which is built
+    /// over the launch mob.
+    async fn at(&self, of: &Fixture, method: &str, params: Value) -> Value {
+        at_the_schedule_door(
+            &self.default_mob,
+            of,
+            &self.launch.aggregator,
+            method,
+            params,
+        )
+        .await
+    }
+
+    /// A schedule created for the agent `alpha` of the mob `of` wraps.
+    async fn created_for_alpha(&self, of: &Fixture) -> String {
+        answered_id(
+            &self
+                .at(of, "meta/schedule/create", create_params("alpha"))
+                .await,
+        )
+    }
+
+    /// A schedule of the second mob's `alpha` in the host's schedule
+    /// service ([`stored_for_alpha_of`]).
+    async fn stored_for_alpha_of_the_second_mob(
+        &self,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        stored_for_alpha_of(
+            &self.launch.service,
+            &self.default_mob,
+            self.second.runtime.handle().mob_id(),
+        )
+        .await
+    }
+
+    /// The ids of the schedules the door lists for `alpha` of the mob `of`
+    /// wraps.
+    async fn listed_for_alpha(&self, of: &Fixture) -> Vec<String> {
+        let listed = self
+            .at(of, "meta/schedule/list", json!({ "identity": "alpha" }))
+            .await;
+        listed["result"]["schedules"]
+            .as_array()
+            .unwrap_or_else(|| panic!("a list of schedules: {listed:#?}"))
+            .iter()
+            .filter_map(|schedule| schedule["schedule_id"].as_str())
+            .map(ToString::to_string)
+            .collect()
+    }
+
+    /// The params text the host's schedule service stores for `schedule_id`.
+    async fn stored_params(&self, schedule_id: &str) -> String {
+        let stored = self
+            .launch
+            .service
+            .get(&ScheduleId::parse(schedule_id).expect("a schedule id"))
+            .await
+            .expect("the schedule is stored");
+        let meerkat::TargetBinding::HostRunnable(binding) = stored.target else {
+            panic!("a console schedule targets the console's runnable");
+        };
+        binding.params.expect("a send has params").get().to_string()
+    }
+
+    async fn stop(self) {
+        self.second.stop().await;
+        self.launch.stop().await;
+    }
+}
+
+/// A schedule of the second mob's `alpha` stores a send that names the
+/// second mob, on a host that states its default mob: it is that agent's
+/// and not the launch mob's agent's of that name.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn member_keyed_schedule_door_a_second_mobs_schedule_names_that_mob() -> TestResult {
+    let host = two_mob_host("console-schedules-door-stores", false).await?;
+    let second_mob = host.second.runtime.handle().mob_id().clone();
+    let of_second = host.stored_for_alpha_of_the_second_mob().await?;
+
+    let send = stored_send(&host.launch, &of_second).await?;
+    assert_eq!(
+        send.mob_id.as_ref(),
+        Some(&second_mob),
+        "the send of the second mob's alpha names the second mob: {}",
+        host.stored_params(&of_second).await
+    );
+    assert!(send.is_for(&host.default_mob, &second_mob, "alpha"));
+    assert!(!send.is_for(&host.default_mob, host.default_mob.mob_id(), "alpha"));
+    host.stop().await;
+    Ok(())
+}
+
+/// Spawn the agent `alias` in `fixture`'s mob. With `takes_sends` false it
+/// is an agent that takes no console send.
+async fn spawn_agent(fixture: &Fixture, alias: &str, takes_sends: bool) -> TestResult {
+    spawn_agent_of_role(fixture, "worker", alias, takes_sends).await
+}
+
+/// [`spawn_agent`] with the role `role` (`agent` in a fixture whose agents
+/// take console sends).
+async fn spawn_agent_of_role(
+    fixture: &Fixture,
+    role: &str,
+    alias: &str,
+    takes_sends: bool,
+) -> TestResult {
+    let mut spec =
+        SpawnMemberSpec::from_wire(role.to_string(), alias.to_string(), None, None, None);
+    if !takes_sends {
+        spec = spec.with_labels(BTreeMap::from([(
+            "addressable".to_string(),
+            "false".to_string(),
+        )]));
+    }
+    fixture.runtime.handle().spawn_spec(spec).await?;
+    Ok(())
+}
+
+/// The fires reach the agents of the host's default mob alone, so the
+/// schedule door refuses a schedule for the second mob's `alpha`, an agent
+/// that mob's identity runtime knows, and says
+/// that it would never be sent; nothing is stored. A schedule of that agent
+/// that is in the store all the same is refused an update and a resume the
+/// same way, and is listed, paused and deleted through its own mob. The
+/// launch mob's `alpha` takes a schedule.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn member_keyed_schedule_door_refuses_a_schedule_no_fire_would_send() -> TestResult {
+    let host =
+        two_mob_host_with_an_identity_plane("console-schedules-door-refuses", &[("alpha", true)])
+            .await?;
+    let second_mob = host.second.runtime.handle().mob_id().clone();
+    let never_sent = |answer: &Value, what: &str| {
+        assert_eq!(
+            error_of(answer),
+            (
+                json!(crate::rpc::CAPABILITY_UNAVAILABLE_CODE),
+                json!("schedule_host_unavailable")
+            ),
+            "{what}: {answer:#?}"
+        );
+        let message = answer["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains("would never be sent") && message.contains(second_mob.as_str()),
+            "{what}: the refusal says that the schedule would never be sent, and names the \
+             mob: {message}"
+        );
+    };
+
+    let created = host
+        .at(&host.second, "meta/schedule/create", create_params("alpha"))
+        .await;
+    never_sent(&created, "create");
+    assert!(
+        host.launch.service.list().await?.is_empty(),
+        "a refused create stores nothing"
+    );
+
+    let of_second = host.stored_for_alpha_of_the_second_mob().await?;
+    let stored_before = host.stored_params(&of_second).await;
+    let by_id = json!({ "identity": "alpha", "schedule_id": of_second });
+    let updated = host
+        .at(
+            &host.second,
+            "meta/schedule/update",
+            json!({ "identity": "alpha", "schedule_id": of_second, "content": "Changed." }),
+        )
+        .await;
+    never_sent(&updated, "update");
+    assert_eq!(host.stored_params(&of_second).await, stored_before);
+    assert_eq!(
+        host.listed_for_alpha(&host.second).await,
+        std::slice::from_ref(&of_second),
+        "the schedule is listed for its own agent"
+    );
+    let paused = host
+        .at(&host.second, "meta/schedule/pause", by_id.clone())
+        .await;
+    assert_eq!(paused["result"]["phase"], json!("paused"), "{paused:#?}");
+    let resumed = host
+        .at(&host.second, "meta/schedule/resume", by_id.clone())
+        .await;
+    never_sent(&resumed, "resume");
+    assert_eq!(
+        host.launch
+            .service
+            .get(&ScheduleId::parse(&of_second)?)
+            .await?
+            .phase,
+        meerkat::SchedulePhase::Paused,
+        "the refused resume changed nothing"
+    );
+    assert_eq!(host.stored_params(&of_second).await, stored_before);
+    let deleted = host.at(&host.second, "meta/schedule/delete", by_id).await;
+    assert!(deleted["error"].is_null(), "{deleted:#?}");
+
+    let of_launch = host.created_for_alpha(&host.launch).await;
+    assert_eq!(host.listed_for_alpha(&host.launch).await, [of_launch]);
+    host.stop().await;
+    Ok(())
+}
+
+/// A name is an agent's in the mob of the request only. Through the second
+/// mob, a name that only an agent of the launch mob has is answered as a
+/// name no agent has, whether that agent takes console sends or not, and a
+/// list for it answers as for a name no agent has. Through the launch mob
+/// the same names are its agents'.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn member_keyed_schedule_door_finds_no_agent_of_another_mob() -> TestResult {
+    let host = two_mob_host("console-schedules-door-finds", false).await?;
+    spawn_agent(&host.launch, "gamma", true).await?;
+    spawn_agent(&host.launch, "quiet", false).await?;
+
+    let of_no_agent = host
+        .at(&host.second, "meta/schedule/create", create_params("ghost"))
+        .await;
+    assert_eq!(
+        error_of(&of_no_agent),
+        (json!(-32001), json!("unknown_identity")),
+        "{of_no_agent:#?}"
+    );
+    for name in ["gamma", "quiet"] {
+        let through_the_second_mob = host
+            .at(&host.second, "meta/schedule/create", create_params(name))
+            .await;
+        assert_eq!(
+            error_of(&through_the_second_mob),
+            error_of(&of_no_agent),
+            "{name} is no agent of the second mob: {through_the_second_mob:#?}"
+        );
+        let listed = host
+            .at(
+                &host.second,
+                "meta/schedule/list",
+                json!({ "identity": name }),
+            )
+            .await;
+        assert_eq!(
+            listed["result"],
+            json!({ "identity": name, "schedules": [], "other_schedules": [] }),
+            "{listed:#?}"
+        );
+    }
+    assert!(
+        host.launch.service.list().await?.is_empty(),
+        "nothing was stored"
+    );
+
+    let of_gamma = host
+        .at(&host.launch, "meta/schedule/create", create_params("gamma"))
+        .await;
+    assert!(of_gamma["error"].is_null(), "{of_gamma:#?}");
+    let of_quiet = host
+        .at(&host.launch, "meta/schedule/create", create_params("quiet"))
+        .await;
+    assert_eq!(
+        error_of(&of_quiet),
+        (json!(-32002), json!("not_addressable")),
+        "{of_quiet:#?}"
+    );
+    host.stop().await;
+    Ok(())
+}
+
+/// Two mobs' agents of one name are judged each in its own mob: whether
+/// the agent takes console sends is its own, as its mob's identity runtime
+/// says it, never its namesake's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn member_keyed_schedule_door_judges_an_agent_and_not_its_namesake() -> TestResult {
+    // `echo` takes sends in the launch mob and none in the second; `mute`
+    // the other way round.
+    let host = two_mob_host_with_an_identity_plane(
+        "console-schedules-door-judges",
+        &[("alpha", true), ("echo", false), ("mute", true)],
+    )
+    .await?;
+    spawn_agent(&host.launch, "echo", true).await?;
+    spawn_agent(&host.launch, "mute", false).await?;
+    let takes_no_sends = (json!(-32002), json!("not_addressable"));
+
+    let echo_of_the_second_mob = host
+        .at(&host.second, "meta/schedule/create", create_params("echo"))
+        .await;
+    assert_eq!(
+        error_of(&echo_of_the_second_mob),
+        takes_no_sends,
+        "the second mob's echo takes no sends: {echo_of_the_second_mob:#?}"
+    );
+    let mute_of_the_second_mob = host
+        .at(&host.second, "meta/schedule/create", create_params("mute"))
+        .await;
+    let alpha_of_the_second_mob = host
+        .at(&host.second, "meta/schedule/create", create_params("alpha"))
+        .await;
+    assert_eq!(
+        error_of(&mute_of_the_second_mob),
+        error_of(&alpha_of_the_second_mob),
+        "the second mob's mute takes sends, as its alpha does: {mute_of_the_second_mob:#?}"
+    );
+    assert_ne!(error_of(&mute_of_the_second_mob), takes_no_sends);
+
+    let echo_of_the_launch_mob = host
+        .at(&host.launch, "meta/schedule/create", create_params("echo"))
+        .await;
+    assert!(
+        echo_of_the_launch_mob["error"].is_null(),
+        "the launch mob's echo takes sends: {echo_of_the_launch_mob:#?}"
+    );
+    let mute_of_the_launch_mob = host
+        .at(&host.launch, "meta/schedule/create", create_params("mute"))
+        .await;
+    assert_eq!(
+        error_of(&mute_of_the_launch_mob),
+        takes_no_sends,
+        "the launch mob's mute takes no sends: {mute_of_the_launch_mob:#?}"
+    );
+    host.stop().await;
+    Ok(())
+}
+
+/// An agent the second mob's identity runtime knows, with no namesake in
+/// the launch mob, is an agent to a call for the second mob: the door
+/// answers for it as for the second mob's `alpha`, and not as for a name no
+/// agent has. Through the launch mob that name is no agent's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn member_keyed_schedule_door_knows_an_agent_of_the_requests_mob_without_a_namesake()
+-> TestResult {
+    let host = two_mob_host_with_an_identity_plane(
+        "console-schedules-door-knows",
+        &[("alpha", true), ("delta", true)],
+    )
+    .await?;
+    let no_agent = (json!(-32001), json!("unknown_identity"));
+
+    let delta = host
+        .at(&host.second, "meta/schedule/create", create_params("delta"))
+        .await;
+    let alpha = host
+        .at(&host.second, "meta/schedule/create", create_params("alpha"))
+        .await;
+    assert_ne!(
+        error_of(&delta),
+        no_agent,
+        "the second mob's delta is an agent of it: {delta:#?}"
+    );
+    assert_eq!(
+        error_of(&delta),
+        error_of(&alpha),
+        "the second mob's delta is answered as its alpha is: {delta:#?}"
+    );
+
+    let through_the_launch_mob = host
+        .at(&host.launch, "meta/schedule/create", create_params("delta"))
+        .await;
+    assert_eq!(
+        error_of(&through_the_launch_mob),
+        no_agent,
+        "delta is no agent of the launch mob: {through_the_launch_mob:#?}"
+    );
+    host.stop().await;
+    Ok(())
+}
+
+/// For a mob other than the host's default mob the door knows the agents
+/// that mob's identity runtime knows, and no other name. A member of the
+/// second mob that its identity runtime does not know is answered as a name
+/// no agent has, and so is every member of a second mob that has no
+/// identity runtime; a list for such a name answers as for a name no agent
+/// has. The agent the identity runtime knows is an agent, and the launch
+/// mob's own member is found by the console's records.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn member_keyed_schedule_door_knows_another_mobs_agents_by_its_identity_runtime_alone()
+-> TestResult {
+    let no_agent = (json!(-32001), json!("unknown_identity"));
+
+    // A second mob whose identity runtime knows `alpha`, with a member
+    // `delta` that it does not know.
+    let host =
+        two_mob_host_with_an_identity_plane("console-schedules-door-plane", &[("alpha", true)])
+            .await?;
+    spawn_agent_of_role(&host.second, "agent", "delta", true).await?;
+    let of_no_agent = host
+        .at(&host.second, "meta/schedule/create", create_params("ghost"))
+        .await;
+    assert_eq!(error_of(&of_no_agent), no_agent, "{of_no_agent:#?}");
+    let of_the_member = host
+        .at(&host.second, "meta/schedule/create", create_params("delta"))
+        .await;
+    assert_eq!(
+        error_of(&of_the_member),
+        no_agent,
+        "the second mob's identity runtime does not know delta: {of_the_member:#?}"
+    );
+    let listed = host
+        .at(
+            &host.second,
+            "meta/schedule/list",
+            json!({ "identity": "delta" }),
+        )
+        .await;
+    assert_eq!(
+        listed["result"],
+        json!({ "identity": "delta", "schedules": [], "other_schedules": [] }),
+        "{listed:#?}"
+    );
+    let of_the_agent = host
+        .at(&host.second, "meta/schedule/create", create_params("alpha"))
+        .await;
+    assert_ne!(
+        error_of(&of_the_agent),
+        no_agent,
+        "the second mob's identity runtime knows alpha: {of_the_agent:#?}"
+    );
+    assert!(
+        host.launch.service.list().await?.is_empty(),
+        "nothing was stored"
+    );
+    host.stop().await;
+
+    // A second mob with no identity runtime: none of its members is an
+    // agent to the door, and the launch mob's member still is.
+    let host = two_mob_host("console-schedules-door-no-plane", false).await?;
+    let of_the_member = host
+        .at(&host.second, "meta/schedule/create", create_params("alpha"))
+        .await;
+    assert_eq!(
+        error_of(&of_the_member),
+        no_agent,
+        "a second mob without an identity runtime: {of_the_member:#?}"
+    );
+    let of_the_launch_mobs_member = host
+        .at(&host.launch, "meta/schedule/create", create_params("alpha"))
+        .await;
+    assert!(
+        of_the_launch_mobs_member["error"].is_null(),
+        "{of_the_launch_mobs_member:#?}"
+    );
+    host.stop().await;
+    Ok(())
+}
+
+/// On a gateway that serves one mob the door reads the console's records
+/// as its send resolves them: an agent of the mob is found by its name and
+/// by its runtime member id, a name no agent has is refused, and a
+/// schedule stores the bytes every released build stores.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn member_keyed_schedule_door_of_a_one_mob_gateway_reads_the_consoles_records() -> TestResult
+{
+    let fixture = fixture(
+        "console-schedules-door-one-mob",
+        Some(ScheduleFiringHostBinding::external_driver()),
+    )
+    .await?;
+    let default_mob = crate::member_key::DefaultMob::new(fixture.runtime.handle().mob_id().clone());
+    let records = fixture.aggregator.identity_records_now().await?;
+    let alpha = records
+        .iter()
+        .find(|record| record.identity == "alpha")
+        .ok_or("the console's record of alpha")?;
+    let at = |method: &'static str, params: Value| {
+        at_the_schedule_door(&default_mob, &fixture, &fixture.aggregator, method, params)
+    };
+
+    let created = at("meta/schedule/create", create_params("alpha")).await;
+    let schedule_id = answered_id(&created);
+    let defined_at = stored_send(&fixture, &schedule_id).await?.defined_at;
+    let stored = fixture
+        .service
+        .get(&ScheduleId::parse(&schedule_id)?)
+        .await?;
+    let meerkat::TargetBinding::HostRunnable(binding) = stored.target else {
+        return Err("a console schedule targets the console's runnable".into());
+    };
+    assert_eq!(
+        binding.params.ok_or("a send has params")?.get(),
+        format!(
+            r#"{{"content":"Post the morning summary.","defined_at":{defined_at},"identity":"alpha","schema":"meta.console.scheduled_send.v1","sender":{{"kind":"anonymous"}}}}"#
+        )
+    );
+    let by_member_id = at(
+        "meta/schedule/list",
+        json!({ "identity": alpha.runtime_member_id }),
+    )
+    .await;
+    assert_eq!(
+        by_member_id["result"]["identity"],
+        json!("alpha"),
+        "{by_member_id:#?}"
+    );
+    assert_eq!(
+        by_member_id["result"]["schedules"][0]["schedule_id"],
+        json!(schedule_id),
+        "{by_member_id:#?}"
+    );
+    let of_no_agent = at("meta/schedule/create", create_params("ghost")).await;
+    assert_eq!(
+        error_of(&of_no_agent),
+        (json!(-32001), json!("unknown_identity")),
+        "{of_no_agent:#?}"
+    );
+    fixture.stop().await;
+    Ok(())
+}
+
+/// A schedule of the second mob's `alpha` is listed for that agent and not
+/// for the launch mob's agent of that name, and the launch mob's own
+/// schedule is listed for its own `alpha` only.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn member_keyed_schedule_door_lists_a_second_mobs_schedule_for_its_own_agent() -> TestResult {
+    let host = two_mob_host("console-schedules-door-lists", false).await?;
+    let of_second = host.stored_for_alpha_of_the_second_mob().await?;
+    let of_launch = host.created_for_alpha(&host.launch).await;
+
+    assert_eq!(
+        host.listed_for_alpha(&host.launch).await,
+        [of_launch],
+        "the launch mob's alpha lists its own schedule only"
+    );
+    assert_eq!(
+        host.listed_for_alpha(&host.second).await,
+        [of_second],
+        "the second mob's alpha lists its own schedule only"
+    );
+    host.stop().await;
+    Ok(())
+}
+
+/// A schedule that is no Console schedule and names an agent by its name
+/// alone is the default mob's agent's: the door lists it on that agent's
+/// view, and not on the view of the agent of the same name in another mob
+/// of the host.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn member_keyed_schedule_door_lists_a_schedule_that_names_no_mob_for_the_default_mobs_agent()
+-> TestResult {
+    let host = two_mob_host("console-schedules-door-no-mob", false).await?;
+    let schedule = host
+        .launch
+        .service
+        .create(meerkat::CreateScheduleRequest {
+            name: Some("a note".to_owned()),
+            description: None,
+            trigger: meerkat::TriggerSpec::Once {
+                due_at_utc: chrono::Utc::now() + chrono::Duration::days(1),
+            },
+            target: meerkat::TargetBinding::identity(meerkat::IdentityTargetBinding::resumable(
+                "alpha",
+                meerkat::ScheduledSessionAction::Prompt {
+                    prompt: meerkat_core::ContentInput::Text("Say hello.".into()),
+                    system_prompt: None,
+                    render_metadata: None,
+                    skill_refs: Vec::new(),
+                    additional_instructions: Vec::new(),
+                },
+            )),
+            misfire_policy: meerkat::MisfirePolicy::default(),
+            overlap_policy: meerkat::OverlapPolicy::default(),
+            missing_target_policy: meerkat::MissingTargetPolicy::default(),
+            labels: BTreeMap::new(),
+            planning_horizon_days: None,
+            planning_horizon_occurrences: None,
+        })
+        .await
+        .map_err(|error| error.to_string())?
+        .schedule_id
+        .to_string();
+
+    let through_the_launch_mob = host
+        .at(
+            &host.launch,
+            "meta/schedule/list",
+            json!({ "identity": "alpha" }),
+        )
+        .await;
+    assert_eq!(
+        through_the_launch_mob["result"]["other_schedules"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .map(|other| other["schedule_id"].clone())
+            .collect::<Vec<_>>(),
+        vec![json!(schedule)],
+        "the default mob's agent's view lists the schedule that names it by its name alone: \
+         {through_the_launch_mob:#?}"
+    );
+    let through_the_second_mob = host
+        .at(
+            &host.second,
+            "meta/schedule/list",
+            json!({ "identity": "alpha" }),
+        )
+        .await;
+    assert_eq!(
+        through_the_second_mob["result"]["other_schedules"],
+        json!([]),
+        "the view of the second mob's agent of that name does not list it: \
+         {through_the_second_mob:#?}"
+    );
+    host.stop().await;
+    Ok(())
+}
+
+/// A schedule of the second mob's `alpha` is not changed through the launch
+/// mob's agent of that name: an update, a pause, a resume and a delete that
+/// name it are answered as those of another agent's schedule are, and change
+/// nothing. Through its own mob it pauses.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn member_keyed_schedule_door_changes_a_second_mobs_schedule_through_its_own_agent()
+-> TestResult {
+    let host = two_mob_host("console-schedules-door-changes", false).await?;
+    let of_second = host.stored_for_alpha_of_the_second_mob().await?;
+    let of_launch = host.created_for_alpha(&host.launch).await;
+    let stored_before = host.stored_params(&of_second).await;
+
+    for method in [
+        "meta/schedule/update",
+        "meta/schedule/pause",
+        "meta/schedule/resume",
+        "meta/schedule/delete",
+    ] {
+        let through_the_launch_mob = host
+            .at(
+                &host.launch,
+                method,
+                json!({ "identity": "alpha", "schedule_id": of_second }),
+            )
+            .await;
+        let of_another_agent = host
+            .at(
+                &host.launch,
+                method,
+                json!({ "identity": "beta", "schedule_id": of_launch }),
+            )
+            .await;
+        assert!(
+            !through_the_launch_mob["error"].is_null(),
+            "{method}: {through_the_launch_mob:#?}"
+        );
+        assert_eq!(
+            error_of(&through_the_launch_mob),
+            error_of(&of_another_agent),
+            "{method}: a schedule of the agent of that name in another mob is another agent's"
+        );
+    }
+    let unchanged = host
+        .launch
+        .service
+        .get(&ScheduleId::parse(&of_second)?)
+        .await?;
+    assert_eq!(unchanged.phase, meerkat::SchedulePhase::Active);
+    assert_eq!(host.stored_params(&of_second).await, stored_before);
+
+    let paused = host
+        .at(
+            &host.second,
+            "meta/schedule/pause",
+            json!({ "identity": "alpha", "schedule_id": of_second }),
+        )
+        .await;
+    assert!(paused["error"].is_null(), "{paused:#?}");
+    assert_eq!(paused["result"]["phase"], json!("paused"), "{paused:#?}");
+    host.stop().await;
+    Ok(())
+}
+
+/// A schedule of the second mob's `alpha` is not fired at the launch mob's
+/// agent of that name: the launch mob's send path refuses the fire and sends
+/// nothing, while the launch mob's own schedule fires and is sent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn member_keyed_schedule_door_a_second_mobs_schedule_fires_at_no_launch_mob_agent()
+-> TestResult {
+    let host = two_mob_host("console-schedules-door-fires", true).await?;
+    let of_second = host.stored_for_alpha_of_the_second_mob().await?;
+    let of_launch = host.created_for_alpha(&host.launch).await;
+
+    let open = doors(
+        &host.launch,
+        open_decisions(false),
+        None,
+        crate::auth::session_fence::ConsoleSessionFences::detached(),
+        ungoverned(),
+    );
+    refused_because(
+        fire(&host.launch, &open, &of_second, "key-of-the-second-mob").await,
+        "a member of mob",
+    );
+    assert!(
+        sends_under(&host.launch, "alpha", "key-of-the-second-mob")
+            .await
+            .is_empty(),
+        "nothing was sent to the launch mob's agent of the same name"
+    );
+    fire(&host.launch, &open, &of_launch, "key-of-the-launch-mob").await?;
+    assert_eq!(
+        sends_under(&host.launch, "alpha", "key-of-the-launch-mob")
+            .await
+            .len(),
+        1
+    );
+    host.stop().await;
+    Ok(())
+}
+
+/// A schedule created for the launch mob's agent stores the bytes every
+/// released build stores: the first schema string and no mob. Passes before
+/// and after the door is told the host's default mob.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn member_keyed_schedule_door_a_launch_mobs_schedule_stores_the_released_bytes() -> TestResult
+{
+    let host = two_mob_host("console-schedules-door-bytes", false).await?;
+    let of_launch = host.created_for_alpha(&host.launch).await;
+    let defined_at = stored_send(&host.launch, &of_launch).await?.defined_at;
+    assert_eq!(
+        host.stored_params(&of_launch).await,
+        format!(
+            r#"{{"content":"Post the morning summary.","defined_at":{defined_at},"identity":"alpha","schema":"meta.console.scheduled_send.v1","sender":{{"kind":"anonymous"}}}}"#
+        )
+    );
+    host.stop().await;
+    Ok(())
+}
+
+/// `method` with `params` posted to the request door of the open console
+/// `router`: the JSON-RPC answer.
+async fn post_to_the_open_console(router: &axum::Router, method: &str, params: Value) -> Value {
+    use tower::ServiceExt;
+    let response = router
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/console/rpc")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from(
+                    json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params})
+                        .to_string(),
+                ))
+                .expect("console request"),
+        )
+        .await
+        .expect("console response");
+    let body = axum::body::to_bytes(response.into_body(), 1 << 20)
+        .await
+        .expect("console body");
+    serde_json::from_slice(&body).unwrap_or(Value::Null)
+}
+
+/// End to end, through the console's request door, for all six methods: on
+/// a host whose resolver serves a second mob (a test-only seam; no host can
+/// serve one yet) whose identity runtime knows `alpha`, a
+/// `meta/schedule/create` that names the second mob is refused, because no
+/// fire would send the schedule, and stores nothing; a name that only an
+/// agent of the launch mob has is answered as a name no agent has. A
+/// schedule of the second mob's `alpha` that is in the store is listed for
+/// that agent and not for the launch mob's agent of that name, and a pause
+/// that names it through the launch mob answers as for another agent's
+/// schedule. Named for the second mob, an update and a resume of it are
+/// refused as the create is, and a pause and a delete answer. A create that
+/// names no mob stores the bytes every released build stores, and that
+/// schedule stays the launch mob's agent's throughout.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn member_keyed_schedule_door_through_the_console_a_second_mobs_schedule_is_its_own()
+-> TestResult {
+    let launch = delivering_fixture("console-schedules-rpc-launch").await?;
+    let second = identity_plane_fixture("console-schedules-rpc-second", &[("alpha", true)]).await?;
+    // One host: both mobs' console schedules live in its one schedule
+    // service, the launch's.
+    second.runtime.console_schedules().attach(
+        launch.service.clone(),
+        ScheduleFiringHostBinding::external_driver(),
+    );
+    let second_mob = second.runtime.handle().mob_id().clone();
+    let resolver = launch
+        .owner
+        .as_ref()
+        .ok_or("the launch's runtime")?
+        .mob_resolver()
+        .serving_a_second_mob_in_tests(
+            &second
+                .owner
+                .as_ref()
+                .ok_or("the second mob's runtime")?
+                .mob_resolver(),
+        );
+    let mut state = super::console_private_side_chat_tests::open_console(&launch.runtime);
+    state.console_aggregator = Some(launch.aggregator.clone());
+    state.console_events = Some(launch.events.clone());
+    let router = console_json_router_with_state(state).layer(axum::Extension(resolver));
+    let naming = |mut params: Value, mob: Option<&meerkat_mob::MobId>| {
+        if let Some(mob) = mob {
+            params["mob_id"] = json!(mob.as_str());
+        }
+        params
+    };
+    let listed = |answer: &Value| -> Vec<String> {
+        answer["result"]["schedules"]
+            .as_array()
+            .unwrap_or_else(|| panic!("a list of schedules: {answer:#?}"))
+            .iter()
+            .filter_map(|schedule| schedule["schedule_id"].as_str())
+            .map(ToString::to_string)
+            .collect()
+    };
+
+    let refused = post_to_the_open_console(
+        &router,
+        "meta/schedule/create",
+        naming(create_params("alpha"), Some(&second_mob)),
+    )
+    .await;
+    assert_eq!(
+        error_of(&refused),
+        (
+            json!(crate::rpc::CAPABILITY_UNAVAILABLE_CODE),
+            json!("schedule_host_unavailable")
+        ),
+        "no fire would send a schedule of the second mob's alpha: {refused:#?}"
+    );
+    spawn_agent_of_role(&launch, "agent", "gamma", true).await?;
+    let of_no_agent = post_to_the_open_console(
+        &router,
+        "meta/schedule/create",
+        naming(create_params("ghost"), Some(&second_mob)),
+    )
+    .await;
+    assert_eq!(
+        error_of(&of_no_agent),
+        (json!(-32001), json!("unknown_identity")),
+        "{of_no_agent:#?}"
+    );
+    let of_the_launch_mobs_agent = post_to_the_open_console(
+        &router,
+        "meta/schedule/create",
+        naming(create_params("gamma"), Some(&second_mob)),
+    )
+    .await;
+    assert_eq!(
+        error_of(&of_the_launch_mobs_agent),
+        error_of(&of_no_agent),
+        "gamma is no agent of the second mob: {of_the_launch_mobs_agent:#?}"
+    );
+    assert!(
+        launch.service.list().await?.is_empty(),
+        "the refused creates stored nothing"
+    );
+    let default_mob = crate::member_key::DefaultMob::new(launch.runtime.handle().mob_id().clone());
+    let of_second = stored_for_alpha_of(&launch.service, &default_mob, &second_mob).await?;
+    let send = stored_send(&launch, &of_second).await?;
+    assert_eq!(send.mob_id.as_ref(), Some(&second_mob));
+    assert_eq!(send.schema, "meta.console.scheduled_send.v2");
+
+    let of_launch = answered_id(
+        &post_to_the_open_console(&router, "meta/schedule/create", create_params("alpha")).await,
+    );
+    let send = stored_send(&launch, &of_launch).await?;
+    assert_eq!(send.mob_id, None, "a request that names no mob");
+    assert_eq!(send.schema, "meta.console.scheduled_send.v1");
+
+    let for_alpha = json!({ "identity": "alpha" });
+    assert_eq!(
+        listed(
+            &post_to_the_open_console(
+                &router,
+                "meta/schedule/list",
+                naming(for_alpha.clone(), Some(&second_mob)),
+            )
+            .await
+        ),
+        std::slice::from_ref(&of_second),
+        "the second mob's alpha lists its own schedule only"
+    );
+    assert_eq!(
+        listed(&post_to_the_open_console(&router, "meta/schedule/list", for_alpha).await),
+        std::slice::from_ref(&of_launch),
+        "the launch mob's alpha lists its own schedule only"
+    );
+
+    let through_the_launch_mob = post_to_the_open_console(
+        &router,
+        "meta/schedule/pause",
+        json!({ "identity": "alpha", "schedule_id": of_second }),
+    )
+    .await;
+    let of_another_agent = post_to_the_open_console(
+        &router,
+        "meta/schedule/pause",
+        json!({ "identity": "beta", "schedule_id": of_launch }),
+    )
+    .await;
+    assert!(
+        !through_the_launch_mob["error"].is_null(),
+        "{through_the_launch_mob:#?}"
+    );
+    assert_eq!(
+        error_of(&through_the_launch_mob),
+        error_of(&of_another_agent),
+        "a schedule of the agent of that name in another mob is another agent's"
+    );
+
+    // The other writes, each named for the second mob: an update and a
+    // resume are refused as the create is, a pause and a delete answer, and
+    // the launch mob's schedule is not touched.
+    let never_sent = (
+        json!(crate::rpc::CAPABILITY_UNAVAILABLE_CODE),
+        json!("schedule_host_unavailable"),
+    );
+    let by_id = naming(
+        json!({ "identity": "alpha", "schedule_id": of_second }),
+        Some(&second_mob),
+    );
+    let updated = post_to_the_open_console(
+        &router,
+        "meta/schedule/update",
+        naming(
+            json!({ "identity": "alpha", "schedule_id": of_second, "content": "Changed." }),
+            Some(&second_mob),
+        ),
+    )
+    .await;
+    assert_eq!(error_of(&updated), never_sent, "{updated:#?}");
+    let paused = post_to_the_open_console(&router, "meta/schedule/pause", by_id.clone()).await;
+    assert_eq!(paused["result"]["phase"], json!("paused"), "{paused:#?}");
+    let resumed = post_to_the_open_console(&router, "meta/schedule/resume", by_id.clone()).await;
+    assert_eq!(error_of(&resumed), never_sent, "{resumed:#?}");
+    assert_eq!(
+        launch
+            .service
+            .get(&ScheduleId::parse(&of_second)?)
+            .await?
+            .phase,
+        meerkat::SchedulePhase::Paused,
+        "the refused resume changed nothing"
+    );
+    let deleted = post_to_the_open_console(&router, "meta/schedule/delete", by_id).await;
+    assert!(deleted["error"].is_null(), "{deleted:#?}");
+    assert!(
+        listed(
+            &post_to_the_open_console(
+                &router,
+                "meta/schedule/list",
+                naming(json!({ "identity": "alpha" }), Some(&second_mob)),
+            )
+            .await
+        )
+        .is_empty(),
+        "the second mob's alpha has no schedule left"
+    );
+    assert_eq!(
+        listed(
+            &post_to_the_open_console(
+                &router,
+                "meta/schedule/list",
+                json!({ "identity": "alpha" })
+            )
+            .await
+        ),
+        std::slice::from_ref(&of_launch),
+        "the launch mob's alpha keeps its schedule"
+    );
+    assert_eq!(
+        launch
+            .service
+            .get(&ScheduleId::parse(&of_launch)?)
+            .await?
+            .phase,
+        meerkat::SchedulePhase::Active
+    );
+    second.stop().await;
+    launch.stop().await;
+    Ok(())
+}
+
+/// End to end, for signed-in callers under an access policy whose rules
+/// select mobs, on a host whose resolver serves a second mob (a test-only
+/// seam). A person whose allow selects the second mob reaches the schedule
+/// door for that mob: a schedule for its `alpha` is refused because no fire
+/// would send it, a name that only an agent of the launch mob has is
+/// answered as a name no agent has, and nothing is stored; the same person
+/// has no rule in the launch mob. A person whose allow selects the launch
+/// mob is answered for the second mob as for an id no mob has, and
+/// schedules the launch mob's `alpha` with a send that names no mob.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn member_keyed_schedule_door_through_the_console_for_signed_in_callers() -> TestResult {
+    use super::console_human_admission_tests::BOB;
+    use super::console_private_side_chat_tests::{
+        ALICE, ROOT, alice_claims, bearer, bob_claims, enforced_console,
+    };
+    use super::console_token_lapse_tests::console_rpc_as;
+    let launch = delivering_fixture("console-schedules-signed-launch").await?;
+    let second =
+        identity_plane_fixture("console-schedules-signed-second", &[("alpha", true)]).await?;
+    second.runtime.console_schedules().attach(
+        launch.service.clone(),
+        ScheduleFiringHostBinding::external_driver(),
+    );
+    spawn_agent_of_role(&launch, "agent", "gamma", true).await?;
+    let second_mob = second.runtime.handle().mob_id().clone();
+    let schedules_agents = [ACTION_AGENT_VIEW, ACTION_AGENT_SEND, "schedule.manage"]
+        .map(str::to_string)
+        .to_vec();
+    let access = AccessController::new(crate::access::AccessControlConfig {
+        enabled: true,
+        admins: vec![ROOT.to_string()],
+        rules: vec![
+            AccessRule {
+                id: "alice-schedules-the-second-mob".to_string(),
+                subjects: vec![ALICE.to_string()],
+                actions: schedules_agents.clone(),
+                agents: vec!["*".to_string()],
+                mobs: vec![second_mob.to_string()],
+                ..AccessRule::default()
+            },
+            AccessRule {
+                id: "bob-schedules-the-launch-mob".to_string(),
+                subjects: vec![BOB.to_string()],
+                actions: schedules_agents,
+                agents: vec!["*".to_string()],
+                ..AccessRule::default()
+            },
+        ],
+        ..crate::access::AccessControlConfig::default()
+    })?;
+    let mut state = enforced_console(&launch.runtime, Some(access));
+    state.console_aggregator = Some(launch.aggregator.clone());
+    state.console_events = Some(launch.events.clone());
+    let resolver = launch
+        .owner
+        .as_ref()
+        .ok_or("the launch's runtime")?
+        .mob_resolver()
+        .serving_a_second_mob_in_tests(
+            &second
+                .owner
+                .as_ref()
+                .ok_or("the second mob's runtime")?
+                .mob_resolver(),
+        );
+    let router = console_json_router_with_state(state).layer(axum::Extension(resolver));
+    let alice = bearer(alice_claims());
+    let bob = bearer(bob_claims());
+    let naming = |mut params: Value, mob: &str| {
+        params["mob_id"] = json!(mob);
+        params
+    };
+    let no_agent = (json!(-32001), json!("unknown_identity"));
+
+    // A person whose rules select the launch mob alone.
+    let no_mob_has = format!("{second_mob}-absent");
+    for (method, params) in [
+        ("meta/schedule/list", json!({ "identity": "alpha" })),
+        ("meta/schedule/create", create_params("alpha")),
+    ] {
+        let of_the_second_mob = console_rpc_as(
+            &router,
+            Some(&bob),
+            method,
+            naming(params.clone(), second_mob.as_str()),
+        )
+        .await;
+        let of_no_mob =
+            console_rpc_as(&router, Some(&bob), method, naming(params, &no_mob_has)).await;
+        assert_eq!(
+            error_of(&of_the_second_mob),
+            (json!(-32602), json!("foreign_mob_target")),
+            "{method}: {of_the_second_mob:#?}"
+        );
+        assert_eq!(
+            error_of(&of_the_second_mob),
+            error_of(&of_no_mob),
+            "{method}: a mob the caller may not address is answered as an id no mob has"
+        );
+    }
+
+    // A person whose rule selects the second mob.
+    let refused = console_rpc_as(
+        &router,
+        Some(&alice),
+        "meta/schedule/create",
+        naming(create_params("alpha"), second_mob.as_str()),
+    )
+    .await;
+    assert_eq!(
+        error_of(&refused),
+        (
+            json!(crate::rpc::CAPABILITY_UNAVAILABLE_CODE),
+            json!("schedule_host_unavailable")
+        ),
+        "no fire would send a schedule of the second mob's alpha: {refused:#?}"
+    );
+    let of_no_agent = console_rpc_as(
+        &router,
+        Some(&alice),
+        "meta/schedule/create",
+        naming(create_params("ghost"), second_mob.as_str()),
+    )
+    .await;
+    assert_eq!(error_of(&of_no_agent), no_agent, "{of_no_agent:#?}");
+    let of_the_launch_mobs_agent = console_rpc_as(
+        &router,
+        Some(&alice),
+        "meta/schedule/create",
+        naming(create_params("gamma"), second_mob.as_str()),
+    )
+    .await;
+    assert_eq!(
+        error_of(&of_the_launch_mobs_agent),
+        no_agent,
+        "gamma is no agent of the second mob: {of_the_launch_mobs_agent:#?}"
+    );
+    let listed = console_rpc_as(
+        &router,
+        Some(&alice),
+        "meta/schedule/list",
+        naming(json!({ "identity": "alpha" }), second_mob.as_str()),
+    )
+    .await;
+    assert_eq!(
+        listed["result"],
+        json!({ "identity": "alpha", "schedules": [], "other_schedules": [] }),
+        "{listed:#?}"
+    );
+    let in_the_launch_mob = console_rpc_as(
+        &router,
+        Some(&alice),
+        "meta/schedule/create",
+        create_params("alpha"),
+    )
+    .await;
+    assert_eq!(
+        error_of(&in_the_launch_mob),
+        (json!(ACCESS_DENIED_RPC_CODE), json!("access_denied")),
+        "a rule that selects the second mob gives nothing in the launch mob: \
+         {in_the_launch_mob:#?}"
+    );
+    assert!(
+        launch.service.list().await?.is_empty(),
+        "nothing was stored"
+    );
+
+    let of_launch = answered_id(
+        &console_rpc_as(
+            &router,
+            Some(&bob),
+            "meta/schedule/create",
+            create_params("alpha"),
+        )
+        .await,
+    );
+    let send = stored_send(&launch, &of_launch).await?;
+    assert_eq!(send.mob_id, None, "a request that names no mob");
+    assert_eq!(send.schema, "meta.console.scheduled_send.v1");
+    second.stop().await;
+    launch.stop().await;
     Ok(())
 }

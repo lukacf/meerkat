@@ -475,6 +475,7 @@ fn e2e_004_happy_path_full_lifecycle_startup_reconcile_route_delivery_shutdown()
 
     let resolution = tokio_runtime
         .block_on(runtime.resolve_routing(RoutingResolveRequest {
+            mob_id: None,
             recipient: "user@example.com".to_string(),
             channel: Some("transactional".to_string()),
             retry_max: Some(1),
@@ -487,6 +488,7 @@ fn e2e_004_happy_path_full_lifecycle_startup_reconcile_route_delivery_shutdown()
 
     let delivery = tokio_runtime
         .block_on(runtime.send_delivery(DeliverySendRequest {
+            mob_id: None,
             resolution: resolution.clone(),
             payload: json!({"message":"phase5 lifecycle happy path"}),
             idempotency_key: Some("phase5-e2e-004".to_string()),

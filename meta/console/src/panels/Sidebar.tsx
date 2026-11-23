@@ -1,9 +1,11 @@
 import { ApprovalAttention, useApprovalViewer } from "../../../packages/console-components/src/conversation/approval-card";
 import { CopyButton } from "../../../packages/console-components/src/copy-button";
+import { copyTextToClipboard } from "../../../packages/console-components/src/shared";
 import { IconButton } from "../../../packages/console-components/src/panel-kit/button";
+import { OverflowMenu, type MenuEntry } from "../../../packages/console-components/src/panel-kit/menu";
 import { RelativeTime } from "../../../packages/console-components/src/panel-kit/relative-time";
 import { StatusMark } from "../../../packages/console-components/src/panel-kit/status-mark";
-import { SearchField } from "../../../packages/console-components/src/panel-kit/toolbar";
+import { SearchField, SelectField } from "../../../packages/console-components/src/panel-kit/toolbar";
 import { ViewOptions, type ViewOptionsControl } from "../../../packages/console-components/src/panel-kit/view-options";
 import { Sparkline } from "../../../packages/console-components/src/viz/charts/sparkline";
 import { approvalAudience, type ApprovalViewer, type PendingApprovalSnapshot } from "../../../packages/console-core/src/pending-approvals";
@@ -20,8 +22,17 @@ import {
   SUBGROUP_COLLAPSE_STORAGE_PREFIX,
   applyConsoleNavigationReorderIntent,
   applyConsoleSidebarOrder as applySidebarOrder,
+  memberReferenceKeys,
+  nestedMobIdsOfMembers,
   capConsoleSidebarAgentOrder,
+  consoleMobTree,
   listConsoleSidebarAgentOrder,
+  listedMobOf,
+  mobAndNestedIds,
+  mobCreatorNamer,
+  mobFullName,
+  mobStateTone,
+  mobStateWords,
   moveConsoleSidebarOrderKey,
   normalizeConsoleNavigationModel,
   normalizeConsoleSidebarGroupBy,
@@ -35,6 +46,7 @@ import {
   writeConsoleSidebarView,
   writeSidebarStringList,
   writeSidebarStringSet,
+  type ConsoleMobNode,
   type ConsoleNavigationModel,
   type ConsoleNavigationNode,
   type ConsoleSidebarDropPosition,
@@ -46,6 +58,7 @@ import type {
   ConsoleAgent,
   ConsoleAgentListConfig,
   ConsoleFrame,
+  ConsoleMob,
   ConsoleSidebarButtonConfig,
 } from "../types";
 import { Icon } from "../icon";
@@ -111,6 +124,38 @@ interface SidebarProps {
   onOpenApproval?: (pendingId?: string) => void;
   /** Host-provided attention items, counted in "Needs you". */
   hostAttentionCount?: number;
+  /**
+   * Every mob the console lists (`topology.live_snapshot.mobs`): with more
+   * than one, the roster can group agents by mob, as a tree that follows
+   * the nesting, and the mob choice applies.
+   */
+  mobs?: readonly ConsoleMob[];
+  /** The console's own mob: an agent row that names no mob is its member. */
+  primaryMobId?: string;
+  /** The mob choice: the mob shown with the mobs nested under it, or all mobs (null). */
+  selectedMobId?: string | null;
+  /** Choose a mob (and the mobs nested under it), or all mobs with null. */
+  onSelectMob?: (mobId: string | null) => void;
+  /**
+   * A person opened a mob that is asleep (by its header, or by choosing
+   * it): the host wakes it. The roster itself asks nothing of the gateway.
+   */
+  onOpenMob?: (mobId: string) => void;
+  /** The mobs a person's opening is under way for: each reads "Waking". */
+  wakingMobIds?: ReadonlySet<string>;
+  /**
+   * Whether the host has read the mob list yet. The roster decides its
+   * default grouping once, from the first list it is given; a host that
+   * mounts the roster before its first read passes false until then.
+   * Defaults to true once `mobs` or an agent is given.
+   */
+  mobsLoaded?: boolean;
+  /**
+   * The ordinals the host keeps for mobs whose name says nothing of its own
+   * ("Team 1", "Team 2"), so the roster and the host's other surfaces give a
+   * mob one name. The roster keeps its own when the host passes none.
+   */
+  mobOrdinals?: Map<string, number>;
   /** Replies meant for the signed-in person alone, counted there too. */
   attentionReplyCount?: number;
   /** The open sets of questions agents asked a person, counted in "Needs
@@ -220,6 +265,15 @@ interface AgentRow {
   subgroup?: string | null;
 }
 
+/**
+ * What a mob's header shows when the roster is grouped by mob: the mob and
+ * how deep it sits under the first mob shown.
+ */
+interface SidebarMobHeader {
+  node: ConsoleMobNode;
+  depth: number;
+}
+
 type SidebarVirtualRow =
   | {
     kind: "section";
@@ -231,6 +285,8 @@ type SidebarVirtualRow =
     reorderable: boolean;
     /** The key its collapse state is kept under, when not its name. */
     collapseKey?: string;
+    /** Set when the section is a mob of the roster grouped by mob. */
+    mob?: SidebarMobHeader;
   }
   | { kind: "empty"; key: string; bucket: string; sectionConfig: ReturnType<typeof sectionConfigFor> }
   | { kind: "subgroup"; key: string; bucket: string; label: string; count: number; collapsed: boolean; storageKey: string; reorderable: boolean }
@@ -296,6 +352,15 @@ const PINNED_SECTION_KEY = "section:__meta_pinned";
 /** The roster's one section when it is not grouped by category. */
 const FLAT_SECTION_NAME = "All agents";
 const FLAT_SECTION_KEY = "section:__meta_all_agents";
+/** A mob's header and its agents step in once per nesting level, up to this many levels: deeper mobs keep that indent. */
+const MOB_INDENT_CAP = 3;
+/** One nesting step, in px. */
+const MOB_INDENT_STEP_PX = 8;
+
+/** How far a mob at `depth` and its agents step in: capped, so a deep mob's name keeps its room. */
+function mobIndentPx(depth: number): number {
+  return Math.min(Math.max(0, depth), MOB_INDENT_CAP) * MOB_INDENT_STEP_PX;
+}
 /** A drag within this distance of the list's top or bottom edge scrolls the list. */
 const SIDEBAR_DRAG_EDGE_PX = 36;
 const SIDEBAR_DRAG_EDGE_MAX_STEP_PX = 14;
@@ -443,17 +508,41 @@ function referenceMatchesAgentKey(reference: string, key: string): boolean {
   return false;
 }
 
-function isWiredTo(a: ConsoleAgent, host: ConsoleAgent | null): boolean {
-  if (!host) return false;
-  const wiredTo = a.wired_to || [];
-  return agentKeys(host).some((key) =>
-    wiredTo.some((peer) => referenceMatchesAgentKey(peer, key)),
-  );
+const NESTED_MOBS_OF_ROSTER = new WeakMap<readonly ConsoleAgent[], Set<string>>();
+
+/** The listed mobs other than the console's own, read from the roster once per roster array. */
+function rosterNestedMobs(agents: readonly ConsoleAgent[]): Set<string> {
+  let nested = NESTED_MOBS_OF_ROSTER.get(agents);
+  if (!nested) {
+    nested = nestedMobIdsOfMembers(agents);
+    NESTED_MOBS_OF_ROSTER.set(agents, nested);
+  }
+  return nested;
 }
 
-function isSpawnedDelegateLike(a: ConsoleAgent, host: ConsoleAgent | null): boolean {
+/**
+ * Whether a reference (a wired peer, a spawner, a side chat's source) names
+ * the agent. A reference that starts with a listed nested mob names that
+ * mob's member by its identity alone: `alpha/reviewer` is never the
+ * `reviewer` of another mob. Any other reference matches the way the
+ * sidebar always matched ({@link referenceMatchesAgentKey}).
+ */
+function referenceNamesAgent(reference: string, agent: ConsoleAgent, nested?: ReadonlySet<string>): boolean {
+  const lookup = memberReferenceKeys(reference, nested);
+  if (lookup.nested) {
+    return [agent.identity, agent.member_id, agent.agent_id].some((key) => Boolean(key) && lookup.keys.includes(key!));
+  }
+  return agentKeys(agent).some((key) => referenceMatchesAgentKey(reference, key));
+}
+
+function isWiredTo(a: ConsoleAgent, host: ConsoleAgent | null, nested?: ReadonlySet<string>): boolean {
+  if (!host) return false;
+  return (a.wired_to || []).some((peer) => referenceNamesAgent(peer, host, nested));
+}
+
+function isSpawnedDelegateLike(a: ConsoleAgent, host: ConsoleAgent | null, nested?: ReadonlySet<string>): boolean {
   if (!isWorkerish(a)) return false;
-  if (isWiredTo(a, host)) return true;
+  if (isWiredTo(a, host, nested)) return true;
   if (a.labels?.group?.trim() || a.labels?.console_group?.trim()) return false;
 
   const role = (a.role || "").toLowerCase();
@@ -476,50 +565,44 @@ function explicitHostId(a: ConsoleAgent): string | null {
 }
 
 function findSpawnHost(a: ConsoleAgent, agents: ConsoleAgent[], commander: ConsoleAgent | null): ConsoleAgent | null {
+  const nested = rosterNestedMobs(agents);
+  const named = (reference: string) => agents.find((candidate) =>
+    candidate.member_id !== a.member_id && referenceNamesAgent(reference, candidate, nested));
   // A side chat lists under the agent it branched from, as the runtime's
   // roster records the fork.
   const sideChatOf = a.side_chat_of;
   if (sideChatOf) {
-    const match = agents.find((candidate) =>
-      candidate.member_id !== a.member_id
-        && agentKeys(candidate).some((key) => referenceMatchesAgentKey(sideChatOf, key)),
-    );
+    const match = named(sideChatOf);
     if (match) return match;
   }
   const spawnedBy = a.labels?.spawned_by;
   if (spawnedBy) {
-    const match = agents.find((candidate) =>
-      candidate.member_id !== a.member_id
-        && agentKeys(candidate).some((key) => referenceMatchesAgentKey(spawnedBy, key)),
-    );
+    const match = named(spawnedBy);
     if (match) return match;
   }
   if (!isWorkerish(a)) return null;
   const explicitHost = explicitHostId(a);
   if (explicitHost) {
-    const match = agents.find((candidate) =>
-      candidate.member_id !== a.member_id
-        && agentKeys(candidate).some((key) => referenceMatchesAgentKey(explicitHost, key)),
-    );
+    const match = named(explicitHost);
     if (match) return match;
   }
 
   const commanderHost = agents.find((candidate) =>
-    candidate.member_id !== a.member_id && isCommanderLike(candidate) && isWiredTo(a, candidate),
+    candidate.member_id !== a.member_id && isCommanderLike(candidate) && isWiredTo(a, candidate, nested),
   );
   if (commanderHost) return commanderHost;
 
   const wiredNonWorkerHost = agents.find((candidate) =>
-    candidate.member_id !== a.member_id && !isWorkerish(candidate) && isWiredTo(a, candidate),
+    candidate.member_id !== a.member_id && !isWorkerish(candidate) && isWiredTo(a, candidate, nested),
   );
   if (wiredNonWorkerHost) return wiredNonWorkerHost;
 
   const workerHost = agents.find((candidate) =>
-    candidate.member_id !== a.member_id && isWorkerish(candidate) && isWiredTo(a, candidate),
+    candidate.member_id !== a.member_id && isWorkerish(candidate) && isWiredTo(a, candidate, nested),
   );
   if (workerHost) return workerHost;
 
-  if (commander && commander.member_id !== a.member_id && isSpawnedDelegateLike(a, commander)) return commander;
+  if (commander && commander.member_id !== a.member_id && isSpawnedDelegateLike(a, commander, nested)) return commander;
   return null;
 }
 
@@ -570,6 +653,8 @@ export const __sidebarTest = {
   agentDetailText,
   sidebarActivity,
   sidebarViewSummary,
+  groupSidebarAgentsByMob,
+  buildMobSidebarVirtualRows,
   logsErrorCount,
   FLAT_SECTION_NAME,
   FLAT_SECTION_KEY,
@@ -998,6 +1083,12 @@ function agentDetailText(agent: ConsoleAgent, openRun = false): string {
   return [kind, status].filter(Boolean).join(" · ");
 }
 
+/** Whether a roster search (lower case) finds the agent: by its name, label, identity, member id or role. */
+function agentMatchesSearch(agent: ConsoleAgent, needle: string): boolean {
+  return [sidebarAgentTitle(agent), agent.label, agent.identity, agent.member_id, agent.role]
+    .some((value) => value?.toLowerCase().includes(needle));
+}
+
 /** The roster's Show filter: every agent, or one activity. Session state. */
 type SidebarActivityFilter = "all" | SidebarActivity;
 
@@ -1008,14 +1099,21 @@ const ACTIVITY_SUMMARY_WORD: Readonly<Record<SidebarActivity, string>> = {
 };
 
 /**
- * The parts of the roster view that differ from the default (All,
- * Category, Manual), in words and in the order the summary lists them
- * (A5): "Working", "Quiet" or "Status unknown"; "By name" or "By last
- * activity"; "Ungrouped". Empty for the default view.
+ * The parts of the roster view that differ from the default (All, grouped,
+ * Manual, all mobs), in words and in the order the summary lists them (A5):
+ * "Working", "Quiet" or "Status unknown"; the chosen mob's name; "By name"
+ * or "By last activity"; "Ungrouped". Category and Mob are both ordinary
+ * groupings: neither is listed, so a grouping kept from before a second mob
+ * was listed never reads as a changed view. Empty for the default view.
  */
-function sidebarViewSummary(activity: SidebarActivityFilter, view: ConsoleSidebarViewPreferences): string[] {
+function sidebarViewSummary(
+  activity: SidebarActivityFilter,
+  view: ConsoleSidebarViewPreferences,
+  chosenMobName?: string | null,
+): string[] {
   const parts: string[] = [];
   if (activity !== "all") parts.push(ACTIVITY_SUMMARY_WORD[activity]);
+  if (chosenMobName) parts.push(chosenMobName);
   if (view.sortBy === "name") parts.push("By name");
   else if (view.sortBy === "activity") parts.push("By last activity");
   if (view.groupBy === "none") parts.push("Ungrouped");
@@ -1612,10 +1710,167 @@ function buildSidebarVirtualRows(args: {
   return rows;
 }
 
+/** The key a mob's rows, and its collapse state, are kept under. */
+function sidebarMobBucket(mobId: string): string {
+  return `mob:${mobId}`;
+}
+
+/**
+ * The roster's agents by mob, each mob's rows a preorder tree of spawners
+ * inside the mob, under the chosen sort. An agent whose spawner is a member
+ * of another mob starts a tree of its own in its mob: the mob itself is
+ * nested under the spawner's mob. A row whose mob the tree does not list is
+ * the console's own mob's ({@link listedMobOf}).
+ */
+function groupSidebarAgentsByMob(
+  classified: SidebarClassification,
+  tree: readonly ConsoleMobNode[],
+  primaryMobId: string | undefined,
+  order?: SidebarSortContext,
+  defaultRank?: ReadonlyMap<string, number>,
+): Map<string, AgentRow[]> {
+  const listed = new Set(tree.map((mob) => mob.mobId));
+  const fallback = tree[0]?.mobId ?? "";
+  const rows = Array.from(classified.rowsByBucket.values()).flat();
+  const mobOf = new Map<string, string>();
+  for (const row of rows) {
+    mobOf.set(row.agent.member_id, listedMobOf(row.agent, listed, primaryMobId) ?? fallback);
+  }
+  const parentById = new Map<string, string>();
+  for (const [child, parent] of classified.parentById) {
+    if (mobOf.get(child) === mobOf.get(parent)) parentById.set(child, parent);
+  }
+  const byMob = new Map<string, AgentRow[]>();
+  for (const row of rows) {
+    const bucket = sidebarMobBucket(mobOf.get(row.agent.member_id) ?? fallback);
+    const list = byMob.get(bucket) || [];
+    list.push({
+      ...row,
+      subgroup: null,
+      childOfHost: parentById.has(row.agent.member_id),
+      depth: depthForAgent(row.agent, parentById),
+      parentMemberId: parentById.get(row.agent.member_id) || null,
+    });
+    byMob.set(bucket, list);
+  }
+  const grouped = new Map<string, AgentRow[]>();
+  for (const [bucket, list] of byMob) {
+    grouped.set(bucket, orderRowsPreorder(list, parentById, classified.host, false, order, defaultRank));
+  }
+  return grouped;
+}
+
+/**
+ * The roster grouped by mob: Pinned first, then each mob of `tree` in tree
+ * order, its header and then its agents, with the mobs nested under it after
+ * them. A collapsed mob hides its agents and its nested mobs. While a search
+ * or the Show filter is on, only mobs with an agent shown are listed, with
+ * the mobs they are nested under; otherwise every mob of the tree is, an
+ * empty one too.
+ */
+function buildMobSidebarVirtualRows(args: {
+  tree: readonly ConsoleMobNode[];
+  grouped: Map<string, AgentRow[]>;
+  collapsedSections: Set<string>;
+  pinnedAgentIds?: Set<string>;
+  searchActive?: boolean;
+  order?: SidebarSortContext;
+}): SidebarVirtualRow[] {
+  const rows: SidebarVirtualRow[] = [];
+  const baseRows = args.tree.flatMap((mob) => args.grouped.get(sidebarMobBucket(mob.mobId)) || []);
+  const baseOrderIndex = new Map(baseRows.map((row, index) => [row.agent.member_id, index] as const));
+  const pinnedRowIds = collectPinnedRows(baseRows, args.pinnedAgentIds);
+  if (pinnedRowIds.size > 0) {
+    const pinnedRows = orderRowsPreorderByIndex(
+      baseRows.filter((row) => pinnedRowIds.has(row.agent.member_id)),
+      baseOrderIndex,
+      args.order,
+    );
+    const collapsedPinned = args.searchActive ? false : args.collapsedSections.has(PINNED_SECTION_NAME);
+    rows.push({
+      kind: "section",
+      key: PINNED_SECTION_KEY,
+      bucket: PINNED_SECTION_NAME,
+      count: pinnedRows.length,
+      collapsed: collapsedPinned,
+      pinned: true,
+      reorderable: false,
+    });
+    if (!collapsedPinned) {
+      for (const row of pinnedRows) {
+        const parent = row.parentMemberId && pinnedRowIds.has(row.parentMemberId) ? row.parentMemberId : null;
+        rows.push({
+          kind: "agent",
+          key: `agent:${PINNED_SECTION_NAME}:${row.agent.member_id}`,
+          bucket: PINNED_SECTION_NAME,
+          row,
+          container: sidebarAgentContainer(PINNED_SECTION_NAME, null, parent),
+        });
+      }
+    }
+  }
+
+  const parentOf = new Map(args.tree.map((mob) => [mob.mobId, mob.parentMobId] as const));
+  const shown = new Set<string>();
+  for (const mob of args.tree) {
+    const hasRows = (args.grouped.get(sidebarMobBucket(mob.mobId)) || []).length > 0;
+    if (args.searchActive && !hasRows) continue;
+    const seen = new Set<string>();
+    let current: string | null | undefined = mob.mobId;
+    while (current && !seen.has(current) && parentOf.has(current)) {
+      seen.add(current);
+      shown.add(current);
+      current = parentOf.get(current);
+    }
+  }
+  const baseDepth = args.tree.reduce((least, mob) => Math.min(least, mob.depth), Number.POSITIVE_INFINITY);
+  let hiddenBelow: number | null = null;
+  for (const mob of args.tree) {
+    if (hiddenBelow !== null) {
+      if (mob.depth > hiddenBelow) continue;
+      hiddenBelow = null;
+    }
+    if (!shown.has(mob.mobId)) continue;
+    const bucket = sidebarMobBucket(mob.mobId);
+    const all = args.grouped.get(bucket) || [];
+    const list = all.filter((row) => !pinnedRowIds.has(row.agent.member_id));
+    const collapsed = args.searchActive ? false : args.collapsedSections.has(bucket);
+    rows.push({
+      kind: "section",
+      key: `section:${bucket}`,
+      bucket,
+      count: list.length,
+      collapsed,
+      reorderable: false,
+      collapseKey: bucket,
+      mob: {
+        node: mob,
+        depth: Number.isFinite(baseDepth) ? mob.depth - baseDepth : 0,
+      },
+    });
+    if (collapsed) {
+      hiddenBelow = mob.depth;
+      continue;
+    }
+    const listIds = new Set(all.map((row) => row.agent.member_id));
+    for (const row of list) {
+      const parent = row.parentMemberId && listIds.has(row.parentMemberId) ? row.parentMemberId : null;
+      rows.push({
+        kind: "agent",
+        key: `agent:${row.agent.member_id}`,
+        bucket,
+        row,
+        container: sidebarAgentContainer(bucket, null, parent),
+      });
+    }
+  }
+  return rows;
+}
+
 function sidebarNavigationLabel(row: SidebarVirtualRow): string {
   switch (row.kind) {
     case "section":
-      return row.bucket;
+      return row.mob ? mobFullName(row.mob.node) : row.bucket;
     case "subgroup":
       return row.label;
     case "empty":
@@ -2147,6 +2402,14 @@ export const Sidebar = React.memo(function Sidebar({
   onOpenApproval,
   hostAttentionCount = 0,
   attentionReplyCount = 0,
+  mobs,
+  primaryMobId,
+  selectedMobId = null,
+  onSelectMob,
+  onOpenMob,
+  wakingMobIds,
+  mobsLoaded,
+  mobOrdinals,
   questionSetCount = 0,
   questionSetStatus,
   density = "comfortable",
@@ -2196,12 +2459,52 @@ export const Sidebar = React.memo(function Sidebar({
     () => sidebarStorageKey(SIDEBAR_AGENT_ORDER_STORAGE_PREFIX, preferenceNamespace),
     [preferenceNamespace],
   );
-  const [view, setView] = React.useState<ConsoleSidebarViewPreferences>(
-    () => readConsoleSidebarView(localSidebarStorage(), viewStorageKey) ?? { ...DEFAULT_CONSOLE_SIDEBAR_VIEW },
+  // The mobs the console lists, as a tree, each named for people: by the
+  // member that created it when the roster lists that member, by its id's
+  // words, never by its id. With more than one the roster can group by mob.
+  const ownMobOrdinals = React.useRef<Map<string, number> | null>(null);
+  if (!ownMobOrdinals.current) ownMobOrdinals.current = new Map();
+  const ordinals = mobOrdinals ?? ownMobOrdinals.current;
+  const mobTree = React.useMemo(
+    () => consoleMobTree(mobs, primaryMobId, {
+      creatorName: mobCreatorNamer(agents, nestedMobIdsOfMembers(agents)),
+      ordinals,
+    }),
+    [agents, mobs, ordinals, primaryMobId],
+  );
+  const multipleMobs = mobTree.length > 1;
+  // The default grouping is decided once, by the first mob list the roster
+  // is given: Mob when it lists several mobs, Category otherwise. A mob that
+  // appears or goes away later leaves the grouping as it is, so the roster
+  // never re-groups itself under the person; Mob is then offered in the
+  // view options.
+  const mobListLoaded = mobsLoaded ?? (mobs !== undefined || agents.length > 0);
+  const startedWithMobs = React.useRef<boolean | null>(null);
+  if (startedWithMobs.current === null && mobListLoaded) startedWithMobs.current = multipleMobs;
+  const [pickedMobGrouping, setPickedMobGrouping] = React.useState(false);
+  const defaultGroupBy: ConsoleSidebarViewPreferences["groupBy"] = startedWithMobs.current ? "mob" : DEFAULT_CONSOLE_SIDEBAR_VIEW.groupBy;
+  const defaultView = React.useMemo<ConsoleSidebarViewPreferences>(
+    () => ({ ...DEFAULT_CONSOLE_SIDEBAR_VIEW, groupBy: defaultGroupBy }),
+    [defaultGroupBy],
+  );
+  const [storedView, setStoredView] = React.useState<ConsoleSidebarViewPreferences | null>(
+    () => readConsoleSidebarView(localSidebarStorage(), viewStorageKey),
   );
   React.useEffect(() => {
-    setView(readConsoleSidebarView(localSidebarStorage(), viewStorageKey) ?? { ...DEFAULT_CONSOLE_SIDEBAR_VIEW });
+    setStoredView(readConsoleSidebarView(localSidebarStorage(), viewStorageKey));
   }, [viewStorageKey]);
+  // The roster is grouped by mob when that is the grouping and the console
+  // listed several mobs when the roster started, or the person picked Mob
+  // since. A Mob grouping kept from an earlier visit reads as Category on a
+  // console that started with one mob.
+  const chosenView = storedView ?? defaultView;
+  const byMob = chosenView.groupBy === "mob"
+    && mobTree.length > 0
+    && (startedWithMobs.current === true || pickedMobGrouping);
+  const view = React.useMemo<ConsoleSidebarViewPreferences>(
+    () => (chosenView.groupBy === "mob" && !byMob ? { ...chosenView, groupBy: "category" } : chosenView),
+    [byMob, chosenView],
+  );
   const [agentOrder, setAgentOrder] = React.useState<string[]>(
     () => readSidebarStringList(localSidebarStorage(), agentOrderStorageKey) || [],
   );
@@ -2215,27 +2518,54 @@ export const Sidebar = React.memo(function Sidebar({
       if (event.key === agentOrderStorageKey) {
         setAgentOrder(readSidebarStringList(localSidebarStorage(), agentOrderStorageKey) || []);
       } else if (event.key === viewStorageKey) {
-        setView(readConsoleSidebarView(localSidebarStorage(), viewStorageKey) ?? { ...DEFAULT_CONSOLE_SIDEBAR_VIEW });
+        setStoredView(readConsoleSidebarView(localSidebarStorage(), viewStorageKey));
       }
     };
     window.addEventListener("storage", onStorage);
     return () => window.removeEventListener("storage", onStorage);
   }, [agentOrderStorageKey, viewStorageKey]);
   const updateView = React.useCallback((patch: Partial<ConsoleSidebarViewPreferences>) => {
-    setView((current) => {
-      const next = { ...current, ...patch };
+    setStoredView((current) => {
+      const next = { ...(current ?? defaultView), ...patch };
       writeConsoleSidebarView(localSidebarStorage(), viewStorageKey, next);
       return next;
     });
-  }, [viewStorageKey]);
+  }, [defaultView, viewStorageKey]);
+  // A Mob grouping kept in storage is dropped once the console is seen to
+  // list one mob: it would otherwise come back with the next second mob.
+  const storedMobGroupingGone = mobListLoaded
+    && storedView?.groupBy === "mob"
+    && startedWithMobs.current === false
+    && !pickedMobGrouping;
+  React.useEffect(() => {
+    if (storedMobGroupingGone) updateView({ groupBy: "category" });
+  }, [storedMobGroupingGone, updateView]);
 
-  // The roster view (A5): Show is session state; Group by and Sort by persist.
-  const viewSummary = sidebarViewSummary(activityFilter, view);
+  // The mob choice: one mob with the mobs nested under it, or all mobs. It
+  // applies while the console lists several mobs; a chosen mob the console
+  // does not list reads as all mobs.
+  const chosenMobIds = React.useMemo(() => {
+    if (!multipleMobs) return null;
+    const ids = mobAndNestedIds(mobTree, selectedMobId);
+    return ids.size > 0 ? ids : null;
+  }, [mobTree, multipleMobs, selectedMobId]);
+  const chosenMob = chosenMobIds ? mobTree.find((mob) => mob.mobId === selectedMobId) ?? null : null;
+  const chosenMobTree = React.useMemo(
+    () => (chosenMobIds ? mobTree.filter((mob) => chosenMobIds.has(mob.mobId)) : mobTree),
+    [chosenMobIds, mobTree],
+  );
+
+  // The roster view (A5): Show is session state; Group by and Sort by
+  // persist, and so does the mob choice, which the console keeps.
+  const viewSummary = sidebarViewSummary(activityFilter, view, chosenMob ? mobFullName(chosenMob) : null);
   const viewIsDefault = viewSummary.length === 0;
+  // The reset undoes what the summary lists: the filter, the mob choice, the
+  // sort and an ungrouped list. A Category or Mob grouping stays.
   const resetView = React.useCallback(() => {
     setActivityFilter("all");
-    updateView({ ...DEFAULT_CONSOLE_SIDEBAR_VIEW });
-  }, [updateView]);
+    updateView({ sortBy: defaultView.sortBy, groupBy: view.groupBy === "none" ? defaultView.groupBy : view.groupBy });
+    if (selectedMobId) onSelectMob?.(null);
+  }, [defaultView, onSelectMob, selectedMobId, updateView, view.groupBy]);
 
   // The activity ledger: each row's 15-minute sparkline and the runs it saw
   // open. Its clock moves every minute, so the sparklines slide while
@@ -2264,25 +2594,42 @@ export const Sidebar = React.memo(function Sidebar({
   const flat = view.groupBy === "none";
   const searchActive = Boolean(q) || activityFilter !== "all";
 
+  // The agents of the chosen mobs; all of them without a choice. A row is
+  // in the mob the roster lists it under, so no row is lost to a choice.
+  const listedMobIds = React.useMemo(() => new Set(mobTree.map((mob) => mob.mobId)), [mobTree]);
+  const mobShown = React.useMemo(
+    () => (chosenMobIds
+      ? agents.filter((agent) => chosenMobIds.has(listedMobOf(agent, listedMobIds, primaryMobId) ?? ""))
+      : agents),
+    [agents, chosenMobIds, listedMobIds, primaryMobId],
+  );
   // The Show filter reads the ledger's open runs; with All it never does,
   // so the roster does not re-filter on every ledger change.
   const filterLedger = activityFilter === "all" ? null : ledger;
   const shown = React.useMemo(
     () => (activityFilter === "all"
-      ? agents
-      : agents.filter((agent) => sidebarActivity(agent, agentOpenRun(filterLedger, agent)) === activityFilter)),
-    [agents, activityFilter, filterLedger],
+      ? mobShown
+      : mobShown.filter((agent) => sidebarActivity(agent, agentOpenRun(filterLedger, agent)) === activityFilter)),
+    [mobShown, activityFilter, filterLedger],
   );
   const filtered = React.useMemo(() => {
     const needle = q.toLowerCase();
     if (!needle) return shown;
-    return shown.filter((agent) =>
-      [sidebarAgentTitle(agent), agent.label, agent.identity, agent.member_id, agent.role]
-        .some(value => value?.toLowerCase().includes(needle)));
+    return shown.filter((agent) => agentMatchesSearch(agent, needle));
   }, [shown, q]);
+  // With a mob chosen and nothing matching in it: how many agents of the
+  // other mobs match, so the empty roster can say where the matches are.
+  const matchesInOtherMobs = React.useMemo(() => {
+    if (!chosenMobIds || filtered.length > 0 || !searchActive) return 0;
+    const needle = q.toLowerCase();
+    return agents.filter((agent) =>
+      !chosenMobIds.has(listedMobOf(agent, listedMobIds, primaryMobId) ?? "")
+      && (activityFilter === "all" || sidebarActivity(agent, agentOpenRun(filterLedger, agent)) === activityFilter)
+      && (!needle || agentMatchesSearch(agent, needle))).length;
+  }, [activityFilter, agents, chosenMobIds, filterLedger, filtered.length, listedMobIds, primaryMobId, q, searchActive]);
   // The mast's count: "17 agents", and "1 of 17 agents" while the Show
-  // filter hides some (grouping and sorting hide nothing).
-  const mastCount = activityFilter === "all"
+  // filter or the mob choice hides some (grouping and sorting hide nothing).
+  const mastCount = activityFilter === "all" && !chosenMobIds
     ? agentCountText(agents.length)
     : `${shown.length} of ${agentCountText(agents.length)}`;
 
@@ -2307,11 +2654,12 @@ export const Sidebar = React.memo(function Sidebar({
     setSubgroupOrder(readSidebarStringList(localSidebarStorage(), subgroupOrderStorageKey) || []);
   }, [subgroupOrderStorageKey]);
   const classified = React.useMemo(() => classifySidebarAgents(filtered, grouping), [filtered, grouping]);
-  // The category view's rows. The flat list needs them only for Manual,
-  // where they give its default order and the one list both views store.
+  // The category view's rows. The flat list and the mob view need them only
+  // for Manual, where they give their default order and the one list every
+  // view stores.
   const categoryGrouped = React.useMemo(
-    () => (flat && view.sortBy !== "manual" ? null : orderSidebarGroups(classified, sortContext)),
-    [classified, flat, sortContext, view.sortBy],
+    () => ((flat || byMob) && view.sortBy !== "manual" ? null : orderSidebarGroups(classified, sortContext)),
+    [byMob, classified, flat, sortContext, view.sortBy],
   );
   const categorySequence = React.useMemo(
     () => (categoryGrouped && view.sortBy === "manual"
@@ -2319,16 +2667,21 @@ export const Sidebar = React.memo(function Sidebar({
       : []),
     [categoryGrouped, grouping, sectionOrder, subgroupOrder, view.sortBy],
   );
-  const grouped = React.useMemo(
-    () => (!flat && categoryGrouped ? categoryGrouped : orderFlatSidebarGroup(classified, categorySequence, sortContext)),
-    [categoryGrouped, categorySequence, classified, flat, sortContext],
-  );
+  const grouped = React.useMemo(() => {
+    if (byMob) {
+      const defaultRank = new Map(categorySequence.map((row, index) => [row.agent.member_id, index] as const));
+      return groupSidebarAgentsByMob(classified, chosenMobTree, primaryMobId, sortContext, defaultRank);
+    }
+    return !flat && categoryGrouped ? categoryGrouped : orderFlatSidebarGroup(classified, categorySequence, sortContext);
+  }, [byMob, categoryGrouped, categorySequence, chosenMobTree, classified, flat, primaryMobId, sortContext]);
   const familyPinIdsByMemberId = React.useMemo(() => sidebarFamilyPinIdsByMemberId(grouped), [grouped]);
   const sectionNames = React.useMemo(
-    () => flat
-      ? (grouped.has(FLAT_SECTION_NAME) ? [FLAT_SECTION_NAME] : [])
-      : orderedSectionNames(grouped, grouping),
-    [flat, grouped, grouping],
+    () => byMob
+      ? chosenMobTree.map((mob) => sidebarMobBucket(mob.mobId))
+      : flat
+        ? (grouped.has(FLAT_SECTION_NAME) ? [FLAT_SECTION_NAME] : [])
+        : orderedSectionNames(grouped, grouping),
+    [byMob, chosenMobTree, flat, grouped, grouping],
   );
   const defaultCollapsedKey = React.useMemo(
     () => JSON.stringify((grouping?.sections || []).map((section) => [section.name, section.collapsed === true])),
@@ -2425,7 +2778,11 @@ export const Sidebar = React.memo(function Sidebar({
     ? "Choose Manual under Sort by in the roster view options to reorder agents."
     : searchActive
       ? "Clear the search and the activity filter to reorder agents."
-      : null;
+      // One order serves every mob: a move made while one mob shows would
+      // move agents the person cannot see.
+      : chosenMobIds
+        ? "Show all mobs to reorder agents."
+        : null;
   const completeAgentDrop = React.useCallback((
     target: string,
     where: SidebarDropPosition,
@@ -2614,6 +2971,16 @@ export const Sidebar = React.memo(function Sidebar({
     };
   }, [draggingOrder, finishPointerOrderDrag, movePointerOrderDrag]);
   const sidebarNavigationModel = React.useMemo<SidebarNavigationModel>(() => {
+    if (byMob) {
+      return sidebarNavigationModelFromRows(buildMobSidebarVirtualRows({
+        tree: chosenMobTree,
+        grouped,
+        collapsedSections,
+        pinnedAgentIds,
+        searchActive,
+        order: sortContext,
+      }));
+    }
     return buildStockSidebarNavigationModel({
       sectionNames,
       grouped,
@@ -2627,7 +2994,7 @@ export const Sidebar = React.memo(function Sidebar({
       flat,
       order: sortContext,
     });
-  }, [sectionNames, grouped, grouping, collapsedSections, collapsedSubgroups, pinnedAgentIds, sectionOrder, subgroupOrder, searchActive, flat, sortContext]);
+  }, [byMob, chosenMobTree, sectionNames, grouped, grouping, collapsedSections, collapsedSubgroups, pinnedAgentIds, sectionOrder, subgroupOrder, searchActive, flat, sortContext]);
   const virtualRows = React.useMemo<SidebarVirtualRow[]>(
     () => sidebarNavigationRows(sidebarNavigationModel),
     [sidebarNavigationModel],
@@ -2640,13 +3007,25 @@ export const Sidebar = React.memo(function Sidebar({
     }
     return counts;
   }, [virtualRows]);
+  // An agent listed under a mob steps in with its mob's header.
+  const mobIndentByBucket = React.useMemo(() => {
+    const indents = new Map<string, number>();
+    for (const row of virtualRows) {
+      if (row.kind === "section" && row.mob) indents.set(row.bucket, mobIndentPx(row.mob.depth));
+    }
+    return indents;
+  }, [virtualRows]);
   const virtualOffsets = React.useMemo(() => sidebarVirtualOffsets(virtualRows, density), [virtualRows, density]);
   const [listRef, listHeight] = useMeasuredHeight<HTMLDivElement>();
   const [scrollTop, setScrollTop] = React.useState(0);
+  // A search, a filter, a grouping or a sort the person picks, or another
+  // mob choice, starts the list at its top. The default grouping settling
+  // with the first mob list does not: it is no choice of the person's.
+  const pickedGroupBy = storedView?.groupBy ?? null;
   React.useEffect(() => {
     setScrollTop(0);
     if (listRef.current) listRef.current.scrollTop = 0;
-  }, [q, activityFilter, grouping, view.groupBy, view.sortBy, listRef]);
+  }, [q, activityFilter, grouping, pickedGroupBy, view.sortBy, selectedMobId, listRef]);
   // A drag near the list's top or bottom edge scrolls the list, so a row
   // can move past what is on screen.
   React.useEffect(() => {
@@ -2873,10 +3252,15 @@ export const Sidebar = React.memo(function Sidebar({
       testId: "sidebar-view-group",
       value: view.groupBy,
       options: [
+        ...(multipleMobs || byMob ? [{ id: "mob", label: "Mob", title: "Each mob, with the mobs nested under it", testId: "sidebar-view-group:mob" }] : []),
         { id: "category", label: "Category", testId: "sidebar-view-group:category" },
         { id: "none", label: "None", testId: "sidebar-view-group:none" },
       ],
-      onChange: (id: string) => updateView({ groupBy: normalizeConsoleSidebarGroupBy(id) }),
+      onChange: (id: string) => {
+        const groupBy = normalizeConsoleSidebarGroupBy(id);
+        if (groupBy === "mob") setPickedMobGrouping(true);
+        updateView({ groupBy });
+      },
     },
     {
       label: "Sort by",
@@ -2890,7 +3274,162 @@ export const Sidebar = React.memo(function Sidebar({
       onChange: (id: string) => updateView({ sortBy: normalizeConsoleSidebarSortBy(id) }),
       hint: view.sortBy === "manual" ? "Manual order: drag agents to reorder" : "Switch to Manual to drag agents",
     },
-  ], [activityFilter, updateView, view.groupBy, view.sortBy]);
+  ], [activityFilter, byMob, multipleMobs, updateView, view.groupBy, view.sortBy]);
+
+  // Copy mob ID: through the console's clipboard helper, which works on a
+  // plain-http origin too, with the outcome said beside the mob for a moment.
+  const [mobCopy, setMobCopy] = React.useState<{ mobId: string; copied: boolean } | null>(null);
+  const mobCopyTimerRef = React.useRef<number | null>(null);
+  React.useEffect(() => () => {
+    if (mobCopyTimerRef.current !== null) window.clearTimeout(mobCopyTimerRef.current);
+  }, []);
+  const copyMobId = React.useCallback((mobId: string) => {
+    void copyTextToClipboard(mobId).then((copied) => {
+      setMobCopy({ mobId, copied });
+      if (mobCopyTimerRef.current !== null) window.clearTimeout(mobCopyTimerRef.current);
+      mobCopyTimerRef.current = window.setTimeout(() => {
+        setMobCopy(null);
+        mobCopyTimerRef.current = null;
+      }, 1600);
+    });
+  }, []);
+
+  // A mob's header in the roster grouped by mob: its name for people (with
+  // what tells it apart from another mob of that name, in muted text), its
+  // count, a status mark and, for a mob that is not running, its state in
+  // words; indented by its depth. The tooltip adds its creator, the mob it
+  // is nested under and its id. Beside it, a discreet "..." (shown on hover
+  // or focus) chooses the mob or all mobs and copies the id.
+  const renderMobSection = (
+    row: Extract<SidebarVirtualRow, { kind: "section" }>,
+    header: SidebarMobHeader,
+  ): React.JSX.Element => {
+    const { node } = header;
+    // A mob that is not loaded (asleep, or unavailable) has no rows and no
+    // count. Opening an asleep one is the person's act: it is reported to
+    // the host, which wakes it; until the rows arrive it reads "Waking".
+    const asleep = node.state === "dormant";
+    const waking = !node.loaded && wakingMobIds?.has(node.mobId) === true;
+    const stateWords = waking ? "Waking" : mobStateWords(node.state);
+    const countText = node.loaded ? agentCountText(row.count) : null;
+    const openAsleep = asleep && onOpenMob ? () => onOpenMob(node.mobId) : undefined;
+    const fullName = mobFullName(node);
+    const parent = node.parentMobId ? mobTree.find((mob) => mob.mobId === node.parentMobId) : undefined;
+    const tooltip = [
+      fullName,
+      stateWords,
+      countText,
+      node.hostName ? `Created by ${node.hostName}` : null,
+      parent ? `In ${mobFullName(parent)}` : null,
+      `Mob ID ${node.mobId}`,
+    ].filter(Boolean).join(" · ");
+    const collapseKey = row.collapseKey ?? row.bucket;
+    const showAll: MenuEntry = {
+      kind: "item",
+      id: "all",
+      label: "Show all mobs",
+      onSelect: () => onSelectMob?.(null),
+      testId: "sidebar-mob-all",
+    };
+    const items: MenuEntry[] = [
+      ...(onSelectMob
+        ? selectedMobId === node.mobId
+          ? [showAll]
+          : [
+            {
+              kind: "item" as const,
+              id: "only",
+              label: "Show only this mob",
+              onSelect: () => {
+                openAsleep?.();
+                onSelectMob(node.mobId);
+              },
+              testId: `sidebar-mob-only:${node.mobId}`,
+            },
+            ...(selectedMobId ? [showAll] : []),
+          ]
+        : []),
+      {
+        kind: "item",
+        id: "copy",
+        label: "Copy mob ID",
+        onSelect: () => copyMobId(node.mobId),
+        testId: `sidebar-mob-copy:${node.mobId}`,
+      },
+    ];
+    return (
+      <div
+        className="sidebar__section sidebar__mob cc-reveal-host"
+        data-collapsed={row.collapsed || !node.loaded ? "true" : undefined}
+        data-depth={header.depth}
+        data-state={node.state}
+        data-testid={`sidebar-mob:${node.mobId}`}
+        style={{ "--sidebar-mob-indent": `${mobIndentPx(header.depth)}px` } as React.CSSProperties}
+      >
+        <button
+          type="button"
+          className="sidebar__sec-head sidebar__sec-head--button sidebar__mob-head"
+          aria-expanded={node.loaded ? !row.collapsed : false}
+          aria-label={[fullName, stateWords, countText].filter(Boolean).join(", ")}
+          title={tooltip}
+          data-testid={`sidebar-mob-toggle:${node.mobId}`}
+          onClick={() => {
+            openAsleep?.();
+            setCollapsedSections((current) => {
+              const next = new Set(current);
+              // A mob that is not loaded has nothing to fold: opening it
+              // leaves it unfolded for the rows that arrive.
+              if (!node.loaded) next.delete(collapseKey);
+              else if (next.has(collapseKey)) next.delete(collapseKey);
+              else next.add(collapseKey);
+              writeSidebarStringSet(localSidebarStorage(), sectionCollapseStorageKey, next);
+              return next;
+            });
+          }}
+        >
+          {/* The mark, the name, what tells it apart and the count stay on
+              the header's line: the name alone truncates. The state word
+              follows when the line has room for it. */}
+          <span className="sidebar__mob-title">
+            <StatusMark tone={mobStateTone(node.state)} className="sidebar__mob-mark" />
+            <span className="sidebar__sec-label sidebar__mob-label">{node.name}</span>
+            {node.detail ? (
+              <span className="sidebar__mob-detail" data-testid={`sidebar-mob-detail:${node.mobId}`}>{node.detail}</span>
+            ) : null}
+            {node.loaded ? (
+              <span className="sidebar__sec-count" data-testid={`sidebar-mob-count:${node.mobId}`}>{row.count}</span>
+            ) : null}
+          </span>
+          {node.state !== "running" ? (
+            <span className="sidebar__mob-state" data-testid={`sidebar-mob-state:${node.mobId}`}>{stateWords}</span>
+          ) : null}
+          <span className="sidebar__sec-chevron cc-reveal" aria-hidden="true">
+            <Icon name="i-chevron" />
+          </span>
+        </button>
+        <OverflowMenu
+          label={`More actions for ${fullName}`}
+          items={items}
+          size="sm"
+          quiet
+          reveal
+          triggerTestId={`sidebar-mob-menu:${node.mobId}`}
+          triggerClassName="sidebar__mob-menu"
+          testId={`sidebar-mob-actions:${node.mobId}`}
+        />
+        {mobCopy?.mobId === node.mobId ? (
+          <span
+            className="sidebar__mob-copied"
+            role="status"
+            data-copied={mobCopy.copied ? "true" : "false"}
+            data-testid={`sidebar-mob-copied:${node.mobId}`}
+          >
+            {mobCopy.copied ? "Mob ID copied" : "Could not copy"}
+          </span>
+        ) : null}
+      </div>
+    );
+  };
 
   if (collapsed) {
     return (
@@ -3133,6 +3672,24 @@ export const Sidebar = React.memo(function Sidebar({
             onReset={resetView}
             resetDisabled={viewIsDefault}
             resetTestId="sidebar-view-options-reset"
+            hint={multipleMobs && onSelectMob ? (
+              // The mob choice, under every grouping: All mobs, or one mob
+              // with the mobs nested under it, in tree order.
+              <SelectField
+                label="Mob"
+                value={chosenMob?.mobId ?? ""}
+                options={[
+                  { value: "", label: "All mobs" },
+                  ...mobTree.map((mob) => ({
+                    value: mob.mobId,
+                    label: `${"\u00a0\u00a0".repeat(Math.min(mob.depth, MOB_INDENT_CAP))}${mobFullName(mob)}`,
+                  })),
+                ]}
+                onChange={(value) => onSelectMob(value || null)}
+                className="sidebar__view-mob"
+                testId="sidebar-view-mob"
+              />
+            ) : undefined}
             id={viewMenuId}
             testId="sidebar-view-options"
             className="sidebar__view-options"
@@ -3158,20 +3715,42 @@ export const Sidebar = React.memo(function Sidebar({
         onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}
         data-testid="sidebar-agent-list"
       >
-        {filtered.length === 0 && (q || activityFilter !== "all") ? (
-          <div className="sidebar__empty sidebar__empty--filtered" role="status">
-            <span>No matching agents.</span>
-            <button
-              type="button"
-              className="sidebar__empty-clear"
-              data-testid="sidebar-clear-filters"
-              onClick={() => {
-                setQ("");
-                setActivityFilter("all");
-              }}
-            >
-              Clear filters
-            </button>
+        {filtered.length === 0 && (searchActive || chosenMob) ? (
+          // Nothing to list: the search or the filter matches no agent, in
+          // the chosen mob when one is chosen. The roster says which mob it
+          // looked in and how many matches the other mobs hold, and offers
+          // the other mobs beside clearing every filter.
+          <div className="sidebar__empty sidebar__empty--filtered" role="status" data-testid="sidebar-empty-filtered">
+            <span>
+              {chosenMob
+                ? `${searchActive ? "No matching agents" : "No agents"} in ${mobFullName(chosenMob)}.`
+                : "No matching agents."}
+              {matchesInOtherMobs > 0 ? ` ${matchesInOtherMobs} in other mobs.` : ""}
+            </span>
+            {chosenMob && onSelectMob ? (
+              <button
+                type="button"
+                className="sidebar__empty-clear"
+                data-testid="sidebar-search-all-mobs"
+                onClick={() => onSelectMob(null)}
+              >
+                {searchActive ? "Search all mobs" : "Show all mobs"}
+              </button>
+            ) : null}
+            {searchActive ? (
+              <button
+                type="button"
+                className="sidebar__empty-clear"
+                data-testid="sidebar-clear-filters"
+                onClick={() => {
+                  setQ("");
+                  setActivityFilter("all");
+                  if (chosenMob) onSelectMob?.(null);
+                }}
+              >
+                Clear filters
+              </button>
+            ) : null}
           </div>
         ) : null}
         <div className="sidebar__virtual-space" style={{ height: `${virtualOffsets.total}px` }}>
@@ -3183,9 +3762,17 @@ export const Sidebar = React.memo(function Sidebar({
               <div
                 className={`sidebar__virtual-row sidebar__virtual-row--${row.kind}`}
                 key={row.key}
-                style={{ transform: `translateY(${top}px)`, height: `${height}px` }}
+                style={{
+                  transform: `translateY(${top}px)`,
+                  height: `${height}px`,
+                  ...(row.kind === "agent" && mobIndentByBucket.get(row.bucket)
+                    ? { "--sidebar-mob-indent": `${mobIndentByBucket.get(row.bucket)}px` }
+                    : {}),
+                } as React.CSSProperties}
               >
-                {row.kind === "section" ? (
+                {row.kind === "section" && row.mob ? (
+                  renderMobSection(row, row.mob)
+                ) : row.kind === "section" ? (
                   <div
                     className="sidebar__section"
                     data-collapsed={row.collapsed ? "true" : undefined}

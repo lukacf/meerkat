@@ -651,6 +651,13 @@ impl PersistentMetadataStore for CountingMetadataStore {
             .await
     }
 
+    async fn release_mob_records(
+        &self,
+        mob_id: &str,
+    ) -> Result<crate::MobRecordsRelease, MetadataStoreError> {
+        self.inner.release_mob_records(mob_id).await
+    }
+
     async fn settle_detached_writes(&self) {
         self.inner.settle_detached_writes().await;
     }
@@ -1504,6 +1511,8 @@ async fn a_relabelled_agent_hides_its_item_without_a_prior_read() -> TestResult 
         .owner
         .console_events()
         .register_identity_labels(
+            fixture.owner.mob_runtime().handle().mob_id().as_str(),
+            "alpha",
             "alpha",
             std::collections::BTreeMap::from([("tier".to_string(), "secret".to_string())]),
         )

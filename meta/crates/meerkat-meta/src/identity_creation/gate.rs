@@ -253,6 +253,19 @@ impl IdentityFamilySlot {
             .is_some_and(|attached| attached.changes_enabled)
     }
 
+    /// The holder of the changes of this mob's agents that a person
+    /// decides, when the attached family is the launch's own gate and it
+    /// holds changes: what the host's one driver carries a held change of
+    /// this mob out through.
+    pub(crate) fn held_changes(&self) -> Option<IdentityDecisions> {
+        self.0
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .and_then(|attached| attached.gate.as_ref())
+            .and_then(|gate| gate.decisions.clone())
+    }
+
     /// Detach the family: the mob stopped.
     pub fn clear(&self) {
         *self.0.write().unwrap_or_else(PoisonError::into_inner) = None;
@@ -294,8 +307,18 @@ pub(crate) trait PrivateMembers: Send + Sync {
 }
 
 impl PrivateMembers for crate::private_owners::PrivateOwners {
+    /// A member the record names a person for; and a member the record
+    /// cannot tell yet, which is kept on the closed side with them: its
+    /// mob's durable records are not read (the read is owed, the mob was
+    /// loaded a moment ago, or the mob was never loaded in this process).
+    /// That is never so for a member of the launch's own mob, which is
+    /// answered as before.
     fn is_private(&self, mob_id: &str, member: &str) -> bool {
         self.owner_of(mob_id, member).is_some()
+            || matches!(
+                self.person_for_a_reader(mob_id, member),
+                crate::mob_announcements::MemberPerson::NotKnown
+            )
     }
 }
 
@@ -2724,14 +2747,177 @@ impl HeldChangeHost for HeldReads {
     }
 }
 
+/// What a launch says once for the families of the mobs it hosts beside
+/// its launch mob: its identity policy, what it gave beside it
+/// ([`crate::UnifiedRuntime::attach_identity_policy`]), and the host's one
+/// store of durable decisions, in which every mob's changes a person
+/// decides are held. One policy holds for every mob of the launch.
+#[derive(Clone)]
+pub(crate) struct LaunchIdentityPolicy {
+    pub(crate) policy: Arc<IdentityCreationPolicy>,
+    pub(crate) options: IdentityFamilyOptions,
+    pub(crate) decisions: crate::durable_decisions::RuntimeDecisions,
+}
+
+/// The holder of the changes of `mob`'s agents that a person decides, over
+/// the host's decisions `decisions`: it reads through a copy of `gate`
+/// that holds no decisions (so nothing here holds itself), commits through
+/// `executor` behind the rules the launch has when a change is carried
+/// out, and is given the launch's source of consequence lines and its
+/// notice route. It starts nothing.
+fn held_changes(
+    mob: &crate::mob_handle_runtime::MobRuntime,
+    gate: &IdentityGate,
+    executor: Arc<dyn IdentityChangeExecutor>,
+    options: &IdentityFamilyOptions,
+    decisions: &crate::durable_decisions::RuntimeDecisions,
+) -> IdentityDecisions {
+    let held: Arc<dyn HeldChangeHost> = Arc::new(HeldReads {
+        rules: gate.clone(),
+        realm_profiles: options.realm_profiles.clone().or_else(|| {
+            mob.agent_mob_mcp_state()
+                .and_then(|state| state.realm_profile_store().cloned())
+        }),
+    });
+    let decided: Arc<dyn IdentityChangeExecutor> = Arc::new(DecidedExecutor {
+        rules: gate.clone(),
+        launch: executor,
+    });
+    let mut holder = IdentityDecisions::new(decisions, decided, held);
+    if let Some(hooks) = options.hooks.clone() {
+        holder =
+            holder.with_consequences(host_consequences_of(move |request: &IdentityRequest| {
+                hooks.consequences(request)
+            }));
+    }
+    if let Some(notices) = options.decision_notices.clone() {
+        holder = holder.with_notices(notices);
+    }
+    holder
+}
+
+/// The held changes a host keeps under a mob's id, as a release a create
+/// asks ([`crate::private_owners::PrivateOwners::bind_create_release`]):
+/// the changes still held for a person's decision whose body names the id
+/// were asked for an earlier mob of it, and are withdrawn as the host
+/// before the new mob exists.
+struct HeldChangesOfAnEarlierMob(crate::durable_decisions::RuntimeDecisions);
+
+#[async_trait]
+impl crate::private_owners::MobCreateRelease for HeldChangesOfAnEarlierMob {
+    fn what(&self) -> &'static str {
+        "the held changes of the mob's agents"
+    }
+
+    async fn release_before_create(&self, mob_id: &meerkat_mob::MobId) -> Result<(), String> {
+        let withdrawn = super::decided::withdraw_open_held_changes_of(&self.0, mob_id.as_str())?;
+        if withdrawn > 0 {
+            tracing::info!(
+                %mob_id,
+                withdrawn,
+                "held changes of an earlier mob of the id were withdrawn before a create"
+            );
+        }
+        Ok(())
+    }
+}
+
+/// The gate of the family of the mob `mob` wraps, over that mob's own
+/// identity runtime `identities`, and the executor it commits through.
+/// Everything it judges by is that mob's: its wrapper's record of private
+/// members (the launch's one record, keyed by mob), whether its runtime is
+/// governed, and the mobs its agents' sessions own. The gate holds no
+/// change a person decides: its caller adds the holder where the mob has
+/// one.
+fn family_gate(
+    mob: &crate::mob_handle_runtime::MobRuntime,
+    identities: &Arc<IdentityRuntime>,
+    policy: Option<Arc<IdentityCreationPolicy>>,
+    options: &IdentityFamilyOptions,
+) -> (IdentityGate, Arc<dyn IdentityChangeExecutor>) {
+    // The mobs an agent's session owns are recorded by the launch's
+    // agent mob tools: a launch without them has no agent that creates
+    // a mob, and refuses no archive or removal for one.
+    let owned_mobs: Option<Arc<dyn OwnedMobs>> = mob
+        .agent_mob_mcp_state()
+        .map(|state| Arc::new(HostedOwnedMobs(state)) as Arc<dyn OwnedMobs>);
+    let executor = change_executor(
+        policy.as_ref(),
+        identities,
+        options.instruction_step.clone(),
+        options.schedules.clone(),
+        owned_mobs.clone(),
+    );
+    let mut gate = IdentityGate::new(policy, identities, Arc::clone(&executor))
+        .with_private_members(Arc::new(mob.private_owners().clone()))
+        .on_governed_runtime(mob.native_work_governed());
+    if let Some(owned) = owned_mobs {
+        gate = gate.with_owned_mobs(owned);
+    }
+    if let Some(hooks) = options.hooks.clone() {
+        gate = gate.with_host_hooks(hooks);
+    }
+    if let Some(schedules) = options.schedules.clone() {
+        gate = gate.with_schedules(schedules);
+    }
+    (gate, executor)
+}
+
+/// Attach the family of a mob a host serves beside its launch mob to that
+/// mob's own identity runtime `identities`, over that mob's wrapper `mob`:
+/// its reads, and under `launch` (the launch's one identity policy) its
+/// changes. Without `launch` every change is refused, as for the launch mob
+/// of a launch without a policy. It builds one value: nothing is read and
+/// nothing is started.
+///
+/// A change of such a mob that a person decides is held in the host's one
+/// store of durable decisions, filed under the mob's incarnation
+/// ([`IdentityDecisions::filed_by_incarnation`]). This family starts no
+/// driver: the launch's one driver carries an approved change out through
+/// this mob's own holder
+/// ([`super::decided::HeldChangeFamilies`]).
+///
+/// The policy is applied as a mob beside the launch mob applies it
+/// ([`IdentityCreationPolicy::for_a_mob_beside_the_launch_mob`]): a rule
+/// that names agents only tightens here, since the launch's rules by name
+/// were written with the launch mob's agents in mind, and for none of this
+/// mob's.
+pub(crate) fn attach_host_mob_family(
+    mob: &crate::mob_handle_runtime::MobRuntime,
+    identities: &Arc<IdentityRuntime>,
+    launch: Option<&LaunchIdentityPolicy>,
+) {
+    let no_options = IdentityFamilyOptions::new();
+    let (policy, options) = match launch {
+        Some(launch) => (
+            Some(Arc::new(launch.policy.for_a_mob_beside_the_launch_mob())),
+            &launch.options,
+        ),
+        None => (None, &no_options),
+    };
+    let changes_enabled = policy.is_some();
+    let (mut gate, executor) = family_gate(mob, identities, policy, options);
+    if let Some(launch) = launch {
+        let holder =
+            held_changes(mob, &gate, executor, options, &launch.decisions).filed_by_incarnation();
+        gate = gate.with_decisions(holder, None, launch.decisions.owner().clone());
+    }
+    identities.attach_identity_gate(Arc::new(gate), changes_enabled);
+}
+
 impl crate::UnifiedRuntime {
     /// Attach this launch's identity policy: from now on the runtime serves
-    /// the changes of its mob's long-term agents (`meta/identity/*` on the
+    /// the changes of its mobs' long-term agents (`meta/identity/*` on the
     /// stdio gateway and the Console, and the agents' identity tools) under
     /// `policy`, beside the reads it serves since its identity runtime was
     /// installed. A launch attaches it once, before its identity bootstrap.
     /// `false` when the runtime serves no identities: there is nothing to
     /// attach it to.
+    ///
+    /// The policy is the launch's one policy: each mob the launch hosts
+    /// beside its launch mob gets the family of its own agents under it,
+    /// when that mob's identity plane is composed, and the mobs composed
+    /// before are given it now.
     pub fn attach_identity_policy(
         &self,
         policy: Arc<IdentityCreationPolicy>,
@@ -2740,6 +2926,11 @@ impl crate::UnifiedRuntime {
         let Some(identities) = self.identity_runtime_ref().cloned() else {
             return false;
         };
+        self.say_identity_policy_to_host_mobs(LaunchIdentityPolicy {
+            policy: Arc::clone(&policy),
+            options: options.clone(),
+            decisions: self.durable_decisions().clone(),
+        });
         self.attach_identity_gate(&identities, Some(policy), options);
         true
     }
@@ -2760,59 +2951,31 @@ impl crate::UnifiedRuntime {
         options: IdentityFamilyOptions,
     ) {
         let changes_enabled = policy.is_some();
-        // The mobs an agent's session owns are recorded by the launch's
-        // agent mob tools: a launch without them has no agent that creates
-        // a mob, and refuses no archive or removal for one.
-        let owned_mobs: Option<Arc<dyn OwnedMobs>> = self
-            .mob_runtime()
-            .agent_mob_mcp_state()
-            .map(|state| Arc::new(HostedOwnedMobs(state)) as Arc<dyn OwnedMobs>);
-        let executor = change_executor(
-            policy.as_ref(),
-            identities,
-            options.instruction_step,
-            options.schedules.clone(),
-            owned_mobs.clone(),
-        );
-        let mut gate = IdentityGate::new(policy, identities, Arc::clone(&executor))
-            .with_private_members(Arc::new(self.mob_runtime().private_owners().clone()))
-            .on_governed_runtime(self.mob_runtime().native_work_governed());
-        if let Some(owned) = owned_mobs {
-            gate = gate.with_owned_mobs(owned);
-        }
-        if let Some(hooks) = options.hooks.clone() {
-            gate = gate.with_host_hooks(hooks);
-        }
-        if let Some(schedules) = options.schedules.clone() {
-            gate = gate.with_schedules(schedules);
-        }
+        let (mut gate, executor) = family_gate(self.mob_runtime(), identities, policy, &options);
         if changes_enabled {
             // The changes a person decides: held in the runtime's durable
             // decisions, and carried out through the same executor by a
-            // driver that runs only on a launch that serves changes. The
-            // holder reads through a copy of the gate that holds no
-            // decisions, so nothing here holds itself.
-            let held: Arc<dyn HeldChangeHost> = Arc::new(HeldReads {
-                rules: gate.clone(),
-                realm_profiles: options.realm_profiles.clone().or_else(|| {
-                    self.mob_runtime()
-                        .agent_mob_mcp_state()
-                        .and_then(|state| state.realm_profile_store().cloned())
-                }),
-            });
-            let decided: Arc<dyn IdentityChangeExecutor> = Arc::new(DecidedExecutor {
-                rules: gate.clone(),
-                launch: executor,
-            });
-            let mut decisions = IdentityDecisions::new(self.durable_decisions(), decided, held);
-            if let Some(hooks) = options.hooks {
-                decisions = decisions.with_consequences(host_consequences_of(
-                    move |request: &IdentityRequest| hooks.consequences(request),
-                ));
-            }
-            if let Some(notices) = options.decision_notices {
-                decisions = decisions.with_notices(notices);
-            }
+            // driver that runs only on a launch that serves changes. It is
+            // the host's one driver of these kinds: a held change of a mob
+            // the host serves beside the launch mob is carried out through
+            // that mob's own holder, which the families answer.
+            let decisions = held_changes(
+                self.mob_runtime(),
+                &gate,
+                executor,
+                &options,
+                self.durable_decisions(),
+            )
+            .with_families(
+                self.held_change_families(self.mob_runtime().handle().mob_id().clone(), identities),
+            );
+            // A create under an id withdraws what is still held for an
+            // earlier mob of the id.
+            self.mob_runtime()
+                .private_owners()
+                .bind_create_release(Arc::new(HeldChangesOfAnEarlierMob(
+                    self.durable_decisions().clone(),
+                )));
             let driver = if tokio::runtime::Handle::try_current().is_ok() {
                 match decisions.spawn_driver(
                     self.decision_approver_currentness(),
@@ -2873,6 +3036,86 @@ mod tests {
     use super::*;
     use crate::identity_creation::{ArchiveIdentitySpec, RequestEnvelope};
     use crate::identity_first::AgentAddressability;
+
+    /// A member spawn log whose read does not return until the row opens
+    /// it, and then holds the spawns it was given.
+    struct HeldLog {
+        opened: tokio::sync::watch::Receiver<bool>,
+        spawns: Vec<crate::private_owners::MemberJournalStep>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::private_owners::MemberSpawnLog for HeldLog {
+        async fn spawns_after(
+            &self,
+            cursor: u64,
+            _limit: usize,
+        ) -> Result<Option<crate::private_owners::MemberSpawnPage>, String> {
+            let mut opened = self.opened.clone();
+            let _ = opened.wait_for(|opened| *opened).await;
+            Ok((cursor == 0).then(|| (self.spawns.clone(), 2)))
+        }
+    }
+
+    /// While the record of the members' persons owes a first read, it
+    /// cannot say whose a member it did not build is: the gate keeps every
+    /// such member on the closed side, as a member that asks for no change
+    /// of agents, until the read has landed. Then a member the log names a
+    /// person for stays there, and a member it names none for, and a name
+    /// it does not hold, do not.
+    #[tokio::test]
+    async fn a_member_the_record_cannot_tell_yet_is_on_the_closed_side_of_the_gate() {
+        const OWNER: &str = "console-caller:v1:aa";
+        let spawn = |member: &str, labels: BTreeMap<String, String>, cursor: u64| {
+            crate::private_owners::MemberJournalStep::seated(
+                "mob", member, &labels, false, cursor, 0,
+            )
+        };
+        let (open, opened) = tokio::sync::watch::channel(false);
+        let log = HeldLog {
+            opened,
+            spawns: vec![
+                spawn(
+                    "side",
+                    BTreeMap::from([(
+                        crate::access::PRIVATE_TO_LABEL.to_owned(),
+                        OWNER.to_owned(),
+                    )]),
+                    1,
+                ),
+                spawn("open", BTreeMap::new(), 2),
+            ],
+        };
+        let owners = crate::private_owners::PrivateOwners::default();
+        let read = {
+            let owners = owners.clone();
+            tokio::spawn(async move { owners.seeded(&log).await.landed() })
+        };
+        while !owners.first_read_pending() {
+            tokio::task::yield_now().await;
+        }
+        for member in ["side", "open", "nobody"] {
+            assert!(
+                PrivateMembers::is_private(&owners, "mob", member),
+                "`{member}`: while the read is owed the gate keeps the member on the closed side"
+            );
+        }
+
+        open.send(true).expect("the read is waiting");
+        assert!(read.await.expect("the read ends"), "the read landed");
+        assert!(
+            PrivateMembers::is_private(&owners, "mob", "side"),
+            "the log names a person for the member"
+        );
+        assert!(
+            !PrivateMembers::is_private(&owners, "mob", "open"),
+            "the log names no person for the member"
+        );
+        assert!(
+            !PrivateMembers::is_private(&owners, "mob", "nobody"),
+            "a name the log of a mob that is read does not hold is no member kept apart"
+        );
+    }
 
     /// A created agent as the gate read it, with what the roster pass says
     /// of its name.

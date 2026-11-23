@@ -293,28 +293,30 @@ impl RelinkDelivery {
 /// `RelinkDelivery::managed_mobs`).
 #[derive(Clone)]
 pub struct ManagedMobs {
-    mobs: Arc<tokio::sync::RwLock<BTreeMap<MobId, crate::ManagedMob>>>,
+    hosted: Arc<crate::hosted_set::HostedSet>,
     principal: MobControlPrincipal,
 }
 
 impl ManagedMobs {
     pub(crate) fn new(
-        mobs: Arc<tokio::sync::RwLock<BTreeMap<MobId, crate::ManagedMob>>>,
+        hosted: Arc<crate::hosted_set::HostedSet>,
         principal: MobControlPrincipal,
     ) -> Self {
-        Self { mobs, principal }
+        Self { hosted, principal }
     }
 
     /// The handles of every mob managed now.
     async fn handles(&self) -> Vec<MobHandle> {
-        self.mobs
+        self.hosted
             .read()
             .await
-            .values()
-            .map(|managed| {
-                managed.handle.clone().with_command_authority(
-                    meerkat_mob::CommandAuthority::principal(self.principal.clone()),
-                )
+            .managed_handles()
+            .map(|(_, handle)| {
+                handle
+                    .clone()
+                    .with_command_authority(meerkat_mob::CommandAuthority::principal(
+                        self.principal.clone(),
+                    ))
             })
             .collect()
     }

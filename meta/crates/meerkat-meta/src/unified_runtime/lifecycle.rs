@@ -92,6 +92,67 @@ pub(super) fn run_failed_crash_error(
     detail
 }
 
+/// Reset the resolved mob `mob` and run its own discovery again (see
+/// [`UnifiedRuntime::rediscover`] for the steps): its own roster, discovery,
+/// managed edges and edge policy. A failure is reported on the host's
+/// error hook, whichever mob it was.
+pub(super) async fn rediscover_in(
+    mob: &super::MobEntryRef<'_>,
+) -> Result<Option<RediscoverReport>, MobRuntimeError> {
+    match rediscover_steps(mob).await {
+        Ok(report) => Ok(report),
+        Err(err) => {
+            mob.runtime()
+                .fire_error(super::types::ErrorEvent::RediscoverFailure {
+                    error: format!("{err}"),
+                });
+            Err(err)
+        }
+    }
+}
+
+async fn rediscover_steps(
+    mob: &super::MobEntryRef<'_>,
+) -> Result<Option<RediscoverReport>, MobRuntimeError> {
+    let entry = mob.entry();
+    let discovery = match &entry.discovery {
+        Some(d) => d,
+        None => return Ok(None),
+    };
+    if entry.identity_runtime_ref().is_some() {
+        return Err(MobRuntimeError::InvalidConfig(
+            "rediscover resets the whole mob and is unavailable with identity-first authority; use refresh_desired_topology"
+                .to_string(),
+        ));
+    }
+
+    // 1. Reset the mob: retires all, clears state, returns to Running
+    entry
+        .mob_runtime
+        .handle()
+        .reset()
+        .await
+        .map_err(MobRuntimeError::Mob)?;
+
+    // 2. Re-run discovery (no pre-spawn context: PreSpawnHook is FnOnce)
+    let specs = discovery.discover(serde_json::Value::Null).await;
+    let spawn_specs: Vec<SpawnMemberSpec> =
+        specs.iter().map(discovery_spec_to_spawn_spec).collect();
+    let spawned: Vec<String> = spawn_specs.iter().map(|s| s.identity.to_string()).collect();
+
+    // 3. Spawn discovered members (the default mob's post-spawn hook is
+    //    told of the default mob's members)
+    super::mob_ops::spawn_many_in(mob, spawn_specs).await?;
+
+    // 4. Clear stale managed edges (old topology is gone after reset)
+    entry.managed_dynamic_edges.write().await.clear();
+
+    // 5. Reconcile edges
+    let edges = mob.reconcile_edges().await;
+
+    Ok(Some(RediscoverReport { spawned, edges }))
+}
+
 impl UnifiedRuntime {
     /// Reset the mob and re-run discovery + edge reconciliation.
     ///
@@ -105,53 +166,11 @@ impl UnifiedRuntime {
     /// 5. Runs edge reconciliation if `EdgeDiscovery` is configured
     ///
     /// Returns `None` if no `Discovery` is configured (nothing to rediscover).
+    ///
+    /// This is the default mob's form of the operation: it resets and
+    /// rediscovers the mob the launch names.
     pub async fn rediscover(&self) -> Result<Option<RediscoverReport>, MobRuntimeError> {
-        match self.rediscover_inner().await {
-            Ok(report) => Ok(report),
-            Err(err) => {
-                self.fire_error(super::types::ErrorEvent::RediscoverFailure {
-                    error: format!("{err}"),
-                });
-                Err(err)
-            }
-        }
-    }
-
-    async fn rediscover_inner(&self) -> Result<Option<RediscoverReport>, MobRuntimeError> {
-        let discovery = match &self.discovery {
-            Some(d) => d,
-            None => return Ok(None),
-        };
-        if self.identity_runtime_ref().is_some() {
-            return Err(MobRuntimeError::InvalidConfig(
-                "rediscover resets the whole mob and is unavailable with identity-first authority; use refresh_desired_topology"
-                    .to_string(),
-            ));
-        }
-
-        // 1. Reset the mob — retires all, clears state, returns to Running
-        self.mob_runtime
-            .handle()
-            .reset()
-            .await
-            .map_err(MobRuntimeError::Mob)?;
-
-        // 2. Re-run discovery (no pre-spawn context — PreSpawnHook is FnOnce)
-        let specs = discovery.discover(serde_json::Value::Null).await;
-        let spawn_specs: Vec<SpawnMemberSpec> =
-            specs.iter().map(discovery_spec_to_spawn_spec).collect();
-        let spawned: Vec<String> = spawn_specs.iter().map(|s| s.identity.to_string()).collect();
-
-        // 3. Spawn discovered members (hook-aware variant fires post_spawn_hook)
-        self.spawn_many(spawn_specs).await?;
-
-        // 4. Clear stale managed edges (old topology is gone after reset)
-        self.managed_dynamic_edges.write().await.clear();
-
-        // 5. Reconcile edges
-        let edges = self.reconcile_edges().await;
-
-        Ok(Some(RediscoverReport { spawned, edges }))
+        rediscover_in(&self.default_mob_resolved()).await
     }
 
     pub async fn run<F>(
@@ -320,6 +339,10 @@ impl UnifiedRuntime {
         // No peer message of another mob of this process wakes a member of
         // a runtime that is closing: its links go first.
         self.close_cross_mob_links();
+        // So do the links of every other mob of this host, and no entry of
+        // such a mob is begun once its table reads this (a pass that is
+        // making one puts it in, and the table's close ends it).
+        self.other_mobs().begin_close();
         // Nothing is delivered once teardown starts: stop the mob
         // announcement dispatcher first, whichever surface composed it.
         // Stopping is idempotent; a gateway may already have stopped it.
@@ -329,13 +352,13 @@ impl UnifiedRuntime {
         // The liveness probe is observation only. Abort it before anything
         // can quiesce the mob actor so an intentional shutdown stall cannot
         // page a false ActorLoopStalled.
-        if let Some(task) = self.actor_loop_probe_task.lock().await.take() {
+        if let Some(task) = self.default_mob().actor_loop_probe_task.lock().await.take() {
             task.abort();
             let _ = task.await;
         }
         // The continuity mirror writes its last copy while the mob still
         // serves reads; the mirror's own deadline bounds the wait.
-        let continuity_mirror = self.continuity_mirror.lock().await.take();
+        let continuity_mirror = self.default_mob().continuity_mirror.lock().await.take();
         if let Some(mirror) = continuity_mirror {
             let counts = mirror.stop().await;
             tracing::info!(
@@ -347,7 +370,13 @@ impl UnifiedRuntime {
         // The fact tail owns only a lossy wake projection, so shutdown does
         // not drain it. Abort and join the sole runtime-owned task before
         // taking down the authoritative WorkGraph-bearing mob runtime.
-        if let Some(task) = self.workgraph_fact_tail_task.lock().await.take() {
+        if let Some(task) = self
+            .default_mob()
+            .workgraph_fact_tail_task
+            .lock()
+            .await
+            .take()
+        {
             task.abort();
             let _ = task.await;
         }
@@ -386,6 +415,9 @@ impl UnifiedRuntime {
             // before the mob actor is taken down.
             identity_runtime.join_foreground_operations().await;
         }
+        // The identity runtimes of the host's other mobs close the same
+        // way, before any mob's actor is taken down.
+        self.other_mobs().close_identity_requests().await;
         if let Some(task) = self.implicit_delegate_retirement_task.lock().await.take() {
             task.abort();
             let _ = task.await;
@@ -416,6 +448,11 @@ impl UnifiedRuntime {
                     .stop_lifecycle_projection(lifecycle_projection_deadline)
                     .await;
             }
+            // The other mobs' projections stop in the same share of the
+            // window.
+            self.other_mobs()
+                .stop_identity_lifecycle_projections(lifecycle_projection_deadline)
+                .await;
         };
         let event_drain = tokio::time::timeout(self.drain_timeout, async {
             loop {
@@ -461,10 +498,10 @@ impl UnifiedRuntime {
         // Shutdown is terminal: the delivery owner stops with the mob rather
         // than when the last runtime clone happens to drop. Undelivered rows
         // stay pending in the durable inbox.
-        self.mob_runtime.stop_runtime_delivery();
+        self.default_mob().mob_runtime.stop_runtime_delivery();
         // Terminal as well: no member is built or admitted after Stop, and
         // the builder's tool slots otherwise keep the whole composition alive.
-        self.mob_runtime.release_composition_slots();
+        self.default_mob().mob_runtime.release_composition_slots();
 
         // Meta holds no identity lease authority: Core owns every
         // member binding, so there is no grant to release here.
@@ -475,12 +512,11 @@ impl UnifiedRuntime {
             // kept, in the terminal teardown below. This is required for
             // failed builders to release persistent topology/store locks
             // before returning Err; on a failed mob stop the authority
-            // deliberately stays attached.
-            self.mob_runtime.clear_identity_runtime_authority();
-            *self
-                .implicit_delegate_identity_runtime
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+            // deliberately stays attached. The mob's one identity runtime
+            // slot is cleared for every holder of its plane.
+            self.default_mob()
+                .mob_runtime
+                .clear_identity_runtime_authority();
         }
 
         // `stop` quiesces members but keeps the mob actor - and its
@@ -504,10 +540,11 @@ impl UnifiedRuntime {
         // starts now: a root teardown that spent its whole budget must not
         // leave them an expired deadline.
         let child_mob_stand_down = if mob_stop.is_ok() {
-            self.mob_runtime
+            self.default_mob()
+                .mob_runtime
                 .stand_down_child_mobs(std::time::Instant::now() + CHILD_MOB_STAND_DOWN_BUDGET)
                 .await
-        } else if self.mob_runtime.owns_child_mob_root() {
+        } else if self.default_mob().mob_runtime.owns_child_mob_root() {
             crate::child_mob_storage::ChildMobStandDownOutcome::SkippedMobStopFailed
         } else {
             crate::child_mob_storage::ChildMobStandDownOutcome::NotConfigured
@@ -569,7 +606,7 @@ impl UnifiedRuntime {
         // state directory's claim. This runtime's own share ends with the
         // shutdown that covered it, so a successor may claim the directory;
         // otherwise the claim stays until the runtime drops.
-        if !self.mob_runtime.holds_state_dir_claims() {
+        if !self.default_mob().mob_runtime.holds_state_dir_claims() {
             self.state_dir_claims
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -578,6 +615,10 @@ impl UnifiedRuntime {
         // The members' inboxes are gone: so are the routes between them and
         // the members of other mobs of this process.
         self.clear_cross_mob_wake_routes();
+        // The entries of the other mobs of this host go with the runtime:
+        // each clears its own part of the link table and ends the tasks
+        // that served its mob. Their actors are the mob set's to stand down.
+        self.other_mobs().close().await;
         UnifiedRuntimeShutdownReport {
             drain,
             module_shutdown,
@@ -651,7 +692,7 @@ impl UnifiedRuntime {
     /// [`Self::settle_member_mcp_to_exit`] after it.
     pub(crate) async fn settle_member_mcp(&self) -> MemberMcpSettlement {
         #[cfg(not(target_arch = "wasm32"))]
-        if let Some(custody) = self.mob_runtime.member_mcp_custody() {
+        if let Some(custody) = self.default_mob().mob_runtime.member_mcp_custody() {
             return custody.settle().await;
         }
         MemberMcpSettlement::NothingOwned
@@ -664,7 +705,7 @@ impl UnifiedRuntime {
     /// that needed the wait still counts under `deadline`.
     pub(crate) async fn settle_member_mcp_to_exit(&self) -> MemberMcpSettlement {
         #[cfg(not(target_arch = "wasm32"))]
-        if let Some(custody) = self.mob_runtime.member_mcp_custody() {
+        if let Some(custody) = self.default_mob().mob_runtime.member_mcp_custody() {
             return custody.settle_to_exit().await;
         }
         MemberMcpSettlement::NothingOwned
@@ -696,7 +737,11 @@ impl UnifiedRuntime {
         let mut actor_task = self.mob_handle().actor_task_watch();
         let outcome = match self
             .mob_handle()
-            .shutdown_with_report(self.mob_runtime.mob_shutdown_options(deadline))
+            .shutdown_with_report(
+                self.default_mob()
+                    .mob_runtime
+                    .mob_shutdown_options(deadline),
+            )
             .await
         {
             Ok(report) => {
@@ -784,7 +829,7 @@ impl UnifiedRuntime {
             Err(error) => MobStopOutcome::Failed(error),
         };
         // Teardown: no delivery may be applied to the stopped mob.
-        self.mob_runtime.stop_runtime_delivery();
+        self.default_mob().mob_runtime.stop_runtime_delivery();
         outcome
     }
 
@@ -890,11 +935,11 @@ impl UnifiedRuntime {
         }
         // The liveness probe is observation only: a Stopped mob with long
         // turns must not page a false ActorLoopStalled.
-        if let Some(task) = self.actor_loop_probe_task.lock().await.take() {
+        if let Some(task) = self.default_mob().actor_loop_probe_task.lock().await.take() {
             task.abort();
             let _ = task.await;
         }
-        self.mob_runtime.stop_runtime_delivery();
+        self.default_mob().mob_runtime.stop_runtime_delivery();
         // A candidate launch holds every stored member, so no run is in
         // flight to drain, and it stops nothing
         // ([`Self::stop_mob_unless_candidate`]).
@@ -1022,16 +1067,33 @@ impl UnifiedRuntime {
             if let Some(alert) = forwarded.alert {
                 self.fire_error(alert);
             }
+            // The mob the event's row and its place in the merged events
+            // name, with the incarnation of the mob the event came from:
+            // none for the launch selection, as on a host of one mob.
+            let event_mob =
+                forwarded
+                    .selection
+                    .row_mob()
+                    .cloned()
+                    .map(|mob_id| crate::runtime::EventMob {
+                        mob_id,
+                        incarnation: forwarded.mob_incarnation,
+                    });
+            // The console events the event is projected into: those of the
+            // mob its selection names, never another mob's.
+            let console_events =
+                self.console_events_of_selection(&forwarded.selection, forwarded.mob_incarnation);
             let unified_event = forwarded.envelope;
             if let Some(room) = event_log_room {
-                room.ingest(unified_event.clone());
+                room.ingest_of_mob(unified_event.clone(), event_mob.clone());
             }
-            self.project_console_event_from_unified(&unified_event)
-                .await;
+            if let Some(console_events) = console_events {
+                console_events.project_unified_event(&unified_event).await;
+            }
             self.module_runtime
                 .lock()
                 .await
-                .append_normalized_event(unified_event)?;
+                .append_normalized_event_of_mob(unified_event, event_mob)?;
         }
 
         if disconnected {
@@ -1051,30 +1113,48 @@ impl UnifiedRuntime {
             log.close_intake();
         }
         let ingress = self.mob_event_ingress.lock().await.take();
-        match ingress {
+        let undrained = match ingress {
             Some(MobEventIngress::Forwarder(forwarder)) => {
                 let task = forwarder.task;
                 task.abort();
                 let _ = task.await;
-                let health_task = forwarder.identity_stream_health_task;
-                health_task.abort();
-                let _ = health_task.await;
-                // What no drain took closes with the router: it reaches
-                // neither the event log nor the console.
-                let left = forwarder.event_rx.len();
-                if left > 0 {
-                    tracing::warn!(
-                        left,
-                        "the event router closed with forwarded member events no drain took; \
-                         they reach neither the event log nor the console"
-                    );
-                }
+                Some(forwarder.event_rx)
             }
-            None => {}
+            None => None,
+        };
+        // The monitor of a mob's identity streams is its entry's and stops
+        // with the entry, after the forwarder where there is one: a drain
+        // that found the forwarder's channel closed dropped the ingress,
+        // and the monitor still runs then.
+        let health_task = self
+            .default_mob()
+            .identity_stream_health_task
+            .lock()
+            .await
+            .take();
+        if let Some(health_task) = health_task {
+            health_task.abort();
+            let _ = health_task.await;
+        }
+        // What no drain took closes with the router: it reaches neither
+        // the event log nor the console.
+        let left = undrained.map_or(0, |event_rx| event_rx.len());
+        if left > 0 {
+            tracing::warn!(
+                left,
+                "the event router closed with forwarded member events no drain took; \
+                 they reach neither the event log nor the console"
+            );
         }
 
         // Stop the structural mob-events subscription task as well.
-        if let Some(task) = self.mob_events_subscriber_task.lock().await.take() {
+        if let Some(task) = self
+            .default_mob()
+            .mob_events_subscriber_task
+            .lock()
+            .await
+            .take()
+        {
             task.abort();
             let _ = task.await;
         }
@@ -1543,6 +1623,8 @@ mod event_log_intake_tests {
                 }),
             },
             alert: None,
+            selection: crate::unified_runtime::EventSelection::Launch,
+            mob_incarnation: None,
         }
     }
 

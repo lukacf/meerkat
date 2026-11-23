@@ -369,6 +369,21 @@ describe("MetaRuntime", () => {
     assert.equal(params.runtime_options.console_read_only, true);
   });
 
+  it("builds console_list_nested_mobs runtime option only when set", () => {
+    const { rt } = createMockRuntime();
+
+    const unset = (rt as any)._buildInitParams();
+    assert.equal(
+      "console_list_nested_mobs" in (unset.runtime_options ?? {}),
+      false,
+    );
+
+    (rt as any)._config.consoleListNestedMobs = false;
+    const params = (rt as any)._buildInitParams();
+
+    assert.equal(params.runtime_options.console_list_nested_mobs, false);
+  });
+
   it("builds access_config_path runtime option", () => {
     const { rt } = createMockRuntime();
     (rt as any)._config.accessConfigPath = "config/access.toml";
@@ -713,7 +728,7 @@ describe("MobHandle.status()", () => {
   it("sends meta/status and parses the result", async () => {
     const { handle, calls, setResponse } = createMockRuntime();
     setResponse(() => ({
-      contract_version: "0.5.0",
+      contract_version: "0.6.0",
       running: true,
       loaded_modules: ["mod-a", "mod-b"],
     }));
@@ -721,7 +736,7 @@ describe("MobHandle.status()", () => {
     const result = await handle.status();
     assert.equal(calls.length, 1);
     assert.equal(calls[0].method, "meta/status");
-    assert.equal(result.contractVersion, "0.5.0");
+    assert.equal(result.contractVersion, "0.6.0");
     assert.equal(result.running, true);
     assert.deepEqual(result.loadedModules, ["mod-a", "mod-b"]);
   });
@@ -731,14 +746,14 @@ describe("MobHandle.capabilities()", () => {
   it("sends meta/capabilities and parses the result", async () => {
     const { handle, calls, setResponse } = createMockRuntime();
     setResponse(() => ({
-      contract_version: "0.5.0",
+      contract_version: "0.6.0",
       methods: ["meta/status", "meta/capabilities"],
       loaded_modules: ["mod-a"],
     }));
 
     const result = await handle.capabilities();
     assert.equal(calls[0].method, "meta/capabilities");
-    assert.equal(result.contractVersion, "0.5.0");
+    assert.equal(result.contractVersion, "0.6.0");
     assert.deepEqual(result.methods, ["meta/status", "meta/capabilities"]);
     assert.deepEqual(result.loadedModules, ["mod-a"]);
   });
@@ -3645,7 +3660,7 @@ describe("MobHandle live methods", () => {
   it("serializes v1 execution identity and returns a typed handle", async () => {
     const { handle, calls, setResponse } = createMockRuntime();
     setResponse((method) => method === "meta/capabilities" ? {
-      contract_version: "0.5.0",
+      contract_version: "0.6.0",
       methods: ["meta/live/open"],
       loaded_modules: [],
       feature_capabilities: [
@@ -3691,7 +3706,7 @@ describe("MobHandle live methods", () => {
   it("refuses execution identity before opening against an old gateway", async () => {
     const { handle, calls, setResponse } = createMockRuntime();
     setResponse(() => ({
-      contract_version: "0.5.0",
+      contract_version: "0.6.0",
       methods: ["meta/live/open"],
       loaded_modules: [],
     }));
@@ -3743,7 +3758,7 @@ describe("MobHandle live methods", () => {
   it("refuses a strict open response missing canonical target identity", async () => {
     const { handle, setResponse } = createMockRuntime();
     setResponse((method) => method === "meta/capabilities" ? {
-      contract_version: "0.5.0",
+      contract_version: "0.6.0",
       methods: ["meta/live/open"],
       loaded_modules: [],
       feature_capabilities: ["live.execution_identity.v1"],
@@ -3789,7 +3804,7 @@ describe("MobHandle live methods", () => {
     const events: string[] = [];
     setResponse((method) => {
       if (method === "meta/capabilities") return {
-        contract_version: "0.5.0",
+        contract_version: "0.6.0",
         methods: [],
         loaded_modules: [],
         feature_capabilities: [
@@ -3908,7 +3923,7 @@ describe("MobHandle live methods", () => {
     const events: string[] = [];
     setResponse((method) => {
       if (method === "meta/capabilities") return {
-        contract_version: "0.5.0",
+        contract_version: "0.6.0",
         methods: [],
         loaded_modules: [],
         feature_capabilities: [

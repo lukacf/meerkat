@@ -107,7 +107,7 @@ inventory::submit! {
 inventory::submit! {
     meerkat_capabilities::CapabilityRegistration {
         id: meerkat_capabilities::CapabilityId::Shell,
-        description: "Shell tool with job management: shell, shell_jobs, shell_job_status, shell_job_cancel",
+        description: "Shell tools with job management and script monitors: shell, shell_jobs, shell_job_status, shell_job_cancel, monitor_start",
         scope: meerkat_capabilities::CapabilityScope::Universal,
         requires_feature: None,
         prerequisites: &[],

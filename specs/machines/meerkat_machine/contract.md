@@ -621,7 +621,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ResolveAdmissionIdempotency`(input_id: String, idempotency_key: Option<String>)
 - `RegisterAcceptedIdempotency`(input_id: String, idempotency_key: String)
 - `NormalizeRecoveredInputLifecycle`(input_id: String, phase: RecoveredInputObservedPhase, applied_boundary_committed: Option<Bool>, bound_run_resumable: Bool)
-- `ClassifyRecoveredInputDurability`(input_id: String, durability: InputDurabilityKind)
+- `ClassifyRecoveredInputDurability`(input_id: String, durability: InputDurabilityKind, pending_terminal_carrier: Bool)
 - `ResolveInputPublicLifecycle`(input_id: String, phase: RecoveredInputObservedPhase)
 - `ResolveInputPublicTerminalOutcome`(input_id: String, phase: RecoveredInputObservedPhase, terminal_kind: Option<InputTerminalKind>, abandon_reason: Option<InputAbandonReason>)
 - `ClassifyInputTerminality`(input_id: String, phase: RecoveredInputObservedPhase, terminal_kind: Option<InputTerminalKind>, abandon_reason: Option<InputAbandonReason>)
@@ -674,7 +674,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RunFailed`(run_id: RunId, runtime_apply_failure_cause: Option<RuntimeApplyFailureCause>, runtime_apply_failure_message: Option<String>, machine_terminal_failure_observed: Bool, terminal_failure_source: Option<RunFailureSourceKind>, error: String)
 - `RunCancelled`(run_id: RunId)
 - `RecoverAdmittedInput`(input_id: String, input_kind: RecoveredInputKind, runtime_boundary: RecoveredRunApplyBoundary, runtime_execution_kind: RecoveredRuntimeExecutionKind, runtime_peer_response_terminal_apply_intent: Option<RecoveredPeerResponseTerminalApplyIntent>, lane: InputLane)
-- `RecoverInputLifecycle`(input_id: String, phase: InputPhase, terminal_kind: Option<InputTerminalKind>, superseded_by: Option<String>, aggregate_id: Option<String>, abandon_reason: Option<InputAbandonReason>, abandon_attempt_count: u64, attempt_count: u64, run_id: Option<RunId>, boundary_sequence: Option<u64>, admission_sequence: Option<u64>, admission_sequence_recovery: Option<RecoveredInputNormalizationReasonKind>, recovery_lane: Option<InputLane>, lane: Option<InputLane>, runtime_boundary: Option<RecoveredRunApplyBoundary>, runtime_execution_kind: Option<RecoveredRuntimeExecutionKind>, runtime_peer_response_terminal_apply_intent: Option<RecoveredPeerResponseTerminalApplyIntent>, is_prompt: Bool)
+- `RecoverInputLifecycle`(input_id: String, phase: InputPhase, terminal_kind: Option<InputTerminalKind>, superseded_by: Option<String>, aggregate_id: Option<String>, abandon_reason: Option<InputAbandonReason>, abandon_attempt_count: u64, attempt_count: u64, run_id: Option<RunId>, boundary_sequence: Option<u64>, admission_sequence: Option<u64>, admission_sequence_recovery: Option<RecoveredInputNormalizationReasonKind>, recovery_lane: Option<InputLane>, lane: Option<InputLane>, runtime_boundary: Option<RecoveredRunApplyBoundary>, runtime_execution_kind: Option<RecoveredRuntimeExecutionKind>, runtime_peer_response_terminal_apply_intent: Option<RecoveredPeerResponseTerminalApplyIntent>, is_prompt: Bool, live_boundary_delivery: Option<LiveBoundaryDelivery>)
 - `QueueAccepted`(input_id: String)
 - `SteerAccepted`(input_id: String)
 - `ChangeLane`(input_id: String, new_lane: InputLane)
@@ -9260,55 +9260,115 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyRecoveredInputDurabilityDiscardEphemeralInitializing`
 - From: `Initializing`
-- On: `ClassifyRecoveredInputDurability`(input_id, durability)
+- On: `ClassifyRecoveredInputDurability`(input_id, durability, pending_terminal_carrier)
 - Guards:
   - `ephemeral_durability`
+  - `unfinished_work`
 - Emits: `RecoveredInputDurabilityClassified`
 - To: `Initializing`
 
 ### `ClassifyRecoveredInputDurabilityDiscardEphemeralIdle`
 - From: `Idle`
-- On: `ClassifyRecoveredInputDurability`(input_id, durability)
+- On: `ClassifyRecoveredInputDurability`(input_id, durability, pending_terminal_carrier)
 - Guards:
   - `ephemeral_durability`
+  - `unfinished_work`
 - Emits: `RecoveredInputDurabilityClassified`
 - To: `Idle`
 
 ### `ClassifyRecoveredInputDurabilityDiscardEphemeralAttached`
 - From: `Attached`
-- On: `ClassifyRecoveredInputDurability`(input_id, durability)
+- On: `ClassifyRecoveredInputDurability`(input_id, durability, pending_terminal_carrier)
 - Guards:
   - `ephemeral_durability`
+  - `unfinished_work`
 - Emits: `RecoveredInputDurabilityClassified`
 - To: `Attached`
 
 ### `ClassifyRecoveredInputDurabilityDiscardEphemeralRunning`
 - From: `Running`
-- On: `ClassifyRecoveredInputDurability`(input_id, durability)
+- On: `ClassifyRecoveredInputDurability`(input_id, durability, pending_terminal_carrier)
 - Guards:
   - `ephemeral_durability`
+  - `unfinished_work`
 - Emits: `RecoveredInputDurabilityClassified`
 - To: `Running`
 
 ### `ClassifyRecoveredInputDurabilityDiscardEphemeralRetired`
 - From: `Retired`
-- On: `ClassifyRecoveredInputDurability`(input_id, durability)
+- On: `ClassifyRecoveredInputDurability`(input_id, durability, pending_terminal_carrier)
 - Guards:
   - `ephemeral_durability`
+  - `unfinished_work`
 - Emits: `RecoveredInputDurabilityClassified`
 - To: `Retired`
 
 ### `ClassifyRecoveredInputDurabilityDiscardEphemeralStopped`
 - From: `Stopped`
-- On: `ClassifyRecoveredInputDurability`(input_id, durability)
+- On: `ClassifyRecoveredInputDurability`(input_id, durability, pending_terminal_carrier)
 - Guards:
   - `ephemeral_durability`
+  - `unfinished_work`
+- Emits: `RecoveredInputDurabilityClassified`
+- To: `Stopped`
+
+### `ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierInitializing`
+- From: `Initializing`
+- On: `ClassifyRecoveredInputDurability`(input_id, durability, pending_terminal_carrier)
+- Guards:
+  - `ephemeral_durability`
+  - `pending_terminal_carrier`
+- Emits: `RecoveredInputDurabilityClassified`
+- To: `Initializing`
+
+### `ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierIdle`
+- From: `Idle`
+- On: `ClassifyRecoveredInputDurability`(input_id, durability, pending_terminal_carrier)
+- Guards:
+  - `ephemeral_durability`
+  - `pending_terminal_carrier`
+- Emits: `RecoveredInputDurabilityClassified`
+- To: `Idle`
+
+### `ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierAttached`
+- From: `Attached`
+- On: `ClassifyRecoveredInputDurability`(input_id, durability, pending_terminal_carrier)
+- Guards:
+  - `ephemeral_durability`
+  - `pending_terminal_carrier`
+- Emits: `RecoveredInputDurabilityClassified`
+- To: `Attached`
+
+### `ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierRunning`
+- From: `Running`
+- On: `ClassifyRecoveredInputDurability`(input_id, durability, pending_terminal_carrier)
+- Guards:
+  - `ephemeral_durability`
+  - `pending_terminal_carrier`
+- Emits: `RecoveredInputDurabilityClassified`
+- To: `Running`
+
+### `ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierRetired`
+- From: `Retired`
+- On: `ClassifyRecoveredInputDurability`(input_id, durability, pending_terminal_carrier)
+- Guards:
+  - `ephemeral_durability`
+  - `pending_terminal_carrier`
+- Emits: `RecoveredInputDurabilityClassified`
+- To: `Retired`
+
+### `ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierStopped`
+- From: `Stopped`
+- On: `ClassifyRecoveredInputDurability`(input_id, durability, pending_terminal_carrier)
+- Guards:
+  - `ephemeral_durability`
+  - `pending_terminal_carrier`
 - Emits: `RecoveredInputDurabilityClassified`
 - To: `Stopped`
 
 ### `ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingInitializing`
 - From: `Initializing`
-- On: `ClassifyRecoveredInputDurability`(input_id, durability)
+- On: `ClassifyRecoveredInputDurability`(input_id, durability, pending_terminal_carrier)
 - Guards:
   - `retained_durability`
 - Emits: `RecoveredInputDurabilityClassified`
@@ -9316,7 +9376,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingIdle`
 - From: `Idle`
-- On: `ClassifyRecoveredInputDurability`(input_id, durability)
+- On: `ClassifyRecoveredInputDurability`(input_id, durability, pending_terminal_carrier)
 - Guards:
   - `retained_durability`
 - Emits: `RecoveredInputDurabilityClassified`
@@ -9324,7 +9384,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingAttached`
 - From: `Attached`
-- On: `ClassifyRecoveredInputDurability`(input_id, durability)
+- On: `ClassifyRecoveredInputDurability`(input_id, durability, pending_terminal_carrier)
 - Guards:
   - `retained_durability`
 - Emits: `RecoveredInputDurabilityClassified`
@@ -9332,7 +9392,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingRunning`
 - From: `Running`
-- On: `ClassifyRecoveredInputDurability`(input_id, durability)
+- On: `ClassifyRecoveredInputDurability`(input_id, durability, pending_terminal_carrier)
 - Guards:
   - `retained_durability`
 - Emits: `RecoveredInputDurabilityClassified`
@@ -9340,7 +9400,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingRetired`
 - From: `Retired`
-- On: `ClassifyRecoveredInputDurability`(input_id, durability)
+- On: `ClassifyRecoveredInputDurability`(input_id, durability, pending_terminal_carrier)
 - Guards:
   - `retained_durability`
 - Emits: `RecoveredInputDurabilityClassified`
@@ -9348,7 +9408,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingStopped`
 - From: `Stopped`
-- On: `ClassifyRecoveredInputDurability`(input_id, durability)
+- On: `ClassifyRecoveredInputDurability`(input_id, durability, pending_terminal_carrier)
 - Guards:
   - `retained_durability`
 - Emits: `RecoveredInputDurabilityClassified`
@@ -12789,7 +12849,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RecoverInputLifecycleIdle`
 - From: `Idle`
-- On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, admission_sequence, admission_sequence_recovery, recovery_lane, lane, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, is_prompt)
+- On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, admission_sequence, admission_sequence_recovery, recovery_lane, lane, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, is_prompt, live_boundary_delivery)
 - Guards:
   - `recovered_lifecycle_has_admission_witness`
   - `recovered_recovery_lane_matches_witness`
@@ -12805,7 +12865,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RecoverInputLifecycleAttached`
 - From: `Attached`
-- On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, admission_sequence, admission_sequence_recovery, recovery_lane, lane, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, is_prompt)
+- On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, admission_sequence, admission_sequence_recovery, recovery_lane, lane, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, is_prompt, live_boundary_delivery)
 - Guards:
   - `recovered_lifecycle_has_admission_witness`
   - `recovered_recovery_lane_matches_witness`
@@ -12821,7 +12881,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RecoverInputLifecycleRunning`
 - From: `Running`
-- On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, admission_sequence, admission_sequence_recovery, recovery_lane, lane, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, is_prompt)
+- On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, admission_sequence, admission_sequence_recovery, recovery_lane, lane, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, is_prompt, live_boundary_delivery)
 - Guards:
   - `recovered_lifecycle_has_admission_witness`
   - `recovered_recovery_lane_matches_witness`
@@ -12837,7 +12897,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RecoverInputLifecycleRetired`
 - From: `Retired`
-- On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, admission_sequence, admission_sequence_recovery, recovery_lane, lane, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, is_prompt)
+- On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, admission_sequence, admission_sequence_recovery, recovery_lane, lane, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, is_prompt, live_boundary_delivery)
 - Guards:
   - `recovered_lifecycle_has_admission_witness`
   - `recovered_recovery_lane_matches_witness`
@@ -12853,7 +12913,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RecoverInputLifecycleStopped`
 - From: `Stopped`
-- On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, admission_sequence, admission_sequence_recovery, recovery_lane, lane, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, is_prompt)
+- On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, admission_sequence, admission_sequence_recovery, recovery_lane, lane, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, is_prompt, live_boundary_delivery)
 - Guards:
   - `recovered_lifecycle_has_admission_witness`
   - `recovered_recovery_lane_matches_witness`

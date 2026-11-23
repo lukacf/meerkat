@@ -17254,6 +17254,7 @@ pub mod inputs {
     pub struct ClassifyRecoveredInputDurability {
         pub input_id: String,
         pub durability: InputDurabilityKind,
+        pub pending_terminal_carrier: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResolveInputPublicLifecycle {
@@ -17548,6 +17549,7 @@ pub mod inputs {
         pub runtime_peer_response_terminal_apply_intent:
             Option<RecoveredPeerResponseTerminalApplyIntent>,
         pub is_prompt: bool,
+        pub live_boundary_delivery: Option<LiveBoundaryDelivery>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct QueueAccepted {
@@ -26563,6 +26565,12 @@ pub enum TransitionId {
     DeferInputBehindBacklogEndedWithRefusedRunRunning,
     DeferInputBehindBacklogEndedWithRefusedRunRetired,
     DeferInputBehindBacklogEndedWithRefusedRunStopped,
+    ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierInitializing,
+    ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierIdle,
+    ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierAttached,
+    ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierRunning,
+    ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierRetired,
+    ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierStopped,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

@@ -12,10 +12,10 @@ use crate::console_aggregator::{ConsoleLogStore, InMemoryConsoleLogStore, Sqlite
 use crate::contact_directory::ContactDirectory;
 pub use crate::identity_first::IdentityBootstrapMode;
 use crate::identity_first::{
-    AgentCustomizer, AgentMemoryConfig, AgentMemoryCustomizer, AgentMemoryProvider,
-    AgentMemoryRuntimeInjector, AgentRuntimeServices, DurabilityPolicy,
-    IdentityFirstRuntimeContext, IdentityRuntime, IdentityRuntimeConfig, LocalContinuityStore,
-    LocalLeaseProvider, RosterContext, RosterProvider, TopologyProvider,
+    AgentCustomizer, AgentMemoryConfig, AgentMemoryProvider, AgentMemoryRuntimeInjector,
+    AgentRuntimeServices, DurabilityPolicy, IdentityFirstRuntimeContext, IdentityRuntime,
+    IdentityRuntimeConfig, LocalContinuityStore, LocalLeaseProvider, RosterContext, RosterProvider,
+    TopologyProvider,
 };
 use crate::mob_composition_manifest::MobStorageProvenance;
 use crate::mob_handle_runtime::{
@@ -126,6 +126,9 @@ pub struct UnifiedRuntimeBuilder {
     agent_memory_provider: Option<Arc<dyn AgentMemoryProvider>>,
     agent_memory_config: Option<AgentMemoryConfig>,
     agent_memory_profile_policy: BTreeMap<meerkat_mob::ProfileName, bool>,
+    /// The profiles listed their own memory only, as given: checked against
+    /// the launch mob's definition at `build`.
+    agent_memory_own_memory_only_profiles: Vec<String>,
     /// Named Rust tool bundles added to the resolved or supplied mob spec,
     /// each with its availability to child mobs.
     tool_bundles: BTreeMap<
@@ -180,6 +183,9 @@ pub struct UnifiedRuntimeBuilder {
     schedule_store: Option<Arc<dyn meerkat::ScheduleStore>>,
     workgraph_store: Option<Arc<dyn meerkat::WorkGraphStore>>,
     storage_provider: Option<Arc<dyn crate::storage_provider::MetaStorageProvider>>,
+    /// The bundled agent memory store, when the storage provider's agent
+    /// memory is that store: the build runs its first start's step.
+    storage_provider_memory_store: Option<crate::memory::sqlite_store::SqliteAgentMemoryStore>,
     meerkat_realm_declaration: Option<crate::storage_provider::MeerkatLevelRealmDeclaration>,
     // Materialized from `storage_provider` (M4b): the meerkat-level bundle
     // opened through `meerkat_provider()` for non-disk backends, and the
@@ -801,19 +807,49 @@ impl UnifiedRuntimeBuilder {
         self
     }
 
+    /// List the profiles whose agents are listed their own memory only
+    /// (the gateway's `agent_memory.own_memory_only_profiles`).
+    ///
+    /// An agent of a listed profile, an agent whose profile its own mob
+    /// does not define, an agent such an agent created and an agent whose
+    /// creation cannot be followed back to the host is given, in the memory
+    /// index of its build, the rows of its own records alone: none of its
+    /// mob's shared records and none of the realm's. It is a filter on what
+    /// an agent is listed, not a boundary between tenants, and it limits no
+    /// write. The names hold in the launch mob and, by name, in every mob
+    /// hosted beside it.
+    ///
+    /// The names are distinct profiles of the launch mob's definition:
+    /// `build` refuses a name it does not have and a name given twice
+    /// ([`UnifiedRuntimeBuilderError::ConflictingConfiguration`]). Only an
+    /// agent of an identity-first roster is built with agent memory, so
+    /// `build` refuses a list on a runtime without one (`roster_provider()`)
+    /// the same way. A second call replaces the list.
+    pub fn agent_memory_own_memory_only_profiles(
+        mut self,
+        profiles: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.agent_memory_own_memory_only_profiles = profiles.into_iter().map(Into::into).collect();
+        self
+    }
+
     fn composed_agent_customizer(
         &self,
         memory_provider: Option<Arc<dyn AgentMemoryProvider>>,
+        own_memory_only: Option<crate::memory::own_memory_only::OwnMemoryOnly>,
     ) -> Option<Arc<dyn AgentCustomizer>> {
         match memory_provider {
-            Some(provider) => Some(Arc::new(
-                AgentMemoryCustomizer::wrap(
-                    self.agent_customizer.clone(),
-                    provider,
-                    self.agent_memory_config.clone().unwrap_or_default(),
-                )
-                .with_profile_memory_policy(self.agent_memory_profile_policy.clone()),
-            )),
+            // The one constructor of the customizer that builds a mob's
+            // agents with that mob's memory. This launch mob's agents are
+            // listed no shared memory, as before.
+            Some(provider) => Some(Arc::new(crate::gateway_wiring::mob_memory_customizer(
+                self.agent_customizer.clone(),
+                provider,
+                self.agent_memory_config.clone().unwrap_or_default(),
+                self.agent_memory_profile_policy.clone(),
+                None,
+                own_memory_only,
+            ))),
             None => self.agent_customizer.clone(),
         }
     }
@@ -1461,6 +1497,13 @@ impl UnifiedRuntimeBuilder {
     /// at build. A [`TopologyProvider`]'s desired topology needs no such
     /// state: it is reconciled against the mob's own wiring, which the realm
     /// keeps.
+    ///
+    /// The policy is the host's: every mob the host serves beside its
+    /// default mob reads it too. Such a mob keeps its own state in a file
+    /// beside its store file, named after it; a mob the host keeps in
+    /// memory has no durable place for operator intent and reads
+    /// [`TopologyControlMode::ReadOnly`](crate::topology_control::TopologyControlMode::ReadOnly)
+    /// under an editable policy.
     pub fn topology_control(
         mut self,
         policy: crate::topology_control::TopologyControlPolicy,
@@ -1980,6 +2023,13 @@ impl UnifiedRuntimeBuilder {
                 .child_tool_bundle_availability
                 .insert(name, availability);
         }
+        // The runtime composes announcements: said on the spec before the
+        // runtime is built, as `register_member_tools` says it for a
+        // gateway, so that no mob is created over what an earlier mob of
+        // its id left with them before their owner is attached below.
+        if announcements.is_some() {
+            mob_spec = mob_spec.with_mob_announcements_declared();
+        }
         if let Some(binding) = self.child_application_tool_policy.take() {
             if mob_spec.child_application_tool_policy.is_some() {
                 return Err(UnifiedRuntimeBuilderError::ConflictingConfiguration(
@@ -2041,6 +2091,14 @@ impl UnifiedRuntimeBuilder {
         // event sink and mob handle exist. An explicit `agent_memory()`
         // provider is used as-is — `attach_memory_engines` capability-checks
         // it; otherwise the bundled SQLite store opens under the layout root.
+        //
+        // The bundled store's first start's step (`crate::memory::set_aside`)
+        // runs once the mob is bootstrapped, below: it leaves where they are
+        // the notes stored from this moment on. The bundled store is the
+        // one opened here, or the one a storage provider's agent memory is.
+        let memory_notes_before_ms = crate::memory::set_aside::now_ms();
+        let mut bundled_memory_store: Option<crate::memory::sqlite_store::SqliteAgentMemoryStore> =
+            self.storage_provider_memory_store.clone();
         let stack_provider: Option<Arc<dyn AgentMemoryProvider>> =
             if self.agent_memory_engines.is_some() {
                 if let Some(provider) = self.agent_memory_provider.clone() {
@@ -2069,19 +2127,24 @@ impl UnifiedRuntimeBuilder {
                     // lies; fresh deployments get the canonical
                     // `agent-memory/` root.
                     let memory_path = layout.agent_memory_root()?.path;
-                    Some(Arc::new(
-                        crate::memory::sqlite_store::SqliteAgentMemoryStore::open(&memory_path)
-                            .map_err(|e| {
-                                UnifiedRuntimeBuilderError::Io(format!(
-                                    "failed to open agent memory store at {}: {e}",
-                                    memory_path.display()
-                                ))
-                            })?,
-                    ))
+                    let store = open_bundled_memory_store(&memory_path)?;
+                    bundled_memory_store = Some(store.clone());
+                    Some(Arc::new(store))
                 }
             } else {
                 None
             };
+        // The release of a hosted mob's memory is the bundled store's: the
+        // one directory of that mob below the store's root. It is bound on
+        // the launch's spec here, where the store is known and BEFORE the
+        // runtime is built: a member the bootstrap restores is built before
+        // the next line after the bootstrap, and a create it asks must find
+        // the release bound, or a mob created under a used id would later
+        // be composed over the memory an earlier mob of that id left. What
+        // an earlier start's releases left unfinished is finished with it.
+        if let Some(store) = bundled_memory_store.as_ref() {
+            mob_spec.mob_memory_release.bind(Arc::new(store.clone()));
+        }
         let agent_memory_provider = self
             .agent_memory_provider
             .clone()
@@ -2092,15 +2155,54 @@ impl UnifiedRuntimeBuilder {
                 self.agent_memory_config.clone().unwrap_or_default(),
             )
         });
-        let agent_customizer = self.composed_agent_customizer(agent_memory_provider.clone());
+        // The profiles this launch lists their own memory only. Who created
+        // an agent is read from the launch mob's own records, through its
+        // identity runtime, which does not exist yet: the lineage is bound
+        // to it when it stands, before the customizer is given to it, and
+        // nothing builds an agent with this customizer before then. Until
+        // it is bound it reads every link as one that cannot be read.
+        let own_memory_only_lineage = crate::memory::own_memory_only::RecordedLineage::unbound();
+        let own_memory_only_profiles: std::collections::BTreeSet<meerkat_mob::ProfileName> = self
+            .agent_memory_own_memory_only_profiles
+            .iter()
+            .map(|name| meerkat_mob::ProfileName::from(name.as_str()))
+            .collect();
+        // Only an agent of an identity-first roster is built with agent
+        // memory. A list on a runtime without one would cover nothing, and
+        // its names would be checked against no definition: it is refused.
+        if !wants_identity_first && !own_memory_only_profiles.is_empty() {
+            return Err(UnifiedRuntimeBuilderError::ConflictingConfiguration(
+                "agent_memory_own_memory_only_profiles() lists profiles, and this runtime has \
+                 no identity-first agents (roster_provider()): the list would cover no agent"
+                    .to_string(),
+            ));
+        }
+        let agent_customizer = self.composed_agent_customizer(
+            agent_memory_provider.clone(),
+            crate::memory::own_memory_only::OwnMemoryOnly::listing(
+                own_memory_only_profiles.clone(),
+                own_memory_only_lineage.clone(),
+            ),
+        );
         // A console side chat inherits its source's tool overlay, recorder
         // included: every member build binds a side chat's `memory` tool to
         // the side chat's own identity with this provider, on the classic
-        // and the identity-first path alike.
+        // and the identity-first path alike. The side chat's tool is gated
+        // as its source's own recorder is: per agent profile where the agent
+        // customizer attaches it, for every member where the mob's spawn
+        // customizer does (the classic path, below).
         if let Some(provider) = agent_memory_provider.as_ref() {
-            mob_spec.side_chat_memory_slot().fill(
+            let gate = if wants_identity_first {
+                crate::memory::side_chat_memory::SideChatMemoryGate::AgentProfiles(
+                    self.agent_memory_profile_policy.clone(),
+                )
+            } else {
+                crate::memory::side_chat_memory::SideChatMemoryGate::EveryMember
+            };
+            mob_spec.side_chat_memory_slot().fill_gated(
                 provider.clone(),
                 self.agent_memory_config.clone().unwrap_or_default(),
+                gate,
             );
         }
 
@@ -2118,14 +2220,20 @@ impl UnifiedRuntimeBuilder {
         if let Some(provider) = classic_agent_memory.as_ref() {
             // Composed after a spawn customizer the spec already carries,
             // never replacing it: the host's runs first, and memory keys on
-            // the identity it leaves.
+            // the identity it leaves. It reads who the spawn will be private
+            // to from the mob's owner record: the owner is written on the
+            // spec only after it.
+            let private_owners = mob_spec.private_owners.clone();
             mob_spec.spawn_member_customizer =
                 Some(crate::identity_first::ComposedSpawnMemberCustomizer::over(
                     mob_spec.spawn_member_customizer.take(),
-                    Arc::new(crate::memory::MemorySpawnCustomizer::new(
-                        provider.clone(),
-                        self.agent_memory_config.clone().unwrap_or_default(),
-                    )),
+                    Arc::new(
+                        crate::memory::MemorySpawnCustomizer::new(
+                            provider.clone(),
+                            self.agent_memory_config.clone().unwrap_or_default(),
+                        )
+                        .with_private_owners(private_owners),
+                    ),
                 ));
         }
         // Identity-first `customize_build` tools follow each member across
@@ -2207,6 +2315,18 @@ impl UnifiedRuntimeBuilder {
             let launch_definition = mob_spec.read_launch_definition().await.map_err(|error| {
                 UnifiedRuntimeBuilderError::Bootstrap(UnifiedRuntimeBootstrapError::Mob(error))
             })?;
+            // The profiles listed their own memory only are distinct
+            // profiles of the launch mob: a name it does not have, or a
+            // name given twice, refuses the build before anything is built.
+            crate::memory::own_memory_only::own_memory_only_profiles_of(
+                &launch_definition,
+                &self.agent_memory_own_memory_only_profiles,
+            )
+            .map_err(|error| {
+                UnifiedRuntimeBuilderError::ConflictingConfiguration(format!(
+                    "agent_memory_own_memory_only_profiles(): {error}"
+                ))
+            })?;
             let launch_mob_id = launch_definition.id.to_string();
             (
                 Some(
@@ -2263,7 +2383,7 @@ impl UnifiedRuntimeBuilder {
         let options = self.options;
         #[allow(unused_mut)]
         let mut runtime = crate::boxed_future::boxed(|| {
-            UnifiedRuntime::bootstrap_with_options(
+            UnifiedRuntime::bootstrap_for_the_builder(
                 mob_spec,
                 module_config,
                 module_agent_events,
@@ -2280,6 +2400,33 @@ impl UnifiedRuntimeBuilder {
                 error
             })
         })?;
+
+        // The bundled agent memory store's first start's step
+        // (`crate::memory::set_aside`), through the bootstrapped mob's event
+        // log and those of the mobs its agent mob tools host: before the
+        // identity runtime is given its customizer and its
+        // injector, before the roster's agents are built and before the
+        // memory panel is given the store. The recorder slot and, on a
+        // runtime without registered agents, the spawn customizer were
+        // given the store before the bootstrap, so a member the bootstrap
+        // restored was built before this step. A step that cannot run fails
+        // the build: nothing was written, and the next build tries again.
+        if let Some(store) = bundled_memory_store.as_ref() {
+            let realm = self.agent_memory_config.clone().unwrap_or_default().realm;
+            let start = Box::pin(crate::memory::set_aside::memory_start_for(
+                store,
+                &realm,
+                runtime.mob_runtime(),
+                memory_notes_before_ms,
+            ))
+            .await;
+            match start {
+                crate::memory::set_aside::MemoryStart::Attach => {}
+                crate::memory::set_aside::MemoryStart::Refuse { message } => {
+                    return Err(UnifiedRuntimeBuilderError::Io(message));
+                }
+            }
+        }
 
         #[cfg(feature = "extension-state")]
         {
@@ -2313,8 +2460,8 @@ impl UnifiedRuntimeBuilder {
             // theirs, with every seam the mob runtime recorded: the controller
             // pin source among them, so governed input reaches the host's bind.
             let bridge = crate::gateway_wiring::identity_session_bridge(
-                &runtime.mob_runtime,
-                runtime.mob_runtime.handle(),
+                &runtime.default_mob().mob_runtime,
+                runtime.default_mob().mob_runtime.handle(),
             );
             Some(Arc::new(bridge) as Arc<dyn crate::identity_first::bridge::SessionBridge>)
         };
@@ -2401,10 +2548,19 @@ impl UnifiedRuntimeBuilder {
                 bridge,
                 default_timeout: None,
             })
-            .with_runtime_services(AgentRuntimeServices::new(runtime.mob_runtime.handle()))
+            .with_runtime_services(AgentRuntimeServices::new(
+                runtime.default_mob().mob_runtime.handle(),
+            ))
             .with_reset_roster_provider_context(
                 roster_provider.clone(),
-                Some(runtime.mob_runtime.handle().definition().clone()),
+                Some(
+                    runtime
+                        .default_mob()
+                        .mob_runtime
+                        .handle()
+                        .definition()
+                        .clone(),
+                ),
             );
             // A governed send's "not now" waits are reported where the
             // agents' operation refusals are.
@@ -2412,6 +2568,17 @@ impl UnifiedRuntimeBuilder {
                 Some(observer) => identity_runtime.with_operation_refusal_observer(observer),
                 None => identity_runtime,
             });
+            // From here on the launch mob's customizer reads who created an
+            // agent from this runtime's mob. The lineage was made for this
+            // launch mob alone and is bound once: a binding that is not the
+            // first would leave it reading another mob's records.
+            if !own_memory_only_lineage.bind(&identity_runtime) {
+                return Err(UnifiedRuntimeBuilderError::ConflictingConfiguration(
+                    "the launch mob's record of who created an agent was bound to an identity \
+                     runtime before the launch mob's own"
+                        .to_string(),
+                ));
+            }
             identity_runtime
                 .set_agent_customizer(agent_customizer.clone())
                 .await;
@@ -2421,7 +2588,7 @@ impl UnifiedRuntimeBuilder {
             identity_runtime.set_identity_records(identity_record_store, runtime.mob_id());
             // A candidate launch's mob build held every stored member's run
             // starts, and it releases none of them.
-            if !runtime.mob_runtime.speaks_for_composition() {
+            if !runtime.default_mob().mob_runtime.speaks_for_composition() {
                 identity_runtime.mark_candidate_launch();
             }
             // The preparer meets the identity runtime once its customizer,
@@ -2430,7 +2597,7 @@ impl UnifiedRuntimeBuilder {
             member_build_wiring
                 .bind(
                     &identity_runtime,
-                    runtime.mob_runtime.session_service().cloned(),
+                    runtime.default_mob().mob_runtime.session_service().cloned(),
                 )
                 .await;
             identity_runtime
@@ -2444,6 +2611,7 @@ impl UnifiedRuntimeBuilder {
             identity_runtime.set_session_repair_scope(self.session_repair_scope.clone().or_else(
                 || {
                     runtime
+                        .default_mob()
                         .mob_runtime
                         .resolved_storage()
                         .as_ref()
@@ -2489,36 +2657,60 @@ impl UnifiedRuntimeBuilder {
                 roster_provider,
                 self.topology_provider.clone(),
                 agent_customizer.clone(),
-                Some(runtime.mob_runtime.handle().definition().clone()),
+                Some(
+                    runtime
+                        .default_mob()
+                        .mob_runtime
+                        .handle()
+                        .definition()
+                        .clone(),
+                ),
                 self.identity_bootstrap_mode.clone(),
             ));
             (Some(identity_context), Some(roster_specs))
         } else {
             (None, None)
         };
+        if let Some(controller) = self.access_controller.as_ref() {
+            controller.bind_default_mob(&crate::member_key::DefaultMob::new(
+                runtime.default_mob().mob_id().clone(),
+            ));
+            runtime.other_mobs().keep_access_controller(controller);
+        }
         // Set immutable outer fields by rebuilding the struct
-        let (core, public_owner) = runtime.into_parts();
+        let (mut core, public_owner) = runtime.into_parts();
+        {
+            let mob = core.default_mob_mut();
+            mob.topology_controller = topology_controller;
+            // A custom embedder policy overrides the definition-derived
+            // default `bootstrap_with_options` installed (a downstream app,
+            // 2026-07-09); with none supplied the default is preserved.
+            if let Some(edge_discovery) = self.edge_discovery {
+                mob.edge_discovery =
+                    Some(std::sync::Arc::<dyn EdgeDiscovery>::from(edge_discovery));
+            }
+            mob.session_bridge = session_bridge;
+            if let Some(context) = identity_first_context {
+                mob.identity_first_context.install(context);
+            }
+            mob.discovery = self.discovery;
+        }
+        // The controller of the launch is final: every other mob of the
+        // host gets its own from it, and the entries the table held back
+        // are built now.
+        core.other_mobs()
+            .bind_launch_topology(&core.default_mob().topology_controller)
+            .await;
         let mut runtime = UnifiedRuntime::from_parts_unchecked(
             super::UnifiedRuntimeCore {
                 access_controller: self.access_controller,
                 flow_editor_host_deploy: self.flow_editor_host_deploy,
                 // A host deploy cannot carry the builder's credential store.
                 explicit_provider_credentials: self.provider_auth_persistence.is_some(),
-                topology_controller,
                 post_spawn_hook: self.post_spawn_hook,
                 post_reconcile_hook: self.post_reconcile_hook,
                 drain_timeout: self.drain_timeout.unwrap_or(DEFAULT_DRAIN_TIMEOUT),
-                discovery: self.discovery,
-                // A custom embedder policy overrides the definition-derived
-                // default `bootstrap_with_options` installed (a downstream app,
-                // 2026-07-09); with none supplied the default is preserved.
-                edge_discovery: self
-                    .edge_discovery
-                    .map(std::sync::Arc::<dyn EdgeDiscovery>::from)
-                    .or(core.edge_discovery),
                 contact_directory: self.contact_directory,
-                session_bridge,
-                identity_first_context,
                 console_log_store,
                 ..core
             },
@@ -2550,7 +2742,7 @@ impl UnifiedRuntimeBuilder {
         // construction (runtime-owned tasks already hold it), so a
         // builder-supplied hook installs into the slot rather than
         // replacing it.
-        if let Some(hook) = self.error_hook {
+        if let Some(hook) = self.error_hook.clone() {
             runtime.set_error_hook(hook);
         } else {
             // Say so at startup rather than at the first failure: a host that
@@ -2647,9 +2839,41 @@ impl UnifiedRuntimeBuilder {
                 } else {
                     None
                 };
+            // The engines read the sessions of the launch's memory alone:
+            // the runtime's one session store holds the sessions of every
+            // mob it builds. The launch's record of its mobs decides which
+            // those are, so it must name the launch mob its own.
+            let owners = runtime.default_mob().mob_runtime.private_owners().clone();
+            let transcripts = match transcript_store.clone() {
+                Some(store) => {
+                    crate::memory_wiring::launch_mob_is_bound(
+                        &owners,
+                        runtime.default_mob().mob_id(),
+                    )
+                    .map_err(UnifiedRuntimeBuilderError::Io)?;
+                    // Which session is one of the launch's own is what a
+                    // mob's journal bound: a mob storage a host composed
+                    // without that journal cannot serve the engines.
+                    let launch_mob = runtime.default_mob().mob_runtime.handle();
+                    crate::memory_wiring::launch_mob_keeps_a_journal(&launch_mob)
+                        .await
+                        .map_err(|refusal| {
+                            UnifiedRuntimeBuilderError::ConflictingConfiguration(format!(
+                                "persistent_agent_memory_stack() with a distiller or a \
+                                 steward needs a mob_storage() that keeps the journal of \
+                                 its members' sessions (MobStorage::in_memory() and \
+                                 MobStorage::persistent() do): {refusal}"
+                            ))
+                        })?;
+                    Some(crate::memory_wiring::launch_transcript_source(
+                        store, owners, launch_mob,
+                    ))
+                }
+                None => None,
+            };
             // The engines resolve provider credentials in the runtime's
             // store, as its agents do.
-            let stack = crate::memory_wiring::attach_memory_engines_with_provider_auth(
+            let stack = crate::memory_wiring::assemble_memory_stack(
                 provider,
                 &config,
                 engines,
@@ -2657,10 +2881,18 @@ impl UnifiedRuntimeBuilder {
                     persistent_state,
                     transcript_store,
                     event_sink: Some(runtime.memory_event_sink()),
-                    private_members: Some(runtime.mob_runtime.private_member_source()),
+                    private_members: Some(
+                        runtime.default_mob().mob_runtime.private_member_source(),
+                    ),
                     ..Default::default()
                 },
                 self.provider_auth_persistence.clone(),
+                crate::memory_wiring::MemoryStackOver {
+                    taint: None,
+                    transcripts,
+                    #[cfg(test)]
+                    clients: None,
+                },
             )
             .map_err(UnifiedRuntimeBuilderError::Io)?;
             if let Some(panel) = stack.panel.clone() {
@@ -2670,6 +2902,7 @@ impl UnifiedRuntimeBuilder {
             // of the private-owner record's durable reads.
             if let Some(store) = stack.steward_store.clone() {
                 runtime
+                    .default_mob()
                     .mob_runtime
                     .private_owners()
                     .bind_private_retirements(store, config.realm.clone());
@@ -2683,13 +2916,20 @@ impl UnifiedRuntimeBuilder {
             // normal shutdown and to the identity-bootstrap failure cleanup
             // path below. Leaking either handle here would leave ghost memory
             // work behind after build() returned Err.
-            *runtime.agent_memory_observer_task.lock().await = Some(
-                crate::spawn_member_event_observer(runtime.mob_runtime.handle(), stack.sinks),
-            );
+            *runtime.agent_memory_observer_task.lock().await =
+                Some(crate::spawn_member_event_observer(
+                    runtime.default_mob().mob_runtime.handle(),
+                    stack.sinks,
+                ));
             if let Some(steward) = stack.steward.as_ref() {
                 // Library mode has no schedule host; the guarded interval
-                // loop drives dreams.
-                *runtime.agent_memory_steward_task.lock().await = Some(steward.spawn_dream_loop());
+                // loop drives dreams: for the launch mob, then for each
+                // mob the launch hosts beside it that is loaded.
+                *runtime.agent_memory_steward_task.lock().await =
+                    Some(crate::memory_wiring::spawn_host_dream_loop(
+                        Arc::clone(steward),
+                        Some(runtime.hosted_mob_dreams()),
+                    ));
             }
             tracing::info!(
                 distiller = stack.distiller.is_some(),
@@ -2708,7 +2948,7 @@ impl UnifiedRuntimeBuilder {
         // between runtime construction and this point share that latent
         // route leak for same-process same-id rebuilds.)
         if let (Some(context), Some(roster_specs)) = (
-            runtime.identity_first_context.clone(),
+            runtime.default_mob().identity_first_context.get().cloned(),
             identity_roster_specs.as_ref(),
         ) {
             // The shared installer registers continuity owners before lifting
@@ -2723,6 +2963,87 @@ impl UnifiedRuntimeBuilder {
                     )),
                 );
                 return Err(build_error);
+            }
+            // The launch says how the identity planes of the mobs it hosts
+            // beside its launch mob are composed, with what it gave its
+            // launch mob. Its roster is its launch mob's own: the provider
+            // is asked for the launch mob alone. So with its topology
+            // provider: none is handed over.
+            //
+            // Agent memory is kept per mob. A runtime that keeps its agent
+            // memory in the bundled store hands that store over with the
+            // customizer it wrapped its launch mob's memory around: each
+            // other mob is composed with a memory of its own, in a store of
+            // its own below the launch's memory root. A host's own memory
+            // provider keeps none apart per mob: that memory is the launch
+            // mob's alone, and such a runtime hands nothing over.
+            if let Some(roster) = self.roster_provider.clone() {
+                let launch_mob = runtime.default_mob().mob_id().clone();
+                let memory_per_mob = agent_memory_provider
+                    .as_ref()
+                    .and(bundled_memory_store.clone())
+                    .map(|store| {
+                        // Where the runtime runs memory engines, each mob
+                        // it hosts beside its launch mob gets a distiller
+                        // and a steward of its own, built with what the
+                        // launch's are.
+                        let engines = self
+                            .agent_memory_engines
+                            .as_ref()
+                            .filter(|engines| engines.distiller.enabled || engines.steward.enabled)
+                            .zip(
+                                self.persistent_state_path
+                                    .clone()
+                                    .or_else(|| self.scratch_dir.clone())
+                                    .or_else(|| {
+                                        self.host_store.as_ref().map(|host| host.cache_root.clone())
+                                    }),
+                            )
+                            .zip(composed_session_store.clone())
+                            .map(|((engines, state), sessions)| {
+                                crate::gateway_wiring::HostMobEngines::new(
+                                    engines.clone(),
+                                    state,
+                                    sessions,
+                                )
+                                .with_provider_auth(self.provider_auth_persistence.clone())
+                            });
+                        crate::gateway_wiring::HostMobMemory::new(
+                            store,
+                            self.agent_memory_config.clone().unwrap_or_default(),
+                            launch_mob.clone(),
+                        )
+                        .with_profile_memory_policy(self.agent_memory_profile_policy.clone())
+                        .with_engines(engines)
+                        .with_own_memory_only_profiles(own_memory_only_profiles.clone())
+                    });
+                let memory_of_the_launch_mob_alone =
+                    agent_memory_provider.is_some() && memory_per_mob.is_none();
+                crate::gateway_wiring::HostMobIdentities::new(roster, true)
+                    .with_roster_of_the_launch_mob_alone(launch_mob)
+                    .with_candidate_launch(
+                        !runtime.default_mob().mob_runtime.speaks_for_composition(),
+                    )
+                    .with_customizer(if memory_per_mob.is_some() {
+                        self.agent_customizer.clone()
+                    } else {
+                        agent_customizer.clone()
+                    })
+                    .with_error_hook(self.error_hook.clone())
+                    .with_bootstrap_mode(self.identity_bootstrap_mode.clone())
+                    .with_session_repair_scope(self.session_repair_scope.clone().or_else(|| {
+                        runtime
+                            .default_mob()
+                            .mob_runtime
+                            .resolved_storage()
+                            .as_ref()
+                            .and_then(
+                                crate::identity_first::SessionRepairScope::from_resolved_storage,
+                            )
+                    }))
+                    .with_agent_memory_of_the_launch_mob(memory_of_the_launch_mob_alone)
+                    .with_agent_memory_per_mob(memory_per_mob)
+                    .hand_over_to(&runtime);
             }
         } else {
             runtime
@@ -2758,8 +3079,8 @@ impl UnifiedRuntimeBuilder {
             }
         }
 
-        if runtime.identity_first_context.is_none()
-            && let Some(ref discovery) = runtime.discovery
+        if runtime.default_mob().identity_first_context.get().is_none()
+            && let Some(ref discovery) = runtime.default_mob().discovery
         {
             let specs = discovery.discover(pre_spawn_context).await;
             let spawn_specs: Vec<SpawnMemberSpec> =
@@ -2776,12 +3097,16 @@ impl UnifiedRuntimeBuilder {
         }
 
         // Run initial edge reconciliation after spawn completes
-        if runtime.edge_discovery.is_some()
-            || runtime.topology_controller.revision().await > 0
-            || runtime.topology_controller.has_pending().await
+        if runtime.default_mob().edge_discovery.is_some()
+            || runtime.default_mob().topology_controller.revision().await > 0
+            || runtime
+                .default_mob()
+                .topology_controller
+                .has_pending()
+                .await
         {
             let report = runtime.reconcile_edges().await;
-            *runtime.bootstrap_edges_report.write().await = Some(report);
+            *runtime.default_mob().bootstrap_edges_report.write().await = Some(report);
         }
 
         // Bind the cross-mob control listener last among the fallible
@@ -3235,7 +3560,17 @@ impl UnifiedRuntimeBuilder {
                 });
         }
 
-        self.install_realm_store_set(set);
+        // A provider whose agent memory is Meta's bundled store (the disk
+        // bundle's is): the build runs that store's first start's step over
+        // it, as over the store it opens itself. A host store realm's
+        // memory is the host's own and is installed as it is, below.
+        let bundled_memory = set
+            .agent_memory_provider
+            .as_ref()
+            .and_then(|memory| memory.as_bundled_store());
+        if self.install_realm_store_set(set) {
+            self.storage_provider_memory_store = bundled_memory;
+        }
         Ok(())
     }
 
@@ -3269,8 +3604,9 @@ impl UnifiedRuntimeBuilder {
     }
 
     /// Install a provider's realm store set into the per-slot seams the rest
-    /// of `build()` composes through.
-    fn install_realm_store_set(&mut self, set: crate::storage_provider::MetaRealmStoreSet) {
+    /// of `build()` composes through. Answers whether the set's agent memory
+    /// became this build's.
+    fn install_realm_store_set(&mut self, set: crate::storage_provider::MetaRealmStoreSet) -> bool {
         self.continuity_store = Some(set.continuity_store);
         self.lease_provider = Some(match set.lease_authority {
             crate::storage_provider::MetaLeaseAuthority::Provider(provider) => provider,
@@ -3295,7 +3631,9 @@ impl UnifiedRuntimeBuilder {
             && let Some(memory) = set.agent_memory_provider
         {
             self.agent_memory_provider = Some(memory);
+            return true;
         }
+        false
     }
 
     /// [`Self::materialize_storage_provider`] for a provider that keeps the
@@ -3626,6 +3964,14 @@ impl UnifiedRuntimeBuilder {
         } else {
             None
         };
+        // The access file this builder was given, when its controller
+        // persists to one, and the sibling a save of it is written
+        // through: the runtime declares both to its members' file tools.
+        let host_named_paths: Vec<PathBuf> = self
+            .access_controller
+            .as_ref()
+            .map(crate::access::AccessController::persist_paths)
+            .unwrap_or_default();
         let mut spec = if let Some((store_path, realm, ephemeral, authority)) = persistent {
             MobBootstrapSpec::persistent_inner_with_provider_stores(
                 definition,
@@ -3651,6 +3997,7 @@ impl UnifiedRuntimeBuilder {
                 self.session_identity_config_root.clone(),
                 self.provider_auth_persistence.clone(),
                 personal_accounts.clone(),
+                host_named_paths,
             )
             .await
             .map_err(storage_resolution_builder_error)?
@@ -3681,6 +4028,7 @@ impl UnifiedRuntimeBuilder {
                 self.session_identity_config_root.clone(),
                 self.provider_auth_persistence.clone(),
                 personal_accounts.clone(),
+                host_named_paths,
             )
             .map_err(storage_resolution_builder_error)?
         } else {
@@ -3709,6 +4057,7 @@ impl UnifiedRuntimeBuilder {
                 self.session_identity_config_root.clone(),
                 self.provider_auth_persistence.clone(),
                 personal_accounts.clone(),
+                host_named_paths,
             )
             .map_err(storage_resolution_builder_error)?;
             spec._ephemeral_dir = Some(Arc::new(temp_dir));
@@ -3898,6 +4247,22 @@ fn root_host_store_mob_storage_failure(
     }
 }
 
+/// Open the bundled agent memory store under `memory_path`.
+#[allow(
+    clippy::result_large_err,
+    reason = "UnifiedRuntimeBuilderError is the published builder error; boxing it would change that public type"
+)]
+fn open_bundled_memory_store(
+    memory_path: &std::path::Path,
+) -> Result<crate::memory::sqlite_store::SqliteAgentMemoryStore, UnifiedRuntimeBuilderError> {
+    crate::memory::sqlite_store::SqliteAgentMemoryStore::open(memory_path).map_err(|e| {
+        UnifiedRuntimeBuilderError::Io(format!(
+            "failed to open agent memory store at {}: {e}",
+            memory_path.display()
+        ))
+    })
+}
+
 /// An identity-first resume binds to the stored definition its roster was
 /// resolved from, and Core refuses it when that definition changed in
 /// between. Core's message names only epochs; say what changed relative to
@@ -3928,6 +4293,78 @@ mod tests {
     use meerkat_core::service::{
         CreateSessionRequest, DeferredPromptPolicy, InitialTurnPolicy, SessionService,
     };
+
+    /// A controller with one allow that names the mob `mob` by its id, and
+    /// a deny that names another mob. Nothing in it tells the controller
+    /// its default mob.
+    fn member_keyed_controller_naming(mob: &str) -> crate::access::AccessController {
+        use crate::access::{AccessControlConfig, AccessController, AccessEffect, AccessRule};
+        let rule = |id: &str, effect: AccessEffect, mob: &str| AccessRule {
+            id: id.to_string(),
+            effect,
+            actions: vec!["agent.view".to_string()],
+            mobs: vec![mob.to_string()],
+            ..AccessRule::default()
+        };
+        AccessController::new(AccessControlConfig {
+            enabled: true,
+            admins: vec!["root@example.test".to_string()],
+            rules: vec![
+                rule("own-mob-views", AccessEffect::Allow, mob),
+                rule("another-mob-hidden", AccessEffect::Deny, "another"),
+            ],
+            ..AccessControlConfig::default()
+        })
+        .expect("controller")
+    }
+
+    fn member_keyed_runtime_builder(mob: &str) -> UnifiedRuntimeBuilder {
+        let definition = MobDefinition::from_toml(&format!(
+            "[mob]\nid = \"{mob}\"\n\n[profiles.worker]\nmodel = \"gpt-5.5\"\n"
+        ))
+        .expect("fixture definition");
+        UnifiedRuntimeBuilder::default()
+            .definition(definition)
+            .default_llm_client(Arc::new(meerkat_client::TestClient::default()))
+    }
+
+    /// Whether the runtime's controller reads its rules as the rules of a
+    /// host whose default mob is the runtime's own mob: the allow that
+    /// names that mob by its id grants on an agent a check names without a
+    /// mob, and the deny that names another mob does not reach it.
+    fn member_keyed_runtime_honours_its_own_mob_by_id(runtime: &UnifiedRuntime) -> bool {
+        let view = runtime
+            .access_controller()
+            .expect("the runtime holds the controller")
+            .view_for_subject(None);
+        view.can_view_agent("alice") && view.allows_agent("agent.view", "alice")
+    }
+
+    /// A controller handed to the builder is told the runtime's mob as the
+    /// host's default mob by the build itself: the host binds nothing, and
+    /// a rule that names that mob by its id is the default mob's rule.
+    #[tokio::test]
+    async fn member_keyed_access_a_controller_given_to_the_builder_learns_the_runtimes_mob() {
+        let runtime = Box::pin(
+            member_keyed_runtime_builder("bound-by-build")
+                .access_controller(member_keyed_controller_naming("bound-by-build"))
+                .build(),
+        )
+        .await
+        .expect("runtime builds");
+        assert!(member_keyed_runtime_honours_its_own_mob_by_id(&runtime));
+    }
+
+    /// A controller installed on a built runtime, as the gateways install
+    /// theirs, is told the runtime's mob by the installation.
+    #[tokio::test]
+    async fn member_keyed_access_a_controller_installed_on_a_runtime_learns_its_mob() {
+        let mut runtime = Box::pin(member_keyed_runtime_builder("bound-by-install").build())
+            .await
+            .expect("runtime builds");
+        runtime.set_access_controller(member_keyed_controller_naming("bound-by-install"));
+        assert!(member_keyed_runtime_honours_its_own_mob_by_id(&runtime));
+    }
 
     #[tokio::test]
     async fn supplied_mob_storage_keeps_its_owner_and_provenance_in_every_storage_arm() {
@@ -5361,6 +5798,105 @@ model = "gpt-5.5"
             let runtime = Box::pin(builder.build()).await.expect("runtime builds");
             assert_eq!(runtime.has_explicit_provider_credentials(), named, "{id}");
             runtime.shutdown().await;
+        }
+    }
+
+    /// An identity-first builder over `state` for the mob `mob`, whose
+    /// definition has the one profile `worker`, that lists the profiles
+    /// `names` their own memory only.
+    async fn builder_listing_own_memory_only(
+        state: &std::path::Path,
+        mob: &str,
+        names: &[&str],
+    ) -> UnifiedRuntimeBuilder {
+        member_keyed_runtime_builder(mob)
+            .persistent_state(state)
+            .continuity_from_state_dir(state)
+            .await
+            .expect("open the state-dir identity substrate")
+            .roster_provider(Arc::new(crate::identity_first::MutableRosterProvider::new(
+                Vec::new(),
+            )))
+            .agent_memory_own_memory_only_profiles(names.iter().copied())
+    }
+
+    /// The profiles a builder lists their own memory only are distinct
+    /// profiles of the launch mob's definition: `build` refuses a name the
+    /// definition does not have, and a name given twice, and says which.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn build_refuses_a_profile_listed_its_own_memory_only_that_is_no_profile_of_the_launch_mob()
+     {
+        for (id, names, says) in [
+            (
+                "own-memory-only-unknown",
+                &["visitor"][..],
+                "\"visitor\", which is no profile of the mob",
+            ),
+            (
+                "own-memory-only-twice",
+                &["worker", "worker"][..],
+                "\"worker\" more than once",
+            ),
+        ] {
+            let dir = tempfile::tempdir().expect("temporary directory");
+            let result = Box::pin(
+                builder_listing_own_memory_only(dir.path(), id, names)
+                    .await
+                    .build(),
+            )
+            .await;
+            match result {
+                Err(UnifiedRuntimeBuilderError::ConflictingConfiguration(message)) => {
+                    assert!(
+                        message.contains("agent_memory_own_memory_only_profiles()")
+                            && message.contains(says),
+                        "{id}: {message}"
+                    );
+                }
+                Err(other) => panic!("{id}: expected ConflictingConfiguration, got: {other}"),
+                Ok(_) => panic!("{id}: the build must refuse the list"),
+            }
+        }
+    }
+
+    /// A builder that lists a profile of the launch mob's definition its
+    /// own memory only builds: the launch mob's record of who created an
+    /// agent is bound to the launch mob's identity runtime, once.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn build_takes_a_profile_of_the_launch_mob_listed_its_own_memory_only() {
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let runtime = Box::pin(
+            builder_listing_own_memory_only(dir.path(), "own-memory-only-taken", &["worker"])
+                .await
+                .build(),
+        )
+        .await
+        .expect("a list of the launch mob's own profiles builds");
+        runtime.shutdown().await;
+    }
+
+    /// A runtime with no identity-first agents builds no agent with agent
+    /// memory: `build` refuses a list of profiles their own memory only
+    /// there, and says what the list needs.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn build_refuses_profiles_listed_their_own_memory_only_on_a_runtime_without_identity_first_agents()
+     {
+        let result = Box::pin(
+            member_keyed_runtime_builder("own-memory-only-no-roster")
+                .agent_memory_own_memory_only_profiles(["worker"])
+                .build(),
+        )
+        .await;
+        match result {
+            Err(UnifiedRuntimeBuilderError::ConflictingConfiguration(message)) => {
+                assert!(
+                    message.contains("agent_memory_own_memory_only_profiles()")
+                        && message.contains("roster_provider()"),
+                    "{message}"
+                );
+            }
+            Err(other) => panic!("expected ConflictingConfiguration, got: {other}"),
+            Ok(_) => panic!("the build must refuse the list"),
         }
     }
 }

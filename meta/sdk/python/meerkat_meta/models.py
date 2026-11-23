@@ -238,11 +238,19 @@ class SessionQuery:
 @dataclass(frozen=True)
 class SessionCreatedContext:
     """Context delivered to SessionAgentBuilder.after_create after a session
-    is successfully created."""
+    is successfully created.
+
+    ``mob_id`` is the mob the member is in when an agent customizer's
+    ``after_create`` is told one; ``None`` otherwise (a host of an earlier
+    release, and a session builder's ``after_create``). It is given by
+    keyword only: the context is built by position as before, and a
+    subclass may add fields of its own without defaults.
+    """
 
     model: str
     labels: dict[str, str]
     system_prompt: str | None
+    mob_id: str | None = field(default=None, kw_only=True)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> SessionCreatedContext:

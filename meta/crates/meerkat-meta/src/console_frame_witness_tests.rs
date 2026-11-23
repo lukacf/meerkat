@@ -266,6 +266,7 @@ fn frame_with(
     provenance: Option<crate::ConsoleFrameMemberProvenance>,
 ) -> NewConsoleFrame {
     NewConsoleFrame {
+        mob_id: None,
         id: None,
         dedupe_key: format!("witness-row:{identity}:{canary}"),
         timestamp_ms: 2_000,
@@ -1265,7 +1266,8 @@ async fn a_frame_with_no_witness_is_refused_before_the_owner_record_is_read() ->
     record_live_and_registered_attributes(
         &controller,
         Vec::new(),
-        &BTreeMap::new(),
+        &crate::console_spawn::SpawnRegistry::default(),
+        &BTreeSet::new(),
         &BTreeSet::new(),
         &known,
         "",
@@ -1299,13 +1301,97 @@ async fn a_frame_with_no_witness_is_refused_before_the_owner_record_is_read() ->
     record_live_and_registered_attributes(
         &controller,
         Vec::new(),
-        &BTreeMap::new(),
+        &crate::console_spawn::SpawnRegistry::default(),
+        &BTreeSet::new(),
         &BTreeSet::new(),
         &known,
         "",
     );
     assert!(!timeline_frame_visible_to(&bob, &frame));
     assert!(timeline_frame_visible_to(&root, &frame));
+    Ok(())
+}
+
+/// A stored frame keeps the labels its member carried, a label named `role`
+/// among them, apart from the member's role in its mob. After a restart a
+/// person a deny on that label applies to is still refused the frame: while
+/// the access cache knows nothing of the member, and once a priming has
+/// recorded the member as ended. A person no rule refuses reads it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_deny_on_a_members_own_label_named_role_refuses_its_stored_frames_after_a_restart()
+-> TestResult {
+    const CAROL: &str = "carol@example.test";
+    let (_state, runtime, aggregator) = runtime_and_aggregator("witness-role-label").await?;
+    Box::pin(runtime.mob_runtime().handle().spawn_spec(
+        SpawnMemberSpec::new("worker", AgentIdentity::from("claimant")).with_labels(
+            BTreeMap::from([("role".to_string(), "auditor".to_string())]),
+        ),
+    ))
+    .await?;
+    let session = session_of(&runtime, "claimant").await?;
+    let witness = aggregator
+        .capture_member_provenance_for_test(RUNTIME_KEY, "claimant", &session)
+        .await
+        .ok_or("the owner captures the member")?;
+    // The frame as a store that outlives the gateway holds it.
+    let frame = MetaConsoleAggregator::in_memory()
+        .store()
+        .append_if_absent(frame_with("claimant", "auditor-record", Some(witness)))
+        .await?
+        .frame;
+    let _ = runtime.shutdown().await;
+
+    // After the restart: a controller that has read nothing of the member.
+    let rule = |id: &str, subject: &str| AccessRule {
+        id: id.to_string(),
+        subjects: vec![subject.to_string()],
+        actions: vec!["agent.*".to_string()],
+        ..AccessRule::default()
+    };
+    let controller = AccessController::new(crate::access::AccessControlConfig {
+        enabled: true,
+        admins: vec![ROOT.to_string()],
+        rules: vec![
+            AccessRule {
+                agents: vec!["*".to_string()],
+                ..rule("bob-drives-every-agent", BOB)
+            },
+            AccessRule {
+                effect: crate::access::AccessEffect::Deny,
+                match_labels: BTreeMap::from([("role".to_string(), "auditor".to_string())]),
+                ..rule("bob-is-denied-the-label", BOB)
+            },
+            AccessRule {
+                agents: vec!["*".to_string()],
+                ..rule("carol-drives-every-agent", CAROL)
+            },
+        ],
+        ..crate::access::AccessControlConfig::default()
+    })?;
+    let bob = controller.view_for_caller(Some(BOB), Some("bob-key"));
+    let carol = controller.view_for_caller(Some(CAROL), Some("carol-key"));
+    assert!(!bob.knows_agent("claimant"), "the cache does not know it");
+    assert!(
+        !timeline_frame_visible_to(&bob, &frame),
+        "the frame is refused to the person the deny on the label applies to"
+    );
+    assert!(
+        timeline_frame_visible_to(&carol, &frame),
+        "a person no rule refuses reads the frame"
+    );
+    // Once a priming has recorded the member as ended, the same.
+    record_live_and_registered_attributes(
+        &controller,
+        Vec::new(),
+        &crate::console_spawn::SpawnRegistry::default(),
+        &BTreeSet::new(),
+        &BTreeSet::new(),
+        &BTreeMap::from([("claimant".to_string(), None)]),
+        "",
+    );
+    assert!(bob.knows_agent("claimant"), "the cache knows it as ended");
+    assert!(!timeline_frame_visible_to(&bob, &frame));
+    assert!(timeline_frame_visible_to(&carol, &frame));
     Ok(())
 }
 

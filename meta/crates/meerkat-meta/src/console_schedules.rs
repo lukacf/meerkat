@@ -37,16 +37,37 @@ use tokio::sync::watch;
 
 use crate::auth::session_fence::ConsoleSessionFences;
 use crate::console_aggregator::ConsoleSendScope;
+use crate::member_key::DefaultMob;
 use crate::runtime::RuntimeDecisionState;
 use crate::schedule_wiring::ScheduleFiringHostBinding;
+use meerkat_mob::MobId;
 
 /// The host runnable every console schedule targets. Reserved: Meta
 /// registers it with the schedule host, and no SDK or host runnable may
 /// take the name.
 pub const CONSOLE_SCHEDULE_RUNNABLE: &str = "meta.console.scheduled_send";
 
-/// The schema of a console schedule's send ([`ConsoleScheduledSend`]).
+/// The schema of a console schedule's send ([`ConsoleScheduledSend`]) that
+/// names no mob: the send of an agent of the host's default mob. Every send
+/// a release before sends named a mob wrote has it, and such a release
+/// reads this string alone.
 pub(crate) const CONSOLE_SCHEDULED_SEND_SCHEMA: &str = "meta.console.scheduled_send.v1";
+
+/// The schema of a console schedule's send that names its agent's mob
+/// ([`ConsoleScheduledSend::mob_id`]). A release that knows no such member
+/// does not read this string: it lists no such schedule and fails its fire,
+/// where under the first string it would read the send as its default mob's
+/// agent of that name.
+pub(crate) const CONSOLE_SCHEDULED_SEND_MOB_SCHEMA: &str = "meta.console.scheduled_send.v2";
+
+/// The schema string a send is written under: the second for a send that
+/// names a mob, the first for one that names none.
+fn send_schema(mob_id: Option<&MobId>) -> &'static str {
+    match mob_id {
+        Some(_) => CONSOLE_SCHEDULED_SEND_MOB_SCHEMA,
+        None => CONSOLE_SCHEDULED_SEND_SCHEMA,
+    }
+}
 
 /// How long after the gateway's schedule host starts (when the console
 /// schedules' runnable is composed) a fire waits for the Console's send path
@@ -244,8 +265,16 @@ pub(crate) struct ConsoleScheduleFormerSender {
 /// A console schedule's deferred send, held as its host-runnable params.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ConsoleScheduledSend {
-    /// [`CONSOLE_SCHEDULED_SEND_SCHEMA`].
+    /// [`CONSOLE_SCHEDULED_SEND_SCHEMA`] for a send that names no mob,
+    /// [`CONSOLE_SCHEDULED_SEND_MOB_SCHEMA`] for one that names a mob.
     pub(crate) schema: String,
+    /// The mob the agent is a member of, when it is not the host's default
+    /// mob: a send that names none is for an agent of the default mob, as
+    /// every send stored before sends named a mob is
+    /// ([`crate::member_key::DefaultMob::stored`]). With `identity` it is
+    /// the member the message goes to ([`Self::is_for`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) mob_id: Option<meerkat_mob::MobId>,
     /// The agent the message goes to, as the console names it.
     pub(crate) identity: String,
     /// The message text.
@@ -265,14 +294,20 @@ pub(crate) struct ConsoleScheduledSend {
 }
 
 impl ConsoleScheduledSend {
+    /// The send of `content` to the agent `identity` of the mob `mob_id`,
+    /// on a host whose default mob is `default_mob`.
     pub(crate) fn new(
+        default_mob: &DefaultMob,
+        mob_id: &MobId,
         identity: String,
         content: String,
         sender: ConsoleScheduleSender,
         defined_at: u64,
     ) -> Self {
+        let mob_id = default_mob.stored(mob_id).cloned();
         Self {
-            schema: CONSOLE_SCHEDULED_SEND_SCHEMA.to_string(),
+            schema: send_schema(mob_id.as_ref()).to_string(),
+            mob_id,
             identity,
             content,
             sender,
@@ -281,11 +316,37 @@ impl ConsoleScheduledSend {
         }
     }
 
+    /// The mob the send's agent is a member of, on a host whose default mob
+    /// is `default_mob`.
+    pub(crate) fn mob(&self, default_mob: &DefaultMob) -> MobId {
+        default_mob.resolve(self.mob_id.as_ref().map(meerkat_mob::MobId::as_str))
+    }
+
+    /// Whether the send goes to the agent `identity` of the mob `mob_id`,
+    /// on a host whose default mob is `default_mob`. An agent of the same
+    /// name in another mob is another agent, and its schedules are not this
+    /// one's.
+    pub(crate) fn is_for(&self, default_mob: &DefaultMob, mob_id: &MobId, identity: &str) -> bool {
+        self.mob(default_mob) == *mob_id && self.identity == identity
+    }
+
+    /// [`Self::is_for`] where the host's default mob is not known, as on a
+    /// host of one mob: a send that names no mob goes to the agent of that
+    /// name, and a send that names a mob goes to that mob's agent.
+    pub(crate) fn is_for_where_the_default_mob_is_not_known(
+        &self,
+        mob_id: &MobId,
+        identity: &str,
+    ) -> bool {
+        self.identity == identity && self.mob_id.as_ref().is_none_or(|named| named == mob_id)
+    }
+
     /// This send as `sender` defines it again at `now` (whole seconds since
     /// the epoch), to `identity` with `content`. The same caller as this
     /// send's sender keeps it, with a new definition time; any other caller
     /// takes it over, and this send's sender joins the history, which keeps
-    /// its newest [`CONSOLE_SCHEDULE_SENDER_HISTORY_LIMIT`] entries.
+    /// its newest [`CONSOLE_SCHEDULE_SENDER_HISTORY_LIMIT`] entries. The
+    /// agent stays a member of the mob it was defined in.
     pub(crate) fn redefined(
         &self,
         identity: String,
@@ -306,7 +367,8 @@ impl ConsoleScheduledSend {
             sender_history.drain(..excess);
         }
         Self {
-            schema: CONSOLE_SCHEDULED_SEND_SCHEMA.to_string(),
+            schema: send_schema(self.mob_id.as_ref()).to_string(),
+            mob_id: self.mob_id.clone(),
             identity,
             content,
             sender,
@@ -339,10 +401,20 @@ impl ConsoleScheduledSend {
     }
 
     /// The send a console schedule's params text holds, when it is one of
-    /// this schema.
+    /// a schema this build reads. Each schema string has one meaning: the
+    /// first is a send that names no mob, the second a send that names one.
+    /// A send whose string and mob disagree is not read, and neither is one
+    /// whose mob is blank ([`crate::member_key::names_a_mob`]).
     pub(crate) fn from_params(text: &str) -> Option<Self> {
         let send: Self = serde_json::from_str(text).ok()?;
-        (send.schema == CONSOLE_SCHEDULED_SEND_SCHEMA).then_some(send)
+        let read = match &send.mob_id {
+            None => send.schema == CONSOLE_SCHEDULED_SEND_SCHEMA,
+            Some(mob_id) => {
+                send.schema == CONSOLE_SCHEDULED_SEND_MOB_SCHEMA
+                    && crate::member_key::names_a_mob(mob_id)
+            }
+        };
+        read.then_some(send)
     }
 }
 
@@ -358,6 +430,30 @@ pub(crate) fn targets_console_runnable(target: &TargetBinding) -> bool {
         target,
         TargetBinding::HostRunnable(binding) if binding.runnable.as_str() == CONSOLE_SCHEDULE_RUNNABLE
     )
+}
+
+/// Whether `schedule` is the host's memory steward schedule: its target
+/// names the steward's runnable
+/// ([`crate::schedule_wiring::STEWARD_DREAM_RUNNABLE`]). The host keeps one
+/// such schedule and retimes it itself; no agent fires, stops or retimes
+/// the host's steward.
+pub(crate) fn is_steward_schedule(schedule: &Schedule) -> bool {
+    matches!(
+        &schedule.target,
+        TargetBinding::HostRunnable(binding)
+            if binding.runnable.as_str() == crate::schedule_wiring::STEWARD_DREAM_RUNNABLE
+    )
+}
+
+/// Whether `schedule` is one of Meta's announcement source runner
+/// schedules: it carries their label
+/// ([`crate::schedule_wiring::SOURCE_RUNNER_LABEL`]), at any value. Meta
+/// makes, retimes and ends those itself; no agent reads or changes one.
+pub(crate) fn is_source_runner_schedule(schedule: &Schedule) -> bool {
+    schedule
+        .config
+        .labels
+        .contains_key(crate::schedule_wiring::SOURCE_RUNNER_LABEL)
 }
 
 /// Refuse `name` for an SDK or host runnable: the console's runnable name is
@@ -731,6 +827,12 @@ enum GateVerdict {
 /// refused, and so is one whose schedule cannot be read (it may be a console
 /// schedule); and `meerkat_schedule_list` leaves console schedules out.
 ///
+/// The host's memory steward is left alone the same way, in every arm: a
+/// create or update whose target names the steward's runnable is refused,
+/// every verb that names the host's steward schedule by its id is refused,
+/// and the list leaves it out. The host schedules its steward through the
+/// schedule service, which this gate does not stand in front of.
+///
 /// With an [`AgentScheduleAudience`], the schedules it hides from the calling
 /// agent are on no surface of its tools either: its list leaves them out,
 /// and every verb that names one by its id is answered exactly as the same
@@ -788,6 +890,23 @@ impl ConsoleScheduleToolGate {
                  console schedule as its Console caller, and only the Console schedules it"
             )));
         }
+        if SCHEDULE_TOOLS_WITH_TARGET.contains(&name)
+            && args.get("target").is_some_and(target_value_names_steward)
+        {
+            return GateVerdict::Refuse(meerkat_core::ToolError::execution_failed(format!(
+                "{name} refused: the host runnable {} runs the host's memory steward, and \
+                 only the host schedules it",
+                crate::schedule_wiring::STEWARD_DREAM_RUNNABLE
+            )));
+        }
+        if SCHEDULE_TOOLS_WITH_TARGET.contains(&name)
+            && let Some(label) = args.get("labels").and_then(reserved_label_in)
+        {
+            return GateVerdict::Refuse(meerkat_core::ToolError::execution_failed(format!(
+                "{name} refused: the label {label} marks a schedule the host keeps itself, \
+                 and only the host sets it"
+            )));
+        }
         if !SCHEDULE_TOOLS_BY_ID.contains(&name) {
             return GateVerdict::Pass;
         }
@@ -804,6 +923,18 @@ impl ConsoleScheduleToolGate {
                 GateVerdict::Refuse(meerkat_core::ToolError::execution_failed(format!(
                     "{name} refused: schedule {schedule_id} is a console schedule, a Console \
                      caller's deferred message to an agent; only the Console reads or changes it"
+                )))
+            }
+            Ok(schedule) if is_steward_schedule(&schedule) => {
+                GateVerdict::Refuse(meerkat_core::ToolError::execution_failed(format!(
+                    "{name} refused: schedule {schedule_id} is the host's memory steward \
+                     schedule; only the host reads or changes it"
+                )))
+            }
+            Ok(schedule) if is_source_runner_schedule(&schedule) => {
+                GateVerdict::Refuse(meerkat_core::ToolError::execution_failed(format!(
+                    "{name} refused: schedule {schedule_id} is an announcement source runner \
+                     schedule the host keeps itself; only the host reads or changes it"
                 )))
             }
             Ok(schedule) if self.hides(&schedule, context).await => GateVerdict::Absent,
@@ -856,7 +987,8 @@ impl ConsoleScheduleToolGate {
             .await
     }
 
-    /// `meerkat_schedule_list` without the console schedules and the
+    /// `meerkat_schedule_list` without the console schedules, the host's
+    /// steward and source runner schedules, and the
     /// schedules hidden from the agent calling with `context`: the tool's own
     /// page of summaries over the other schedules. Core leaves them out
     /// before it orders, pages and cuts, so the reply keeps the tool's
@@ -873,6 +1005,8 @@ impl ConsoleScheduleToolGate {
         if self.audience.is_none() {
             return meerkat::dispatch_schedule_list_where(&self.service, call, &|schedule| {
                 !is_console_schedule(schedule)
+                    && !is_steward_schedule(schedule)
+                    && !is_source_runner_schedule(schedule)
             })
             .await;
         }
@@ -883,7 +1017,11 @@ impl ConsoleScheduleToolGate {
         })?;
         let mut visible = std::collections::HashMap::with_capacity(schedules.len());
         for schedule in schedules {
-            if !is_console_schedule(&schedule) && !self.hides(&schedule, context).await {
+            if !is_console_schedule(&schedule)
+                && !is_steward_schedule(&schedule)
+                && !is_source_runner_schedule(&schedule)
+                && !self.hides(&schedule, context).await
+            {
                 visible.insert(schedule.schedule_id, schedule.revision);
             }
         }
@@ -892,6 +1030,33 @@ impl ConsoleScheduleToolGate {
         })
         .await
     }
+}
+
+/// Whether a tool call's `target` argument names the memory steward's
+/// runnable.
+fn target_value_names_steward(target: &Value) -> bool {
+    target.get("target_kind").and_then(Value::as_str) == Some("host_runnable")
+        && target.get("runnable").and_then(Value::as_str)
+            == Some(crate::schedule_wiring::STEWARD_DREAM_RUNNABLE)
+}
+
+/// The labels the host puts on schedules it keeps itself: the memory
+/// steward's ([`crate::schedule_wiring::STEWARD_DREAM_LABEL`]) and the
+/// announcement source runners'
+/// ([`crate::schedule_wiring::SOURCE_RUNNER_LABEL`]). Agents' schedule
+/// tools take no create or update that carries one, at any value.
+const RESERVED_SCHEDULE_LABELS: &[&str] = &[
+    crate::schedule_wiring::STEWARD_DREAM_LABEL,
+    crate::schedule_wiring::SOURCE_RUNNER_LABEL,
+];
+
+/// The reserved label a tool call's `labels` argument holds, if it holds
+/// one.
+fn reserved_label_in(labels: &Value) -> Option<&'static str> {
+    RESERVED_SCHEDULE_LABELS
+        .iter()
+        .copied()
+        .find(|label| labels.get(*label).is_some())
 }
 
 /// Whether a tool call's `target` argument names the console's runnable.
@@ -1133,7 +1298,10 @@ mod tests {
     }
 
     fn send() -> ConsoleScheduledSend {
+        let default_mob = DefaultMob::new(MobId::from("launch"));
         ConsoleScheduledSend::new(
+            &default_mob,
+            default_mob.mob_id(),
             "agent:notes".to_string(),
             "Post the morning summary.".to_string(),
             sender(),
@@ -1614,6 +1782,299 @@ mod tests {
         );
     }
 
+    /// Agents' schedule tools leave the host's memory steward alone, as they
+    /// leave console schedules alone: a create or update naming the
+    /// steward's runnable is refused, every verb on the host's steward
+    /// schedule is refused and changes nothing, and the listing leaves it
+    /// out, while the agent's own schedules pass as before. The host's own
+    /// use is untouched: it still finds its one schedule and retimes it.
+    #[tokio::test]
+    async fn agent_schedule_tools_leave_the_hosts_steward_schedule_alone() {
+        use crate::schedule_wiring::{STEWARD_DREAM_RUNNABLE, ensure_steward_dream_schedule};
+
+        let names_the_steward = |schedule: &meerkat::Schedule| {
+            matches!(
+                &schedule.target,
+                TargetBinding::HostRunnable(binding)
+                    if binding.runnable.as_str() == STEWARD_DREAM_RUNNABLE
+            )
+        };
+        let service = ScheduleService::new(Arc::new(MemoryScheduleStore::default()));
+        ensure_steward_dream_schedule(
+            &service,
+            std::time::Duration::from_hours(1),
+            chrono::Utc::now(),
+        )
+        .await
+        .expect("the host schedules its steward");
+        let hosts = service
+            .list()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|schedule| names_the_steward(schedule))
+            .expect("the host's steward schedule");
+        let own_target = json!({ "target_kind": "host_runnable", "runnable": "nightly-report" });
+        let own = service
+            .create(create_request(serde_json::from_value(own_target).unwrap()))
+            .await
+            .unwrap();
+        let gate = ConsoleScheduleToolGate::new(
+            Arc::new(ScheduleToolDispatcher::new(service.clone())),
+            service.clone(),
+        );
+
+        let named = json!({ "target_kind": "host_runnable", "runnable": STEWARD_DREAM_RUNNABLE });
+        let create = raw(&json!({
+            "trigger": serde_json::to_value(every_hour()).unwrap(),
+            "target": named,
+        }));
+        let refused = gate
+            .dispatch(call("meerkat_schedule_create", &create))
+            .await
+            .expect_err("an agent cannot schedule the host's steward");
+        assert!(
+            refused.to_string().contains(STEWARD_DREAM_RUNNABLE),
+            "{refused}"
+        );
+        let retarget = raw(&json!({
+            "schedule_id": own.schedule_id.to_string(),
+            "target": named,
+        }));
+        assert!(
+            gate.dispatch(call("meerkat_schedule_update", &retarget))
+                .await
+                .is_err(),
+            "an agent cannot retarget its schedule to the steward's runnable"
+        );
+
+        let hosts_id = raw(&json!({ "schedule_id": hosts.schedule_id.to_string() }));
+        for verb in SCHEDULE_TOOLS_BY_ID {
+            let refused = gate
+                .dispatch(call(verb, &hosts_id))
+                .await
+                .expect_err("every verb on the host's steward schedule is refused");
+            assert!(refused.to_string().contains("steward"), "{verb}: {refused}");
+        }
+        assert_eq!(
+            service.get(&hosts.schedule_id).await.unwrap(),
+            hosts,
+            "the host's steward schedule is untouched"
+        );
+
+        let empty = raw(&json!({}));
+        let listed = gate
+            .dispatch(call("meerkat_schedule_list", &empty))
+            .await
+            .unwrap();
+        let listed: Value = serde_json::from_str(&listed.result.text_content()).unwrap();
+        let ids = listed["schedules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|schedule| schedule["schedule_id"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec![own.schedule_id.to_string()]);
+
+        let own_id = raw(&json!({ "schedule_id": own.schedule_id.to_string() }));
+        gate.dispatch(call("meerkat_schedule_pause", &own_id))
+            .await
+            .expect("the agent's own schedule passes");
+
+        // The host's own use: one schedule names the runnable, and the host
+        // retimes it.
+        ensure_steward_dream_schedule(
+            &service,
+            std::time::Duration::from_hours(2),
+            chrono::Utc::now(),
+        )
+        .await
+        .expect("the host retimes its steward");
+        let naming = service
+            .list()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|schedule| names_the_steward(schedule))
+            .collect::<Vec<_>>();
+        assert_eq!(naming.len(), 1, "one schedule names the steward's runnable");
+        assert_eq!(naming[0].schedule_id, hosts.schedule_id);
+        assert!(
+            matches!(
+                &naming[0].trigger,
+                TriggerSpec::Interval(spec) if spec.every_seconds == 7200
+            ),
+            "the host's own change of its schedule is taken: {:?}",
+            naming[0].trigger
+        );
+    }
+
+    /// The label on the host's own steward schedule is the host's: an
+    /// agent's create or update that carries it is refused, whatever the
+    /// target, and stores or changes nothing, while another label is taken.
+    #[tokio::test]
+    async fn agent_schedule_tools_refuse_the_hosts_steward_label() {
+        use crate::schedule_wiring::STEWARD_DREAM_LABEL;
+
+        let service = ScheduleService::new(Arc::new(MemoryScheduleStore::default()));
+        let own_target = json!({ "target_kind": "host_runnable", "runnable": "nightly-report" });
+        let own = service
+            .create(create_request(
+                serde_json::from_value(own_target.clone()).unwrap(),
+            ))
+            .await
+            .unwrap();
+        let gate = ConsoleScheduleToolGate::new(
+            Arc::new(ScheduleToolDispatcher::new(service.clone())),
+            service.clone(),
+        );
+
+        let create = raw(&json!({
+            "trigger": serde_json::to_value(every_hour()).unwrap(),
+            "target": own_target,
+            "labels": { STEWARD_DREAM_LABEL: "1" },
+        }));
+        let refused = gate
+            .dispatch(call("meerkat_schedule_create", &create))
+            .await
+            .expect_err("an agent's create cannot carry the host's label");
+        assert!(
+            refused.to_string().contains(STEWARD_DREAM_LABEL),
+            "{refused}"
+        );
+        let relabel = raw(&json!({
+            "schedule_id": own.schedule_id.to_string(),
+            "labels": { "team": "reports", STEWARD_DREAM_LABEL: "1" },
+        }));
+        let refused = gate
+            .dispatch(call("meerkat_schedule_update", &relabel))
+            .await
+            .expect_err("an agent's update cannot carry the host's label");
+        assert!(
+            refused.to_string().contains(STEWARD_DREAM_LABEL),
+            "{refused}"
+        );
+        assert_eq!(
+            service.list().await.unwrap(),
+            vec![own.clone()],
+            "nothing is stored and nothing is changed"
+        );
+
+        let other = raw(&json!({
+            "schedule_id": own.schedule_id.to_string(),
+            "labels": { "team": "reports" },
+        }));
+        gate.dispatch(call("meerkat_schedule_update", &other))
+            .await
+            .expect("another label is the agent's to set");
+        let labels = service.get(&own.schedule_id).await.unwrap().config.labels;
+        assert_eq!(labels.get("team").map(String::as_str), Some("reports"));
+    }
+
+    /// Agents' schedule tools leave Meta's announcement source runner
+    /// schedules alone, as they leave the steward's alone. The label on
+    /// those schedules is the host's at any value: a create or an update
+    /// that carries it is refused and stores or changes nothing. Every verb
+    /// on a schedule that carries it is refused and changes nothing, and
+    /// the listing leaves such schedules out, while the agent's own
+    /// schedules pass as before.
+    #[tokio::test]
+    async fn agent_schedule_tools_leave_the_hosts_source_runner_schedules_alone() {
+        use crate::schedule_wiring::SOURCE_RUNNER_LABEL;
+
+        let service = ScheduleService::new(Arc::new(MemoryScheduleStore::default()));
+        let collector = json!({
+            "target_kind": "host_runnable",
+            "runnable": "inbox-collector",
+            "params": { "mob_id": "ops", "source_id": "inbox" },
+        });
+        let mut hosts = Vec::new();
+        for value in ["1", "2"] {
+            let mut request = create_request(serde_json::from_value(collector.clone()).unwrap());
+            request.labels =
+                std::collections::BTreeMap::from([(SOURCE_RUNNER_LABEL.to_string(), value.into())]);
+            hosts.push(service.create(request).await.unwrap());
+        }
+        let own_target = json!({ "target_kind": "host_runnable", "runnable": "nightly-report" });
+        let own = service
+            .create(create_request(
+                serde_json::from_value(own_target.clone()).unwrap(),
+            ))
+            .await
+            .unwrap();
+        let stored = service.list().await.unwrap();
+        let gate = ConsoleScheduleToolGate::new(
+            Arc::new(ScheduleToolDispatcher::new(service.clone())),
+            service.clone(),
+        );
+
+        for value in ["1", "2"] {
+            let create = raw(&json!({
+                "trigger": serde_json::to_value(every_hour()).unwrap(),
+                "target": own_target,
+                "labels": { SOURCE_RUNNER_LABEL: value },
+            }));
+            let refused = gate
+                .dispatch(call("meerkat_schedule_create", &create))
+                .await
+                .expect_err("an agent's create cannot carry the host's label");
+            assert!(
+                refused.to_string().contains(SOURCE_RUNNER_LABEL),
+                "{value}: {refused}"
+            );
+            let relabel = raw(&json!({
+                "schedule_id": own.schedule_id.to_string(),
+                "labels": { SOURCE_RUNNER_LABEL: value },
+            }));
+            let refused = gate
+                .dispatch(call("meerkat_schedule_update", &relabel))
+                .await
+                .expect_err("an agent's update cannot carry the host's label");
+            assert!(
+                refused.to_string().contains(SOURCE_RUNNER_LABEL),
+                "{value}: {refused}"
+            );
+        }
+
+        for hosts_schedule in &hosts {
+            let hosts_id = raw(&json!({ "schedule_id": hosts_schedule.schedule_id.to_string() }));
+            for verb in SCHEDULE_TOOLS_BY_ID {
+                let refused = gate
+                    .dispatch(call(verb, &hosts_id))
+                    .await
+                    .expect_err("every verb on a source runner schedule is refused");
+                assert!(
+                    refused.to_string().contains("source runner"),
+                    "{verb}: {refused}"
+                );
+            }
+        }
+        assert_eq!(
+            service.list().await.unwrap(),
+            stored,
+            "nothing is stored and nothing is changed"
+        );
+
+        let empty = raw(&json!({}));
+        let listed = gate
+            .dispatch(call("meerkat_schedule_list", &empty))
+            .await
+            .unwrap();
+        let listed: Value = serde_json::from_str(&listed.result.text_content()).unwrap();
+        let ids = listed["schedules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|schedule| schedule["schedule_id"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec![own.schedule_id.to_string()]);
+
+        let own_id = raw(&json!({ "schedule_id": own.schedule_id.to_string() }));
+        gate.dispatch(call("meerkat_schedule_pause", &own_id))
+            .await
+            .expect("the agent's own schedule passes");
+    }
+
     /// The agent tool stack a gateway composes over its own durable store:
     /// the schedule service, and the dispatcher agents call, with the
     /// firing-host gate, the console gate and the identity rewrite around
@@ -1997,5 +2458,314 @@ mod tests {
                 "{args}: {refused:?}"
             );
         }
+    }
+
+    fn member_keyed_send(default_mob: &DefaultMob, mob_id: &str) -> ConsoleScheduledSend {
+        ConsoleScheduledSend::new(
+            default_mob,
+            &MobId::from(mob_id),
+            "alice".to_string(),
+            "good morning".to_string(),
+            sender(),
+            100,
+        )
+    }
+
+    /// Two mobs of one host each have an agent named `alice`. A console
+    /// schedule is one agent's: the send names its mob with its identity,
+    /// and the schedule of one alice is not the other's.
+    #[test]
+    fn member_keyed_schedule_two_mobs_agents_of_one_name_keep_their_own_schedules() {
+        let default_mob = DefaultMob::new(MobId::from("launch"));
+        let launch = MobId::from("launch");
+        let second = MobId::from("second");
+        let of_launch = member_keyed_send(&default_mob, "launch");
+        let of_second = member_keyed_send(&default_mob, "second");
+        assert_ne!(of_launch, of_second);
+        assert!(of_launch.is_for(&default_mob, &launch, "alice"));
+        assert!(!of_launch.is_for(&default_mob, &second, "alice"));
+        assert!(of_second.is_for(&default_mob, &second, "alice"));
+        assert!(!of_second.is_for(&default_mob, &launch, "alice"));
+        assert!(!of_second.is_for(&default_mob, &second, "bob"));
+        // The mob survives the schedule's stored form and a redefinition.
+        for (send, mob) in [(&of_launch, &launch), (&of_second, &second)] {
+            let stored = ConsoleScheduledSend::of_target(&send.target().unwrap()).unwrap();
+            assert_eq!(&stored, send);
+            assert_eq!(stored.mob(&default_mob), *mob);
+            let redefined = stored.redefined(
+                "alice".to_string(),
+                "good evening".to_string(),
+                sender(),
+                200,
+            );
+            assert_eq!(redefined.mob(&default_mob), *mob);
+            assert!(redefined.is_for(&default_mob, mob, "alice"));
+        }
+    }
+
+    /// Where the host's default mob is not known a send is matched as on a
+    /// host of one mob: a send that names no mob is the agent's of that
+    /// name, whichever mob is asked for, and a send that names a mob is
+    /// that mob's agent's alone.
+    #[test]
+    fn member_keyed_schedule_a_send_is_matched_by_name_where_the_default_mob_is_not_known() {
+        let default_mob = DefaultMob::new(MobId::from("launch"));
+        let launch = MobId::from("launch");
+        let second = MobId::from("second");
+        // Stored on a host whose default mob is `launch`: the first names no
+        // mob, the second names `second`.
+        let names_no_mob = member_keyed_send(&default_mob, "launch");
+        let names_second = member_keyed_send(&default_mob, "second");
+        assert!(names_no_mob.mob_id.is_none());
+        assert_eq!(names_second.mob_id.as_ref(), Some(&second));
+
+        for mob in [&launch, &second] {
+            assert!(names_no_mob.is_for_where_the_default_mob_is_not_known(mob, "alice"));
+            assert!(!names_no_mob.is_for_where_the_default_mob_is_not_known(mob, "bob"));
+        }
+        assert!(names_second.is_for_where_the_default_mob_is_not_known(&second, "alice"));
+        assert!(!names_second.is_for_where_the_default_mob_is_not_known(&launch, "alice"));
+        assert!(!names_second.is_for_where_the_default_mob_is_not_known(&second, "bob"));
+    }
+
+    /// A send stored before sends named a mob has no `mob_id`: it is the
+    /// default mob's agent's, and never the agent of that name in another
+    /// mob. A send for the default mob's agent is still stored in that
+    /// form, byte for byte.
+    #[test]
+    fn member_keyed_schedule_a_send_stored_without_a_mob_is_the_default_mobs() {
+        let default_mob = DefaultMob::new(MobId::from("launch"));
+        let stored = json!({
+            "schema": CONSOLE_SCHEDULED_SEND_SCHEMA,
+            "identity": "alice",
+            "content": "good morning",
+            "sender": { "kind": "anonymous" },
+            "defined_at": 100,
+        })
+        .to_string();
+        let send = ConsoleScheduledSend::from_params(&stored).expect("a stored send reads");
+        assert_eq!(send.mob_id, None);
+        assert_eq!(send.mob(&default_mob), MobId::from("launch"));
+        assert!(send.is_for(&default_mob, &MobId::from("launch"), "alice"));
+        assert!(!send.is_for(&default_mob, &MobId::from("second"), "alice"));
+
+        let written = serde_json::to_value(ConsoleScheduledSend::new(
+            &default_mob,
+            &MobId::from("launch"),
+            "alice".to_string(),
+            "good morning".to_string(),
+            ConsoleScheduleSender::Anonymous,
+            100,
+        ))
+        .unwrap();
+        assert_eq!(
+            written,
+            serde_json::from_str::<Value>(&stored).unwrap(),
+            "a send of the default mob's agent names no mob"
+        );
+        let other = serde_json::to_value(member_keyed_send(&default_mob, "second")).unwrap();
+        assert_eq!(other["mob_id"], json!("second"));
+    }
+
+    /// The schema string every released build writes and reads, by value:
+    /// a change of this build's constants does not move it.
+    const RELEASED_SEND_SCHEMA: &str = "meta.console.scheduled_send.v1";
+
+    /// The schema string of a send that names its agent's mob, by value.
+    const MOB_SEND_SCHEMA: &str = "meta.console.scheduled_send.v2";
+
+    /// A stored send as the released builds read it: no `mob_id` member (an
+    /// unknown member is ignored, not refused) and one schema string. A copy
+    /// kept here, so that a change of this build's reader does not move it.
+    #[derive(Debug, PartialEq, Eq, Deserialize)]
+    struct ReleasedSend {
+        schema: String,
+        identity: String,
+        content: String,
+        sender: ConsoleScheduleSender,
+        defined_at: u64,
+        #[serde(default)]
+        sender_history: Vec<ConsoleScheduleFormerSender>,
+    }
+
+    /// The released builds' reader of a console schedule's params text: the
+    /// send, when it is one of their schema. Their list skips a schedule it
+    /// answers none for, and their fire fails with "the console schedule's
+    /// send cannot be read".
+    fn released_reader(text: &str) -> Option<ReleasedSend> {
+        let send: ReleasedSend = serde_json::from_str(text).ok()?;
+        (send.schema == RELEASED_SEND_SCHEMA).then_some(send)
+    }
+
+    /// The params text a schedule stores for `send`.
+    fn stored_params(send: &ConsoleScheduledSend) -> String {
+        let TargetBinding::HostRunnable(binding) = send.target().unwrap() else {
+            panic!("a console schedule targets the console's runnable");
+        };
+        binding.params.expect("a send has params").get().to_string()
+    }
+
+    fn anonymous_send(default_mob: &DefaultMob, mob_id: &str) -> ConsoleScheduledSend {
+        ConsoleScheduledSend::new(
+            default_mob,
+            &MobId::from(mob_id),
+            "alice".to_string(),
+            "good morning".to_string(),
+            ConsoleScheduleSender::Anonymous,
+            100,
+        )
+    }
+
+    /// A send that names a mob is written under the second schema string,
+    /// which no released build reads: such a build answers none for it, so
+    /// it lists no such schedule and fails its fire, where under the first
+    /// string it would read the send as the default mob's agent of that
+    /// name. A redefinition and a takeover keep the string.
+    #[test]
+    fn member_keyed_schedule_an_earlier_release_reads_no_send_that_names_a_mob() {
+        let default_mob = DefaultMob::new(MobId::from("launch"));
+        let of_second = anonymous_send(&default_mob, "second");
+        let redefined = of_second.redefined(
+            "alice".to_string(),
+            "good evening".to_string(),
+            ConsoleScheduleSender::Anonymous,
+            200,
+        );
+        let taken_over =
+            of_second.redefined("alice".to_string(), "hello".to_string(), robot(), 300);
+        for (what, send) in [
+            ("as created", &of_second),
+            ("redefined by its sender", &redefined),
+            ("taken over", &taken_over),
+        ] {
+            let stored = stored_params(send);
+            assert_eq!(
+                released_reader(&stored),
+                None,
+                "{what}: an earlier release reads the send as its default mob's alice: {stored}"
+            );
+            let written: Value = serde_json::from_str(&stored).unwrap();
+            assert_eq!(
+                written["schema"],
+                json!(MOB_SEND_SCHEMA),
+                "{what}: {stored}"
+            );
+            assert_eq!(written["mob_id"], json!("second"), "{what}: {stored}");
+        }
+    }
+
+    /// A send of the default mob's agent keeps the first schema string and
+    /// the bytes every released build writes, and a released build reads it
+    /// as before. Passes before and after the second string exists.
+    #[test]
+    fn member_keyed_schedule_a_default_mobs_send_keeps_its_bytes_and_its_readers() {
+        let default_mob = DefaultMob::new(MobId::from("launch"));
+        let of_launch = anonymous_send(&default_mob, "launch");
+        let stored = stored_params(&of_launch);
+        assert_eq!(
+            stored,
+            r#"{"content":"good morning","defined_at":100,"identity":"alice","schema":"meta.console.scheduled_send.v1","sender":{"kind":"anonymous"}}"#
+        );
+        let released = released_reader(&stored).expect("a released build reads the send");
+        assert_eq!(
+            (released.identity.as_str(), released.content.as_str()),
+            ("alice", "good morning")
+        );
+        assert_eq!(released.sender, ConsoleScheduleSender::Anonymous);
+        assert_eq!(released.defined_at, 100);
+        assert!(released.sender_history.is_empty());
+
+        // A redefinition and a takeover of the default mob's send keep the
+        // first string and name no mob.
+        let taken_over =
+            of_launch.redefined("alice".to_string(), "hello".to_string(), robot(), 300);
+        let stored = stored_params(&taken_over);
+        let written: Value = serde_json::from_str(&stored).unwrap();
+        assert_eq!(written["schema"], json!(RELEASED_SEND_SCHEMA), "{stored}");
+        assert!(written.get("mob_id").is_none(), "{stored}");
+        assert_eq!(
+            released_reader(&stored).map(|send| send.sender_history.len()),
+            Some(1)
+        );
+    }
+
+    /// This build reads both schema strings: a send of the default mob's
+    /// agent under the first, a send that names a mob under the second.
+    /// Each reads back as it was written and as its own mob's agent's.
+    #[test]
+    fn member_keyed_schedule_the_reader_takes_both_schema_strings() {
+        let default_mob = DefaultMob::new(MobId::from("launch"));
+        for mob in ["launch", "second"] {
+            let send = anonymous_send(&default_mob, mob);
+            let stored = stored_params(&send);
+            let read = ConsoleScheduledSend::from_params(&stored);
+            assert_eq!(read.as_ref(), Some(&send), "{mob}: {stored}");
+            let read = read.unwrap();
+            assert_eq!(read.mob(&default_mob), MobId::from(mob));
+            assert!(read.is_for(&default_mob, &MobId::from(mob), "alice"));
+            assert_eq!(
+                ConsoleScheduledSend::of_target(&send.target().unwrap()),
+                Some(send)
+            );
+        }
+        // Written by hand, as a store holds them.
+        let of_second = json!({
+            "schema": MOB_SEND_SCHEMA,
+            "mob_id": "second",
+            "identity": "alice",
+            "content": "good morning",
+            "sender": { "kind": "anonymous" },
+            "defined_at": 100,
+        })
+        .to_string();
+        let read = ConsoleScheduledSend::from_params(&of_second)
+            .expect("a send under the second string reads");
+        assert_eq!(read.mob(&default_mob), MobId::from("second"));
+        assert!(!read.is_for(&default_mob, &MobId::from("launch"), "alice"));
+    }
+
+    /// Each schema string has one meaning: the first is a send that names no
+    /// mob, the second a send that names one. A send under the first string
+    /// that names a mob, a send under the second string without a mob (or
+    /// with a blank one) and a send under any other string are not read:
+    /// the list skips them and their fire fails. (What is read is the row
+    /// above.)
+    #[test]
+    fn member_keyed_schedule_a_schema_string_has_one_meaning() {
+        let send = |schema: &str, mob: Option<&str>| {
+            let mut send = json!({
+                "schema": schema,
+                "identity": "alice",
+                "content": "good morning",
+                "sender": { "kind": "anonymous" },
+                "defined_at": 100,
+            });
+            if let Some(mob) = mob {
+                send["mob_id"] = json!(mob);
+            }
+            send.to_string()
+        };
+        let reads = |text: String| ConsoleScheduledSend::from_params(&text).is_some();
+        assert!(
+            !reads(send(RELEASED_SEND_SCHEMA, Some("second"))),
+            "the first string with a mob"
+        );
+        assert!(
+            !reads(send(MOB_SEND_SCHEMA, None)),
+            "the second string without a mob"
+        );
+        assert!(
+            !reads(send(MOB_SEND_SCHEMA, Some(""))),
+            "the second string with an empty mob"
+        );
+        assert!(
+            !reads(send(MOB_SEND_SCHEMA, Some("  "))),
+            "the second string with a blank mob"
+        );
+        assert!(!reads(send(
+            "meta.console.scheduled_send.v3",
+            Some("second")
+        )));
+        assert!(!reads(send("meta.console.scheduled_send.v0", None)));
     }
 }

@@ -4216,7 +4216,10 @@ macro_rules! meerkat_catalog_machine_dsl {
             // current run: `JoinLiveBoundaryDurableAppend` records `Published`,
             // `ResolveLiveBoundaryDurableAppendJoin` either returns the input to
             // its lane or marks it `Retained`, and every run-ending transition
-            // clears both maps. None of these facts is recovered after restart.
+            // clears both maps. A join is never recovered after a restart. A
+            // tracked class is recovered only for an input that never left the
+            // Steer lane (`RecoverInputLifecycle`): that input still waits for
+            // a boundary of the run that resumes.
             admission_authorized_live_boundary_delivery: Map<String, Enum<LiveBoundaryDelivery>>,
             input_live_boundary_delivery: Map<String, Enum<LiveBoundaryDelivery>>,
             input_live_boundary_join_run: Map<String, RunId>,
@@ -5919,6 +5922,11 @@ macro_rules! meerkat_catalog_machine_dsl {
             ClassifyRecoveredInputDurability {
                 input_id: String,
                 durability: Enum<InputDurabilityKind>,
+                // True only for a terminal row the store names as still
+                // carrying an unfinished completion or publication of a
+                // committed run. Such a row is not unfinished work, so its
+                // durability does not decide whether it is recovered.
+                pending_terminal_carrier: bool,
             },
             ResolveInputPublicLifecycle {
                 input_id: String,
@@ -6127,6 +6135,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 runtime_execution_kind: Option<Enum<RecoveredRuntimeExecutionKind>>,
                 runtime_peer_response_terminal_apply_intent: Option<Enum<RecoveredPeerResponseTerminalApplyIntent>>,
                 is_prompt: bool,
+                live_boundary_delivery: Option<Enum<LiveBoundaryDelivery>>,
             },
             QueueAccepted { input_id: String },
             SteerAccepted { input_id: String },
@@ -18820,10 +18829,19 @@ macro_rules! meerkat_catalog_machine_dsl {
         // retention authority. Persistent recovery may only retain/drop a row
         // after this typed effect is observed; ledgers and queues must not
         // interpret durability classes themselves.
+        //
+        // Durability decides only whether unfinished work survives a restart.
+        // A terminal row that still carries the pending completion or
+        // publication of a committed run is not work: it is retained whatever
+        // its durability, so the store's pending terminal owners and the
+        // recovered driver agree and the startup drain finalizes the batch
+        // (and takes the session checkpoint it requires) as a live host would
+        // have. A batch that one run consumed is never split by durability.
         transition ClassifyRecoveredInputDurabilityDiscardEphemeral {
             per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
-            on input ClassifyRecoveredInputDurability { input_id, durability }
+            on input ClassifyRecoveredInputDurability { input_id, durability, pending_terminal_carrier }
             guard "ephemeral_durability" { durability == InputDurabilityKind::Ephemeral }
+            guard "unfinished_work" { pending_terminal_carrier == false }
             update {}
             to Idle
             emit RecoveredInputDurabilityClassified {
@@ -18832,9 +18850,22 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
         }
 
+        transition ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrier {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input ClassifyRecoveredInputDurability { input_id, durability, pending_terminal_carrier }
+            guard "ephemeral_durability" { durability == InputDurabilityKind::Ephemeral }
+            guard "pending_terminal_carrier" { pending_terminal_carrier == true }
+            update {}
+            to Idle
+            emit RecoveredInputDurabilityClassified {
+                input_id: input_id,
+                disposition: RecoveredInputRecoveryDisposition::Retain
+            }
+        }
+
         transition ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissing {
             per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
-            on input ClassifyRecoveredInputDurability { input_id, durability }
+            on input ClassifyRecoveredInputDurability { input_id, durability, pending_terminal_carrier }
             guard "retained_durability" {
                 durability == InputDurabilityKind::Durable
                 || durability == InputDurabilityKind::Derived
@@ -19943,6 +19974,15 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.input_authority_bindings.insert(input_id, authority_binding);
                 self.input_authority_batch_keys.insert(input_id, authority_batch_key);
+                // A governed input never joins a running run
+                // (`live_join_input_is_ungoverned`), so a recovered governed
+                // row keeps no live-boundary delivery, and its controller
+                // hold, which only a recovered input can take, stays
+                // available (`HoldInputController`). An input admitted live
+                // is left as its admission classed it.
+                if self.recovered_admitted_inputs.contains(input_id) {
+                    self.input_live_boundary_delivery.remove(input_id);
+                }
             }
             to Idle
         }
@@ -26458,7 +26498,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 runtime_boundary,
                 runtime_execution_kind,
                 runtime_peer_response_terminal_apply_intent,
-                is_prompt
+                is_prompt,
+                live_boundary_delivery
             }
             guard "recovered_lifecycle_has_admission_witness" {
                 phase == InputPhase::Consumed
@@ -26574,9 +26615,24 @@ macro_rules! meerkat_catalog_machine_dsl {
                 // A controller hold is live only: the registration holds the
                 // recovered input again from its own answer.
                 self.input_controller_holds.remove(input_id);
-                // Live-boundary delivery classes and joins are never recovered:
-                // a recovered input only ever takes the queued path.
-                self.input_live_boundary_delivery.remove(input_id);
+                // A steer that was admitted and never left the Steer lane
+                // (Queued there, never bound to a run, no stage attempt) keeps
+                // the delivery class it was admitted with: it still waits for
+                // a boundary of the run that resumes. Every other recovered
+                // input takes the queued path, and a join is never recovered.
+                // The phase condition is stated for the reader: the guard
+                // `recovered_current_lane_matches_phase` gives every other
+                // phase no lane, so the lane condition already implies it.
+                if live_boundary_delivery != None
+                    && phase == InputPhase::Queued
+                    && lane == Some(InputLane::Steer)
+                    && run_id == None
+                    && attempt_count == 0
+                {
+                    self.input_live_boundary_delivery.insert(input_id, live_boundary_delivery.get("value"));
+                } else {
+                    self.input_live_boundary_delivery.remove(input_id);
+                }
                 self.input_live_boundary_join_run.remove(input_id);
                 self.input_live_boundary_join_phase.remove(input_id);
 

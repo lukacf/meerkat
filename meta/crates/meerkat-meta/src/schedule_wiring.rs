@@ -72,11 +72,22 @@ pub const STEWARD_DREAM_RUNNABLE: &str = "meta.memory.steward.dream";
 /// schedule listings — idempotency keys on the host-runnable target, not this.
 pub(crate) const STEWARD_DREAM_SCHEDULE_NAME: &str = "meta-memory-steward-dream";
 
-/// A [`HostRunnable`] that runs one guarded steward dream attempt. Registered
-/// with the schedule host so the dream fires as a durable, misfire-aware
+/// The label of the host's own steward dream schedule: the schedule
+/// [`ensure_steward_dream_schedule`] keeps carries it. The label is the
+/// host's: agents' schedule tools take no create or update that carries it.
+pub const STEWARD_DREAM_LABEL: &str = "meta.memory.steward.schedule";
+
+/// A [`HostRunnable`] that runs one guarded dream occurrence of the host: a
+/// dream attempt of the launch's steward, then one of the steward of each
+/// mob the launch hosts beside its launch mob that is loaded and keeps
+/// memory ([`crate::memory_wiring::dream_for_the_host`]). Registered with
+/// the schedule host so the dream fires as a durable, misfire-aware
 /// schedule occurrence instead of a bare in-process interval loop.
 struct StewardDreamRunnable {
     engine: Arc<StewardEngine>,
+    /// The dreams of the mobs the launch hosts beside its launch mob, read
+    /// at each fire. `None`: the launch hosts none.
+    hosted: Option<crate::memory_wiring::HostedMobDreams>,
 }
 
 #[async_trait]
@@ -89,7 +100,7 @@ impl HostRunnable for StewardDreamRunnable {
         // and never returns an error — a skipped dream is a normal outcome,
         // not an occurrence failure. Always report completion so the
         // occurrence lands terminal-complete.
-        self.engine.dream_now().await;
+        crate::memory_wiring::dream_for_the_host(&self.engine, self.hosted.as_ref()).await;
         Ok(HostRunnableOutcome::completed())
     }
 }
@@ -110,7 +121,13 @@ pub fn steward_dream_runnable_host(
     let name = HostRunnableName::parse(STEWARD_DREAM_RUNNABLE)
         .expect("STEWARD_DREAM_RUNNABLE is a non-empty runnable name");
     registry
-        .register(name, Arc::new(StewardDreamRunnable { engine }))
+        .register(
+            name,
+            Arc::new(StewardDreamRunnable {
+                engine,
+                hosted: None,
+            }),
+        )
         .expect("first registration into a fresh registry cannot duplicate");
     Some(Arc::new(registry))
 }
@@ -213,10 +230,22 @@ pub type HostRunnables = Vec<(HostRunnableName, Arc<dyn HostRunnable>)>;
 /// idempotency key included. `Err` on a duplicate name, as for the others,
 /// on the steward's reserved name, and on the console schedules' reserved
 /// name (`meta.console.scheduled_send`) for a callback or host runnable.
-// The steward runnable name is a non-empty const, so its parse is infallible.
-#[allow(clippy::expect_used)]
 pub fn gateway_runnable_host_with(
     steward: Option<Arc<StewardEngine>>,
+    callback_runnables: Option<(Arc<dyn CallbackBridge>, Vec<HostRunnableName>)>,
+    host_runnables: HostRunnables,
+) -> Result<Option<Arc<dyn ScheduleRunnableHost>>, String> {
+    gateway_runnable_host_over(steward, None, callback_runnables, host_runnables)
+}
+
+/// [`gateway_runnable_host_with`], where the steward's dream runnable also
+/// dreams for the mobs the launch hosts beside its launch mob: `hosted`
+/// answers their dreams at each fire.
+// The steward runnable name is a non-empty const, so its parse is infallible.
+#[allow(clippy::expect_used)]
+pub(crate) fn gateway_runnable_host_over(
+    steward: Option<Arc<StewardEngine>>,
+    hosted: Option<crate::memory_wiring::HostedMobDreams>,
     callback_runnables: Option<(Arc<dyn CallbackBridge>, Vec<HostRunnableName>)>,
     host_runnables: HostRunnables,
 ) -> Result<Option<Arc<dyn ScheduleRunnableHost>>, String> {
@@ -226,7 +255,7 @@ pub fn gateway_runnable_host_with(
         let name = HostRunnableName::parse(STEWARD_DREAM_RUNNABLE)
             .expect("STEWARD_DREAM_RUNNABLE is a non-empty runnable name");
         registry
-            .register(name, Arc::new(StewardDreamRunnable { engine }))
+            .register(name, Arc::new(StewardDreamRunnable { engine, hosted }))
             .map_err(|error| error.to_string())?;
         registered = true;
     }
@@ -263,8 +292,17 @@ pub fn gateway_runnable_host_with(
 
 /// The label every source runner schedule Meta makes carries. A schedule
 /// without it is never Meta's to change or end, whatever it targets: a
-/// host's own schedule of its collector stays the host's.
+/// host's own schedule of its collector stays the host's. The label is the
+/// host's at any value: agents' schedule tools take no create or update
+/// that carries it.
 pub const SOURCE_RUNNER_LABEL: &str = "mob_announcements.source_runner";
+
+/// The label's value on the runner schedules this version makes. Only a
+/// schedule carrying it is kept across a start; a labelled schedule with
+/// any other value (one an earlier version made, which carried "1") ends
+/// and the source's schedule is made anew. The key is unchanged, so an
+/// earlier version still reads these schedules as its own.
+const SOURCE_RUNNER_MARK: &str = "2";
 
 /// The params a source runner's schedule carries: the source its collector
 /// reads.
@@ -288,19 +326,34 @@ fn host_runnable_target(target: &TargetBinding) -> Option<(HostRunnableName, Val
 /// naming its source.
 type RunnerSchedule = (Schedule, HostRunnableName, Value);
 
-/// Every source runner schedule Meta made on `service`.
-async fn runner_schedules(service: &ScheduleService) -> Result<Vec<RunnerSchedule>, String> {
-    Ok(service
+/// Every schedule on `service` that carries [`SOURCE_RUNNER_LABEL`]: the
+/// source runner schedules (a host runnable with a source as params), in
+/// the order they were stored, and the labelled schedules that are none.
+async fn runner_schedules(
+    service: &ScheduleService,
+) -> Result<(Vec<RunnerSchedule>, Vec<Schedule>), String> {
+    let mut labelled: Vec<Schedule> = service
         .list()
         .await
         .map_err(|error| format!("list schedules: {error}"))?
         .into_iter()
         .filter(|schedule| schedule.config.labels.contains_key(SOURCE_RUNNER_LABEL))
-        .filter_map(|schedule| {
-            let (runnable, params) = host_runnable_target(&schedule.target)?;
-            Some((schedule, runnable, params))
-        })
-        .collect())
+        .collect();
+    labelled.sort_by_cached_key(|schedule| {
+        (
+            schedule.config.created_at_utc,
+            schedule.schedule_id.to_string(),
+        )
+    });
+    let mut runners = Vec::new();
+    let mut others = Vec::new();
+    for schedule in labelled {
+        match host_runnable_target(&schedule.target) {
+            Some((runnable, params)) => runners.push((schedule, runnable, params)),
+            None => others.push(schedule),
+        }
+    }
+    Ok((runners, others))
 }
 
 /// Bring `source`'s runner schedule in line with its record, given the
@@ -315,6 +368,14 @@ async fn runner_schedules(service: &ScheduleService) -> Result<Vec<RunnerSchedul
 /// `now_utc`; a changed runnable replaces it; no runner, or an ended source,
 /// ends it. A paused source keeps its schedule: the collector reads the
 /// pause and does nothing.
+///
+/// The schedule that is kept carries this version's mark
+/// ([`SOURCE_RUNNER_MARK`]), the one stored first if several do. It is
+/// resumed when it is paused, and retimed from `now_utc` whenever its
+/// trigger is not the source's (another interval, an end time, a start
+/// that has not come). Every other labelled schedule for the source ends,
+/// one an earlier version made included: the source's schedule is then
+/// made anew.
 async fn apply_source_runner(
     service: &ScheduleService,
     source: &AnnouncementSource,
@@ -331,7 +392,14 @@ async fn apply_source_runner(
         .map_err(|error| format!("source runner host runnable: {error}"))?;
     let mut kept: Option<Schedule> = None;
     for (schedule, target_runnable, _) in theirs {
-        if kept.is_none() && runnable.as_ref() == Some(&target_runnable) {
+        if kept.is_none()
+            && runnable.as_ref() == Some(&target_runnable)
+            && schedule
+                .config
+                .labels
+                .get(SOURCE_RUNNER_LABEL)
+                .is_some_and(|value| value == SOURCE_RUNNER_MARK)
+        {
             kept = Some(schedule);
             continue;
         }
@@ -351,22 +419,31 @@ async fn apply_source_runner(
     });
     match kept {
         Some(schedule) => {
-            if matches!(
+            let the_sources = matches!(
                 &schedule.trigger,
-                TriggerSpec::Interval(spec) if spec.every_seconds == every_seconds
-            ) {
-                return Ok(());
+                TriggerSpec::Interval(spec)
+                    if spec.every_seconds == every_seconds
+                        && spec.end_at_utc.is_none()
+                        && spec.start_at_utc <= now_utc
+            );
+            if !the_sources {
+                service
+                    .update(
+                        &schedule.schedule_id,
+                        UpdateScheduleRequest {
+                            trigger: Some(trigger),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .map_err(|error| format!("update a source runner schedule: {error}"))?;
             }
-            service
-                .update(
-                    &schedule.schedule_id,
-                    UpdateScheduleRequest {
-                        trigger: Some(trigger),
-                        ..Default::default()
-                    },
-                )
-                .await
-                .map_err(|error| format!("update a source runner schedule: {error}"))?;
+            if schedule.phase == SchedulePhase::Paused {
+                service
+                    .resume(&schedule.schedule_id)
+                    .await
+                    .map_err(|error| format!("resume a source runner schedule: {error}"))?;
+            }
         }
         None => {
             let params = meerkat::HostRunnableParams::try_from(source_runner_params(source))
@@ -389,7 +466,10 @@ async fn apply_source_runner(
                     misfire_policy: meerkat::MisfirePolicy::default(),
                     overlap_policy: meerkat::OverlapPolicy::default(),
                     missing_target_policy: meerkat::MissingTargetPolicy::default(),
-                    labels: BTreeMap::from([(SOURCE_RUNNER_LABEL.to_string(), "1".to_string())]),
+                    labels: BTreeMap::from([(
+                        SOURCE_RUNNER_LABEL.to_string(),
+                        SOURCE_RUNNER_MARK.to_string(),
+                    )]),
                     planning_horizon_days: None,
                     planning_horizon_occurrences: None,
                 })
@@ -409,8 +489,8 @@ pub async fn reconcile_source_runner(
     now_utc: chrono::DateTime<chrono::Utc>,
 ) -> Result<(), String> {
     let params = source_runner_params(source);
-    let theirs = runner_schedules(service)
-        .await?
+    let (runners, _) = runner_schedules(service).await?;
+    let theirs = runners
         .into_iter()
         .filter(|(_, _, target_params)| *target_params == params)
         .collect();
@@ -421,13 +501,15 @@ pub async fn reconcile_source_runner(
 /// sources that are not ended, from one read of the schedules: each live
 /// source's is kept, made or changed as [`reconcile_source_runner`] would,
 /// and a runner schedule naming no live source (its source ended, or is
-/// gone) ends. Every source is tried; the failures come back together.
+/// gone) ends, as does a labelled schedule that is no runner schedule (no
+/// host runnable, or no source as params). Every source is tried; the
+/// failures come back together.
 pub async fn reconcile_source_runners(
     service: &ScheduleService,
     live: &[AnnouncementSource],
     now_utc: chrono::DateTime<chrono::Utc>,
 ) -> Result<(), String> {
-    let mut left = runner_schedules(service).await?;
+    let (mut left, unreadable) = runner_schedules(service).await?;
     let mut failures = Vec::new();
     for source in live {
         let params = source_runner_params(source);
@@ -439,7 +521,8 @@ pub async fn reconcile_source_runners(
             failures.push(format!("{} {}: {error}", source.mob_id, source.source_id));
         }
     }
-    for (schedule, _, _) in left {
+    let left = left.into_iter().map(|(schedule, _, _)| schedule);
+    for schedule in left.chain(unreadable) {
         if let Err(error) = service.delete(&schedule.schedule_id).await {
             failures.push(format!(
                 "end runner schedule {}: {error}",
@@ -476,12 +559,19 @@ impl SourceRunners for ScheduleSourceRunners {
     }
 }
 
-/// Find-or-create the durable schedule that drives the steward dream runnable
-/// at `cadence`. Idempotent across boots against the persistent schedule
-/// store: keyed on the reserved host-runnable target, so a restart reuses the
-/// existing schedule (and its planning cursor) rather than stacking duplicate
-/// dreams. When the configured cadence changed, the existing schedule's
-/// interval is updated in place; otherwise it is left untouched.
+/// Keep the one durable schedule that drives the steward dream runnable at
+/// `cadence`. The host's own schedule names the reserved host-runnable target
+/// and carries [`STEWARD_DREAM_LABEL`]. Idempotent across boots against the
+/// persistent schedule store: a restart reuses that schedule (and its
+/// planning cursor) rather than stacking duplicate dreams, resumes it when it
+/// is paused, and retimes it in place when the configured cadence changed
+/// or its trigger would not run as configured (an end time, a first run
+/// later than one interval from now). Every other schedule naming the
+/// runnable is deleted, so one schedule runs the steward; of several
+/// labelled ones the one stored first stays. Where no schedule of the
+/// runnable carries the label (a store written before the label existed)
+/// they are all deleted and the host creates its own, first due one
+/// interval later.
 // The runnable name is a non-empty const, so its parse is infallible.
 #[allow(clippy::expect_used)]
 pub async fn ensure_steward_dream_schedule(
@@ -497,12 +587,24 @@ pub async fn ensure_steward_dream_schedule(
         .list()
         .await
         .map_err(|error| format!("list schedules: {error}"))?;
-    let existing = schedules.into_iter().find(|schedule| {
-        matches!(
-            &schedule.target,
-            TargetBinding::HostRunnable(binding) if binding.runnable == runnable
+    let (mut hosts, mut others): (Vec<Schedule>, Vec<Schedule>) = schedules
+        .into_iter()
+        .filter(|schedule| {
+            matches!(
+                &schedule.target,
+                TargetBinding::HostRunnable(binding) if binding.runnable == runnable
+            )
+        })
+        .partition(|schedule| schedule.config.labels.contains_key(STEWARD_DREAM_LABEL));
+    hosts.sort_by_cached_key(|schedule| {
+        (
+            schedule.config.created_at_utc,
+            schedule.schedule_id.to_string(),
         )
     });
+    let mut hosts = hosts.into_iter();
+    let existing = hosts.next();
+    others.extend(hosts);
 
     // First occurrence one interval out (parity with the old loop's initial
     // sleep-then-dream) so a fresh gateway does not dream immediately on boot.
@@ -519,29 +621,43 @@ pub async fn ensure_steward_dream_schedule(
 
     match existing {
         Some(schedule) => {
+            // The host's own trigger: the configured interval, no end, a
+            // first run no later than one interval from now. It is left as
+            // it is (and keeps its planning cursor); any other is retimed.
             let cadence_unchanged = matches!(
                 &schedule.trigger,
-                TriggerSpec::Interval(spec) if spec.every_seconds == every_seconds
+                TriggerSpec::Interval(spec)
+                    if spec.every_seconds == every_seconds
+                        && spec.end_at_utc.is_none()
+                        && spec.start_at_utc <= start_at_utc
             );
-            if cadence_unchanged {
-                return Ok(());
+            if !cadence_unchanged {
+                service
+                    .update(
+                        &schedule.schedule_id,
+                        UpdateScheduleRequest {
+                            trigger: Some(trigger),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .map_err(|error| format!("update steward dream schedule cadence: {error}"))?;
+                tracing::info!(
+                    schedule_id = %schedule.schedule_id,
+                    every_seconds,
+                    "updated steward dream schedule cadence"
+                );
             }
-            service
-                .update(
-                    &schedule.schedule_id,
-                    UpdateScheduleRequest {
-                        trigger: Some(trigger),
-                        ..Default::default()
-                    },
-                )
-                .await
-                .map_err(|error| format!("update steward dream schedule cadence: {error}"))?;
-            tracing::info!(
-                schedule_id = %schedule.schedule_id,
-                every_seconds,
-                "updated steward dream schedule cadence"
-            );
-            Ok(())
+            if schedule.phase == SchedulePhase::Paused {
+                service
+                    .resume(&schedule.schedule_id)
+                    .await
+                    .map_err(|error| format!("resume steward dream schedule: {error}"))?;
+                tracing::info!(
+                    schedule_id = %schedule.schedule_id,
+                    "resumed steward dream schedule"
+                );
+            }
         }
         None => {
             let created = service
@@ -555,7 +671,7 @@ pub async fn ensure_steward_dream_schedule(
                     misfire_policy: meerkat::MisfirePolicy::default(),
                     overlap_policy: meerkat::OverlapPolicy::default(),
                     missing_target_policy: meerkat::MissingTargetPolicy::default(),
-                    labels: std::collections::BTreeMap::new(),
+                    labels: BTreeMap::from([(STEWARD_DREAM_LABEL.to_string(), "1".to_string())]),
                     planning_horizon_days: None,
                     planning_horizon_occurrences: None,
                 })
@@ -566,9 +682,26 @@ pub async fn ensure_steward_dream_schedule(
                 every_seconds,
                 "created steward dream schedule (host-runnable target)"
             );
-            Ok(())
         }
     }
+
+    // One schedule runs the steward: the host's own, kept or created above.
+    let mut failed = None;
+    for other in others {
+        match service.delete(&other.schedule_id).await {
+            Ok(_) => tracing::info!(
+                schedule_id = %other.schedule_id,
+                "removed a steward dream schedule that is not the host's own"
+            ),
+            Err(error) => {
+                failed.get_or_insert(format!(
+                    "remove steward dream schedule {}: {error}",
+                    other.schedule_id
+                ));
+            }
+        }
+    }
+    failed.map_or(Ok(()), Err)
 }
 
 #[derive(Clone, Default)]
@@ -581,6 +714,14 @@ pub struct ScheduleMobTargetRegistry {
     /// ([`Self::adopt_mob_runtime`]): Core's entry of an agent's name is read
     /// from it.
     mob: Arc<RwLock<Option<MobHandle>>>,
+    /// The host's default mob, as the host stated it at this registry's
+    /// first adoption ([`Self::adopt_mob_runtime`]): the launch's mob,
+    /// whichever mob an adopted runtime wraps. It is kept for the registry's
+    /// life: an adoption that states another one is refused. A stored record
+    /// that names no mob is for a member of it
+    /// ([`crate::member_key::DefaultMob`]). `None` until a runtime was
+    /// adopted.
+    default_mob: Arc<RwLock<Option<crate::member_key::DefaultMob>>>,
 }
 
 /// The mob state a registry resolves bridge sessions against, held weakly:
@@ -605,6 +746,57 @@ enum MobSessionResolution {
     Stopped,
 }
 
+/// The member a session target's session is, read without a load
+/// ([`ScheduleMobTargetRegistry::session_target_member`]).
+enum SessionMember {
+    /// A loaded mob's roster holds the session for this member (mob id,
+    /// member).
+    Seated(String, String),
+    /// No loaded mob's roster holds the session, and its stored record
+    /// names this member (mob id, member).
+    Stored(String, String),
+    /// No loaded mob's roster holds the session and no member is named
+    /// for it: its stored record names none, nothing is stored for it, the
+    /// target names no session, or no mob state stands to read from.
+    NoMember,
+    /// No loaded mob's roster holds the session, and its stored record
+    /// cannot be read while the adopted mob state stands.
+    Unreadable,
+}
+
+/// What an agent's schedule tools know of the person of the member a
+/// target names ([`ScheduleMobTargetRegistry::target_person`]).
+enum TargetPerson {
+    /// It is not known whose the member is: the closed side for every
+    /// caller.
+    NotKnown,
+    /// The member is private to this person.
+    Private(String),
+    /// The target names no member, or one private to no one.
+    NoOne,
+}
+
+/// Whose a session is, as the judge of what an agent's schedule tools show
+/// reads it ([`ScheduleMobTargetRegistry::audience_session`]).
+enum AudienceSession {
+    /// A member of a mob holds the session: the mob.
+    Member(String),
+    /// Every mob the state knows was read and no member holds the session,
+    /// or no mob state was adopted: a host's own session.
+    NoMember,
+    /// No member of the mobs that were read holds the session, and the mob
+    /// state knows a mob whose roster was not read: a member of that mob
+    /// may hold the session, so whose it is is not known. With
+    /// `handle_withheld` one of those mobs is managed and its handle was
+    /// not handed out: its actor runs, and a member of it can be in a
+    /// turn. Without it they are mobs that have no actor (not loaded, held
+    /// before activation, quarantined).
+    NotPlaced { handle_withheld: bool },
+    /// The mobs cannot be read: the adopted mob state is gone, the record of
+    /// it cannot be read, or its mobs cannot be listed.
+    Unreadable,
+}
+
 impl ScheduleMobTargetRegistry {
     /// Adopt the mob state bridge sessions resolve against, or forget it
     /// with `None`. The registry keeps only a weak reference to it.
@@ -621,13 +813,116 @@ impl ScheduleMobTargetRegistry {
     /// ([`Self::set_mob_state`]), the record of who its members are private
     /// to, which still knows a member its mob has retired, and the runtime's
     /// own mob, whose entry of an agent's name says where the agent stands.
-    pub(crate) fn adopt_mob_runtime(&self, runtime: &crate::mob_handle_runtime::MobRuntime) {
+    ///
+    /// `host_default_mob` is the host's default mob, as the host states it:
+    /// its launch mob. It is never read from `runtime`: a host may serve
+    /// several mobs and a registry may adopt the wrapper of any of them. The
+    /// registry keeps the first default mob it is told. An adoption that
+    /// states another one is refused whole: it is logged as an error, and
+    /// the registry keeps the default mob, the mob state, the private owners
+    /// and the mob it adopted before, so a stored record that names no mob
+    /// stays the launch mob's member's.
+    pub(crate) fn adopt_mob_runtime(
+        &self,
+        runtime: &crate::mob_handle_runtime::MobRuntime,
+        host_default_mob: &crate::member_key::DefaultMob,
+    ) {
+        // The default mob first, and nothing else when it is refused or
+        // cannot be recorded.
+        let Ok(mut default_mob) = self.default_mob.write() else {
+            return;
+        };
+        if let Some(first) = default_mob.as_ref()
+            && first != host_default_mob
+        {
+            tracing::error!(
+                default_mob = %first.mob_id(),
+                stated = %host_default_mob.mob_id(),
+                adopting = %runtime.handle().mob_id(),
+                "a schedule target registry was told a second default mob for its host; the \
+                 adoption is refused and the registry keeps what it adopted before"
+            );
+            return;
+        }
+        *default_mob = Some(host_default_mob.clone());
+        drop(default_mob);
         self.set_mob_state(runtime.agent_mob_mcp_state());
         if let Ok(mut guard) = self.private_owners.write() {
             *guard = Some(runtime.private_owners().clone());
         }
         if let Ok(mut guard) = self.mob.write() {
             *guard = Some(runtime.observer().handle());
+        }
+    }
+
+    /// The host's default mob, once this registry adopted a runtime of the
+    /// host.
+    fn default_mob(&self) -> Option<crate::member_key::DefaultMob> {
+        self.default_mob.read().ok().and_then(|guard| guard.clone())
+    }
+
+    /// This registry on a host whose default mob is `default_mob`, for a
+    /// fixture that adopts no runtime.
+    #[cfg(test)]
+    pub(crate) fn with_default_mob_for_test(
+        self,
+        default_mob: crate::member_key::DefaultMob,
+    ) -> Self {
+        if let Ok(mut guard) = self.default_mob.write() {
+            *guard = Some(default_mob);
+        }
+        self
+    }
+
+    /// Whether `mob_id` is the adopted runtime's own mob, the launch's mob,
+    /// which is never created again. `false` while no runtime is adopted.
+    fn is_own_mob(&self, mob_id: &meerkat_mob::MobId) -> bool {
+        self.mob
+            .read()
+            .ok()
+            .and_then(|guard| guard.as_ref().map(|mob| mob.mob_id() == mob_id))
+            .unwrap_or(false)
+    }
+
+    /// The mob member the stored session `session_id` names, for a schedule
+    /// that names the session. It is read as Core's schedule host reads it
+    /// when it fires a resumable-session target whose session is gone
+    /// (`meerkat::surface::recover_mob_member_identity_from_session_target`):
+    /// from what the session's stored record keeps, which an archived
+    /// session keeps too
+    /// ([`meerkat_mob::MobSessionService::load_retained_session_metadata`]).
+    ///
+    /// `Ok(None)`: no mob state was adopted (the launch hosts no mob a
+    /// create could be asked for), its session service keeps no stored
+    /// record, nothing is stored under the id, or the stored session names
+    /// no mob member. An error: the adopted mob state is gone, or the stored
+    /// record cannot be read.
+    async fn stored_session_member(
+        &self,
+        session_id: &meerkat_core::types::SessionId,
+    ) -> Result<Option<meerkat_core::MobMemberBinding>, String> {
+        let adopted = match self.state.read().as_deref() {
+            Ok(AdoptedMobState::Adopted(state)) => Some(state.upgrade()),
+            Ok(AdoptedMobState::Unset) => None,
+            Err(_) => return Err("which mob state was adopted is unknown".to_string()),
+        };
+        let state = match adopted {
+            None => return Ok(None),
+            Some(None) => {
+                return Err("the mob state its sessions are read from is gone".to_string());
+            }
+            Some(Some(state)) => state,
+        };
+        match state
+            .session_service()
+            .load_retained_session_metadata(session_id)
+            .await
+        {
+            Ok(stored) => Ok(stored
+                .and_then(|stored| stored.session_metadata)
+                .and_then(|metadata| metadata.mob_member_binding)),
+            Err(meerkat_core::service::SessionError::Unsupported(_)) => Ok(None),
+            Err(error) => Err(error.to_string()),
         }
     }
 
@@ -744,13 +1039,55 @@ impl ScheduleMobTargetRegistry {
     }
 
     /// The person member `member` of mob `mob_id` is private to, as the
-    /// adopted runtime's record knows it.
+    /// adopted runtime's record knows it
+    /// ([`crate::private_owners::PrivateOwners::person_of`]): what its
+    /// build recorded, else what the event log named. A member neither
+    /// holds, whose retirement the memory store recorded as private, is
+    /// private to a person nobody is: it is read as private here too, so
+    /// no caller is taken for its person.
     fn recorded_private_owner(&self, mob_id: &str, member: &str) -> Option<String> {
-        self.private_owners
+        match self
+            .private_owners
             .read()
             .ok()?
             .as_ref()?
-            .owner_of(mob_id, member)
+            .person_of(mob_id, member)
+        {
+            crate::mob_announcements::MemberPerson::Private(person) => Some(person),
+            _ => None,
+        }
+    }
+
+    /// Whether the mob state this registry adopted still stands: `false`
+    /// once its host dropped it, and when none was adopted. A registry
+    /// whose record of the adopted state cannot be read answers that it
+    /// stands: what it cannot read it does not take for gone.
+    fn adopted_mob_state_stands(&self) -> bool {
+        match self.state.read().as_deref() {
+            Ok(AdoptedMobState::Adopted(state)) => state.strong_count() > 0,
+            Ok(AdoptedMobState::Unset) => false,
+            Err(_) => true,
+        }
+    }
+
+    /// Whether the adopted runtime's record does not know whose member
+    /// `member` of mob `mob_id` is
+    /// ([`crate::private_owners::PrivateOwners::person_for_a_reader`]): it
+    /// has not read that mob (the mob was not loaded since the process
+    /// started, or its read is still owed) and holds nothing for the
+    /// member. The launch's own mob is never answered so. A record that
+    /// cannot be read is taken as one that does not know; a registry that
+    /// adopted no runtime keeps no record, and nothing is unknown to it.
+    fn recorded_person_not_known(&self, mob_id: &str, member: &str) -> bool {
+        let Ok(record) = self.private_owners.read() else {
+            return true;
+        };
+        record.as_ref().is_some_and(|record| {
+            matches!(
+                record.person_for_a_reader(mob_id, member),
+                crate::mob_announcements::MemberPerson::NotKnown
+            )
+        })
     }
 
     /// The person member `member` is private to: of mob `mob_id`, or of
@@ -787,11 +1124,141 @@ impl ScheduleMobTargetRegistry {
         mob_id.and_then(|mob_id| self.recorded_private_owner(mob_id, member))
     }
 
-    /// The person the member holding session `session_id` is private to
-    /// (see [`Self::member_private_owner`]).
-    async fn session_private_owner(&self, session_id: &str) -> Option<String> {
-        let (mob_id, member) = self.resolve_bridge_session(session_id).await?;
-        self.member_private_owner(Some(&mob_id), &member).await
+    /// Whether whose member `member` of mob `mob_id` is is not known: the
+    /// adopted runtime's record does not know it
+    /// ([`Self::recorded_person_not_known`]) and no roster of the adopted
+    /// mob state holds the member. A member a roster holds is known by its
+    /// labels, as [`Self::member_private_owner`] reads it. No mob is loaded
+    /// to answer, and nothing is waited for.
+    async fn member_person_not_known(&self, mob_id: &str, member: &str) -> bool {
+        if !self.recorded_person_not_known(mob_id, member) {
+            return false;
+        }
+        let state = match self.state.read().as_deref() {
+            Ok(AdoptedMobState::Adopted(state)) => state.upgrade(),
+            Ok(AdoptedMobState::Unset) | Err(_) => None,
+        };
+        let handles = match state {
+            Some(state) => state.mob_handles_snapshot().await.ok(),
+            None => None,
+        };
+        let identity = meerkat_mob::AgentIdentity::from(member);
+        for (id, handle) in handles.unwrap_or_default() {
+            if id.as_str() == mob_id && matches!(handle.get_member(&identity).await, Ok(Some(_))) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Whether `target` names a member whose person is not known
+    /// ([`Self::member_person_not_known`]): the member of a member target
+    /// or of an identity target (an identity target that names no mob
+    /// names the default mob's member, where the default mob is known), or
+    /// the source of a fork helper, or the member a session target's
+    /// session is (`session`, read once by [`Self::session_target_member`]
+    /// for a session target). The member a loaded mob's roster holds a
+    /// session for is known; for a session no roster holds, the member is
+    /// the one its stored record names. A stored record that cannot be
+    /// read is taken as naming a member whose person is not known. A
+    /// session no member is named for, and a target that names no member,
+    /// name none.
+    async fn target_person_not_known(
+        &self,
+        target: &TargetBinding,
+        session: Option<&SessionMember>,
+    ) -> bool {
+        match target {
+            TargetBinding::Identity(binding) => {
+                match parse_mob_member_schedule_identity(binding.identity()) {
+                    Some(member) => {
+                        self.member_person_not_known(&member.mob_id, &member.member)
+                            .await
+                    }
+                    None => match self.default_mob() {
+                        Some(default_mob) => {
+                            self.member_person_not_known(
+                                default_mob.mob_id().as_str(),
+                                binding.identity(),
+                            )
+                            .await
+                        }
+                        None => false,
+                    },
+                }
+            }
+            TargetBinding::Mob(binding) => match binding.as_ref() {
+                MobTargetBinding::Member {
+                    mob_id, member_id, ..
+                } => self.member_person_not_known(mob_id, member_id).await,
+                MobTargetBinding::ForkHelper {
+                    mob_id,
+                    source_member_id,
+                    ..
+                } => self.member_person_not_known(mob_id, source_member_id).await,
+                MobTargetBinding::SpawnHelper { .. } | MobTargetBinding::Flow { .. } => false,
+            },
+            TargetBinding::Session(_) => match session {
+                Some(SessionMember::Stored(mob_id, member)) => {
+                    self.member_person_not_known(mob_id, member).await
+                }
+                // The state stands and the stored record cannot be read:
+                // the closed side.
+                Some(SessionMember::Unreadable) => true,
+                // A session a loaded mob's roster holds is its member's,
+                // and that member is known by its labels.
+                Some(SessionMember::Seated(..) | SessionMember::NoMember) | None => false,
+            },
+            TargetBinding::HostRunnable(_) => false,
+        }
+    }
+
+    /// The member a session target's session is, read without a load, once
+    /// for a call: the member a loaded mob's roster holds the session for;
+    /// else the member the session's stored record names
+    /// ([`Self::stored_session_member`], which loads no mob). The stored
+    /// record is read only while the adopted mob state stands
+    /// ([`Self::adopted_mob_state_stands`], asked of the state itself, not
+    /// read off an error): once the state is gone (its host stopped) no
+    /// mob is left to name a member, and the session names none.
+    async fn session_target_member(&self, session: &SessionTargetBinding) -> SessionMember {
+        let Some(session_id) = session_target_session(session) else {
+            return SessionMember::NoMember;
+        };
+        if let Some((mob_id, member)) = self.resolve_bridge_session(&session_id).await {
+            return SessionMember::Seated(mob_id, member);
+        }
+        let Ok(session_id) = meerkat::SessionId::parse(&session_id) else {
+            return SessionMember::NoMember;
+        };
+        if !self.adopted_mob_state_stands() {
+            return SessionMember::NoMember;
+        }
+        match self.stored_session_member(&session_id).await {
+            Ok(Some(member)) => SessionMember::Stored(member.mob_id, member.member),
+            Ok(None) => SessionMember::NoMember,
+            Err(_) => SessionMember::Unreadable,
+        }
+    }
+
+    /// What an agent's schedule tools know of the person of the member
+    /// `target` names: that it is not known
+    /// ([`Self::target_person_not_known`]), the person the member is
+    /// private to ([`Self::target_private_owner`]), or that the target
+    /// names no member or one private to no one. A session target's member
+    /// is read once for both.
+    async fn target_person(&self, target: &TargetBinding) -> TargetPerson {
+        let session = match target {
+            TargetBinding::Session(session) => Some(self.session_target_member(session).await),
+            _ => None,
+        };
+        if self.target_person_not_known(target, session.as_ref()).await {
+            return TargetPerson::NotKnown;
+        }
+        match self.target_private_owner(target, session.as_ref()).await {
+            Some(owner) => TargetPerson::Private(owner),
+            None => TargetPerson::NoOne,
+        }
     }
 
     /// The member (mob and member id) a schedule tool call's turn belongs
@@ -816,14 +1283,29 @@ impl ScheduleMobTargetRegistry {
     }
 
     /// The person the member `target` names is private to: the member a
-    /// member target or an identity target names, the source of a fork
-    /// helper, or the member holding a session target's session. A target
-    /// that names no member names no owner.
-    async fn target_private_owner(&self, target: &TargetBinding) -> Option<String> {
+    /// member target or an identity target names (an identity target that
+    /// names no mob names the default mob's member, where the default mob
+    /// is known), the source of a fork helper, or the member a session
+    /// target's session is (`session`, read once by
+    /// [`Self::session_target_member`] for a session target): the member a
+    /// loaded mob's roster holds the session for, else the member the
+    /// session's stored record names, whose owner is read as a member
+    /// target's is, from its roster and else from the record
+    /// ([`Self::member_private_owner`]). So a schedule aimed at the session
+    /// of a member private to a person stays that person's while the
+    /// member's mob is not loaded. A target that names no member names no
+    /// owner.
+    async fn target_private_owner(
+        &self,
+        target: &TargetBinding,
+        session: Option<&SessionMember>,
+    ) -> Option<String> {
         match target {
-            TargetBinding::Session(session) => match session_target_session(session) {
-                Some(session_id) => self.session_private_owner(&session_id).await,
-                None => None,
+            TargetBinding::Session(_) => match session {
+                Some(
+                    SessionMember::Seated(mob_id, member) | SessionMember::Stored(mob_id, member),
+                ) => self.member_private_owner(Some(mob_id), member).await,
+                Some(SessionMember::NoMember | SessionMember::Unreadable) | None => None,
             },
             TargetBinding::Identity(binding) => {
                 match parse_mob_member_schedule_identity(binding.identity()) {
@@ -831,7 +1313,19 @@ impl ScheduleMobTargetRegistry {
                         self.member_private_owner(Some(&member.mob_id), &member.member)
                             .await
                     }
-                    None => self.member_private_owner(None, binding.identity()).await,
+                    // A target that names no mob is delivered to the default
+                    // mob's member: where the default mob is known, its
+                    // owner is read from that mob's member alone.
+                    None => {
+                        let default_mob = self.default_mob();
+                        self.member_private_owner(
+                            default_mob
+                                .as_ref()
+                                .map(|default_mob| default_mob.mob_id().as_str()),
+                            binding.identity(),
+                        )
+                        .await
+                    }
                 }
             }
             TargetBinding::Mob(binding) => match binding.as_ref() {
@@ -871,7 +1365,16 @@ impl ScheduleMobTargetRegistry {
             TargetBinding::Identity(binding) => {
                 match parse_mob_member_schedule_identity(binding.identity()) {
                     Some(named) => named.mob_id == mob_id && named.member == member,
-                    None => binding.identity() == member,
+                    // A target that names no mob is delivered by the launch
+                    // itself: it names the default mob's member. A registry
+                    // that adopted no mob does not know the default mob: it
+                    // serves a host of one mob, whose member the name is.
+                    None => {
+                        binding.identity() == member
+                            && self.default_mob().is_none_or(|default_mob| {
+                                default_mob.is(&meerkat_mob::MobId::from(mob_id))
+                            })
+                    }
                 }
             }
             TargetBinding::Session(session) => match session_target_session(session) {
@@ -903,6 +1406,314 @@ impl ScheduleMobTargetRegistry {
         };
         MobSessionResolution::Resolved(bridge_session_member(&state, session_id).await)
     }
+
+    /// Whose the session `session_id` is, for the judge of what an agent's
+    /// schedule tools show. It tells mobs that cannot be read, and a mob
+    /// whose roster was not read, from a session no member holds, which
+    /// [`Self::resolve_bridge_session`] answers alike: the judge shows a
+    /// host's own session every schedule, and must not take a member for
+    /// one because its mob could not be read or was not read. The mob
+    /// state's inventory is read after the rosters, so a mob whose roster
+    /// was read counts as read whatever the state lists it as since. It
+    /// loads no mob and waits for none.
+    async fn audience_session(&self, session_id: &str) -> AudienceSession {
+        let adopted = match self.state.read().as_deref() {
+            Ok(AdoptedMobState::Adopted(state)) => state.upgrade(),
+            Ok(AdoptedMobState::Unset) => return AudienceSession::NoMember,
+            Err(_) => return AudienceSession::Unreadable,
+        };
+        let Some(state) = adopted else {
+            return AudienceSession::Unreadable;
+        };
+        let Ok(parsed_session_id) = meerkat::SessionId::parse(session_id) else {
+            return AudienceSession::NoMember;
+        };
+        let Ok(handles) = state.mob_handles_snapshot().await else {
+            return AudienceSession::Unreadable;
+        };
+        let (holder, read) =
+            session_among_rosters(roster_reads(&handles, &parsed_session_id).await);
+        if let Some((mob_id, _)) = holder {
+            return AudienceSession::Member(mob_id);
+        }
+        let Ok(inventory) = state.mob_inventory().await else {
+            return AudienceSession::Unreadable;
+        };
+        let managed = inventory
+            .managed
+            .iter()
+            .map(|(mob_id, observed)| (mob_id.clone(), observed.phase))
+            .collect::<Vec<_>>();
+        let without_actor = inventory
+            .dormant
+            .iter()
+            .chain(inventory.held.iter().map(|(mob_id, _)| mob_id))
+            .chain(
+                inventory
+                    .quarantined
+                    .iter()
+                    .map(|quarantined| &quarantined.mob_id),
+            )
+            .cloned()
+            .collect::<Vec<_>>();
+        session_in_no_roster(&managed, &without_actor, &read)
+    }
+
+    /// The launch's judgement of a schedule create or update the turn of the
+    /// session `writer_session` makes, for a schedule aimed at `target`
+    /// ([`meerkat::ScheduleWriteJudge`]): accepted where the member holding
+    /// that session could message the member the target names, by the
+    /// wiring of the mobs the launch holds
+    /// ([`MobMcpState::member_can_message`]), and for a schedule a member
+    /// aims at itself.
+    ///
+    /// The member a target names is read as the private rule reads it
+    /// ([`Self::target_private_owner`]): the member of a member target, the
+    /// source of a fork helper, the member an identity target names (an
+    /// identity that is no `mob_member:` form names an agent of the
+    /// launch's own mob), and the member holding a session target's
+    /// session. A session target naming another session no member holds is
+    /// out of reach. A target that has the host act in a mob (a helper to
+    /// spawn, a flow) is accepted for the writer's own mob and for a mob
+    /// its session created ([`MobMcpState::member_may_schedule_in_mob`]). A
+    /// turn of a session no member holds is not a member's write: the
+    /// answer is that the writer is no member, whatever the target. A
+    /// writer found in no roster is such a session only when every mob was
+    /// read: while a managed mob's handle is withheld (the mob is asked
+    /// whether it is idle) a member of it can make the turn, and the answer
+    /// is unavailable, never that the writer is no member. A member's
+    /// target that names neither a member nor a mob is not judged here.
+    /// Member names are compared as roster ids, whichever form the target
+    /// wrote.
+    ///
+    /// A launch that adopted no mob state holds no member. A mob state that
+    /// is gone, or that cannot be read now, answers unavailable: never "in
+    /// reach".
+    async fn judge_schedule_write(
+        &self,
+        writer_session: &meerkat_core::types::SessionId,
+        target: &TargetBinding,
+    ) -> meerkat::ScheduleWriteVerdict {
+        use meerkat::ScheduleWriteVerdict::{Accepted, NotAMember, OutOfReach, Unavailable};
+        let state = match self.state.read().as_deref() {
+            Ok(AdoptedMobState::Adopted(state)) => state.upgrade(),
+            Ok(AdoptedMobState::Unset) => return NotAMember,
+            Err(_) => None,
+        };
+        let Some(state) = state else {
+            return Unavailable;
+        };
+        let Ok(handles) = state.mob_handles_snapshot().await else {
+            return Unavailable;
+        };
+        let Some((writer_mob, writer)) = session_holder(&handles, writer_session).await else {
+            // Found in no roster. That is a session no member holds only
+            // when every mob was read: while a managed mob's handle is
+            // withheld a member of that mob can make this turn, and its
+            // write is not a host's own.
+            return match self.audience_session(&writer_session.to_string()).await {
+                AudienceSession::NoMember
+                | AudienceSession::NotPlaced {
+                    handle_withheld: false,
+                } => NotAMember,
+                AudienceSession::Member(_)
+                | AudienceSession::NotPlaced {
+                    handle_withheld: true,
+                }
+                | AudienceSession::Unreadable => Unavailable,
+            };
+        };
+        let (target_mob, named) = match target {
+            TargetBinding::Mob(binding) => match binding.as_ref() {
+                MobTargetBinding::Member {
+                    mob_id, member_id, ..
+                } => (mob_id.clone(), member_id.clone()),
+                MobTargetBinding::ForkHelper {
+                    mob_id,
+                    source_member_id,
+                    ..
+                } => (mob_id.clone(), source_member_id.clone()),
+                MobTargetBinding::SpawnHelper { mob_id, .. }
+                | MobTargetBinding::Flow { mob_id, .. } => {
+                    return if state
+                        .member_may_schedule_in_mob(
+                            &meerkat_mob::MobId::from(writer_mob.as_str()),
+                            writer_session,
+                            &meerkat_mob::MobId::from(mob_id.as_str()),
+                        )
+                        .await
+                    {
+                        Accepted
+                    } else {
+                        OutOfReach
+                    };
+                }
+            },
+            TargetBinding::Identity(binding) => {
+                match parse_mob_member_schedule_identity(binding.identity()) {
+                    Some(named) => (named.mob_id, named.member),
+                    None => match self.mob.read().ok().and_then(|guard| guard.clone()) {
+                        Some(mob) => (mob.mob_id().to_string(), binding.identity().to_string()),
+                        None => return OutOfReach,
+                    },
+                }
+            }
+            TargetBinding::Session(session) => {
+                let Some(session_id) = session_target_session(session) else {
+                    return Accepted;
+                };
+                if session_id == writer_session.to_string() {
+                    return Accepted;
+                }
+                let Ok(session_id) = meerkat::SessionId::parse(&session_id) else {
+                    return OutOfReach;
+                };
+                match session_holder(&handles, &session_id).await {
+                    Some(holder) => holder,
+                    None => return OutOfReach,
+                }
+            }
+            TargetBinding::HostRunnable(_) => return Accepted,
+        };
+        let roster_id = |member: &str| {
+            crate::member_comms_id::mob_member_id(&crate::member_comms_id::runtime_alias_str(
+                member,
+            ))
+        };
+        let (writer, named) = (roster_id(&writer), roster_id(&named));
+        if writer_mob == target_mob && writer == named {
+            return Accepted;
+        }
+        match state
+            .member_can_message(
+                &meerkat_mob::MobId::from(writer_mob.as_str()),
+                &writer,
+                &meerkat_mob::MobId::from(target_mob.as_str()),
+                &named,
+            )
+            .await
+        {
+            Ok(true) => Accepted,
+            Ok(false) => OutOfReach,
+            Err(_) => Unavailable,
+        }
+    }
+}
+
+/// What one mob's roster says of a session: the member of the mob that
+/// holds it, that no member of the mob does, or that the roster could not
+/// be read.
+#[derive(Debug)]
+enum RosterRead {
+    Holder(String),
+    NoHolder,
+    Unreadable,
+}
+
+/// What the roster of `handle`'s mob says of the session `session`, read
+/// through the handle's fallible roster read
+/// ([`MobHandle::roster_snapshot`]): a read that fails is told apart from a
+/// roster that holds no such member.
+async fn roster_read(handle: &MobHandle, session: &meerkat_core::types::SessionId) -> RosterRead {
+    match handle.roster_snapshot().await {
+        Ok(roster) => match roster.find_by_bridge_session_id(session) {
+            Some(entry) => RosterRead::Holder(entry.agent_identity.to_string()),
+            None => RosterRead::NoHolder,
+        },
+        Err(_) => RosterRead::Unreadable,
+    }
+}
+
+/// The roster reads of the mobs `handles` for the session `session`, in
+/// the handles' order, up to and with the first roster that holds it.
+async fn roster_reads(
+    handles: &[(meerkat_mob::MobId, MobHandle)],
+    session: &meerkat_core::types::SessionId,
+) -> Vec<(meerkat_mob::MobId, RosterRead)> {
+    let mut reads = Vec::with_capacity(handles.len());
+    for (mob_id, handle) in handles {
+        let read = roster_read(handle, session).await;
+        let holds = matches!(read, RosterRead::Holder(_));
+        reads.push((mob_id.clone(), read));
+        if holds {
+            break;
+        }
+    }
+    reads
+}
+
+/// The member (mob id and roster member id) that holds a session among the
+/// mobs' roster reads `reads`, taken in their order, and the mobs before it
+/// whose roster counts as read. A mob whose roster could not be read is
+/// not counted as read: a member of it may hold the session, so the
+/// placing step that follows answers a session found in no roster as not
+/// placed, a handle withheld ([`session_in_no_roster`]).
+fn session_among_rosters(
+    reads: Vec<(meerkat_mob::MobId, RosterRead)>,
+) -> (Option<(String, String)>, Vec<meerkat_mob::MobId>) {
+    let mut read = Vec::with_capacity(reads.len());
+    for (mob_id, roster) in reads {
+        match roster {
+            RosterRead::Holder(member) => return (Some((mob_id.to_string(), member)), read),
+            RosterRead::NoHolder => read.push(mob_id),
+            RosterRead::Unreadable => {}
+        }
+    }
+    (None, read)
+}
+
+/// The member (mob id and roster member id) holding the session `session`
+/// among the mobs `handles`, if a member holds it.
+async fn session_holder(
+    handles: &[(meerkat_mob::MobId, MobHandle)],
+    session: &meerkat_core::types::SessionId,
+) -> Option<(String, String)> {
+    session_among_rosters(roster_reads(handles, session).await).0
+}
+
+/// A launch's judge of its agents' schedule writes
+/// ([`meerkat::ScheduleWriteJudge`]) over the mobs its registry adopted
+/// ([`ScheduleMobTargetRegistry::judge_schedule_write`]). The registry holds
+/// the mob state weakly, so the schedule service that keeps this judge
+/// keeps no stopped host's mob state alive.
+struct MemberReachScheduleJudge {
+    registry: ScheduleMobTargetRegistry,
+}
+
+#[async_trait]
+impl meerkat::ScheduleWriteJudge for MemberReachScheduleJudge {
+    async fn judge_schedule_write(
+        &self,
+        writer_session: &meerkat_core::types::SessionId,
+        target: &TargetBinding,
+    ) -> meerkat::ScheduleWriteVerdict {
+        self.registry
+            .judge_schedule_write(writer_session, target)
+            .await
+    }
+}
+
+/// Whose a session is that no roster of the mobs in `read` holds, by what
+/// the mob state lists: `managed` are the mobs it manages with the phase
+/// each last published, `without_actor` the mobs it knows that have no
+/// actor (not loaded, held before activation, quarantined). A managed mob
+/// that was not read had its handle withheld. One whose destroy was
+/// admitted hands out no handle either and is no mob to place a session
+/// in: it counts as neither.
+fn session_in_no_roster(
+    managed: &[(meerkat_mob::MobId, meerkat_mob::MobState)],
+    without_actor: &[meerkat_mob::MobId],
+    read: &[meerkat_mob::MobId],
+) -> AudienceSession {
+    let handle_withheld = managed.iter().any(|(mob_id, phase)| {
+        !matches!(phase, meerkat_mob::MobState::Destroyed) && !read.contains(mob_id)
+    });
+    let not_read = handle_withheld || without_actor.iter().any(|mob_id| !read.contains(mob_id));
+    if not_read {
+        AudienceSession::NotPlaced { handle_withheld }
+    } else {
+        AudienceSession::NoMember
+    }
 }
 
 /// The schedules of a launch, as the family of changes of its long-term
@@ -927,6 +1738,17 @@ impl ScheduleMobTargetRegistry {
 pub struct MobAgentSchedules {
     service: ScheduleService,
     targets: ScheduleMobTargetRegistry,
+}
+
+/// The agent a follow is asked for: the agent `agent`, with the member id
+/// `member`, of the mob `mob_id`, on a host whose default mob is
+/// `default_mob` once the follow's registry adopted the launch's runtime.
+#[derive(Clone, Copy)]
+struct AgentOfMob<'a> {
+    default_mob: Option<&'a crate::member_key::DefaultMob>,
+    mob_id: &'a str,
+    agent: &'a str,
+    member: &'a str,
 }
 
 impl MobAgentSchedules {
@@ -957,10 +1779,17 @@ impl MobAgentSchedules {
                     "reading Core's entry of the agent: {error}"
                 ))
             })?;
+        let default_mob = self.targets.default_mob();
+        let followed = AgentOfMob {
+            default_mob: default_mob.as_ref(),
+            mob_id,
+            agent,
+            member: member.as_str(),
+        };
         let mut targeting = Vec::new();
         for schedule in self.service.list().await? {
             if self
-                .names_agent(&schedule.target, mob_id, agent, member.as_str(), &sessions)
+                .names_agent(&schedule.target, &followed, &sessions)
                 .await
             {
                 targeting.push(schedule);
@@ -969,22 +1798,35 @@ impl MobAgentSchedules {
         Ok(targeting)
     }
 
-    /// Whether `target` names the agent `agent`, member `member` of the mob
-    /// `mob_id`, in any form a schedule names an agent: a member target of
-    /// it; an identity target naming it, by its member id or by its name;
-    /// a session target naming a session of it (the session a live member
-    /// of it holds, or one of `sessions`, which Core's entry records for
-    /// it); or a Console caller's schedule for it.
+    /// Whether `target` names the agent `followed`, in any form a schedule
+    /// names an agent: a member target of it; an identity target naming it,
+    /// by its member id or by its name; a session target naming a session
+    /// of it (the session a live member of it holds, or one of `sessions`,
+    /// which Core's entry records for it); or a Console caller's schedule
+    /// for it, which is for one mob's agent: the agent of the same name in
+    /// another mob is another agent. A Console caller's send and an
+    /// identity target that name no mob are for the default mob's agent. A
+    /// follow whose registry adopted no mob does not know the default mob:
+    /// it serves a host of one mob, and matches such a target by the
+    /// agent's name.
     async fn names_agent(
         &self,
         target: &TargetBinding,
-        mob_id: &str,
-        agent: &str,
-        member: &str,
+        followed: &AgentOfMob<'_>,
         sessions: &[String],
     ) -> bool {
+        let AgentOfMob {
+            default_mob,
+            mob_id,
+            agent,
+            member,
+        } = *followed;
         if let Some(send) = crate::console_schedules::ConsoleScheduledSend::of_target(target) {
-            return send.identity == agent;
+            let followed_mob = meerkat_mob::MobId::from(mob_id);
+            return match default_mob {
+                Some(default_mob) => send.is_for(default_mob, &followed_mob, agent),
+                None => send.is_for_where_the_default_mob_is_not_known(&followed_mob, agent),
+            };
         }
         if let TargetBinding::Session(session) = target
             && let Some(session_id) = session_target_session(session)
@@ -1019,6 +1861,176 @@ impl MobAgentSchedules {
             schedule.schedule_id.to_string(),
             schedule.config.name.clone(),
         )
+    }
+
+    /// End every schedule that names the mob `mob_id`, for a mob that is
+    /// about to be created under that id, and name the schedules ended.
+    ///
+    /// A schedule names a mob by its id and a member by its name, and
+    /// nothing in it says which mob of that id it was made for, nor who
+    /// wrote it. So a create under an id first ends each schedule that
+    /// names the id (`names_mob`): a member, flow or helper target of the
+    /// mob, an identity target that names a member of it, and the runner of
+    /// one of its announcement sources. Each is deleted, as a removed
+    /// agent's schedules are
+    /// ([`crate::identity_creation::AgentSchedules::follow`]), and named in
+    /// the host's log by its id, never by what it sends.
+    ///
+    /// A schedule can also name a session, and a fire follows a session
+    /// that is gone to the member its stored record names: a mob's id and a
+    /// member's name. So a schedule that names a session whose stored record
+    /// names a member of the mob names the id too, and is ended
+    /// (`names_a_session_of`). A schedule that names any other
+    /// session stays. A Console caller's schedule is for an agent of the
+    /// mob its send names: one for an agent of the mob is ended, one for an
+    /// agent of another mob stays.
+    ///
+    /// The launch's own mob is not created again and its schedules are
+    /// never released: asked for it, this ends nothing. A schedule that
+    /// cannot be listed or ended is an error, and so is a named session
+    /// whose stored record cannot be read. On an error the caller refuses
+    /// the create; asked again, the release ends what is left.
+    pub async fn release_mob(
+        &self,
+        mob_id: &meerkat_mob::MobId,
+    ) -> Result<Vec<crate::identity_creation::ScheduleRef>, meerkat::ScheduleDomainError> {
+        if self.targets.is_own_mob(mob_id) {
+            return Ok(Vec::new());
+        }
+        let default_mob = self.targets.default_mob();
+        let mut released = Vec::new();
+        for schedule in self.service.list().await? {
+            if !names_mob(&schedule, default_mob.as_ref(), mob_id)
+                && !self.names_a_session_of(&schedule, mob_id).await?
+            {
+                continue;
+            }
+            let ended = self.service.delete(&schedule.schedule_id).await?;
+            if ended.phase != SchedulePhase::Deleted {
+                return Err(meerkat::ScheduleDomainError::Internal(format!(
+                    "schedule {} names mob '{mob_id}' and was not ended",
+                    schedule.schedule_id
+                )));
+            }
+            tracing::warn!(
+                mob_id = %mob_id,
+                schedule_id = %schedule.schedule_id,
+                "a schedule that named a mob's id is ended before a mob is created under the id"
+            );
+            released.push(Self::named(&schedule));
+        }
+        Ok(released)
+    }
+
+    /// Whether `schedule` names a session whose stored record names a member
+    /// of the mob `mob_id`: the one form in which a schedule names a mob
+    /// that the schedule itself does not spell ([`names_mob`] reads the
+    /// others). Only the target form that follows a session that is gone is
+    /// read. A stored record that cannot be read is an error.
+    async fn names_a_session_of(
+        &self,
+        schedule: &Schedule,
+        mob_id: &meerkat_mob::MobId,
+    ) -> Result<bool, meerkat::ScheduleDomainError> {
+        let TargetBinding::Session(session) = &schedule.target else {
+            return Ok(false);
+        };
+        let SessionTargetBinding::ResumableSession { session_id, .. } = session.as_ref() else {
+            return Ok(false);
+        };
+        let named = self
+            .targets
+            .stored_session_member(session_id)
+            .await
+            .map_err(|error| {
+                meerkat::ScheduleDomainError::Internal(format!(
+                    "schedule {} names a session whose stored record was not read: {error}",
+                    schedule.schedule_id
+                ))
+            })?;
+        Ok(named.is_some_and(|member| member.mob_id == mob_id.as_str()))
+    }
+}
+
+/// Whether `schedule` names the mob `mob_id`, in any form a schedule names
+/// a mob: a member, flow or helper target of it; an identity target that
+/// names a member of it; or the runner of one of its announcement sources.
+/// A session target spells no mob (what its stored record names is read by
+/// [`MobAgentSchedules::names_a_session_of`]), and neither does an identity
+/// target that gives a name alone. A Console caller's schedule names the
+/// mob its send is for, on a host whose default mob is `default_mob`: a
+/// send that names no mob is for the default mob. While the default mob is
+/// not known, which mob a send is for is not known, and it names none.
+fn names_mob(
+    schedule: &Schedule,
+    default_mob: Option<&crate::member_key::DefaultMob>,
+    mob_id: &meerkat_mob::MobId,
+) -> bool {
+    let target = &schedule.target;
+    if let Some(send) = crate::console_schedules::ConsoleScheduledSend::of_target(target) {
+        return default_mob.is_some_and(|default_mob| send.mob(default_mob) == *mob_id);
+    }
+    match target {
+        TargetBinding::Mob(binding) => match binding.as_ref() {
+            MobTargetBinding::Member { mob_id: named, .. }
+            | MobTargetBinding::Flow { mob_id: named, .. }
+            | MobTargetBinding::SpawnHelper { mob_id: named, .. }
+            | MobTargetBinding::ForkHelper { mob_id: named, .. } => named == mob_id.as_str(),
+        },
+        TargetBinding::Identity(binding) => parse_mob_member_schedule_identity(binding.identity())
+            .is_some_and(|member| member.mob_id == mob_id.as_str()),
+        TargetBinding::HostRunnable(_) => {
+            schedule.config.labels.contains_key(SOURCE_RUNNER_LABEL)
+                && host_runnable_target(target).is_some_and(|(_, params)| {
+                    params.get("mob_id").and_then(Value::as_str) == Some(mob_id.as_str())
+                })
+        }
+        TargetBinding::Session(_) => false,
+    }
+}
+
+/// The mob `schedule` names by its id, when its target is not a Console
+/// caller's send: the mob of a member, flow or helper target, the mob of the
+/// member an identity target names, or the mob of the announcement source a
+/// source runner runs. A session target, an identity target that gives a
+/// name alone and any other host runnable name no mob.
+fn target_mob(schedule: &Schedule) -> Option<String> {
+    let target = &schedule.target;
+    match target {
+        TargetBinding::Mob(binding) => match binding.as_ref() {
+            MobTargetBinding::Member { mob_id, .. }
+            | MobTargetBinding::Flow { mob_id, .. }
+            | MobTargetBinding::SpawnHelper { mob_id, .. }
+            | MobTargetBinding::ForkHelper { mob_id, .. } => Some(mob_id.clone()),
+        },
+        TargetBinding::Identity(binding) => {
+            parse_mob_member_schedule_identity(binding.identity()).map(|member| member.mob_id)
+        }
+        TargetBinding::HostRunnable(_) => {
+            if !schedule.config.labels.contains_key(SOURCE_RUNNER_LABEL) {
+                return None;
+            }
+            let (_, params) = host_runnable_target(target)?;
+            params
+                .get("mob_id")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        }
+        TargetBinding::Session(_) => None,
+    }
+}
+
+/// The launch's schedules as the release a create asks before its mob
+/// exists ([`MobAgentSchedules::release_mob`]): the answer is how many
+/// schedules ended, and an error's text is for the host's log.
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+impl crate::mob_schedules_release::MobSchedulesRelease for MobAgentSchedules {
+    async fn release_mob(&self, mob_id: &meerkat_mob::MobId) -> Result<usize, String> {
+        MobAgentSchedules::release_mob(self, mob_id)
+            .await
+            .map(|released| released.len())
+            .map_err(|error| error.to_string())
     }
 }
 
@@ -1134,9 +2146,16 @@ impl crate::identity_creation::AgentSchedules for MobAgentSchedules {
 /// created after the member's end is not the ended member's, whatever it
 /// names, and is left as it is; so is a schedule of a member private to no
 /// one.
+///
+/// A member is one mob's: a schedule for the member of the same name in
+/// another mob is not the ended member's. A Console caller's deferred send
+/// and an identity target that name no mob are for an agent of the launch's
+/// default mob ([`crate::member_key::DefaultMob`]), which the follower is
+/// told when it is made.
 #[derive(Clone)]
 pub(crate) struct EndedPrivateMemberSchedules {
     schedules: Arc<dyn EndedMemberSchedules>,
+    default_mob: crate::member_key::DefaultMob,
 }
 
 /// The two calls [`EndedPrivateMemberSchedules`] makes on a launch's
@@ -1178,13 +2197,25 @@ impl EndedPrivateMemberSchedules {
     /// How often the deletes of one ended member are tried.
     const ATTEMPTS: u32 = 3;
 
-    pub(crate) fn new(service: ScheduleService) -> Self {
-        Self::over(Arc::new(service))
+    /// The follower over the schedules of `service`, in a launch whose
+    /// default mob is `default_mob`.
+    pub(crate) fn new(
+        service: ScheduleService,
+        default_mob: crate::member_key::DefaultMob,
+    ) -> Self {
+        Self::over(Arc::new(service), default_mob)
     }
 
-    /// The follower over `schedules`.
-    pub(crate) fn over(schedules: Arc<dyn EndedMemberSchedules>) -> Self {
-        Self { schedules }
+    /// The follower over `schedules`, in a launch whose default mob is
+    /// `default_mob`.
+    pub(crate) fn over(
+        schedules: Arc<dyn EndedMemberSchedules>,
+        default_mob: crate::member_key::DefaultMob,
+    ) -> Self {
+        Self {
+            schedules,
+            default_mob,
+        }
     }
 
     /// The form in which `target` names the ended member, when it does: a
@@ -1192,14 +2223,23 @@ impl EndedPrivateMemberSchedules {
     /// target naming it (by its roster id or by the name that id spells), a
     /// session target naming the session it held at its end, or a Console
     /// caller's deferred send to it.
+    ///
+    /// The member is one mob's. A Console caller's send is for one mob's
+    /// agent, the default mob's when it names no mob; an identity target
+    /// that names no mob is delivered by the launch itself, to the default
+    /// mob's agent. Neither names the member of the same name in another
+    /// mob.
     fn targets(
+        &self,
         target: &TargetBinding,
         ended: &crate::private_owners::EndedPrivateMember,
     ) -> Option<&'static str> {
         let alias = crate::member_comms_id::runtime_alias_str(&ended.member);
+        let ended_mob = meerkat_mob::MobId::from(ended.mob_id.as_str());
         if let Some(send) = crate::console_schedules::ConsoleScheduledSend::of_target(target) {
-            return (send.identity == ended.member || send.identity == alias)
-                .then_some("console_send");
+            return (send.is_for(&self.default_mob, &ended_mob, &ended.member)
+                || send.is_for(&self.default_mob, &ended_mob, &alias))
+            .then_some("console_send");
         }
         match target {
             TargetBinding::Mob(binding) => match binding.as_ref() {
@@ -1217,7 +2257,10 @@ impl EndedPrivateMemberSchedules {
             TargetBinding::Identity(binding) => {
                 let names = match parse_mob_member_schedule_identity(binding.identity()) {
                     Some(named) => named.mob_id == ended.mob_id && named.member == ended.member,
-                    None => binding.identity() == ended.member || binding.identity() == alias,
+                    None => {
+                        self.default_mob.is(&ended_mob)
+                            && (binding.identity() == ended.member || binding.identity() == alias)
+                    }
                 };
                 names.then_some("identity")
             }
@@ -1253,7 +2296,7 @@ impl EndedPrivateMemberSchedules {
             if schedule.config.created_at_utc > ended.ended_at {
                 continue;
             }
-            let Some(names_it_as) = Self::targets(&schedule.target, ended) else {
+            let Some(names_it_as) = self.targets(&schedule.target, ended) else {
                 continue;
             };
             match self.schedules.delete(&schedule.schedule_id).await {
@@ -1308,10 +2351,63 @@ impl crate::private_owners::PrivateMemberEndFollower for EndedPrivateMemberSched
     }
 }
 
+/// Two rules keep a schedule off an agent's schedule tools: its list leaves
+/// the schedule out, and every verb naming it by id answers as for an id no
+/// schedule holds.
+///
 /// A schedule aimed at a member private to a person is hidden from every
 /// agent not private to that person (an agent whose turn no member's
-/// session makes is private to no one): its list leaves the schedule out,
-/// and every verb naming it by id answers as for an id no schedule holds.
+/// session makes is private to no one).
+///
+/// A schedule aimed at a member whose person is not known is hidden from
+/// every caller, a host's own session included: the launch's record of
+/// whose its members are has not read the member's mob (the mob was not
+/// loaded since the process started, or its read is still owed) and no
+/// roster holds the member. No mob is loaded to answer. So until a mob of
+/// the host beside the launch's own is first loaded, no agent's schedule
+/// tools show or change a schedule aimed at its members. The launch's own
+/// mob is never read so. A schedule aimed at the session of a member is
+/// judged as one aimed at the member: for a session no loaded mob's roster
+/// holds, the member is the one the session's stored record names, read
+/// without a load, so the schedule stays its person's, and stays off every
+/// caller's tools where that person is not known, while the member's mob
+/// is not loaded.
+///
+/// On a host that serves several mobs, a schedule that names a mob is
+/// hidden from an agent whose turn is a member of another mob: an agent's
+/// schedule tools show its own mob's schedules. The mob a schedule names is
+/// the mob of its member, flow or helper target, of the member its identity
+/// target names, or of the announcement source it runs; a session target
+/// names the mob of the member that holds the session, where a roster
+/// knows it. A schedule that names no mob is the default mob's: an identity
+/// target that gives a name alone, a session no roster knows, and a host
+/// runnable that names no mob are hidden from an agent of every other mob.
+/// While the tools do not know the host's default mob such a schedule is no
+/// mob's, and it is hidden from every mob's agents. A caller whose turn no
+/// member's session makes (a host's own session) sees as it did.
+///
+/// While the mobs cannot be read (the adopted mob state is gone, or it or
+/// its mobs cannot be read), which mob's member makes a turn or holds a
+/// session is not known, and every schedule is hidden from that call: a
+/// caller is taken for a host's own session only when the mobs were read
+/// and no member holds its session. The caller is read first, so the same
+/// answer for a session target's holder arises only when the mobs stop
+/// being readable between the two reads of one call.
+///
+/// While the mob state knows a mob whose roster was not read (a managed
+/// mob whose handle is withheld while it is asked whether it is idle, a
+/// mob that is not loaded, one held before activation, a quarantined one),
+/// a session found in no roster is not placed: a member of that mob may
+/// hold it. A schedule that names such a session is hidden from every
+/// member's tools, and a host's own session still sees it. A caller found
+/// in no roster is shown no schedule while a managed mob's handle is
+/// withheld, a host's own session too, because a member of that mob can be
+/// in a turn; a mob that has no actor takes no schedule off a caller's
+/// tools. A managed mob whose destroy was admitted is not read any more
+/// and counts for neither. The rule for a mob that has no actor rests on
+/// a member's session taking a turn only through its mob, which loads it:
+/// a host that also gives a member's session a turn by its session id,
+/// beside its mob set, while the mob is not loaded is outside it.
 #[async_trait]
 impl crate::console_schedules::AgentScheduleAudience for ScheduleMobTargetRegistry {
     async fn hides(
@@ -1319,10 +2415,57 @@ impl crate::console_schedules::AgentScheduleAudience for ScheduleMobTargetRegist
         schedule: &meerkat::Schedule,
         context: &meerkat_core::ToolDispatchContext,
     ) -> bool {
-        let Some(owner) = self.target_private_owner(&schedule.target).await else {
+        match self.target_person(&schedule.target).await {
+            // A member whose person is not known: the schedule is shown to
+            // no caller, a host's own session included.
+            TargetPerson::NotKnown => return true,
+            TargetPerson::Private(owner) => {
+                if self.caller_private_owner(context).await.as_deref() != Some(owner.as_str()) {
+                    return true;
+                }
+            }
+            TargetPerson::NoOne => {}
+        }
+        // A turn no session makes is a host's own call.
+        let Some(caller) = context.origin_session_id() else {
             return false;
         };
-        self.caller_private_owner(context).await.as_deref() != Some(owner.as_str())
+        let callers_mob = match self.audience_session(&caller.to_string()).await {
+            AudienceSession::Member(mob_id) => mob_id,
+            AudienceSession::NoMember => return false,
+            // Found in no roster while a mob was not read: a member of a
+            // managed mob whose handle is withheld can make this turn, so
+            // nothing is shown for that time. A mob that has no actor makes
+            // no turn: the caller is a host's own session.
+            AudienceSession::NotPlaced { handle_withheld } => return handle_withheld,
+            AudienceSession::Unreadable => return true,
+        };
+        let named = match target_mob(schedule) {
+            Some(named) => Some(named),
+            None => match &schedule.target {
+                TargetBinding::Session(session) => match session_target_session(session) {
+                    Some(session_id) => match self.audience_session(&session_id).await {
+                        AudienceSession::Member(mob_id) => Some(mob_id),
+                        AudienceSession::NoMember => None,
+                        // Whose the session is is not known: it is not the
+                        // default mob's to show, nor the caller's mob's.
+                        AudienceSession::NotPlaced { .. } | AudienceSession::Unreadable => {
+                            return true;
+                        }
+                    },
+                    None => None,
+                },
+                _ => None,
+            },
+        };
+        match named {
+            Some(named) => named != callers_mob,
+            // A schedule that names no mob is the default mob's, and no
+            // mob's while the default mob is not known.
+            None => self
+                .default_mob()
+                .is_none_or(|default_mob| default_mob.mob_id().as_str() != callers_mob),
+        }
     }
 }
 
@@ -1330,13 +2473,7 @@ impl crate::console_schedules::AgentScheduleAudience for ScheduleMobTargetRegist
 async fn bridge_session_member(state: &MobMcpState, session_id: &str) -> Option<(String, String)> {
     let parsed_session_id = meerkat::SessionId::parse(session_id).ok()?;
     let handles = state.mob_handles_snapshot().await.ok()?;
-    for (mob_id, handle) in handles {
-        let roster = handle.roster().await;
-        if let Some(entry) = roster.find_by_bridge_session_id(&parsed_session_id) {
-            return Some((mob_id.to_string(), entry.agent_identity.to_string()));
-        }
-    }
-    None
+    session_among_rosters(roster_reads(&handles, &parsed_session_id).await).0
 }
 
 pub struct AttachedScheduleTools {
@@ -1568,6 +2705,12 @@ const ARCHIVED_SCHEDULE_TARGET: &str = "identity_archived";
 /// the calling member's reach ([`private_target_refusal`]), else because
 /// the schedule would point at an archived agent
 /// ([`archived_target_refusal`]).
+///
+/// An archived agent out of the writing member's reach answers as every
+/// target out of its reach does ([`meerkat::schedule_target_not_a_peer`]),
+/// so the refusal does not say that a name it cannot reach is an archived
+/// agent. A member that could reach the agent, and a call of no member's
+/// turn, are told it is archived.
 async fn schedule_target_refusal(
     registry: &ScheduleMobTargetRegistry,
     service: &ScheduleService,
@@ -1578,7 +2721,36 @@ async fn schedule_target_refusal(
     if let Some(refusal) = private_target_refusal(registry, service, name, args, context).await {
         return Some(refusal);
     }
-    archived_target_refusal(registry, service, name, args).await
+    let archived = archived_target_refusal(registry, service, name, args).await?;
+    if let Some(writer) = context.origin_session_id()
+        && let Some(target) = target_after(service, name, args).await
+        && registry.judge_schedule_write(writer, &target).await
+            == meerkat::ScheduleWriteVerdict::OutOfReach
+    {
+        return Some(meerkat::schedule_target_not_a_peer(name));
+    }
+    Some(archived)
+}
+
+/// The target a schedule has after a create or update: the one the call
+/// writes, when it writes one that parses, else, for an update, the one
+/// the schedule holds.
+async fn target_after(
+    service: &ScheduleService,
+    name: &str,
+    args: &Value,
+) -> Option<TargetBinding> {
+    match written_target(args) {
+        Some(target) => Some(target),
+        None if name == "meerkat_schedule_update" => {
+            let schedule_id = args
+                .get("schedule_id")
+                .and_then(Value::as_str)
+                .and_then(|raw| meerkat::ScheduleId::parse(raw).ok())?;
+            Some(service.get(&schedule_id).await.ok()?.target)
+        }
+        None => None,
+    }
 }
 
 /// Why a schedule create or update is refused because the schedule would
@@ -1599,17 +2771,7 @@ async fn archived_target_refusal(
     name: &str,
     args: &Value,
 ) -> Option<meerkat_core::ToolError> {
-    let target = match written_target(args) {
-        Some(target) => target,
-        None if name == "meerkat_schedule_update" => {
-            let schedule_id = args
-                .get("schedule_id")
-                .and_then(Value::as_str)
-                .and_then(|raw| meerkat::ScheduleId::parse(raw).ok())?;
-            service.get(&schedule_id).await.ok()?.target
-        }
-        None => return None,
-    };
+    let target = target_after(service, name, args).await?;
     match registry.archived_target(&target) {
         Ok(None) => None,
         Ok(Some(agent)) => Some(meerkat_core::ToolError::policy_denied(
@@ -1645,7 +2807,14 @@ async fn archived_target_refusal(
 /// itself, or the call is refused as a policy denial
 /// ([`PRIVATE_MEMBER_SCHEDULE_TARGET`]). Any other caller's target that names
 /// a member private to a person the caller is not private to is refused as
-/// an act on a member outside the caller's reach (`access_denied`).
+/// every target out of a writer's reach is
+/// ([`meerkat::schedule_target_not_a_peer`]): the same code and the same
+/// sentence a name no member holds gets, so the refusal does not say that
+/// the name is somebody's private member. A target that names a member
+/// whose person is not known
+/// ([`ScheduleMobTargetRegistry::target_person_not_known`]) is refused the
+/// same way, whoever the caller is: no mob is loaded to learn whose the
+/// member is.
 async fn private_target_refusal(
     registry: &ScheduleMobTargetRegistry,
     service: &ScheduleService,
@@ -1686,9 +2855,12 @@ async fn private_target_refusal(
             ))
         });
     }
-    let owner = registry.target_private_owner(target.as_ref()?).await?;
-    (caller_owner.as_deref() != Some(owner.as_str()))
-        .then(|| meerkat_core::ToolError::access_denied(name))
+    match registry.target_person(target.as_ref()?).await {
+        TargetPerson::NotKnown => Some(meerkat::schedule_target_not_a_peer(name)),
+        TargetPerson::Private(owner) => (caller_owner.as_deref() != Some(owner.as_str()))
+            .then(|| meerkat::schedule_target_not_a_peer(name)),
+        TargetPerson::NoOne => None,
+    }
 }
 
 impl MobIdentityScheduleToolDispatcher {
@@ -2120,6 +3292,15 @@ fn attach_schedule_tools_with_store_and_binding(
     firing_host_binding: ScheduleFiringHostBinding,
 ) -> AttachedScheduleTools {
     let service = ScheduleService::new(store);
+    // Whether this gateway's agents may write a schedule that creates a
+    // session, from the configuration the builder was created with (the
+    // operator's file over the defaults).
+    service.allow_agent_session_creation(
+        builder
+            .initial_config()
+            .tools
+            .agent_schedules_may_create_sessions,
+    );
     let mob_target_registry = ScheduleMobTargetRegistry::default();
     let gated = FiringHostGatedScheduleTools {
         inner: agent_schedule_tool_chain(service.clone(), mob_target_registry.clone()),
@@ -2139,10 +3320,19 @@ fn attach_schedule_tools_with_store_and_binding(
 /// are left to the console, and the schedules aimed at a member private to
 /// a person the calling agent does not act for are on no surface of its
 /// tools.
+///
+/// `service` also gets the launch's judge of its agents' schedule writes
+/// here ([`MemberReachScheduleJudge`]), so no composition of these tools is
+/// without it: the innermost tools ask it on the target the schedule has
+/// after the rewrite, once the private and the archived refusals have
+/// answered.
 fn agent_schedule_tool_chain(
     service: ScheduleService,
     mob_target_registry: ScheduleMobTargetRegistry,
 ) -> Arc<dyn meerkat_core::AgentToolDispatcher> {
+    service.attach_write_judge(Arc::new(MemberReachScheduleJudge {
+        registry: mob_target_registry.clone(),
+    }));
     let dispatcher = MobIdentityScheduleToolDispatcher::new(
         Arc::new(ScheduleToolDispatcher::new(service.clone())),
         mob_target_registry.clone(),
@@ -2167,7 +3357,11 @@ pub(crate) fn agent_schedule_tools_over_runtime_for_test(
     runtime: &crate::mob_handle_runtime::MobRuntime,
 ) -> Arc<dyn meerkat_core::AgentToolDispatcher> {
     let mob_target_registry = ScheduleMobTargetRegistry::default();
-    mob_target_registry.adopt_mob_runtime(runtime);
+    // The fixture's runtime is its host's launch mob.
+    mob_target_registry.adopt_mob_runtime(
+        runtime,
+        &crate::member_key::DefaultMob::new(runtime.handle().mob_id().clone()),
+    );
     agent_schedule_tool_chain(service, mob_target_registry)
 }
 
@@ -2212,10 +3406,19 @@ pub(crate) fn agent_schedule_tools_over_registry_for_test(
 /// (flows, helpers, probes) delegates to the wrapped host.
 struct InternalDeliveryScheduleMobHost {
     inner: Arc<dyn SurfaceScheduleMobHost>,
+    /// The mob whose members this host delivers to through the internal
+    /// lane.
+    lane: MobInternalLane,
+}
+
+/// The internal delivery lane of one mob: what a schedule fire addressed to
+/// one of that mob's members is delivered through.
+struct MobInternalLane {
     /// The host is handed to the gateway, so this is the caller's public
     /// (owning) handle; it keeps the mob owned while the host lives, and
     /// `identity_runtime` beside it is the plain runtime.
     handle: MobHandle,
+    /// The identity runtime attached to this mob, when it has one.
     identity_runtime: Option<Arc<crate::identity_first::IdentityRuntime>>,
 }
 
@@ -2274,6 +3477,12 @@ async fn classify_identity_fire_refusal(
 }
 
 impl InternalDeliveryScheduleMobHost {
+    /// The internal lane a fire addressed to a member of `mob_id` takes:
+    /// this host's, when `mob_id` names the mob it serves.
+    fn lane_of(&self, mob_id: &str) -> Option<&MobInternalLane> {
+        (self.lane.handle.definition().id.as_str() == mob_id).then_some(&self.lane)
+    }
+
     /// Deliver a schedule fire addressed to a member of this mob through the
     /// internal lane. `None` when the fire is not this host's to deliver
     /// here; `Err` only for a retryable refusal of an identity's delivery
@@ -2286,9 +3495,7 @@ impl InternalDeliveryScheduleMobHost {
         member_id: &str,
         content: &meerkat_core::ContentInput,
     ) -> Option<Result<meerkat::DeliveryDispatch, meerkat::ScheduleDomainError>> {
-        if self.handle.definition().id.as_str() != mob_id {
-            return None;
-        }
+        let lane = self.lane_of(mob_id)?;
         // Binding member ids arrive in ROSTER space (the authoring rewrite
         // stores `entry.agent_identity`, and meerkat's delivery-time identity
         // recovery stamps the same roster id from the session's mob-member
@@ -2304,7 +3511,7 @@ impl InternalDeliveryScheduleMobHost {
         // the runtime has not registered, or its entry could not be read)
         // ends the fire typed, or leaves it reclaimable when the refusal
         // clears on its own: never the raw member door.
-        let identity = match self.identity_runtime.as_ref() {
+        let identity = match lane.identity_runtime.as_ref() {
             Some(identity_runtime) => match identity_runtime
                 .identity_for_member_mutation(&member_alias)
                 .await
@@ -2335,7 +3542,7 @@ impl InternalDeliveryScheduleMobHost {
             },
             None => None,
         };
-        if let Some(identity_runtime) = self.identity_runtime.as_ref()
+        if let Some(identity_runtime) = lane.identity_runtime.as_ref()
             && let Some(identity) = identity
         {
             // meerkat 0.8.15: the driver replays this exact identity on every
@@ -2422,7 +3629,7 @@ impl InternalDeliveryScheduleMobHost {
             )));
         }
         let member = crate::member_comms_id::mob_member_id(&member_alias);
-        let entry = match self.handle.get_member(&member).await {
+        let entry = match lane.handle.get_member(&member).await {
             Ok(Some(entry)) => entry,
             Ok(None) => return None,
             Err(error) => {
@@ -2460,7 +3667,7 @@ impl InternalDeliveryScheduleMobHost {
                 )));
             }
         };
-        match self
+        match lane
             .handle
             .submit_work_with_mode_and_delivery_identity(
                 entry.agent_runtime_id.clone(),
@@ -2566,6 +3773,103 @@ impl SurfaceScheduleMobHost for InternalDeliveryScheduleMobHost {
     }
 }
 
+/// The internal delivery lanes of the mobs a host serves beside its launch
+/// mob.
+///
+/// A schedule fire addressed to a member of the launch's mob takes that
+/// mob's internal lane ([`InternalDeliveryScheduleMobHost`]). A fire
+/// addressed to a member of another mob the host serves takes that mob's
+/// own lane in the same way: its own handle, and the identity runtime
+/// attached to it when the fire is delivered. Which mobs the host serves is
+/// the mob set's to say: the mob is resolved at the fire, through the
+/// resolver the runtime's request doors use, so a mob the set has not
+/// loaded is loaded by the fire that addresses it, and nothing is resolved
+/// or kept before a fire names such a mob. A fire that names no mob of the
+/// host (a mob a member created, an id no mob has) goes to the wrapped
+/// host, as before.
+struct HostMobsInternalDelivery {
+    /// What a fire takes that names no mob of the host, and what a mob's
+    /// lane falls back to.
+    inner: Arc<dyn SurfaceScheduleMobHost>,
+    /// Resolves the mobs the host serves.
+    mobs: crate::unified_runtime::MobResolver,
+}
+
+impl HostMobsInternalDelivery {
+    /// The schedule mob host of the mob `mob_id`, when the host serves that
+    /// mob beside its launch mob. The launch mob's own lane is held by the
+    /// host that wraps this one, so the default mob has none here.
+    async fn host_of(&self, mob_id: &str) -> Option<InternalDeliveryScheduleMobHost> {
+        let named = meerkat_mob::MobId::from(mob_id);
+        let resolved = self.mobs.resolve(Some(&named)).await.ok()?;
+        if resolved.is_default() {
+            return None;
+        }
+        Some(InternalDeliveryScheduleMobHost {
+            inner: Arc::clone(&self.inner),
+            lane: MobInternalLane {
+                handle: resolved.mob_handle(),
+                identity_runtime: resolved.identity_runtime_ref(),
+            },
+        })
+    }
+}
+
+#[async_trait]
+impl SurfaceScheduleMobHost for HostMobsInternalDelivery {
+    async fn probe_mob_target(
+        &self,
+        binding: &MobTargetBinding,
+    ) -> Result<meerkat::TargetProbeOutcome, meerkat::ScheduleDomainError> {
+        self.inner.probe_mob_target(binding).await
+    }
+
+    async fn deliver_mob_target(
+        &self,
+        occurrence: &meerkat::Occurrence,
+        identity: &meerkat::ScheduleDeliveryIdentity,
+        binding: &MobTargetBinding,
+    ) -> Result<meerkat::DeliveryDispatch, meerkat::ScheduleDomainError> {
+        if let MobTargetBinding::Member {
+            mob_id,
+            action: ScheduledMobAction::Send { .. },
+            ..
+        } = binding
+            && let Some(host) = self.host_of(mob_id).await
+        {
+            return host.deliver_mob_target(occurrence, identity, binding).await;
+        }
+        self.inner
+            .deliver_mob_target(occurrence, identity, binding)
+            .await
+    }
+
+    async fn probe_identity_target(
+        &self,
+        binding: &meerkat::IdentityTargetBinding,
+    ) -> Result<Option<meerkat::TargetProbeOutcome>, meerkat::ScheduleDomainError> {
+        self.inner.probe_identity_target(binding).await
+    }
+
+    async fn deliver_identity_target(
+        &self,
+        occurrence: &meerkat::Occurrence,
+        delivery_identity: &meerkat::ScheduleDeliveryIdentity,
+        binding: &meerkat::IdentityTargetBinding,
+    ) -> Result<Option<meerkat::DeliveryDispatch>, meerkat::ScheduleDomainError> {
+        if let Some(named) = parse_mob_member_schedule_identity(binding.identity())
+            && let Some(host) = self.host_of(&named.mob_id).await
+        {
+            return host
+                .deliver_identity_target(occurrence, delivery_identity, binding)
+                .await;
+        }
+        self.inner
+            .deliver_identity_target(occurrence, delivery_identity, binding)
+            .await
+    }
+}
+
 #[must_use]
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_schedule_host<B: SessionAgentBuilder + 'static>(
@@ -2606,19 +3910,65 @@ pub fn spawn_schedule_host_with_identity_runtime<B: SessionAgentBuilder + 'stati
     workgraph_service: Option<meerkat::WorkGraphService>,
     owner_id: impl Into<String>,
 ) -> Option<ScheduleHostHandle> {
+    spawn_schedule_host_over_host_mobs(
+        service,
+        adapter,
+        schedule_service,
+        mob_state,
+        mob_handle,
+        identity_runtime,
+        None,
+        runnable_host,
+        workgraph_service,
+        owner_id,
+    )
+}
+
+/// [`spawn_schedule_host_with_identity_runtime`] for a launch whose host
+/// may serve further mobs: with `host_mobs`, the resolver of the launch's
+/// runtime, a fire addressed to a member of another mob the host serves is
+/// delivered through that mob's own internal lane
+/// ([`HostMobsInternalDelivery`]). Without it only the launch's mob has an
+/// internal lane.
+#[must_use]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn spawn_schedule_host_over_host_mobs<B: SessionAgentBuilder + 'static>(
+    service: Arc<PersistentSessionService<B>>,
+    adapter: Arc<MeerkatMachine>,
+    schedule_service: ScheduleService,
+    mob_state: Option<Arc<MobMcpState>>,
+    mob_handle: MobHandle,
+    identity_runtime: Option<Arc<crate::identity_first::IdentityRuntime>>,
+    host_mobs: Option<crate::unified_runtime::MobResolver>,
+    runnable_host: Option<Arc<dyn meerkat::ScheduleRunnableHost>>,
+    workgraph_service: Option<meerkat::WorkGraphService>,
+    owner_id: impl Into<String>,
+) -> Option<ScheduleHostHandle> {
     let inner_mob_host: Arc<dyn SurfaceScheduleMobHost> = match mob_state {
         Some(state) => Arc::new(MobMcpScheduleHost::new(state)),
         None => Arc::new(NoopScheduleMobHost::new(
             "scheduled mob targets are not supported: no mob runtime",
         )),
     };
+    // A fire for a member of another mob the host serves takes that mob's
+    // own internal lane; every other fire that is not the launch mob's
+    // goes to the stock host as before.
+    let inner_mob_host: Arc<dyn SurfaceScheduleMobHost> = match host_mobs {
+        Some(mobs) => Arc::new(HostMobsInternalDelivery {
+            inner: inner_mob_host,
+            mobs,
+        }),
+        None => inner_mob_host,
+    };
     // Member-addressed deliveries take the INTERNAL work lane (schedule
     // delivery to a mob member is mob coordination, not external ingress) —
     // internal-only members receive their own schedules.
     let mob_host: Arc<dyn SurfaceScheduleMobHost> = Arc::new(InternalDeliveryScheduleMobHost {
         inner: inner_mob_host,
-        handle: mob_handle,
-        identity_runtime,
+        lane: MobInternalLane {
+            handle: mob_handle,
+            identity_runtime,
+        },
     });
     // meerkat 0.7.13 (upstream ask 10): thread a host-runnable registry so
     // host-registered runnables (e.g. the memory steward's dream) can be
@@ -3166,6 +4516,10 @@ pub fn spawn_schedule_claim_watchdog(
 #[cfg(test)]
 #[path = "schedule_wiring_follow_tests.rs"]
 mod follow_tests;
+
+#[cfg(test)]
+#[path = "schedule_wiring_writer_tests.rs"]
+mod writer_tests;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -4508,8 +5862,10 @@ comms = true
 
         let first_host = InternalDeliveryScheduleMobHost {
             inner: Arc::new(NoopScheduleMobHost::new("unused fallback")),
-            handle: handle.clone(),
-            identity_runtime: None,
+            lane: MobInternalLane {
+                handle: handle.clone(),
+                identity_runtime: None,
+            },
         };
         let first = first_host
             .deliver_internal_member_prompt(
@@ -4535,8 +5891,10 @@ comms = true
         // identity, matching a driver reclaim after the previous host dies.
         let replacement_host = InternalDeliveryScheduleMobHost {
             inner: Arc::new(NoopScheduleMobHost::new("unused fallback")),
-            handle,
-            identity_runtime: None,
+            lane: MobInternalLane {
+                handle,
+                identity_runtime: None,
+            },
         };
         let second = replacement_host
             .deliver_internal_member_prompt(
@@ -4766,8 +6124,10 @@ comms = true
 
         let first_host = InternalDeliveryScheduleMobHost {
             inner: Arc::new(NoopScheduleMobHost::new("unused fallback")),
-            handle: handle.clone(),
-            identity_runtime: Some(identity_runtime.clone()),
+            lane: MobInternalLane {
+                handle: handle.clone(),
+                identity_runtime: Some(identity_runtime.clone()),
+            },
         };
         let first = first_host
             .deliver_mob_target(&occurrence, &delivery_identity, binding)
@@ -4798,8 +6158,10 @@ comms = true
         drop(first_host);
         let replacement_host = InternalDeliveryScheduleMobHost {
             inner: Arc::new(NoopScheduleMobHost::new("unused fallback")),
-            handle,
-            identity_runtime: Some(identity_runtime),
+            lane: MobInternalLane {
+                handle,
+                identity_runtime: Some(identity_runtime),
+            },
         };
         let second = replacement_host
             .deliver_mob_target(&occurrence, &delivery_identity, binding)
@@ -4965,8 +6327,10 @@ external_addressable = true
         .expect("occurrence");
         let host = InternalDeliveryScheduleMobHost {
             inner: Arc::new(NoopScheduleMobHost::new("unused fallback")),
-            handle: runtime.mob_handle(),
-            identity_runtime: Some(identity_runtime),
+            lane: MobInternalLane {
+                handle: runtime.mob_handle(),
+                identity_runtime: Some(identity_runtime),
+            },
         };
 
         let dispatch = host
@@ -4997,6 +6361,22 @@ external_addressable = true
             }),
             "{:?}",
             terminal.detail
+        );
+
+        // The internal lane is this mob's: the same fire naming a member of
+        // another mob is not delivered through it, whatever identity runtime
+        // the host carries, and falls to the wrapped host.
+        assert!(
+            host.deliver_internal_member_prompt(
+                &occurrence,
+                &meerkat::ScheduleDeliveryIdentity::for_occurrence(&occurrence),
+                "another-mob",
+                alias,
+                &meerkat_core::ContentInput::Text("deliver".to_string()),
+            )
+            .await
+            .is_none(),
+            "a fire addressed to another mob's member took this mob's internal lane"
         );
 
         runtime.shutdown().await;
@@ -5130,8 +6510,10 @@ external_addressable = true
         .expect("occurrence");
         let host = InternalDeliveryScheduleMobHost {
             inner: Arc::new(NoopScheduleMobHost::new("unused fallback")),
-            handle: runtime.mob_handle(),
-            identity_runtime: Some(identity_runtime),
+            lane: MobInternalLane {
+                handle: runtime.mob_handle(),
+                identity_runtime: Some(identity_runtime),
+            },
         };
         let delivery = meerkat::ScheduleDeliveryIdentity::for_occurrence(&occurrence);
         let content = meerkat_core::ContentInput::Text("deliver".to_string());
@@ -5337,8 +6719,10 @@ comms = true
         .expect("occurrence");
         let host = InternalDeliveryScheduleMobHost {
             inner: Arc::new(NoopScheduleMobHost::new("unused fallback")),
-            handle: runtime.mob_handle(),
-            identity_runtime: Some(identity_runtime.clone()),
+            lane: MobInternalLane {
+                handle: runtime.mob_handle(),
+                identity_runtime: Some(identity_runtime.clone()),
+            },
         };
         let delivery = meerkat::ScheduleDeliveryIdentity::for_occurrence(&occurrence);
         let content = meerkat_core::ContentInput::Text("deliver".to_string());
@@ -5544,8 +6928,10 @@ comms = true
         .expect("occurrence");
         let host = InternalDeliveryScheduleMobHost {
             inner: Arc::new(NoopScheduleMobHost::new("unused fallback")),
-            handle: runtime.mob_handle(),
-            identity_runtime: Some(identity_runtime),
+            lane: MobInternalLane {
+                handle: runtime.mob_handle(),
+                identity_runtime: Some(identity_runtime),
+            },
         };
         let delivery = meerkat::ScheduleDeliveryIdentity::for_occurrence(&occurrence);
         CreatedIdentityFire {
@@ -6944,6 +8330,295 @@ schedule = true
         assert_eq!(dream_interval_seconds(&schedules[0]), 30 * 60);
     }
 
+    fn fixed_start() -> chrono::DateTime<chrono::Utc> {
+        "2026-07-01T00:00:00Z".parse().expect("fixed now")
+    }
+
+    /// Store a schedule naming the steward's runnable every `every_seconds`,
+    /// carrying the host's label when `labelled`.
+    async fn seed_dream_schedule(
+        service: &ScheduleService,
+        every_seconds: u64,
+        labelled: bool,
+    ) -> meerkat::Schedule {
+        let labels = if labelled {
+            BTreeMap::from([(STEWARD_DREAM_LABEL.to_string(), "1".to_string())])
+        } else {
+            BTreeMap::new()
+        };
+        service
+            .create(CreateScheduleRequest {
+                name: None,
+                description: None,
+                trigger: TriggerSpec::Interval(IntervalTriggerSpec {
+                    start_at_utc: fixed_start(),
+                    every_seconds,
+                    end_at_utc: None,
+                }),
+                target: TargetBinding::host_runnable(HostRunnableTargetBinding {
+                    runnable: HostRunnableName::parse(STEWARD_DREAM_RUNNABLE).expect("name"),
+                    params: None,
+                }),
+                misfire_policy: meerkat::MisfirePolicy::default(),
+                overlap_policy: meerkat::OverlapPolicy::default(),
+                missing_target_policy: meerkat::MissingTargetPolicy::default(),
+                labels,
+                planning_horizon_days: None,
+                planning_horizon_occurrences: None,
+            })
+            .await
+            .expect("store a schedule naming the steward's runnable")
+    }
+
+    /// The stored schedules that name the steward's runnable.
+    async fn dream_schedules(service: &ScheduleService) -> Vec<meerkat::Schedule> {
+        let schedules = service.list().await.expect("list");
+        let named = dream_target_count(&schedules);
+        let dreams = schedules
+            .into_iter()
+            .filter(|schedule| matches!(&schedule.target, TargetBinding::HostRunnable(_)))
+            .collect::<Vec<_>>();
+        assert_eq!(dreams.len(), named, "these stores hold no other runnable");
+        dreams
+    }
+
+    fn carries_the_hosts_label(schedule: &meerkat::Schedule) -> bool {
+        schedule.config.labels.contains_key(STEWARD_DREAM_LABEL)
+    }
+
+    /// The schedule a start creates on a fresh store carries the host's
+    /// label.
+    #[tokio::test]
+    async fn a_start_labels_the_steward_schedule_it_creates() {
+        let service = ScheduleService::new(Arc::new(MemoryScheduleStore::default()));
+        ensure_steward_dream_schedule(&service, Duration::from_hours(6), fixed_start())
+            .await
+            .expect("start");
+        let dreams = dream_schedules(&service).await;
+        assert_eq!(dreams.len(), 1);
+        assert!(
+            carries_the_hosts_label(&dreams[0]),
+            "the host's steward schedule carries the host's label: {:?}",
+            dreams[0].config.labels
+        );
+    }
+
+    /// A start brings the host's own steward schedule back to work: paused,
+    /// it is active again afterwards and runs at the configured interval,
+    /// and it is the same schedule. A paused one already at the configured
+    /// interval is resumed as well.
+    #[tokio::test]
+    async fn a_start_resumes_and_retimes_the_hosts_steward_schedule() {
+        let service = ScheduleService::new(Arc::new(MemoryScheduleStore::default()));
+        let hosts = seed_dream_schedule(&service, 6 * 3600, true).await;
+        service.pause(&hosts.schedule_id).await.expect("pause");
+
+        ensure_steward_dream_schedule(&service, Duration::from_mins(30), fixed_start())
+            .await
+            .expect("start");
+        let dreams = dream_schedules(&service).await;
+        assert_eq!(dreams.len(), 1);
+        assert_eq!(dreams[0].schedule_id, hosts.schedule_id);
+        assert_eq!(dream_interval_seconds(&dreams[0]), 30 * 60);
+        assert_eq!(
+            dreams[0].phase,
+            SchedulePhase::Active,
+            "a start resumes the host's steward schedule"
+        );
+
+        service.pause(&hosts.schedule_id).await.expect("pause");
+        ensure_steward_dream_schedule(&service, Duration::from_mins(30), fixed_start())
+            .await
+            .expect("start at the same interval");
+        let dreams = dream_schedules(&service).await;
+        assert_eq!(dreams.len(), 1);
+        assert_eq!(dreams[0].schedule_id, hosts.schedule_id);
+        assert_eq!(
+            dreams[0].phase,
+            SchedulePhase::Active,
+            "a start resumes the host's steward schedule at an unchanged interval"
+        );
+    }
+
+    /// One schedule runs the steward: a start keeps the host's own and
+    /// removes any other schedule naming the steward's runnable, whichever
+    /// of the two was stored first.
+    #[tokio::test]
+    async fn a_start_keeps_the_hosts_steward_schedule_and_removes_any_other() {
+        for hosts_first in [true, false] {
+            let service = ScheduleService::new(Arc::new(MemoryScheduleStore::default()));
+            let (hosts, other) = if hosts_first {
+                let hosts = seed_dream_schedule(&service, 6 * 3600, true).await;
+                (hosts, seed_dream_schedule(&service, 60, false).await)
+            } else {
+                let other = seed_dream_schedule(&service, 60, false).await;
+                (seed_dream_schedule(&service, 6 * 3600, true).await, other)
+            };
+
+            ensure_steward_dream_schedule(&service, Duration::from_hours(6), fixed_start())
+                .await
+                .expect("start");
+            let dreams = dream_schedules(&service).await;
+            assert_eq!(
+                dreams
+                    .iter()
+                    .map(|schedule| &schedule.schedule_id)
+                    .collect::<Vec<_>>(),
+                vec![&hosts.schedule_id],
+                "hosts_first={hosts_first}: only the host's schedule is left, not {}",
+                other.schedule_id
+            );
+            assert_eq!(dream_interval_seconds(&dreams[0]), 6 * 3600);
+        }
+    }
+
+    /// A store whose schedules of the steward's runnable all lack the
+    /// host's label ends with one new schedule of the host's: labelled,
+    /// active, at the configured interval, first due one interval after the
+    /// start, and none of the earlier ones, whatever their state.
+    #[tokio::test]
+    async fn a_start_replaces_unlabelled_steward_schedules_with_the_hosts_own() {
+        let service = ScheduleService::new(Arc::new(MemoryScheduleStore::default()));
+        let earlier = [
+            seed_dream_schedule(&service, 60, false).await,
+            seed_dream_schedule(&service, 6 * 3600, false).await,
+        ];
+        service
+            .pause(&earlier[1].schedule_id)
+            .await
+            .expect("pause one of the earlier schedules");
+
+        ensure_steward_dream_schedule(&service, Duration::from_hours(6), fixed_start())
+            .await
+            .expect("start");
+        let dreams = dream_schedules(&service).await;
+        assert_eq!(dreams.len(), 1, "one schedule runs the steward");
+        assert!(
+            earlier
+                .iter()
+                .all(|schedule| schedule.schedule_id != dreams[0].schedule_id),
+            "no earlier schedule is taken over"
+        );
+        assert!(carries_the_hosts_label(&dreams[0]));
+        assert_eq!(dreams[0].phase, SchedulePhase::Active);
+        match &dreams[0].trigger {
+            TriggerSpec::Interval(spec) => {
+                assert_eq!(spec.every_seconds, 6 * 3600);
+                assert_eq!(
+                    spec.start_at_utc,
+                    fixed_start() + chrono::Duration::hours(6),
+                    "the first run is one interval after the start"
+                );
+            }
+            other => panic!("expected interval trigger, got {other:?}"),
+        }
+    }
+
+    /// Two schedules carrying the host's label end as one, active and at
+    /// the configured interval.
+    #[tokio::test]
+    async fn a_start_keeps_one_of_two_labelled_steward_schedules() {
+        let service = ScheduleService::new(Arc::new(MemoryScheduleStore::default()));
+        let labelled = [
+            seed_dream_schedule(&service, 60, true).await,
+            seed_dream_schedule(&service, 120, true).await,
+        ];
+        service
+            .pause(&labelled[0].schedule_id)
+            .await
+            .expect("pause the first");
+
+        ensure_steward_dream_schedule(&service, Duration::from_hours(6), fixed_start())
+            .await
+            .expect("start");
+        let dreams = dream_schedules(&service).await;
+        assert_eq!(dreams.len(), 1, "one schedule runs the steward");
+        assert_eq!(
+            dreams[0].schedule_id, labelled[0].schedule_id,
+            "the one stored first is kept"
+        );
+        assert!(carries_the_hosts_label(&dreams[0]));
+        assert_eq!(dreams[0].phase, SchedulePhase::Active);
+        assert_eq!(dream_interval_seconds(&dreams[0]), 6 * 3600);
+    }
+
+    /// A labelled schedule that would not run the steward as configured (it
+    /// has an end time, or a first run later than one interval from the
+    /// start) is retimed by a start: the configured interval, no end, first
+    /// due one interval after the start. The host's own schedule has
+    /// neither, and a later start at an unchanged interval leaves it as it
+    /// is.
+    #[tokio::test]
+    async fn a_start_retimes_a_labelled_steward_schedule_that_would_not_run() {
+        let every: u64 = 6 * 3600;
+        let one_interval_out = fixed_start() + chrono::Duration::seconds(every as i64);
+        for (case, start_at_utc, end_at_utc) in [
+            (
+                "an end time",
+                fixed_start(),
+                Some(fixed_start() + chrono::Duration::days(36_500)),
+            ),
+            (
+                "a first run far ahead",
+                fixed_start() + chrono::Duration::days(36_500),
+                None,
+            ),
+        ] {
+            let service = ScheduleService::new(Arc::new(MemoryScheduleStore::default()));
+            let seeded = seed_dream_schedule(&service, every, true).await;
+            service
+                .update(
+                    &seeded.schedule_id,
+                    UpdateScheduleRequest {
+                        trigger: Some(TriggerSpec::Interval(IntervalTriggerSpec {
+                            start_at_utc,
+                            every_seconds: every,
+                            end_at_utc,
+                        })),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect("give the seeded schedule the trigger of the case");
+
+            ensure_steward_dream_schedule(&service, Duration::from_hours(6), fixed_start())
+                .await
+                .expect("start");
+            let dreams = dream_schedules(&service).await;
+            assert_eq!(dreams.len(), 1, "{case}");
+            assert_eq!(dreams[0].schedule_id, seeded.schedule_id, "{case}");
+            match &dreams[0].trigger {
+                TriggerSpec::Interval(spec) => {
+                    assert_eq!(spec.every_seconds, every, "{case}");
+                    assert_eq!(spec.end_at_utc, None, "{case}: no end");
+                    assert_eq!(
+                        spec.start_at_utc, one_interval_out,
+                        "{case}: first due one interval after the start"
+                    );
+                }
+                other => panic!("{case}: expected interval trigger, got {other:?}"),
+            }
+        }
+
+        let service = ScheduleService::new(Arc::new(MemoryScheduleStore::default()));
+        ensure_steward_dream_schedule(&service, Duration::from_hours(6), fixed_start())
+            .await
+            .expect("first start");
+        let hosts = dream_schedules(&service).await;
+        ensure_steward_dream_schedule(
+            &service,
+            Duration::from_hours(6),
+            fixed_start() + chrono::Duration::days(1),
+        )
+        .await
+        .expect("a later start");
+        assert_eq!(
+            dream_schedules(&service).await,
+            hosts,
+            "the host's own schedule is left as it is at an unchanged interval"
+        );
+    }
+
     #[tokio::test]
     async fn repair_rewrites_persisted_resumable_session_prompt_targets() {
         let service = ScheduleService::new(Arc::new(MemoryScheduleStore::default()));
@@ -7163,6 +8838,431 @@ schedule = true
             schedule_call(&installed, name, args)
                 .await
                 .unwrap_or_else(|error| panic!("{name} still answers: {error:?}"));
+        }
+    }
+
+    /// A schedule that names a member of a mob and one that names a session,
+    /// on a store of their own: what an agent's schedule tools are asked to
+    /// show or hide.
+    async fn audience_schedules() -> Vec<Schedule> {
+        let service = ScheduleService::new(Arc::new(MemoryScheduleStore::new()));
+        let targets = [
+            (
+                "names-a-member",
+                TargetBinding::Mob(Box::new(MobTargetBinding::Member {
+                    mob_id: "some-mob".to_owned(),
+                    member_id: "worker".to_owned(),
+                    action: ScheduledMobAction::Send {
+                        content: meerkat_core::ContentInput::Text("Check in.".into()),
+                        render_metadata: None,
+                    },
+                })),
+            ),
+            (
+                "names-a-session",
+                TargetBinding::session(SessionTargetBinding::ExactSession {
+                    session_id: SessionId::new(),
+                    action: meerkat::ScheduledSessionAction::Prompt {
+                        prompt: meerkat_core::ContentInput::Text("Check in.".into()),
+                        system_prompt: None,
+                        render_metadata: None,
+                        skill_refs: Vec::new(),
+                        additional_instructions: Vec::new(),
+                    },
+                }),
+            ),
+        ];
+        let mut schedules = Vec::new();
+        for (name, target) in targets {
+            let created = service
+                .create(meerkat::CreateScheduleRequest {
+                    name: Some(name.to_owned()),
+                    description: None,
+                    trigger: meerkat::TriggerSpec::Once {
+                        due_at_utc: chrono::Utc::now() + chrono::Duration::days(1),
+                    },
+                    target,
+                    misfire_policy: meerkat::MisfirePolicy::default(),
+                    overlap_policy: meerkat::OverlapPolicy::default(),
+                    missing_target_policy: meerkat::MissingTargetPolicy::default(),
+                    labels: BTreeMap::new(),
+                    planning_horizon_days: Some(1),
+                    planning_horizon_occurrences: Some(1),
+                })
+                .await
+                .expect("the schedule is created");
+            schedules.push(
+                service
+                    .get(&created.schedule_id)
+                    .await
+                    .expect("the schedule is read"),
+            );
+        }
+        schedules
+    }
+
+    /// The context of a schedule tool call made in a turn of the session
+    /// `caller`.
+    fn turn_of(caller: &SessionId) -> meerkat_core::ToolDispatchContext {
+        meerkat_core::ToolDispatchContext::default().with_runtime_identity(caller.clone(), None)
+    }
+
+    /// Once the adopted mob state is gone, an agent's schedule tools show a
+    /// caller no schedule: which mob's member makes the turn cannot be read
+    /// any more, so the caller is not taken for a host's own session, which
+    /// sees every schedule. While the state stands and no member holds the
+    /// caller's session, the caller sees them.
+    #[tokio::test]
+    async fn the_audience_hides_every_schedule_once_the_mob_state_is_gone() {
+        use crate::console_schedules::AgentScheduleAudience as _;
+        let (_state_dir, state) = mob_state_without_mobs();
+        let registry = ScheduleMobTargetRegistry::default();
+        registry.set_mob_state(Some(Arc::clone(&state)));
+        let schedules = audience_schedules().await;
+        let caller = turn_of(&SessionId::new());
+        for schedule in &schedules {
+            assert!(
+                !registry.hides(schedule, &caller).await,
+                "while the mobs can be read, a caller whose turn no member's session makes \
+                 sees the schedule {}",
+                schedule.schedule_id
+            );
+        }
+        let adopted = Arc::downgrade(&state);
+        drop(state);
+        assert!(
+            dropped_within_bound(&adopted).await,
+            "the mob state is gone"
+        );
+        for schedule in &schedules {
+            assert!(
+                registry.hides(schedule, &caller).await,
+                "once the mob state is gone, the schedule {} is hidden from a caller that \
+                 cannot be placed in a mob",
+                schedule.schedule_id
+            );
+        }
+    }
+
+    /// The same while the registry's record of the mob state it adopted
+    /// cannot be read at all, because a writer of it failed while it held
+    /// it: no schedule is shown to a caller.
+    #[tokio::test]
+    async fn the_audience_hides_every_schedule_while_the_adopted_mob_state_cannot_be_read() {
+        use crate::console_schedules::AgentScheduleAudience as _;
+        let (_state_dir, state) = mob_state_without_mobs();
+        let registry = ScheduleMobTargetRegistry::default();
+        registry.set_mob_state(Some(Arc::clone(&state)));
+        let schedules = audience_schedules().await;
+        let caller = turn_of(&SessionId::new());
+        let writer = registry.clone();
+        let failed = std::thread::spawn(move || {
+            let _held = writer.state.write();
+            panic!("a writer of the adopted mob state fails while it holds it");
+        })
+        .join();
+        assert!(
+            failed.is_err() && registry.state.read().is_err(),
+            "the adopted mob state cannot be read"
+        );
+        for schedule in &schedules {
+            assert!(
+                registry.hides(schedule, &caller).await,
+                "while the adopted mob state cannot be read, the schedule {} is hidden from \
+                 a caller that cannot be placed in a mob",
+                schedule.schedule_id
+            );
+        }
+        drop(state);
+    }
+
+    /// A mob state that knows a mob it has not loaded: it declared its
+    /// default mob, and no launch has served it yet. It lists the mob as
+    /// known and not loaded and hands out no handle for it.
+    fn mob_state_with_a_mob_that_is_not_loaded() -> (tempfile::TempDir, Arc<MobMcpState>) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let factory = AgentFactory::new(dir.path());
+        let builder = FactoryAgentBuilder::new(factory, Config::default());
+        let service = Arc::new(meerkat_session::EphemeralSessionService::new(builder, 4));
+        let state = MobMcpState::new(service, meerkat_mob::MobControlPrincipal::Owner)
+            .expect("mob state")
+            .with_default_mob(meerkat_mob_mcp::DefaultMobDeclaration::in_memory(
+                meerkat_mob::MobId::from("not-loaded"),
+            ))
+            .expect("the default mob is declared");
+        (dir, Arc::new(state))
+    }
+
+    /// While the mob state knows a mob whose roster was not read, a session
+    /// that no roster holds is not placed: a member of the mob that was not
+    /// read may hold it, so the judge of an agent's schedule tools does not
+    /// take it for a session no member holds.
+    #[tokio::test]
+    async fn the_audience_places_no_session_while_the_mob_state_knows_a_mob_it_did_not_read() {
+        let (_state_dir, state) = mob_state_with_a_mob_that_is_not_loaded();
+        let inventory = state.mob_inventory().await.expect("the set's inventory");
+        let handles = state
+            .mob_handles_snapshot()
+            .await
+            .expect("the set's handles");
+        assert!(
+            inventory
+                .dormant
+                .contains(&meerkat_mob::MobId::from("not-loaded"))
+                && handles.is_empty(),
+            "the mob state knows a mob it has not loaded and hands out no handle for it"
+        );
+        let registry = ScheduleMobTargetRegistry::default();
+        registry.set_mob_state(Some(Arc::clone(&state)));
+        let placed = registry
+            .audience_session(&SessionId::new().to_string())
+            .await;
+        assert!(
+            !matches!(placed, AudienceSession::NoMember),
+            "a session that no roster holds is not taken for a session no member holds \
+             while the mob state knows a mob whose roster was not read"
+        );
+    }
+
+    /// A mob that is not loaded takes no schedule off a caller's tools: a
+    /// caller whose turn no member's session makes still sees a schedule
+    /// that names a member and one that names a session. A mob that is not
+    /// loaded has no member in a turn, so such a caller is a host's own
+    /// session, as it is while every mob was read.
+    #[tokio::test]
+    async fn a_mob_that_is_not_loaded_takes_no_schedule_off_a_callers_tools() {
+        use crate::console_schedules::AgentScheduleAudience as _;
+        let (_state_dir, state) = mob_state_with_a_mob_that_is_not_loaded();
+        let registry = ScheduleMobTargetRegistry::default();
+        registry.set_mob_state(Some(Arc::clone(&state)));
+        let caller = turn_of(&SessionId::new());
+        for schedule in &audience_schedules().await {
+            assert!(
+                !registry.hides(schedule, &caller).await,
+                "while a mob is not loaded, a caller whose turn no member's session makes \
+                 still sees the schedule {}",
+                schedule.schedule_id
+            );
+        }
+    }
+
+    /// A mob whose roster cannot be read is not counted as read. The
+    /// lookups' step over the mobs' roster reads leaves such a mob out of
+    /// the mobs that were read, so the placing step answers a session found
+    /// in no roster as not placed, a handle withheld: the closed side, as
+    /// while a mob is asked whether it is idle. A roster that holds the
+    /// session names its member whatever the reads before it were.
+    #[test]
+    fn a_mob_whose_roster_cannot_be_read_is_not_counted_as_read() {
+        let mob = |id: &str| meerkat_mob::MobId::from(id);
+        let (holder, read) = session_among_rosters(vec![
+            (mob("read"), RosterRead::NoHolder),
+            (mob("unreadable"), RosterRead::Unreadable),
+        ]);
+        assert!(holder.is_none(), "no roster holds the session: {holder:?}");
+        assert_eq!(
+            read,
+            vec![mob("read")],
+            "a mob whose roster cannot be read is not counted as read"
+        );
+        let running = meerkat_mob::MobState::Running;
+        assert!(
+            matches!(
+                session_in_no_roster(
+                    &[(mob("read"), running), (mob("unreadable"), running)],
+                    &[],
+                    &read
+                ),
+                AudienceSession::NotPlaced {
+                    handle_withheld: true
+                }
+            ),
+            "a session found in no roster is not placed while a mob's roster cannot be read"
+        );
+
+        let (holder, read) = session_among_rosters(vec![
+            (mob("unreadable"), RosterRead::Unreadable),
+            (mob("holds-it"), RosterRead::Holder("desk".to_string())),
+        ]);
+        assert_eq!(
+            holder,
+            Some(("holds-it".to_string(), "desk".to_string())),
+            "a roster that holds the session names its member"
+        );
+        assert!(
+            read.is_empty(),
+            "the mob whose roster could not be read is not among the read ones: {read:?}"
+        );
+    }
+
+    /// The placing step, over what a mob state lists: a session in no
+    /// roster is a session no member holds only when every mob the state
+    /// knows was read. A managed mob whose handle was not handed out, and
+    /// a mob that has no actor, leave it not placed; only the first says
+    /// that a handle was withheld. A managed mob whose destroy was
+    /// admitted counts for neither, and a mob that was read counts as read
+    /// whatever the state lists it as since.
+    #[test]
+    fn a_session_in_no_roster_is_placed_by_the_mobs_that_were_not_read() {
+        let mob = |id: &str| meerkat_mob::MobId::from(id);
+        let running = meerkat_mob::MobState::Running;
+        assert!(matches!(
+            session_in_no_roster(&[(mob("read"), running)], &[], &[mob("read")]),
+            AudienceSession::NoMember
+        ));
+        assert!(matches!(
+            session_in_no_roster(
+                &[(mob("read"), running), (mob("withheld"), running)],
+                &[],
+                &[mob("read")]
+            ),
+            AudienceSession::NotPlaced {
+                handle_withheld: true
+            }
+        ));
+        assert!(matches!(
+            session_in_no_roster(
+                &[(mob("read"), running)],
+                &[mob("not-loaded")],
+                &[mob("read")]
+            ),
+            AudienceSession::NotPlaced {
+                handle_withheld: false
+            }
+        ));
+        assert!(matches!(
+            session_in_no_roster(
+                &[
+                    (mob("read"), running),
+                    (mob("destroyed"), meerkat_mob::MobState::Destroyed)
+                ],
+                &[],
+                &[mob("read")]
+            ),
+            AudienceSession::NoMember
+        ));
+        assert!(matches!(
+            session_in_no_roster(&[], &[mob("read")], &[mob("read")]),
+            AudienceSession::NoMember
+        ));
+    }
+
+    /// A mob state that restores its mobs on demand, with one stored mob
+    /// whose idle unload is admitted and not answered: the state lists the
+    /// mob as managed and hands out no handle for it. An earlier state over
+    /// the same root creates the mob and gives it up; this state loads it,
+    /// and its unload pass is polled once and dropped while the mob is asked
+    /// whether it is idle. The state is shared without a reference to
+    /// itself, so the pass runs in its caller's own future, and a dropped
+    /// pass leaves the unload admitted until the next pass or lookup takes
+    /// it up.
+    async fn mob_state_with_a_withheld_handle()
+    -> (tempfile::TempDir, Arc<MobMcpState>, meerkat_mob::MobId) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("mobs");
+        let state_over = |policy: meerkat_mob_mcp::MobRestorePolicy| {
+            let builder =
+                FactoryAgentBuilder::new(AgentFactory::new(dir.path()), Config::default());
+            let service = Arc::new(meerkat_session::EphemeralSessionService::new(builder, 4));
+            Arc::new(
+                MobMcpState::new(service, meerkat_mob::MobControlPrincipal::Owner)
+                    .expect("mob state")
+                    .with_persistent_storage_root(Some(root.clone()))
+                    .with_mob_restore_policy(policy),
+            )
+        };
+        let earlier = state_over(meerkat_mob_mcp::MobRestorePolicy::Eager);
+        let definition = meerkat_mob::MobDefinition::from_toml(
+            "[mob]\nid = \"asked-whether-idle\"\n\n[profiles.worker]\nmodel = \"gpt-5.5\"\n",
+        )
+        .expect("a definition with one profile");
+        let mob_id = earlier
+            .mob_create_definition(definition)
+            .await
+            .expect("the mob is created");
+        earlier
+            .handle_for(&mob_id)
+            .await
+            .expect("the mob's handle")
+            .shutdown()
+            .await
+            .expect("the earlier state gives the mob up");
+        drop(earlier);
+        let state = state_over(meerkat_mob_mcp::MobRestorePolicy::OnDemand);
+        state.handle_for(&mob_id).await.expect("the mob is loaded");
+        // The pass is polled exactly once and dropped. It runs in this
+        // future, and on this test's single-threaded runtime the mob's actor
+        // cannot answer the idle question inside that one poll, so the pass
+        // is still waiting for the answer when it is dropped. A timeout of
+        // zero is not one poll: it polls the pass again each time the pass
+        // is woken, until a turn of the timer finds its deadline (rounded
+        // up to a millisecond) passed, and a pass that ran to its end before
+        // that unloaded the mob.
+        assert!(
+            futures::FutureExt::now_or_never(state.unload_idle_mobs_for_tests()).is_none(),
+            "the unload pass is dropped while the mob is asked whether it is idle"
+        );
+        let inventory = state.mob_inventory().await.expect("the set's inventory");
+        let handles = state
+            .mob_handles_snapshot()
+            .await
+            .expect("the set's handles");
+        assert!(
+            inventory.managed.iter().any(|(id, _)| id == &mob_id)
+                && handles.iter().all(|(id, _)| id != &mob_id),
+            "the mob state lists the mob as managed and hands out no handle for it"
+        );
+        (dir, state, mob_id)
+    }
+
+    /// While a mob's handle is withheld (the mob is asked whether it is
+    /// idle) a member of that mob can make a turn, and its session is in no
+    /// roster that was read. The judge of an agent's schedule write does not
+    /// take such a writer for a session no member holds, whose write would
+    /// be a host's own and asked no reach: it answers that it cannot judge
+    /// now, and the tools then store nothing.
+    #[tokio::test]
+    async fn a_schedule_write_is_not_a_hosts_own_while_a_mobs_handle_is_withheld() {
+        let (_dir, state, mob_id) = mob_state_with_a_withheld_handle().await;
+        let registry = ScheduleMobTargetRegistry::default();
+        registry.set_mob_state(Some(Arc::clone(&state)));
+        let writer = SessionId::new();
+        let target = TargetBinding::Mob(Box::new(MobTargetBinding::Member {
+            mob_id: mob_id.to_string(),
+            member_id: "worker".to_owned(),
+            action: ScheduledMobAction::Send {
+                content: meerkat_core::ContentInput::Text("Check in.".into()),
+                render_metadata: None,
+            },
+        }));
+        assert!(
+            matches!(
+                registry.judge_schedule_write(&writer, &target).await,
+                meerkat::ScheduleWriteVerdict::Unavailable
+            ),
+            "while a mob's handle is withheld, a writer found in no roster is not judged as a \
+             session no member holds"
+        );
+    }
+
+    /// The same state through the judge of what an agent's schedule tools
+    /// show: while a mob's handle is withheld, a caller found in no roster
+    /// is shown no schedule: a member of that mob can make the turn, so the
+    /// caller is not taken for a session no member holds.
+    #[tokio::test]
+    async fn a_caller_in_no_roster_is_shown_no_schedule_while_a_mobs_handle_is_withheld() {
+        use crate::console_schedules::AgentScheduleAudience as _;
+        let (_dir, state, _mob_id) = mob_state_with_a_withheld_handle().await;
+        let registry = ScheduleMobTargetRegistry::default();
+        registry.set_mob_state(Some(Arc::clone(&state)));
+        let caller = turn_of(&SessionId::new());
+        for schedule in &audience_schedules().await {
+            assert!(
+                registry.hides(schedule, &caller).await,
+                "while a mob's handle is withheld, the schedule {} is hidden from a caller \
+                 found in no roster",
+                schedule.schedule_id
+            );
         }
     }
 
@@ -7487,8 +9587,10 @@ schedule = true
         .expect("occurrence");
         let host = InternalDeliveryScheduleMobHost {
             inner: Arc::new(NoopScheduleMobHost::new("unused fallback")),
-            handle: handle.clone(),
-            identity_runtime: None,
+            lane: MobInternalLane {
+                handle: handle.clone(),
+                identity_runtime: None,
+            },
         };
 
         let mut outcome = ScheduledFireOutcome {
@@ -8576,8 +10678,10 @@ schedule = true
         .expect("occurrence");
         let host = InternalDeliveryScheduleMobHost {
             inner: Arc::new(NoopScheduleMobHost::new("unused fallback")),
-            handle: handle.clone(),
-            identity_runtime: runtime.identity_runtime_ref().cloned(),
+            lane: MobInternalLane {
+                handle: handle.clone(),
+                identity_runtime: runtime.identity_runtime_ref().cloned(),
+            },
         };
         let (dispatch_result, terminal) = match host
             .deliver_mob_target(
@@ -9111,6 +11215,8 @@ schedule = true
             .with_agent_mob_tools(mob_tools_slot)
             .expect("install the agent mob tools")
             .with_composition_authority(authority)
+            // As a gateway does for a launch that has a schedule service.
+            .with_mob_schedules_declared()
             .with_options(crate::mob_handle_runtime::MobBootstrapOptions {
                 allow_ephemeral_sessions: true,
                 notify_orchestrator_on_resume: true,
@@ -9271,6 +11377,13 @@ schedule = true
             ScheduleFiringAuthority::Vacant,
             "a candidate takes no executor lease"
         );
+        assert!(
+            matches!(
+                candidate.runtime.mob_runtime().mob_schedules().standing(),
+                crate::mob_schedules_release::MobSchedulesStanding::Owed
+            ),
+            "a candidate launch declares its schedules and is never handed their release"
+        );
         candidate.shutdown().await;
 
         let authoritative = ScheduleLaunch::boot(
@@ -9281,6 +11394,17 @@ schedule = true
         .await;
         assert!(authoritative.host.is_some());
         assert!(authoritative.attached.firing_host_binding.is_bound());
+        assert!(
+            matches!(
+                authoritative
+                    .runtime
+                    .mob_runtime()
+                    .mob_schedules()
+                    .standing(),
+                crate::mob_schedules_release::MobSchedulesStanding::Bound(_)
+            ),
+            "the launch that speaks for its composition is handed the release of a mob's schedules"
+        );
         let deadline = tokio::time::Instant::now() + HOSTED_FIRE_TERMINAL_WAIT;
         let fired = loop {
             let completed = authoritative

@@ -4,6 +4,8 @@
 The census and the guard run cargo; what they decide from cargo's output is
 pure and pinned here: comment stripping, the guard's findings, the test-name
 listing parser, the manifest's workspace-only selection and name parity.
+Also the census workflow's jobs (scripts/published_crates_standalone_jobs.py):
+every release crate is tested by exactly one job.
 """
 
 from __future__ import annotations
@@ -15,6 +17,8 @@ import io
 import json
 import os
 import pathlib
+import re
+import shlex
 import shutil
 import sys
 import tarfile
@@ -971,6 +975,545 @@ class SelfDevDependency(unittest.TestCase):
         targeted = crate_manifest()
         targeted["target"] = {"cfg(unix)": {"dev-dependencies": {"demo": {"path": "."}}}}
         self.assertEqual(len(pcs.self_dev_dependency_failures("demo", targeted)), 1)
+
+
+WORKSPACE_ONLY_FEATURES = {"default": ["std"], "std": [], "extra": [], "workspace-tests": []}
+
+
+class WorkspaceOnlyGates(unittest.TestCase):
+    """The pull-request side of the census's parity: read from the sources,
+    the lib tests `workspace-tests` gates are the tests the manifest declares
+    workspace-only, and the feature gates test code only."""
+
+    LIB = (
+        "pub fn shipped() {}\n"
+        "#[cfg(test)]\n"
+        "mod tests {\n"
+        "    #[test]\n"
+        "    fn plain() {}\n"
+        '    #[cfg(feature = "workspace-tests")]\n'
+        "    #[tokio::test]\n"
+        "    async fn needs_the_workspace() {}\n"
+        "}\n"
+    )
+
+    def failures(self, files, rows=(), features=None, standalone=None):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            for relative, text in files.items():
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(text)
+            manifest = crate_manifest(standalone, WORKSPACE_ONLY_FEATURES if features is None else features)
+            entry = {"workspace_only": [{"target": "src/lib.rs", "reason": "needs a sibling", **row} for row in rows]}
+            return pcs.workspace_only_gate_failures("demo", entry, manifest, root)
+
+    def test_a_declared_gated_test_passes(self):
+        self.assertEqual(self.failures({"src/lib.rs": self.LIB}, [{"tests": ["tests::needs_the_workspace"]}]), [])
+
+    def test_a_gated_test_the_manifest_does_not_declare_fails(self):
+        failures = self.failures({"src/lib.rs": self.LIB})
+        self.assertEqual(len(failures), 1)
+        self.assertIn("src/lib.rs:8: test tests::needs_the_workspace is gated on workspace-tests", failures[0])
+        self.assertIn("does not declare it workspace-only", failures[0])
+
+    def test_a_declared_test_that_is_not_gated_fails(self):
+        failures = self.failures(
+            {"src/lib.rs": self.LIB}, [{"tests": ["tests::needs_the_workspace", "tests::plain"]}]
+        )
+        self.assertEqual(len(failures), 1)
+        self.assertIn("declared workspace-only test tests::plain is not gated on workspace-tests", failures[0])
+
+    def test_a_declared_test_that_does_not_exist_fails(self):
+        failures = self.failures(
+            {"src/lib.rs": self.LIB}, [{"tests": ["tests::needs_the_workspace", "tests::renamed"]}]
+        )
+        self.assertEqual(len(failures), 1)
+        self.assertIn("declared workspace-only test tests::renamed is not a test of src/lib.rs", failures[0])
+
+    def test_a_declared_module_covers_its_gated_tests_and_no_other(self):
+        lib = (
+            '#[cfg(all(test, feature = "workspace-tests"))]\n'
+            "mod sibling_tests;\n"
+            "#[cfg(test)]\n"
+            "mod mixed {\n"
+            "    #[test]\n"
+            "    fn plain() {}\n"
+            '    #[cfg(feature = "workspace-tests")]\n'
+            "    #[test]\n"
+            "    fn gated() {}\n"
+            "}\n"
+        )
+        files = {"src/lib.rs": lib, "src/sibling_tests.rs": "#[test]\nfn one() {}\nmod inner {\n    #[test]\n    fn two() {}\n}\n"}
+        self.assertEqual(self.failures(files, [{"modules": ["sibling_tests"], "tests": ["mixed::gated"]}]), [])
+        failures = self.failures(files, [{"modules": ["sibling_tests", "mixed"]}])
+        self.assertEqual(len(failures), 1)
+        self.assertIn("declared workspace-only module mixed holds mixed::plain, which is not gated", failures[0])
+        failures = self.failures(files, [{"modules": ["sibling_tests", "gone"], "tests": ["mixed::gated"]}])
+        self.assertEqual(len(failures), 1)
+        self.assertIn("declared workspace-only module gone holds no test gated on workspace-tests", failures[0])
+        # A module name is a path, not a string prefix.
+        failures = self.failures(files, [{"modules": ["sibling"], "tests": ["mixed::gated"]}])
+        self.assertEqual(len(failures), 3)
+
+    def test_module_files_are_found_where_rust_finds_them(self):
+        files = {
+            "src/lib.rs": (
+                "mod flat;\nmod nested;\n"
+                '#[cfg(all(test, feature = "workspace-tests"))]\n#[path = "elsewhere_tests.rs"]\nmod renamed;\n'
+            ),
+            "src/flat.rs": '#[cfg(all(test, feature = "workspace-tests"))]\nmod tests;\n',
+            "src/flat/tests.rs": "#[test]\nfn in_a_child_file() {}\n",
+            "src/nested/mod.rs": (
+                "#[cfg(test)]\nmod inline {\n"
+                '    #[cfg(feature = "workspace-tests")]\n    mod deeper;\n}\n'
+            ),
+            "src/nested/inline/deeper.rs": "#[test]\nfn in_an_inline_module() {}\n",
+            "src/elsewhere_tests.rs": "#[test]\nfn by_path_attribute() {}\n",
+        }
+        failures = self.failures(files)
+        self.assertEqual(
+            sorted(failure.split(" test ")[1].split(" is gated")[0] for failure in failures),
+            ["flat::tests::in_a_child_file", "nested::inline::deeper::in_an_inline_module", "renamed::by_path_attribute"],
+        )
+        self.assertEqual(self.failures(files, [{"modules": ["flat::tests", "nested::inline::deeper", "renamed"]}]), [])
+
+    def test_a_module_without_a_source_file_fails(self):
+        failures = self.failures({"src/lib.rs": "mod missing;\n"})
+        self.assertEqual(len(failures), 1)
+        self.assertIn("src/lib.rs:1: module missing has no source file", failures[0])
+
+    def test_other_predicates_are_decided_under_the_census_configuration(self):
+        lib = (
+            "#[cfg(test)]\nmod tests {\n"
+            '    #[cfg(feature = "workspace-tests")]\n    #[cfg(not(target_arch = "wasm32"))]\n    #[test]\n    fn on_linux() {}\n'
+            '    #[cfg(all(feature = "workspace-tests", target_os = "macos"))]\n    #[test]\n    fn on_macos_only() {}\n'
+            '    #[cfg(all(feature = "workspace-tests", feature = "extra"))]\n    #[test]\n    fn behind_an_undeclared_test_feature() {}\n'
+            '    #[cfg(all(feature = "workspace-tests", feature = "std"))]\n    #[test]\n    fn behind_a_default_feature() {}\n'
+            '    #[cfg(all(feature = "workspace-tests", tokio_unstable))]\n    #[test]\n    fn behind_an_unknown_flag() {}\n'
+            "}\n"
+        )
+        # Required: the tests the census host builds only with the feature.
+        failures = self.failures({"src/lib.rs": lib})
+        self.assertEqual(
+            sorted(failure.split(" test ")[1].split(" is gated")[0] for failure in failures),
+            ["tests::behind_a_default_feature", "tests::on_linux"],
+        )
+        declared = ["tests::behind_a_default_feature", "tests::on_linux"]
+        self.assertEqual(self.failures({"src/lib.rs": lib}, [{"tests": declared}]), [])
+        # A declared test feature counts as on.
+        with_extra = self.failures({"src/lib.rs": lib}, [{"tests": declared}], standalone={"features": ["extra"]})
+        self.assertEqual(len(with_extra), 1)
+        self.assertIn("tests::behind_an_undeclared_test_feature is gated", with_extra[0])
+        # A test the workspace's test build compiles out cannot be declared
+        # (the census would call the row stale); an undecided one may be.
+        compiled_out = self.failures({"src/lib.rs": lib}, [{"tests": [*declared, "tests::on_macos_only"]}])
+        self.assertEqual(len(compiled_out), 1)
+        self.assertIn("tests::on_macos_only is compiled out of the workspace's test build", compiled_out[0])
+        self.assertEqual(self.failures({"src/lib.rs": lib}, [{"tests": [*declared, "tests::behind_an_unknown_flag"]}]), [])
+
+    def test_the_feature_gates_test_code_only(self):
+        ok = (
+            '#[cfg(feature = "workspace-tests")]\n#[cfg(test)]\nuse helper::Thing;\n'
+            '#[cfg(all(test, feature = "workspace-tests"))]\nmod helper {\n    pub struct Thing;\n}\n'
+            "#[cfg(test)]\nmod tests {\n"
+            '    #[cfg(feature = "workspace-tests")]\n    fn helper() {}\n'
+            "    #[test]\n    fn plain() {\n"
+            '        #[cfg(feature = "workspace-tests")]\n        helper();\n    }\n}\n'
+        )
+        self.assertEqual(self.failures({"src/lib.rs": ok}), [])
+        for source, line in (
+            ('#[cfg(feature = "workspace-tests")]\npub fn only_in_the_workspace() {}\n', 1),
+            ('pub fn shipped() {\n    #[cfg(feature = "workspace-tests")]\n    extra();\n}\n', 2),
+            ('pub struct Shipped {\n    #[cfg(feature = "workspace-tests")]\n    pub extra: u8,\n}\n', 2),
+            ('#[cfg(any(test, unix))]\nmod helpers {\n    #[cfg(feature = "workspace-tests")]\n    pub fn extra() {}\n}\n', 3),
+        ):
+            with self.subTest(source=source):
+                failures = self.failures({"src/lib.rs": source})
+                self.assertEqual(len(failures), 1)
+                self.assertIn(f"src/lib.rs:{line}: a workspace-tests gate outside test code", failures[0])
+
+    def test_text_in_comments_and_strings_is_not_code(self):
+        lib = (
+            '// #[cfg(feature = "workspace-tests")]\n// pub fn commented() {}\n'
+            'pub const TEXT: &str = "#[cfg(feature = \\"workspace-tests\\")] #[test] fn quoted() {}";\n'
+            "#[cfg(test)]\nmod tests {\n"
+            "    /* #[test] fn in_a_block_comment() {} */\n"
+            '    const BRACES: &str = "}";\n'
+            '    #[cfg(feature = "workspace-tests")]\n    #[test]\n    fn after_a_brace_in_a_string() {}\n'
+            "}\n"
+        )
+        failures = self.failures({"src/lib.rs": lib})
+        self.assertEqual(len(failures), 1)
+        self.assertIn("tests::after_a_brace_in_a_string is gated", failures[0])
+
+    def test_a_crate_without_the_feature_declares_nothing(self):
+        files = {"src/lib.rs": "#[cfg(test)]\nmod tests {\n    #[test]\n    fn plain() {}\n}\n"}
+        self.assertEqual(self.failures(files, features={}), [])
+        failures = self.failures(files, [{"tests": ["tests::plain"]}], features={})
+        self.assertEqual(len(failures), 1)
+        self.assertIn("the crate has no workspace-tests feature", failures[0])
+
+    def test_rows_of_another_target_are_not_the_lib_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            (root / "src").mkdir()
+            (root / "src" / "lib.rs").write_text(self.LIB)
+            entry = {"workspace_only": [{"target": "tests/other.rs", "reason": "x", "tests": ["tests::needs_the_workspace"]}]}
+            failures = pcs.workspace_only_gate_failures("demo", entry, crate_manifest(None, WORKSPACE_ONLY_FEATURES), root)
+        self.assertEqual(len(failures), 1)
+        self.assertIn("tests::needs_the_workspace is gated", failures[0])
+
+    def test_cfg_value(self):
+        on = {"workspace-tests", "std"}
+        for predicate, value in (
+            ("test", True),
+            ('feature = "workspace-tests"', True),
+            ('feature = "other"', False),
+            ('all(test, feature = "workspace-tests")', True),
+            ('all(test, feature = "other")', False),
+            ('all(feature = "other", unknown_flag)', False),
+            ('all(test, unknown_flag)', None),
+            ('any(feature = "other", unix)', True),
+            ('any(feature = "other", unknown_flag)', None),
+            ('not(target_arch = "wasm32")', True),
+            ('target_os = "macos"', False),
+            ('not(unknown_flag)', None),
+            ("all()", True),
+            ("any()", False),
+            ('feature = workspace-tests', None),
+        ):
+            with self.subTest(predicate=predicate):
+                self.assertIs(pcs.cfg_value(predicate, on), value)
+        self.assertIs(pcs.cfg_value('all(test, feature = "workspace-tests")', on, test=False), False)
+        self.assertIs(pcs.cfg_value('any(test, feature = "workspace-tests")', on, test=False), True)
+
+    def test_feature_closure(self):
+        manifest = {"features": {"default": ["a"], "a": ["b", "dep:x", "other/feature"], "b": [], "c": []}}
+        self.assertEqual(pcs.feature_closure(manifest, ["default", "missing"]), {"default", "a", "b"})
+
+
+# ---------------------------------------------------------------------------
+# The census workflow's jobs (scripts/published_crates_standalone_jobs.py)
+# ---------------------------------------------------------------------------
+
+JOBS_SCRIPT = SCRIPT.parent / "published_crates_standalone_jobs.py"
+jobs_spec = importlib.util.spec_from_file_location("published_crates_standalone_jobs", JOBS_SCRIPT)
+assert jobs_spec is not None and jobs_spec.loader is not None
+pcj = importlib.util.module_from_spec(jobs_spec)
+sys.modules["published_crates_standalone_jobs"] = pcj
+jobs_spec.loader.exec_module(pcj)
+
+CENSUS_WORKFLOW = SCRIPT.parent.parent / ".github" / "workflows" / "published-crates-standalone.yml"
+MAKEFILE = SCRIPT.parent.parent / "Makefile"
+CENSUS_TARGET = "published-crates-standalone-census"
+
+
+def census_recipe():
+    """The recipe lines of the Makefile's census target: what hands the
+    jobs script's values to the census."""
+    lines = MAKEFILE.read_text().splitlines()
+    recipe = []
+    for line in lines[lines.index(f"{CENSUS_TARGET}:") + 1 :]:
+        if not line.startswith("\t"):
+            break
+        recipe.append(line[1:])
+    return recipe
+
+
+def census_recipe_arguments(variables):
+    """The census's arguments when make runs that recipe with `variables`:
+    make puts each value into the line as text and the shell splits the line
+    into words (an empty value adds no word)."""
+    (line,) = census_recipe()
+    line = line.removeprefix("@")
+    for name, value in {"PYTHON": "python3", **variables}.items():
+        line = line.replace(f"$({name})", value)
+    assert "$" not in line, line
+    words = shlex.split(line)
+    assert words[:3] == ["python3", "scripts/published_crates_standalone.py", "census"], words
+    return words[3:]
+
+
+def census_selects(arguments, crates):
+    """(exit code, the crates the census would test) for `arguments` over the
+    release list `crates`: the census's own `main`, with the list it reads
+    and the run it starts replaced."""
+    started = []
+
+    def record(_root, selected, _out, _stack, _allow_dirty):
+        started.append(list(selected))
+        return 0
+
+    with unittest.mock.patch.object(pcs, "release_crates", return_value=list(crates)), \
+            unittest.mock.patch.object(pcs, "census", side_effect=record), \
+            contextlib.redirect_stderr(io.StringIO()):
+        code = pcs.main(["census", "--out", "unused", *arguments])
+    return code, (started[0] if started else None)
+
+
+def job_starts(crates, job, partitions, isolate):
+    """What the workflow's job does over the release list `crates`: (exit
+    code, the census arguments it starts make with, or None when it starts no
+    census). The jobs script's own `run`, with only the start replaced."""
+    commands = []
+
+    def record(command):
+        commands.append(command)
+        return 0
+
+    with unittest.mock.patch.object(pcj, "start_census", side_effect=record), \
+            contextlib.redirect_stdout(io.StringIO()):
+        try:
+            code = pcj.run(list(crates), job, partitions, isolate, pathlib.Path("/census-out"))
+        except pcj.UsageError:
+            return 2, None
+    if not commands:
+        return code, None
+    (command,) = commands
+    assert command[:2] == ["make", CENSUS_TARGET], command
+    words = census_recipe_arguments(dict(word.split("=", 1) for word in command[2:]))
+    assert words[:2] == ["--out", "/census-out"], words
+    return code, words[2:]
+
+
+def job_selections(crates, partitions, isolate, extra=()):
+    """job -> the crates the census would test in it ([] for a job that
+    starts no census, None for a job that fails). `extra` is appended to
+    every census's arguments (the controls use it)."""
+    selections = {}
+    for job in pcj.jobs(partitions):
+        code, arguments = job_starts(crates, job, partitions, isolate)
+        if code != 0:
+            selections[job] = None
+        elif arguments is None:
+            selections[job] = []
+        else:
+            code, selected = census_selects([*arguments, *extra], crates)
+            selections[job] = selected if code == 0 else None
+    return selections
+
+
+def coverage_problems(crates, selections, partitions, isolate):
+    """What is wrong with `selections` as a census of `crates`: every crate
+    is tested exactly once, nothing else is, each partition job tests its
+    ordinary partition (what `census --shard K/N` tests) without `isolate`,
+    and `isolate` is tested by the isolated job alone."""
+    problems = []
+    tested = [name for names in selections.values() for name in names or []]
+    for name in crates:
+        if tested.count(name) != 1:
+            problems.append(f"{name} is tested {tested.count(name)} times")
+    problems += [f"{name} is not a release crate" for name in sorted(set(tested) - set(crates))]
+    for k in range(1, partitions + 1):
+        code, ordinary = census_selects(["--shard", f"{k}/{partitions}"], crates)
+        expected = [name for name in ordinary if name != isolate] if code == 0 else None
+        if selections.get(str(k)) != expected:
+            problems.append(f"job {k} tests {selections.get(str(k))}, its partition without {isolate} is {expected}")
+    if isolate in crates and selections.get(pcj.ISOLATED) != [isolate]:
+        problems.append(f"the isolated job tests {selections.get(pcj.ISOLATED)}")
+    return problems
+
+
+def workflow_census_jobs():
+    """(the matrix's jobs, the partition count, the isolated crate) as the
+    census workflow states them."""
+    text = "\n".join(line for line in CENSUS_WORKFLOW.read_text().splitlines() if not line.lstrip().startswith("#"))
+    matrix = re.search(r"^\s+shard: \[(.*)\]$", text, re.M)
+    partitions = re.search(r"^\s+--partitions (\d+)$", text, re.M)
+    isolate = re.findall(r"^\s+STANDALONE_CENSUS_ISOLATED: (\S+)$", text, re.M)
+    assert matrix and partitions and len(isolate) == 1, "the census workflow no longer states its jobs this way"
+    return [item.strip().strip('"') for item in matrix.group(1).split(",")], int(partitions.group(1)), isolate[0]
+
+
+class CensusJobs(unittest.TestCase):
+    """Every release crate is tested by exactly one job of the census
+    workflow, whatever the release list becomes."""
+
+    ISOLATE = "long"
+
+    def crates(self, count=20, at=12):
+        """A release list of `count` crates with the isolated one at entry `at`."""
+        names = [f"crate-{index:02d}" for index in range(1, count)]
+        return names[: at - 1] + [self.ISOLATE] + names[at - 1 :]
+
+    def assert_covered(self, crates, partitions=8, isolate=None):
+        isolate = isolate or self.ISOLATE
+        selections = job_selections(crates, partitions, isolate)
+        self.assertEqual(coverage_problems(crates, selections, partitions, isolate), [])
+        return selections
+
+    def test_the_release_list_with_the_workflows_own_jobs(self):
+        jobs, partitions, isolate = workflow_census_jobs()
+        crates = pcs.release_crates(SCRIPT.parent.parent)
+        self.assertEqual(jobs, pcj.jobs(partitions))
+        self.assertIn(isolate, crates)
+        selections = self.assert_covered(crates, partitions, isolate)
+        changed = [job for job in jobs[:-1]
+                   if selections[job] != census_selects(["--shard", f"{job}/{partitions}"], crates)[1]]
+        self.assertEqual(len(changed), 1, "exactly the isolated crate's partition differs from the ordinary one")
+        self.assertEqual([job for job, names in selections.items() if isolate in names], [pcj.ISOLATED])
+
+    def test_a_crate_added_at_the_front(self):
+        self.assert_covered(["crate-new", *self.crates()])
+
+    def test_a_crate_added_in_the_middle(self):
+        crates = self.crates()
+        self.assert_covered(crates[:9] + ["crate-new"] + crates[9:])
+
+    def test_a_crate_added_at_the_end(self):
+        self.assert_covered([*self.crates(), "crate-new"])
+
+    def test_a_crate_removed(self):
+        crates = self.crates()
+        self.assert_covered(crates[:3] + crates[4:])
+
+    def test_two_crates_swapped(self):
+        crates = self.crates()
+        crates[2], crates[15] = crates[15], crates[2]
+        self.assert_covered(crates)
+
+    def test_the_isolated_crate_at_another_entry_lands_in_another_partition(self):
+        for at, job in ((1, "1"), (12, "4"), (20, "4"), (8, "8")):
+            with self.subTest(at=at):
+                crates = self.crates(at=at)
+                selections = self.assert_covered(crates)
+                ordinary = census_selects(["--shard", f"{job}/8"], crates)[1]
+                self.assertIn(self.ISOLATE, ordinary)
+                self.assertEqual(selections[job], [name for name in ordinary if name != self.ISOLATE])
+
+    def test_the_isolated_crate_alone_in_its_partition_leaves_a_job_that_starts_no_census(self):
+        crates = self.crates(count=12, at=8)
+        self.assertEqual(census_selects(["--shard", "8/8"], crates)[1], [self.ISOLATE])
+        self.assertEqual(job_starts(crates, "8", 8, self.ISOLATE), (0, None))
+        self.assertEqual(self.assert_covered(crates)["8"], [])
+
+    def test_a_list_shorter_than_the_partition_count(self):
+        crates = self.crates(count=5, at=3)
+        selections = self.assert_covered(crates)
+        self.assertEqual([job for job, names in selections.items() if names == []], ["3", "6", "7", "8"])
+        for job in ("6", "7", "8"):
+            self.assertEqual(job_starts(crates, job, 8, self.ISOLATE), (0, None))
+
+    def test_an_isolated_name_the_list_no_longer_has_fails_its_job_and_leaves_the_partitions_whole(self):
+        crates = [name for name in self.crates() if name != self.ISOLATE]
+        selections = job_selections(crates, 8, self.ISOLATE)
+        self.assertIsNone(selections.pop(pcj.ISOLATED))
+        self.assertEqual(job_starts(crates, pcj.ISOLATED, 8, self.ISOLATE), (2, None))
+        tested = [name for names in selections.values() for name in names]
+        self.assertEqual(sorted(tested), sorted(crates))
+        for job, names in selections.items():
+            self.assertEqual(names, census_selects(["--shard", f"{job}/8"], crates)[1])
+
+    def test_a_job_without_a_crate_never_reaches_the_census_as_every_crate(self):
+        crates = self.crates()
+        # Why: the census with no `--crate` tests the whole list.
+        self.assertEqual(census_selects([], crates), (0, crates))
+        with self.assertRaises(pcj.UsageError):
+            pcj.census_arguments([])
+        with self.assertRaises(pcj.UsageError):
+            pcj.census_command([], pathlib.Path("/census-out"))
+        for job in pcj.jobs(8):
+            code, arguments = job_starts(crates, job, 8, self.ISOLATE)
+            self.assertEqual(code, 0)
+            self.assertEqual(arguments[0], "--crate")
+            self.assertEqual(arguments[::2], ["--crate"] * (len(arguments) // 2))
+            self.assertTrue(all(pcj.CRATE_NAME.fullmatch(name) for name in arguments[1::2]))
+            self.assertNotIn("--shard", arguments)
+
+    def test_an_unusable_request_is_a_usage_error(self):
+        crates = self.crates()
+        for job, partitions, isolate, listed in (
+            ("9", 8, self.ISOLATE, crates),
+            ("0", 8, self.ISOLATE, crates),
+            ("", 8, self.ISOLATE, crates),
+            ("1/8", 8, self.ISOLATE, crates),
+            ("1", 0, self.ISOLATE, crates),
+            ("1", 8, "", crates),
+            ("1", 8, "two words", crates),
+            ("1", 8, "--shard", crates),
+            ("1", 8, self.ISOLATE, [*crates, crates[0]]),
+            ("1", 8, self.ISOLATE, [*crates, "bad name"]),
+        ):
+            with self.subTest(job=job, partitions=partitions, isolate=isolate):
+                self.assertEqual(job_starts(listed, job, partitions, isolate), (2, None))
+
+    def test_the_command_fails_closed_and_starts_nothing_on_a_usage_error(self):
+        with unittest.mock.patch.object(pcj, "start_census") as start, \
+                unittest.mock.patch.object(pcj, "census_module", return_value=unittest.mock.Mock(
+                    release_crates=lambda _root: self.crates())), \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            code = pcj.main(["run", "--job", "1", "--partitions", "8", "--isolate", "", "--out", "/census-out"])
+        self.assertEqual(code, 2)
+        self.assertIn("--isolate must name a crate", err.getvalue())
+        start.assert_not_called()
+
+    def test_the_check_fails_when_the_stride_is_applied_a_second_time(self):
+        crates = self.crates()
+        selections = job_selections(crates, 8, self.ISOLATE, extra=("--shard", "2/8"))
+        self.assertNotEqual(coverage_problems(crates, selections, 8, self.ISOLATE), [])
+
+    def test_the_check_fails_when_the_isolated_crate_stays_in_its_partition(self):
+        crates = self.crates()
+        selections = {str(k): census_selects(["--shard", f"{k}/8"], crates)[1] for k in range(1, 9)}
+        selections[pcj.ISOLATED] = [self.ISOLATE]
+        self.assertIn(f"{self.ISOLATE} is tested 2 times", coverage_problems(crates, selections, 8, self.ISOLATE))
+
+    def test_the_check_fails_when_a_job_tests_every_crate(self):
+        crates = self.crates()
+        selections = job_selections(crates, 8, self.ISOLATE)
+        selections["3"] = census_selects([], crates)[1]
+        self.assertNotEqual(coverage_problems(crates, selections, 8, self.ISOLATE), [])
+
+
+class CensusWorkflow(unittest.TestCase):
+    """published-crates-standalone.yml starts every census through the jobs
+    script, names the isolated crate once, and its gate needs every job."""
+
+    def lines(self):
+        return [line for line in CENSUS_WORKFLOW.read_text().splitlines() if not line.lstrip().startswith("#")]
+
+    def test_the_makefile_recipe_hands_the_out_directory_and_the_arguments_to_the_census(self):
+        # Unquoted: the shell splits the arguments into the census's words.
+        # A recipe without them would start a census of every crate.
+        self.assertEqual(census_recipe(), [
+            "@$(PYTHON) scripts/published_crates_standalone.py census "
+            "--out $(STANDALONE_CENSUS_OUT) $(STANDALONE_CENSUS_ARGS)"
+        ])
+
+    def test_no_job_may_fail_and_leave_the_gate_green(self):
+        self.assertNotIn("continue-on-error", "\n".join(self.lines()))
+
+    def test_every_job_starts_its_census_through_the_jobs_script(self):
+        text = "\n".join(self.lines())
+        step = text.split("      - name: Standalone census\n", 1)[1].split("\n\n", 1)[0]
+        self.assertEqual(
+            step.split(),
+            'run: >- python3 scripts/published_crates_standalone_jobs.py run --job "${{ matrix.shard }}" '
+            '--partitions 8 --isolate "${STANDALONE_CENSUS_ISOLATED}" '
+            '--out "${{ runner.temp }}/standalone-census"'.split(),
+        )
+        self.assertNotIn("STANDALONE_CENSUS_ARGS", text)
+        self.assertNotIn("--shard", text)
+        self.assertNotIn("published-crates-standalone-census", text)
+
+    def test_the_isolated_crate_is_named_once(self):
+        _jobs, _partitions, isolate = workflow_census_jobs()
+        self.assertEqual([line.strip() for line in self.lines() if isolate in line],
+                         [f"STANDALONE_CENSUS_ISOLATED: {isolate}"])
+
+    def test_the_jobs_have_names_and_reports_of_their_own_and_the_gate_needs_them_all(self):
+        text = "\n".join(self.lines())
+        jobs, partitions, _isolate = workflow_census_jobs()
+        self.assertEqual(len(set(jobs)), partitions + 1)
+        self.assertIn("name: Standalone census (${{ matrix.shard }}${{ matrix.shard != 'isolated' && '/8' || '' }})", text)
+        self.assertIn("name: published-crates-standalone-${{ matrix.shard }}\n", text)
+        self.assertIn("      fail-fast: false\n", text)
+        census, gate = text.split("\n  gate:\n", 1)
+        self.assertEqual(census.count("\n  census:\n"), 1)
+        self.assertIn("    needs: census\n", gate)
+        self.assertIn("CENSUS_RESULT: ${{ needs.census.result }}", gate)
+        self.assertIn('if [[ "${CENSUS_RESULT}" != "success" ]]; then', gate)
 
 
 if __name__ == "__main__":

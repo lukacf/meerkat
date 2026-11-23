@@ -605,13 +605,37 @@ fn to_value(value: impl serde::Serialize) -> Result<Value, JsonRpcError> {
 ///
 /// A member is judged as the agent the view speaks of when this gateway's
 /// runtime holds its mob, and every member is judged while that cannot be
-/// said. The view knows the agents of the mobs held here by their names.
+/// said. The view names the agents of this host's own mob and of the mobs
+/// below it, the mobs its members created and theirs
+/// ([`AnnouncementService::mobs_below_own`]). A member of any other mob
+/// held here is an agent of its own mob: it is judged in the caller's view
+/// of that mob ([`AccessView::in_mob`]), whoever holds its name in this
+/// host's own mob, and a name that view holds no attributes of is hidden
+/// from a caller the console keeps apart from other people
+/// ([`AccessView::withholds_unknown_member`]). A mob the lineage records do
+/// not show below this host's own mob is such a mob.
 /// Only a member of a mob that is positively another gateway's (one the
 /// contact directory files a peer under, and this gateway's runtime does
 /// not hold) is another member under the same name, and is not judged. A
 /// refusal that carries a member of a record, not of the request, is
 /// answered without that member when the caller may not see it
 /// ([`Self::refused`]).
+///
+/// A member of a mob other than this host's own is also a member of a mob
+/// the caller must be able to address
+/// ([`AccessView::may_address_other_mob`]), as a request that names that mob
+/// is judged at the caller's door: to a caller who may not address the mob
+/// every member of it, and every record of one, is hidden as a member
+/// private to another person is, whoever holds the member's name here.
+///
+/// What the caller is shown of a member it may see names no such mob
+/// either: a subscription and a role template are shown without it among
+/// their mobs ([`Self::subscription`], [`Self::template`]), an announcement
+/// without the causes announced in it ([`Self::announcement`]), an
+/// escalation about a source of such a mob is left out
+/// ([`Self::hides_subject`]), and a role template that selects the members
+/// of such a mob is answered as an id nobody holds
+/// ([`Self::subscription_id`]).
 struct Audience<'a> {
     view: Option<&'a AccessView>,
     /// The owner, which says whether a mob is a peer's.
@@ -619,6 +643,12 @@ struct Audience<'a> {
     /// The mobs this gateway's runtime holds; `None` while that cannot be
     /// said.
     here: Option<BTreeSet<MobId>>,
+    /// The mobs whose agents the view names: the owner's own mob and the
+    /// mobs below it; `None` while that cannot be said, and then no mob but
+    /// this host's own is one of them.
+    below: Option<BTreeSet<MobId>>,
+    /// This host's own mob: the one mob every caller of its door addresses.
+    own_mob: &'a MobId,
     absent: ConsoleAbsentNames,
 }
 
@@ -627,11 +657,15 @@ impl<'a> Audience<'a> {
         view: Option<&'a AccessView>,
         owner: Option<&'a AnnouncementService>,
         here: Option<BTreeSet<MobId>>,
+        below: Option<BTreeSet<MobId>>,
+        own_mob: &'a MobId,
     ) -> Self {
         Self {
             view,
             owner,
             here,
+            below,
+            own_mob,
             absent: if view.is_some() {
                 ConsoleAbsentNames::fresh()
             } else {
@@ -645,6 +679,11 @@ impl<'a> Audience<'a> {
         let Some(view) = self.view else {
             return false;
         };
+        // A member of a mob the caller may not address is hidden, before
+        // anything is asked about its name.
+        if self.leaves_out_mob(&member.mob_id) {
+            return true;
+        }
         let another_gateways = self
             .here
             .as_ref()
@@ -652,7 +691,24 @@ impl<'a> Audience<'a> {
             && self
                 .owner
                 .is_some_and(|owner| owner.files_peer(&member.mob_id));
-        !another_gateways && view.hides_agent(member.identity.as_str())
+        if another_gateways {
+            return false;
+        }
+        let name = member.identity.as_str();
+        // The view names the agents of this host's own mob and of the mobs
+        // below it. A member of any other mob held here is judged as an
+        // agent of its own mob, and withheld from a caller the console
+        // keeps apart where that mob's view holds no attributes of it.
+        let named_by_the_view = member.mob_id == *self.own_mob
+            || self
+                .below
+                .as_ref()
+                .is_some_and(|below| below.contains(&member.mob_id));
+        if named_by_the_view {
+            return view.hides_agent(name);
+        }
+        let there = view.in_mob(&meerkat_mob::MobId::from(member.mob_id.as_str()));
+        there.hides_agent(name) || there.withholds_unknown_member(name)
     }
 
     /// Whether the caller may not see the member that made `announcement`:
@@ -693,6 +749,15 @@ impl<'a> Audience<'a> {
                     Value::Null,
                 )
             }
+            // The announcement a taken key holds, as the caller may see it.
+            AnnouncementError::Store(AnnouncementStoreError::AnnouncementConflict {
+                mut existing,
+            }) => {
+                self.announcement(&mut existing);
+                rpc_error(AnnouncementError::Store(
+                    AnnouncementStoreError::AnnouncementConflict { existing },
+                ))
+            }
             other => rpc_error(other),
         }
     }
@@ -721,7 +786,8 @@ impl<'a> Audience<'a> {
 
     /// The id a method on the subscription `id` is to take: an id nobody
     /// holds in the place of one whose subscription is of a member the
-    /// caller may not see.
+    /// caller may not see, and in the place of one whose role template
+    /// selects the members of a mob the caller may not address.
     async fn subscription_id(
         &self,
         service: &AnnouncementService,
@@ -730,12 +796,20 @@ impl<'a> Audience<'a> {
         if self.view.is_none() {
             return Ok(id);
         }
+        let absent = |id: &SubscriptionId| {
+            SubscriptionId::new(self.absent_name(id.as_str()))
+                .map_err(|error| rpc_error(error.into()))
+        };
         match service.subscription(&id).await.map_err(rpc_error)? {
-            Some(found) if self.hides(&found.member) => {
-                SubscriptionId::new(self.absent_name(id.as_str()))
-                    .map_err(|error| rpc_error(error.into()))
-            }
-            _ => Ok(id),
+            Some(found) if self.hides(&found.member) => absent(&id),
+            Some(_) => Ok(id),
+            // No subscription has the id. A role template with it that
+            // selects the members of a mob the caller may not address is
+            // that mob's record.
+            None => match service.role_template(&id).await.map_err(rpc_error)? {
+                Some(template) if self.leaves_out_mob(&template.members.mob_id) => absent(&id),
+                _ => Ok(id),
+            },
         }
     }
 
@@ -781,7 +855,8 @@ impl<'a> Audience<'a> {
                         .is_some_and(|member| self.hides(&member)))
                 }
             },
-            EscalationSubject::Source { .. } => Ok(false),
+            // A source is its mob's record.
+            EscalationSubject::Source { mob_id, .. } => Ok(self.leaves_out_mob(mob_id)),
         }
     }
 
@@ -811,6 +886,47 @@ impl<'a> Audience<'a> {
             SourceRoute::Direct { .. } => true,
         });
         source
+    }
+
+    /// Whether what names the mob `mob_id` is left out of what the caller is
+    /// shown: a mob other than this host's own that the caller may not
+    /// address.
+    fn leaves_out_mob(&self, mob_id: &MobId) -> bool {
+        self.view.is_some_and(|view| {
+            mob_id != self.own_mob
+                && !view.may_address_other_mob(&meerkat_mob::MobId::from(mob_id.as_str()))
+        })
+    }
+
+    /// `subscription` as the caller may see it: without the mobs the caller
+    /// may not address among the mobs it captures from, the mobs it holds a
+    /// frontier for and the mobs that ended. It stays the row it is: its id,
+    /// its place in a listing and its revision are the owner's.
+    fn subscription(&self, subscription: &mut Subscription) {
+        subscription
+            .selector
+            .mobs
+            .retain(|mob_id| !self.leaves_out_mob(mob_id));
+        subscription
+            .frontier
+            .retain(|mob_id, _| !self.leaves_out_mob(mob_id));
+        subscription
+            .ended_mobs
+            .retain(|mob_id| !self.leaves_out_mob(mob_id));
+    }
+
+    /// `template` as the caller may see it: without the mobs the caller may
+    /// not address among the mobs its children capture from.
+    fn template(&self, template: &mut super::declarations::RoleTemplate) {
+        template.mobs.retain(|mob_id| !self.leaves_out_mob(mob_id));
+    }
+
+    /// `announcement` as the caller may see it: without the causes that are
+    /// announcements of a mob the caller may not address.
+    fn announcement(&self, announcement: &mut Announcement) {
+        announcement
+            .causes
+            .retain(|cause| !self.leaves_out_mob(&cause.mob_id));
     }
 
     /// The answer as the caller receives it: every name and id the method
@@ -1234,7 +1350,12 @@ pub(crate) async fn handle_announcement_method_seen_by(
         }),
         _ => None,
     };
-    let audience = Audience::of(view, service, here);
+    // And it names the agents of the owner's own mob and the mobs below it.
+    let below = match (view, service, here.as_ref()) {
+        (Some(_), Some(service), Some(here)) => service.mobs_below_own(here).await,
+        _ => None,
+    };
+    let audience = Audience::of(view, service, here, below, own_mob);
     let answer = answer_announcement_method(service, own_mob, &audience, method, raw).await;
     audience.spelled_back(answer)
 }
@@ -1297,11 +1418,14 @@ async fn answer_announcement_method(
             let request: GetAnnouncementParams = params(raw)?;
             // An announcement a member the caller may not see made is
             // answered as a key nothing was announced under.
-            let announcement = service
+            let mut announcement = service
                 .announcement(&request.mob_id, &request.source_key)
                 .await
                 .map_err(refused)?
                 .filter(|announcement| !audience.hides_announcer(announcement));
+            if let Some(announcement) = &mut announcement {
+                audience.announcement(announcement);
+            }
             Ok(json!({ "announcement": to_value(announcement)? }))
         }
         "meta/mob_announcements/subscriptions/put" => {
@@ -1318,7 +1442,7 @@ async fn answer_announcement_method(
                             "a role-selected subscription starts now".to_string(),
                         ));
                     }
-                    let template = service
+                    let mut template = service
                         .put_role_template(
                             &request.operation_id,
                             PutRoleTemplate {
@@ -1332,6 +1456,7 @@ async fn answer_announcement_method(
                         )
                         .await
                         .map_err(refused)?;
+                    audience.template(&mut template);
                     return Ok(json!({ "subscription": to_value(template)? }));
                 }
                 _ => {
@@ -1340,7 +1465,7 @@ async fn answer_announcement_method(
                     ));
                 }
             };
-            let subscription = service
+            let mut subscription = service
                 .put_subscription(
                     &request.operation_id,
                     PutSubscription {
@@ -1360,6 +1485,7 @@ async fn answer_announcement_method(
                 )
                 .await
                 .map_err(refused)?;
+            audience.subscription(&mut subscription);
             Ok(json!({ "subscription": to_value(subscription)? }))
         }
         "meta/mob_announcements/subscriptions/pause"
@@ -1383,12 +1509,22 @@ async fn answer_announcement_method(
                 )
                 .await
                 .map_err(refused)?;
-            // A role template's change lists its children: none of a member
-            // the caller may not see.
-            if let SubscriptionVerbOutcome::Template(template) = &mut outcome {
-                template
-                    .children
-                    .retain(|child| !audience.hides(&child.member));
+            // The subscription as the caller may see it. A role template's
+            // change lists its children: none of a member the caller may
+            // not see, each as the caller may see it, and the template too.
+            match &mut outcome {
+                SubscriptionVerbOutcome::Subscription(changed) => {
+                    audience.subscription(&mut changed.subscription);
+                }
+                SubscriptionVerbOutcome::Template(template) => {
+                    template
+                        .children
+                        .retain(|child| !audience.hides(&child.member));
+                    for child in &mut template.children {
+                        audience.subscription(child);
+                    }
+                    audience.template(&mut template.template);
+                }
             }
             to_value(outcome)
         }
@@ -1397,7 +1533,7 @@ async fn answer_announcement_method(
             let subscription_id = audience
                 .subscription_id(service, request.subscription_id)
                 .await?;
-            let subscription = service
+            let mut subscription = service
                 .subscription(&subscription_id)
                 .await
                 .map_err(refused)?;
@@ -1406,17 +1542,21 @@ async fn answer_announcement_method(
             let marker = subscription
                 .as_ref()
                 .and_then(|subscription| service.suspend_marker(&subscription.member));
+            if let Some(subscription) = &mut subscription {
+                audience.subscription(subscription);
+            }
             let mut found = json!({
                 "subscription": to_value(&subscription)?,
                 "marker": to_value(marker)?,
             });
             // A role template's id reads the template beside no subscription.
             if subscription.is_none()
-                && let Some(template) = service
+                && let Some(mut template) = service
                     .role_template(&subscription_id)
                     .await
                     .map_err(refused)?
             {
+                audience.template(&mut template);
                 found["template"] = to_value(template)?;
             }
             Ok(found)
@@ -1427,7 +1567,7 @@ async fn answer_announcement_method(
                 .member
                 .map(|member| audience.member(member))
                 .transpose()?;
-            let subscriptions = seen_page(
+            let mut subscriptions = seen_page(
                 audience,
                 request.limit.unwrap_or(DEFAULT_LIMIT),
                 request.after,
@@ -1439,6 +1579,11 @@ async fn answer_announcement_method(
                 },
             )
             .await?;
+            // Each row as the caller may see it, after the page is cut: the
+            // page and the row a next page is asked after are the method's.
+            for row in &mut subscriptions {
+                audience.subscription(row);
+            }
             Ok(json!({ "subscriptions": to_value(subscriptions)? }))
         }
         "meta/mob_announcements/deliveries/list" => {

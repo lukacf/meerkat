@@ -2904,3 +2904,129 @@ async fn a_host_template_put_gives_its_children_its_delivery() {
         "{child}"
     );
 }
+
+/// A declared source and a declared role template of a mob are the host's
+/// standing word for the mob that stands under the id. A release of what an
+/// earlier mob left under the id ends the source and cancels the template,
+/// and the next reconcile of the declarations starts both again: the source
+/// in its next generation, the template active, both applied, neither held
+/// as ended by an operator.
+#[tokio::test]
+async fn a_declared_source_and_template_of_a_released_id_start_again_at_the_next_reconcile() {
+    let harness = harness_with(native_with_seated_builds());
+    let service = &harness.service;
+    let inbox = SourceId::new("inbox").unwrap();
+    let audience = serde_json::json!([{ "kind": "role", "mob_id": "builds", "role": "builder" }]);
+    try_apply(
+        service,
+        1,
+        serde_json::json!([with(
+            declared_inbox(audience),
+            "mob_id",
+            serde_json::json!("builds")
+        )]),
+        serde_json::json!([{
+            "subscription_id": "builders",
+            "members": { "mob_id": "builds", "role": "builder" },
+            "topics": ["deploy.done"],
+            "start": { "kind": "now" },
+        }]),
+    )
+    .await
+    .unwrap();
+    let statuses = |view: &serde_json::Value| {
+        (
+            record(view, "source", "inbox").map(|record| record["status"].clone()),
+            record(view, "subscription", "builders").map(|record| record["status"].clone()),
+        )
+    };
+    let applied = (
+        Some(serde_json::json!("applied")),
+        Some(serde_json::json!("applied")),
+    );
+    let view = declared(service).await;
+    assert_eq!(statuses(&view), applied, "{view}");
+
+    service.release_mob(&mob("builds")).await.unwrap();
+    let ended = service
+        .source(&mob("builds"), &inbox)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(ended.state, super::super::sources::SourceState::Ended);
+    let cancelled = service
+        .role_template(&sid("builders"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(cancelled.state, SubscriptionState::Cancelled);
+
+    service.reconcile_declarations().await.unwrap();
+    let again = service
+        .source(&mob("builds"), &inbox)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(again.state, super::super::sources::SourceState::Active);
+    assert_eq!(again.generation, 2, "the declared source's next generation");
+    let template = service
+        .role_template(&sid("builders"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        template.state,
+        SubscriptionState::Active,
+        "the declared template is active again for the mob under the id"
+    );
+    let view = declared(service).await;
+    assert_eq!(statuses(&view), applied, "{view}");
+}
+
+/// The child a role template makes for a shared member in the capture of
+/// what a member private to a person announces captures nothing of it; the
+/// child is made, and captures the host's announcement on the topic.
+#[tokio::test]
+async fn a_role_child_takes_nothing_of_a_private_members_announcement() {
+    let harness = harness_with(native_serving(&["agent:b", "agent:p"]));
+    let service = &harness.service;
+    harness.native.set_roster_facts("agent:b", "reviewer", &[]);
+    harness.native.set_roster_facts(
+        "agent:p",
+        "author",
+        &[(crate::access::PRIVATE_TO_LABEL, "person-one")],
+    );
+    try_apply(
+        service,
+        1,
+        serde_json::json!([]),
+        serde_json::json!([declared_template("reviewers", "reviewer", &["deploy.done"])]),
+    )
+    .await
+    .unwrap();
+    let outcome = service
+        .announce(AnnounceRequest {
+            mob_id: mob(OWN_MOB),
+            announced_by: Announcer::Member {
+                identity: MemberIdentity::new("agent:p").unwrap(),
+            },
+            source_key: SourceKey::new("deploy-private").unwrap(),
+            topics: [Topic::new("deploy.done").unwrap()].into(),
+            body: "the draft of the offer is ready".to_string(),
+            correlation_id: None,
+            causes: Vec::new(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(outcome.captured_for, Vec::new(), "captured for no child");
+    assert_eq!(owed(&harness).await.get("agent:b"), None);
+    let children = role_children(&declared(service).await, "reviewers");
+    assert_eq!(children.len(), 1, "the child is made: {children:?}");
+
+    host_announces(service, "deploy-1", &["deploy.done"]).await;
+    assert_eq!(
+        owed(&harness).await.get("agent:b"),
+        Some(&1),
+        "the child captures the host's announcement"
+    );
+}

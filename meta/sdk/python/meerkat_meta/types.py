@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
+from .errors import ContractMismatchError
 from .identity_first_models import WakeRefusal
 
 
@@ -497,23 +498,39 @@ def _parse_unified_event(raw: dict[str, Any]) -> UnifiedEvent:
 
 @dataclass(frozen=True)
 class PersistedEvent:
-    """A persisted operational event with monotonic ordering."""
+    """A persisted operational event with monotonic ordering.
+
+    ``mob_id`` names the event's mob when the event is of a mob of the host
+    other than the launch mob (or of a mob below that mob); it is ``None``
+    for an event of the launch mob and of every mob below it, which is
+    every event of a host of one mob. ``mob_incarnation`` is the incarnation
+    of that mob the event came from (a mob created under an id an earlier
+    mob had is another incarnation); it is present where ``mob_id`` is.
+    """
     id: str
     seq: int
     timestamp_ms: int
     member_id: str | None
     event: UnifiedEvent
+    mob_id: str | None = None
+    mob_incarnation: str | None = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> PersistedEvent:
         raw_event = data.get("event", {})
         event = _parse_unified_event(raw_event) if isinstance(raw_event, dict) else UnifiedModuleEvent(module="unknown", event_type="unknown", payload={})
+        raw_mob_id = data.get("mob_id")
+        raw_mob_incarnation = data.get("mob_incarnation")
         return cls(
             id=data["id"],
             seq=data["seq"],
             timestamp_ms=data["timestamp_ms"],
             member_id=data.get("member_id"),
             event=event,
+            mob_id=raw_mob_id if isinstance(raw_mob_id, str) else None,
+            mob_incarnation=(
+                raw_mob_incarnation if isinstance(raw_mob_incarnation, str) else None
+            ),
         )
 
 
@@ -523,8 +540,9 @@ class EventQuery:
 
     ``after_seq`` is the pagination cursor — pass the highest ``seq`` /
     ``cursor`` you have seen to receive only strictly-newer events.
-    ``mob_id``, ``run_id``, ``step_id``, and ``identity`` filter the
-    structural mob-events surface (``meta/mob_events/query``).
+    ``mob_id`` names the mob the request is for. ``run_id``, ``step_id``
+    and ``identity`` filter the structural mob-events surface
+    (``meta/mob_events/query``).
     """
     since_ms: int | None = None
     until_ms: int | None = None
@@ -1089,10 +1107,17 @@ class GatingAuditEntry:
 
 @dataclass(frozen=True)
 class GatingOrigin:
-    """Where a gated action was requested from, as recorded by the owner."""
+    """Where a gated action was requested from, as recorded by the owner.
+
+    ``mob_id`` is the mob ``identity`` is a member of, when it is not the
+    host's default mob; ``None`` for a member of the default mob. Two mobs
+    of one host may each have a member of the same name: the mob and the
+    identity together name the member.
+    """
     identity: str
     conversation_id: str | None = None
     interaction_id: str | None = None
+    mob_id: str | None = None
 
     @classmethod
     def from_dict(cls, data: Any) -> GatingOrigin | None:
@@ -1110,6 +1135,7 @@ class GatingOrigin:
             identity=identity,
             conversation_id=text(data.get("conversation_id")),
             interaction_id=text(data.get("interaction_id")),
+            mob_id=text(data.get("mob_id")),
         )
 
 
@@ -4152,3 +4178,269 @@ def supports_flow_run_idempotency_key(capabilities: CapabilitiesResult | list[st
         else capabilities
     )
     return FLOW_RUN_IDEMPOTENCY_KEY in features
+
+
+MOB_ADDRESSING = "mob_addressing"
+
+
+def supports_mob_addressing(capabilities: CapabilitiesResult | list[str] | tuple[str, ...]) -> bool:
+    """Whether this gateway honours ``mob_id`` on a request: its
+    ``feature_capabilities`` name ``"mob_addressing"``.
+
+    Takes a :class:`CapabilitiesResult` or its ``feature_capabilities``. A
+    gateway without it ignores the id on most methods and answers for its
+    own mob, so a caller checks this before naming a mob (a handle from
+    :meth:`MetaRuntime.mob` does).
+    """
+    features = (
+        capabilities.feature_capabilities
+        if isinstance(capabilities, CapabilitiesResult)
+        else capabilities
+    )
+    return MOB_ADDRESSING in features
+
+
+HOSTED_MOBS = "hosted_mobs"
+
+
+def supports_hosted_mobs(capabilities: CapabilitiesResult | list[str] | tuple[str, ...]) -> bool:
+    """Whether this gateway serves the hosting calls (``meta/mobs/*``): its
+    ``feature_capabilities`` name ``"hosted_mobs"``.
+
+    Takes a :class:`CapabilitiesResult` or its ``feature_capabilities``.
+    :attr:`MetaRuntime.mobs` checks it before each call.
+    """
+    features = (
+        capabilities.feature_capabilities
+        if isinstance(capabilities, CapabilitiesResult)
+        else capabilities
+    )
+    return HOSTED_MOBS in features
+
+
+# The states a hosted mob is listed with. The lifecycle of a loaded mob:
+# ``creating``, ``running``, ``completed``, ``destroyed``. ``stopped``: the
+# mob's own stop, which holds whether the host has the mob loaded or not.
+# ``dormant``: the host knows the mob, has not loaded it and does not know
+# it as stopped. ``quarantined`` (its store could not be opened or
+# restored), ``held`` (a mob a member created, kept until its owner
+# resolves). An open list: a state newer than this SDK is kept as its text.
+HOSTED_MOB_STATES: frozenset[str] = frozenset(
+    {
+        "creating",
+        "running",
+        "stopped",
+        "completed",
+        "destroyed",
+        "dormant",
+        "quarantined",
+        "held",
+    }
+)
+
+
+@dataclass(frozen=True)
+class HostedMob:
+    """One mob of a host, as ``meta/mobs/list``, ``get`` and ``create``
+    answer it.
+
+    ``default`` is true for the mob the launch names: the mob a request
+    without a ``mob_id`` addresses. ``state`` is one of
+    :data:`HOSTED_MOB_STATES`; a gateway newer than this SDK may send
+    another, which is kept as its text with :attr:`known_state` false, so
+    read it as advice and never as a closed set. ``provenance`` is the kind
+    of the mob's creation record (``host``, ``member``, ``session``, ...,
+    also an open list); it is ``None`` while the host has not read that
+    record (for a short time after a start, for a mob that is not loaded;
+    such a mob reads ``dormant`` until then, a stopped one too) and for a
+    quarantined or held mob. ``failure`` is
+    present when a loaded mob's actor has stopped, ``quarantine`` when the
+    state is ``quarantined``; both are the gateway's objects, unchanged.
+
+    ``revision`` is the revision of the mob's definition, a whole number
+    that every committed redefinition advances (a mob that was never
+    redefined reports the revision its create recorded). It is what
+    ``runtime.mobs.redefine`` takes as ``expected_revision``. ``get`` carries
+    it for a loaded mob (a ``get`` loads a mob the host created), and so
+    does the entry of a ``create``, ``lifecycle`` or ``redefine`` answer; an
+    entry of ``list`` never carries it, and a quarantined or held mob
+    has ``None``. A value that is not a whole number reads as ``None`` too:
+    it cannot be passed on, and it does not make the entry unreadable.
+
+    ``from_dict`` raises :class:`~meerkat_meta.errors.ContractMismatchError`
+    for an entry without its id or its state.
+
+    The entry is what the gateway said when it was asked. The SDK keeps no
+    list of mobs: ask again for the current one.
+    """
+
+    mob_id: str
+    default: bool
+    state: str
+    provenance: str | None = None
+    failure: dict[str, Any] | None = None
+    quarantine: dict[str, Any] | None = None
+    revision: int | None = None
+
+    @property
+    def known_state(self) -> bool:
+        """Whether ``state`` is one of :data:`HOSTED_MOB_STATES`."""
+        return self.state in HOSTED_MOB_STATES
+
+    @classmethod
+    def from_dict(cls, data: Any) -> HostedMob:
+        # An entry without its id or its state is an answer this SDK does not
+        # read: the gateway's doing, not a mistake in the caller's arguments.
+        if not isinstance(data, dict):
+            raise ContractMismatchError(
+                f"HostedMob must be an object, got {type(data).__name__}"
+            )
+        mob_id = data.get("mob_id")
+        if not isinstance(mob_id, str):
+            raise ContractMismatchError(
+                f"HostedMob.mob_id must be a string, got {type(mob_id).__name__}: {mob_id!r}"
+            )
+        state = data.get("state")
+        if not isinstance(state, str):
+            raise ContractMismatchError(
+                f"HostedMob.state must be a string, got {type(state).__name__}: {state!r}"
+            )
+        provenance = data.get("provenance")
+        failure = data.get("failure")
+        quarantine = data.get("quarantine")
+        revision = data.get("revision")
+        return cls(
+            mob_id=mob_id,
+            default=data.get("default") is True,
+            state=state,
+            provenance=provenance if isinstance(provenance, str) else None,
+            failure=dict(failure) if isinstance(failure, dict) else None,
+            quarantine=dict(quarantine) if isinstance(quarantine, dict) else None,
+            revision=(
+                revision if isinstance(revision, int) and not isinstance(revision, bool) else None
+            ),
+        )
+
+
+def _hosting_answer(data: Any, owner: str) -> dict[str, Any]:
+    """An answer of a hosting call, or a part of one, as an object.
+
+    The request left and the gateway acted on it, so an answer that cannot
+    be read is not a ``TypeError`` (that is for the caller's arguments,
+    refused before anything is sent) but a ``ContractMismatchError``.
+    """
+    if not isinstance(data, dict):
+        raise ContractMismatchError(f"{owner} must be an object, got {type(data).__name__}")
+    return data
+
+
+def _hosting_report(value: Any, owner: str) -> dict[str, Any] | None:
+    """A report as it came; ``None`` when none was sent. A report that is
+    not an object is not read as "none": the answer is not one this SDK
+    reads."""
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ContractMismatchError(f"{owner} must be an object, got {type(value).__name__}")
+    return dict(value)
+
+
+@dataclass(frozen=True)
+class MobLifecycleResult:
+    """What ``meta/mobs/lifecycle`` answers: the mob's entry after the stop
+    or the resume, and for a stop the mob's own stop report as it came
+    (``None`` for a resume). A report that is not an object raises
+    :class:`~meerkat_meta.errors.ContractMismatchError`, and so does
+    ``runtime.mobs.lifecycle`` for a stop answered without one."""
+
+    mob: HostedMob
+    stop_report: dict[str, Any] | None = None
+
+    @classmethod
+    def from_dict(cls, data: Any) -> MobLifecycleResult:
+        answer = _hosting_answer(data, "MobLifecycleResult")
+        return cls(
+            mob=HostedMob.from_dict(answer.get("mob")),
+            stop_report=_hosting_report(
+                answer.get("stop_report"), "MobLifecycleResult.stop_report"
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class MobRedefineReceipt:
+    """The receipt of a definition update: the revision it was made against,
+    the revision the definition holds now, the projection revision and the
+    cursor of the definition event, and the dotted paths that differed."""
+
+    mob_id: str
+    previous_revision: int
+    committed_revision: int
+    projection_revision: int
+    event_cursor: int
+    declared_fields: tuple[str, ...]
+
+    @classmethod
+    def from_dict(cls, data: Any) -> MobRedefineReceipt:
+        receipt = _hosting_answer(data, "MobRedefineReceipt")
+        mob_id = receipt.get("mob_id")
+        if not isinstance(mob_id, str):
+            raise ContractMismatchError("MobRedefineReceipt.mob_id must be a string")
+        numbers = {}
+        for name in (
+            "previous_revision",
+            "committed_revision",
+            "projection_revision",
+            "event_cursor",
+        ):
+            value = receipt.get(name)
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ContractMismatchError(f"MobRedefineReceipt.{name} must be an integer")
+            numbers[name] = value
+        fields = receipt.get("declared_fields")
+        if not isinstance(fields, list) or not all(isinstance(f, str) for f in fields):
+            raise ContractMismatchError(
+                "MobRedefineReceipt.declared_fields must be a list of strings"
+            )
+        return cls(mob_id=mob_id, declared_fields=tuple(fields), **numbers)
+
+
+@dataclass(frozen=True)
+class MobRedefineResult:
+    """What ``meta/mobs/redefine`` answers: the mob's entry and the receipt
+    of the definition update."""
+
+    mob: HostedMob
+    receipt: MobRedefineReceipt
+
+    @classmethod
+    def from_dict(cls, data: Any) -> MobRedefineResult:
+        answer = _hosting_answer(data, "MobRedefineResult")
+        return cls(
+            mob=HostedMob.from_dict(answer.get("mob")),
+            receipt=MobRedefineReceipt.from_dict(answer.get("receipt")),
+        )
+
+
+@dataclass(frozen=True)
+class MobDestroyResult:
+    """What ``meta/mobs/destroy`` answers: the id of the destroyed mob and
+    the destroy report as it came (``None`` when none was sent; one that is
+    not an object raises
+    :class:`~meerkat_meta.errors.ContractMismatchError`)."""
+
+    mob_id: str
+    destroy_report: dict[str, Any] | None = None
+
+    @classmethod
+    def from_dict(cls, data: Any) -> MobDestroyResult:
+        answer = _hosting_answer(data, "MobDestroyResult")
+        mob_id = answer.get("mob_id")
+        if not isinstance(mob_id, str):
+            raise ContractMismatchError("MobDestroyResult.mob_id must be a string")
+        return cls(
+            mob_id=mob_id,
+            destroy_report=_hosting_report(
+                answer.get("destroy_report"), "MobDestroyResult.destroy_report"
+            ),
+        )

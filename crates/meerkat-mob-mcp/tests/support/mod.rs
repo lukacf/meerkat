@@ -1076,6 +1076,37 @@ impl CouncilFixture {
         state
     }
 
+    /// [`Self::restart_state`] for a host that restores its mobs on demand:
+    /// the restart takes a census of the mob stores and loads none of them
+    /// until something addresses its mob.
+    pub fn restart_state_on_demand(&self) -> Arc<MobMcpState> {
+        self.restart_state_with(|state, _root| {
+            state.with_mob_restore_policy(meerkat_mob_mcp::MobRestorePolicy::OnDemand)
+        })
+    }
+
+    /// [`Self::restart_state`] with [`Self::new_with`]'s customization, for
+    /// a host that composes its restarted state as it composed the first
+    /// one (its default mob, its restore policy).
+    #[allow(dead_code)]
+    pub fn restart_state_with(
+        &self,
+        customize: impl FnOnce(MobMcpState, &std::path::Path) -> MobMcpState,
+    ) -> Arc<MobMcpState> {
+        let state_root = self.root.join("state");
+        let state = customize(
+            Self::state_over(&self.service, self.runtime_adapter.as_ref()),
+            &state_root,
+        )
+        .try_with_persistent_storage_root(Some(state_root))
+        .expect("reopen rooted council + capability custody")
+        .into_shared();
+        if let Some(continuations) = &self.continuations {
+            continuations.bind(&state);
+        }
+        state
+    }
+
     /// Restart over the SAME durable stores with a FRESH session service, the
     /// way a restarted process comes back: the previous lifetime's mobs and
     /// sessions are shut down and no live actor survives, so a member returns

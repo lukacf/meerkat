@@ -20,8 +20,25 @@ use toml_edit::{Array, ArrayOfTables, DocumentMut, InlineTable, Item, Table, Val
 /// disagreement between the two TOML readers, not a bad document.
 pub(crate) fn parse(content: &str) -> Result<DocumentMut, ConfigError> {
     content.parse::<DocumentMut>().map_err(|error| {
-        ConfigError::InternalError(format!("config document is not editable: {error}"))
+        ConfigError::InternalError(format!(
+            "config document is not editable: {}",
+            edit_error_text(&error, content)
+        ))
     })
+}
+
+/// The editing reader's error over `content` as an answer or a log line may
+/// show it: where the error sits and what is wrong, never the reader's own
+/// display, which quotes the line of the document.
+pub(crate) fn edit_error_text(error: &toml_edit::TomlError, content: &str) -> String {
+    match error.span() {
+        Some(span) => format!(
+            "{}: {}",
+            crate::redact::line_and_column(content, span.start),
+            error.message()
+        ),
+        None => error.message().to_string(),
+    }
 }
 
 /// Apply an RFC 7396 JSON merge patch to `document`.
@@ -50,9 +67,15 @@ pub(crate) fn apply_merge_patch(
 }
 
 /// The error for a patched document that no longer loads as a config: the
-/// patch wrote a value the config schema does not accept.
+/// patch wrote a value the config schema does not accept. It says where the
+/// error sits in the patched document and what is wrong, never the reader's
+/// own display: that quotes the line of the document, with whatever the
+/// stored document holds on it beside the patched value.
 pub(crate) fn invalid_patched_document(error: &toml::de::Error) -> ConfigError {
-    patch_error(format!("the patched config document is invalid: {error}"))
+    patch_error(format!(
+        "the patched config document is invalid: {}",
+        crate::redact::toml_error_text(error)
+    ))
 }
 
 fn patch_error(message: String) -> ConfigError {

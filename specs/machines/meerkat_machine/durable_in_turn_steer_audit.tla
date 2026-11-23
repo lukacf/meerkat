@@ -39,11 +39,33 @@
 \* generated 256 (one, then two), so TLC explores the durable join the
 \* run_contributor_capacity guard refuses and the one it takes at the bound.
 \*
-\* Scope limit: the generated model has no crash action, so durable-row
-\* recovery (RecoverInputLifecycle and durable-tail adoption after a process
-\* dies mid-run) is outside this audit. The Rust test
+\* The recovery scene. The generated model has no crash action, so the scene
+\* scripts what a start over the same store does: it registers the session,
+\* marks the run the stored cursor names resumable, recovers the batch input
+\* Staged and bound to that run and the late input Queued from one stored
+\* row, and resumes the run. Each run of the scene is given the set of rows
+\* the late input may be recovered from (its lane, its stage attempts, the
+\* run it still names, the delivery class it stores) and whether the row is
+\* governed, so each run asks one question:
+\*   - the row of a steer that never left the Steer lane (no attempt, no run,
+\*     the durable class) keeps its class and joins the resumed run (the
+\*     runner requires AuditLateNeverJoins violated);
+\*   - a row with a stage attempt, a row that still names a run, a row in the
+\*     Queue lane and a row that stores no class hold no class after
+\*     recovery and never join (one run over all four);
+\*   - a governed row that never left loses its class at the binding
+\*     recovery restores, and never joins.
+\* With --mutants the runner seeds four defects into a copy of the generated
+\* model (a recovery that ignores the attempts, the run or the lane, and a
+\* binding that keeps the class) and requires TLC to refuse each.
+\* The scene explores what the audit's main body explores after its prefix,
+\* without a second admission of the late input.
+\*
+\* Scope limit of the scene: durable-tail adoption (which stored tail a start
+\* adopts, and which appends it holds) is not modelled; the scene takes the
+\* stored row as given. The Rust test
 \* persistent_crash_after_the_join_recovers_the_input_for_exactly_one_follow_up
-\* covers that path.
+\* covers a join that a crash interrupts.
 EXTENDS model
 
 \* Upper bound on model_step_count, including the deterministic prefix.
@@ -52,6 +74,11 @@ CONSTANT AuditMaxSteps
 \* Admission input kinds the late Steer input may take: Prompt in the safety
 \* run (every content kind on request), one kind per reachability goal run.
 CONSTANT AuditLateKinds
+
+\* The stored rows the recovery scene may recover the late input from, and
+\* whether the recovered row is governed. The main audit does not read them;
+\* the runner gives every run a value.
+CONSTANTS AuditRows, AuditRowGoverned
 
 AuditRun == "runid_1"
 AuditSession == "sessionid_1"
@@ -198,4 +225,79 @@ AuditCapacityRefusalNeverReached ==
                ELSE FALSE
         /\ meerkat_machine_run_contributor_count(input_run_associations, input_phases, AuditRun)
                >= meerkat_machine_run_contributor_limit )
+\* ---------------------------------------------------------------------------
+\* The recovery scene.
+\* ---------------------------------------------------------------------------
+
+\* The row of a steer that was admitted with the durable class and never left
+\* the Steer lane.
+AuditRowsThatNeverLeft ==
+    {[lane |-> "Steer", attempts |-> 0, run |-> None, class |-> Some("DurableAppend")]}
+
+\* One row per way of having left it: a stage attempt (staged, then rolled
+\* back, replayed or deferred), a run still named (a join whose applied image
+\* was discarded), the Queue lane, and no stored class.
+AuditRowsThatLeft ==
+    {[lane |-> "Steer", attempts |-> 1, run |-> None, class |-> Some("DurableAppend")],
+     [lane |-> "Steer", attempts |-> 0, run |-> Some(AuditRun), class |-> Some("DurableAppend")],
+     [lane |-> "Queue", attempts |-> 0, run |-> None, class |-> Some("DurableAppend")],
+     [lane |-> "Steer", attempts |-> 0, run |-> None, class |-> None]}
+
+\* A governed row is bound again after its lifecycle, one step more.
+AuditRecoveryBindSteps == IF AuditRowGoverned THEN 1 ELSE 0
+AuditRecoveryPrefixLength == 11 + AuditRecoveryBindSteps
+
+\* The generated lifecycle guard requires the row's lane to be the lane of the
+\* admission witness, so the row is in effect chosen at the witness step.
+AuditRecoveryPrefix ==
+    \/ model_step_count = 0 /\ Initialize
+    \/ model_step_count = 1 /\ RegisterSessionIdle(AuditSession, None, {})
+    \/ model_step_count = 2 /\ MarkRunResumableIdle(AuditRun)
+    \/ model_step_count = 3
+       /\ RecoverAdmittedInputIdle(AuditBatch, "Prompt", "RunStart", "ContentTurn", None, "Queue")
+    \/ model_step_count = 4
+       /\ RecoverInputLifecycleIdle(AuditBatch, "Staged", None, None, None, None, 0, 1,
+             Some(AuditRun), None, Some(1), None, Some("Queue"), None, None, None, None,
+             FALSE, None)
+    \/ model_step_count = 5
+       /\ \E row \in AuditRows :
+            RecoverAdmittedInputIdle(AuditLate, "PeerMessage", "RunCheckpoint", "ContentTurn",
+                None, row.lane)
+    \/ model_step_count = 6
+       /\ \E row \in AuditRows :
+            RecoverInputLifecycleIdle(AuditLate, "Queued", None, None, None, None, 0,
+                row.attempts, row.run, None, Some(2), None, Some(row.lane), Some(row.lane),
+                Some("RunCheckpoint"), Some("ContentTurn"), None, FALSE, row.class)
+    \/ model_step_count = 7 /\ AuditRowGoverned
+       /\ BindInputAuthorityIdle(AuditLate, "binding_late", "batch_late")
+    \/ model_step_count = 7 + AuditRecoveryBindSteps /\ PrepareIdle(AuditSession, AuditRun)
+    \/ model_step_count = 8 + AuditRecoveryBindSteps /\ ResumeRunRunning(AuditRun)
+    \/ model_step_count = 9 + AuditRecoveryBindSteps
+       /\ StartConversationRunRunning(AuditRun, "ConversationTurn", "conversation", FALSE, FALSE, 0)
+    \/ model_step_count = 10 + AuditRecoveryBindSteps /\ PrimitiveAppliedConversation(AuditRun)
+
+AuditRecoveryBody ==
+    \/ AuditTurn
+    \/ AuditLiveBoundary
+    \/ AuditInputLifecycle
+    \/ AuditRunEnding
+
+AuditRecoveryNext ==
+    \/ AuditRecoveryPrefix
+    \/ (model_step_count >= AuditRecoveryPrefixLength /\ AuditRecoveryBody)
+
+AuditRecoverySpec == Init /\ [][AuditRecoveryNext]_vars
+
+\* The recovered input holds no delivery class. Checked in the runs whose rows
+\* all left the Steer lane: nothing in the scene admits the late input again,
+\* so a class it held would be one recovery gave it. With AuditLateNeverJoins
+\* in the same run this is exactly once across the restart: a row that names
+\* a run (its applied append may sit in an adopted tail) or counts a stage
+\* attempt never joins.
+AuditLateHoldsNoClass == AuditLate \notin DOMAIN input_live_boundary_delivery
+
+\* A governed recovered input holds no class once its binding is restored.
+AuditGovernedRecoveredInputHoldsNoClass ==
+    AuditLate \in DOMAIN input_authority_bindings
+        => AuditLate \notin DOMAIN input_live_boundary_delivery
 ====

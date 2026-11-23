@@ -130,6 +130,80 @@ pub async fn event_log(factory: &dyn EventLogStoreFactory) -> Result<(), Conform
             limited.len()
         ),
     )?;
+
+    // --- the query's mob and incarnation are selected before its limit ----------
+    // A host that serves a second mob keeps that mob's rows under its id and
+    // the incarnation they came from; `meta/query_events` asks for one
+    // selection and a client pages through it by `after_seq`. A store that
+    // cuts to the limit among every mob's rows hands such a client short or
+    // empty pages while its mob still has rows.
+    let step = "limit_is_cut_among_the_rows_of_the_querys_mob";
+    let mob = "conformance-mob";
+    let earlier = meerkat_core::service::MobIncarnationId::mint();
+    let now = meerkat_core::service::MobIncarnationId::mint();
+    steps.wrap(
+        step,
+        store
+            .append_batch(vec![
+                fixtures::persisted_event_of_mob("evt-10", 10, mob, earlier),
+                fixtures::persisted_event_of_mob("evt-11", 11, mob, now),
+                fixtures::persisted_event("evt-12", 12),
+                fixtures::persisted_event_of_mob("evt-13", 13, mob, earlier),
+                fixtures::persisted_event_of_mob("evt-14", 14, "another-conformance-mob", now),
+                fixtures::persisted_event_of_mob("evt-15", 15, mob, now),
+                fixtures::persisted_event_of_mob("evt-16", 16, mob, now),
+            ])
+            .await,
+    )?;
+    let ids = |rows: &[meerkat_meta::unified_runtime::PersistedEvent]| -> Vec<String> {
+        rows.iter().map(|row| row.id.clone()).collect()
+    };
+    let of_the_mob_now = |after_seq: Option<u64>| EventQuery {
+        mob_id: Some(mob.to_string()),
+        mob_incarnation: Some(now),
+        after_seq,
+        limit: Some(2),
+        ..EventQuery::default()
+    };
+    let first_page = steps.wrap(step, store.query(of_the_mob_now(None)).await)?;
+    steps.ensure(
+        step,
+        ids(&first_page) == ["evt-11", "evt-15"],
+        format!(
+            "a query that names a mob and its incarnation with a limit of 2 must answer the \
+             first two rows of THAT selection (evt-11, evt-15), got {:?}: select by \
+             `EventQuery.mob_id` and `EventQuery.mob_incarnation` before cutting to `limit`",
+            ids(&first_page)
+        ),
+    )?;
+    let second_page = steps.wrap(step, store.query(of_the_mob_now(Some(15))).await)?;
+    steps.ensure(
+        step,
+        ids(&second_page) == ["evt-16"],
+        format!(
+            "the page after seq 15 of that selection must be its last row (evt-16), got {:?}",
+            ids(&second_page)
+        ),
+    )?;
+    let of_no_mob = steps.wrap(
+        step,
+        store
+            .query(EventQuery {
+                after_seq: Some(9),
+                limit: Some(1),
+                ..EventQuery::default()
+            })
+            .await,
+    )?;
+    steps.ensure(
+        step,
+        ids(&of_no_mob) == ["evt-12"],
+        format!(
+            "a query that names no mob selects the rows that name no mob: after seq 9 with a \
+             limit of 1 it must answer evt-12, got {:?}",
+            ids(&of_no_mob)
+        ),
+    )?;
     Ok(())
 }
 

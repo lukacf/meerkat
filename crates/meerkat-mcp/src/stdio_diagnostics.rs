@@ -55,6 +55,13 @@ pub(crate) const MIN_TRACKED_SECRET_BYTES: usize = 8;
 /// One read of the stderr drain.
 const STDERR_READ_CHUNK_BYTES: usize = 4096;
 
+/// How long one claim of failed attempts for the host's report waits, in
+/// all, for their stderr captures to end, so that the last lines of a
+/// server that just exited are in the tails it returns: the drain's grace
+/// and a margin. A capture still open after it (a descendant holds the
+/// pipe) is reported as it stands.
+pub(crate) const STDERR_CLAIM_SETTLE: Duration = Duration::from_millis(500);
+
 /// Why the protocol transport stopped receiving from the server.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TransportEnd {
@@ -197,6 +204,15 @@ impl StdioAttemptRecord {
         {
             capture.stopped = Some(complete);
         }
+    }
+
+    /// Whether nothing more will be added to the tail: nothing was
+    /// captured, or the drain stopped (at end of stream or at its bound).
+    pub(crate) fn stderr_capture_ended(&self) -> bool {
+        self.lock()
+            .capture
+            .as_ref()
+            .is_none_or(|capture| capture.stopped.is_some())
     }
 
     /// Track the launch environment values for exact-value redaction, in

@@ -3,8 +3,8 @@
 //! A console read decides every identity record and frame it touches
 //! against each runtime's members as listed once in that read: the
 //! membership a read uses is the snapshot it takes, the primary mob's
-//! members when the read first needs them and the implicit delegates' when
-//! a decision first reads them. A read is one identities read, one timeline
+//! members when the read first needs them and the nested mobs' when a
+//! decision first reads them. A read is one identities read, one timeline
 //! page (so one page of a replay) or one live frame. A member hidden while a
 //! read runs is decided as that read's snapshot listed it, and is hidden
 //! from the next read, which lists the members again.
@@ -19,8 +19,8 @@ use super::*;
 
 /// The members of one runtime entry for one read (see the module docs), in
 /// two listings each taken on first use and then kept: the primary mob's
-/// members, and the implicit delegates' members, which only a decision that
-/// reads them lists.
+/// members, and the members of the mobs nested under it (the implicit
+/// delegates among them), which only a decision that reads them lists.
 pub(super) struct MemberCut {
     entry: RuntimeEntry,
     primary: tokio::sync::OnceCell<Vec<CutMember>>,
@@ -58,7 +58,7 @@ impl MemberCut {
             .await
     }
 
-    /// The implicit delegates' members, listed on the read's first use.
+    /// The nested mobs' members, listed on the read's first use.
     async fn delegates(&self) -> &[CutMember] {
         self.delegates
             .get_or_init(|| async {
@@ -71,42 +71,51 @@ impl MemberCut {
             .await
     }
 
-    /// Whether the entry's policy lists the implicit delegates' members.
-    fn lists_delegates(&self) -> bool {
-        self.entry
-            .visibility_policy
-            .include_implicit_delegate_members()
-    }
-
     /// Every member, hidden ones included, as
     /// [`member_sources_for_entry_including_hidden`] lists them: the primary
-    /// mob's members, then the implicit delegates'.
+    /// mob's members, then the nested mobs'.
     pub(super) async fn members(&self) -> impl Iterator<Item = &CutMember> {
         let primary = self.primary().await;
         primary.iter().chain(self.delegates().await)
     }
 
+    /// Whether the entry's policy lists any member of a nested mob.
+    fn lists_nested(&self) -> bool {
+        self.entry.visibility_policy.include_nested_mob_members()
+    }
+
     /// The members [`member_sources_for_entry`] lists: the primary mob's,
-    /// then the implicit delegates' only while the policy includes them. The
-    /// delegates are not listed for it otherwise, and a council participant
-    /// is among them on no policy (see `council`).
+    /// then the members of the nested mobs the console lists that the
+    /// policy's mob-level switches do not hide
+    /// ([`policy_hides_nested_member`]). Under a policy that lists no nested
+    /// member the nested mobs are not listed for it at all, and a council
+    /// participant is among them on no policy (see `council`).
     pub(super) async fn unhidden(&self) -> impl Iterator<Item = &CutMember> {
         let primary = self.primary().await;
-        let delegates: &[CutMember] = if self.lists_delegates() {
+        let nested: &[CutMember] = if self.lists_nested() {
             self.delegates().await
         } else {
             &[]
         };
-        primary.iter().chain(
-            delegates
-                .iter()
-                .filter(|member| !member.resolved.council_participant),
-        )
+        let policy = self.entry.visibility_policy.clone();
+        let primary_mob_id = self.entry.runtime.handle().mob_id().to_string();
+        let nested = nested.iter().filter(move |member| {
+            member.resolved.listed
+                && !member.resolved.council_participant
+                && !nested_member_unnamed(&member.resolved)
+                && !policy_hides_nested_member(
+                    policy.as_ref(),
+                    &primary_mob_id,
+                    &member.resolved.source_mob_id,
+                    member.resolved.member.role.as_str(),
+                )
+        });
+        primary.iter().chain(nested)
     }
 
     /// Whether the listings [`Self::unhidden`] reads are taken already.
     pub(super) fn unhidden_listed(&self) -> bool {
-        self.primary.initialized() && (!self.lists_delegates() || self.delegates.initialized())
+        self.primary.initialized() && (!self.lists_nested() || self.delegates.initialized())
     }
 }
 
@@ -214,11 +223,7 @@ pub(super) async fn console_identity_record_visible_in(
         // encoded durable identity, so exact equality never matched and a hidden
         // row stopped affecting its own record's visibility - which is how a
         // hidden member stayed inspectable.
-        if !crate::member_comms_id::live_member_names_identity_or_incarnation(
-            &member.resolved.runtime_identity,
-            &record.identity,
-            Some(record.runtime_member_id.as_str()),
-        ) {
+        if !live_member_names_record(&member.resolved, record) {
             continue;
         }
         bound_live_member_seen = true;
@@ -237,6 +242,30 @@ pub(super) async fn console_identity_record_visible_in(
         return true;
     }
     !bound_live_member_seen
+}
+
+/// Whether the live row `resolved` is a row of `record`. A primary member is
+/// one by the identity-level predicate
+/// ([`crate::member_comms_id::live_member_names_identity_or_incarnation`]). A
+/// nested mob's member is the row of its own record alone, the one that
+/// names its mob and name: its bare name never ties it to a record of the
+/// primary mob, whatever name the two share.
+pub(super) fn live_member_names_record(
+    resolved: &ResolvedConsoleMember,
+    record: &ConsoleIdentityRecord,
+) -> bool {
+    if resolved.nested() {
+        return crate::console_member_ref::nested_member_identity(
+            &resolved.source_mob_id,
+            &resolved.runtime_identity,
+        )
+        .is_some_and(|name| name == record.runtime_member_id);
+    }
+    crate::member_comms_id::live_member_names_identity_or_incarnation(
+        &resolved.runtime_identity,
+        &record.identity,
+        Some(record.runtime_member_id.as_str()),
+    )
 }
 
 /// [`resolved_member_visible`] decided against `cut`, the read `resolved`
@@ -263,7 +292,7 @@ pub(super) async fn live_record_shadowed_by_hidden_durable_binding_in(
     resolved: &ResolvedConsoleMember,
     record: &ConsoleIdentityRecord,
 ) -> bool {
-    let Some(identity_runtime) = resolved.entry.identity_runtime.as_ref() else {
+    let Some(identity_runtime) = resolved.identity_runtime() else {
         return false;
     };
     let Ok(identity) = crate::identity_first::AgentIdentity::parse(&record.identity) else {
@@ -293,11 +322,13 @@ pub(super) async fn live_record_shadowed_by_hidden_durable_binding_in(
     for candidate in cut.unhidden().await {
         // Same identity-level rule: find the candidate whose roster identity IS
         // this status's durable identity, not one whose spelling matches an
-        // AgentRuntimeId.
-        if !crate::member_comms_id::live_member_is_identity(
-            &candidate.resolved.runtime_identity,
-            status.identity.as_str(),
-        ) {
+        // AgentRuntimeId. A durable identity's row is a primary member's.
+        if candidate.resolved.nested()
+            || !crate::member_comms_id::live_member_is_identity(
+                &candidate.resolved.runtime_identity,
+                status.identity.as_str(),
+            )
+        {
             continue;
         }
         let Some(bound_record) = candidate.record().await else {
@@ -314,13 +345,18 @@ pub(super) async fn live_record_shadowed_by_hidden_durable_binding_in(
 
 /// Whether `frame` belongs to a member the read's `cut` lists hidden and
 /// none it lists visible: the members it names by session, runtime member
-/// id or identity.
+/// id or identity. A frame that sits under a bare name and was written by a
+/// nested mob's member (it names that member's session, or its bare name
+/// while no primary member has the name) is a hidden member's too: a nested
+/// member is named by its mob and name, so such a frame predates that and
+/// its bare name names a primary member only.
 pub(super) async fn frame_matches_hidden_member_in(cut: &MemberCut, frame: &ConsoleFrame) -> bool {
     let runtime_member_id = strip_namespace(&frame.identity, &cut.entry.identity_namespace)
         .unwrap_or_else(|| frame.identity.clone());
     let frame_session_id = frame.session_id.as_deref();
     let mut saw_hidden = false;
     let mut saw_visible = false;
+    let mut named_bare_by_a_nested_member = false;
     for member in cut.members().await {
         let Some(record) = member.record().await else {
             continue;
@@ -330,9 +366,15 @@ pub(super) async fn frame_matches_hidden_member_in(cut: &MemberCut, frame: &Cons
         let runtime_matches = record.runtime_member_id == runtime_member_id;
         let identity_matches = record.identity == frame.identity;
         if !session_matches && !runtime_matches && !identity_matches {
+            if member.resolved.nested() && member.resolved.runtime_identity == runtime_member_id {
+                named_bare_by_a_nested_member = true;
+            }
             continue;
         }
         if session_matches && !raw_resolved_member_visible(&member.resolved, record) {
+            return true;
+        }
+        if session_matches && member.resolved.nested() && !runtime_matches && !identity_matches {
             return true;
         }
         if member.own_record_visible(cut).await == Some(true) {
@@ -341,7 +383,7 @@ pub(super) async fn frame_matches_hidden_member_in(cut: &MemberCut, frame: &Cons
             saw_hidden = true;
         }
     }
-    saw_hidden && !saw_visible
+    (saw_hidden || named_bare_by_a_nested_member) && !saw_visible
 }
 
 /// [`capture_member_lineage`] read from `cut`, the read `resolved` was
@@ -356,6 +398,7 @@ pub(super) async fn capture_member_lineage_in(
         record,
         namespace,
         resolved.member.role.as_str(),
+        resolved.member.labels.get("role").map(String::as_str),
     )];
     let mut visited = BTreeSet::from([record.identity.clone()]);
     let mut child_labels = record.labels.clone();
@@ -386,7 +429,14 @@ pub(super) async fn capture_member_lineage_in(
                     &candidate.resolved.member.labels,
                 );
                 let durable = resolved_identity.as_deref().unwrap_or(alias);
-                if roster_id != parent && alias != parent && durable != parent {
+                // A nested mob's member is also named by its mob and name:
+                // the spelling the spawn registry gives a nested spawner.
+                let console_name = candidate.resolved.console_name();
+                if roster_id != parent
+                    && alias != parent
+                    && durable != parent
+                    && console_name.as_deref() != Some(parent.as_str())
+                {
                     continue;
                 }
                 let Some(candidate_record) = candidate.record().await else {
@@ -396,14 +446,20 @@ pub(super) async fn capture_member_lineage_in(
                     confirmed = Some((
                         candidate_record.clone(),
                         candidate.resolved.member.role.to_string(),
+                        candidate.resolved.member.labels.get("role").cloned(),
                     ));
                     break;
                 }
             }
         }
         match confirmed {
-            Some((parent_record, role)) => {
-                lineage.push(lineage_link_for_record(&parent_record, namespace, &role));
+            Some((parent_record, role, own_role_label)) => {
+                lineage.push(lineage_link_for_record(
+                    &parent_record,
+                    namespace,
+                    &role,
+                    own_role_label.as_deref(),
+                ));
                 child_labels = parent_record.labels;
             }
             None => {
@@ -442,7 +498,7 @@ pub(super) mod listings {
     pub(in crate::console_aggregator) enum Listing {
         /// The primary mob's members.
         Primary,
-        /// The implicit delegate mobs' members.
+        /// The members of the mobs nested under the primary mob.
         Delegates,
     }
 

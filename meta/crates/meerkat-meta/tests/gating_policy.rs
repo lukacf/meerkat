@@ -1359,6 +1359,7 @@ fn gating_origin_is_opt_in_and_preserved_across_serialization_and_escalation() {
     }))
     .expect("request");
     let origin = GatingOrigin {
+        mob_id: None,
         identity: "identity:release".to_string(),
         conversation_id: Some("conversation:release".to_string()),
         interaction_id: Some("interaction:123".to_string()),
@@ -1432,6 +1433,7 @@ fn gating_owner_snapshot_restores_origin_and_sequence_without_replaying_decision
         .expect("request")
     };
     let origin = GatingOrigin {
+        mob_id: None,
         identity: "identity:release".to_string(),
         conversation_id: Some("conversation:release".to_string()),
         interaction_id: Some("interaction:release".to_string()),
@@ -1691,6 +1693,7 @@ fn gating_snapshot_validation_is_atomic_and_cannot_overwrite_a_live_owner() {
     corruptions.push(frontier);
     let mut origin = valid.clone();
     origin.pending[0].origin = Some(meerkat_meta::runtime::GatingOrigin {
+        mob_id: None,
         identity: "".to_string(),
         conversation_id: None,
         interaction_id: None,
@@ -1766,6 +1769,7 @@ fn gating_empty_optional_origin_fields_preserve_identity_authority() {
         }))
         .expect("request");
         let expected = GatingOrigin {
+            mob_id: None,
             identity: "hidden-reviewer".to_string(),
             conversation_id: conversation_id
                 .clone()
@@ -1777,6 +1781,7 @@ fn gating_empty_optional_origin_fields_preserve_identity_authority() {
         let evaluated = runtime.evaluate_gating_action_with_origin(
             request,
             Some(GatingOrigin {
+                mob_id: None,
                 identity: expected.identity.clone(),
                 conversation_id,
                 interaction_id,
@@ -1815,6 +1820,7 @@ fn gating_invalid_supplied_identity_cannot_become_unattributed() {
         let evaluated = runtime.evaluate_gating_action_with_origin(
             request,
             Some(GatingOrigin {
+                mob_id: None,
                 identity: identity.to_string(),
                 conversation_id: None,
                 interaction_id: Some("private-turn".to_string()),

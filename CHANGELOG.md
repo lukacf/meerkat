@@ -35,6 +35,74 @@ them.
 
 ## [Unreleased]
 
+### Changed
+
+- `meerkat-mob-mcp`, `meerkat-mob` (the agent `delegate` tool): `delegate`
+  owns its wait, and a call that ends without its helper's result cancels
+  and retires the helper. What a user of an earlier release sees differently:
+  - A `delegate` call that reaches its time limit no longer answers the agent
+    loop's generic `Tool 'delegate' timed out after ...ms` (error `timeout`).
+    It ends by itself a little before that limit (15 seconds, or a quarter
+    of the limit when that is shorter), cancels its helper's run, retires
+    the helper, and answers `execution_failed` with typed data: `kind`
+    `delegate_helper_ended`, `reason` (`max_run_elapsed`, `turn_failed`,
+    `not_started`, `run_lost`), `helper` (`cancelled_and_retired`, `retired`,
+    `already_gone`, `not_seated`, `end_pending`, `mob_not_running`,
+    `retirement_failed`, `unknown`), `mob_id`, `member_id`, `member_ref`,
+    `session_id` and `max_run_secs`. No `ToolExecutionTimedOut` event is emitted for such a
+    call; a host that watched that event for `delegate` sees
+    `ToolExecutionCompleted` with the error instead. The answer does not
+    wait for a helper that cannot be started or ended in time: the call
+    waits for the helper's end three quarters of that margin and then
+    answers `end_pending`, and the engine ends the helper without the call.
+    The deadline counts from the start of the call's dispatch, so the time
+    a call waited before it reached the tool (for a dispatch slot, in a
+    host's checks) is taken off its wait. The steps before the helper's
+    run count against the wait as well. The generic timeout remains for a
+    call that reaches the tool with no wait left, for a call whose implicit
+    mob's creation uses up the wait (no mob exists yet; the creation goes
+    on, and a later `delegate` of the session waits for it instead of
+    starting another), and for a call dispatched under a host's own,
+    shorter cut that the tool is not told of.
+  - By default the call lasts as long as before: it waits what its tool
+    deadline allows (`[tools.tool_timeouts] delegate`, else `[tools]
+    default_timeout`, 10 minutes by default). The new optional argument
+    `max_run_secs` sets a shorter wait; a longer one is clamped and the
+    answer says so (`max_run_limited_by: "call_deadline"`). To let
+    delegations run longer, raise `[tools.tool_timeouts] delegate`: set
+    above the other tool deadlines, it also lets a helper's own slow tool
+    time out first, so that the helper reports it.
+  - A bounded call owns ending its helper even when the call is dropped:
+    when the calling turn is interrupted, or a deadline outside the tool
+    cuts the call, the run cancels and retires its helper. The cancel and the
+    retirement name the exact member the call seated; the caller's other
+    work, another call's helper and a later member under the same id are
+    not touched.
+  - The result and every error of `delegate` name the helper's mob once
+    that mob exists (`mob_id`, and `data.mob_id` with `data.member_id` on
+    errors), so a model can address the helper in `implicit-<session id>`
+    after a call that returned no result. `member_not_found` is unchanged.
+  - Not closed by the engine: a helper whose call died with the host. A
+    restarted host restores it seated and idle (it does not run again); it
+    stays until its owner's session ends or it is retired by hand, and the
+    same call made again is refused with the mob and member id to retire.
+  - Rust: `DelegationExecutionService::execute_within`,
+    `DelegationRunBounds`, `DelegationHelperEnd`, `DelegationHelperEnded`,
+    `DelegationRunFailure`, `DelegationExecutionError::MaxRunElapsed` and
+    `RunLost`, and `ToolDispatchContext::dispatch_started` /
+    `with_dispatch_started` (`meerkat-core`: the agent loop tells each call
+    when its dispatch started) are new, and additive.
+  - Embedders that wrap the agent mob tools in a dispatcher of their own:
+    `delegate`'s catalog entry now says that the tool owns its deadline, so
+    the agent loop's default tool deadline no longer cuts it, and the tool
+    reads the deadline from the plan the loop resolved for the call. A
+    wrapper that forwards the tools' `tool_catalog` must forward
+    `AgentToolDispatcher::dispatch_resolved_with_context` too. One that
+    lowers the call to `dispatch_with_context` hands `delegate` no deadline:
+    a call with no `max_run_secs` then waits 30 minutes instead of the
+    loop's 10. Meta's mob tool wrapper forwards the plan in this release.
+  See [`delegate`: its wait and how it ends](docs/reference/builtin-tools.mdx).
+
 ## [0.9.18] - 2026-11-22
 
 ### Breaking

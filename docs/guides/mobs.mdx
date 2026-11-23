@@ -90,14 +90,21 @@ that should report back.
 rkat run --tools full "Ask one helper to inspect the test failure, then summarize what it found."
 ```
 
-A delegate helper is ephemeral: it is retired after its one task. If the
-call that started it ends first (the tool call's time limit, ten minutes by
-default, or a hard interrupt of the calling turn), the call does not retire
-the helper: it finishes its turn and then stays seated, until its owner's
-session is archived through a surface (for an owner that is a mob member
-retired by its mob: until the host's next start). On a Meta gateway the idle
-sweep retires it once it has been idle for
-`implicit_delegate_idle_retire_secs` (300 seconds by default).
+A delegate helper is ephemeral: it is retired after its one task. The call
+owns its wait: what the tool call's time limit allows (ten minutes by
+default), or a shorter `max_run_secs`. When the wait ends, or the calling
+turn is interrupted, before the helper has answered, the helper's run is
+cancelled and the helper is retired, and the call answers a typed error
+(`delegate_helper_ended`) that names the helper's mob and member id and says
+what became of the helper. A helper stays only when the error says it
+could not be ended (`retirement_failed`, `mob_not_running`) or when its
+call ended with its host: a restarted host restores it seated and idle. It
+then stays until its owner's session is archived (for an owner that is a
+mob member retired by its mob: until the host's next start) or it is
+retired with `mob_retire_member`. On a Meta
+gateway the idle sweep retires it once it has been idle for
+`implicit_delegate_idle_retire_secs` (300 seconds by default). See
+[`delegate`: its wait and how it ends](/reference/builtin-tools#delegate-its-wait-and-how-it-ends).
 
 Unless its `tooling` supplies a profile, a helper runs on the model and
 provider (and self-hosted server) the calling session runs on when the call

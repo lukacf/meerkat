@@ -367,7 +367,8 @@ pub use runtime::{
     ControllingAcceptorConfig, CurrentMobAdmission, DEFAULT_BOUNDED_HELPER_RESULT_BYTES,
     DelegationCancellationHandle, DelegationExecutionError, DelegationExecutionHandle,
     DelegationExecutionOutcome, DelegationExecutionRequest, DelegationExecutionService,
-    DelegationExecutionSource, DelegationMemberOptions, DelegationParentContext,
+    DelegationExecutionSource, DelegationHelperEnd, DelegationHelperEnded, DelegationMemberOptions,
+    DelegationParentContext, DelegationRunBounds, DelegationRunFailure,
     DelegationTerminalizedExecution, DelegationTurnTerminal, DurableBoundedMemberState,
     DurableBoundedWorkRecovery, DurableBoundedWorkState, ExternalPeerBindingSpec, FlowRunHandle,
     FlowRunWaitError, FlowTargetProvisioner, ForkBuildInheritance, ForkChildRun,
@@ -470,8 +471,9 @@ pub use runtime::{
     ForkSupervisorExitForTest, IdentityRecoveryFailStopPoint, MemberStatusDeadlineTestObservation,
     MemberTurnAdmissionTestStage, RestoreTupleFault, arm_identity_recovery_fail_stop_for_test,
     explicit_resume_served_bindings_for_test, fail_stop_next_actor_start_for_test,
-    fault_next_restore_tuple_for_test, member_operator_tool_defs_for_test,
-    member_status_deadline_after_snapshot_wait_for_test,
+    fault_next_restore_tuple_for_test, hold_delegation_limit_for_test,
+    hold_delegation_start_for_test, lose_delegation_run_for_test,
+    member_operator_tool_defs_for_test, member_status_deadline_after_snapshot_wait_for_test,
 };
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 pub use runtime::{HeldSpawn, HeldSpawnSettlement, HeldSpawnStart, abort_all_held};

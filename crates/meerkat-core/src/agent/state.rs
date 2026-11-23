@@ -12271,6 +12271,9 @@ fn dispatch_tool_calls_fenced_boxed<T: AgentToolDispatcher + ?Sized + 'static>(
                 };
                 async move {
                     let start = crate::time_compat::Instant::now();
+                    // The call's own timer starts here: a tool that owns its
+                    // wait counts what the call's deadline leaves from it.
+                    let tool_dispatch_context = tool_dispatch_context.with_dispatch_started(start);
                     let resolution_context =
                         match crate::ToolDeadlineChain::new(vec![core_deadline]) {
                             Ok(deadlines) => crate::ToolExecutionResolutionContext::new(deadlines),

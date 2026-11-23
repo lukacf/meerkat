@@ -7,6 +7,95 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Upgrade
+
+- A change of an agent's instructions that was waiting for a compaction
+  applies at the agent's first run after the upgrade. Nothing stored takes
+  a new form.
+  Before going back, `meta/storage/doctor` counts the sessions concerned
+  (`operator-instruction-entry-after-conversation`; see Added).
+  Going BACK to an earlier gateway with the same state: it
+  reads every agent, and cannot run an agent on a model that takes a
+  system instruction only ahead of the conversation whose instructions
+  changed under this release while it had a conversation, unless a
+  compaction has folded that change into the head of the conversation
+  since. It refuses to resume that agent's conversation, so the agent does
+  not run. The refusal to look for reads "model '<model>' cannot represent
+  the operator-instruction entries already applied in session <id>: an
+  entry row stands after a conversation row, and the target carries System
+  rows only before the first one". (Where a request of such a conversation
+  is reached all the same, it is refused before the provider is called,
+  with "this model requires System rows to form a leading prefix" for an
+  Anthropic model or "System rows must form a leading prefix" for a Gemini
+  model.) Agents on other models, and agents whose instructions did not
+  change under this release, run as before. What to do: upgrade again,
+  which runs the agent
+  as it is; or reset that agent (`meta/reset`), which starts it on a new
+  conversation built from its current instructions and gives the earlier
+  conversation up.
+
+### Added
+
+- `meta/storage/doctor` counts, before a host goes back to an earlier
+  release, the sessions such a release may refuse to resume: the finding
+  `operator-instruction-entry-after-conversation` (Info, on `runtime.sqlite`,
+  only when it holds any) reports the sessions whose stored conversation
+  holds their own operator-instruction entry after a conversation row, with
+  the models their stored metadata names and the count per model
+  (`model not recorded` where it names none, `model unreadable` where it
+  cannot be read as the metadata the session's head commits to), never a
+  session id. A session is counted from its current record: a WholeBlob
+  document the store kept when the session moved to head storage counts
+  only for a session that has no head and whose runtime holds no head
+  authority. Where the rows of a session cannot be read as the session
+  store serves them, the finding says that the sessions could not be
+  counted, without that session's id. An earlier release refuses to resume
+  those whose model takes
+  a system instruction only ahead of the conversation (see Changed and
+  Upgrade); the store records no model capability, so the count cannot tell
+  which. Core's census rule, shared with `rkat storage doctor`.
+
+### Changed
+
+- A changed instruction reaches an agent at its next run on every model
+  that takes a system instruction, on the same conversation, with nothing
+  to compact, reset or respawn. Until now that held only for a model that
+  takes a system instruction after conversation rows. On a model that takes
+  one only ahead of the conversation an agent that had a conversation took
+  the change only once a compaction at the start of a run carried it, which
+  a conversation under its compaction threshold never reaches. Which kind a
+  model is, is its catalog capability
+  `supports_mid_conversation_system_messages`: `false` is the second kind,
+  and so is a model the catalog does not know. No provider name and no list
+  of models decides it; `claude-haiku-4-5` and `gemini-3.5-flash` are of
+  the second kind, for instance.
+  - An update of such an agent's instructions answers
+    `applies_at_next_run`, and its instruction status reads `pending` with
+    `awaiting_run_start`, then `effective` after the next run.
+    `applies_after_compaction` and `leading_prefix_only_lowering` are no
+    longer answered; both stay in their vocabularies, and the SDKs still
+    read them from an earlier gateway.
+  - The agent's conversation is not rewritten: the change is one entry
+    where the run started, and the gateway asks such a model with the entry
+    ahead of the conversation, after the prompt. The first request after a
+    change is as a rule not served from the provider's prompt cache.
+  - A respawn and an archive followed by an unarchive keep the
+    conversation, and the agent's next run after either follows the change.
+  - An update whose agent's model could not be read (no member session
+    service, a failed read) answers `applies_at_next_session` with the
+    reason `lowering_unavailable`, where it answered
+    `applies_after_compaction`: the one answer that promises nothing the
+    agent may not get. `meta/instruction_status` is the authority, and it
+    answers the same way where it reads the agent's conversation and the
+    read does not tell how the model takes an instruction: the slot reads
+    `pending` with `lowering_unavailable`.
+  - Unchanged: an OpenAI model served through the ChatGPT backend takes a
+    change only from a new conversation (`applies_at_next_session`,
+    `lowering_unavailable`), and an open voice channel reads the agent's
+    instructions when it is opened.
+  - The agent tool `identity_update` no longer describes
+    `applies_after_compaction`.
+
 ## [0.9.18] - 2026-11-22
 
 Records that name a member carry the member's mob, so that one host can keep

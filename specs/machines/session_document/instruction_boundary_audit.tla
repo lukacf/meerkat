@@ -13,7 +13,7 @@
 \* interleaved, before and after a mob seats the session as a member's),
 \* and checks the machine's own state. The audit's few variables model only
 \* the run around the session: whether a run is open, whether its first
-\* request was sent, whether the transcript has conversation rows, which
+\* request was sent, which
 \* slots an application revoked, which mob released the target, and the
 \* session's binding fact (its metadata names a mob member binding: set
 \* once, when a mob seats the session, and never cleared).
@@ -41,9 +41,13 @@
 \*     leaves the slots in effect unchanged.
 \*   AuditSessionWriteNeverLowersRevision: a session write never replaces a
 \*     slot's record with a lower or equal revision.
-\*   AuditPrefixOnlyAppliesInLeadingPrefix: an application on a
-\*     leading-prefix-only model happens only while the transcript is a
-\*     leading System prefix, and nothing applies without a lowering.
+\*   AuditNothingAppliesWithoutALowering: nothing applies on a wire that
+\*     carries no entry.
+\*   AuditFreshRunStartLeavesNothingPending: after a fresh run start on a
+\*     lowering that carries an entry nothing is pending, whatever the
+\*     transcript holds: a leading-prefix-only model takes its changes at
+\*     the run start, as a mid-conversation model does, and waits for no
+\*     compaction.
 \*   AuditMobTargetBoundUntilReleased: a mob-owned target changes its owner
 \*     only when its own mob releases it; another mob's record or release
 \*     and a rebind leave it alone.
@@ -70,11 +74,12 @@
 \* target in effect, a target another mob bound after its owning mob
 \* released it, a released mob's instructions revoked at a run start, and a
 \* record that took over a member's session-owned target (an attach).
-\* The runner's --mutants mode seeds twelve defects into a copy of the
+\* The runner's --mutants mode seeds thirteen defects into a copy of the
 \* generated model and requires TLC to refuse each with the invariant it
 \* targets, run as the only invariant: apply on ResumeRun, keep a revoked
 \* slot in effect at an application, apply a mid-run fold from the target,
-\* accept a stale session write, skip the leading-prefix check, accept
+\* accept a stale session write, apply on a wire that carries no entry,
+\* defer a leading-prefix-only model again, accept
 \* another mob's record, let a rebind take a mob-owned target (its
 \* ownership guard dropped), record a session write over the active budget,
 \* keep a released mob's instructions at a run start, keep the target on a
@@ -116,11 +121,11 @@ AuditSnapshots ==
       AuditJoin(AuditActiveSlot("a", 2, [digest |-> "dy", bytes |-> AuditBudget]),
            AuditActiveSlot("b", 1, [digest |-> "dx", bytes |-> 1])) }
 
-VARIABLES in_run, run_start_open, conversed, revoked_applied, released_from, rebound,
+VARIABLES in_run, run_start_open, revoked_applied, released_from, rebound,
           revoked_after_release, member_bound, adopted, audit_breach
 
 audit_vars ==
-    << in_run, run_start_open, conversed, revoked_applied, released_from, rebound,
+    << in_run, run_start_open, revoked_applied, released_from, rebound,
        revoked_after_release, member_bound, adopted, audit_breach >>
 audit_all_vars == << vars, audit_vars >>
 
@@ -184,7 +189,6 @@ AuditInit ==
     /\ Init
     /\ in_run = FALSE
     /\ run_start_open = FALSE
-    /\ conversed = FALSE
     /\ revoked_applied = [s \in AuditSlots |-> FALSE]
     /\ released_from = ""
     /\ rebound = FALSE
@@ -198,7 +202,7 @@ AuditInit ==
 AuditSeed ==
     /\ ~AuditSeeded
     /\ RecoverSessionInstructionState(AuditSession, "Unowned", "", 0, 0)
-    /\ UNCHANGED << in_run, run_start_open, conversed, revoked_applied, released_from, rebound,
+    /\ UNCHANGED << in_run, run_start_open, revoked_applied, released_from, rebound,
                     revoked_after_release, member_bound, adopted >>
     /\ audit_breach' = {}
 
@@ -209,7 +213,7 @@ AuditBind ==
     /\ AuditSeeded
     /\ ~member_bound
     /\ member_bound' = TRUE
-    /\ UNCHANGED << vars, in_run, run_start_open, conversed, revoked_applied, released_from,
+    /\ UNCHANGED << vars, in_run, run_start_open, revoked_applied, released_from,
                     rebound, revoked_after_release, adopted >>
     /\ audit_breach' = {}
 
@@ -228,7 +232,7 @@ AuditWrite(s, r, eff, dig, byt) ==
        \/ SetSessionInstructionUnknownSlot(AuditSession, s, r, eff, dig, byt, member_bound)
        \/ SetSessionInstructionMemberSession(AuditSession, s, r, eff, dig, byt, member_bound)
     /\ revoked_applied' = AuditRevokedNext
-    /\ UNCHANGED << in_run, run_start_open, conversed, released_from, rebound,
+    /\ UNCHANGED << in_run, run_start_open, released_from, rebound,
                     revoked_after_release, member_bound, adopted >>
     /\ audit_breach' =
            (IF AuditEffectiveChanged THEN {"EffectiveChangedOutsideRunStart"} ELSE {})
@@ -255,7 +259,7 @@ AuditRecord(m, g, snap) ==
     /\ revoked_applied' = AuditRevokedNext
     /\ rebound' = (rebound \/ (released_from \notin {"", m} /\ AuditOwnerNext = "Mob" /\ AuditOwnerMobNext = m))
     /\ adopted' = (adopted \/ (AuditOwner = "Session" /\ AuditOwnerNext = "Mob"))
-    /\ UNCHANGED << in_run, run_start_open, conversed, released_from, revoked_after_release,
+    /\ UNCHANGED << in_run, run_start_open, released_from, revoked_after_release,
                     member_bound >>
     /\ audit_breach' =
            (IF AuditEffectiveChanged THEN {"EffectiveChangedOutsideRunStart"} ELSE {})
@@ -270,7 +274,7 @@ AuditRebind(owner, m) ==
        \/ RebindInstructionOwnerUnowned(AuditSession, owner, m, member_bound)
        \/ RebindInstructionOwnerMemberSession(AuditSession, owner, m, member_bound)
     /\ revoked_applied' = AuditRevokedNext
-    /\ UNCHANGED << in_run, run_start_open, conversed, released_from, rebound,
+    /\ UNCHANGED << in_run, run_start_open, released_from, rebound,
                     revoked_after_release, member_bound, adopted >>
     /\ audit_breach' =
            (IF AuditEffectiveChanged THEN {"EffectiveChangedOutsideRunStart"} ELSE {})
@@ -290,7 +294,7 @@ AuditRelease(m) ==
        \/ ReleaseInstructionTargetOwnedBySession(AuditSession, m)
     /\ released_from' = IF AuditOwner = "Mob" /\ AuditOwnerNext = "Unowned" THEN AuditOwnerMob ELSE released_from
     /\ revoked_applied' = AuditRevokedNext
-    /\ UNCHANGED << in_run, run_start_open, conversed, rebound, revoked_after_release,
+    /\ UNCHANGED << in_run, run_start_open, rebound, revoked_after_release,
                     member_bound, adopted >>
     /\ audit_breach' =
            (IF AuditEffectiveChanged THEN {"EffectiveChangedOutsideRunStart"} ELSE {})
@@ -301,13 +305,14 @@ AuditRelease(m) ==
                  THEN {"ReleaseKeptTarget"} ELSE {})
 
 \* A turn starts: the shell resolves the run start before any input of the
-\* run is appended, so the transcript is still a leading System prefix only
-\* before the session's first run.
+\* run is appended. Every lowering that carries an entry takes one, whatever
+\* the transcript holds: the entry is appended at its tail, and the model
+\* request of a leading-prefix-only model places it inside the leading
+\* System prefix.
 AuditRunStart(kind, lowering) ==
     /\ AuditSeeded
     /\ ~in_run
-    /\ LET prefix == ~conversed
-           lowers == lowering = "MidConversation" \/ (lowering = "LeadingPrefixOnly" /\ prefix)
+    /\ LET lowers == lowering # "Unavailable"
            \* An unowned target is empty: a fresh run start that can lower an
            \* entry leaves nothing in effect.
            kept == IF /\ AuditOwner = "Unowned"
@@ -315,30 +320,34 @@ AuditRunStart(kind, lowering) ==
                       /\ lowers
                       /\ \E s \in AuditSlots : AuditActiveIn(AuditEffectiveNext, s)
                    THEN {"ReleasedInstructionsKept"} ELSE {}
-       IN \/ /\ ResolveRunStartInstructionsApply(AuditSession, kind, lowering, prefix)
+           \* A fresh run start on a lowering that carries an entry leaves
+           \* nothing pending.
+           left_pending == IF /\ kind = "FreshRun"
+                              /\ lowers
+                              /\ AuditPendingIn(AuditTargetNext, AuditEffectiveNext)
+                           THEN {"FreshRunStartLeftPending"} ELSE {}
+       IN \/ /\ ResolveRunStartInstructionsApply(AuditSession, kind, lowering)
              /\ audit_breach' =
                     (IF kind # "FreshRun" THEN {"EffectiveChangedOutsideRunStart"} ELSE {})
                     \cup (IF AuditPendingIn(AuditTargetNext, AuditEffectiveNext)
                           THEN {"ApplicationLeftPending"} ELSE {})
-                    \cup (IF \/ lowering = "Unavailable"
-                             \/ (lowering = "LeadingPrefixOnly" /\ ~prefix)
+                    \cup (IF lowering = "Unavailable"
                           THEN {"AppliedWithoutLowering"} ELSE {})
                     \cup (IF AuditEntrySequenceNext > AuditEntrySequence + 1
                           THEN {"SeveralEntriesAtOneRunStart"} ELSE {})
                     \cup (IF AuditMobTargetTaken THEN {"MobTargetTakenWithoutRelease"} ELSE {})
                     \cup kept
-          \/ /\ \/ ResolveRunStartInstructionsNoChange(AuditSession, kind, lowering, prefix)
-                \/ ResolveRunStartInstructionsDeferredLeadingPrefix(AuditSession, kind, lowering, prefix)
-                \/ ResolveRunStartInstructionsDeferredUnavailable(AuditSession, kind, lowering, prefix)
+          \/ /\ \/ ResolveRunStartInstructionsNoChange(AuditSession, kind, lowering)
+                \/ ResolveRunStartInstructionsDeferredUnavailable(AuditSession, kind, lowering)
              /\ audit_breach' =
                     (IF AuditEffectiveChanged THEN {"EffectiveChangedOutsideRunStart"} ELSE {})
                     \cup (IF AuditMobTargetTaken THEN {"MobTargetTakenWithoutRelease"} ELSE {})
                     \cup kept
+                    \cup left_pending
     /\ revoked_applied' = AuditRevokedNext
     /\ revoked_after_release' = (revoked_after_release \/ AuditRevokesAfterRelease)
     /\ in_run' = (kind # "NoRun")
     /\ run_start_open' = (kind = "FreshRun")
-    /\ conversed' = (conversed \/ kind # "NoRun")
     /\ UNCHANGED << released_from, rebound, member_bound, adopted >>
 
 \* A compaction folds the entry rows at a request boundary of the open run;
@@ -363,7 +372,7 @@ AuditFold(lowering) ==
                     \cup (IF AuditMobTargetTaken THEN {"MobTargetTakenWithoutRelease"} ELSE {})
     /\ revoked_applied' = AuditRevokedNext
     /\ revoked_after_release' = (revoked_after_release \/ AuditRevokesAfterRelease)
-    /\ UNCHANGED << in_run, run_start_open, conversed, released_from, rebound, member_bound,
+    /\ UNCHANGED << in_run, run_start_open, released_from, rebound, member_bound,
                     adopted >>
 
 \* The open run sends its first request; a later fold is mid-run.
@@ -371,7 +380,7 @@ AuditFirstRequest ==
     /\ in_run
     /\ run_start_open
     /\ run_start_open' = FALSE
-    /\ UNCHANGED << vars, in_run, conversed, revoked_applied, released_from, rebound,
+    /\ UNCHANGED << vars, in_run, revoked_applied, released_from, rebound,
                     revoked_after_release, member_bound, adopted >>
     /\ audit_breach' = {}
 
@@ -379,7 +388,7 @@ AuditRunEnd ==
     /\ in_run
     /\ in_run' = FALSE
     /\ run_start_open' = FALSE
-    /\ UNCHANGED << vars, conversed, revoked_applied, released_from, rebound,
+    /\ UNCHANGED << vars, revoked_applied, released_from, rebound,
                     revoked_after_release, member_bound, adopted >>
     /\ audit_breach' = {}
 
@@ -411,7 +420,8 @@ AuditAppliedRevokeStaysAbsent ==
     AuditSeeded => \A s \in AuditSlots : revoked_applied[s] => ~AuditActiveIn(AuditEffective, s)
 AuditMidRunFoldKeepsEffective == "MidRunFoldChangedEffective" \notin audit_breach
 AuditSessionWriteNeverLowersRevision == "SessionWriteLoweredRevision" \notin audit_breach
-AuditPrefixOnlyAppliesInLeadingPrefix == "AppliedWithoutLowering" \notin audit_breach
+AuditNothingAppliesWithoutALowering == "AppliedWithoutLowering" \notin audit_breach
+AuditFreshRunStartLeavesNothingPending == "FreshRunStartLeftPending" \notin audit_breach
 AuditMobTargetBoundUntilReleased == "MobTargetTakenWithoutRelease" \notin audit_breach
 AuditReleaseEmptiesTheTarget == "ReleaseKeptTarget" \notin audit_breach
 AuditUnownedRunStartRevokesWhatIsInEffect == "ReleasedInstructionsKept" \notin audit_breach

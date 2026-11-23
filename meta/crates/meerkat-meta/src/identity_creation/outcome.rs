@@ -338,16 +338,22 @@ closed_tokens!(IdentityOutcome {
 pub enum InstructionOutcome {
     /// The change reaches the agent at its next run. A run that starts
     /// within moments of the change may still use the earlier instructions.
+    /// It is the answer for every model that takes a system instruction,
+    /// after conversation rows or only ahead of the conversation.
     AppliesAtNextRun,
-    /// The agent's model takes new instructions only at the head of what
-    /// it reads: the change reaches the agent after its next compaction,
-    /// which a short conversation may never reach. Also the answer when
-    /// how the agent's model takes them could not be read: an agent with a
-    /// conversation is never answered [`Self::AppliesAtNextRun`] without
-    /// that having been read.
+    /// Not answered by this release. A gateway of 0.9.15 answered it for an
+    /// agent whose model takes new instructions only at the head of what it
+    /// reads: there the change waited for a compaction at the start of a
+    /// run. Such an agent now takes the change at its next run
+    /// ([`Self::AppliesAtNextRun`]). The value stays in the closed
+    /// vocabulary for the answers of that gateway.
     AppliesAfterCompaction,
     /// The change does not reach the agent as it runs now, for `reason`: it
-    /// applies when the agent next starts afresh.
+    /// applies when the agent next starts afresh. With the reason
+    /// `lowering_unavailable` it is also the answer when how the agent's
+    /// model takes a system instruction could not be read: an agent with a
+    /// conversation is never answered [`Self::AppliesAtNextRun`] without
+    /// that having been read.
     AppliesAtNextSession {
         /// Why.
         reason: InstructionNextSessionReason,

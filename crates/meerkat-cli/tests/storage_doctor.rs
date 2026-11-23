@@ -741,3 +741,531 @@ fn doctor_reads_every_ancestor_state_root_by_default() {
     assert!(message.contains(&nested_realms.join("team").display().to_string()));
     assert_eq!(output.status.code(), Some(1), "{report:#}");
 }
+
+/// A session of `model` on Anthropic that took an instruction change at a
+/// real fresh run start, lowered as for a model that takes System rows only
+/// ahead of the conversation: behind a conversation row when `conversed`,
+/// else while its transcript was still the leading System rows.
+fn session_after_a_run_start_change(model: &str, conversed: bool) -> Session {
+    use meerkat_core::types::{InstructionKey, InstructionNamespace};
+
+    let mut session = Session::new();
+    session
+        .set_session_metadata(meerkat_core::SessionMetadata {
+            model_fallback: None,
+            schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
+            model: model.to_string(),
+            max_tokens: 8_192,
+            structured_output_retries: 2,
+            provider: meerkat_core::Provider::Anthropic,
+            self_hosted_server_id: None,
+            provider_params: None,
+            tooling: meerkat_core::SessionTooling::default(),
+            keep_alive: false,
+            comms_name: None,
+            peer_meta: None,
+            realm_id: None,
+            instance_id: None,
+            backend: None,
+            config_generation: None,
+            auth_binding: None,
+            mob_member_binding: None,
+        })
+        .unwrap();
+    session.append_system_message("You are a careful assistant.");
+    if conversed {
+        session.push(Message::User(UserMessage::text("hello")));
+    }
+    session
+        .set_session_instruction(meerkat_core::SessionInstructionWrite {
+            slot: meerkat_core::InstructionSlot {
+                namespace: InstructionNamespace::new("app.example").unwrap(),
+                key: InstructionKey::new("tone").unwrap(),
+            },
+            revision: meerkat_core::InstructionRevision::new(1).unwrap(),
+            change: meerkat_core::SessionInstructionChange::Activate {
+                body: "Answer formally.".to_string(),
+                content_sha256: None,
+            },
+        })
+        .unwrap();
+    let outcome = session
+        .apply_run_start_instructions(
+            meerkat_core::InstructionRunStart::FreshRun,
+            meerkat_core::InstructionLowering::LeadingPrefixOnly,
+            None,
+        )
+        .unwrap();
+    assert!(
+        matches!(
+            outcome,
+            meerkat_core::RunStartInstructionOutcome::Applied { .. }
+        ),
+        "the run start applies the change: {outcome:?}"
+    );
+    session.push(Message::User(UserMessage::text("next")));
+    session
+}
+
+/// The count of sessions that hold their own operator-instruction entry
+/// after a conversation row, on a store the session store itself wrote and
+/// through the binary. Two sessions are saved through `SqliteSessionStore`
+/// after a real run start applied an instruction change: one behind a
+/// conversation row, one while its transcript was still the leading System
+/// rows. The doctor counts the first, with the model its metadata names, and
+/// not the second. Info alone, so the doctor exits 0. The plain save of a
+/// session the store does not hold yet writes a whole document; the form a
+/// runtime-backed surface writes is the row below.
+#[tokio::test]
+async fn sessions_the_store_saved_after_a_late_run_start_entry_are_counted() {
+    use meerkat_store::SessionStore;
+
+    let temp = TempDir::new().unwrap();
+    let state_root = temp.path().join("realms");
+    let paths = write_manifest(&state_root, "saved-by-the-store");
+    let late = session_after_a_run_start_change("claude-haiku-4-5", true);
+    let leading = session_after_a_run_start_change("claude-haiku-4-5", false);
+    {
+        let store = meerkat_store::SqliteSessionStore::open(&paths.sessions_sqlite_path).unwrap();
+        store.save(&late).await.unwrap();
+        store.save(&leading).await.unwrap();
+    }
+
+    let output = run_doctor(
+        &temp,
+        &[
+            "--state-root",
+            state_root.to_str().unwrap(),
+            "storage",
+            "doctor",
+            "--json",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "an Info finding never fails the doctor\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report = parse_json(&output);
+    let rows = findings_with_code(&report, "operator-instruction-entry-after-conversation");
+    assert_eq!(rows.len(), 1, "one finding for the database: {report:#}");
+    assert_eq!(rows[0]["severity"], "info");
+    assert_eq!(rows[0]["realm"], "saved-by-the-store");
+    assert_eq!(
+        rows[0]["path"],
+        paths.sessions_sqlite_path.to_str().unwrap()
+    );
+    let message = rows[0]["message"].as_str().unwrap();
+    let expected = format!(
+        "1 session(s) hold their own operator-instruction entry after a conversation row \
+         (anthropic/claude-haiku-4-5: 1): {} (model anthropic/claude-haiku-4-5).",
+        late.id()
+    );
+    assert!(
+        message.starts_with(&expected),
+        "the count, the count per model from the metadata the store wrote, and the session: \
+         {message}"
+    );
+    assert!(
+        !message.contains(&leading.id().to_string()),
+        "an entry applied ahead of the conversation is not counted: {message}"
+    );
+
+    // Human-readable mode: the same line, exit 0.
+    let text = run_doctor(
+        &temp,
+        &[
+            "--state-root",
+            state_root.to_str().unwrap(),
+            "storage",
+            "doctor",
+        ],
+    );
+    assert!(text.status.success());
+    let stdout = String::from_utf8_lossy(&text.stdout);
+    assert!(stdout.contains(&expected), "the line is printed:\n{stdout}");
+}
+
+/// The same count on the stored form every runtime-backed surface writes: a
+/// session written through the store's head path. Its head row is compact:
+/// the row's own metadata map names no model, and the session's metadata
+/// (its model among it) stands out of line in the head's metadata cells. The
+/// doctor counts the session and names its model from there.
+#[tokio::test]
+async fn a_session_written_through_the_head_path_is_counted_with_its_model() {
+    use meerkat_core::session_store::{IncrementalSessionStore, PreparedHeadCanonicalMutation};
+
+    let temp = TempDir::new().unwrap();
+    let state_root = temp.path().join("realms");
+    let paths = write_manifest(&state_root, "written-through-the-head-path");
+    let late = session_after_a_run_start_change("claude-haiku-4-5", true);
+    {
+        let store = meerkat_store::SqliteSessionStore::open(&paths.sessions_sqlite_path).unwrap();
+        let root = PreparedHeadCanonicalMutation::prepare_root(&late).unwrap();
+        store
+            .apply_prepared_head_canonical_mutation(&root)
+            .await
+            .unwrap();
+    }
+    {
+        let conn = Connection::open(&paths.sessions_sqlite_path).unwrap();
+        let inline: String = conn
+            .query_row(
+                "SELECT metadata_json FROM session_heads WHERE session_id = ?1",
+                [late.id().to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            !inline.contains("session_metadata"),
+            "the head row's own map names no model, so the label is read out of line: {inline}"
+        );
+        let cells: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM session_head_metadata_current \
+                 WHERE session_id = ?1 AND metadata_key = 'session_metadata'",
+                [late.id().to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            cells, 1,
+            "the head's current metadata holds the model's key"
+        );
+    }
+
+    let output = run_doctor(
+        &temp,
+        &[
+            "--state-root",
+            state_root.to_str().unwrap(),
+            "storage",
+            "doctor",
+            "--json",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "an Info finding never fails the doctor\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report = parse_json(&output);
+    let rows = findings_with_code(&report, "operator-instruction-entry-after-conversation");
+    assert_eq!(rows.len(), 1, "one finding for the database: {report:#}");
+    assert_eq!(
+        rows[0]["path"],
+        paths.sessions_sqlite_path.to_str().unwrap()
+    );
+    let message = rows[0]["message"].as_str().unwrap();
+    let expected = format!(
+        "1 session(s) hold their own operator-instruction entry after a conversation row \
+         (anthropic/claude-haiku-4-5: 1): {} (model anthropic/claude-haiku-4-5).",
+        late.id()
+    );
+    assert!(
+        message.starts_with(&expected),
+        "the count, and the model read from the head's out-of-line metadata: {message}"
+    );
+}
+
+/// The model the finding names is the one the head holds now. A session is
+/// written through the store's head path on one model; a later write through
+/// the same path moves it to another model, as a change of model on a live
+/// session does, and appends a row. The head then commits to a metadata map
+/// that holds the later value, and the doctor names that model: the head's
+/// current metadata follows every write, and an earlier value of the key
+/// names nothing.
+#[tokio::test]
+async fn the_model_named_is_the_one_the_head_holds_after_a_later_write() {
+    use meerkat_core::session_store::{IncrementalSessionStore, PreparedHeadCanonicalMutation};
+
+    let temp = TempDir::new().unwrap();
+    let state_root = temp.path().join("realms");
+    let paths = write_manifest(&state_root, "written-twice");
+    let mut late = session_after_a_run_start_change("claude-haiku-4-5", true);
+    {
+        let store = meerkat_store::SqliteSessionStore::open(&paths.sessions_sqlite_path).unwrap();
+        let root = PreparedHeadCanonicalMutation::prepare_root(&late).unwrap();
+        let token = store
+            .apply_prepared_head_canonical_mutation(&root)
+            .await
+            .unwrap();
+        root.acknowledge_session(&mut late, &token).unwrap();
+
+        let mut metadata = late
+            .session_metadata()
+            .expect("the session's metadata names its model");
+        metadata.model = "claude-haiku-5-5".to_string();
+        late.set_session_metadata(metadata).unwrap();
+        late.push(Message::User(UserMessage::text(
+            "after the change of model",
+        )));
+        let later =
+            PreparedHeadCanonicalMutation::prepare(&late, Some(root.successor_head().clone()))
+                .unwrap();
+        store
+            .apply_prepared_head_canonical_mutation(&later)
+            .await
+            .unwrap();
+    }
+
+    let output = run_doctor(
+        &temp,
+        &[
+            "--state-root",
+            state_root.to_str().unwrap(),
+            "storage",
+            "doctor",
+            "--json",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "an Info finding never fails the doctor\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report = parse_json(&output);
+    let rows = findings_with_code(&report, "operator-instruction-entry-after-conversation");
+    assert_eq!(rows.len(), 1, "one finding for the database: {report:#}");
+    let message = rows[0]["message"].as_str().unwrap();
+    let expected = format!(
+        "1 session(s) hold their own operator-instruction entry after a conversation row \
+         (anthropic/claude-haiku-5-5: 1): {} (model anthropic/claude-haiku-5-5).",
+        late.id()
+    );
+    assert!(
+        message.starts_with(&expected),
+        "the model the head holds after the later write: {message}"
+    );
+}
+
+/// The count reads a head's live rows as the store serves them. A
+/// same-session rewrite makes the head's strand a linked strand: it holds the
+/// rewrite's replacement rows and what was appended after it, and the rows
+/// before the splice are served by the strand it links to. A session is
+/// written through the store's head path with its own operator-instruction
+/// entry after a conversation row, and a rewrite then replaces its last row
+/// only, so the entry row stands outside the rewrite's splice. The transcript
+/// still holds the late entry: the doctor counts the session, with the model
+/// its head names. The row asserts first that the head's own strand holds
+/// fewer rows than the head counts, so it cannot pass on a strand that holds
+/// every row itself.
+#[tokio::test]
+async fn a_late_entry_outside_the_last_rewrites_splice_is_counted() {
+    use meerkat_core::session_store::{
+        IncrementalSessionStore, PreparedHeadCanonicalMutation,
+        PreparedHeadCanonicalRewriteMutation,
+    };
+    use meerkat_core::{TranscriptRewriteReason, TranscriptRewriteSelection};
+
+    let temp = TempDir::new().unwrap();
+    let state_root = temp.path().join("realms");
+    let paths = write_manifest(&state_root, "rewritten-after-a-late-entry");
+    let mut late = session_after_a_run_start_change("claude-haiku-4-5", true);
+    let rows = late.messages().len();
+    let head = {
+        let store = meerkat_store::SqliteSessionStore::open(&paths.sessions_sqlite_path).unwrap();
+        let root = PreparedHeadCanonicalMutation::prepare_root(&late).unwrap();
+        let token = store
+            .apply_prepared_head_canonical_mutation(&root)
+            .await
+            .unwrap();
+        root.acknowledge_session(&mut late, &token).unwrap();
+        // A generic rewrite of the last row only: the entry row keeps its
+        // place, outside the splice.
+        late.commit_transcript_rewrite(
+            TranscriptRewriteSelection::MessageRange {
+                start: rows - 1,
+                end: rows,
+            },
+            vec![Message::User(UserMessage::text("next, said again"))],
+            TranscriptRewriteReason::new("doctor-census-fixture"),
+            None,
+            None,
+        )
+        .expect("the rewrite commits");
+        let rewrite =
+            PreparedHeadCanonicalRewriteMutation::prepare(&late, root.successor_head().clone())
+                .unwrap();
+        store
+            .apply_prepared_head_canonical_rewrite_mutation(&rewrite)
+            .await
+            .unwrap();
+        rewrite.successor_head().clone()
+    };
+    {
+        let conn = Connection::open(&paths.sessions_sqlite_path).unwrap();
+        let held: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM session_strand_messages \
+                 WHERE session_id = ?1 AND strand = ?2",
+                rusqlite::params![late.id().to_string(), head.strand.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            u64::try_from(held).unwrap() < head.message_count,
+            "the head's own strand holds {held} of the head's {} rows, the others are served \
+             through its link",
+            head.message_count
+        );
+    }
+
+    let output = run_doctor(
+        &temp,
+        &[
+            "--state-root",
+            state_root.to_str().unwrap(),
+            "storage",
+            "doctor",
+            "--json",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "an Info finding never fails the doctor\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report = parse_json(&output);
+    let rows = findings_with_code(&report, "operator-instruction-entry-after-conversation");
+    assert_eq!(
+        rows.len(),
+        1,
+        "the session is counted from the rows its head serves: {report:#}"
+    );
+    let message = rows[0]["message"].as_str().unwrap();
+    let expected = format!(
+        "1 session(s) hold their own operator-instruction entry after a conversation row \
+         (anthropic/claude-haiku-4-5: 1): {} (model anthropic/claude-haiku-4-5).",
+        late.id()
+    );
+    assert!(
+        message.starts_with(&expected),
+        "the count, the model the head names, and the session: {message}"
+    );
+}
+
+/// The same after two rewrites: the head's strand links to a strand that is
+/// itself linked, so the rows before both splices are served two strands
+/// away. Each rewrite replaces the last row only; the session's own entry
+/// row stands outside both splices, on the strand the session was first
+/// written to. The doctor follows both links and counts the session once,
+/// with the model its head names. The row asserts first that the head's
+/// strand holds fewer rows than the head counts and that the strand it links
+/// to is itself a linked strand.
+#[tokio::test]
+async fn a_late_entry_two_rewrites_back_is_counted() {
+    use meerkat_core::session_store::{
+        IncrementalSessionStore, PreparedHeadCanonicalMutation,
+        PreparedHeadCanonicalRewriteMutation,
+    };
+    use meerkat_core::{TranscriptRewriteReason, TranscriptRewriteSelection};
+
+    let temp = TempDir::new().unwrap();
+    let state_root = temp.path().join("realms");
+    let paths = write_manifest(&state_root, "rewritten-twice-after-a-late-entry");
+    let mut late = session_after_a_run_start_change("claude-haiku-4-5", true);
+    let rows = late.messages().len();
+    let head = {
+        let store = meerkat_store::SqliteSessionStore::open(&paths.sessions_sqlite_path).unwrap();
+        let root = PreparedHeadCanonicalMutation::prepare_root(&late).unwrap();
+        let token = store
+            .apply_prepared_head_canonical_mutation(&root)
+            .await
+            .unwrap();
+        root.acknowledge_session(&mut late, &token).unwrap();
+        let mut head = root.successor_head().clone();
+        for said in ["next, said again", "next, said a third time"] {
+            late.commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange {
+                    start: rows - 1,
+                    end: rows,
+                },
+                vec![Message::User(UserMessage::text(said))],
+                TranscriptRewriteReason::new("doctor-census-fixture"),
+                None,
+                None,
+            )
+            .expect("the rewrite commits");
+            let rewrite = PreparedHeadCanonicalRewriteMutation::prepare(&late, head).unwrap();
+            store
+                .apply_prepared_head_canonical_rewrite_mutation(&rewrite)
+                .await
+                .unwrap();
+            rewrite
+                .acknowledge_physical_projection(&mut late, rewrite.successor_head_token())
+                .unwrap();
+            head = rewrite.successor_head().clone();
+        }
+        head
+    };
+    {
+        let conn = Connection::open(&paths.sessions_sqlite_path).unwrap();
+        let held: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM session_strand_messages \
+                 WHERE session_id = ?1 AND strand = ?2",
+                rusqlite::params![late.id().to_string(), head.strand.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            u64::try_from(held).unwrap() < head.message_count,
+            "the head's own strand holds {held} of the head's {} rows, the others are served \
+             through its link",
+            head.message_count
+        );
+        let linked_twice: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM session_strand_links AS first \
+                 JOIN session_strand_links AS second \
+                 ON second.session_id = first.session_id AND second.strand = first.successor \
+                 WHERE first.session_id = ?1 AND first.strand = ?2",
+                rusqlite::params![late.id().to_string(), head.strand.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            linked_twice, 1,
+            "the strand the head's strand links to is itself a linked strand"
+        );
+    }
+
+    let output = run_doctor(
+        &temp,
+        &[
+            "--state-root",
+            state_root.to_str().unwrap(),
+            "storage",
+            "doctor",
+            "--json",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "an Info finding never fails the doctor\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report = parse_json(&output);
+    let rows = findings_with_code(&report, "operator-instruction-entry-after-conversation");
+    assert_eq!(
+        rows.len(),
+        1,
+        "the session is counted from the rows its head serves through both links: {report:#}"
+    );
+    let message = rows[0]["message"].as_str().unwrap();
+    let expected = format!(
+        "1 session(s) hold their own operator-instruction entry after a conversation row \
+         (anthropic/claude-haiku-4-5: 1): {} (model anthropic/claude-haiku-4-5).",
+        late.id()
+    );
+    assert!(
+        message.starts_with(&expected),
+        "the count, the model the head names, and the session: {message}"
+    );
+}

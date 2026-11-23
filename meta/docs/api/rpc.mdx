@@ -2020,16 +2020,15 @@ the change may still use the
 earlier instructions; earlier instructions are never rewritten. The first
 answer of an update that names `set.instructions` says what became of the
 change in the agent's `instructions` member: `{"kind": "applies_at_next_run"}`,
-`{"kind": "applies_after_compaction"}`,
 `{"kind": "applies_at_next_session", "reason": ...}` or
-`{"kind": "unchanged"}` (a retry states none). `applies_after_compaction`
-is a change that waits: the agent's model takes a system instruction only
-ahead of the conversation, the change takes effect at a compaction at the
-start of a run, and a short conversation may never reach one; `meta/reset`
-brings it into effect and gives the agent's conversation up. Whatever the
+`{"kind": "unchanged"}` (a retry states none). `applies_at_next_run` is
+the answer on every model that takes a system instruction, whether after
+conversation rows or only ahead of the conversation. The vocabulary also
+holds `{"kind": "applies_after_compaction"}`, which an earlier gateway
+answered for a model of the second kind and which is not answered any
+more. Whatever the
 kind, `meta/instruction_status` is the authority for whether the change is
-in effect: the agent's slot reads `pending` (with the reason
-`leading_prefix_only_lowering` for such a model) until it is, then
+in effect: the agent's slot reads `pending` until it is, then
 `effective`. The kinds, the reasons and
 the limits are in
 [Changing an agent's instructions](/concepts/roster#changing-an-agent%E2%80%99s-instructions).
@@ -6058,6 +6057,18 @@ each such store or store that could not be read or counted. Its messages
 carry counts
 only; a store's finding has the store's file as its `path`, and that file's
 name carries the mob's id.
+
+Before going back to any earlier release, the doctor also counts the
+sessions such a release may refuse to resume
+(`operator-instruction-entry-after-conversation`, Info, on `runtime.sqlite`,
+only when it holds any): the sessions whose stored conversation holds their
+own operator-instruction entry after a conversation row, with the models
+their stored metadata names and the count per model (`model not recorded`
+where it names none, `model unreadable` where it cannot be read as the
+metadata the session's head commits to), never a session id. An
+earlier release refuses to resume those whose model takes a system
+instruction only ahead of the conversation, and serves the others; the store
+records no model capability, so the count cannot tell which.
 
 Available on the module-only, unified, and console (`POST /console/rpc`,
 read method, `runtime.admin` grant) surfaces. Additive method — no

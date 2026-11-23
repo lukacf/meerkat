@@ -555,12 +555,16 @@ pub struct MemberInstructionEffectiveSlot {
 pub enum MemberInstructionPendingReason {
     /// Recorded; the session's next fresh run start applies it.
     AwaitingRunStart,
-    /// Recorded; the member's model takes System rows only inside the
-    /// leading System prefix, so it applies at a run start whose transcript
-    /// is still that prefix, or at a compaction fold.
+    /// Not reported by this release: a member whose model takes System
+    /// rows only inside the leading System prefix applies a recorded change
+    /// at its next fresh run start and reads [`Self::AwaitingRunStart`].
+    /// Earlier releases reported it for such a member while the change
+    /// waited for a compaction fold at a run start; the value stays for
+    /// their answers.
     LeadingPrefixOnlyLowering,
     /// Recorded; the member's model wire carries no System row an entry can
-    /// take.
+    /// take, or the read of the member's session did not tell how its model
+    /// lowers one.
     LoweringUnavailable,
     /// The member's seat has no session yet.
     SessionUnborn,

@@ -185,6 +185,26 @@ pub const FINDING_HEAD_METADATA_SIDECAR: &str = "head-metadata-sidecar";
 /// `runtime.sqlite3`). A host-store realm keeps its documents in the host's
 /// store, not on disk, so the disk sweep cannot list them.
 pub const FINDING_OPERATOR_INSTRUCTION_ENVELOPE: &str = "operator-instruction-envelope";
+/// Sessions whose stored transcript holds the session's own
+/// operator-instruction entry row after a conversation row. This release
+/// writes such a row also in a session of a model that takes System rows
+/// only ahead of the conversation, where its model request places the row
+/// ahead of the conversation. An earlier release does not place it and
+/// refuses to resume such a session of such a model ("cannot represent the
+/// operator-instruction entries already applied in session"); it serves the
+/// session on a model that takes System rows anywhere. An operator counts
+/// them before a rollback. Informational, with the count, the count per
+/// model over all of them and, for the first fifty sessions by id, the
+/// model its stored metadata names. The store records no
+/// model capability, so the finding cannot tell which of the listed
+/// sessions an earlier release refuses: that is decided by the model's
+/// `supports_mid_conversation_system_messages`. The census covers the realms
+/// whose documents are on disk, as
+/// [`FINDING_OPERATOR_INSTRUCTION_ENVELOPE`] does: a SQLite realm's
+/// head-canonical sessions by the live rows of their head strand and its
+/// head-less documents, and a JSONL realm's WholeBlob documents.
+pub const FINDING_OPERATOR_INSTRUCTION_ENTRY_AFTER_CONVERSATION: &str =
+    "operator-instruction-entry-after-conversation";
 /// Mob journals that hold operator-instruction events (the records a mob
 /// committed and the member targets its members' sessions recorded),
 /// written at mob event schema
@@ -935,6 +955,12 @@ fn diagnose_realm_dir(
                             sweep_dangling_blobs(&tx, realm_dir, &sessions_db, realm, diagnosis);
                             census_storage_footprint(&tx, &sessions_db, realm, diagnosis);
                             census_operator_instruction_envelopes(
+                                &tx,
+                                &sessions_db,
+                                realm,
+                                diagnosis,
+                            );
+                            census_operator_instruction_late_entries(
                                 &tx,
                                 &sessions_db,
                                 realm,
@@ -2260,7 +2286,10 @@ fn census_runtime_store_instruction_envelopes(
         return;
     };
     match conn.unchecked_transaction() {
-        Ok(tx) => census_operator_instruction_envelopes(&tx, db_path, realm, diagnosis),
+        Ok(tx) => {
+            census_operator_instruction_envelopes(&tx, db_path, realm, diagnosis);
+            census_operator_instruction_late_entries(&tx, db_path, realm, diagnosis);
+        }
         Err(err) => {
             diagnosis.findings.push(
                 StorageFinding::new(
@@ -2336,6 +2365,700 @@ fn census_operator_instruction_envelopes(
                  census reads the realms whose documents are on disk (SQLite realms, and JSONL \
                  realms through runtime.sqlite3); host-store realms keep their documents in \
                  the host's store and are not listed",
+                sessions.len()
+            ),
+        )
+        .with_path(db_path.to_path_buf())
+        .with_realm(realm),
+    );
+}
+
+/// The most sessions the finding for an own operator-instruction entry
+/// after a conversation row names.
+const OPERATOR_INSTRUCTION_LATE_ENTRY_REPORT_CAP: usize = 50;
+
+/// What the store records of the model of a session that
+/// [`operator_instruction_entry_after_conversation_sessions`] counts.
+///
+/// One case answers differently by its source: a session metadata value
+/// that names no model. A whole document and a released inline head are
+/// read through a lens that cannot tell such a value from an absent key,
+/// so they answer [`LateEntrySessionModel::NotRecorded`]. A head that holds
+/// its metadata out of line answers [`LateEntrySessionModel::Unreadable`]:
+/// the map it commits to is read whole, and a session metadata value
+/// without a model is a malformed value there. A session's metadata as the
+/// store writes it always names a model, so the case does not arise from
+/// the store's own writes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LateEntrySessionModel {
+    /// `provider/model`, or the model alone, as the session's metadata names
+    /// it.
+    Named(String),
+    /// The session's metadata names no model. In a whole document and in a
+    /// released inline head: no session metadata, or a session metadata
+    /// value without a model. In a head that holds its metadata out of line:
+    /// the map the head commits to holds no session metadata.
+    NotRecorded,
+    /// The head row's own bytes do not parse; or the head holds its metadata
+    /// out of line and the rows found for it are not the map the head
+    /// commits to (in a database without the metadata tables there are
+    /// none), or that map's session metadata value names no model. The
+    /// census does not guess one.
+    Unreadable,
+}
+
+impl LateEntrySessionModel {
+    /// The label a finding prints for it.
+    pub fn label(&self) -> &str {
+        match self {
+            Self::Named(model) => model,
+            Self::NotRecorded => "model not recorded",
+            Self::Unreadable => "model unreadable",
+        }
+    }
+}
+
+/// Metadata lens of a session document or of a head row's own map: the model
+/// its session metadata names.
+#[derive(Deserialize, Default)]
+struct SessionModelMetadataLens {
+    #[serde(default)]
+    session_metadata: Option<SessionModelLens>,
+}
+
+/// The value under the session metadata key.
+#[derive(Deserialize)]
+struct SessionModelLens {
+    #[serde(default)]
+    provider: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+}
+
+impl SessionModelLens {
+    /// `provider/model`, or the model alone, where it names one.
+    fn label(self) -> Option<String> {
+        let model = self.model?;
+        Some(match self.provider {
+            Some(provider) => format!("{provider}/{model}"),
+            None => model,
+        })
+    }
+}
+
+impl SessionModelMetadataLens {
+    /// `provider/model`, or the model alone, where the metadata names one.
+    fn label(self) -> Option<String> {
+        self.session_metadata?.label()
+    }
+}
+
+/// Head lens: the identity of the out-of-line metadata map the head commits
+/// to. A released inline head names none: its row's own map holds its
+/// metadata.
+#[derive(Deserialize)]
+struct HeadMetadataIdentityLens {
+    #[serde(default)]
+    metadata_identity: Option<meerkat_core::SessionHeadMetadataIdentity>,
+}
+
+/// The model a head records.
+///
+/// A head that names no metadata identity is a released inline head: the
+/// model is the one its row's own map names. A head that names one holds
+/// its metadata out of line, and the model is read only from the map the
+/// head commits to: `current_cells` selects, for a session, each key the
+/// physical head holds with its route and value digest and the cell of that
+/// value; each cell is admitted through the core's own check (its bytes are
+/// canonical and are the value its digest names) and must carry its key's
+/// route; and the cells together must rebuild the identity the head names
+/// (`SessionHeadMetadataProjection::from_snapshot`, the check the store's
+/// own cold load makes). Anything else is [`LateEntrySessionModel::Unreadable`].
+fn head_session_model(
+    current_cells: Option<&mut rusqlite::Statement<'_>>,
+    session_id: &str,
+    own_map: &[u8],
+    head_json: &[u8],
+) -> Result<LateEntrySessionModel, rusqlite::Error> {
+    let Ok(head) = serde_json::from_slice::<HeadMetadataIdentityLens>(head_json) else {
+        return Ok(LateEntrySessionModel::Unreadable);
+    };
+    let Some(identity) = head.metadata_identity else {
+        return Ok(serde_json::from_slice::<SessionModelMetadataLens>(own_map)
+            .ok()
+            .and_then(SessionModelMetadataLens::label)
+            .map_or(
+                LateEntrySessionModel::NotRecorded,
+                LateEntrySessionModel::Named,
+            ));
+    };
+    let Some(current_cells) = current_cells else {
+        return Ok(LateEntrySessionModel::Unreadable);
+    };
+    let mut cells = Vec::new();
+    let mut rows = current_cells.query(rusqlite::params![session_id])?;
+    while let Some(row) = rows.next()? {
+        let key: String = row.get(0)?;
+        let held_route: Vec<u8> = row.get(1)?;
+        let digest: String = row.get(2)?;
+        let cell_route: Option<Vec<u8>> = row.get(3)?;
+        let cell_json: Option<JsonColumnBytes> = row.get(4)?;
+        let (Some(cell_route), Some(cell_json)) = (cell_route, cell_json) else {
+            return Ok(LateEntrySessionModel::Unreadable);
+        };
+        let Ok(digest) = meerkat_core::SessionHeadMetadataValueDigest::parse(digest) else {
+            return Ok(LateEntrySessionModel::Unreadable);
+        };
+        let Ok(cell) = meerkat_core::SessionHeadMetadataCell::from_canonical_json(
+            key,
+            meerkat_core::SessionHeadMetadataCellIdentity::new(digest),
+            std::sync::Arc::from(cell_json.into_bytes()),
+        ) else {
+            return Ok(LateEntrySessionModel::Unreadable);
+        };
+        if cell.key_route().as_slice() != held_route.as_slice()
+            || cell.key_route().as_slice() != cell_route.as_slice()
+        {
+            return Ok(LateEntrySessionModel::Unreadable);
+        }
+        cells.push(std::sync::Arc::new(cell));
+    }
+    let Ok(values) = meerkat_core::SessionHeadMetadataProjection::from_snapshot(identity, cells)
+        .and_then(|snapshot| snapshot.materialized_values())
+    else {
+        return Ok(LateEntrySessionModel::Unreadable);
+    };
+    Ok(
+        match values.get(meerkat_core::session::SESSION_METADATA_KEY) {
+            None => LateEntrySessionModel::NotRecorded,
+            Some(value) => serde_json::from_value::<SessionModelLens>(value.clone())
+                .ok()
+                .and_then(SessionModelLens::label)
+                .map_or(
+                    LateEntrySessionModel::Unreadable,
+                    LateEntrySessionModel::Named,
+                ),
+        },
+    )
+}
+
+/// Document lens: its messages and its metadata's model.
+#[derive(Deserialize)]
+struct LateEntryDocumentLens<'a> {
+    #[serde(borrow, default)]
+    messages: Vec<&'a serde_json::value::RawValue>,
+    #[serde(default)]
+    metadata: SessionModelMetadataLens,
+}
+
+/// Walks one session's rows in order and says whether the session's own
+/// operator-instruction entry row stands after a conversation row: the
+/// rule `meerkat_core` judges a session's own entry rows by. A conversation
+/// row is any row that is not a System row; an entry another session wrote
+/// (a fork's copy) is not the session's own. A row that does not decode is
+/// passed over; the blob sweep reports it.
+#[derive(Default)]
+struct LateEntryWalk {
+    conversation_seen: bool,
+    late: bool,
+}
+
+impl LateEntryWalk {
+    fn row(&mut self, session_id: &str, message_json: &[u8]) {
+        let Ok(message) = serde_json::from_slice::<Message>(message_json) else {
+            return;
+        };
+        let Message::System(system) = message else {
+            self.conversation_seen = true;
+            return;
+        };
+        if self.conversation_seen
+            && system
+                .instruction_entry
+                .as_ref()
+                .is_some_and(|entry| entry.origin_session_id().to_string() == session_id)
+        {
+            self.late = true;
+        }
+    }
+}
+
+/// Why [`operator_instruction_entry_after_conversation_sessions`] could not
+/// count a database's sessions.
+#[derive(Debug)]
+pub enum LateEntryCensusError {
+    /// The database could not be read.
+    Sql(rusqlite::Error),
+    /// The live rows of one head-canonical session cannot be read as the
+    /// session store serves them: a strand does not hold a row its head or
+    /// its link names, a link of the session is one the store itself
+    /// refuses, or its links run through more strands than the session
+    /// links. Whether that session holds its own entry after a
+    /// conversation row is then not known, so the census counts nothing for
+    /// the database: it neither leaves the session out silently nor reads
+    /// another record in its place.
+    UnresolvedLiveRows {
+        /// The session whose live rows do not resolve.
+        session_id: String,
+        /// What does not resolve.
+        reason: String,
+    },
+}
+
+impl std::fmt::Display for LateEntryCensusError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Sql(error) => error.fmt(f),
+            Self::UnresolvedLiveRows { session_id, reason } => write!(
+                f,
+                "the live rows of session {session_id} cannot be read as the session store \
+                 serves them ({reason})"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for LateEntryCensusError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Sql(error) => Some(error),
+            Self::UnresolvedLiveRows { .. } => None,
+        }
+    }
+}
+
+impl From<rusqlite::Error> for LateEntryCensusError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Sql(error)
+    }
+}
+
+/// Why a head's live rows do not resolve, before the session is named.
+enum LiveRowsError {
+    Sql(rusqlite::Error),
+    Unresolved(String),
+}
+
+impl From<rusqlite::Error> for LiveRowsError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Sql(error)
+    }
+}
+
+/// One supersession edge of a session's strands, as the session store
+/// persists it: the strand holds its splice span and any rows appended past
+/// the link's length, and every other row of it is a row of `successor`.
+/// `splice` is none for a descriptor the store itself refuses (a negative
+/// number, or spans that are not in order).
+struct StrandLink {
+    successor: String,
+    splice: Option<meerkat_core::session_store::StrandSplice>,
+}
+
+/// The supersession edges of one session, keyed by the strand that links.
+fn session_strand_links(
+    links: &mut rusqlite::Statement<'_>,
+    session_id: &str,
+) -> Result<HashMap<String, StrandLink>, rusqlite::Error> {
+    let mut found = HashMap::new();
+    let mut rows = links.query(rusqlite::params![session_id])?;
+    while let Some(row) = rows.next()? {
+        let strand: String = row.get(0)?;
+        let successor: String = row.get(1)?;
+        let numbers: [i64; 4] = [row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?];
+        let splice = match numbers.map(u64::try_from) {
+            [
+                Ok(strand_len),
+                Ok(splice_start),
+                Ok(splice_end),
+                Ok(successor_end),
+            ] => Some(meerkat_core::session_store::StrandSplice {
+                strand_len,
+                splice_start,
+                splice_end,
+                successor_end,
+            })
+            .filter(meerkat_core::session_store::StrandSplice::is_well_formed),
+            _ => None,
+        };
+        found.insert(strand, StrandLink { successor, splice });
+    }
+    Ok(found)
+}
+
+/// Walks the rows `range` that `strand` itself holds, in order, and refuses
+/// when the strand does not hold every one of them.
+fn walk_own_rows(
+    physical: &mut rusqlite::Statement<'_>,
+    session_id: &str,
+    strand: &str,
+    range: std::ops::Range<u64>,
+    walk: &mut LateEntryWalk,
+) -> Result<(), LiveRowsError> {
+    let missing = |found: u64| {
+        LiveRowsError::Unresolved(format!(
+            "strand {strand} holds {found} of its rows {}..{}",
+            range.start, range.end
+        ))
+    };
+    let (Ok(start), Ok(end)) = (i64::try_from(range.start), i64::try_from(range.end)) else {
+        return Err(missing(0));
+    };
+    let mut found = 0_u64;
+    let mut rows = physical.query(rusqlite::params![session_id, strand, start, end])?;
+    while let Some(row) = rows.next()? {
+        let message_json: JsonColumnBytes = row.get(0)?;
+        walk.row(session_id, &message_json.into_bytes());
+        found += 1;
+    }
+    if found == range.end.saturating_sub(range.start) {
+        Ok(())
+    } else {
+        Err(missing(found))
+    }
+}
+
+/// Walks the live rows `range` of `strand` as the session store serves
+/// them. After a same-session rewrite the head's strand is a linked strand:
+/// it holds only its splice span and the rows appended past the link's
+/// length, and every other row is a row of the strand it links to
+/// (`meerkat_core::session_store::StrandSplice`), so the walk follows the
+/// session's edges for the rows the strand does not hold. A session's own
+/// entry row that stands outside the last rewrite's splice is read there:
+/// from the session's head, never from a kept document. A row a strand
+/// should hold and does not, a link the store itself refuses and a chain of
+/// more hops than the session has links are not passed over: the walk
+/// refuses, and the census then counts nothing for the database and names
+/// the session. A row that is there and does not decode is passed over as
+/// before ([`LateEntryWalk`]).
+fn walk_live_rows(
+    physical: &mut rusqlite::Statement<'_>,
+    session_id: &str,
+    strand: &str,
+    range: std::ops::Range<u64>,
+    links: &HashMap<String, StrandLink>,
+    hops: usize,
+    walk: &mut LateEntryWalk,
+) -> Result<(), LiveRowsError> {
+    let Some(link) = links.get(strand) else {
+        return walk_own_rows(physical, session_id, strand, range, walk);
+    };
+    let Some(splice) = link.splice else {
+        return Err(LiveRowsError::Unresolved(format!(
+            "the link of strand {strand} is not one the store reads"
+        )));
+    };
+    if hops == 0 {
+        return Err(LiveRowsError::Unresolved(format!(
+            "the links from strand {strand} run through more strands than the session links"
+        )));
+    }
+    let linked_end = range.end.min(splice.strand_len);
+    if range.start < linked_end {
+        for segment in splice.segments(range.start..linked_end) {
+            match segment {
+                meerkat_core::session_store::StrandSegment::Retained(span) => {
+                    walk_own_rows(physical, session_id, strand, span, walk)?;
+                }
+                meerkat_core::session_store::StrandSegment::Successor(span) => {
+                    walk_live_rows(
+                        physical,
+                        session_id,
+                        &link.successor,
+                        span,
+                        links,
+                        hops - 1,
+                        walk,
+                    )?;
+                }
+            }
+        }
+    }
+    let tail_start = range.start.max(splice.strand_len);
+    if tail_start < range.end {
+        walk_own_rows(physical, session_id, strand, tail_start..range.end, walk)?;
+    }
+    Ok(())
+}
+
+/// The sessions of one database whose stored transcript holds the session's
+/// own operator-instruction entry row after a conversation row, each with
+/// the model its head or document records ([`LateEntrySessionModel`]; for a
+/// head, the map the head commits to and no other): the
+/// census behind
+/// [`FINDING_OPERATOR_INSTRUCTION_ENTRY_AFTER_CONVERSATION`], over a
+/// connection the caller opened read-only (inside one read transaction, so
+/// the sources below are read from one snapshot). It reads a session
+/// store's head-canonical sessions at the operator-instruction envelope or
+/// later by their live rows as the session store serves them (the head's
+/// strand, through the session's strand links for the rows a rewrite left
+/// on another strand), its head-less documents,
+/// and a runtime store's WholeBlob documents (each session's committed
+/// body, and the candidate body of a run's provisional tail); a source
+/// whose table the database does not hold is skipped. A session is counted
+/// from its current record: a kept document is counted only for a session
+/// that has no current record and no authority row (a session with a head
+/// is counted, and its model read, by its head alone, and a WholeBlob
+/// document of a runtime that holds head-canonical authority is the copy
+/// kept from its activation). A head whose live rows do not resolve is not
+/// left out: the census answers [`LateEntryCensusError::UnresolvedLiveRows`]
+/// for the database and names the session. It only reads.
+pub fn operator_instruction_entry_after_conversation_sessions(
+    conn: &Connection,
+) -> Result<BTreeMap<String, LateEntrySessionModel>, LateEntryCensusError> {
+    let envelope =
+        meerkat_core::generated::session_persistence_version_authority::session_envelope_version_for_document(
+            true,
+        );
+    let mut sessions = BTreeMap::new();
+    let heads = table_exists(conn, "session_heads")?;
+    if heads && table_exists(conn, "session_strand_messages")? {
+        let mut head_rows = conn.prepare(
+            "SELECT session_id, strand, message_count, metadata_json, head_json \
+             FROM session_heads WHERE version >= ?1 ORDER BY session_id",
+        )?;
+        // The keys the physical head holds, each with its route, its value's
+        // digest and the cell of that value (NULL where no cell holds it). A
+        // database from before these tables holds inline heads only.
+        let mut current_cells = if table_exists(conn, "session_head_metadata_current")?
+            && table_exists(conn, "session_head_metadata_cells")?
+        {
+            Some(conn.prepare(
+                "SELECT held.metadata_key, held.key_route, held.exact_value_digest, \
+                 cell.key_route, cell.metadata_json \
+                 FROM session_head_metadata_current AS held \
+                 LEFT JOIN session_head_metadata_cells AS cell \
+                 ON cell.session_id = held.session_id \
+                 AND cell.metadata_key = held.metadata_key \
+                 AND cell.exact_value_digest = held.exact_value_digest \
+                 WHERE held.session_id = ?1 ORDER BY held.metadata_key",
+            )?)
+        } else {
+            None
+        };
+        // The rows a strand itself holds in a span, and the session's strand
+        // links: a head's live rows are read as the session store serves
+        // them, not only where the head's own strand holds them.
+        let mut own_rows = conn.prepare(
+            "SELECT message_json FROM session_strand_messages \
+             WHERE session_id = ?1 AND strand = ?2 AND seq >= ?3 AND seq < ?4 ORDER BY seq",
+        )?;
+        let mut strand_links = if table_exists(conn, "session_strand_links")? {
+            Some(conn.prepare(
+                "SELECT strand, successor, strand_len, splice_start, splice_end, successor_end \
+                 FROM session_strand_links WHERE session_id = ?1",
+            )?)
+        } else {
+            None
+        };
+        let mut rows = head_rows.query(rusqlite::params![i64::from(envelope)])?;
+        while let Some(row) = rows.next()? {
+            let session_id: String = row.get(0)?;
+            let strand: String = row.get(1)?;
+            let message_count: i64 = row.get(2)?;
+            let metadata: JsonColumnBytes = row.get(3)?;
+            let head_json: JsonColumnBytes = row.get(4)?;
+            let links = match strand_links.as_mut() {
+                Some(links) => session_strand_links(links, &session_id)?,
+                None => HashMap::new(),
+            };
+            let mut walk = LateEntryWalk::default();
+            match walk_live_rows(
+                &mut own_rows,
+                &session_id,
+                &strand,
+                0..u64::try_from(message_count).unwrap_or(0),
+                &links,
+                links.len(),
+                &mut walk,
+            ) {
+                Ok(()) => {}
+                Err(LiveRowsError::Sql(error)) => return Err(error.into()),
+                Err(LiveRowsError::Unresolved(reason)) => {
+                    return Err(LateEntryCensusError::UnresolvedLiveRows { session_id, reason });
+                }
+            }
+            if walk.late {
+                let model = head_session_model(
+                    current_cells.as_mut(),
+                    &session_id,
+                    &metadata.into_bytes(),
+                    &head_json.into_bytes(),
+                )?;
+                sessions.insert(session_id, model);
+            }
+        }
+    }
+    // A kept document is counted only for a session that has no current
+    // record and no authority row. After a runtime's activation its WholeBlob
+    // body stays in the file as the copy of the moment of activation: the
+    // session's current record is then its head (which a later compaction
+    // can leave without any late entry), and a runtime that holds
+    // head-canonical authority has only a kept copy even where the head is
+    // gone. So a WholeBlob document is read only for a session without a row
+    // in `session_heads` and without a row in `runtime_session_authority`,
+    // each where the database holds the table: a store not yet converted.
+    let head_authority = table_exists(conn, "runtime_session_authority")?;
+    let current_documents_only = |alias: &str| {
+        let without =
+            |table: &str| format!("{alias}.session_id NOT IN (SELECT session_id FROM {table})");
+        match (heads, head_authority) {
+            (true, true) => format!(
+                " WHERE {} AND {}",
+                without("session_heads"),
+                without("runtime_session_authority")
+            ),
+            (true, false) => format!(" WHERE {}", without("session_heads")),
+            (false, true) => format!(" WHERE {}", without("runtime_session_authority")),
+            (false, false) => String::new(),
+        }
+    };
+    // The whole documents the envelope census reads, without a runtime
+    // store's boundary heads: a head holds no row.
+    let mut documents = Vec::new();
+    if table_exists(conn, "sessions")? {
+        documents.push(
+            if heads {
+                "SELECT session_id, session_json FROM sessions \
+                 WHERE session_id NOT IN (SELECT session_id FROM session_heads) \
+                 ORDER BY session_id"
+            } else {
+                "SELECT session_id, session_json FROM sessions ORDER BY session_id"
+            }
+            .to_string(),
+        );
+    }
+    if table_exists(conn, "runtime_whole_blob_bodies")? {
+        if table_exists(conn, "runtime_whole_blob_authority")? {
+            documents.push(format!(
+                "SELECT authority.session_id, body.session_snapshot \
+                 FROM runtime_whole_blob_authority AS authority \
+                 JOIN runtime_whole_blob_bodies AS body \
+                 ON body.blob_sha256 = authority.blob_sha256{}",
+                current_documents_only("authority")
+            ));
+        }
+        if table_exists(conn, "runtime_whole_blob_provisional_tails")? {
+            documents.push(format!(
+                "SELECT tail.session_id, body.session_snapshot \
+                 FROM runtime_whole_blob_provisional_tails AS tail \
+                 JOIN runtime_whole_blob_bodies AS body \
+                 ON body.blob_sha256 = tail.candidate_blob_sha256{}",
+                current_documents_only("tail")
+            ));
+        }
+    }
+    for sql in documents {
+        let mut statement = conn.prepare(&sql)?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            let session_id: String = row.get(0)?;
+            let document: JsonColumnBytes = row.get(1)?;
+            let document = document.into_bytes();
+            let Ok(lens) = serde_json::from_slice::<LateEntryDocumentLens<'_>>(&document) else {
+                continue;
+            };
+            let mut walk = LateEntryWalk::default();
+            for message in &lens.messages {
+                walk.row(&session_id, message.get().as_bytes());
+            }
+            if walk.late {
+                let model = lens.metadata.label().map_or(
+                    LateEntrySessionModel::NotRecorded,
+                    LateEntrySessionModel::Named,
+                );
+                sessions
+                    .entry(session_id)
+                    .and_modify(|known: &mut LateEntrySessionModel| {
+                        if !matches!(known, LateEntrySessionModel::Named(_)) {
+                            known.clone_from(&model);
+                        }
+                    })
+                    .or_insert(model);
+            }
+        }
+    }
+    Ok(sessions)
+}
+
+/// One Info finding counting the sessions of this database that hold their
+/// own operator-instruction entry after a conversation row.
+fn census_operator_instruction_late_entries(
+    conn: &Connection,
+    db_path: &Path,
+    realm: &str,
+    diagnosis: &mut StorageDiagnosis,
+) {
+    let sessions = match operator_instruction_entry_after_conversation_sessions(conn) {
+        Ok(sessions) => sessions,
+        Err(error) => {
+            diagnosis.findings.push(
+                StorageFinding::new(
+                    FindingSeverity::Warning,
+                    FINDING_STORAGE_CENSUS_UNMEASURED,
+                    format!(
+                        "could not count the sessions that hold their own operator-instruction \
+                         entry after a conversation row: {error}"
+                    ),
+                )
+                .with_path(db_path.to_path_buf())
+                .with_realm(realm),
+            );
+            return;
+        }
+    };
+    if sessions.is_empty() {
+        return;
+    }
+    let listed = sessions
+        .iter()
+        .take(OPERATOR_INSTRUCTION_LATE_ENTRY_REPORT_CAP)
+        .map(|(session_id, model)| match model {
+            LateEntrySessionModel::Named(model) => format!("{session_id} (model {model})"),
+            unnamed => format!("{session_id} ({})", unnamed.label()),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let overflow = sessions
+        .len()
+        .saturating_sub(OPERATOR_INSTRUCTION_LATE_ENTRY_REPORT_CAP);
+    let overflow_note = if overflow > 0 {
+        format!(" and {overflow} more")
+    } else {
+        String::new()
+    };
+    // The count per model over every session, not only the listed ones: the
+    // list is capped and ordered by session id, so its models alone could
+    // leave out a model that only later sessions run on.
+    let mut by_model = BTreeMap::<&str, usize>::new();
+    for model in sessions.values() {
+        *by_model.entry(model.label()).or_insert(0) += 1;
+    }
+    let by_model = by_model
+        .iter()
+        .map(|(model, count)| format!("{model}: {count}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    diagnosis.findings.push(
+        StorageFinding::new(
+            FindingSeverity::Info,
+            FINDING_OPERATOR_INSTRUCTION_ENTRY_AFTER_CONVERSATION,
+            format!(
+                "{} session(s) hold their own operator-instruction entry after a conversation \
+                 row ({by_model}): {listed}{overflow_note}. An earlier release, one that does \
+                 not place such \
+                 an entry ahead of the conversation in the model request, refuses to resume \
+                 such a session when its model takes System rows only ahead of the conversation \
+                 (the model's capability `supports_mid_conversation_system_messages` is false, \
+                 or the catalog does not know the model), with \"cannot represent the \
+                 operator-instruction entries already applied in session\"; it serves the \
+                 session on a model that takes System rows anywhere. The store records no model \
+                 capability, so this census cannot tell which of the sessions such a \
+                 release refuses: the counts per model cover every session it counts, listed \
+                 or not, so look at each model before a rollback. The census reads \
+                 the realms whose documents are on disk (SQLite realms, and JSONL realms \
+                 through runtime.sqlite3); host-store realms keep their documents in the \
+                 host's store and are not counted",
                 sessions.len()
             ),
         )
@@ -5259,6 +5982,1445 @@ mod tests {
         assert!(
             !listed.message.contains("carry operator instructions"),
             "a session at the envelope need not carry operator instructions: {}",
+            listed.message
+        );
+    }
+
+    /// A stored operator-instruction entry row written in session `origin`.
+    fn instruction_entry_row(origin: &SessionId) -> serde_json::Value {
+        serde_json::json!({
+            "role": "system",
+            "content": "[meerkat-operator-instructions-v1]",
+            "instruction_entry": {
+                "render_version": 1,
+                "origin_session_id": origin.to_string(),
+                "entry_sequence": 1,
+                "kind": "delta",
+                "target_generation": 1,
+            },
+        })
+    }
+
+    fn prompt_row() -> serde_json::Value {
+        serde_json::json!({"role": "system", "content": "You are a careful assistant."})
+    }
+
+    fn question_row() -> serde_json::Value {
+        serde_json::json!({"role": "user", "content": "hello"})
+    }
+
+    /// The metadata a document or a head row records for a session of `model`.
+    fn metadata_naming(provider: &str, model: &str) -> serde_json::Value {
+        serde_json::json!({"session_metadata": {"provider": provider, "model": model}})
+    }
+
+    /// Before a rollback an operator needs the sessions an earlier release
+    /// may refuse to resume: the doctor counts the sessions whose stored
+    /// transcript holds the session's OWN operator-instruction entry row
+    /// after a conversation row, a head-canonical session by the live rows
+    /// of its head strand and a head-less document by its messages. It names
+    /// each with the model its stored metadata names, and says that
+    /// the store cannot tell which of them such a release refuses. Not
+    /// counted: an entry that stands ahead of the conversation, an entry
+    /// another session wrote (a fork's copy), and a late entry on a strand
+    /// row past the head's live rows.
+    #[tokio::test]
+    async fn sessions_with_their_own_instruction_entry_after_a_conversation_row_are_counted() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("realms");
+        let realm_dir = write_manifest(&root, "late-entries", "sqlite");
+        let db_path = realm_dir.join("sessions.sqlite3");
+        let late_id = Session::new().id().clone();
+        let unnamed_late_id = Session::new().id().clone();
+        let leading_id = Session::new().id().clone();
+        let copied_id = Session::new().id().clone();
+        let retained_id = Session::new().id().clone();
+        let headless_id = Session::new().id().clone();
+        let other_id = Session::new().id().clone();
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(SESSIONS_DDL).unwrap();
+            conn.execute_batch(SESSION_HEADS_DDL).unwrap();
+            conn.execute_batch(SESSION_STRAND_MESSAGES_DDL).unwrap();
+            let head = |id: &SessionId, live_rows: usize, metadata: serde_json::Value| {
+                conn.execute(
+                    "INSERT INTO session_heads (session_id, version, strand, head_revision, \
+                     message_count, rewrite_count, total_tokens, created_at_ms, updated_at_ms, \
+                     metadata_json, head_json, cas_token) \
+                     VALUES (?1, 5, 'root', 'digest', ?2, 0, 0, 0, 0, ?3, '{}', 'cas')",
+                    rusqlite::params![id.to_string(), live_rows as i64, metadata.to_string()],
+                )
+                .unwrap();
+            };
+            let strand = |id: &SessionId, rows: Vec<serde_json::Value>| {
+                for (seq, row) in rows.into_iter().enumerate() {
+                    conn.execute(
+                        "INSERT INTO session_strand_messages (session_id, strand, seq, \
+                         message_json, created_at_ms) VALUES (?1, 'root', ?2, ?3, 0)",
+                        rusqlite::params![id.to_string(), seq as i64, row.to_string().into_bytes()],
+                    )
+                    .unwrap();
+                }
+            };
+            // Its own entry after a conversation row; the head names a model.
+            head(&late_id, 3, metadata_naming("gemini", "gemini-3.5-flash"));
+            strand(
+                &late_id,
+                vec![
+                    prompt_row(),
+                    question_row(),
+                    instruction_entry_row(&late_id),
+                ],
+            );
+            // The same, and the head records no model.
+            head(&unnamed_late_id, 3, serde_json::json!({}));
+            strand(
+                &unnamed_late_id,
+                vec![
+                    prompt_row(),
+                    question_row(),
+                    instruction_entry_row(&unnamed_late_id),
+                ],
+            );
+            // Its own entry ahead of the conversation.
+            head(
+                &leading_id,
+                3,
+                metadata_naming("gemini", "gemini-3.5-flash"),
+            );
+            strand(
+                &leading_id,
+                vec![
+                    prompt_row(),
+                    instruction_entry_row(&leading_id),
+                    question_row(),
+                ],
+            );
+            // An entry another session wrote, after a conversation row.
+            head(&copied_id, 3, metadata_naming("gemini", "gemini-3.5-flash"));
+            strand(
+                &copied_id,
+                vec![
+                    prompt_row(),
+                    question_row(),
+                    instruction_entry_row(&other_id),
+                ],
+            );
+            // Its own late entry on a strand row past the head's live rows.
+            head(
+                &retained_id,
+                2,
+                metadata_naming("gemini", "gemini-3.5-flash"),
+            );
+            strand(
+                &retained_id,
+                vec![
+                    prompt_row(),
+                    question_row(),
+                    instruction_entry_row(&retained_id),
+                ],
+            );
+            // A head-less document with its own late entry.
+            let document = serde_json::json!({
+                "version": 5,
+                "messages": [prompt_row(), question_row(), instruction_entry_row(&headless_id)],
+                "metadata": metadata_naming("anthropic", "claude-haiku-4-5"),
+            });
+            conn.execute(
+                "INSERT INTO sessions (session_id, created_at_ms, updated_at_ms, message_count, \
+                 total_tokens, metadata_json, session_json) VALUES (?1, 0, 0, 3, 0, '{}', ?2)",
+                rusqlite::params![headless_id.to_string(), document.to_string().into_bytes()],
+            )
+            .unwrap();
+        }
+
+        let diagnosis = diagnose_disk_roots(&scope(&[&root])).await;
+
+        let listed = finding(
+            &diagnosis,
+            FINDING_OPERATOR_INSTRUCTION_ENTRY_AFTER_CONVERSATION,
+        )
+        .expect("the finding for an own entry after a conversation row");
+        assert_eq!(listed.severity, FindingSeverity::Info);
+        assert_eq!(listed.realm.as_deref(), Some("late-entries"));
+        assert_eq!(listed.path.as_deref(), Some(db_path.as_path()));
+        assert!(
+            listed.message.contains("3 session(s)"),
+            "{}",
+            listed.message
+        );
+        for named in [
+            format!("{late_id} (model gemini/gemini-3.5-flash)"),
+            format!("{unnamed_late_id} (model not recorded)"),
+            format!("{headless_id} (model anthropic/claude-haiku-4-5)"),
+        ] {
+            assert!(
+                listed.message.contains(&named),
+                "the finding names {named:?}: {}",
+                listed.message
+            );
+        }
+        for (id, why) in [
+            (&leading_id, "an entry ahead of the conversation"),
+            (&copied_id, "an entry another session wrote"),
+            (&retained_id, "a row past the head's live rows"),
+        ] {
+            assert!(
+                !listed.message.contains(&id.to_string()),
+                "{why} is not counted: {}",
+                listed.message
+            );
+        }
+        for said in [
+            "cannot represent the operator-instruction entries already applied in session",
+            "supports_mid_conversation_system_messages",
+            "cannot tell",
+        ] {
+            assert!(
+                listed.message.contains(said),
+                "the finding says {said:?}: {}",
+                listed.message
+            );
+        }
+    }
+
+    /// A current head keeps its row's own metadata map empty and commits to
+    /// a metadata map that stands out of line: the head names the map's
+    /// identity, `session_head_metadata_current` names, per key, the value
+    /// the physical head holds, and `session_head_metadata_cells` holds the
+    /// values. Every session a runtime-backed surface writes has this form,
+    /// so the finding reads the model there, and only from cells that are
+    /// the map the head commits to: each cell must be the value its digest
+    /// and its key's route name, and together they must give the identity
+    /// the head names. The heads and cells here are the core's own, written
+    /// into tables built by hand. The head whose cells name a model is
+    /// listed with it; a head whose map holds no session metadata records no
+    /// model; and a head is listed as unreadable when the cell of the model's
+    /// key is missing, when its bytes are not the value its digest names,
+    /// when its current row carries another route, or when its current row
+    /// names another well-formed value than the one the head commits to. The
+    /// finding does not guess, and the count and the sessions stay whole.
+    #[tokio::test]
+    async fn a_current_heads_model_is_read_from_the_metadata_the_head_commits_to() {
+        use meerkat_core::session_store::{PreparedHeadCanonicalMutation, SessionHead};
+
+        const METADATA_CELLS_DDL: &str = "CREATE TABLE session_head_metadata_cells (
+            session_id TEXT NOT NULL,
+            metadata_key TEXT NOT NULL,
+            key_route BLOB NOT NULL CHECK (length(key_route) = 32),
+            exact_value_digest TEXT NOT NULL,
+            metadata_json BLOB NOT NULL,
+            created_at_ms INTEGER NOT NULL,
+            PRIMARY KEY (session_id, metadata_key, exact_value_digest)
+        )";
+        const METADATA_CURRENT_DDL: &str = "CREATE TABLE session_head_metadata_current (
+            session_id TEXT NOT NULL,
+            metadata_key TEXT NOT NULL,
+            key_route BLOB NOT NULL CHECK (length(key_route) = 32),
+            exact_value_digest TEXT NOT NULL,
+            PRIMARY KEY (session_id, metadata_key)
+        )";
+        const KEY: &str = meerkat_core::session::SESSION_METADATA_KEY;
+
+        // A root head of the core's own making, for a session on `model`
+        // (none: a session whose metadata names no model), with its cells:
+        // key, route, digest and canonical bytes of each.
+        type Cell = (String, Vec<u8>, String, Vec<u8>);
+        let head_of = |model: Option<&str>| -> (SessionHead, Vec<Cell>) {
+            let mut session = Session::new();
+            if let Some(model) = model {
+                session
+                    .set_session_metadata(meerkat_core::SessionMetadata {
+                        model_fallback: None,
+                        schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
+                        model: model.to_string(),
+                        max_tokens: 8_192,
+                        structured_output_retries: 2,
+                        provider: meerkat_core::Provider::Anthropic,
+                        self_hosted_server_id: None,
+                        provider_params: None,
+                        tooling: meerkat_core::SessionTooling::default(),
+                        keep_alive: false,
+                        comms_name: None,
+                        peer_meta: None,
+                        realm_id: None,
+                        instance_id: None,
+                        backend: None,
+                        config_generation: None,
+                        auth_binding: None,
+                        mob_member_binding: None,
+                    })
+                    .unwrap();
+            }
+            let root = PreparedHeadCanonicalMutation::prepare_root(&session).unwrap();
+            let cells = root
+                .metadata_projection()
+                .mutations()
+                .iter()
+                .filter_map(|mutation| mutation.successor())
+                .map(|cell| {
+                    (
+                        cell.key().to_string(),
+                        cell.key_route().to_vec(),
+                        cell.identity().exact_value_digest().as_str().to_string(),
+                        cell.canonical_json().to_vec(),
+                    )
+                })
+                .collect();
+            (root.successor_head().clone(), cells)
+        };
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("realms");
+        let realm_dir = write_manifest(&root, "current-heads", "sqlite");
+        let db_path = realm_dir.join("sessions.sqlite3");
+        let (named, named_cells) = head_of(Some("claude-haiku-4-5"));
+        let (unnamed, unnamed_cells) = head_of(None);
+        let (missing, missing_cells) = head_of(Some("claude-haiku-4-5"));
+        let (altered, altered_cells) = head_of(Some("claude-haiku-4-5"));
+        let (rerouted, rerouted_cells) = head_of(Some("claude-haiku-4-5"));
+        let (swapped, swapped_cells) = head_of(Some("claude-haiku-4-5"));
+        // Another model's value of the key: well formed, and no part of the
+        // maps the heads above commit to.
+        let (_, other_cells) = head_of(Some("claude-haiku-5-5"));
+        let (_, other_route, other_digest, other_json) = other_cells
+            .iter()
+            .find(|(key, ..)| key == KEY)
+            .cloned()
+            .expect("a session's metadata is carried in a cell");
+        assert!(
+            named.metadata_identity.is_some() && !named.metadata.contains_key(KEY),
+            "a current head commits to an out-of-line map and its own map names no model"
+        );
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(SESSIONS_DDL).unwrap();
+            conn.execute_batch(SESSION_HEADS_DDL).unwrap();
+            conn.execute_batch(SESSION_STRAND_MESSAGES_DDL).unwrap();
+            conn.execute_batch(METADATA_CELLS_DDL).unwrap();
+            conn.execute_batch(METADATA_CURRENT_DDL).unwrap();
+            for (head, cells) in [
+                (&named, &named_cells),
+                (&unnamed, &unnamed_cells),
+                (&missing, &missing_cells),
+                (&altered, &altered_cells),
+                (&rerouted, &rerouted_cells),
+                (&swapped, &swapped_cells),
+            ] {
+                let id = head.id.to_string();
+                // The head's own map and bytes as the core made them, in a row
+                // at the operator-instruction envelope (as the rows above),
+                // over three live rows: the session's own entry after a
+                // conversation row.
+                conn.execute(
+                    "INSERT INTO session_heads (session_id, version, strand, head_revision, \
+                     message_count, rewrite_count, total_tokens, created_at_ms, updated_at_ms, \
+                     metadata_json, head_json, cas_token) \
+                     VALUES (?1, 5, 'root', 'digest', 3, 0, 0, 0, 0, ?2, ?3, 'cas')",
+                    rusqlite::params![
+                        id,
+                        serde_json::to_string(&head.metadata).unwrap(),
+                        serde_json::to_vec(head).unwrap(),
+                    ],
+                )
+                .unwrap();
+                for (seq, row) in [
+                    prompt_row(),
+                    question_row(),
+                    instruction_entry_row(&head.id),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    conn.execute(
+                        "INSERT INTO session_strand_messages (session_id, strand, seq, \
+                         message_json, created_at_ms) VALUES (?1, 'root', ?2, ?3, 0)",
+                        rusqlite::params![id, seq as i64, row.to_string().into_bytes()],
+                    )
+                    .unwrap();
+                }
+                for (key, route, digest, json) in cells {
+                    conn.execute(
+                        "INSERT INTO session_head_metadata_cells (session_id, metadata_key, \
+                         key_route, exact_value_digest, metadata_json, created_at_ms) \
+                         VALUES (?1, ?2, ?3, ?4, ?5, 0)",
+                        rusqlite::params![id, key, route, digest, json],
+                    )
+                    .unwrap();
+                    conn.execute(
+                        "INSERT INTO session_head_metadata_current (session_id, metadata_key, \
+                         key_route, exact_value_digest) VALUES (?1, ?2, ?3, ?4)",
+                        rusqlite::params![id, key, route, digest],
+                    )
+                    .unwrap();
+                }
+            }
+            // The cell of the model's key is gone.
+            let changed = conn
+                .execute(
+                    "DELETE FROM session_head_metadata_cells \
+                     WHERE session_id = ?1 AND metadata_key = ?2",
+                    rusqlite::params![missing.id.to_string(), KEY],
+                )
+                .unwrap();
+            assert_eq!(changed, 1);
+            // The cell's bytes are another value than its digest names.
+            let changed = conn
+                .execute(
+                    "UPDATE session_head_metadata_cells SET metadata_json = ?3 \
+                     WHERE session_id = ?1 AND metadata_key = ?2",
+                    rusqlite::params![altered.id.to_string(), KEY, other_json],
+                )
+                .unwrap();
+            assert_eq!(changed, 1);
+            // The current row of the key carries another route than the key's.
+            let changed = conn
+                .execute(
+                    "UPDATE session_head_metadata_current SET key_route = zeroblob(32) \
+                     WHERE session_id = ?1 AND metadata_key = ?2",
+                    rusqlite::params![rerouted.id.to_string(), KEY],
+                )
+                .unwrap();
+            assert_eq!(changed, 1);
+            // The current row of the key names another well-formed value, whose
+            // cell stands beside the one the head commits to.
+            conn.execute(
+                "INSERT INTO session_head_metadata_cells (session_id, metadata_key, \
+                 key_route, exact_value_digest, metadata_json, created_at_ms) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, 0)",
+                rusqlite::params![
+                    swapped.id.to_string(),
+                    KEY,
+                    other_route,
+                    other_digest,
+                    other_json
+                ],
+            )
+            .unwrap();
+            let changed = conn
+                .execute(
+                    "UPDATE session_head_metadata_current SET exact_value_digest = ?3 \
+                     WHERE session_id = ?1 AND metadata_key = ?2",
+                    rusqlite::params![swapped.id.to_string(), KEY, other_digest],
+                )
+                .unwrap();
+            assert_eq!(changed, 1);
+        }
+
+        let diagnosis = diagnose_disk_roots(&scope(&[&root])).await;
+
+        let listed = finding(
+            &diagnosis,
+            FINDING_OPERATOR_INSTRUCTION_ENTRY_AFTER_CONVERSATION,
+        )
+        .expect("the finding for an own entry after a conversation row");
+        assert!(
+            listed.message.contains(
+                "6 session(s) hold their own operator-instruction entry after a conversation \
+                 row (anthropic/claude-haiku-4-5: 1, model not recorded: 1, model unreadable: 4): "
+            ),
+            "the count, and the count per model read from the maps the heads commit to: {}",
+            listed.message
+        );
+        for named in [
+            format!("{} (model anthropic/claude-haiku-4-5)", named.id),
+            format!("{} (model not recorded)", unnamed.id),
+            format!("{} (model unreadable)", missing.id),
+            format!("{} (model unreadable)", altered.id),
+            format!("{} (model unreadable)", rerouted.id),
+            format!("{} (model unreadable)", swapped.id),
+        ] {
+            assert!(
+                listed.message.contains(&named),
+                "the finding names {named:?}: {}",
+                listed.message
+            );
+        }
+        assert!(
+            !listed.message.contains("claude-haiku-5-5"),
+            "a value the head does not commit to names no model: {}",
+            listed.message
+        );
+    }
+
+    /// A head row at the operator-instruction envelope, with `own_map` as its
+    /// row's own metadata map and `head_json` as its bytes, over three live
+    /// rows on the root strand: the session's own operator-instruction entry
+    /// after a conversation row.
+    fn late_entry_head(conn: &Connection, id: &SessionId, own_map: &str, head_json: &[u8]) {
+        conn.execute(
+            "INSERT INTO session_heads (session_id, version, strand, head_revision, \
+             message_count, rewrite_count, total_tokens, created_at_ms, updated_at_ms, \
+             metadata_json, head_json, cas_token) \
+             VALUES (?1, 5, 'root', 'digest', 3, 0, 0, 0, 0, ?2, ?3, 'cas')",
+            rusqlite::params![id.to_string(), own_map, head_json],
+        )
+        .unwrap();
+        for (seq, row) in [prompt_row(), question_row(), instruction_entry_row(id)]
+            .into_iter()
+            .enumerate()
+        {
+            conn.execute(
+                "INSERT INTO session_strand_messages (session_id, strand, seq, \
+                 message_json, created_at_ms) VALUES (?1, 'root', ?2, ?3, 0)",
+                rusqlite::params![id.to_string(), seq as i64, row.to_string().into_bytes()],
+            )
+            .unwrap();
+        }
+    }
+
+    /// A session whose metadata names `model` on Anthropic, as a surface
+    /// writes it.
+    fn session_on(model: &str) -> Session {
+        let mut session = Session::new();
+        session
+            .set_session_metadata(meerkat_core::SessionMetadata {
+                model_fallback: None,
+                schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
+                model: model.to_string(),
+                max_tokens: 8_192,
+                structured_output_retries: 2,
+                provider: meerkat_core::Provider::Anthropic,
+                self_hosted_server_id: None,
+                provider_params: None,
+                tooling: meerkat_core::SessionTooling::default(),
+                keep_alive: false,
+                comms_name: None,
+                peer_meta: None,
+                realm_id: None,
+                instance_id: None,
+                backend: None,
+                config_generation: None,
+                auth_binding: None,
+                mob_member_binding: None,
+            })
+            .unwrap();
+        session
+    }
+
+    /// The finding of a store whose only counted session is `id`, listed as
+    /// unreadable: the count, the count per model and the session, and no
+    /// word of `model`.
+    fn assert_listed_alone_as_unreadable(
+        diagnosis: &StorageDiagnosis,
+        id: &SessionId,
+        model: &str,
+    ) {
+        let listed = finding(
+            diagnosis,
+            FINDING_OPERATOR_INSTRUCTION_ENTRY_AFTER_CONVERSATION,
+        )
+        .expect("the finding for an own entry after a conversation row");
+        assert!(
+            listed.message.contains(
+                "1 session(s) hold their own operator-instruction entry after a conversation \
+                 row (model unreadable: 1): "
+            ),
+            "the count, and the count per model: {}",
+            listed.message
+        );
+        assert!(
+            listed.message.contains(&format!("{id} (model unreadable)")),
+            "the finding lists the session as unreadable: {}",
+            listed.message
+        );
+        assert!(
+            !listed.message.contains(model),
+            "the finding does not guess a model: {}",
+            listed.message
+        );
+    }
+
+    /// A head row whose own bytes do not parse says nothing about where its
+    /// metadata stands, so the census does not read the row's own map
+    /// either: the session is counted and listed as unreadable, although
+    /// the row's own map names a model.
+    #[tokio::test]
+    async fn a_head_row_that_does_not_parse_is_listed_as_unreadable() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("realms");
+        let realm_dir = write_manifest(&root, "unparsed-head", "sqlite");
+        let db_path = realm_dir.join("sessions.sqlite3");
+        let id = Session::new().id().clone();
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(SESSIONS_DDL).unwrap();
+            conn.execute_batch(SESSION_HEADS_DDL).unwrap();
+            conn.execute_batch(SESSION_STRAND_MESSAGES_DDL).unwrap();
+            late_entry_head(
+                &conn,
+                &id,
+                &metadata_naming("gemini", "gemini-3.5-flash").to_string(),
+                b"not a head",
+            );
+        }
+
+        let diagnosis = diagnose_disk_roots(&scope(&[&root])).await;
+
+        assert_listed_alone_as_unreadable(&diagnosis, &id, "gemini-3.5-flash");
+    }
+
+    /// A head that commits to an out-of-line metadata map, in a database
+    /// that holds neither of the two metadata tables: there are no rows to
+    /// read the map from, so the session is counted and listed as
+    /// unreadable. The head is the core's own.
+    #[tokio::test]
+    async fn a_current_head_in_a_database_without_the_metadata_tables_is_listed_as_unreadable() {
+        use meerkat_core::session_store::PreparedHeadCanonicalMutation;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("realms");
+        let realm_dir = write_manifest(&root, "current-head-without-tables", "sqlite");
+        let db_path = realm_dir.join("sessions.sqlite3");
+        let prepared =
+            PreparedHeadCanonicalMutation::prepare_root(&session_on("claude-haiku-4-5")).unwrap();
+        let head = prepared.successor_head().clone();
+        assert!(
+            head.metadata_identity.is_some()
+                && !head
+                    .metadata
+                    .contains_key(meerkat_core::session::SESSION_METADATA_KEY),
+            "a current head commits to an out-of-line map and its own map names no model"
+        );
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(SESSIONS_DDL).unwrap();
+            conn.execute_batch(SESSION_HEADS_DDL).unwrap();
+            conn.execute_batch(SESSION_STRAND_MESSAGES_DDL).unwrap();
+            late_entry_head(
+                &conn,
+                &head.id,
+                &serde_json::to_string(&head.metadata).unwrap(),
+                &serde_json::to_vec(&head).unwrap(),
+            );
+        }
+
+        let diagnosis = diagnose_disk_roots(&scope(&[&root])).await;
+
+        assert_listed_alone_as_unreadable(&diagnosis, &head.id, "claude-haiku-4-5");
+    }
+
+    /// A head that commits to an out-of-line metadata map whose session
+    /// metadata value names no model. The rows are sound: they are the map
+    /// the head commits to. The value is not one a surface writes (a
+    /// session's metadata always names a model), so the census lists the
+    /// session as unreadable and does not call the model "not recorded". A
+    /// second session in the same tables, whose value names its model, is
+    /// listed with it: the rows are read. Both heads and their cells are the
+    /// core's own; the first is prepared from a session document with the
+    /// model taken out of its session metadata value.
+    #[tokio::test]
+    async fn a_current_head_whose_session_metadata_names_no_model_is_listed_as_unreadable() {
+        use meerkat_core::session_store::{PreparedHeadCanonicalMutation, SessionHead};
+
+        const METADATA_CELLS_DDL: &str = "CREATE TABLE session_head_metadata_cells (
+            session_id TEXT NOT NULL,
+            metadata_key TEXT NOT NULL,
+            key_route BLOB NOT NULL CHECK (length(key_route) = 32),
+            exact_value_digest TEXT NOT NULL,
+            metadata_json BLOB NOT NULL,
+            created_at_ms INTEGER NOT NULL,
+            PRIMARY KEY (session_id, metadata_key, exact_value_digest)
+        )";
+        const METADATA_CURRENT_DDL: &str = "CREATE TABLE session_head_metadata_current (
+            session_id TEXT NOT NULL,
+            metadata_key TEXT NOT NULL,
+            key_route BLOB NOT NULL CHECK (length(key_route) = 32),
+            exact_value_digest TEXT NOT NULL,
+            PRIMARY KEY (session_id, metadata_key)
+        )";
+        const KEY: &str = meerkat_core::session::SESSION_METADATA_KEY;
+
+        // The core's own root head of `session`, with its cells: key, route,
+        // digest and canonical bytes of each.
+        type Cell = (String, Vec<u8>, String, Vec<u8>);
+        let head_of = |session: &Session| -> (SessionHead, Vec<Cell>) {
+            let root = PreparedHeadCanonicalMutation::prepare_root(session).unwrap();
+            let cells = root
+                .metadata_projection()
+                .mutations()
+                .iter()
+                .filter_map(|mutation| mutation.successor())
+                .map(|cell| {
+                    (
+                        cell.key().to_string(),
+                        cell.key_route().to_vec(),
+                        cell.identity().exact_value_digest().as_str().to_string(),
+                        cell.canonical_json().to_vec(),
+                    )
+                })
+                .collect();
+            (root.successor_head().clone(), cells)
+        };
+
+        // A session document as the core writes it, with the model taken out
+        // of its session metadata value, read back as a session.
+        let mut document = serde_json::to_value(session_on("claude-haiku-4-5")).unwrap();
+        let taken_out = document
+            .get_mut("metadata")
+            .and_then(|metadata| metadata.get_mut(KEY))
+            .and_then(serde_json::Value::as_object_mut)
+            .and_then(|value| value.remove("model"));
+        assert!(
+            taken_out.is_some(),
+            "a session document holds the model under its session metadata"
+        );
+        let modelless: Session = serde_json::from_value(document).unwrap();
+        let (unnamed, unnamed_cells) = head_of(&modelless);
+        let (named, named_cells) = head_of(&session_on("claude-haiku-4-5"));
+        let held: serde_json::Value = unnamed_cells
+            .iter()
+            .find(|(key, ..)| key == KEY)
+            .map(|(_, _, _, json)| serde_json::from_slice(json).unwrap())
+            .expect("the session metadata value is carried in a cell");
+        assert!(
+            unnamed.metadata_identity.is_some()
+                && held.get("provider").is_some()
+                && held.get("model").is_none(),
+            "the head commits to a map whose session metadata value names no model: {held}"
+        );
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("realms");
+        let realm_dir = write_manifest(&root, "current-head-without-a-model", "sqlite");
+        let db_path = realm_dir.join("sessions.sqlite3");
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(SESSIONS_DDL).unwrap();
+            conn.execute_batch(SESSION_HEADS_DDL).unwrap();
+            conn.execute_batch(SESSION_STRAND_MESSAGES_DDL).unwrap();
+            conn.execute_batch(METADATA_CELLS_DDL).unwrap();
+            conn.execute_batch(METADATA_CURRENT_DDL).unwrap();
+            for (head, cells) in [(&unnamed, &unnamed_cells), (&named, &named_cells)] {
+                let id = head.id.to_string();
+                late_entry_head(
+                    &conn,
+                    &head.id,
+                    &serde_json::to_string(&head.metadata).unwrap(),
+                    &serde_json::to_vec(head).unwrap(),
+                );
+                for (key, route, digest, json) in cells {
+                    conn.execute(
+                        "INSERT INTO session_head_metadata_cells (session_id, metadata_key, \
+                         key_route, exact_value_digest, metadata_json, created_at_ms) \
+                         VALUES (?1, ?2, ?3, ?4, ?5, 0)",
+                        rusqlite::params![id, key, route, digest, json],
+                    )
+                    .unwrap();
+                    conn.execute(
+                        "INSERT INTO session_head_metadata_current (session_id, metadata_key, \
+                         key_route, exact_value_digest) VALUES (?1, ?2, ?3, ?4)",
+                        rusqlite::params![id, key, route, digest],
+                    )
+                    .unwrap();
+                }
+            }
+        }
+
+        let diagnosis = diagnose_disk_roots(&scope(&[&root])).await;
+
+        let listed = finding(
+            &diagnosis,
+            FINDING_OPERATOR_INSTRUCTION_ENTRY_AFTER_CONVERSATION,
+        )
+        .expect("the finding for an own entry after a conversation row");
+        assert!(
+            listed.message.contains(
+                "2 session(s) hold their own operator-instruction entry after a conversation \
+                 row (anthropic/claude-haiku-4-5: 1, model unreadable: 1): "
+            ),
+            "the count, and the count per model: {}",
+            listed.message
+        );
+        for said in [
+            format!("{} (model unreadable)", unnamed.id),
+            format!("{} (model anthropic/claude-haiku-4-5)", named.id),
+        ] {
+            assert!(
+                listed.message.contains(&said),
+                "the finding names {said:?}: {}",
+                listed.message
+            );
+        }
+        assert!(
+            !listed.message.contains("model not recorded"),
+            "a value without a model in the map a head commits to is not \"not recorded\": {}",
+            listed.message
+        );
+    }
+
+    /// The finding lists at most fifty sessions, the first by id, which are
+    /// the oldest. An operator who reads only the listed models could miss
+    /// every model an earlier release refuses, so the finding carries the
+    /// count per model over ALL the sessions it counts: here fifty-five
+    /// sessions, the fifty oldest on one model and the five newest on
+    /// another, none of which is listed.
+    #[tokio::test]
+    async fn the_late_entry_finding_counts_every_model_past_the_sessions_it_lists() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("realms");
+        let realm_dir = write_manifest(&root, "many-late-entries", "sqlite");
+        let db_path = realm_dir.join("sessions.sqlite3");
+        let mut ids: Vec<SessionId> = (0..55).map(|_| Session::new().id().clone()).collect();
+        ids.sort_by_key(ToString::to_string);
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(SESSIONS_DDL).unwrap();
+            for (index, id) in ids.iter().enumerate() {
+                let metadata = if index < 50 {
+                    metadata_naming("openai", "gpt-5.5")
+                } else {
+                    metadata_naming("gemini", "gemini-3.5-flash")
+                };
+                let document = serde_json::json!({
+                    "version": 5,
+                    "messages": [prompt_row(), question_row(), instruction_entry_row(id)],
+                    "metadata": metadata,
+                });
+                conn.execute(
+                    "INSERT INTO sessions (session_id, created_at_ms, updated_at_ms, \
+                     message_count, total_tokens, metadata_json, session_json) \
+                     VALUES (?1, 0, 0, 3, 0, '{}', ?2)",
+                    rusqlite::params![id.to_string(), document.to_string().into_bytes()],
+                )
+                .unwrap();
+            }
+        }
+
+        let diagnosis = diagnose_disk_roots(&scope(&[&root])).await;
+
+        let listed = finding(
+            &diagnosis,
+            FINDING_OPERATOR_INSTRUCTION_ENTRY_AFTER_CONVERSATION,
+        )
+        .expect("the finding for an own entry after a conversation row");
+        assert!(
+            listed.message.contains("55 session(s)"),
+            "{}",
+            listed.message
+        );
+        assert!(
+            listed
+                .message
+                .contains("(gemini/gemini-3.5-flash: 5, openai/gpt-5.5: 50)"),
+            "the finding counts every model over all the sessions: {}",
+            listed.message
+        );
+        assert!(listed.message.contains("and 5 more"), "{}", listed.message);
+        assert!(listed.message.contains(&ids[0].to_string()));
+        for unlisted in &ids[50..] {
+            assert!(
+                !listed.message.contains(&unlisted.to_string()),
+                "a session past the fifty listed is counted, not listed: {}",
+                listed.message
+            );
+        }
+    }
+
+    /// After a runtime's activation one file holds a session twice: its head,
+    /// which the store serves and advances, and the WholeBlob body the
+    /// activation read, which stays as the copy of that moment. Where both
+    /// hold the session's own late entry the session is counted once, with
+    /// the answer its head gives: a head whose model cannot be read stays
+    /// "model unreadable" and a head that records none stays "model not
+    /// recorded", and the model that only the body names is not printed. A
+    /// session without a head is still counted by its body, with the body's
+    /// model.
+    #[tokio::test]
+    async fn a_heads_answer_stands_beside_the_whole_document_of_its_activation() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("realms");
+        let realm_dir = write_manifest(&root, "activated", "sqlite");
+        let db_path = realm_dir.join("sessions.sqlite3");
+        let unreadable_id = Session::new().id().clone();
+        let unrecorded_id = Session::new().id().clone();
+        let headless_id = Session::new().id().clone();
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(SESSIONS_DDL).unwrap();
+            conn.execute_batch(SESSION_HEADS_DDL).unwrap();
+            conn.execute_batch(SESSION_STRAND_MESSAGES_DDL).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE runtime_whole_blob_authority (
+                    runtime_id TEXT PRIMARY KEY, authority_version INTEGER, session_id TEXT,
+                    store_revision INTEGER, blob_sha256 TEXT);
+                 CREATE TABLE runtime_whole_blob_bodies (
+                    blob_sha256 TEXT PRIMARY KEY, session_snapshot BLOB);",
+            )
+            .unwrap();
+            // A committed WholeBlob body of `id` that holds the session's own
+            // late entry and names `model`.
+            let late_body = |id: &SessionId, provider: &str, model: &str| {
+                let blob = format!("row-sha256:{id}");
+                let document = serde_json::json!({
+                    "version": 5,
+                    "messages": [prompt_row(), question_row(), instruction_entry_row(id)],
+                    "metadata": metadata_naming(provider, model),
+                });
+                conn.execute(
+                    "INSERT INTO runtime_whole_blob_bodies (blob_sha256, session_snapshot) \
+                     VALUES (?1, ?2)",
+                    rusqlite::params![blob, document.to_string().into_bytes()],
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO runtime_whole_blob_authority (runtime_id, authority_version, \
+                     session_id, store_revision, blob_sha256) VALUES (?1, 1, ?2, 1, ?3)",
+                    rusqlite::params![format!("rt:session:{id}"), id.to_string(), blob],
+                )
+                .unwrap();
+            };
+            // A head row that does not parse: its model is unreadable.
+            late_entry_head(&conn, &unreadable_id, "{}", b"not a head");
+            late_body(&unreadable_id, "gemini", "gemini-3.5-flash");
+            // A released inline head whose own map names no model.
+            late_entry_head(&conn, &unrecorded_id, "{}", b"{}");
+            late_body(&unrecorded_id, "gemini", "gemini-3.5-flash");
+            // No head: the body is the session's only record in this file.
+            late_body(&headless_id, "anthropic", "claude-haiku-4-5");
+        }
+
+        let diagnosis = diagnose_disk_roots(&scope(&[&root])).await;
+
+        let listed = finding(
+            &diagnosis,
+            FINDING_OPERATOR_INSTRUCTION_ENTRY_AFTER_CONVERSATION,
+        )
+        .expect("the finding for an own entry after a conversation row");
+        assert!(
+            listed.message.contains(
+                "3 session(s) hold their own operator-instruction entry after a conversation \
+                 row (anthropic/claude-haiku-4-5: 1, model not recorded: 1, model unreadable: 1): "
+            ),
+            "each session once, and the count per model by the heads' answers: {}",
+            listed.message
+        );
+        for said in [
+            format!("{unreadable_id} (model unreadable)"),
+            format!("{unrecorded_id} (model not recorded)"),
+            format!("{headless_id} (model anthropic/claude-haiku-4-5)"),
+        ] {
+            assert!(
+                listed.message.contains(&said),
+                "the finding names {said:?}: {}",
+                listed.message
+            );
+        }
+        assert!(
+            !listed.message.contains("gemini-3.5-flash"),
+            "the model only an activation's body names is not printed for a session its \
+             head answers: {}",
+            listed.message
+        );
+    }
+
+    /// The finding counts the sessions an earlier release may refuse to
+    /// resume, and the record a release resumes from is the session's current
+    /// one: its head, where the file holds one. A WholeBlob document kept
+    /// beside a head is the copy of the moment of the runtime's activation:
+    /// after a compaction's fold the head holds no entry after a conversation
+    /// row, while that copy still holds the late entry it had then. So a kept
+    /// document is counted only for a session that has no current record and
+    /// no authority row: a session with a head is counted by its head alone,
+    /// and a document whose runtime holds head-canonical authority is a kept
+    /// copy even where the session's head is gone. Here one file holds a head
+    /// without a late entry beside a late kept document (not counted), a
+    /// head with a late entry (counted, by the head), a late document with
+    /// neither a head nor an authority row (counted: a store not yet
+    /// converted) and a late kept document whose runtime holds authority and
+    /// whose head is gone (not counted). The model that only the two kept
+    /// documents name is printed nowhere.
+    #[tokio::test]
+    async fn a_kept_document_is_counted_only_without_a_head_and_an_authority_row() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("realms");
+        let realm_dir = write_manifest(&root, "kept-documents", "sqlite");
+        let db_path = realm_dir.join("sessions.sqlite3");
+        let folded_id = Session::new().id().clone();
+        let late_head_id = Session::new().id().clone();
+        let body_only_id = Session::new().id().clone();
+        let headless_kept_id = Session::new().id().clone();
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(SESSIONS_DDL).unwrap();
+            conn.execute_batch(SESSION_HEADS_DDL).unwrap();
+            conn.execute_batch(SESSION_STRAND_MESSAGES_DDL).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE runtime_whole_blob_authority (
+                    runtime_id TEXT PRIMARY KEY, authority_version INTEGER, session_id TEXT,
+                    store_revision INTEGER, blob_sha256 TEXT);
+                 CREATE TABLE runtime_whole_blob_bodies (
+                    blob_sha256 TEXT PRIMARY KEY, session_snapshot BLOB);
+                 CREATE TABLE runtime_session_authority (
+                    runtime_id TEXT PRIMARY KEY, authority_version INTEGER, session_id TEXT,
+                    store_revision INTEGER, boundary_head_json BLOB,
+                    committed_head_token TEXT);",
+            )
+            .unwrap();
+            // A committed WholeBlob body of `id` that holds the session's own
+            // late entry and names `model`.
+            let late_body = |id: &SessionId, provider: &str, model: &str| {
+                let blob = format!("row-sha256:{id}");
+                let document = serde_json::json!({
+                    "version": 5,
+                    "messages": [prompt_row(), question_row(), instruction_entry_row(id)],
+                    "metadata": metadata_naming(provider, model),
+                });
+                conn.execute(
+                    "INSERT INTO runtime_whole_blob_bodies (blob_sha256, session_snapshot) \
+                     VALUES (?1, ?2)",
+                    rusqlite::params![blob, document.to_string().into_bytes()],
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO runtime_whole_blob_authority (runtime_id, authority_version, \
+                     session_id, store_revision, blob_sha256) VALUES (?1, 1, ?2, 1, ?3)",
+                    rusqlite::params![format!("rt:session:{id}"), id.to_string(), blob],
+                )
+                .unwrap();
+            };
+            // The runtime of `id` holds head-canonical authority: its WholeBlob
+            // document is a kept copy.
+            let head_authority = |id: &SessionId| {
+                let head = format!(r#"{{"id":"{id}","version":5,"message_count":3}}"#);
+                conn.execute(
+                    "INSERT INTO runtime_session_authority (runtime_id, authority_version, \
+                     session_id, store_revision, boundary_head_json, committed_head_token) \
+                     VALUES (?1, 1, ?2, 1, ?3, 'token')",
+                    rusqlite::params![format!("rt:session:{id}"), id.to_string(), head.as_bytes()],
+                )
+                .unwrap();
+            };
+            // Activated, then compacted: the head's one entry stands ahead of
+            // the conversation; the kept document still holds the late one.
+            conn.execute(
+                "INSERT INTO session_heads (session_id, version, strand, head_revision, \
+                 message_count, rewrite_count, total_tokens, created_at_ms, updated_at_ms, \
+                 metadata_json, head_json, cas_token) \
+                 VALUES (?1, 5, 'root', 'digest', 3, 0, 0, 0, 0, '{}', '{}', 'cas')",
+                rusqlite::params![folded_id.to_string()],
+            )
+            .unwrap();
+            for (seq, row) in [
+                prompt_row(),
+                instruction_entry_row(&folded_id),
+                question_row(),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                conn.execute(
+                    "INSERT INTO session_strand_messages (session_id, strand, seq, \
+                     message_json, created_at_ms) VALUES (?1, 'root', ?2, ?3, 0)",
+                    rusqlite::params![
+                        folded_id.to_string(),
+                        seq as i64,
+                        row.to_string().into_bytes()
+                    ],
+                )
+                .unwrap();
+            }
+            late_body(&folded_id, "openai", "gpt-5.5");
+            head_authority(&folded_id);
+            // Activated, its head holds a late entry: counted by the head.
+            late_entry_head(
+                &conn,
+                &late_head_id,
+                &metadata_naming("gemini", "gemini-3.5-flash").to_string(),
+                b"{}",
+            );
+            head_authority(&late_head_id);
+            // A store not yet converted: the document is the current record.
+            late_body(&body_only_id, "anthropic", "claude-haiku-4-5");
+            // Activated, and its head is gone: the document is a kept copy.
+            late_body(&headless_kept_id, "openai", "gpt-5.5");
+            head_authority(&headless_kept_id);
+        }
+
+        let diagnosis = diagnose_disk_roots(&scope(&[&root])).await;
+
+        let listed = finding(
+            &diagnosis,
+            FINDING_OPERATOR_INSTRUCTION_ENTRY_AFTER_CONVERSATION,
+        )
+        .expect("the finding for an own entry after a conversation row");
+        assert!(
+            listed.message.contains(
+                "2 session(s) hold their own operator-instruction entry after a conversation \
+                 row (anthropic/claude-haiku-4-5: 1, gemini/gemini-3.5-flash: 1): "
+            ),
+            "the head with a late entry and the document that is a current record: {}",
+            listed.message
+        );
+        for said in [
+            format!("{late_head_id} (model gemini/gemini-3.5-flash)"),
+            format!("{body_only_id} (model anthropic/claude-haiku-4-5)"),
+        ] {
+            assert!(
+                listed.message.contains(&said),
+                "the finding names {said:?}: {}",
+                listed.message
+            );
+        }
+        for (id, why) in [
+            (
+                &folded_id,
+                "a head without a late entry beside a kept document",
+            ),
+            (
+                &headless_kept_id,
+                "a kept document whose session's head is gone",
+            ),
+        ] {
+            assert!(
+                !listed.message.contains(&id.to_string()),
+                "{why} is not counted: {}",
+                listed.message
+            );
+        }
+        assert!(
+            !listed.message.contains("gpt-5.5"),
+            "a model that only a kept document names is not printed: {}",
+            listed.message
+        );
+    }
+
+    /// A head counts three live rows and its strand holds two: the third is
+    /// a row the head names and the store does not hold, so whether the
+    /// session holds its own late entry is not known. The census does not
+    /// leave the session out silently and reads no other record in its
+    /// place: it counts nothing for the database and names the session whose
+    /// rows do not resolve, as a warning. The finding for late entries is
+    /// absent, although another session of the file holds a late entry.
+    #[tokio::test]
+    async fn a_head_whose_live_rows_do_not_resolve_is_named_not_left_out() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("realms");
+        let realm_dir = write_manifest(&root, "missing-row", "sqlite");
+        let db_path = realm_dir.join("sessions.sqlite3");
+        let short_id = Session::new().id().clone();
+        let late_id = Session::new().id().clone();
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(SESSIONS_DDL).unwrap();
+            conn.execute_batch(SESSION_HEADS_DDL).unwrap();
+            conn.execute_batch(SESSION_STRAND_MESSAGES_DDL).unwrap();
+            // A head that counts three live rows over a strand that holds two.
+            conn.execute(
+                "INSERT INTO session_heads (session_id, version, strand, head_revision, \
+                 message_count, rewrite_count, total_tokens, created_at_ms, updated_at_ms, \
+                 metadata_json, head_json, cas_token) \
+                 VALUES (?1, 5, 'root', 'digest', 3, 0, 0, 0, 0, '{}', '{}', 'cas')",
+                rusqlite::params![short_id.to_string()],
+            )
+            .unwrap();
+            for (seq, row) in [prompt_row(), question_row()].into_iter().enumerate() {
+                conn.execute(
+                    "INSERT INTO session_strand_messages (session_id, strand, seq, \
+                     message_json, created_at_ms) VALUES (?1, 'root', ?2, ?3, 0)",
+                    rusqlite::params![
+                        short_id.to_string(),
+                        seq as i64,
+                        row.to_string().into_bytes()
+                    ],
+                )
+                .unwrap();
+            }
+            // A sound head with its own late entry.
+            late_entry_head(&conn, &late_id, "{}", b"{}");
+        }
+
+        let diagnosis = diagnose_disk_roots(&scope(&[&root])).await;
+
+        assert!(
+            finding(
+                &diagnosis,
+                FINDING_OPERATOR_INSTRUCTION_ENTRY_AFTER_CONVERSATION
+            )
+            .is_none(),
+            "no count is given for a database with a head whose rows do not resolve: {:#?}",
+            diagnosis.findings
+        );
+        let unmeasured = diagnosis
+            .findings
+            .iter()
+            .find(|finding| {
+                finding.code == FINDING_STORAGE_CENSUS_UNMEASURED
+                    && finding.message.contains(&short_id.to_string())
+            })
+            .expect("the census says which session it could not read");
+        assert_eq!(unmeasured.severity, FindingSeverity::Warning);
+        assert!(
+            unmeasured.message.contains(
+                "could not count the sessions that hold their own operator-instruction entry \
+                 after a conversation row"
+            ) && unmeasured
+                .message
+                .contains("strand root holds 2 of its rows 0..3"),
+            "the census names what does not resolve: {}",
+            unmeasured.message
+        );
+    }
+
+    /// The warning of a database whose late-entry census could not read the
+    /// live rows of `id`: no count for the database, the session named, and
+    /// `reason` said.
+    fn assert_census_names_unresolved(diagnosis: &StorageDiagnosis, id: &SessionId, reason: &str) {
+        assert!(
+            finding(
+                diagnosis,
+                FINDING_OPERATOR_INSTRUCTION_ENTRY_AFTER_CONVERSATION
+            )
+            .is_none(),
+            "no count is given for a database with a head whose rows do not resolve: {:#?}",
+            diagnosis.findings
+        );
+        let unmeasured = diagnosis
+            .findings
+            .iter()
+            .find(|finding| {
+                finding.code == FINDING_STORAGE_CENSUS_UNMEASURED
+                    && finding.message.contains(&id.to_string())
+            })
+            .expect("the census says which session it could not read");
+        assert_eq!(unmeasured.severity, FindingSeverity::Warning);
+        assert!(
+            unmeasured.message.contains(
+                "could not count the sessions that hold their own operator-instruction entry \
+                 after a conversation row"
+            ) && unmeasured.message.contains(reason),
+            "the census names what does not resolve ({reason}): {}",
+            unmeasured.message
+        );
+    }
+
+    /// A head whose strand has a link the store itself refuses: its spans are
+    /// out of order, or one of its numbers is negative. The store does not
+    /// read such a session, so the census does not guess which rows the head
+    /// serves: it counts nothing for the database and names the session,
+    /// although the head's own strand holds a late entry and another session
+    /// of the file holds one too.
+    #[tokio::test]
+    async fn a_head_whose_link_the_store_refuses_is_named_not_left_out() {
+        // Spans out of order, then a negative number.
+        for (strand_len, splice_start, splice_end, successor_end) in
+            [(3_i64, 2_i64, 1_i64, 2_i64), (3, -1, 1, 1)]
+        {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("realms");
+            let realm_dir = write_manifest(&root, "refused-link", "sqlite");
+            let db_path = realm_dir.join("sessions.sqlite3");
+            let refused_id = Session::new().id().clone();
+            let late_id = Session::new().id().clone();
+            {
+                let conn = Connection::open(&db_path).unwrap();
+                conn.execute_batch(SESSIONS_DDL).unwrap();
+                conn.execute_batch(SESSION_HEADS_DDL).unwrap();
+                conn.execute_batch(SESSION_STRAND_MESSAGES_DDL).unwrap();
+                conn.execute_batch(SESSION_STRAND_LINKS_DDL).unwrap();
+                late_entry_head(&conn, &refused_id, "{}", b"{}");
+                conn.execute(
+                    "INSERT INTO session_strand_links (session_id, strand, successor, strand_len, \
+                     splice_start, splice_end, successor_end, created_at_ms) \
+                     VALUES (?1, 'root', 'older', ?2, ?3, ?4, ?5, 0)",
+                    rusqlite::params![
+                        refused_id.to_string(),
+                        strand_len,
+                        splice_start,
+                        splice_end,
+                        successor_end
+                    ],
+                )
+                .unwrap();
+                late_entry_head(&conn, &late_id, "{}", b"{}");
+            }
+
+            let diagnosis = diagnose_disk_roots(&scope(&[&root])).await;
+
+            assert_census_names_unresolved(
+                &diagnosis,
+                &refused_id,
+                "the link of strand root is not one the store reads",
+            );
+        }
+    }
+
+    /// A head whose links run in a circle: its strand takes every row from a
+    /// second strand, which takes every row from the first. Each link alone
+    /// is well formed; together they run through more strands than the
+    /// session links, which the store refuses. The census counts nothing for
+    /// the database and names the session.
+    #[tokio::test]
+    async fn a_head_whose_links_run_in_a_circle_is_named_not_left_out() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("realms");
+        let realm_dir = write_manifest(&root, "circular-links", "sqlite");
+        let db_path = realm_dir.join("sessions.sqlite3");
+        let circular_id = Session::new().id().clone();
+        let late_id = Session::new().id().clone();
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(SESSIONS_DDL).unwrap();
+            conn.execute_batch(SESSION_HEADS_DDL).unwrap();
+            conn.execute_batch(SESSION_STRAND_MESSAGES_DDL).unwrap();
+            conn.execute_batch(SESSION_STRAND_LINKS_DDL).unwrap();
+            late_entry_head(&conn, &circular_id, "{}", b"{}");
+            // Each strand holds no row of its own below its length: all three
+            // are rows of the other.
+            for (strand, successor) in [("root", "other"), ("other", "root")] {
+                conn.execute(
+                    "INSERT INTO session_strand_links (session_id, strand, successor, strand_len, \
+                     splice_start, splice_end, successor_end, created_at_ms) \
+                     VALUES (?1, ?2, ?3, 3, 3, 3, 3, 0)",
+                    rusqlite::params![circular_id.to_string(), strand, successor],
+                )
+                .unwrap();
+            }
+            late_entry_head(&conn, &late_id, "{}", b"{}");
+        }
+
+        let diagnosis = diagnose_disk_roots(&scope(&[&root])).await;
+
+        assert_census_names_unresolved(
+            &diagnosis,
+            &circular_id,
+            "the links from strand root run through more strands than the session links",
+        );
+    }
+
+    /// A JSONL realm keeps its session documents in its WholeBlob runtime
+    /// store: the doctor counts there the documents with their own late
+    /// entry, a committed body and a run's provisional candidate body, and a
+    /// realm without one has no such finding.
+    #[tokio::test]
+    async fn runtime_store_documents_with_their_own_late_instruction_entry_are_counted() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("realms");
+        let realm_dir = write_manifest(&root, "jsonl-late-entries", "jsonl");
+        let db_path = realm_dir.join("runtime.sqlite3");
+        let plain_id = Session::new().id().clone();
+        let late_id = Session::new().id().clone();
+        let candidate_id = Session::new().id().clone();
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE runtime_whole_blob_authority (
+                    runtime_id TEXT PRIMARY KEY, authority_version INTEGER, session_id TEXT,
+                    store_revision INTEGER, blob_sha256 TEXT);
+                 CREATE TABLE runtime_whole_blob_bodies (
+                    blob_sha256 TEXT PRIMARY KEY, session_snapshot BLOB);
+                 CREATE TABLE runtime_whole_blob_provisional_tails (
+                    runtime_id TEXT PRIMARY KEY, session_id TEXT, candidate_blob_sha256 TEXT);",
+            )
+            .unwrap();
+            let body = |blob: &str, rows: Vec<serde_json::Value>| {
+                let document = serde_json::json!({
+                    "version": 5,
+                    "messages": rows,
+                    "metadata": metadata_naming("gemini", "gemini-3.5-flash"),
+                });
+                conn.execute(
+                    "INSERT INTO runtime_whole_blob_bodies (blob_sha256, session_snapshot) \
+                     VALUES (?1, ?2)",
+                    rusqlite::params![blob, document.to_string().into_bytes()],
+                )
+                .unwrap();
+            };
+            let committed = |id: &SessionId, blob: &str| {
+                conn.execute(
+                    "INSERT INTO runtime_whole_blob_authority (runtime_id, authority_version, \
+                     session_id, store_revision, blob_sha256) VALUES (?1, 1, ?2, 1, ?3)",
+                    rusqlite::params![format!("rt:session:{id}"), id.to_string(), blob],
+                )
+                .unwrap();
+            };
+            // A committed body with the entry ahead of the conversation.
+            body(
+                "row-sha256:plain",
+                vec![
+                    prompt_row(),
+                    instruction_entry_row(&plain_id),
+                    question_row(),
+                ],
+            );
+            committed(&plain_id, "row-sha256:plain");
+            // A committed body with its own late entry.
+            body(
+                "row-sha256:late",
+                vec![
+                    prompt_row(),
+                    question_row(),
+                    instruction_entry_row(&late_id),
+                ],
+            );
+            committed(&late_id, "row-sha256:late");
+            // A committed body without an entry whose run left a candidate
+            // body with its own late entry.
+            body(
+                "row-sha256:candidate-base",
+                vec![prompt_row(), question_row()],
+            );
+            committed(&candidate_id, "row-sha256:candidate-base");
+            body(
+                "row-sha256:candidate",
+                vec![
+                    prompt_row(),
+                    question_row(),
+                    instruction_entry_row(&candidate_id),
+                ],
+            );
+            conn.execute(
+                "INSERT INTO runtime_whole_blob_provisional_tails (runtime_id, session_id, \
+                 candidate_blob_sha256) VALUES (?1, ?2, 'row-sha256:candidate')",
+                rusqlite::params![
+                    format!("rt:session:{candidate_id}"),
+                    candidate_id.to_string()
+                ],
+            )
+            .unwrap();
+        }
+        // A realm whose only session holds no late entry.
+        let quiet_dir = write_manifest(&root, "no-late-entries", "sqlite");
+        {
+            let conn = Connection::open(quiet_dir.join("sessions.sqlite3")).unwrap();
+            conn.execute_batch(SESSIONS_DDL).unwrap();
+            let document = serde_json::json!({
+                "version": 5,
+                "messages": [prompt_row(), instruction_entry_row(&plain_id), question_row()],
+            });
+            conn.execute(
+                "INSERT INTO sessions (session_id, created_at_ms, updated_at_ms, message_count, \
+                 total_tokens, metadata_json, session_json) VALUES (?1, 0, 0, 3, 0, '{}', ?2)",
+                rusqlite::params![plain_id.to_string(), document.to_string().into_bytes()],
+            )
+            .unwrap();
+        }
+
+        let diagnosis = diagnose_disk_roots(&scope(&[&root])).await;
+
+        let found: Vec<_> = diagnosis
+            .findings
+            .iter()
+            .filter(|finding| finding.code == FINDING_OPERATOR_INSTRUCTION_ENTRY_AFTER_CONVERSATION)
+            .collect();
+        assert_eq!(
+            found.len(),
+            1,
+            "one finding, for the realm that holds late entries"
+        );
+        let listed = found[0];
+        assert_eq!(listed.realm.as_deref(), Some("jsonl-late-entries"));
+        assert_eq!(listed.path.as_deref(), Some(db_path.as_path()));
+        assert!(
+            listed.message.contains("2 session(s)"),
+            "{}",
+            listed.message
+        );
+        assert!(listed.message.contains(&late_id.to_string()));
+        assert!(listed.message.contains(&candidate_id.to_string()));
+        assert!(
+            !listed.message.contains(&plain_id.to_string()),
+            "an entry ahead of the conversation is not counted: {}",
             listed.message
         );
     }

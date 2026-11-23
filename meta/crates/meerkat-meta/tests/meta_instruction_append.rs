@@ -3162,11 +3162,13 @@ async fn the_record_carries_the_specs_sections_only() {
     rig.shutdown().await;
 }
 
-/// A model that takes a system instruction only ahead of the conversation:
-/// the change is recorded, the step answers `applies_after_compaction`, the
-/// agent's next run carries no entry, and the status read says why.
+/// A model that takes a system instruction only ahead of the conversation
+/// takes a change at its next run, as every other model does: the change is
+/// recorded, the step answers `applies_at_next_run`, the agent's next run
+/// carries the entry ahead of the conversation, with no compaction, and the
+/// status read says the change is in effect.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_leading_prefix_only_model_answers_applies_after_compaction() {
+async fn a_leading_prefix_only_model_takes_the_change_at_its_next_run() {
     let temp = tempfile::tempdir().unwrap();
     let mut rig = boot(temp.path(), &fresh_mob_id(), vec![configured_spec(&[])]).await;
     rig.create_spec(created_spec_on("prefix", &["Keep ALPHA records."]))
@@ -3182,19 +3184,46 @@ async fn a_leading_prefix_only_model_answers_applies_after_compaction() {
     assert_eq!(
         rig.after_update(&["Keep ALPHA records."], &["Keep BETA records."])
             .await,
-        InstructionOutcome::AppliesAfterCompaction
+        InstructionOutcome::AppliesAtNextRun
     );
     rig.recorded(CREATED).await;
-    rig.turn(CREATED, "SECOND-TURN").await;
-    assert!(
-        entries(&rig.request_messages("SECOND-TURN")).is_empty(),
-        "no entry is appended after conversation rows for such a model"
-    );
     let status = rig.status(CREATED).await;
     assert_eq!(
         status["members"][0]["slots"][0]["state"],
-        json!({"state": "pending", "reason": "leading_prefix_only_lowering"}),
-        "the status read says why the change is pending: {status:#?}"
+        json!({"state": "pending", "reason": "awaiting_run_start"}),
+        "the recorded change waits for the agent's next run: {status:#?}"
+    );
+    rig.turn(CREATED, "SECOND-TURN").await;
+    let request = rig.request_messages("SECOND-TURN");
+    let carried = entries(&request);
+    assert!(
+        carried
+            .last()
+            .is_some_and(|entry| carries(entry, &["Keep BETA records."])),
+        "the next run carries the entry with the whole current text: {carried:#?}"
+    );
+    let conversation = request
+        .iter()
+        .position(|message| message["role"] != "system")
+        .expect("the request holds conversation rows");
+    assert!(
+        conversation > 1
+            && request[conversation..]
+                .iter()
+                .all(|message| message["role"] != "system"),
+        "every system row, the entry included, stands ahead of the conversation: {request:#?}"
+    );
+    assert!(
+        request.iter().any(|message| message["content"]
+            .as_str()
+            .is_some_and(|text| text.contains("FIRST-TURN"))),
+        "the conversation is the one the agent had: nothing was compacted: {request:#?}"
+    );
+    let status = rig.status(CREATED).await;
+    assert_eq!(
+        status["members"][0]["slots"][0]["state"]["state"],
+        json!("effective"),
+        "the status read says the change is in effect: {status:#?}"
     );
     rig.shutdown().await;
 }
@@ -3206,7 +3235,7 @@ async fn a_leading_prefix_only_model_answers_applies_after_compaction() {
 async fn an_update_during_a_run_in_flight_answers_by_the_agents_model() {
     for (profile, expected) in [
         ("worker", InstructionOutcome::AppliesAtNextRun),
-        ("prefix", InstructionOutcome::AppliesAfterCompaction),
+        ("prefix", InstructionOutcome::AppliesAtNextRun),
     ] {
         let temp = tempfile::tempdir().unwrap();
         let mut rig = boot(temp.path(), &fresh_mob_id(), vec![configured_spec(&[])]).await;

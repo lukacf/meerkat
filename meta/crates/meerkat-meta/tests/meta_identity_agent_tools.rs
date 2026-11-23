@@ -2042,9 +2042,7 @@ fn the_descriptions_say_what_a_model_must_know() {
         "It reaches the agent at its next run, or later when the result says so; a run that \
          starts within moments of the change may still use the earlier instructions; earlier \
          instructions are never rewritten.",
-        "which a short conversation may never reach",
         "`applies_at_next_run`",
-        "`applies_after_compaction`",
         "`applies_at_next_session`",
         "`unchanged`",
         "You cannot change yourself",

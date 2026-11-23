@@ -712,11 +712,14 @@ pub enum InstructionWriteRefusal {
     ActiveSetBudgetExceeded,
 }
 
-/// Why a fresh run start leaves pending changes pending.
+/// Why a fresh run start leaves pending changes pending: the wire of the
+/// session's model carries no System row an entry can take. A model that
+/// carries System rows only inside the leading System prefix defers nothing:
+/// its entry is appended like any other and its model request places it
+/// inside that prefix.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum InstructionDeferReason {
     #[default]
-    LeadingPrefixOnly,
     LoweringUnavailable,
 }
 
@@ -1391,7 +1394,6 @@ machine! {
                 session_id: SessionId,
                 run_start: Enum<InstructionRunStart>,
                 lowering: Enum<InstructionLowering>,
-                transcript_is_system_prefix: bool,
             },
             // A compaction that folds the entry rows into one snapshot.
             AuthorizeInstructionFold {
@@ -1948,17 +1950,15 @@ machine! {
                 && target_revision.contains_key(slot) == false)
         }
 
-        // A run start may append an entry on this lowering: a model that
-        // lowers System rows mid-conversation takes one anywhere; a
-        // leading-prefix-only model takes one only while the transcript is
-        // still a leading System prefix.
-        helper instruction_entry_lowers(
-            lowering: Enum<InstructionLowering>,
-            transcript_is_system_prefix: bool
-        ) -> bool {
-            lowering == InstructionLowering::MidConversation
-                || (lowering == InstructionLowering::LeadingPrefixOnly
-                    && transcript_is_system_prefix)
+        // A run start may append an entry on this lowering: every model
+        // whose wire carries an entry takes one. A model that lowers System
+        // rows mid-conversation is asked with the entry where it stands; a
+        // leading-prefix-only model is asked with the session's own entries
+        // placed inside the leading System prefix, whatever the transcript
+        // holds, so its entry is appended at the transcript tail like any
+        // other. Only a wire that carries no entry takes none.
+        helper instruction_entry_lowers(lowering: Enum<InstructionLowering>) -> bool {
+            lowering != InstructionLowering::Unavailable
         }
 
         // Activation-body retirement region helper. One session's recovered
@@ -6407,16 +6407,18 @@ machine! {
             }
         }
 
-        // A fresh run start with pending changes, on a lowering that can
-        // carry the entry here, applies all of them in one entry: the
-        // target's Active slots become effective when the run commits, and a
-        // revoked slot leaves the slots in effect.
+        // A fresh run start with pending changes, on a lowering that carries
+        // an entry, applies all of them in one entry: the target's Active
+        // slots become effective when the run commits, and a revoked slot
+        // leaves the slots in effect. The transcript's shape does not
+        // matter: the entry is appended at its tail, and the model request
+        // of a leading-prefix-only model places the session's own entries
+        // inside the leading System prefix.
         transition ResolveRunStartInstructionsApply {
             on input ResolveRunStartInstructions {
                 session_id,
                 run_start,
-                lowering,
-                transcript_is_system_prefix
+                lowering
             }
             guard {
                 self.lifecycle_phase == Phase::Ready
@@ -6432,7 +6434,7 @@ machine! {
                 run_start == InstructionRunStart::FreshRun
             }
             guard "lowers" {
-                instruction_entry_lowers(lowering, transcript_is_system_prefix)
+                instruction_entry_lowers(lowering)
             }
             update {
                 self.session_instruction_effective_revision.insert(
@@ -6476,8 +6478,7 @@ machine! {
             on input ResolveRunStartInstructions {
                 session_id,
                 run_start,
-                lowering,
-                transcript_is_system_prefix
+                lowering
             }
             guard {
                 self.lifecycle_phase == Phase::Ready
@@ -6497,44 +6498,13 @@ machine! {
             emit InstructionEntryNotNeeded
         }
 
-        // A leading-prefix-only model after conversation rows: the changes
-        // stay pending until a fresh session's first run or a run-start
-        // fold carries them in the leading prefix.
-        transition ResolveRunStartInstructionsDeferredLeadingPrefix {
-            on input ResolveRunStartInstructions {
-                session_id,
-                run_start,
-                lowering,
-                transcript_is_system_prefix
-            }
-            guard {
-                self.lifecycle_phase == Phase::Ready
-                && run_start == InstructionRunStart::FreshRun
-                && instruction_change_pending(
-                    self.session_instruction_target_revision.get_cloned(session_id).get("value"),
-                    self.session_instruction_target_effect.get_cloned(session_id).get("value"),
-                    self.session_instruction_target_digest.get_cloned(session_id).get("value"),
-                    self.session_instruction_effective_revision.get_cloned(session_id).get("value"),
-                    self.session_instruction_effective_effect.get_cloned(session_id).get("value"),
-                    self.session_instruction_effective_digest.get_cloned(session_id).get("value"))
-                && lowering == InstructionLowering::LeadingPrefixOnly
-                && transcript_is_system_prefix == false
-            }
-            update {}
-            to Ready
-            emit InstructionApplicationDeferred {
-                reason: InstructionDeferReason::LeadingPrefixOnly
-            }
-        }
-
         // A wire that carries no System row after its single leading one:
         // the changes are never lowered as anything else and stay pending.
         transition ResolveRunStartInstructionsDeferredUnavailable {
             on input ResolveRunStartInstructions {
                 session_id,
                 run_start,
-                lowering,
-                transcript_is_system_prefix
+                lowering
             }
             guard {
                 self.lifecycle_phase == Phase::Ready

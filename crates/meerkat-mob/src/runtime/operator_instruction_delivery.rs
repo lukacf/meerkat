@@ -2094,20 +2094,13 @@ impl MobHandle {
             ),
         };
         let live_channel_open = self.member_live_channel_open(session_id.as_ref()).await;
-        // The session's resolved lowering, as its service reads it; without
-        // one, the model's resolved capabilities (a dormant member's from
-        // the catalog, read-only) tell whether it lowers only inside the
-        // leading System prefix.
-        let lowering = match read.as_ref().and_then(|read| read.lowering) {
-            Some(lowering) => lowering,
-            None => {
-                if !unborn && self.member_lowers_leading_prefix_only(identity).await {
-                    meerkat_core::InstructionLowering::LeadingPrefixOnly
-                } else {
-                    meerkat_core::InstructionLowering::MidConversation
-                }
-            }
-        };
+        // The session's resolved lowering, as its service reads it. Every
+        // lowering that carries an entry applies a recorded change at the
+        // next fresh run start (a model that lowers System rows only inside
+        // the leading prefix is asked with the entry placed there). A read
+        // that tells no lowering is answered as a wire that carries no
+        // entry (`slot_status_lowering`).
+        let lowering = slot_status_lowering(read.as_ref());
         // The records of the member's snapshot: the shared records, its own
         // and, for a fork-derived member, the records written for its fork
         // lineage root and its forks (the root MobMachine holds for it).
@@ -2176,19 +2169,6 @@ impl MobHandle {
     #[cfg(not(feature = "openai-live"))]
     async fn member_live_channel_open(&self, _session_id: Option<&SessionId>) -> bool {
         false
-    }
-
-    /// Whether a member's model takes System rows only inside the leading
-    /// System prefix, from its resolved capabilities (a live member's
-    /// registration, a dormant member's model from the catalog).
-    async fn member_lowers_leading_prefix_only(&self, identity: &AgentIdentity) -> bool {
-        match self.member_status(identity).await {
-            Ok(snapshot) => snapshot
-                .resolved_capabilities
-                .as_ref()
-                .is_some_and(|capabilities| !capabilities.mid_conversation_system_messages),
-            Err(_) => false,
-        }
     }
 
     /// MobMachine prepares one owed member's delivery.
@@ -2412,10 +2392,10 @@ fn member_slot_status(
                 meerkat_core::InstructionLowering::Unavailable => {
                     MemberInstructionPendingReason::LoweringUnavailable
                 }
-                meerkat_core::InstructionLowering::LeadingPrefixOnly => {
-                    MemberInstructionPendingReason::LeadingPrefixOnlyLowering
-                }
-                meerkat_core::InstructionLowering::MidConversation => {
+                // A model that lowers System rows only inside the leading
+                // prefix takes the change at its next fresh run start too.
+                meerkat_core::InstructionLowering::LeadingPrefixOnly
+                | meerkat_core::InstructionLowering::MidConversation => {
                     MemberInstructionPendingReason::AwaitingRunStart
                 }
             },
@@ -2428,6 +2408,19 @@ fn member_slot_status(
         effective,
         state: state_of_slot,
     }
+}
+
+/// The lowering a member's slot status is answered with: the one the
+/// member's session service read, and for a read that tells none (a
+/// session without metadata, a service that cannot tell) the wire that
+/// carries no entry. A status that answered such a slot "the next run"
+/// would promise what the member may not get; the answer to the update
+/// itself is the same for a lowering that was not read.
+fn slot_status_lowering(
+    read: Option<&meerkat_core::service::SessionInstructionRead>,
+) -> meerkat_core::InstructionLowering {
+    read.and_then(|read| read.lowering)
+        .unwrap_or(meerkat_core::InstructionLowering::Unavailable)
 }
 
 // ---------------------------------------------------------------------------
@@ -3067,7 +3060,7 @@ mod tests {
             ),
             (
                 meerkat_core::InstructionLowering::LeadingPrefixOnly,
-                MemberInstructionPendingReason::LeadingPrefixOnlyLowering,
+                MemberInstructionPendingReason::AwaitingRunStart,
             ),
             (
                 meerkat_core::InstructionLowering::MidConversation,
@@ -3088,6 +3081,80 @@ mod tests {
                 status.state,
                 MemberInstructionSlotState::Pending { reason },
                 "{lowering:?}"
+            );
+        }
+    }
+
+    /// A session read that tells no lowering (a session without metadata, a
+    /// service that cannot tell) is answered as a wire that carries no
+    /// entry: the status promises no next run the member may not get, as the
+    /// answer to the update itself does. A read lowering is answered as it
+    /// reads.
+    #[test]
+    fn a_recorded_slot_whose_lowering_was_not_read_promises_no_next_run() {
+        let identity = AgentIdentity::from("member");
+        let mut session = Session::new();
+        session
+            .record_instruction_target(InstructionTargetRecord {
+                mob_id: "mob".to_string(),
+                agent_identity: "member".to_string(),
+                generation: 1,
+                slots: vec![InstructionTargetRecordSlot {
+                    slot: tone(),
+                    revision: InstructionRevision::new(1).unwrap(),
+                    body: Some("Be brief.".to_string()),
+                }],
+            })
+            .expect("the snapshot records");
+        let read_with = |lowering| SessionInstructionRead {
+            target: session
+                .instruction_target_state()
+                .expect("the target reads"),
+            effective: meerkat_core::effective_operator_instructions(
+                session.id(),
+                session.messages(),
+            )
+            .expect("nothing is in effect yet"),
+            lowering,
+        };
+        let record = OperatorInstructionRecordStatus {
+            slot: tone(),
+            revision: InstructionRevision::new(1).unwrap(),
+            effect: meerkat_core::InstructionEffect::Active,
+            target: OperatorInstructionTarget::Mob,
+            content_sha256: None,
+            body_bytes: Some(9),
+        };
+        for (lowering, reason) in [
+            (None, MemberInstructionPendingReason::LoweringUnavailable),
+            (
+                Some(meerkat_core::InstructionLowering::Unavailable),
+                MemberInstructionPendingReason::LoweringUnavailable,
+            ),
+            (
+                Some(meerkat_core::InstructionLowering::LeadingPrefixOnly),
+                MemberInstructionPendingReason::AwaitingRunStart,
+            ),
+            (
+                Some(meerkat_core::InstructionLowering::MidConversation),
+                MemberInstructionPendingReason::AwaitingRunStart,
+            ),
+        ] {
+            let read = read_with(lowering);
+            let status = member_slot_status(
+                &record,
+                &identity,
+                "worker",
+                None,
+                Some(&read),
+                &MemberInstructionDeliveryState::Current,
+                false,
+                slot_status_lowering(Some(&read)),
+            );
+            assert_eq!(
+                status.state,
+                MemberInstructionSlotState::Pending { reason },
+                "a read whose lowering is {lowering:?}"
             );
         }
     }

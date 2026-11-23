@@ -3088,6 +3088,97 @@ mod tests {
         );
     }
 
+    /// An operator-instruction entry of a session of a Gemini model, on this
+    /// wire. The session appends the entry at its transcript tail and its
+    /// model request places it at the end of the leading System prefix: that
+    /// request lowers, with the entry as a part of `systemInstruction` after
+    /// the prompt. The rows as the transcript holds them, which is what a
+    /// release that does not place entries sends, are refused before the
+    /// provider is called.
+    #[test]
+    fn a_placed_operator_instruction_entry_lowers_and_the_unplaced_rows_are_refused() {
+        const MODEL: &str = "gemini-3.5-flash";
+        const HEAD: &str = "You are the calendar domain agent.";
+        let client = GeminiClient::new("test-key".to_string());
+        let lower = |messages: Vec<Message>| -> Result<Value, LlmError> {
+            let mut request = LlmRequest::new(MODEL, messages);
+            request.messages = client.project_replay_messages(&request.messages)?;
+            client.build_request_body(&request)
+        };
+        let mut session = meerkat_core::Session::new();
+        session.append_system_message(HEAD);
+        session.push(Message::User(UserMessage::text("note tomorrow's agenda")));
+        session.push(Message::BlockAssistant(BlockAssistantMessage::new(
+            vec![AssistantBlock::Text {
+                text: "Tomorrow: standup at 9, dentist at 14.".to_string(),
+                meta: None,
+            }],
+            StopReason::EndTurn,
+        )));
+        session
+            .set_session_instruction(meerkat_core::SessionInstructionWrite {
+                slot: meerkat_core::InstructionSlot {
+                    namespace: meerkat_core::types::InstructionNamespace::new("app.example")
+                        .unwrap(),
+                    key: meerkat_core::types::InstructionKey::new("times").unwrap(),
+                },
+                revision: meerkat_core::InstructionRevision::new(1).unwrap(),
+                change: meerkat_core::SessionInstructionChange::Activate {
+                    body: "Give every time in 24-hour form.".to_string(),
+                    content_sha256: None,
+                },
+            })
+            .unwrap();
+        let applied = session
+            .apply_run_start_instructions(
+                meerkat_core::InstructionRunStart::FreshRun,
+                meerkat_core::InstructionLowering::LeadingPrefixOnly,
+                None,
+            )
+            .unwrap();
+        assert!(
+            matches!(
+                applied,
+                meerkat_core::RunStartInstructionOutcome::Applied { .. }
+            ),
+            "{applied:?}"
+        );
+        session.push(Message::User(UserMessage::text(
+            "what is left for tomorrow?",
+        )));
+
+        let placed = session
+            .messages_for_model_request(meerkat_core::InstructionLowering::LeadingPrefixOnly)
+            .unwrap();
+        let body = lower(placed).expect("the placed request lowers");
+        let parts = body["systemInstruction"]["parts"]
+            .as_array()
+            .expect("system instruction parts");
+        assert_eq!(parts.len(), 2, "the prompt, then the entry: {parts:?}");
+        assert_eq!(parts[0]["text"], HEAD);
+        assert!(
+            parts[1]["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("Give every time in 24-hour form.")),
+            "{parts:?}"
+        );
+        assert_eq!(
+            body["contents"].as_array().map(Vec::len),
+            Some(3),
+            "the conversation keeps its rows and their order"
+        );
+
+        let unplaced = session.messages_for_model_boundary().unwrap();
+        let error = lower(unplaced).expect_err("the rows as the transcript holds them are refused");
+        let LlmError::InvalidInputShape { message } = &error else {
+            panic!("expected an input-shape refusal, got {error:?}");
+        };
+        assert!(
+            message.contains("System rows must form a leading prefix"),
+            "{message}"
+        );
+    }
+
     fn assistant_image_block() -> AssistantBlock {
         AssistantBlock::Image {
             image_id: AssistantImageId::new(meerkat_core::time_compat::new_uuid_v7()),

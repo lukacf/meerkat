@@ -35,6 +35,242 @@ them.
 
 ## [Unreleased]
 
+### Breaking
+
+- `meerkat-machine-kernels`, `meerkat-core`, `meerkat-machine-schema`
+  (SessionDocumentMachine, the operator-instruction region): a fresh run
+  start no longer defers a pending operator instruction on a model that
+  lowers System rows only inside the leading System prefix (see Changed),
+  so the machine no longer takes the transcript's shape as an input and no
+  longer has that deferral.
+  - `meerkat_machine_kernels::generated::session_document::inputs::ResolveRunStartInstructions`
+    and `meerkat_core::session_document::SessionDocumentInput::ResolveRunStartInstructions`
+    lose the field `transcript_is_system_prefix`, and
+    `meerkat_core::session_document::SessionDocumentMachineAuthority::resolve_run_start_instructions`
+    loses the parameter of that name.
+  - `InstructionDeferReason::LeadingPrefixOnly` is removed from
+    `meerkat_machine_kernels::generated::session_document::InstructionDeferReason`,
+    `meerkat_core::session_document::InstructionDeferReason`,
+    `meerkat_core::InstructionDeferReason` and
+    `meerkat_machine_schema::catalog::dsl::session_document::InstructionDeferReason`
+    (whose `SessionDocumentInput::ResolveRunStartInstructions` loses the
+    field too). `LoweringUnavailable` is the one reason left and the
+    default.
+  - The transition `ResolveRunStartInstructionsDeferredLeadingPrefix` no
+    longer exists. Its `TransitionId` variant stays in
+    `meerkat_machine_kernels::generated::session_document::TransitionId`
+    as a retired variant that is never fired, at the index it was published
+    at, so no published discriminant moves.
+- Behaviour-only (not measured by the gate): `meerkat-core`:
+  `Session::apply_run_start_instructions` and
+  `Agent::apply_run_start_operator_instructions` answer
+  `RunStartInstructionOutcome::Applied` for
+  `InstructionLowering::LeadingPrefixOnly` whatever the transcript holds,
+  where they answered `Deferred` once it held a conversation row;
+  `Session::messages_for_model_request` moves the session's own
+  operator-instruction entry rows to the end of the leading System prefix
+  for that lowering; and `InstructionEntryPlacement::refusal` answers
+  `None` for that lowering when the placement is a session's own
+  (`Session::own_operator_instruction_entry_placement`). See Changed.
+- Behaviour-only (not measured by the gate): `meerkat-contracts`,
+  `meerkat-mob`: `WireInstructionPendingReason::for_lowering` and the mob's
+  member instruction status answer `awaiting_run_start` for a recorded
+  change on a model that lowers System rows only inside the leading System
+  prefix, where they answered `leading_prefix_only_lowering`. The value
+  stays in both vocabularies. The mob's member instruction status answers
+  `lowering_unavailable` for a recorded change whose session read does not
+  tell how the model lowers an entry, where it answered from the member's
+  resolved capabilities. A read does not tell for a session without
+  metadata and for a session service whose builder cannot tell:
+  `SessionAgentBuilder::instruction_lowering_for_identity` answers "cannot
+  tell" by default, and the stock builder and the Meerkat Meta gateway's
+  builder implement it. A host with a builder of its own, or a wrapper that
+  does not forward the method, therefore reads `lowering_unavailable` for
+  every recorded change that waits for a run, until it implements or
+  forwards the method.
+- Behaviour-only (not measured by the gate): `meerkat-openai`: a
+  `store: true` request is sent in full, without `previous_response_id`,
+  when a System row of its leading System prefix is not older than the
+  transcript's last assistant step. See Changed.
+
+### Added
+
+- `rkat storage doctor`: the informational finding
+  `operator-instruction-entry-after-conversation` counts, per database, the
+  sessions whose stored transcript holds the session's own
+  operator-instruction entry after a conversation row, with the count per
+  model over all of them and, for the first fifty, each session with the
+  model its stored metadata names: `model not recorded` where it names
+  none, and `model unreadable` where a session's metadata rows are not the
+  metadata its head commits to (the finding does not guess; the count and
+  the sessions stay whole). They are the sessions an earlier
+  release refuses to resume when their model lowers System rows only
+  inside the leading System prefix (see Changed and the Upgrade notes); the
+  store records no model capability, so the finding names the models and
+  cannot tell which of the sessions such a release refuses. It reads the
+  realms whose documents are on disk (SQLite realms, and JSONL realms
+  through `runtime.sqlite3`). A session is counted from its current record:
+  where a database holds the session's head, the session is counted, and its
+  model read, by the head alone, and a WholeBlob document its runtime store
+  kept when the session moved to head storage counts only for a session
+  that has no head and whose runtime holds no head authority (a store not
+  yet converted). A head's rows are read as the session store serves them,
+  through the session's strand links after a rewrite; where they do not
+  resolve (a strand lacks a row its head or a link names, a link is one the
+  store refuses, or the links run through more strands than the session
+  links), the doctor gives no count for that database and a
+  `storage-census-unmeasured` warning names the session.
+  `meerkat_store::doctor::operator_instruction_entry_after_conversation_sessions`
+  is the census, over a read-only connection (each session with a
+  `LateEntrySessionModel`; `LateEntryCensusError` where it cannot count), and
+  `FINDING_OPERATOR_INSTRUCTION_ENTRY_AFTER_CONVERSATION` the code.
+
+### Changed
+
+- Operator instructions: a model that lowers System rows only inside the
+  leading System prefix takes a changed instruction at its session's next
+  fresh run start, as a model that lowers them anywhere always has. Which
+  of the two a model is, is its capability row
+  `supports_mid_conversation_system_messages` as the session's backend
+  serves it: `false` is such a model, and so is a model the catalog does
+  not know. No provider name and no list of models decides it;
+  `claude-haiku-4-5` and `gemini-3.5-flash` are such models, for instance.
+  Until now such a session deferred the change
+  once its transcript held a conversation row, until a compaction at a
+  run's first request carried it, and a conversation under its compaction
+  threshold never compacts.
+  - The run start appends the one entry at the transcript tail on every
+    model. The transcript is not rewritten: no row is changed or moved.
+  - The model request places the session's own entry rows at the end of
+    the leading System prefix for such a model, in their order
+    (`Session::messages_for_model_request`). That request shape is the one
+    such a model already received after a fold or a first-run application:
+    several System rows ahead of the conversation.
+  - A run in flight is not touched, a resumed run applies nothing, a run
+    that never starts takes its entry back, and several changes before one
+    run are one entry, as before. A fork child's copied rows are still
+    left out of its request where they stand after a conversation row; its
+    own entry is placed. So a fork child on such a model does not follow a
+    change its parent took after its conversation began, until the
+    instruction is recorded in the child itself: a mob member's fork gets
+    its own delivery, a fork whose instructions are set on the session gets
+    none by itself. A child on a model that lowers System rows anywhere
+    reads the copied row as history. The compaction summary request never
+    carried an entry row and needs no placement.
+  - The first request after an application is as a rule not served from
+    the provider's prompt cache on such a model, because its system
+    section changed; later requests are.
+  - A model change of a session that holds its own entry after a
+    conversation row is accepted onto such a model (a hot swap, a
+    reconfigure, a build that resumes the session): the session's request
+    places the entry. It was refused "an entry row stands after a
+    conversation row". A wire that carries one leading System row (an
+    OpenAI model through the ChatGPT backend) still takes no entry, and a
+    per-request model fallback, which hands its target the request as it
+    stands, still skips a target that cannot carry an entry after a
+    conversation row. More sessions meet the refusal that stays, because
+    every session of such a model that took a change now holds an entry
+    after a conversation row: in a realm that holds a ChatGPT backend
+    binding beside another OpenAI binding, a model change or a resumed
+    build onto an OpenAI model that names no binding is judged by the
+    weakest binding it may be served through, and is refused for such a
+    session even where the other binding would serve. Naming the binding
+    decides exactly.
+  - The pending reason of such a change reads `awaiting_run_start`.
+    `leading_prefix_only_lowering` is no longer reported. A recorded change
+    whose session read does not tell how its model lowers an entry reads
+    `lowering_unavailable`: the status promises no next run the session
+    may not get, as the answer to the update does (Meerkat Meta's
+    `applies_at_next_session`).
+  - A wire that carries no entry (`lowering_unavailable`) is unchanged.
+    An open live channel still reads the System rows when it is opened, and
+    its voice model hears a change when the channel is next opened. New for
+    a live session whose turns run on such a model: a run now appends an
+    entry while the channel is open, so a caller's next `live/refresh` of
+    that channel is refused and the channel has to be closed and opened
+    again, as it already was for a session whose turns run on a model that
+    lowers System rows anywhere.
+- OpenAI, `store: true`: a request is replayed in full, once, after a
+  System row entered the leading System prefix behind the transcript's
+  last assistant step. A continuation (`previous_response_id`) sends only
+  the rows after that step, so it never sent such a row, and the provider's
+  stored context never held it: an operator-instruction entry placed there
+  (above), and before this release already the snapshot a compaction folds
+  the instructions in effect into and the new version of a prompt update
+  (`session/update_system_prompt`), which a long-lived process kept
+  continuing past. The client now asks for no continuation when a leading
+  System row is not older than that step: the request carries every row,
+  the step it produces has seen them, and the next request continues from
+  that step. Rows carry no sequence that orders a System row against an
+  assistant step, so their times decide; a System row with the same time
+  as the step, or one stored without its time (it reads as written when the
+  session was loaded), replays in full too. A System row among the
+  conversation rows is ordered by the transcript and changes nothing. The
+  ChatGPT backend's wire sends its one leading System row with every
+  request and is unchanged. The cost is the input tokens of one full
+  request after such a change, where a continuation would have been billed
+  for the new rows alone. Two limits come with deciding by time. A leading
+  System row that the request itself authors is stamped when the request
+  is built: a session without a system prompt whose requests carry a
+  projected output-schema section is replayed in full at each of those
+  requests (a continuation would leave the section out). And a host clock
+  that steps back between a step and a later System row makes that row
+  read older than the step; the continuation then leaves it out, as it did
+  for every such row before this change.
+- `meerkat-machine-codegen`: the retired-variant rule of a kernel's
+  `TransitionId` enum now covers SessionDocumentMachine. 0.9.15 gave the
+  rule to MeerkatMachine alone; the renderer keeps the retired list per
+  machine from this release on (MeerkatMachine and SessionDocumentMachine
+  have one, every other machine has none). Under the rule a transition
+  that a release removes keeps its variant in the enum right after the
+  variant it followed when it was published, so no published discriminant
+  moves; no transition fires it, the generated documentation says so on
+  it, and its name appears in no transition table, spec, model or poster.
+  Rendering refuses a retired name that a schema transition of that
+  machine still has
+  (`MachineKernelRenderError::RetiredTransitionStillLive`) and a retired
+  name whose predecessor the enum does not have
+  (`RetiredTransitionFollowsUnknown`). A list is append-only. This release
+  retires SessionDocumentMachine's
+  `ResolveRunStartInstructionsDeferredLeadingPrefix` (see Breaking).
+
+### Upgrade notes
+
+- Operator instructions on a model that lowers System rows only inside
+  the leading System prefix: nothing stored takes a new form. The entry
+  row, its place at the transcript tail and the recorded target are what a
+  model that lowers System rows anywhere has left since 0.9.9, and a
+  change that was waiting for a compaction applies at the session's first
+  fresh run after the upgrade.
+  Before going back, `rkat storage doctor` counts the sessions concerned
+  (`operator-instruction-entry-after-conversation`; see Added).
+  Going BACK to an earlier release with the same state: such a release
+  reads every session, and cannot serve the sessions of such a model in
+  which this release applied a change while the transcript held a
+  conversation row (the transcript holds an operator-instruction entry row
+  after a conversation row, and no compaction has folded it since), nor a
+  session that this release switched onto such a model with such a row.
+  The earlier release does not place the rows, and it refuses to resume
+  such a session: after the restart of a rollback every session is resumed
+  by a build, and that build answers, before any client or request exists,
+  "model '<model>' cannot represent the operator-instruction entries
+  already applied in session <id>: an entry row stands after a conversation
+  row, and the target carries System rows only before the first one". That
+  is the failure to look for. Where a host reaches a request of such a
+  session without that build, the earlier release's request builder
+  refuses the request before the provider is called: "cannot represent
+  System message at transcript index N; this model requires System rows to
+  form a leading prefix" (Anthropic) or "System rows must form a leading
+  prefix" (Gemini). Either way the session does not run there. Sessions of
+  other models, and sessions of such a model whose instructions did not
+  change under this release, are served as before.
+  What to do: upgrade again, which serves the session as it is; or give
+  that session up and start a new one, whose first prompt is built from the
+  current instructions (for a Meta agent, `meta/reset`).
+- OpenAI, `store: true`: nothing to do. Expect one full request after a
+  compaction, a prompt update or an applied operator instruction (see
+  Changed).
+
 ## [0.9.18] - 2026-11-22
 
 ### Breaking

@@ -484,6 +484,14 @@ impl From<InstructionRunStart> for document::InstructionRunStart {
 
 /// How the session's model carries a System row after conversation rows,
 /// from its resolved capability surface.
+///
+/// Every lowering but [`Self::Unavailable`] takes an operator-instruction
+/// entry at a fresh run start. The entry is appended at the transcript tail
+/// on both; what differs is the model request
+/// ([`Session::messages_for_model_request`]): a model that lowers System
+/// rows anywhere is asked with the entry where it stands, and one that
+/// lowers them only inside the leading System prefix is asked with the
+/// session's own entries placed there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InstructionLowering {
     /// System rows lower at any transcript position.
@@ -534,13 +542,12 @@ impl From<InstructionEffect> for document::InstructionEffect {
     }
 }
 
-/// Why a fresh run start left pending changes pending.
+/// Why a fresh run start left pending changes pending. A model that lowers
+/// System rows only inside the leading System prefix defers nothing: its
+/// entry is appended and its request places it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InstructionDeferReason {
-    /// The model lowers System rows only inside the leading System prefix,
-    /// and the transcript has conversation rows.
-    LeadingPrefixOnly,
     /// The model's wire carries no System row an entry can take.
     LoweringUnavailable,
 }
@@ -548,7 +555,6 @@ pub enum InstructionDeferReason {
 impl From<document::InstructionDeferReason> for InstructionDeferReason {
     fn from(value: document::InstructionDeferReason) -> Self {
         match value {
-            document::InstructionDeferReason::LeadingPrefixOnly => Self::LeadingPrefixOnly,
             document::InstructionDeferReason::LoweringUnavailable => Self::LoweringUnavailable,
         }
     }
@@ -1585,22 +1591,13 @@ impl Session {
             EffectiveOperatorInstructions::default()
         };
         let bodies = InstructionBodies::from_sources(state.as_ref(), &effective);
-        let transcript_is_system_prefix = self
-            .messages()
-            .iter()
-            .all(|message| matches!(message, Message::System(_)));
         let mut document = InstructionDocument::seed(state.as_ref(), &effective)?;
         let key = document.key();
         let target = document.target();
         let in_effect = document.effective();
         let effects = document
             .authority
-            .resolve_run_start_instructions(
-                key,
-                run_start.into(),
-                lowering.into(),
-                transcript_is_system_prefix,
-            )
+            .resolve_run_start_instructions(key, run_start.into(), lowering.into())
             .map_err(|error| refused_by_authority(&error))?;
         let verdict = effects
             .iter()

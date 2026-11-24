@@ -302,9 +302,16 @@ The response contains `catalog_exact`, `total_matches`, `results`, optional
 `pending_sources`, and optional `empty_result_status`. Each result reports
 `name`, `description`, `currently_callable`, and `visibility_status`:
 `loaded`, `deferred`, or `temporarily_unavailable`. A tool the session's tool
-filters do not allow is not returned and not counted, and the deferred-catalog
-notice does not name it. Tool load and call behavior is unchanged; only
-search and notices are filtered.
+filters do not allow, or that a closed tool grant gate holds back, is not
+returned and not counted: a caller of search sees neither its name nor its
+description. Such a tool used to be returned with the status
+`blocked_by_filter`, which is no longer produced; for a gated tool, the
+description could be read there before a grant and no longer can. The
+deferred-catalog notice does not offer a tool the filters do not allow: it is
+not announced as available, and a tool that was never offered is never named.
+A tool that was announced and is later disallowed is reported once as no
+longer available. Tool load and call behavior is unchanged; only search and
+notices are filtered.
 `pending_source` is used only as the empty-result status while a catalog source
 is pending, and `temporarily_unavailable` is the empty-result status of a
 search whose tool scope cannot be read, which returns no result.

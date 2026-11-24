@@ -292,8 +292,13 @@ answers the check from that WorkGraph:
   claimed again, and every later attempt of the same resume answers
   superseded too.
 - When the WorkGraph cannot be read, or the run's attention projection does
-  not decode, the check answers unavailable. Meerkat asks again, up to three
-  attempts, then settles the run the same way.
+  not decode, the check answers unavailable. It also answers unavailable when
+  the list of the mob's open work items is too slow: a run that named no item
+  is checked against that list, and the check stops reading it after seven
+  eighths of one attempt. The reason says which of these it was. Meerkat asks
+  again, up to three attempts. When none of them decides, the run is neither
+  resumed nor ended: it stays held, and Meerkat asks again the next time the
+  worker's runtime wakes or its session registers.
 
 A mob runtime composed without a WorkGraph service has no check, and
 neither has one whose storage provider has no WorkGraph: there is no item

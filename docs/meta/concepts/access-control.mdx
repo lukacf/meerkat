@@ -4,7 +4,7 @@ description: "Optional ABAC for the console: control which users can see which a
 icon: "lock"
 ---
 
-*Mirrored from Meerkat Meta main at [6372543dee87](https://github.com/lukacf/meerkat/commit/6372543dee877e30cf411bacc1317110927dfebc) on 2026-11-24; Meta version 0.9.18 at that commit.*
+*Mirrored from Meerkat Meta main at [03eac87a63cd](https://github.com/lukacf/meerkat/commit/03eac87a63cd7d2448ac6d4a47ca76ef79e47d15) on 2026-11-24; Meta version 0.9.18 at that commit.*
 
 Meta ships an optional attribute-based access control (ABAC) layer for everything that flows through the console and observation surfaces. When it is off — the default — nothing changes. When it is on, every console caller only sees and operates exactly what their attributes grant: the agent sidebar, roster, topology, timeline, event streams, sends, and lifecycle actions are all filtered or gated per principal, invisibly. A restricted user doesn't see denied agents or disabled buttons explained; they just get a console shaped to what they're allowed.
 
@@ -57,7 +57,7 @@ There are no roles. Every check evaluates the caller's attributes (subject, grou
 | `audit.view` | Read the console audit log (`meta/console/audit`): who made each console change, when, and how it ended |
 | `access.admin` | Read and edit this configuration |
 
-- **Rule** — matches principals (`subjects`, `groups`), actions (exact, `agent.*`, or `*`), and resources (`agents`, `roles`, `match_labels`). Resource selectors AND together; values within a list OR together. Empty selectors leave a dimension unconstrained.
+- **Rule** — matches principals (`subjects`, `groups`), actions (exact, `agent.*`, or `*`), and resources (`mobs`, `agents`, `roles`, `match_labels`). Resource selectors AND together; values within a list OR together. An empty `mobs` list has the effect-specific scope described below.
 - **Mobs** - a rule selects agents by their mob too. Identities are names inside a mob, so a rule selects an agent through the agent's mob as well as its name, role and labels. Without `mobs` an allow rule is the default mob's (the mob the launch names): it grants nothing on an agent of any other mob, so a configuration written before rules could list mobs grants what it granted. A deny rule without `mobs` holds in every mob: a deny never stops applying because another mob appears. `mobs = ["<mob id>"]` selects the agents of the listed mobs, the default mob by its id like any other, and `mobs = ["*"]` the agents of every mob. An entry that is no mob's id selects nothing. A host that uses an access controller without a Meta runtime tells it the default mob (`AccessController::bind_default_mob`); until it does, an allow that lists mobs grants nothing on the default mob's agents and a deny that lists mobs holds on them. One controller belongs to one host: it keeps the first default mob it is told, so a controller installed on runtimes that serve different mobs reads the agents of all of them as agents of that one mob. A rule with `mobs` constrains its resource: it matches no check without an agent, such as `gating.decide`. The Console's rule editor shows the mobs a rule lists as the rule's teams and saves the rule with them; it has no field to change them, so set `mobs` in the access file or over the RPC. A Meta release that does not know `mobs` ignores the selector and reads the rule as one without it: an allow written for another mob then grants on the default mob's agents, and the first Console edit there saves the rule without its `mobs`. Before going back to such a release, remove every rule that lists `mobs`, or rewrite it as the rule you want for the default mob.
 
 Evaluation is **deny-by-default with deny-overrides**: a matching `deny` rule always wins, then a matching `allow` rule allows, otherwise the check denies. Subjects listed in `admins` bypass rules entirely. A disabled config allows everything.
@@ -260,6 +260,75 @@ meta = await (
     .build()
 )
 ```
+
+### Keys
+
+These are the access configuration fields in Meta 0.9.18. The file and the
+Console access methods use the same field names.
+
+The configuration itself:
+
+| Key | Value | Meaning |
+|-----|-------|---------|
+| `enabled` | `true` or `false`; `false` when left out | Enables access-rule enforcement. Turning it off does not disable Console authentication. |
+| `admins` | List of subjects | The subjects with full access, who also edit this configuration. At least one while `enabled` is `true`. |
+| `groups` | Table, one entry per group name | Named sets of subjects. |
+| `rules` | List of rules | The rules. They are judged as a set; their order does not matter. |
+| `approvers` | Table, one entry per approver id | Who holds each approver id (see [Approver identities](#approver-identities)). |
+
+A group, `[groups.<name>]`:
+
+| Key | Value | Meaning |
+|-----|-------|---------|
+| `description` | Text, optional | A note for people. No check reads it. |
+| `members` | List of subjects | The subjects in the group. |
+
+A rule, one `[[rules]]` table:
+
+| Key | Value | Meaning |
+|-----|-------|---------|
+| `id` | Text, required | The rule's name. It is not empty, and no two rules have the same one. |
+| `description` | Text, optional | A note for people; the Console's Access panel shows it as the rule's title. No check reads it. |
+| `effect` | `"allow"` or `"deny"`; `"allow"` when left out | Whether a matching rule allows or denies. |
+| `subjects` | List of subjects | Selects callers: the subjects the rule applies to. `"*"` is every signed-in subject. |
+| `groups` | List of group names | Selects callers: the members of any listed group. Each name must be a group the configuration defines. |
+| `actions` | List, required, not empty | The actions the rule is about: exact names, a family such as `agent.*`, or `*`. A name that is no action is refused. |
+| `agents` | List of agent names | Selects agents by name (see the paragraph on `agents` above). `"*"` is every agent. |
+| `roles` | List of role names | Selects agents by role. An agent's role is the role of its member in the mob, which is the name of the profile it is built from. `"*"` is every agent whose role is known. |
+| `match_labels` | Table of label and value | Selects agents by label: every label written must have the value written. |
+| `mobs` | List of mob IDs | Selects members of any listed mob; `"*"` selects every mob. When omitted or empty, an allow selects members of the default (launch) mob only; a deny selects members of every mob. |
+
+For an agent to match a rule directly, its mob, name, role and labels must
+satisfy all the resource selectors the rule sets. The caller and action must
+also match. For example, an allow with
+`mobs = ["research"]` and `roles = ["worker"]` selects workers in `research`,
+not every worker or every member of that mob. All specified labels must match.
+See [The model](#the-model) and [spawn-lineage inheritance](#spawn-lineage-inheritance)
+for how inherited grants and denies apply. A check that names no agent, such
+as `gating.decide`, cannot match a rule with any nonempty resource selector,
+including `mobs = ["*"]`. [Addressing a hosted mob](#mobs-the-gateway-hosts)
+is separate from permission to perform an action in it.
+
+An empty `subjects` list and an empty `groups` list together impose no caller
+restriction. Otherwise a signed-in caller can match by subject **or** by group.
+For anonymous callers, see [Relationship to authentication](#relationship-to-authentication).
+
+An approver, `[approvers."<approver id>"]`, has `subjects`, `groups`,
+`ingress_subjects` and `people`; an entry of `people` has `subjects` and
+`ingress_subjects`; an entry of `ingress_subjects` has `ingress` and `subject`
+(see [Approver identities](#approver-identities)).
+
+Check the effective configuration after loading a file: a successful start
+is not proof that every key was recognized. In checks on the released **Meta
+0.9.16** gateway, a misspelt caller or agent selector was silently dropped;
+a misspelt `effect` left the rule at its default of `allow`, and a misspelt
+`enabled` left access control off. Those observations were on 0.9.16, not a
+0.9.18 gateway run. See the access-file loader limitation and verification
+steps in the [tagged Meta 0.9.16 changelog](https://github.com/lukacf/meerkat/blob/meta-v0.9.16/meta/CHANGELOG.md).
+Do not assume a file load behaves like a Console write: `meta/access/set`,
+`meta/access/rules/upsert` and `meta/access/groups/set` reject unknown
+configuration keys. The typed entries under `people` and `ingress_subjects`
+also reject unknown fields when parsed from a file.
 
 ### Approver identities
 

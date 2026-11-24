@@ -89,7 +89,7 @@ them.
   wakes can answer in its first request. A load of a tool that never waits
   answers `not_deferred_eligible`. The session's tool filters apply as
   without the policy: a comms tool they do not allow is not returned by a
-  search and not named by the notice. For a host that writes its own
+  search and not offered by the notice. For a host that writes its own
   composition, `meerkat_core::StockDeferralDispatcher` applies a policy to
   any dispatcher; the wrapper checks nothing itself, so apply it only
   where the final catalog is exact, as the factory does. Not included: no
@@ -105,10 +105,16 @@ them.
   exercised with realtime conversations. A session resumed after its host
   opts in loads each comms tool it had inline once, and a tool binding
   digest recorded for such a tool before the opt-in differs from its digest
-  after it. Limit: a resumed session keeps the system prompt it was created
-  with, so a session created before the opt-in still carries the comms
-  usage section while those tools wait; the deferred-catalog notice names
-  the tools that wait.
+  after it. Limit, in both directions: a resumed session keeps the system
+  prompt it was created with. A session created before the opt-in still
+  carries the comms usage section while those tools wait; the
+  deferred-catalog notice names the tools that wait. A session created
+  under the policy and resumed without it keeps a prompt that tells the
+  model to load `send_message`, `send_request` and `peers` with
+  `tool_catalog_load`, while its requests list those tools inline and may
+  not offer `tool_catalog_load` at all. A tool name in a prompt confers no
+  grant: what a session can load or call is decided by its tool catalog,
+  its filters and its tool policy, not by the prompt.
 
 ### Changed
 

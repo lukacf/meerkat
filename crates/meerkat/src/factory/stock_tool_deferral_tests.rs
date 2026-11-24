@@ -984,6 +984,65 @@ async fn removing_the_policy_returns_the_tools_inline() {
     );
 }
 
+/// The limit of a resume without the policy, pinned as it is. A session
+/// keeps the system prompt it was created with: created under the policy
+/// and resumed by a host without it, its requests list the comms tools
+/// inline and offer no `tool_catalog_load`, while its prompt still says to
+/// load them with it. The prompt's tool name grants nothing: a call of the
+/// load tool is refused.
+#[tokio::test]
+async fn a_session_resumed_without_the_policy_keeps_its_load_first_prompt() {
+    let load_first = "are in the deferred tool catalog";
+    let temp = tempfile::tempdir().expect("temp root");
+    let requests = Requests::default();
+    let first_factory = host_factory(temp.path(), Some(&comms_name("stale-prompt-first")))
+        .stock_tool_deferral(comms_policy());
+    let mut first = build(&first_factory, Session::new(), exact_host_tool(), &requests).await;
+    let created_prompt = system_prompt(&first);
+    assert!(
+        created_prompt.contains(load_first) && created_prompt.contains("tool_catalog_load"),
+        "precondition: created under the policy, the prompt says to load: {created_prompt}"
+    );
+    let tools = listed_in_a_turn(&mut first, "first life", &requests).await;
+    assert!(
+        listed(&tools, "tool_catalog_load"),
+        "precondition: {tools:?}"
+    );
+    assert!(!listed(&tools, "send_message"), "precondition: {tools:?}");
+    let session = first.session().clone();
+    first.release_owned_resources().await;
+    drop(first);
+
+    let resumed_factory = host_factory(temp.path(), Some(&comms_name("stale-prompt-resumed")));
+    let mut resumed = build(&resumed_factory, session, exact_host_tool(), &requests).await;
+    let tools = listed_in_a_turn(&mut resumed, "second life", &requests).await;
+    for name in COMMS_TOOLS {
+        assert!(listed(&tools, name), "{name} is in the request: {tools:?}");
+    }
+    for name in CONTROL_TOOLS {
+        assert!(
+            !listed(&tools, name),
+            "{name} is not in the request: {tools:?}"
+        );
+    }
+    assert_eq!(
+        system_prompt(&resumed),
+        created_prompt,
+        "the resumed session keeps the prompt it was created with"
+    );
+    let called = call(
+        &mut resumed,
+        "tool_catalog_load",
+        serde_json::json!({ "names": ["peers"] }),
+    )
+    .await;
+    assert!(
+        called.result.is_error,
+        "a tool the prompt names and the request does not offer is not callable: {}",
+        called.result.text_content()
+    );
+}
+
 /// A comms tool the session's own filter hides is not loadable and
 /// stays hidden; the policy widens nothing.
 #[tokio::test]

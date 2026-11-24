@@ -6559,6 +6559,16 @@ impl AgentFactory {
     /// A session that already ran with a named family's tools inline (a
     /// resumed session after its host opts in) starts with the tools it
     /// never loaded behind the catalog and loads each once.
+    ///
+    /// One limit, in both directions: a resumed session keeps the system
+    /// prompt it was created with. A session created before the opt-in
+    /// still carries the comms usage section while those tools wait. A
+    /// session created under the policy and resumed without it keeps a
+    /// prompt that tells the model to load `send_message`, `send_request`
+    /// and `peers` with `tool_catalog_load`, while its requests list those
+    /// tools inline and may not offer `tool_catalog_load` at all. A tool
+    /// name in a prompt confers no grant: what a session can load or call
+    /// is decided by its tool catalog, its filters and its tool policy.
     pub fn stock_tool_deferral(mut self, policy: meerkat_core::StockToolDeferralPolicy) -> Self {
         self.stock_tool_deferral = policy;
         self

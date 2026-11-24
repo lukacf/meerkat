@@ -270,10 +270,18 @@ source, or the empty base source of a session with neither builtin nor
 external tools). Only Rust host code can set the policy: no RPC or REST
 parameter, config file, SDK option, mob definition, profile or tool call
 sets it, and the `rkat` binaries do not set it. This policy has not been
-exercised with realtime conversations. One limit: a resumed session keeps
-the system prompt it was created with, so a session created before its host
-opted in still carries the comms usage section while those tools wait; the
-deferred-catalog notice at its next boundary names the tools that wait.
+exercised with realtime conversations.
+
+One limit, in both directions: a resumed session keeps the system prompt it
+was created with. A session created before its host opted in still carries
+the comms usage section while those tools wait; the deferred-catalog notice
+at its next boundary names the tools that wait. A session created under the
+policy and resumed without it keeps a prompt that tells the model to load
+`send_message`, `send_request` and `peers` with `tool_catalog_load`, while
+its requests list those tools inline and may not offer `tool_catalog_load`
+at all. A tool name in a prompt confers no grant: what a session can load or
+call is decided by its tool catalog, its filters and its tool policy, not by
+the prompt.
 
 A Rust host can read this projection for a live session without a model
 request: `EphemeralSessionService::tool_catalog_view` and

@@ -592,6 +592,12 @@ class HoldTests(GuardTest):
         err = self.assertFindings(self.STALE)
         self.assertIn("0 pin(s) below", err)
         self.assertIn("1 stale allow entry.", err)
+        # Another address of the same release, in a paragraph without the words, is found by
+        # the match and is not the sentence's pin either.
+        self.tree("1.4.2", "Install Demo Core first.\n\n"
+                  "Fetch https://github.com/lukacf/meerkat/releases/download/v1.4.2/sums\n")
+        err = self.assertFindings(self.STALE)
+        self.assertIn("0 pin(s) below", err)
         # The words stand on the page, and the pin the entry names stands beside them, not
         # inside them: it is not the sentence's pin now, and will not be at the hold's version.
         beside = "allow entry 0 connect/README.md (^demo-cli-1\\.4\\.2$) [at 1.4.3] covers nothing; delete it"
@@ -606,26 +612,34 @@ class HoldTests(GuardTest):
         self.assertEqual(code, 1, err)
         self.assertIn(beside, err)
 
-    def test_a_waiting_hold_of_a_context_alone_waits_on_the_pin_inside_its_text(self):
-        # Without a match the context alone says which pin the entry holds. Another pin on
-        # the same package in the file does not keep the entry waiting.
-        releases = "https://github.com/lukacf/meerkat/releases"
-        stale = "allow entry 0 connect/README.md [at 1.4.3] covers nothing; delete it"
+    def test_a_hold_needs_a_match_beside_at(self):
+        # A hold names the pin it holds: an entry with `at` carries a `match`. A hold of a
+        # context alone is refused when the configuration is read, before any file is: also
+        # where its context holds the very pin, while it waits and at its version. The same
+        # entry with the match beside `at` is accepted on the same page.
+        refused = "check_inrepo_version_pins: allow entry 0 (connect/README.md) at needs a match\n"
+        for version in ("1.4.2", "1.4.3"):
+            with self.subTest(version=version):
+                self.tree(version, self.HELD, match=None)
+                code, out, err = self.repo.run()
+                self.assertEqual((code, out, err), (2, "", refused))
+                self.tree(version, self.HELD)
+                self.assertIn("1 allow entries", self.assertClean())
+        # --write refuses it too, and moves nothing.
+        manifest = '[project]\nname = "demo-py"\nversion = "1.4.2"\ndependencies = ["demo-meta==1.4.1"]\n'
         self.tree("1.4.2", self.HELD, match=None)
+        self.repo.write("connect/py/pyproject.toml", manifest)
+        code, out, err = self.repo.run(write=True)
+        self.assertEqual((code, out, err), (2, "", refused))
+        self.assertEqual((self.repo.root / "connect/py/pyproject.toml").read_text(), manifest)
+        # A hold of a match alone stays a hold: the context is the optional part.
+        self.tree("1.4.2", self.PLAIN, context=None)
         self.assertIn("1 allow entries", self.assertClean())
-        self.tree("1.4.3", self.HELD, match=None)
-        self.assertClean()
-        for label, page in (
-                ("the link without the words", self.PLAIN),
-                ("a download address and no sentence",
-                 f"Install Demo Core first.\n\nFetch {releases}/download/v1.4.2/sums\n"),
-                ("an archive name beside the words",
-                 "Unpack demo-cli-1.4.2-linux-x86_64.tar.gz, the Core release\nConnect 1.4.2 was released with.\n")):
-            with self.subTest(label):
-                self.tree("1.4.2", page, match=None)
-                err = self.assertFindings(stale)
-                self.assertIn("0 pin(s) below", err)
-                self.assertIn("1 stale allow entry.", err)
+        self.tree("1.4.3", self.PLAIN, context=None)
+        self.assertIn("1 allow entries", self.assertClean())
+        # An entry without `at` may still name its pins by a context alone.
+        self.tree("1.4.3", self.HELD, match=None, at=None)
+        self.assertIn("1 allow entries", self.assertClean())
 
     def test_a_waiting_hold_with_a_context_waits_on_no_pin_read_from_a_structure(self):
         # A dependency read from a manifest's structure has no place in a line: no context
@@ -721,10 +735,11 @@ class HoldTests(GuardTest):
         self.assertIn("1 stale allow entry.", err)
 
     def test_a_hold_names_a_version_and_the_pins_it_holds(self):
-        for changes, needle in (({"at": "next"}, "at must be a version"),
-                                ({"at": 143}, "at must be a version"),
-                                ({"match": None, "context": None}, "at needs a match or a context"),
-                                ({"key": "^files/"}, "at takes no key")):
+        for changes, needle in (({"at": "next"}, "at must be a version\n"),
+                                ({"at": 143}, "at must be a version\n"),
+                                ({"match": None, "context": None}, "at needs a match\n"),
+                                ({"match": None}, "at needs a match\n"),
+                                ({"key": "^files/"}, "at takes no key\n")):
             with self.subTest(changes=changes):
                 self.tree("1.4.2", self.HELD, **changes)
                 self.assertFindings(needle, code=2)
@@ -1299,8 +1314,9 @@ class CommandTests(unittest.TestCase):
         text = self.help_text()
         self.assertEqual(text.count(" ".join(pins.__doc__.split())), 1)
         for sentence in (
-                "An entry with `at` (a version; beside `match` or `context`, never `key`) is a hold decided for one "
-                "release: it covers its pins only while the package they pin is at exactly that version in this tree.",
+                "An entry with `at` (a version; always beside a `match`, with or without a `context`, never beside "
+                "a `key`) is a hold decided for one release: it covers its pins only while the package they pin is "
+                "at exactly that version in this tree.",
                 "While that package is still below the version the entry waits",
                 "Once the package is past the version the entry covers nothing: its pins are findings again and the "
                 "entry is stale"):

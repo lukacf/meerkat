@@ -221,6 +221,7 @@ tests = [
     "agent::state::tests::decorated_callback_retains_settlement_through_snapshot_resume_and_replay",
     "agent::state::tests::decorated_policy_indeterminate_keeps_its_existing_agent_class",
     "agent::state::tests::deferred_catalog_delta_events_require_generated_visibility_authority",
+    "agent::state::tests::deferred_catalog_notice_follows_the_session_tool_filters",
     "agent::state::tests::deferred_catalog_notice_never_offers_a_closed_gated_name",
     "agent::state::tests::deferred_catalog_notice_separates_loaded_tools_from_removed_tools",
     "agent::state::tests::deferred_tool_load_effect_fails_closed_without_generated_visibility_authority",

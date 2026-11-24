@@ -45757,6 +45757,13 @@ first ship in 0.8.49.
   asset/provenance checks, concurrent pre-push isolation, and a guarded
   tag-to-registry critical path.
 
+### Upgrade
+
+- Added 2026-11-24, after the release. The persistent mob restore scan now
+  selects only `mob--`-prefixed `.db` filenames. A 0.8.30 store such as
+  `team.db` is skipped by name. See [Upgrading to 0.8.31](https://docs.rkat.ai/guides/upgrading#upgrading-to-0-8-31)
+  for the filename rules and the limit of this source-only finding.
+
 ## [0.8.30] - 2026-08-26
 
 ### Breaking

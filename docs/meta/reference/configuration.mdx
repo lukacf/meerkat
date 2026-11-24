@@ -4,7 +4,7 @@ description: "Configuration reference for Meta: module definitions, runtime opti
 icon: "gear"
 ---
 
-*Mirrored from Meerkat Meta main at [03eac87a63cd](https://github.com/lukacf/meerkat/commit/03eac87a63cd7d2448ac6d4a47ca76ef79e47d15) on 2026-11-24; Meta version 0.9.18 at that commit.*
+*Mirrored from Meerkat Meta main at [319bdb60a60d](https://github.com/lukacf/meerkat/commit/319bdb60a60d6027d6324879c7de1df920257070) on 2026-11-24; Meta version 0.9.18 at that commit.*
 
 Meta is configured through Rust types passed at startup. This page documents every configuration surface.
 
@@ -323,24 +323,30 @@ store that holds its first definition is at revision 1, and each committed
 update adds one: the first update declares `expected_revision=1` and leaves
 the store at 2, the next declares 2. An exact retry of a committed update
 adds nothing, and a refused declaration leaves the definition and its
-revision as they were. In 0.9.15 no call of the Python or TypeScript SDK
-returns the revision as a value of its own, so a host keeps count of its own
-updates. When an update is committed, the gateway logs a warning on its
-standard error, `operator-declared mob spec update committed`, with
-`previous_revision` and `committed_revision`. A host that has lost count can
-recover it from the text of a refusal: a declaration that names another
-number than the stored one is refused, and its message names the stored one
-(in 0.9.15 `... moved from revision <declared> to <stored> ...`; the error's
-typed fields do not carry the number). In 0.9.15 a running host can also
-read it from the mob's structural events: `query_mob_events` (TypeScript
-`queryMobEvents`) with the event type `mob_definition_updated` returns one
-event for each committed update, and the `epoch` in its `data` is the
-revision that update left the store at; a store with no such event is at 1.
-This reads an internal event: its shape is not a stable contract, and a
-typed read of the revision is planned to replace it. It needs a started
-gateway, so a host whose definition already differs from the stored one
-reads the revision at its last ordinary start, or from the refusal's
-message. Run with both SDKs on 0.9.15.
+revision as they were. When an update commits, the gateway logs
+`operator-declared mob spec update committed` on standard error, with
+`previous_revision` and `committed_revision`.
+
+Neither the Python nor the TypeScript SDK returns the stored revision as a
+value of its own in 0.9.15 or 0.9.16. A stale declaration is refused
+(`-32014`); the message names the revision, not a typed field. For example,
+suppose the store is at revision 2 and a declaration expecting 1 proposes
+a **different** successor, not an exact retry:
+
+- **0.9.15:** `moved from revision 1 to 2 while the update was being declared`
+  names the stored revision **second**.
+- **0.9.16 through 0.9.18:** `is at revision 2, not the expected revision 1`
+  names the stored revision **first**.
+
+On 0.9.15 and 0.9.16 a running host can also query `mob_definition_updated`
+events with `query_mob_events` (TypeScript: `queryMobEvents`). Each committed
+update has one event; its `data.epoch` is the revision the update left behind.
+With no update events, the initial definition is at revision 1. This is an
+internal event shape, not a stable SDK contract. The query needs a started
+gateway; if startup is refused for a stale revision, read the refusal message.
+The event query was run with both SDKs on 0.9.15. In a separate Python run
+on 0.9.16 it returned no epochs initially and `[2]` after one update; the
+stale declaration named 2 as the stored revision and left the events unchanged.
 
 On an ordinary restart, compare the parsed definitions, not the spelling or
 order of the original TOML. In `profiles.<name>.tools.grant_gated`, the
@@ -393,12 +399,15 @@ The gateway delegates the mutation to Meerkat's canonical definition CAS. It
 does not append raw events, rewrite a projection independently, or treat the
 creation manifest as mutable authority. Remove `declare_spec_update(...)`
 (TypeScript `declareSpecUpdate(...)`) from later ordinary restarts. A stale
-revision or different successor definition raises `StorageResolutionError` in
-both SDKs (in 0.9.15, with a gateway the SDK starts itself, as the
-`startup_error`, in TypeScript `startupError`, of a
-`GatewayStartupCleanupError`; see Known limitations in the Meta changelog);
-an exact retry returns the already
-committed successor revision and converges its checked projection.
+revision or a different successor definition is refused with
+`StorageResolutionError`. When a gateway the SDK starts accepts init and then reports this
+refusal, its handling depends on the SDK version. In 0.9.15 and 0.9.16,
+Python raises `GatewayStartupCleanupError` with the refusal as `startup_error`;
+TypeScript exposes it as `startupError` **if** `build()` rejects. Node can
+instead exit on an [unhandled `write EPIPE`](https://github.com/lukacf/meerkat/blob/v0.9.17/meta/CHANGELOG.md#L793).
+From 0.9.17, both SDKs expose the refusal itself when they read the failed
+settlement. An exact retry returns the already committed successor
+revision and converges its checked projection.
 
 This is a cold-activation ceremony, not a hot reload. Fully shut down the prior
 runtime before issuing the update: an already-running `MobHandle` keeps the

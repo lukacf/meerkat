@@ -5233,11 +5233,12 @@ restart. If the gateway stops before the identity wakes successfully on the
 same session, its next start can permanently remove the stores of mobs that
 session owns.
 
-Do not issue a second `meta/compact_member`: it rebuilds the identity twice.
+For a creator on these affected releases, do not issue a second
+`meta/compact_member`: it rebuilds the identity twice.
 Do not use `meta/reset`: it ends the session, and the mobs that session owns
 end no later than the next gateway start. This order is read from the
 source, not tested on a creator with this failure.
-See the [Meta 0.9.14 release note](https://github.com/lukacf/meerkat/releases/tag/meta-v0.9.14).
+See the first and fourth known issues in the release notes for Meta 0.9.14.
 
 The effect on management is separate from the threshold:
 

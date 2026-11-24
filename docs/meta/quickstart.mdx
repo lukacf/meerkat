@@ -4,7 +4,7 @@ description: "Start a Meta application runtime with a matching gateway and SDK, 
 icon: "rocket"
 ---
 
-*Mirrored from Meerkat Meta main at [b0d2ce71a7ec](https://github.com/lukacf/meerkat/commit/b0d2ce71a7ec420f3163220785766194749e6737) on 2026-11-24; Meta version 0.9.18 at that commit.*
+*Mirrored from Meerkat Meta main at [f8c041aeaab5](https://github.com/lukacf/meerkat/commit/f8c041aeaab5779549893e7363ca3bc6f4b13f14) on 2026-11-24; Meta version 0.9.18 at that commit.*
 
 This guide starts with the Meta application runtime. If you only need to run an
 agent or a mob, [Core's quickstart](https://docs.rkat.ai/quickstart) is enough.
@@ -18,13 +18,13 @@ path below builds the gateway and SDK from the same checkout. For a packaged
 installation, use the instructions and checksums supplied with your release.
 </Note>
 
-From this source checkout, with Rust 1.97+ and Python 3.10+:
+From `meta/` in the repository, with Rust 1.97+ and Python 3.10+:
 
 ```bash
 python3 -m venv .venv
 .venv/bin/python -m pip install -e ./sdk/python
-./scripts/repo-cargo build -p meerkat-meta --bin rpc_gateway --locked
-./scripts/repo-cargo --print-env
+../scripts/repo-cargo build -p meerkat-meta --bin rpc_gateway --locked
+../scripts/repo-cargo --print-env
 ```
 
 The final command prints `CARGO_TARGET_DIR`. The built gateway is its

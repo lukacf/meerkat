@@ -1458,8 +1458,9 @@ and exits:
   `GatewayStartupCleanupError`, a transport error.
 - From 0.9.17, `builder.build()` rejects with the refusal itself when it
   reads the failed settlement. If it writes a host callback reply after the
-  gateway exits but before it reads the settlement, it can instead reject
-  with `InitOutcomeUnknownError` (source reading, not a run).
+  gateway exits but before it reads the settlement, cleanup also fails.
+  `build()` then rejects with `GatewayStartupCleanupError`; its `startupError`
+  is `InitOutcomeUnknownError` (source reading, not a run).
 
 This distinction does not describe a failure before acceptance or a gateway
 that exits without reporting a settlement.

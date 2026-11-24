@@ -1284,10 +1284,9 @@ profiles](/concepts/roster#ensure_member-gateway-profiles)).
 | `backend` / `binding` | `string` / `object` | no | Backend kind and runtime binding overrides |
 </Accordion>
 
-After every successful ensure the gateway runs `reconcile_edges`, so declared
-definition wiring (`auto_wire_orchestrator`, `role_wiring`) converges
-regardless of the order members are brought up; calling `reconcile_edges`
-right after `ensure_member` is redundant.
+A successful worker-plane ensure runs edge reconciliation before returning.
+The [edge report](#meta/reconcile_edges) describes dynamic wiring, not every
+peer connection made at spawn.
 
 Worker-plane spawn refusals use `-32602` on stdio and `-32000` on HTTP,
 with the meerkat error in the message,
@@ -1431,17 +1430,19 @@ no execution or retry verdict and omit backend refusal details.
 
 ### `meta/reconcile_edges`
 
-Converge the definition-derived edge policy over the live roster and return
-`{desired_edges, wired_edges, unwired_edges, retained_edges,
-preexisting_edges, skipped_missing_members, pruned_stale_managed_edges,
-failures}`. The definition-policy reconciler only unwires edges it wired
-itself. In an identity-first runtime with a host `TopologyProvider`, the
-provider owns identity edges: an identity edge that neither the provider nor
-the definition's wiring declares is unwired, including an edge wired before a
-restart (see [Roster](/concepts/roster)). It is needed
-after `meta/reconcile_identity` or an identity-first gateway boot when the
-definition declares wiring, because neither of those converges definition
-edges after materialization; without declared wiring the report is empty.
+Reconcile the selected mob’s dynamic peer edges. The report contains
+`desired_edges`, `wired_edges`, `unwired_edges`, `retained_edges`,
+`preexisting_edges`, `skipped_missing_members`, `pruned_stale_managed_edges`
+and `failures`.
+
+`desired_edges` is the input to this reconciliation, not a list of all live
+connections. On a classic gateway, definition rules can select a pair that
+was already wired at spawn (`preexisting_edges`). On an identity-first
+gateway, the dynamic input comes from the topology provider (or the identity
+runtime’s current desired edges) together with operator topology changes. It
+can be empty even when members are connected by `role_wiring`. Inspect
+`meta/member_status` for a member’s connections. The `managed_edges` count is
+returned by `meta/reconcile_identity`, not by this method.
 
 On a candidate launch (`runtime_options.mob_composition.authority =
 "candidate"`) the reconcile is a dry run: it wires, unwires and prunes

@@ -4886,23 +4886,14 @@ class MobHandle:
         return RediscoverReport.from_dict(raw)
 
     async def reconcile_edges(self) -> ReconcileEdgesReport:
-        """Converge the definition's declared peer wiring on the live roster.
+        """Reconcile dynamic peer wiring and report the targeted pairs and changes.
 
-        The desired edges come from mob.toml's ``[wiring]`` block
-        (``auto_wire_orchestrator`` and ``role_wiring``), which the gateway
-        installs by itself; there is no builder knob to set. Wire and unwire
-        operations are applied so the live topology matches it, and the report
-        names them.
-
-        When it is needed: after ``runtime.reconcile()`` or an identity-first
-        boot, and only when the definition declares ``auto_wire_orchestrator``
-        or ``role_wiring``. Those restore paths embody identities concurrently
-        and do not converge the declared edges themselves, so the wiring is
-        otherwise bring-up-order dependent. ``ensure_member`` already runs this
-        after every successful materialization, so it is redundant there. With
-        no declared wiring the report is empty. Host ``topology_provider``
-        edges are converged by the identity plane on every restore and are not
-        this call's concern.
+        ``desired_edges`` is not a list of all live connections. On a classic
+        gateway, definition rules can select a pair already wired at spawn.
+        On an identity-first gateway, the dynamic input comes from the host
+        topology provider (or the identity runtime’s current desired edges)
+        together with operator topology changes. It can be empty even when
+        members are connected by ``role_wiring``.
         """
         raw = await self._runtime._rpc("meta/reconcile_edges")
         return ReconcileEdgesReport.from_dict(raw)

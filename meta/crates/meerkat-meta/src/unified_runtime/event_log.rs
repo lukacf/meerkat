@@ -33,6 +33,26 @@ pub struct PersistedEvent {
     pub timestamp_ms: u64,
     /// Member/agent ID. `None` for module events.
     pub member_id: Option<String>,
+    /// The mob of the event, when the event is not of the launch
+    /// selection: a mob of the host other than the launch mob (a query
+    /// that names that mob is answered the row), or a mob below such a mob
+    /// (no query is answered it). `None`, and absent
+    /// from the row's serialized form, for an event of the launch mob and
+    /// of every mob below it: a host of one mob stores the
+    /// rows it always stored. A store that reads a query's `mob_id` keeps
+    /// to this: a query without one selects the rows that name no mob. A
+    /// store that applies a query's `limit` selects by the mob first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mob_id: Option<meerkat_mob::MobId>,
+    /// The incarnation of the mob `mob_id` names that the event came
+    /// from: a mob created under an id an earlier mob had is another
+    /// incarnation, and a query that names the id is answered the rows of
+    /// the mob that runs under it now. Present where `mob_id` is; a row
+    /// that names a mob and no incarnation is answered to no query. `None`,
+    /// and absent from the row's serialized form, for a row that names no
+    /// mob.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mob_incarnation: Option<meerkat_core::service::MobIncarnationId>,
     /// The full event payload.
     pub event: UnifiedEvent,
 }
@@ -80,6 +100,13 @@ pub struct EventQuery {
     /// Resume after this sequence number (exclusive; the cursor for pagination).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after_seq: Option<u64>,
+    /// With `mob_id`, the incarnation of that mob whose rows the query
+    /// selects ([`PersistedEvent::mob_incarnation`]). `meta/query_events`
+    /// sets it to the incarnation the request's mob runs at now, whatever
+    /// a request sent. A store that applies `limit` selects by `mob_id`
+    /// and by this before it cuts its answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mob_incarnation: Option<meerkat_core::service::MobIncarnationId>,
 }
 
 // ---------------------------------------------------------------------------
@@ -199,7 +226,7 @@ pub(crate) struct EventLogHandle {
     /// batches. The buffer is bounded, and an event is sent only into room
     /// reserved for it ([`Self::room`]), so a full buffer makes intake wait
     /// instead of dropping the event.
-    ingress_tx: mpsc::Sender<EventEnvelope<UnifiedEvent>>,
+    ingress_tx: mpsc::Sender<LoggedEvent>,
     /// Set once, by shutdown before it closes the event router
     /// ([`Self::close_intake`]): a wait for room then ends, so a store that
     /// never answers cannot hold the router open.
@@ -208,15 +235,39 @@ pub(crate) struct EventLogHandle {
     flush_task_end_reported: AtomicBool,
 }
 
+/// One event in the intake buffer: its envelope and the mob its row names
+/// ([`PersistedEvent::mob_id`], [`PersistedEvent::mob_incarnation`]). The
+/// envelope itself names no mob.
+struct LoggedEvent {
+    envelope: EventEnvelope<UnifiedEvent>,
+    mob: Option<crate::runtime::EventMob>,
+}
+
 /// Room for one event in the event log's intake buffer, reserved by
 /// [`EventLogHandle::room`]. Ingesting through it neither waits nor drops;
 /// dropping it unused gives the room back.
-pub(crate) struct EventLogRoom<'a>(mpsc::Permit<'a, EventEnvelope<UnifiedEvent>>);
+pub(crate) struct EventLogRoom<'a>(mpsc::Permit<'a, LoggedEvent>);
 
 impl EventLogRoom<'_> {
-    /// Ingest `event` into the room reserved for it.
+    /// Ingest `event` into the room reserved for it, as an event of the
+    /// launch selection: its row names no mob.
+    #[cfg(test)]
     pub(crate) fn ingest(self, event: EventEnvelope<UnifiedEvent>) {
-        self.0.send(event);
+        self.ingest_of_mob(event, None);
+    }
+
+    /// Ingest `event` into the room reserved for it. `mob` is the mob its
+    /// row names: the event's own mob, with its incarnation, when the
+    /// event is not of the launch selection, else none.
+    pub(crate) fn ingest_of_mob(
+        self,
+        event: EventEnvelope<UnifiedEvent>,
+        mob: Option<crate::runtime::EventMob>,
+    ) {
+        self.0.send(LoggedEvent {
+            envelope: event,
+            mob,
+        });
     }
 }
 
@@ -336,7 +387,7 @@ pub(crate) fn start_event_log(
 }
 
 async fn run_flush_loop(
-    mut rx: mpsc::Receiver<EventEnvelope<UnifiedEvent>>,
+    mut rx: mpsc::Receiver<LoggedEvent>,
     store: Arc<dyn EventLogStore>,
     seq: Arc<AtomicU64>,
     filter: Option<EventFilter>,
@@ -353,13 +404,13 @@ async fn run_flush_loop(
         tokio::select! {
             maybe_event = rx.recv() => {
                 match maybe_event {
-                    Some(envelope) => {
+                    Some(logged) => {
                         if let Some(ref f) = filter
-                            && !f(&envelope.event)
+                            && !f(&logged.envelope.event)
                         {
                             continue;
                         }
-                        let persisted = to_persisted(&seq, &envelope);
+                        let persisted = to_persisted(&seq, &logged.envelope, logged.mob);
                         batch.push(persisted);
                         if retry.failing() {
                             // While a refused flush waits out its backoff,
@@ -490,16 +541,26 @@ fn enforce_retry_cap(batch: &mut Vec<PersistedEvent>) -> usize {
     drop
 }
 
-fn to_persisted(seq: &AtomicU64, envelope: &EventEnvelope<UnifiedEvent>) -> PersistedEvent {
+fn to_persisted(
+    seq: &AtomicU64,
+    envelope: &EventEnvelope<UnifiedEvent>,
+    mob: Option<crate::runtime::EventMob>,
+) -> PersistedEvent {
     let member_id = match &envelope.event {
         UnifiedEvent::Agent { agent_id, .. } => Some(agent_id.clone()),
         UnifiedEvent::Module(_) => None,
+    };
+    let (mob_id, mob_incarnation) = match mob {
+        Some(mob) => (Some(mob.mob_id), mob.incarnation),
+        None => (None, None),
     };
     PersistedEvent {
         id: envelope.event_id.clone(),
         seq: seq.fetch_add(1, Ordering::Relaxed),
         timestamp_ms: envelope.timestamp_ms,
         member_id,
+        mob_id,
+        mob_incarnation,
         event: envelope.event.clone(),
     }
 }
@@ -623,6 +684,8 @@ mod tests {
             seq: 0,
             timestamp_ms: 0,
             member_id: None,
+            mob_id: None,
+            mob_incarnation: None,
             event: UnifiedEvent::Module(crate::types::ModuleEvent {
                 module: "test-module".into(),
                 event_type: "x".into(),
@@ -1085,6 +1148,60 @@ mod tests {
         flush_batch(&store, &mut batch, 2, &mut retry, &None).await;
         assert_eq!(buffered(&batch), ["evt-2", "evt-3", "evt-4"]);
         assert_eq!(retry.failures, 2);
+    }
+
+    /// The stored form of a row, byte for byte: a row of a second mob of
+    /// the host carries `mob_id` and `mob_incarnation` between `member_id`
+    /// and `event`, and a row of the launch mob is the row a host of one
+    /// mob always stored. Both read back to the rows they were written
+    /// from.
+    #[test]
+    fn a_row_names_its_mob_in_its_stored_form_only_when_it_is_not_the_launch_mobs() {
+        const OF_A_SECOND_MOB: &str = r#"{"id":"evt-second","seq":7,"timestamp_ms":1700000000000,"member_id":"desk","mob_id":"second-mob","mob_incarnation":"0190d6c3-7a1b-7c3e-8f2a-5b6c7d8e9f01","event":{"kind":"agent","agent_id":"desk","event_type":"run_completed","payload":{"session_id":"session-1","type":"run_completed"}}}"#;
+        const OF_THE_LAUNCH_MOB: &str = r#"{"id":"evt-launch","seq":8,"timestamp_ms":1700000000001,"member_id":"desk","event":{"kind":"agent","agent_id":"desk","event_type":"run_completed","payload":{"session_id":"session-1","type":"run_completed"}}}"#;
+        let row = |id: &str, seq: u64, mob_id: Option<&str>| PersistedEvent {
+            id: id.to_string(),
+            seq,
+            timestamp_ms: 1_700_000_000_000 + (seq - 7),
+            member_id: Some("desk".to_string()),
+            mob_id: mob_id.map(meerkat_mob::MobId::from),
+            mob_incarnation: mob_id.map(|_| {
+                "0190d6c3-7a1b-7c3e-8f2a-5b6c7d8e9f01"
+                    .parse()
+                    .expect("an incarnation id")
+            }),
+            event: UnifiedEvent::Agent {
+                agent_id: "desk".to_string(),
+                event_type: "run_completed".to_string(),
+                payload: Some(serde_json::json!({
+                    "session_id": "session-1",
+                    "type": "run_completed",
+                })),
+            },
+        };
+        let of_a_second_mob = row("evt-second", 7, Some("second-mob"));
+        let of_the_launch_mob = row("evt-launch", 8, None);
+        assert_eq!(
+            serde_json::to_string(&of_a_second_mob).expect("the row serializes"),
+            OF_A_SECOND_MOB
+        );
+        assert_eq!(
+            serde_json::to_string(&of_the_launch_mob).expect("the row serializes"),
+            OF_THE_LAUNCH_MOB
+        );
+        for (stored, written) in [
+            (OF_A_SECOND_MOB, &of_a_second_mob),
+            (OF_THE_LAUNCH_MOB, &of_the_launch_mob),
+        ] {
+            let read: PersistedEvent = serde_json::from_str(stored).expect("the row reads back");
+            assert_eq!(read.id, written.id);
+            assert_eq!(read.seq, written.seq);
+            assert_eq!(read.timestamp_ms, written.timestamp_ms);
+            assert_eq!(read.member_id, written.member_id);
+            assert_eq!(read.mob_id, written.mob_id);
+            assert_eq!(read.mob_incarnation, written.mob_incarnation);
+            assert_eq!(read.event, written.event);
+        }
     }
 
     #[test]

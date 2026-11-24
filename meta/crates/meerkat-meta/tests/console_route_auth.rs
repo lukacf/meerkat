@@ -419,7 +419,7 @@ async fn console_voice_http_read_only_blocks_open_but_not_owned_cancel_fencing()
 #[test]
 fn console_contract_requests_take_no_interaction_or_frame_ids() {
     let artifact: Value = serde_json::from_str(include_str!(
-        "../../../docs/rct/console-rest-sse-contract-v0.5.0.json"
+        "../../../docs/rct/console-rest-sse-contract-v0.6.0.json"
     ))
     .expect("contract artifact json should parse");
     const REQUEST_FIELD_LISTS: &[&str] = &[
@@ -477,12 +477,12 @@ fn console_contract_requests_take_no_interaction_or_frame_ids() {
 #[test]
 fn phase0_contract_004_console_rest_sse_contract_version_is_pinned_and_enforced() {
     let artifact: Value = serde_json::from_str(include_str!(
-        "../../../docs/rct/console-rest-sse-contract-v0.5.0.json"
+        "../../../docs/rct/console-rest-sse-contract-v0.6.0.json"
     ))
     .expect("contract artifact json should parse");
 
-    assert_eq!(artifact["contract_version"], json!("0.5.0"));
-    assert_eq!(artifact["version_pin"], json!("v0.5.0"));
+    assert_eq!(artifact["contract_version"], json!("0.6.0"));
+    assert_eq!(artifact["version_pin"], json!("v0.6.0"));
 
     let state = decision_state();
 
@@ -502,10 +502,6 @@ fn phase0_contract_004_console_rest_sse_contract_version_is_pinned_and_enforced(
     );
 
     assert_eq!(experience_response.status, 200);
-    assert_eq!(
-        experience_response.body["contract_version"],
-        artifact["contract_version"]
-    );
     assert_eq!(
         experience_response.body["base_panel"]["route"],
         json!(experience_path)
@@ -594,6 +590,129 @@ fn phase0_contract_004_console_rest_sse_contract_version_is_pinned_and_enforced(
         experience_response.body["activity_feed"]["keep_alive"]["event"],
         json!(keep_alive_event)
     );
+}
+
+/// The experience names the contract version of the checked-in contract
+/// document: the gateway and the document move together. The value is
+/// informative on the wire (no client compares it), so a gateway that names
+/// another version is a document that was not updated, or a gateway that
+/// was not.
+#[test]
+fn the_experience_names_the_version_of_the_checked_in_contract_document() {
+    let artifact: Value = serde_json::from_str(include_str!(
+        "../../../docs/rct/console-rest-sse-contract-v0.6.0.json"
+    ))
+    .expect("contract artifact json should parse");
+    let state = decision_state();
+    let experience_response = handle_console_rest_json_route(
+        &state,
+        &ConsoleRestJsonRequest {
+            method: "GET".to_string(),
+            path: "/console/experience".to_string(),
+            auth: None,
+        },
+    );
+    assert_eq!(experience_response.status, 200);
+    assert_eq!(
+        experience_response.body["contract_version"], artifact["contract_version"],
+        "the experience's contract_version is the document's"
+    );
+}
+
+/// The contract document names where a request's mob goes on every door of
+/// the console: a query parameter on the seven routes that read, a body
+/// member on the five that write, and a member of `params` on the two
+/// request doors; and each of the twelve routes lists the one refusal of a
+/// mob it does not serve to its caller.
+#[test]
+fn console_contract_names_the_mob_of_a_request_on_every_door() {
+    let artifact: Value = serde_json::from_str(include_str!(
+        "../../../docs/rct/console-rest-sse-contract-v0.6.0.json"
+    ))
+    .expect("contract artifact json should parse");
+    let placement = &artifact["mob_addressing"]["mob_id"]["placement"];
+    let listed = |pointer: &str| -> Vec<String> {
+        placement
+            .pointer(pointer)
+            .and_then(Value::as_array)
+            .unwrap_or_else(|| panic!("the placement lists {pointer}"))
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect()
+    };
+    let query = listed("/query_parameter");
+    let body = listed("/body_member");
+    let doors = listed("/params_member/doors");
+    assert_eq!(query.len(), 7, "{query:?}");
+    assert_eq!(body.len(), 5, "{body:?}");
+    assert_eq!(
+        doors,
+        ["POST /console/rpc", "POST /console/rpc/multipart"],
+        "the two request doors"
+    );
+
+    let mut seen = Vec::new();
+    for surface in ["rest", "sse"] {
+        let routes = artifact["surfaces"][surface]
+            .as_object()
+            .expect("a surface is an object");
+        for (name, route) in routes {
+            let Some(method) = route.get("method").and_then(Value::as_str) else {
+                continue;
+            };
+            let path = route
+                .get("path")
+                .or_else(|| route.get("path_template"))
+                .and_then(Value::as_str)
+                .unwrap_or_else(|| panic!("{surface}/{name} names its path"));
+            let door = format!("{method} {path}");
+            if door == "GET /blobs/{blob_id}" {
+                // A blob is the host's and is addressed by its id alone.
+                assert!(route.get("mob_scope").is_none(), "{door}");
+                continue;
+            }
+            let fields = |pointer: &str| -> Vec<&str> {
+                route
+                    .pointer(pointer)
+                    .and_then(Value::as_array)
+                    .map(|fields| fields.iter().filter_map(Value::as_str).collect())
+                    .unwrap_or_default()
+            };
+            if query.contains(&door) {
+                assert!(
+                    fields("/query_optional_fields").contains(&"mob_id"),
+                    "{door} takes mob_id as a query parameter"
+                );
+            } else if body.contains(&door) {
+                assert!(
+                    fields("/request/optional_fields").contains(&"mob_id"),
+                    "{door} takes mob_id as a body member"
+                );
+            } else {
+                panic!("{door} is a console route the placement does not list");
+            }
+            let refuses = route["errors"]
+                .as_array()
+                .expect("a route lists its errors")
+                .iter()
+                .any(|error| {
+                    error["status"] == json!(404)
+                        && error["shape"]["error"] == json!("foreign_mob_target")
+                        && error["shape"]["requested_mob_id"] == json!("string")
+                });
+            assert!(
+                refuses,
+                "{door} lists the refusal of a mob it does not serve"
+            );
+            assert!(route["mob_scope"].is_string(), "{door} names its scope");
+            seen.push(door);
+        }
+    }
+    seen.sort();
+    let mut expected: Vec<String> = query.iter().chain(&body).cloned().collect();
+    expected.sort();
+    assert_eq!(seen, expected, "the twelve routes, each once");
 }
 
 /// A console send refused before authentication (e.g. an off-network browser

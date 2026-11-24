@@ -22,6 +22,13 @@ mod member_cut_tests;
 #[cfg(test)]
 mod member_frame_access_tests;
 #[cfg(test)]
+mod mob_lookup_tests;
+#[cfg(test)]
+mod mob_read_bound_tests;
+#[cfg(test)]
+mod mob_registration_tests;
+pub(crate) mod mob_writers;
+#[cfg(test)]
 mod provenance_search_tests;
 #[cfg(test)]
 mod provenance_store_revision_tests;
@@ -30,6 +37,8 @@ mod query_error;
 mod runtime_notice_tests;
 #[cfg(test)]
 mod runtime_plane_writer_tests;
+#[cfg(test)]
+mod send_mob_tests;
 mod send_recovery;
 #[cfg(test)]
 mod send_recovery_tests;
@@ -75,6 +84,7 @@ use crate::runtime::ConsoleMember;
 use crate::unified_runtime::{ConsoleEventStore, UnifiedRuntime};
 
 pub use query_error::{ConsoleTimelineQueryError, ConsoleTimelineQueryResult};
+pub(crate) use query_error::{OperationServesTheDefaultMobAlone, StoreServesTheDefaultMobAlone};
 pub(crate) use send_recovery::{
     ConsoleSendRecovery, INTERACTIVE_SEND_READ_BOUND, NativeSendObservation, ScopedReservation,
     SendDispatchClaim, governed_delivery_key, governed_input_id,
@@ -131,6 +141,56 @@ enum IdentityCollectionMode {
 #[derive(Clone)]
 pub struct MetaConsoleAggregator {
     inner: Arc<AggregatorInner>,
+    /// The one reading of a string this handle resolves a member by
+    /// ([`Self::with_member_scope`]); none: every reading, a primary member
+    /// before a nested one.
+    member_scope: Option<Arc<ConsoleMemberScope>>,
+}
+
+/// The one reading of a string a request chose: the mob the member it names
+/// sits in. A console request that names its member by two values (the mob
+/// and the member's name there) is resolved with it, so a string never
+/// reaches a member of another mob that the same string spells.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ConsoleMemberScope {
+    /// The mob the member sits in when it is not its runtime's primary
+    /// mob: a mob a member of the primary mob made. None: the primary mob.
+    pub(crate) nested_mob: Option<String>,
+}
+
+impl ConsoleMemberScope {
+    /// Whether `resolved` sits in the mob this scope names.
+    fn admits(&self, resolved: &ResolvedConsoleMember) -> bool {
+        match &self.nested_mob {
+            Some(mob) => resolved.nested() && resolved.source_mob_id == *mob,
+            None => !resolved.nested(),
+        }
+    }
+
+    /// Whether `frame` is of a member of the mob this scope names, by
+    /// the mob the owner captured the frame's member in: a frame
+    /// captured for a member of a nested mob is that mob's, and every
+    /// other frame is the primary mob's. An update marker is of the
+    /// frame it carries.
+    pub(crate) fn admits_frame(&self, frame: &ConsoleFrame) -> bool {
+        if frame.kind == "frame_updated"
+            && frame.source.kind == ConsoleFrameSourceKind::Synthetic
+            && let Some(updated) = frame
+                .payload
+                .get("frame")
+                .and_then(|value| serde_json::from_value::<ConsoleFrame>(value.clone()).ok())
+            && updated.kind != "frame_updated"
+        {
+            return self.admits_frame(&updated);
+        }
+        let nested_mob = frame
+            .source
+            .member_provenance
+            .as_ref()
+            .filter(|provenance| provenance.source_mob_id != provenance.primary_mob_id)
+            .map(|provenance| provenance.source_mob_id.as_str());
+        nested_mob == self.nested_mob.as_deref()
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -220,8 +280,35 @@ struct AggregatorInner {
     id: ConsoleAggregatorId,
     /// Policy views share one canonical projector and publish to its broadcaster.
     projection_owner: Option<Arc<AggregatorInner>>,
+    /// The gates of the writers under the ids of the host's other mobs
+    /// ([`mob_writers`]). The runtime hands its own registry to every
+    /// projection it builds ([`MetaConsoleAggregator::share_mob_writers`]);
+    /// a projector that was handed none makes its own at its first use. A
+    /// policy view uses its owner's ([`mob_writers_of`]).
+    mob_writers: std::sync::OnceLock<mob_writers::MobWriters>,
     store: Arc<dyn ConsoleLogStore>,
     runtimes: RwLock<BTreeMap<String, RuntimeEntry>>,
+    /// The registrations of the console events of the mobs a host serves
+    /// beside its default mob, by runtime key
+    /// ([`MetaConsoleAggregator::register_mob_console_events`]). They are
+    /// apart from `runtimes` on purpose: every read that walks the
+    /// registered runtimes (the identities, the panels, a send's member, the
+    /// session history) reads the default mob's and none of these; only the
+    /// projection of a registration's own console events, and the witness of
+    /// its own frames, find one here, by its key ([`registered_entry`]). The
+    /// canonical projector holds them; a policy view holds none.
+    mob_runtimes: RwLock<BTreeMap<String, RuntimeEntry>>,
+    /// The host's default mob, once the host told this console
+    /// ([`MetaConsoleAggregator::tell_default_mob`]): a send that names that
+    /// mob by its id is the default mob's send. The canonical projector
+    /// holds it; a policy view asks its owner.
+    default_mob: std::sync::OnceLock<crate::member_key::DefaultMob>,
+    /// The policy of a policy view ([`MetaConsoleAggregator::policy_view`]),
+    /// which every registration the view reads is read under: the copies it
+    /// holds of the default mob's runtimes carry it, and the registration of
+    /// another mob's console events is read from the owner with it
+    /// ([`mob_entry_as_read`]). None for a canonical projector.
+    view_policy: Option<Arc<dyn ConsoleVisibilityPolicy>>,
     has_registered_runtime: AtomicBool,
     event_tx: broadcast::Sender<ConsoleTimelineEvent>,
     active_session_backfills:
@@ -282,6 +369,11 @@ struct AggregatorInner {
     moved_boundary_redrives: std::sync::Mutex<BTreeSet<(uuid::Uuid, String, String, String)>>,
     #[cfg(test)]
     moved_boundary_redrive_tasks: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    /// The session history passes asked for, in the order they were asked,
+    /// for rows to read ([`HistoryPassAsked`]). Kept by the canonical
+    /// projector; a view writes its owner's.
+    #[cfg(test)]
+    history_passes_asked: std::sync::Mutex<Vec<HistoryPassAsked>>,
     /// Session-history backfill jobs spawned or armed and not yet finished
     /// (see [`BackfillActivity`]). Zero means every pass the aggregator owes
     /// has run: [`MetaConsoleAggregator::history_backfill_converged`].
@@ -314,6 +406,13 @@ struct AggregatorInner {
 #[derive(Clone)]
 struct ConsoleIdentityReadModel {
     inner: Arc<tokio::sync::RwLock<Vec<ConsoleIdentityRecord>>>,
+    /// The records of the agents of the mobs the host serves beside its
+    /// default mob, each under its mob's registration's runtime key. They
+    /// are apart from `inner` on purpose: every list a console answers is
+    /// the default mob's, and only a decision on a frame of such a mob reads
+    /// these ([`Self::current_with_mobs`]). Each refresh that reads the
+    /// default mob's records reads them too.
+    mobs: Arc<tokio::sync::RwLock<Vec<ConsoleIdentityRecord>>>,
     refresh_lock: Arc<tokio::sync::Mutex<()>>,
     primed: Arc<AtomicBool>,
 }
@@ -322,6 +421,7 @@ impl Default for ConsoleIdentityReadModel {
     fn default() -> Self {
         Self {
             inner: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            mobs: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
             primed: Arc::new(AtomicBool::new(false)),
         }
@@ -339,8 +439,34 @@ impl ConsoleIdentityReadModel {
         Ok(self.inner.read().await.clone())
     }
 
+    /// The default mob's records as they are kept now, for the rows.
+    #[cfg(test)]
     async fn current(&self) -> Vec<ConsoleIdentityRecord> {
         self.inner.read().await.clone()
+    }
+
+    /// The default mob's records and, after them, the records of the agents
+    /// of the other mobs: what a decision on a frame reads, since a frame
+    /// may be of any mob. A record is found by its runtime key and its
+    /// identity, so two mobs' agents of one name are two records.
+    async fn current_with_mobs(&self) -> Vec<ConsoleIdentityRecord> {
+        let mut records = self.inner.read().await.clone();
+        records.extend(self.mobs.read().await.iter().cloned());
+        records
+    }
+
+    /// Read the records of the other mobs' agents again and keep them. A
+    /// read that fails keeps the records it had.
+    async fn refresh_mobs(&self, inner: &Arc<AggregatorInner>, mode: IdentityCollectionMode) {
+        match Box::pin(collect_mob_identity_records(inner, mode)).await {
+            Ok(records) => *self.mobs.write().await = records,
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "console identity read-model refresh of the other mobs failed"
+                );
+            }
+        }
     }
 
     async fn refresh_now_if_idle(
@@ -352,6 +478,7 @@ impl ConsoleIdentityReadModel {
             return None;
         };
         let result = Box::pin(collect_identity_records(&inner, mode)).await;
+        Box::pin(self.refresh_mobs(&inner, mode)).await;
         drop(guard);
         match result {
             Ok(identities) => {
@@ -375,6 +502,7 @@ impl ConsoleIdentityReadModel {
             IdentityCollectionMode::CachedOnly,
         ))
         .await?;
+        Box::pin(self.refresh_mobs(&inner, IdentityCollectionMode::CachedOnly)).await;
         *self.inner.write().await = identities;
         self.primed.store(true, Ordering::Release);
         Ok(())
@@ -404,6 +532,8 @@ impl ConsoleIdentityReadModel {
                     tracing::warn!(error = %err, "console identity read-model refresh failed");
                 }
             }
+            Box::pin(read_model.refresh_mobs(&inner, IdentityCollectionMode::IncludeLiveMembers))
+                .await;
         });
     }
 
@@ -417,6 +547,13 @@ impl ConsoleIdentityReadModel {
 struct RuntimeEntry {
     registration_id: uuid::Uuid,
     runtime_key: String,
+    /// The mob this registration's frames are stored under: none for a
+    /// runtime registered for its host's default mob (every registration a
+    /// host or a gateway makes), the mob's id for the console events of a
+    /// mob the host serves beside its default mob
+    /// ([`MetaConsoleAggregator::register_mob_console_events`]). It is the
+    /// mob as a stored frame names it ([`ConsoleFrame::mob_id`]).
+    mob: Option<meerkat_mob::MobId>,
     identity_namespace: String,
     runtime: MobRuntime,
     identity_runtime: Option<Arc<crate::identity_first::IdentityRuntime>>,
@@ -470,11 +607,51 @@ struct ResolvedConsoleMember {
     handle: MobHandle,
     member: MobMemberListEntry,
     source_mob_id: String,
+    /// The member's public name in its own mob's roster.
     runtime_identity: String,
+    /// Whether the console lists the member's mob
+    /// ([`crate::console_mob_listing`]): the primary mob, and each nested
+    /// mob whose creation record places it. A member of any other mob is
+    /// listed, resolved and read by no one; it is known only so that a
+    /// frame it wrote is decided as a hidden member's.
+    listed: bool,
     /// Whether the member sits in a temporary council's own mob
     /// ([`council::council_owns_mob`]): a participant, which no policy
     /// lists, resolves or serves.
     council_participant: bool,
+}
+
+impl ResolvedConsoleMember {
+    /// Whether the member sits in a mob other than its runtime's primary
+    /// mob. Such a member is named by its mob and name
+    /// ([`crate::console_member_ref`]) and is never an identity of the
+    /// runtime's identity runtime, whatever name it shares with one.
+    fn nested(&self) -> bool {
+        *self.entry.runtime.handle().mob_id() != self.source_mob_id
+    }
+
+    /// The member's console name: its public name in the primary mob, its
+    /// mob and name in any other. `None` for a member that has none.
+    fn console_name(&self) -> Option<String> {
+        if self.nested() {
+            crate::console_member_ref::nested_member_identity(
+                &self.source_mob_id,
+                &self.runtime_identity,
+            )
+        } else {
+            Some(self.runtime_identity.clone())
+        }
+    }
+
+    /// The identity runtime that may hold the member as one of its
+    /// identities: the entry's, for a primary member.
+    fn identity_runtime(&self) -> Option<&Arc<crate::identity_first::IdentityRuntime>> {
+        if self.nested() {
+            None
+        } else {
+            self.entry.identity_runtime.as_ref()
+        }
+    }
 }
 
 /// What a classic send's replay needs to dispatch it again.
@@ -498,7 +675,7 @@ impl ClassicResend<'_> {
         if frame.session_id.is_none() {
             return false;
         }
-        let Some(identity_runtime) = self.resolved.entry.identity_runtime.as_ref() else {
+        let Some(identity_runtime) = self.resolved.identity_runtime() else {
             return false;
         };
         // A name the runtime refuses (Core holds it for an identity the
@@ -568,10 +745,9 @@ fn console_member_for_resolved_member(
     record: &ConsoleIdentityRecord,
 ) -> ConsoleMember {
     ConsoleMember {
-        agent_identity: crate::member_comms_id::runtime_alias_str(
-            resolved.member.agent_identity.as_str(),
-        )
-        .into_owned(),
+        // The console's name of the member: its public name in the primary
+        // mob, its mob and name in any other.
+        agent_identity: record.runtime_member_id.clone(),
         role: resolved.member.role.to_string(),
         state: crate::mob_handle_runtime::member_status_state_string(resolved.member.status),
         model_capabilities: Default::default(),
@@ -581,7 +757,18 @@ fn console_member_for_resolved_member(
             .member
             .wired_to
             .iter()
-            .map(|peer| crate::member_comms_id::runtime_alias_str(peer.as_str()).into_owned())
+            .filter_map(|peer| {
+                let peer = crate::member_comms_id::runtime_alias_str(peer.as_str());
+                if resolved.nested() {
+                    // A nested member's peers sit in its own mob.
+                    crate::console_member_ref::nested_member_identity(
+                        &resolved.source_mob_id,
+                        &peer,
+                    )
+                } else {
+                    Some(peer.into_owned())
+                }
+            })
             .collect(),
         labels: record.labels.clone(),
         progress: None,
@@ -705,14 +892,7 @@ fn retain_member_provenance_with_lineage(
         lineage,
     };
     // A stale identity refresh must not restore a predecessor's witnesses.
-    let entries = inner
-        .runtimes
-        .read()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if entries
-        .get(&resolved.entry.runtime_key)
-        .is_none_or(|entry| entry.registration_id != resolved.entry.registration_id)
-    {
+    if !registered_entry_is_current(inner, &resolved.entry) {
         return provenance;
     }
     // Retained per incarnation only: a witness keyed by the identity alone
@@ -837,34 +1017,50 @@ fn row_names_itself(resolved: &ResolvedConsoleMember) -> bool {
 /// frame. A frame that names neither has none. `registry` holds the runtime
 /// entries and the per-session witnesses, `log` the frames; nothing here
 /// reads a member by its identity alone.
+///
+/// The read of the send the frame names is an operation of the log: a log
+/// that fails it, or refuses it for the frame's mob, fails the frame's
+/// write with that error. The frame is not written with no witness.
 async fn witness_named_by_frame(
     registry: &AggregatorInner,
     log: &dyn ConsoleLogStore,
     entry: &RuntimeEntry,
     frame: &NewConsoleFrame,
     refresh: bool,
-) -> Option<ConsoleFrameMemberProvenance> {
+) -> ConsoleLogResult<Option<ConsoleFrameMemberProvenance>> {
     if crate::console_contracts::is_runtime_plane_identity(&frame.identity) {
-        return None;
+        return Ok(None);
     }
     if let Some(session_id) = frame.session_id.as_deref() {
-        return member_provenance_for_identity(
+        return Ok(member_provenance_for_identity(
             registry,
             entry,
             &frame.identity,
             Some(session_id),
             refresh,
         )
-        .await;
+        .await);
     }
     // A send's interaction id is its own (derived from its dedupe key), so
-    // the send's frame is the record of the member that send was made to.
-    let interaction_id = frame.interaction_id.as_deref()?;
-    let send = log.send_frame_by_interaction(interaction_id).await.ok()??;
-    if send.runtime_key != frame.runtime_key || send.identity != frame.identity {
-        return None;
+    // the send's frame is the record of the member that send was made to:
+    // the member of its name in its mob. A send to the member of that name
+    // in another mob is another member's record.
+    let Some(interaction_id) = frame.interaction_id.as_deref() else {
+        return Ok(None);
+    };
+    let Some(send) = log
+        .send_frame_by_interaction_of_mob(frame.mob_id.as_ref(), interaction_id)
+        .await?
+    else {
+        return Ok(None);
+    };
+    if send.runtime_key != frame.runtime_key
+        || send.mob_id != frame.mob_id
+        || send.identity != frame.identity
+    {
+        return Ok(None);
     }
-    send.source.member_provenance
+    Ok(send.source.member_provenance)
 }
 
 /// What the writer of a frame says about the frame's member witness, at the
@@ -925,22 +1121,20 @@ impl FrameWitness {
 /// not capture its member itself: the member the frame's session names, or
 /// the witness of the console send the frame names
 /// ([`witness_named_by_frame`]).
-async fn capture_frame_witness(inner: &AggregatorInner, frame: &NewConsoleFrame) -> FrameWitness {
+async fn capture_frame_witness(
+    inner: &AggregatorInner,
+    frame: &NewConsoleFrame,
+) -> ConsoleLogResult<FrameWitness> {
     if crate::console_contracts::is_runtime_plane_identity(&frame.identity) {
-        return FrameWitness::NoMember(NoMemberReason::RuntimePlane);
+        return Ok(FrameWitness::NoMember(NoMemberReason::RuntimePlane));
     }
     let owner = inner.projection_owner.as_deref().unwrap_or(inner);
-    let entry = owner
-        .runtimes
-        .read()
-        .ok()
-        .and_then(|entries| entries.get(&frame.runtime_key).cloned());
-    let Some(entry) = entry else {
-        return FrameWitness::NoMember(NoMemberReason::NoRuntimeRegistered);
+    let Some(entry) = registered_entry(owner, &frame.runtime_key) else {
+        return Ok(FrameWitness::NoMember(NoMemberReason::NoRuntimeRegistered));
     };
-    FrameWitness::of_capture(
-        witness_named_by_frame(owner, inner.store.as_ref(), &entry, frame, false).await,
-    )
+    Ok(FrameWitness::of_capture(
+        witness_named_by_frame(owner, inner.store.as_ref(), &entry, frame, false).await?,
+    ))
 }
 
 async fn recover_member_provenance(
@@ -954,7 +1148,12 @@ async fn recover_member_provenance(
     // policy witness remains usable across unrelated concurrent appends.
     for _ in 0..2 {
         let revision = inner.store.history_prefix_revision().await.ok()?;
-        let observed_through = match inner.store.latest_cursor().await.ok()? {
+        // The search reads the member's own frames, which are of the
+        // registration's mob, and ends where that mob's frames end.
+        let observed_through = match newest_cursor_of_mob(inner.store.as_ref(), entry.mob.as_ref())
+            .await
+            .ok()?
+        {
             Some(cursor) => cursor.seq()?,
             None => 0,
         };
@@ -984,6 +1183,10 @@ async fn recover_member_provenance(
                     .store
                     .query_frames(ConsoleTimelineQuery {
                         identity: Some(identity.to_string()),
+                        // The member of the registration's own mob: the
+                        // member of that name in another mob is another
+                        // member, with frames of its own.
+                        mob_id: entry.mob.clone(),
                         after: after.clone(),
                         limit: 1_000,
                         ..Default::default()
@@ -1031,14 +1234,7 @@ async fn recover_member_provenance(
         if recovered.is_none() && inner.store.history_prefix_revision().await.ok()? != revision {
             continue;
         }
-        let entries = inner
-            .runtimes
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if entries
-            .get(&entry.runtime_key)
-            .is_some_and(|current| current.registration_id == entry.registration_id)
-        {
+        if registered_entry_is_current(inner, entry) {
             if let Some(provenance) = &recovered {
                 inner
                     .member_provenance
@@ -1069,9 +1265,48 @@ fn retained_member_visible(
     policy: &dyn ConsoleVisibilityPolicy,
     source: &ConsoleFrameMemberProvenance,
 ) -> bool {
-    (policy.include_implicit_delegate_members() || source.primary_mob_id == source.source_mob_id)
+    !policy_hides_nested_member(
+        policy,
+        &source.primary_mob_id,
+        &source.source_mob_id,
+        &source.member.role,
+    ) && retained_member_named_by_its_mob(source)
         && policy.identity_visible(&source.identity)
         && policy.member_visible(&source.member)
+}
+
+/// Whether a retained capture names its member as the console names it now:
+/// a nested mob's member by its mob and name
+/// ([`crate::console_member_ref`]). A capture of a nested member under its
+/// bare name was written before nested members were named so; the frames it
+/// witnesses sit under a name that now names a primary member only, and are
+/// not served.
+fn retained_member_named_by_its_mob(source: &ConsoleFrameMemberProvenance) -> bool {
+    source.primary_mob_id == source.source_mob_id
+        || crate::console_member_ref::parse_nested_member_identity(
+            &source.identity.runtime_member_id,
+        )
+        .is_some_and(|(mob_id, _)| mob_id == source.source_mob_id)
+}
+
+/// Whether `policy`'s mob-level switches hide a member with `role` of the
+/// mob `source_mob_id`, on a console whose own mob is `primary_mob_id`: a
+/// member of a nested mob, unless the policy includes nested mob members
+/// ([`ConsoleVisibilityPolicy::include_nested_mob_members`]), and an
+/// implicit delegate member (the role `delegate` in a nested mob), unless it
+/// includes those too
+/// ([`ConsoleVisibilityPolicy::include_implicit_delegate_members`]). Every
+/// console read asks here, so no read lists what another hides.
+pub(crate) fn policy_hides_nested_member(
+    policy: &dyn ConsoleVisibilityPolicy,
+    primary_mob_id: &str,
+    source_mob_id: &str,
+    role: &str,
+) -> bool {
+    primary_mob_id != source_mob_id
+        && (!policy.include_nested_mob_members()
+            || (role.eq_ignore_ascii_case("delegate")
+                && !policy.include_implicit_delegate_members()))
 }
 
 /// Reads the members once for itself, when the binding check needs them: a
@@ -1093,12 +1328,14 @@ fn raw_resolved_member_visible(
     resolved: &ResolvedConsoleMember,
     record: &ConsoleIdentityRecord,
 ) -> bool {
-    !resolved.council_participant
-        && (resolved
-            .entry
-            .visibility_policy
-            .include_implicit_delegate_members()
-            || *resolved.entry.runtime.handle().mob_id() == resolved.source_mob_id)
+    resolved.listed
+        && !resolved.council_participant
+        && !policy_hides_nested_member(
+            resolved.entry.visibility_policy.as_ref(),
+            resolved.entry.runtime.handle().mob_id().as_str(),
+            &resolved.source_mob_id,
+            resolved.member.role.as_str(),
+        )
         && resolved.entry.visibility_policy.identity_visible(record)
         && resolved
             .entry
@@ -1107,8 +1344,28 @@ fn raw_resolved_member_visible(
 }
 
 pub trait ConsoleVisibilityPolicy: Send + Sync {
+    /// Whether the console lists implicit delegate members: the members
+    /// with the role `delegate` of a mob nested under the console's own mob
+    /// (the helpers of the `delegate` tool). `false` hides those members on
+    /// every read. Whether it hides the other members of nested mobs too is
+    /// [`Self::include_nested_mob_members`]'s answer, which is this
+    /// method's unless a policy says otherwise.
     fn include_implicit_delegate_members(&self) -> bool {
         true
+    }
+
+    /// Whether the console lists the members of the mobs nested under its
+    /// own mob (the mobs its members created, at any depth). The
+    /// provided answer is [`Self::include_implicit_delegate_members`]'s, so
+    /// a policy written before this method hides and lists what it did: one
+    /// that hides implicit delegate members hides every member of every
+    /// nested mob, on every read. A policy that answers `true` here and
+    /// `false` there lists nested mobs without the `delegate` tool's
+    /// helpers, as the stock console does; the members it lists are then
+    /// decided by [`Self::member_visible`] and [`Self::identity_visible`]
+    /// like the members of the console's own mob.
+    fn include_nested_mob_members(&self) -> bool {
+        self.include_implicit_delegate_members()
     }
 
     fn member_visible(&self, _member: &ConsoleMember) -> bool {
@@ -1141,6 +1398,10 @@ impl ConsoleVisibilityPolicy for HideImplicitDelegateMembersConsoleVisibilityPol
         false
     }
 
+    fn include_nested_mob_members(&self) -> bool {
+        true
+    }
+
     fn member_visible(&self, member: &ConsoleMember) -> bool {
         !is_implicit_delegate_member(member.role.as_str(), &member.labels)
     }
@@ -1154,6 +1415,60 @@ impl ConsoleVisibilityPolicy for HideImplicitDelegateMembersConsoleVisibilityPol
                 .unwrap_or_default(),
             &record.labels,
         )
+    }
+}
+
+/// Whether a gateway's stock console lists the members of the mobs nested
+/// under its own mob.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum NestedMobListing {
+    /// Listed to the callers the access rules allow (the default).
+    #[default]
+    Listed,
+    /// Hidden on every read, as the stock console hid them before it listed
+    /// nested mobs.
+    Hidden,
+}
+
+impl NestedMobListing {
+    /// The switch for a launch that says whether nested mobs are `listed`.
+    pub fn from_listed(listed: bool) -> Self {
+        if listed { Self::Listed } else { Self::Hidden }
+    }
+}
+
+/// The stock console's policy with the listing of nested mobs off: it hides
+/// the implicit delegate members as the stock policy does and answers the
+/// nested mob switch as a policy written before it would, so every member
+/// of every nested mob is hidden on every read.
+#[derive(Debug, Default)]
+struct StockConsoleWithoutNestedMobs;
+
+impl ConsoleVisibilityPolicy for StockConsoleWithoutNestedMobs {
+    fn include_implicit_delegate_members(&self) -> bool {
+        false
+    }
+
+    fn member_visible(&self, member: &ConsoleMember) -> bool {
+        HideImplicitDelegateMembersConsoleVisibilityPolicy.member_visible(member)
+    }
+
+    fn identity_visible(&self, record: &ConsoleIdentityRecord) -> bool {
+        HideImplicitDelegateMembersConsoleVisibilityPolicy.identity_visible(record)
+    }
+}
+
+/// The visibility policy of the stock console a gateway serves: the one
+/// place that reads whether nested mobs are listed. Both stock gateways
+/// build their console's policy here; a host that serves the stock console
+/// from its own router passes the result to
+/// `UnifiedRuntime::build_reference_app_router_with_console_visibility_policy`.
+pub fn stock_console_visibility_policy(
+    nested_mobs: NestedMobListing,
+) -> Arc<dyn ConsoleVisibilityPolicy> {
+    match nested_mobs {
+        NestedMobListing::Listed => Arc::new(HideImplicitDelegateMembersConsoleVisibilityPolicy),
+        NestedMobListing::Hidden => Arc::new(StockConsoleWithoutNestedMobs),
     }
 }
 
@@ -1195,8 +1510,12 @@ impl MetaConsoleAggregator {
             inner: Arc::new(AggregatorInner {
                 id: ConsoleAggregatorId::mint(),
                 projection_owner: None,
+                mob_writers: std::sync::OnceLock::new(),
                 store,
                 runtimes: RwLock::new(BTreeMap::new()),
+                mob_runtimes: RwLock::new(BTreeMap::new()),
+                default_mob: std::sync::OnceLock::new(),
+                view_policy: None,
                 has_registered_runtime: AtomicBool::new(false),
                 event_tx,
                 active_session_backfills: tokio::sync::Mutex::new(BTreeMap::new()),
@@ -1223,6 +1542,8 @@ impl MetaConsoleAggregator {
                 moved_boundary_redrives: std::sync::Mutex::new(BTreeSet::new()),
                 #[cfg(test)]
                 moved_boundary_redrive_tasks: std::sync::Mutex::new(Vec::new()),
+                #[cfg(test)]
+                history_passes_asked: std::sync::Mutex::new(Vec::new()),
                 backfill_activity: tokio::sync::watch::Sender::new(0),
                 notice_observations: std::sync::Mutex::new(NoticeObservationCache::new(
                     NOTICE_OBSERVATION_CACHE_LIMIT,
@@ -1238,7 +1559,39 @@ impl MetaConsoleAggregator {
                 #[cfg(test)]
                 send_admission_override: std::sync::Mutex::new(None),
             }),
+            member_scope: None,
         }
+    }
+
+    /// This aggregator, resolving a member a string names only among the
+    /// members of the mob `scope` names. The handle shares everything else
+    /// with this one.
+    pub(crate) fn with_member_scope(&self, scope: ConsoleMemberScope) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            member_scope: Some(Arc::new(scope)),
+        }
+    }
+
+    /// The scope this handle resolves a member in
+    /// ([`Self::with_member_scope`]); none for a handle without one.
+    pub(crate) fn member_scope(&self) -> Option<&ConsoleMemberScope> {
+        self.member_scope.as_deref()
+    }
+
+    /// Whether the string `identity` names a member this handle resolves
+    /// among the members of the mob `mob`, as a stored record names it
+    /// (none: the host's default mob): a member found in that mob's
+    /// registrations ([`Self::entries_of_mob`]) and in no other mob's,
+    /// and, for a handle with a scope, one of the mob its scope names.
+    pub(crate) async fn names_member(
+        &self,
+        mob: Option<&meerkat_mob::MobId>,
+        identity: &str,
+    ) -> bool {
+        !Box::pin(self.resolve_members_of(mob, identity))
+            .await
+            .is_empty()
     }
 
     pub fn in_memory() -> Self {
@@ -1289,8 +1642,12 @@ impl MetaConsoleAggregator {
             inner: Arc::new(AggregatorInner {
                 id: ConsoleAggregatorId::mint(),
                 projection_owner: Some(owner.clone()),
+                mob_writers: std::sync::OnceLock::new(),
                 store: owner.store.clone(),
                 runtimes: RwLock::new(runtimes),
+                mob_runtimes: RwLock::new(BTreeMap::new()),
+                default_mob: std::sync::OnceLock::new(),
+                view_policy: Some(policy.clone()),
                 has_registered_runtime: AtomicBool::new(
                     owner.has_registered_runtime.load(Ordering::Acquire),
                 ),
@@ -1317,6 +1674,8 @@ impl MetaConsoleAggregator {
                 moved_boundary_redrives: std::sync::Mutex::new(BTreeSet::new()),
                 #[cfg(test)]
                 moved_boundary_redrive_tasks: std::sync::Mutex::new(Vec::new()),
+                #[cfg(test)]
+                history_passes_asked: std::sync::Mutex::new(Vec::new()),
                 backfill_activity: tokio::sync::watch::Sender::new(0),
                 notice_observations: std::sync::Mutex::new(NoticeObservationCache::new(
                     NOTICE_OBSERVATION_CACHE_LIMIT,
@@ -1330,6 +1689,7 @@ impl MetaConsoleAggregator {
                 #[cfg(test)]
                 send_admission_override: std::sync::Mutex::new(None),
             }),
+            member_scope: self.member_scope.clone(),
         };
         view.inner
             .identity_read_model
@@ -1337,8 +1697,20 @@ impl MetaConsoleAggregator {
         view
     }
 
+    /// `frame` as this aggregator answers it. A policy view projects every
+    /// frame under its own payload policy, over the host's, which redacted
+    /// the frame when it was stored. For a frame of a runtime registered
+    /// for the default mob that policy is the one of the view's
+    /// registration of that runtime. A frame that names a mob the host
+    /// serves beside its default mob has no registration with a view (the
+    /// canonical projector alone holds those): it is projected under the
+    /// view's own policy, the policy every such frame is decided under
+    /// ([`mob_entry_as_read`]), whether or not the mob is registered now.
     pub(crate) fn project_frame_for_view(&self, mut frame: ConsoleFrame) -> ConsoleFrame {
         let policy = self.inner.projection_owner.as_ref().and_then(|_| {
+            if frame.mob_id.is_some() {
+                return self.inner.view_policy.clone();
+            }
             self.inner.runtimes.read().ok().and_then(|runtimes| {
                 runtimes
                     .get(&frame.runtime_key)
@@ -1347,6 +1719,7 @@ impl MetaConsoleAggregator {
         });
         if let Some(policy) = policy {
             let input = NewConsoleFrame {
+                mob_id: frame.mob_id.clone(),
                 id: Some(frame.id.clone()),
                 dedupe_key: frame.dedupe_key.clone(),
                 timestamp_ms: frame.timestamp_ms,
@@ -1436,6 +1809,7 @@ impl MetaConsoleAggregator {
     pub fn register_runtime(&self, registration: ConsoleRuntimeRegistration) {
         let identity_owner = registration.runtime.identity_runtime();
         self.register_entry(RuntimeEntry {
+            mob: None,
             registration_id: uuid::Uuid::new_v4(),
             runtime_key: registration.runtime_key,
             identity_namespace: registration.identity_namespace,
@@ -1461,6 +1835,7 @@ impl MetaConsoleAggregator {
         visibility_policy: Arc<dyn ConsoleVisibilityPolicy>,
     ) {
         self.register_entry(RuntimeEntry {
+            mob: None,
             registration_id: uuid::Uuid::new_v4(),
             runtime_key: runtime_key.into(),
             identity_namespace: identity_namespace.into(),
@@ -1551,6 +1926,7 @@ impl MetaConsoleAggregator {
         let runtime_key = runtime_key.into();
         let identity_namespace = identity_namespace.into();
         let entry = RuntimeEntry {
+            mob: None,
             registration_id: uuid::Uuid::new_v4(),
             runtime_key,
             identity_namespace,
@@ -1571,7 +1947,20 @@ impl MetaConsoleAggregator {
             self.inner
                 .has_registered_runtime
                 .store(true, Ordering::Release);
-            runtimes.insert(runtime_key.clone(), entry);
+            // The runtime is served under this entry's namespace from now
+            // on, and under a replaced entry's no longer: a mob that
+            // namespace claims is listed by no reader of the runtime
+            // ([`crate::console_mob_listing::ConsoleMobRecords::claims_mob`]).
+            entry
+                .runtime
+                .console_mob_records()
+                .serve_under(&entry.identity_namespace);
+            if let Some(replaced) = runtimes.insert(runtime_key.clone(), entry) {
+                replaced
+                    .runtime
+                    .console_mob_records()
+                    .stop_serving_under(&replaced.identity_namespace);
+            }
         }
         self.inner
             .member_provenance
@@ -1651,20 +2040,34 @@ impl MetaConsoleAggregator {
                     }
                     received = live_rx.recv() => match received {
                         Ok(envelope) => {
-                            let _ = project_console_event(
+                            if let Err(error) = project_console_event(
                                 inner.clone(),
                                 &runtime_key_for_live,
                                 envelope,
                             )
-                            .await;
+                            .await
+                            {
+                                warn_event_not_written(
+                                    &runtime_key_for_live,
+                                    "live projection",
+                                    &error,
+                                );
+                            }
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                            let _ = recover_lagged_source_events(
+                            if let Err(error) = recover_lagged_source_events(
                                 inner.clone(),
                                 &runtime_key_for_live,
                                 &events_for_live_recovery,
                             )
-                            .await;
+                            .await
+                            {
+                                warn_event_not_written(
+                                    &runtime_key_for_live,
+                                    "lag recovery",
+                                    &error,
+                                );
+                            }
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     },
@@ -1688,8 +2091,12 @@ impl MetaConsoleAggregator {
             }
             if let Ok(events) = events_for_replay.replay_all(None).await {
                 for envelope in events {
-                    let _ = project_console_event(inner.clone(), &runtime_key_for_replay, envelope)
-                        .await;
+                    if let Err(error) =
+                        project_console_event(inner.clone(), &runtime_key_for_replay, envelope)
+                            .await
+                    {
+                        warn_event_not_written(&runtime_key_for_replay, "replay", &error);
+                    }
                 }
             }
             spawn_session_history_backfill(
@@ -1697,7 +2104,11 @@ impl MetaConsoleAggregator {
                 runtime_key_for_replay.clone(),
                 AssistantHistoryRefreshReason::Recovery,
             );
-            spawn_session_history_discovery_loop(inner.clone(), runtime_key_for_replay.clone());
+            spawn_session_history_discovery_loop(
+                inner.clone(),
+                runtime_key_for_replay.clone(),
+                None,
+            );
             if let Ok((next, _effects)) =
                 ingestion_state.apply(SourceIngestionTransition::BackfillComplete)
             {
@@ -1731,6 +2142,407 @@ impl MetaConsoleAggregator {
         first_error.map_or(Ok(()), Err)
     }
 
+    /// Register the console events of the mob `mob`, a mob the host serves
+    /// beside its default mob, with this projector: from here on each event
+    /// of `console_events` (that mob's own store) is a frame of the console
+    /// log UNDER THAT MOB, witnessed by that mob's own members (`runtime`
+    /// is the mob's wrapper; its identity runtime is read from the wrapper
+    /// each time, so one attached later is seen). The events the store
+    /// already holds are projected too.
+    ///
+    /// The registration is the projection of that mob's console events and
+    /// nothing else. It is kept apart from the runtimes registered for the
+    /// default mob ([`AggregatorInner::mob_runtimes`]): no read that walks
+    /// the registered runtimes (the identities, the panels, a send's
+    /// member, the session history) sees it, and an event of the mob's
+    /// member starts no refresh that finds its member by name. It lives
+    /// until [`Self::end_mob_console_events`] is called with the token this
+    /// answers; the same mob again replaces the earlier registration.
+    ///
+    /// The answer is the registration's TOKEN. Whatever writes for this
+    /// registration (its live projection, its replay, its lag recovery, the
+    /// session history passes of its members, a projection its owner asks
+    /// with the token) is held to it by the token and takes a permit of its
+    /// gate for each write ([`mob_writers`]); once it ended, none of them
+    /// writes again, whatever registration the key holds by then.
+    ///
+    /// A registration also sweeps that mob's sends a previous process left
+    /// unsettled, in the background ([`Self::reconcile_interrupted_sends`]
+    /// for that mob alone, read from the mob's own runtime, written for this
+    /// registration alone), unless it takes the place of a standing
+    /// registration whose sweep completed. A sweep that did not complete
+    /// leaves the mob to its next registration; a mob closed and loaded
+    /// again, or created again under its id, is swept at its new
+    /// registration. A launch that does not speak for the composition
+    /// counts the sends and settles none.
+    ///
+    /// Called on the canonical projector, never on a policy view. Refused
+    /// for a blank mob id, where a runtime is registered under the key this
+    /// registration would take, and over a store that does not read one
+    /// mob's frames itself ([`ConsoleLogStore::reads_one_mob`]): such a
+    /// store serves the default mob alone, so no frame of another mob is
+    /// handed to it ([`StoreServesTheDefaultMobAlone`]).
+    ///
+    /// Refused too where the registry of gates still holds, under the key,
+    /// a gate of ANOTHER incarnation of the mob
+    /// ([`mob_writers::AnotherIncarnationStands`]): the frames under the id
+    /// are that incarnation's and were not removed since it wrote them, so
+    /// a mob registered over them would show them as its own. The host
+    /// removes the frames under an id before it creates a mob under it and
+    /// tells the registry ([`mob_writers::MobWriters::released`]); a
+    /// registration that comes before that is not made, and its caller
+    /// logs the refusal.
+    pub(crate) fn register_mob_console_events(
+        &self,
+        mob: &meerkat_mob::MobId,
+        runtime: MobRuntime,
+        console_events: ConsoleEventStore,
+        visibility_policy: Arc<dyn ConsoleVisibilityPolicy>,
+    ) -> ConsoleLogResult<uuid::Uuid> {
+        if !crate::member_key::names_a_mob(mob) {
+            return Err(std::io::Error::other(
+                "the console events of a mob are registered under the mob's id; a blank id names \
+                 no mob",
+            )
+            .into());
+        }
+        // A mob beside the default mob has a console log only in a store
+        // that reads one mob's frames itself: refused here, before any
+        // frame of the mob is handed to a store that could not answer them
+        // apart.
+        if !self.inner.store.reads_one_mob() {
+            return Err(StoreServesTheDefaultMobAlone { mob: mob.clone() }.into());
+        }
+        let runtime_key = mob_runtime_key(mob);
+        if self
+            .inner
+            .runtimes
+            .read()
+            .map_err(|_| runtime_registry_lock_error())?
+            .contains_key(&runtime_key)
+        {
+            return Err(std::io::Error::other(format!(
+                "a runtime is registered under the key `{runtime_key}`: the console events of \
+                 the mob `{}` cannot take it",
+                mob.as_str()
+            ))
+            .into());
+        }
+        let registration_id = uuid::Uuid::new_v4();
+        let incarnation = runtime.handle().incarnation();
+        // Read before the runtime moves into the entry: whether this launch
+        // settles the mob's sends at its sweep.
+        let settles_sends = runtime.speaks_for_composition();
+        let entry = RuntimeEntry {
+            registration_id,
+            runtime_key: runtime_key.clone(),
+            mob: Some(mob.clone()),
+            identity_namespace: String::new(),
+            identity_runtime: runtime.installed_identity_runtime(),
+            runtime,
+            identity_owner: None,
+            memory_panel: None,
+            console_events: console_events.clone(),
+            visibility_policy,
+        };
+        // The registration's own entry, for its tasks: they write for it
+        // and for no registration they would find under the key later.
+        let of_this_registration = entry.clone();
+        {
+            let mut mob_runtimes = self
+                .inner
+                .mob_runtimes
+                .write()
+                .map_err(|_| runtime_registry_lock_error())?;
+            // The registration's gate: what writes for it is held to it,
+            // and a key that still holds another incarnation's gate takes
+            // none. Opened after the last step that can fail before it, so
+            // a registration that is not made leaves no gate.
+            mob_writers_of(&self.inner).open(&runtime_key, registration_id, incarnation)?;
+            mob_runtimes.insert(runtime_key.clone(), entry);
+        }
+        self.forget_mob_registration_state(&runtime_key);
+        // The mob's own sweep, when this registration owes it: its entry is
+        // registered, so each send's evidence is read from the mob's own
+        // runtime, and the sweep writes for this registration alone.
+        if mob_writers_of(&self.inner).claim_sweep(&runtime_key, registration_id) {
+            let sweeper = self.clone();
+            let swept = mob.clone();
+            tokio::spawn(async move {
+                sweeper
+                    .sweep_sends_of_registered_mob(&swept, registration_id, settles_sends)
+                    .await;
+            });
+        }
+        // A registration of the same mob replaces its live projection:
+        // signal the old one before the new one starts.
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+        if let Ok(mut shutdowns) = self.inner.live_projection_shutdowns.lock()
+            && let Some(previous) = shutdowns.insert(runtime_key.clone(), shutdown_tx)
+        {
+            let _ = previous.send(true);
+        }
+        let inner = self.inner.clone();
+        let events_for_recovery = console_events.clone();
+        let entry_for_live = of_this_registration.clone();
+        // Subscribed before the tasks start, as a runtime's registration
+        // does: an event between the replay and the first poll is seen.
+        let mut live_rx = console_events.subscribe();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    changed = shutdown_rx.changed() => {
+                        if changed.is_err() || *shutdown_rx.borrow() {
+                            break;
+                        }
+                    }
+                    received = live_rx.recv() => match received {
+                        Ok(envelope) => {
+                            // An event is written for THIS registration or
+                            // not at all: once it ended the loop is over.
+                            match project_mob_console_event(&inner, &entry_for_live, envelope)
+                                .await
+                            {
+                                Ok(WrittenForRegistration::RegistrationEnded) => break,
+                                Ok(WrittenForRegistration::Written) => {}
+                                Err(error) => {
+                                    warn_event_not_written(
+                                        &entry_for_live.runtime_key,
+                                        "live projection",
+                                        &error,
+                                    );
+                                }
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            match recover_lagged_mob_events(
+                                &inner,
+                                &entry_for_live,
+                                &events_for_recovery,
+                            )
+                            .await
+                            {
+                                Ok(WrittenForRegistration::RegistrationEnded) => break,
+                                Ok(WrittenForRegistration::Written) => {}
+                                Err(error) => {
+                                    warn_event_not_written(
+                                        &entry_for_live.runtime_key,
+                                        "lag recovery",
+                                        &error,
+                                    );
+                                }
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    },
+                }
+            }
+        });
+        let inner = self.inner.clone();
+        // The registration owes a recovery pass over its members' session
+        // histories from this moment, as a runtime's registration does:
+        // counted before the replay task first runs, until that pass has
+        // been spawned.
+        let registration_activity = BackfillActivity::begin(&inner);
+        tokio::spawn(async move {
+            let _registration_activity = registration_activity;
+            if let Ok(events) = console_events.replay_all(None).await {
+                for envelope in events {
+                    // The replay is this registration's: what is left of it
+                    // when the registration ends is dropped, however much,
+                    // and is never written for a registration that holds
+                    // the key later.
+                    match project_mob_console_event(&inner, &of_this_registration, envelope).await {
+                        Ok(WrittenForRegistration::RegistrationEnded) => return,
+                        Ok(WrittenForRegistration::Written) => {}
+                        Err(error) => {
+                            warn_event_not_written(
+                                &of_this_registration.runtime_key,
+                                "replay",
+                                &error,
+                            );
+                        }
+                    }
+                }
+            }
+            // A registration that ended meanwhile starts no pass.
+            if mob_write_permit(&inner, &of_this_registration).is_err() {
+                return;
+            }
+            // The session histories of the mob's own agents, stored under
+            // the mob: once now, and again as its agents are discovered.
+            spawn_session_history_backfill(
+                inner.clone(),
+                runtime_key.clone(),
+                AssistantHistoryRefreshReason::Recovery,
+            );
+            spawn_session_history_discovery_loop(inner, runtime_key, Some(registration_id));
+        });
+        Ok(registration_id)
+    }
+
+    /// Project `events` of the console events of the mob `mob` into the log
+    /// and return once each is durable, as [`Self::project_runtime_events`]
+    /// does for a runtime: the runtime calls it with what the mob's store
+    /// still holds right before it ends the registration, whose live
+    /// projection may stop before it received them. An event already
+    /// written is not written twice.
+    ///
+    /// The events are written for the registration `registration` (the
+    /// token its registration answered) and for no other: nothing is
+    /// written for a mob that is not registered, for a registration that
+    /// ended, or where the key holds another registration.
+    pub(crate) async fn project_mob_console_events(
+        &self,
+        mob: &meerkat_mob::MobId,
+        registration: uuid::Uuid,
+        events: Vec<crate::console_contracts::ConsoleIdentityEventEnvelope>,
+    ) -> ConsoleLogResult<()> {
+        let Some(entry) = self.mob_entry_of_registration(mob, registration) else {
+            return Ok(());
+        };
+        let mut first_error = None;
+        for envelope in events {
+            match project_mob_console_event(&self.inner, &entry, envelope).await {
+                Ok(WrittenForRegistration::Written) => {}
+                Ok(WrittenForRegistration::RegistrationEnded) => break,
+                Err(error) => {
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
+            }
+        }
+        first_error.map_or(Ok(()), Err)
+    }
+
+    /// The entry of the registration `registration` of the mob `mob`'s
+    /// console events, while the key holds exactly that registration.
+    fn mob_entry_of_registration(
+        &self,
+        mob: &meerkat_mob::MobId,
+        registration: uuid::Uuid,
+    ) -> Option<RuntimeEntry> {
+        self.inner
+            .mob_runtimes
+            .read()
+            .ok()
+            .and_then(|entries| entries.get(&mob_runtime_key(mob)).cloned())
+            .filter(|entry| entry.registration_id == registration)
+    }
+
+    /// End the registration `registration` of the console events of the mob
+    /// `mob` ([`Self::register_mob_console_events`] answered the token): it
+    /// gives no write permit from here on, its live projection stops and
+    /// its entry goes. A write of it that is in flight goes on to its end
+    /// and is counted until then ([`mob_writers`]). Where the key holds
+    /// ANOTHER registration, that one is left as it is: only the gate of
+    /// the named registration is ended. The frames already stored stay;
+    /// whether they are removed is the host's to say
+    /// ([`ConsoleLogStore::remove_frames_of_mob`]).
+    pub(crate) fn end_mob_console_events(
+        &self,
+        mob: &meerkat_mob::MobId,
+        registration: uuid::Uuid,
+    ) {
+        let runtime_key = mob_runtime_key(mob);
+        // Ended first: no write of this registration starts from here on.
+        mob_writers_of(&self.inner).end(&runtime_key, registration);
+        let removed = self
+            .inner
+            .mob_runtimes
+            .write()
+            .ok()
+            .and_then(|mut entries| {
+                if entries
+                    .get(&runtime_key)
+                    .is_some_and(|entry| entry.registration_id == registration)
+                {
+                    entries.remove(&runtime_key)
+                } else {
+                    None
+                }
+            })
+            .is_some();
+        if !removed {
+            return;
+        }
+        self.forget_mob_registration_state(&runtime_key);
+        if let Ok(mut shutdowns) = self.inner.live_projection_shutdowns.lock()
+            && let Some(shutdown) = shutdowns.remove(&runtime_key)
+        {
+            let _ = shutdown.send(true);
+        }
+    }
+
+    /// The runtime's own registry of the gates of its mobs' writers: this
+    /// projector opens its registrations' gates in it from here on, so a
+    /// write of a projector the runtime replaced is still counted by the
+    /// runtime. Handed over before the first registration; a projector that
+    /// already made a registry of its own keeps it.
+    pub(crate) fn share_mob_writers(&self, writers: mob_writers::MobWriters) {
+        if self.inner.mob_writers.set(writers).is_err() {
+            tracing::warn!(
+                "the console projection already has a registry of its mobs' writers: its writes \
+                 are not counted by the host's"
+            );
+        }
+    }
+
+    /// Drop what this projector kept under the runtime key of a mob's
+    /// console events: the witnesses of its members and the searches for
+    /// them, the retries and waits of its members' session history passes,
+    /// and what those passes recorded of the sessions they read (as a
+    /// runtime's registration and its end drop theirs). A registration
+    /// under the key starts with none of an earlier one's, and an ended one
+    /// leaves none: the next mob under the id is another mob, over other
+    /// sessions.
+    fn forget_mob_registration_state(&self, runtime_key: &str) {
+        self.inner
+            .member_provenance
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|(key, _, _), _| key != runtime_key);
+        self.inner
+            .assistant_history_retries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|(_, key, _, _)| key != runtime_key);
+        self.inner
+            .status_unknown_redrives
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|(_, key, _, _), _| key != runtime_key);
+        self.inner
+            .status_unknown_backoff
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|(_, key, _, _), _| key != runtime_key);
+        {
+            let prefix = format!("{runtime_key}:session-history:");
+            self.inner
+                .session_backfill_authorities
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .retain(|key, _| !key.starts_with(&prefix));
+            self.inner
+                .session_pending_read_authorities
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .retain(|key, _| !key.starts_with(&prefix));
+        }
+        self.inner
+            .member_provenance_searches
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|(key, _, _), _| key != runtime_key);
+        self.inner
+            .notice_observations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|(key, _, _), _| key != runtime_key);
+    }
+
     /// Unregister a runtime (issue #254 follow-up): removes the registry
     /// entry (which also terminates the 5s session-history discovery loop on
     /// its next tick — it checks registration), signals the live-projection
@@ -1747,6 +2559,13 @@ impl MetaConsoleAggregator {
             .write()
             .ok()
             .and_then(|mut runtimes| runtimes.remove(runtime_key))
+            .inspect(|entry| {
+                // Served under the entry's namespace no longer.
+                entry
+                    .runtime
+                    .console_mob_records()
+                    .stop_serving_under(&entry.identity_namespace);
+            })
             .is_some();
         self.inner
             .member_provenance
@@ -2061,6 +2880,36 @@ impl MetaConsoleAggregator {
         .await
     }
 
+    /// Test seam: append `frame` as the projection appends a member's
+    /// frame, and send it to the timeline's subscribers when it was
+    /// inserted.
+    #[cfg(test)]
+    pub(crate) async fn append_and_emit_for_test(
+        &self,
+        frame: NewConsoleFrame,
+    ) -> ConsoleLogResult<AppendOutcome> {
+        append_and_emit(&self.inner, frame).await
+    }
+
+    /// Test seam: store `frame` and send it to the live subscribers, as a
+    /// frame of a writer that captured its member itself is stored and
+    /// sent, also over an aggregator that holds no registration for the
+    /// frame's runtime. No payload is redacted.
+    #[cfg(test)]
+    pub(crate) async fn store_and_emit_for_test(
+        &self,
+        frame: NewConsoleFrame,
+    ) -> ConsoleLogResult<()> {
+        append_and_emit_frame(
+            &self.inner,
+            frame,
+            Arc::new(AllowAllConsoleVisibilityPolicy),
+            FrameWriter::Staged,
+        )
+        .await
+        .map(|_| ())
+    }
+
     /// Test seam: whether a council of `runtime_key`'s runtime owns the mob
     /// of `incarnation` listed under `mob_id`, as the member listing decides
     /// it for a mob handle it listed. `None` without that runtime or its
@@ -2103,15 +2952,32 @@ impl MetaConsoleAggregator {
         &self,
         identity: &str,
     ) -> ConsoleLogResult<Option<ConsoleIdentityInspection>> {
+        Box::pin(self.inspect_identity_of_mob(None, identity)).await
+    }
+
+    /// [`Self::inspect_identity`] for the identity `identity` of the mob
+    /// `mob`: of the mob whose console events are registered here, or
+    /// (none, and for the host's default mob named by its id on a console
+    /// that was told it) of the default mob ([`Self::mob_of_a_lookup`]).
+    /// The identity is looked for among the registrations and
+    /// the members of that mob alone: two mobs' identities of one name are
+    /// two identities, and the inspection of one never answers the other.
+    /// A mob whose console events are not registered has no identity, as a
+    /// mob no host has: both answer none, and nothing of another mob's
+    /// identities is told.
+    pub(crate) async fn inspect_identity_of_mob(
+        &self,
+        mob: Option<&meerkat_mob::MobId>,
+        identity: &str,
+    ) -> ConsoleLogResult<Option<ConsoleIdentityInspection>> {
+        let mob = self.mob_of_a_lookup(mob);
+        let mob = mob.as_ref();
         let entries = self
-            .inner
-            .runtimes
-            .read()
-            .map_err(|_| runtime_registry_lock_error())?
-            .values()
-            .cloned()
+            .entries_of_mob(mob)
+            .ok_or_else(runtime_registry_lock_error)?
+            .into_values()
             .collect::<Vec<_>>();
-        let live_records = Box::pin(self.live_records_for_identity(identity)).await;
+        let live_records = Box::pin(self.live_records_for_identity_of(mob, identity)).await;
         let mut durable_matches = Vec::new();
         if !requested_identity_has_runtime_member_alias(identity, &entries) {
             for entry in &entries {
@@ -2161,7 +3027,8 @@ impl MetaConsoleAggregator {
             .into());
         }
         if let Some((entry, record)) = durable_matches.into_iter().next() {
-            let durable_live_records = Box::pin(self.live_records_for_durable_record(
+            let durable_live_records = Box::pin(self.live_records_for_durable_record_of(
+                mob,
                 &entry,
                 identity,
                 &record,
@@ -2251,7 +3118,8 @@ impl MetaConsoleAggregator {
             .into());
         }
         if let Some((entry, record)) = runtime_id_matches.into_iter().next() {
-            let durable_live_records = Box::pin(self.live_records_for_durable_record(
+            let durable_live_records = Box::pin(self.live_records_for_durable_record_of(
+                mob,
                 &entry,
                 identity,
                 &record,
@@ -2294,7 +3162,7 @@ impl MetaConsoleAggregator {
             }));
         }
 
-        let live_matches = Box::pin(self.resolve_visible_members(identity)).await;
+        let live_matches = Box::pin(self.resolve_visible_members_of(mob, identity)).await;
         if live_matches.len() > 1 {
             let candidates = live_matches
                 .iter()
@@ -2318,7 +3186,7 @@ impl MetaConsoleAggregator {
             {
                 return Err(stale_error.into());
             }
-            if let Some(identity_runtime) = resolved.entry.identity_runtime.as_ref()
+            if let Some(identity_runtime) = resolved.identity_runtime()
                 && let Some(parsed_identity) = identity_runtime
                     .owned_identity_for_member_alias(&resolved.runtime_identity)
                     .await
@@ -2331,7 +3199,8 @@ impl MetaConsoleAggregator {
                 }
             {
                 let durable_record = identity_record_for_status(&resolved.entry, &status);
-                let durable_live_records = Box::pin(self.live_records_for_durable_record(
+                let durable_live_records = Box::pin(self.live_records_for_durable_record_of(
+                    mob,
                     &resolved.entry,
                     identity,
                     &durable_record,
@@ -2546,7 +3415,7 @@ impl MetaConsoleAggregator {
             {
                 return Err(stale_error.into());
             }
-            let mutation_identity = match resolved.entry.identity_runtime.as_ref() {
+            let mutation_identity = match resolved.identity_runtime() {
                 Some(identity_runtime) => identity_runtime
                     .identity_for_member_mutation(&resolved.runtime_identity)
                     .await
@@ -2555,7 +3424,7 @@ impl MetaConsoleAggregator {
                     })?,
                 None => None,
             };
-            if let Some(identity_runtime) = resolved.entry.identity_runtime.as_ref()
+            if let Some(identity_runtime) = resolved.identity_runtime()
                 && let Some(parsed_identity) = mutation_identity
             {
                 let status = identity_runtime.status(&parsed_identity).await.map_err(
@@ -2688,6 +3557,19 @@ impl MetaConsoleAggregator {
     /// decides each stored frame, with its captured member provenance,
     /// inside the scan and before the frame is projected, so the page limit
     /// counts only frames the caller may see.
+    ///
+    /// Without an identity this is the store's plain read, which names no
+    /// mob: the stores of this crate answer it the default mob's frames
+    /// alone, and a store that does not select by mob answers every frame
+    /// it holds. A door that serves one mob reads with
+    /// [`Self::query_mob_timeline_windowed_for`].
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "the plain read, which names no mob; every door reads one mob's timeline"
+        )
+    )]
     pub(crate) async fn query_timeline_windowed_for(
         &self,
         query: ConsoleTimelineWindowQuery,
@@ -2704,7 +3586,16 @@ impl MetaConsoleAggregator {
 
     /// [`Self::query_timeline_windowed_for`] returning the stored frames
     /// unprojected, for a stream that decides each frame again, under the
-    /// policy committed before it is sent, and projects it then.
+    /// policy committed before it is sent, and projects it then. Like it,
+    /// the store's plain read; a stream of one mob replays with
+    /// [`Self::query_mob_timeline_windowed_stored_for`].
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "the plain replay, which names no mob; every stream replays one mob's timeline"
+        )
+    )]
     pub(crate) async fn query_timeline_windowed_stored_for(
         &self,
         query: ConsoleTimelineWindowQuery,
@@ -2736,6 +3627,51 @@ impl MetaConsoleAggregator {
         .await
     }
 
+    /// [`Self::query_timeline_windowed_for`] over the frames of ONE mob: the
+    /// mob `query.mob_id` names (none for the host's default mob), whoever
+    /// their member ([`ConsoleLogStore::query_windowed_frames_of_mob`]). A
+    /// door that serves one mob reads its timeline with this; the plain
+    /// read names no mob. A store that does not read one mob's frames
+    /// itself ([`ConsoleLogStore::reads_one_mob`]) serves the default mob
+    /// alone: the default mob's read is answered from its plain pages, of
+    /// which the scan keeps the frames that name no mob, and the read of
+    /// another mob is refused, never answered as a page
+    /// ([`StoreServesTheDefaultMobAlone`]). A cursor is held
+    /// against the newest frame of the read's own mob.
+    pub(crate) async fn query_mob_timeline_windowed_for(
+        &self,
+        query: ConsoleTimelineWindowQuery,
+        frame_filter: Option<&TimelineFrameFilter<'_>>,
+    ) -> ConsoleTimelineQueryResult<ConsoleTimelineWindowPage> {
+        Box::pin(self.query_timeline_windowed_scan_of(
+            TimelineMobScope::OneMob,
+            query,
+            frame_filter,
+            TIMELINE_MAX_RAW_SCAN_FRAMES,
+            FrameProjection::ForView,
+        ))
+        .await
+    }
+
+    /// [`Self::query_mob_timeline_windowed_for`] returning the stored
+    /// frames unprojected, for a stream of one mob that decides each frame
+    /// again, under the policy committed before it is sent, and projects it
+    /// then.
+    pub(crate) async fn query_mob_timeline_windowed_stored_for(
+        &self,
+        query: ConsoleTimelineWindowQuery,
+        frame_filter: Option<&TimelineFrameFilter<'_>>,
+    ) -> ConsoleTimelineQueryResult<ConsoleTimelineWindowPage> {
+        Box::pin(self.query_timeline_windowed_scan_of(
+            TimelineMobScope::OneMob,
+            query,
+            frame_filter,
+            TIMELINE_MAX_RAW_SCAN_FRAMES,
+            FrameProjection::Stored,
+        ))
+        .await
+    }
+
     async fn query_timeline_windowed_scan(
         &self,
         query: ConsoleTimelineWindowQuery,
@@ -2743,8 +3679,45 @@ impl MetaConsoleAggregator {
         scan_budget: usize,
         projection: FrameProjection,
     ) -> ConsoleTimelineQueryResult<ConsoleTimelineWindowPage> {
-        self.reject_after_cursor_beyond_store_frontier(query.after.as_ref())
+        Box::pin(self.query_timeline_windowed_scan_of(
+            TimelineMobScope::EveryMob,
+            query,
+            frame_filter,
+            scan_budget,
+            projection,
+        ))
+        .await
+    }
+
+    async fn query_timeline_windowed_scan_of(
+        &self,
+        mob_scope: TimelineMobScope,
+        query: ConsoleTimelineWindowQuery,
+        frame_filter: Option<&TimelineFrameFilter<'_>>,
+        scan_budget: usize,
+        projection: FrameProjection,
+    ) -> ConsoleTimelineQueryResult<ConsoleTimelineWindowPage> {
+        // A mob beside the default mob has no console log in a store that
+        // does not read one mob's frames itself (its console events are not
+        // registered over such a store): its read is refused, never
+        // answered as a page, empty or not. The refusal is a typed error
+        // inside the operational variant, which a door reads by its type
+        // ([`ConsoleTimelineQueryError::store_serves_the_default_mob_alone`]).
+        if mob_scope == TimelineMobScope::OneMob
+            && !self.inner.store.reads_one_mob()
+            && let Some(mob) = self.mob_as_stored(query.mob_id.as_ref())
+            && crate::member_key::names_a_mob(&mob)
+        {
+            return Err(ConsoleTimelineQueryError::Operational(Box::new(
+                StoreServesTheDefaultMobAlone { mob },
+            )));
+        }
+        self.reject_after_cursor_beyond_store_frontier(mob_scope, &query)
             .await?;
+        // The backfill below finds its member by name among the members of
+        // the mob the read names: a read of another mob's member asks for
+        // that mob's member, never for the default mob's member of that
+        // name.
         if query.after.is_none()
             && query.before.is_none()
             && let Some(identity) = query.identity.clone()
@@ -2753,25 +3726,59 @@ impl MetaConsoleAggregator {
             probe_query.limit = TIMELINE_RAW_SCAN_PAGE_LIMIT;
             let page = self.inner.store.query_windowed_frames(probe_query).await?;
             if explicit_identity_query_needs_session_history_backfill(&page.frames) {
+                // The host's default mob named by its id is the default
+                // mob: its member is found among the runtimes registered
+                // for it.
+                let owner = self
+                    .inner
+                    .projection_owner
+                    .as_deref()
+                    .unwrap_or(&self.inner);
+                let mob = match (query.mob_id.as_ref(), owner.default_mob.get()) {
+                    (Some(mob), Some(default_mob)) => default_mob.stored(mob).cloned(),
+                    (mob, _) => mob.cloned(),
+                };
                 spawn_session_history_backfill_for_identity(
                     self.inner.clone(),
+                    mob,
                     identity,
                     true,
                     AssistantHistoryRefreshReason::Recovery,
                 );
             }
         }
-        Box::pin(self.query_timeline_visible(query, frame_filter, scan_budget, projection)).await
+        Box::pin(self.query_timeline_visible(
+            mob_scope,
+            query,
+            frame_filter,
+            scan_budget,
+            projection,
+        ))
+        .await
     }
 
+    /// Refuse a read whose cursor lies past the end of what the read can
+    /// answer. A read of one mob ends at the newest frame of that mob
+    /// ([`newest_cursor_of_mob`]): its cursors are of that mob's own frames,
+    /// so a frame of another mob, later or earlier, does not move the end,
+    /// and the refusal names that mob's newest cursor and no other. The
+    /// plain read ends where the store's own newest cursor is.
     async fn reject_after_cursor_beyond_store_frontier(
         &self,
-        after: Option<&ConsoleCursor>,
+        mob_scope: TimelineMobScope,
+        query: &ConsoleTimelineWindowQuery,
     ) -> ConsoleTimelineQueryResult<()> {
+        let after = query.after.as_ref();
         let Some(after_seq) = after.and_then(ConsoleCursor::seq) else {
             return Ok(());
         };
-        let latest_cursor = self.inner.store.latest_cursor().await?;
+        let latest_cursor = match mob_scope {
+            TimelineMobScope::OneMob => {
+                let mob = self.mob_as_stored(query.mob_id.as_ref());
+                newest_cursor_of_mob(self.inner.store.as_ref(), mob.as_ref()).await?
+            }
+            TimelineMobScope::EveryMob => self.inner.store.latest_cursor().await?,
+        };
         let latest_seq = latest_cursor
             .as_ref()
             .and_then(ConsoleCursor::seq)
@@ -2785,8 +3792,24 @@ impl MetaConsoleAggregator {
         Ok(())
     }
 
+    /// The mob a read names, as a stored frame names it: none for the
+    /// host's default mob, also when the read names that mob by the id this
+    /// console was told ([`Self::tell_default_mob`]).
+    fn mob_as_stored(&self, mob: Option<&meerkat_mob::MobId>) -> Option<meerkat_mob::MobId> {
+        let owner = self
+            .inner
+            .projection_owner
+            .as_deref()
+            .unwrap_or(&self.inner);
+        match (mob, owner.default_mob.get()) {
+            (Some(mob), Some(default_mob)) => default_mob.stored(mob).cloned(),
+            (mob, _) => mob.cloned(),
+        }
+    }
+
     async fn query_timeline_visible(
         &self,
+        mob_scope: TimelineMobScope,
         query: ConsoleTimelineWindowQuery,
         frame_filter: Option<&TimelineFrameFilter<'_>>,
         scan_budget: usize,
@@ -2799,7 +3822,7 @@ impl MetaConsoleAggregator {
         // One read: every frame of this page is decided against the members
         // each runtime had when the page first needed them.
         let mut read = FrameVisibilityRead::default();
-        let identity_records = self.inner.identity_read_model.current().await;
+        let identity_records = self.inner.identity_read_model.current_with_mobs().await;
         let mut next_cursor = query.after.clone();
         let mut since_last_scanned_cursor = query.after.clone();
         let mut since_last_delivered_cursor = None;
@@ -2808,12 +3831,31 @@ impl MetaConsoleAggregator {
         let mut exhausted = false;
         let mut scanned = 0usize;
 
+        // The read of one mob. A store that reads one mob's frames itself
+        // answers them from its own index. A store that does not (a store
+        // implemented outside Meta, a wrapper that does not forward the
+        // read) serves the default mob alone, and the read of another mob
+        // was refused above: for the default mob the scan reads the plain
+        // pages and keeps the frames that name no mob here, so such a
+        // store is never asked a read it refuses, and never answers another
+        // mob's frame in the default mob's place.
+        let one_mob_by_scan =
+            matches!(mob_scope, TimelineMobScope::OneMob) && !self.inner.store.reads_one_mob();
         loop {
-            let page = self
-                .inner
-                .store
-                .query_windowed_frames(scan_query.clone())
-                .await?;
+            let page = match mob_scope {
+                TimelineMobScope::OneMob if !one_mob_by_scan => {
+                    self.inner
+                        .store
+                        .query_windowed_frames_of_mob(scan_query.clone())
+                        .await?
+                }
+                TimelineMobScope::EveryMob | TimelineMobScope::OneMob => {
+                    self.inner
+                        .store
+                        .query_windowed_frames(scan_query.clone())
+                        .await?
+                }
+            };
             latest_cursor = latest_cursor.or(page.latest_cursor.clone());
             // Older custom stores leave exhausted at its default even at the
             // frontier. An empty page is terminal; nonempty repeats still fail.
@@ -2862,6 +3904,20 @@ impl MetaConsoleAggregator {
             }
 
             for frame in page.frames {
+                // The scan of plain pages serves the default mob alone (the
+                // read of another mob over such a store was refused), so a
+                // frame that names a mob is not this read's: it is passed
+                // over like a frame the caller may not see, before anything
+                // is asked about it. The rule is the refusal's: the mob as
+                // a stored frame names it, however the query names it.
+                if one_mob_by_scan
+                    && frame
+                        .mob_id
+                        .as_ref()
+                        .is_some_and(crate::member_key::names_a_mob)
+                {
+                    continue;
+                }
                 let allow_historical_identity =
                     query.identity.as_deref() == Some(frame.identity.as_str());
                 if Box::pin(frame_is_visible_cached(
@@ -3002,6 +4058,26 @@ impl MetaConsoleAggregator {
         self.inner.store.latest_cursor().await
     }
 
+    /// The newest stored frame of one mob (none: the host's default mob):
+    /// the end of that mob's frames in a log that holds the frames of
+    /// several mobs ([`newest_cursor_of_mob`], the end the read of one mob
+    /// holds a cursor against). A door that merges the reads of several
+    /// mobs holds its one cursor against each mob's end with this.
+    pub(crate) async fn newest_cursor_of_mob_frames(
+        &self,
+        mob: Option<&meerkat_mob::MobId>,
+    ) -> ConsoleLogResult<Option<ConsoleCursor>> {
+        newest_cursor_of_mob(self.inner.store.as_ref(), mob).await
+    }
+
+    /// Whether the console's log reads one mob's frames itself
+    /// ([`ConsoleLogStore::reads_one_mob`]). A log that does not holds the
+    /// default mob's console log alone: no other mob's console events are
+    /// registered over it.
+    pub(crate) fn reads_one_mob(&self) -> bool {
+        self.inner.store.reads_one_mob()
+    }
+
     pub async fn timeline_event_visible(&self, event: &ConsoleTimelineEvent) -> bool {
         self.timeline_event_visible_for_subscriber(event, None)
             .await
@@ -3032,7 +4108,7 @@ impl MetaConsoleAggregator {
         match event {
             ConsoleTimelineEvent::ConsoleFrame { frame }
             | ConsoleTimelineEvent::FrameUpdated { frame } => {
-                let identity_records = self.inner.identity_read_model.current().await;
+                let identity_records = self.inner.identity_read_model.current_with_mobs().await;
                 let identity_known = identity_records.iter().any(|record| {
                     record.runtime_key == frame.runtime_key
                         && (record.identity == frame.identity
@@ -3072,7 +4148,7 @@ impl MetaConsoleAggregator {
         identity: Option<&str>,
     ) -> bool {
         let allow_historical_identity = identity == Some(frame.identity.as_str());
-        let identity_records = self.inner.identity_read_model.current().await;
+        let identity_records = self.inner.identity_read_model.current_with_mobs().await;
         Box::pin(frame_is_visible(
             &self.inner,
             frame,
@@ -3243,20 +4319,41 @@ impl MetaConsoleAggregator {
         // live completion event then keyed the `{identity}:{generation}`
         // conversation while the durable conversation - the one the console
         // UI renders - showed only this user_input frame.
-        let durable_identity = crate::member_comms_id::resolve_member_identity(
-            &resolved.handle,
-            &resolved.member.agent_identity,
-            &resolved.member.labels,
-        )
-        .as_deref()
-        .unwrap_or(resolved.runtime_identity.as_str())
-        .to_string();
+        // A nested member has no identity but its mob and name, and its
+        // bare name maps to nothing: that name is a primary member's.
+        let nested_identity = if resolved.nested() {
+            Some(
+                crate::console_member_ref::nested_member_identity(
+                    &resolved.source_mob_id,
+                    &resolved.runtime_identity,
+                )
+                .ok_or_else(|| {
+                    ConsoleSendError::InvalidRequest(format!(
+                        "identity not found: {}",
+                        request.identity
+                    ))
+                })?,
+            )
+        } else {
+            None
+        };
+        let durable_identity = match nested_identity {
+            Some(identity) => identity,
+            None => crate::member_comms_id::resolve_member_identity(
+                &resolved.handle,
+                &resolved.member.agent_identity,
+                &resolved.member.labels,
+            )
+            .as_deref()
+            .unwrap_or(resolved.runtime_identity.as_str())
+            .to_string(),
+        };
         resolved
             .entry
             .console_events
             .reserve_interaction_value(
                 &durable_identity,
-                Some(resolved.runtime_identity.as_str()),
+                (!resolved.nested()).then_some(resolved.runtime_identity.as_str()),
                 &interaction_id,
                 &request.origin,
                 request.content.clone(),
@@ -3285,6 +4382,7 @@ impl MetaConsoleAggregator {
             .is_scoped()
             .then(|| ConsoleSendThread::of_send(provenance.as_ref(), sender));
         let mut new_frame = NewConsoleFrame {
+            mob_id: None,
             id: Some(frame_id),
             dedupe_key,
             timestamp_ms: current_time_ms(),
@@ -3313,7 +4411,7 @@ impl MetaConsoleAggregator {
             .apply(SendTransition::PersistAccepted)
             .map_err(ConsoleSendError::State)?;
         let witness = FrameWitness::of_capture(new_frame.source.member_provenance.take());
-        let outcome = append_frame(&self.inner, new_frame, witness)
+        let outcome = append_frame(&self.inner, new_frame, witness, FrameWriter::SendOrMark)
             .await
             .map_err(ConsoleSendError::Log)?;
         if outcome.disposition == AppendDisposition::Existing {
@@ -3347,6 +4445,7 @@ impl MetaConsoleAggregator {
             .map_err(ConsoleSendError::State)?;
         update_frame_status_and_emit(
             &self.inner,
+            outcome.frame.mob_id.as_ref(),
             &outcome.frame.id,
             ConsoleFrameStatus::Dispatching,
         )
@@ -3394,6 +4493,7 @@ impl MetaConsoleAggregator {
                         .map_err(ConsoleSendError::State)?;
                     update_frame_status_and_emit(
                         &self.inner,
+                        frame.mob_id.as_ref(),
                         &frame.id,
                         ConsoleFrameStatus::Dispatching,
                     )
@@ -3468,10 +4568,14 @@ impl MetaConsoleAggregator {
         let (_delivered, _effects) = state
             .reconcile(SendEvidence::Admitted)
             .map_err(ConsoleSendError::State)?;
-        let updated =
-            update_frame_status_and_emit(&self.inner, &frame.id, ConsoleFrameStatus::Delivered)
-                .await
-                .map_err(ConsoleSendError::Log)?;
+        let updated = update_frame_status_and_emit(
+            &self.inner,
+            frame.mob_id.as_ref(),
+            &frame.id,
+            ConsoleFrameStatus::Delivered,
+        )
+        .await
+        .map_err(ConsoleSendError::Log)?;
         Ok(accepted_from_frame(updated.as_ref().unwrap_or(frame)))
     }
 
@@ -3546,11 +4650,10 @@ impl MetaConsoleAggregator {
             .projection_owner
             .as_deref()
             .unwrap_or(&self.inner);
-        let service = owner.runtimes.read().ok().and_then(|runtimes| {
-            runtimes
-                .get(&frame.runtime_key)
-                .and_then(|entry| entry.runtime.session_service().cloned())
-        });
+        // The frame's own registration: a runtime registered for the default
+        // mob, or the console events of the mob the send was made to.
+        let service = registered_entry(owner, &frame.runtime_key)
+            .and_then(|entry| entry.runtime.session_service().cloned());
         let Some(service) = service else {
             return NativeSendObservation::Unknown {
                 cause: "no registered runtime serves the send".to_string(),
@@ -3569,7 +4672,16 @@ impl MetaConsoleAggregator {
     /// runtime's admission evidence for it. A send the evidence shows admitted
     /// but that has not settled is settled delivered; nothing is dispatched.
     /// `None` when the caller has no such send: a key another caller used is
-    /// a different key, so it answers exactly as a missing one.
+    /// a different key, so it answers exactly as a missing one. So does a
+    /// send to a member this console serves on no read (see
+    /// [`Self::timeline_frame_visible_for_query`]).
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "the console's door recovers a send through the form that takes its mob; the rows of a send that names no mob call this one"
+        )
+    )]
     pub(crate) async fn recover_send(
         &self,
         identities: &[String],
@@ -3577,26 +4689,71 @@ impl MetaConsoleAggregator {
         idempotency_key: &str,
         scope: &ConsoleSendScope,
     ) -> Result<Option<ConsoleSendRecovery>, ConsoleSendError> {
-        let runtime_keys = self.send_runtime_keys();
+        Box::pin(self.recover_send_for_mob(identities, None, origin, idempotency_key, scope)).await
+    }
+
+    /// [`Self::recover_send`] for a send to a member of the mob `mob`, as
+    /// [`Self::reserve_identity_first_interaction_for_mob`] takes it: a
+    /// send to another mob's member is looked for under that mob's key
+    /// alone, so one idempotency key for the members of one name in two
+    /// mobs is recovered as the send of the mob asked for.
+    pub(crate) async fn recover_send_for_mob(
+        &self,
+        identities: &[String],
+        mob: Option<&meerkat_mob::MobId>,
+        origin: &str,
+        idempotency_key: &str,
+        scope: &ConsoleSendScope,
+    ) -> Result<Option<ConsoleSendRecovery>, ConsoleSendError> {
+        let owner = self
+            .inner
+            .projection_owner
+            .as_deref()
+            .unwrap_or(&self.inner);
+        let send_mob = mob_of_send(owner, mob)?;
+        // The send is looked for among the frames of its own mob alone.
+        let stored_mob = send_mob.as_ref().map(|send_mob| send_mob.mob);
+        let keys: Vec<String> = match send_mob {
+            None => self
+                .send_runtime_keys()
+                .iter()
+                .flat_map(|runtime_key| {
+                    identities.iter().map(move |identity| {
+                        scope.dedupe_key(runtime_key, identity, origin, idempotency_key)
+                    })
+                })
+                .collect(),
+            Some(send_mob) => identities
+                .iter()
+                .map(|identity| send_mob.dedupe_key(scope, identity, origin, idempotency_key))
+                .collect(),
+        };
         let mut found = None;
-        'search: for runtime_key in &runtime_keys {
-            for identity in identities {
-                let key = scope.dedupe_key(runtime_key, identity, origin, idempotency_key);
-                if let Some(frame) = self
-                    .inner
-                    .store
-                    .frame_by_dedupe_key(&key)
-                    .await
-                    .map_err(ConsoleSendError::Log)?
-                {
-                    found = Some(frame);
-                    break 'search;
-                }
+        for key in &keys {
+            if let Some(frame) = self
+                .inner
+                .store
+                .frame_by_dedupe_key_of_mob(stored_mob, key)
+                .await
+                .map_err(ConsoleSendError::Log)?
+            {
+                found = Some(frame);
+                break;
             }
         }
         let Some(frame) = found else {
             return Ok(None);
         };
+        // A send whose input this console serves on no read (its member is
+        // one the policy hides, a nested mob's member where nested mobs are
+        // not listed among them) answers as a send the caller never made:
+        // the recovery reaches no member the timeline does not.
+        if !self
+            .timeline_frame_visible_for_query(&frame, Some(frame.identity.as_str()))
+            .await
+        {
+            return Ok(None);
+        }
         let native = self
             .observe_native_send(&frame, INTERACTIVE_SEND_READ_BOUND)
             .await;
@@ -3628,12 +4785,30 @@ impl MetaConsoleAggregator {
     /// settled delivered; a submitted send whose input the runtime does not
     /// hold (the previous process stopped before submitting it) fails, its
     /// outcome unknown. Nothing is ever dispatched here.
+    ///
+    /// The sweep of a start is the host's default mob's: a send of a mob
+    /// beside it is swept when that mob's console events register
+    /// ([`Self::register_mob_console_events`]).
     pub(crate) async fn reconcile_interrupted_sends(&self) -> SendSweepOutcome {
+        self.reconcile_interrupted_sends_of_mob(None, None).await
+    }
+
+    /// [`Self::reconcile_interrupted_sends`] over the sends of the mob `mob`
+    /// alone (none for the host's default mob, as a stored frame names it),
+    /// each read from the runtime of the registration it was made under. A
+    /// mob's own sweep writes for its registration `registration` alone:
+    /// once that registration ended it settles nothing more and stops.
+    async fn reconcile_interrupted_sends_of_mob(
+        &self,
+        mob: Option<&meerkat_mob::MobId>,
+        registration: Option<uuid::Uuid>,
+    ) -> SendSweepOutcome {
         let deadline = tokio::time::Instant::now() + send_recovery::SEND_SWEEP_DEADLINE;
         let frames = match self
             .inner
             .store
-            .unsettled_send_frames(
+            .unsettled_send_frames_of_mob(
+                mob,
                 send_recovery::SEND_SWEEP_WINDOW,
                 send_recovery::SEND_SWEEP_LIMIT,
             )
@@ -3641,53 +4816,83 @@ impl MetaConsoleAggregator {
         {
             Ok(frames) => frames,
             Err(error) => {
-                tracing::warn!(%error, "console send reconciliation could not list unsettled sends");
+                tracing::warn!(
+                    mob = mob.map(meerkat_mob::MobId::as_str),
+                    %error,
+                    "console send reconciliation could not list unsettled sends"
+                );
                 return SendSweepOutcome::default();
             }
         };
         let mut outcome = SendSweepOutcome::default();
+        // Cut at its limit, the sweep leaves the sends past it to the next.
+        let mut completed = frames.len() < send_recovery::SEND_SWEEP_LIMIT;
         for frame in frames {
             if tokio::time::Instant::now() >= deadline {
                 tracing::warn!(
                     examined = outcome.examined,
                     "console send reconciliation stopped at its deadline"
                 );
+                completed = false;
                 break;
             }
             outcome.examined += 1;
             let Some(claim) = self.inner.send_dispatch_claims.claim(&frame.id) else {
+                // Another owner holds the send's dispatch (a live send, or
+                // the sweep of an earlier registration): the send is left
+                // to it, and this sweep did not run to its end. If that
+                // owner does not settle the send, the next sweep does.
+                completed = false;
                 continue;
             };
-            match self
+            let observed = self
                 .observe_native_send(&frame, send_recovery::BOOT_SEND_READ_BOUND)
-                .await
-            {
+                .await;
+            if matches!(observed, NativeSendObservation::Unknown { .. }) {
+                completed = false;
+                continue;
+            }
+            // Each settle writes for the registration the sweep was started
+            // for, holding its permit; a registration that ended gives none.
+            let Ok(_permit) = self.sweep_permit(mob, registration) else {
+                completed = false;
+                break;
+            };
+            let settled = match observed {
                 NativeSendObservation::Admitted { .. } => {
                     match self.settle_admitted_send(&frame, &claim).await {
-                        Ok(_) => outcome.delivered += 1,
-                        Err(error) => tracing::warn!(
-                            frame_id = %frame.id,
-                            %error,
-                            "console send reconciliation could not settle an admitted send"
-                        ),
+                        Ok(_) => {
+                            outcome.delivered += 1;
+                            Ok(())
+                        }
+                        Err(error) => Err(("an admitted send", error)),
                     }
                 }
                 NativeSendObservation::Absent if frame.status == ConsoleFrameStatus::Submitted => {
                     match self.settle_absent_submission(&frame, &claim).await {
-                        Ok(settled) if settled.status == ConsoleFrameStatus::DeliveryFailed => {
-                            outcome.lost += 1;
+                        Ok(settled) => {
+                            if settled.status == ConsoleFrameStatus::DeliveryFailed {
+                                outcome.lost += 1;
+                            }
+                            Ok(())
                         }
-                        Ok(_) => {}
-                        Err(error) => tracing::warn!(
-                            frame_id = %frame.id,
-                            %error,
-                            "console send reconciliation could not settle a lost submission"
-                        ),
+                        Err(error) => Err(("a lost submission", error)),
                     }
                 }
-                NativeSendObservation::Absent | NativeSendObservation::Unknown { .. } => {}
+                NativeSendObservation::Absent | NativeSendObservation::Unknown { .. } => Ok(()),
+            };
+            // A send the sweep could not settle is left to the next sweep.
+            if let Err((what, error)) = settled {
+                completed = false;
+                tracing::warn!(
+                    frame_id = %frame.id,
+                    %error,
+                    "console send reconciliation could not settle {}",
+                    what
+                );
             }
         }
+        outcome.completed = completed;
         outcome
     }
 
@@ -3696,10 +4901,17 @@ impl MetaConsoleAggregator {
     /// [`Self::reconcile_interrupted_sends`] would examine. A candidate
     /// launch's census of what it leaves to the authoritative launch.
     pub(crate) async fn unsettled_send_count(&self) -> usize {
+        self.unsettled_send_count_of_mob(None).await
+    }
+
+    /// [`Self::unsettled_send_count`] of the mob `mob` alone (none for the
+    /// host's default mob).
+    async fn unsettled_send_count_of_mob(&self, mob: Option<&meerkat_mob::MobId>) -> usize {
         match self
             .inner
             .store
-            .unsettled_send_frames(
+            .unsettled_send_frames_of_mob(
+                mob,
                 send_recovery::SEND_SWEEP_WINDOW,
                 send_recovery::SEND_SWEEP_LIMIT,
             )
@@ -3707,9 +4919,72 @@ impl MetaConsoleAggregator {
         {
             Ok(frames) => frames.len(),
             Err(error) => {
-                tracing::warn!(%error, "console send census could not list unsettled sends");
+                tracing::warn!(
+                    mob = mob.map(meerkat_mob::MobId::as_str),
+                    %error,
+                    "console send census could not list unsettled sends"
+                );
                 0
             }
+        }
+    }
+
+    /// The sweep of the sends of the mob `mob`, a mob the host serves beside
+    /// its default mob, run once its console events registered: the sends a
+    /// previous process left unsettled are settled from the evidence of the
+    /// mob's own runtime, as a start settles the default mob's
+    /// ([`Self::reconcile_interrupted_sends`]). A launch that does not speak
+    /// for the composition (`settles` false) settles none: it logs how many
+    /// it leaves to the authoritative launch.
+    async fn sweep_sends_of_registered_mob(
+        &self,
+        mob: &meerkat_mob::MobId,
+        registration: uuid::Uuid,
+        settles: bool,
+    ) {
+        let writers = mob_writers_of(&self.inner);
+        let runtime_key = mob_runtime_key(mob);
+        if !settles {
+            let unsettled = self.unsettled_send_count_of_mob(Some(mob)).await;
+            tracing::warn!(
+                mob = mob.as_str(),
+                unsettled,
+                "candidate launch census: the console sends of this mob a previous process left \
+                 unsettled stay so; the authoritative launch settles them"
+            );
+            writers.sweep_over(&runtime_key, registration, false);
+            return;
+        }
+        let outcome = self
+            .reconcile_interrupted_sends_of_mob(Some(mob), Some(registration))
+            .await;
+        writers.sweep_over(&runtime_key, registration, outcome.completed);
+        if outcome.examined > 0 {
+            tracing::info!(
+                mob = mob.as_str(),
+                examined = outcome.examined,
+                delivered = outcome.delivered,
+                lost = outcome.lost,
+                "reconciled the interrupted console sends of a mob"
+            );
+        }
+    }
+
+    /// A write permit for a sweep's settle: of the registration
+    /// `registration` of the mob `mob` for a mob's own sweep, refused once
+    /// that registration ended (the sweep writes for it alone); no permit
+    /// for the default mob's sweep, which writes for no registration.
+    fn sweep_permit(
+        &self,
+        mob: Option<&meerkat_mob::MobId>,
+        registration: Option<uuid::Uuid>,
+    ) -> Result<Option<mob_writers::WritePermit>, SweepRegistrationEnded> {
+        match (mob, registration) {
+            (Some(mob), Some(registration)) => mob_writers_of(&self.inner)
+                .permit(&mob_runtime_key(mob), registration)
+                .map(Some)
+                .ok_or(SweepRegistrationEnded),
+            _ => Ok(None),
         }
     }
 
@@ -3774,11 +5049,19 @@ impl MetaConsoleAggregator {
         scope: &ConsoleSendScope,
         sender: Option<&ConsoleSender>,
     ) -> Result<ScopedReservation, ConsoleSendError> {
-        Box::pin(self.reserve_identity_first_send(request, session_id, scope, sender, false)).await
+        Box::pin(self.reserve_identity_first_send(request, None, session_id, scope, sender, false))
+            .await
     }
 
     /// [`Self::reserve_identity_first_interaction_scoped`] for a governed
     /// send: a host's binder admits it.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "the console's door reserves a governed send through the form that takes its mob; the rows of a send that names no mob call this one"
+        )
+    )]
     pub(crate) async fn reserve_governed_interaction_scoped(
         &self,
         request: ConsoleSendRequest,
@@ -3786,12 +5069,137 @@ impl MetaConsoleAggregator {
         scope: &ConsoleSendScope,
         sender: Option<&ConsoleSender>,
     ) -> Result<ScopedReservation, ConsoleSendError> {
-        Box::pin(self.reserve_identity_first_send(request, session_id, scope, sender, true)).await
+        Box::pin(self.reserve_identity_first_send(request, None, session_id, scope, sender, true))
+            .await
+    }
+
+    /// [`Self::reserve_identity_first_interaction_scoped`] for a send to a
+    /// member of the mob `mob`, as a stored record names it: none for the
+    /// host's default mob, for which every line is that function's.
+    ///
+    /// A send to a member of another mob of the host is reserved, recorded
+    /// and deduplicated under that mob: its frame names the mob and stands
+    /// under the runtime key the mob's console events are registered under
+    /// ([`Self::register_mob_console_events`]), its key is the mob's member's
+    /// ([`ConsoleSendScope::member_dedupe_key`]), and its witness is that
+    /// mob's member. A mob with no registration has no send: the reservation
+    /// answers an unknown identity and stores nothing.
+    pub(crate) async fn reserve_identity_first_interaction_for_mob(
+        &self,
+        request: ConsoleSendRequest,
+        mob: Option<&meerkat_mob::MobId>,
+        session_id: Option<&str>,
+        scope: &ConsoleSendScope,
+        sender: Option<&ConsoleSender>,
+    ) -> Result<ScopedReservation, ConsoleSendError> {
+        Box::pin(self.reserve_identity_first_send(request, mob, session_id, scope, sender, false))
+            .await
+    }
+
+    /// [`Self::reserve_governed_interaction_scoped`] for a send to a member
+    /// of the mob `mob`, as [`Self::reserve_identity_first_interaction_for_mob`]
+    /// takes it.
+    pub(crate) async fn reserve_governed_interaction_for_mob(
+        &self,
+        request: ConsoleSendRequest,
+        mob: Option<&meerkat_mob::MobId>,
+        session_id: Option<&str>,
+        scope: &ConsoleSendScope,
+        sender: Option<&ConsoleSender>,
+    ) -> Result<ScopedReservation, ConsoleSendError> {
+        Box::pin(self.reserve_identity_first_send(request, mob, session_id, scope, sender, true))
+            .await
+    }
+
+    /// [`Self::send_scoped`] for a send to a member of the mob `mob`, as
+    /// [`Self::reserve_identity_first_interaction_for_mob`] takes it.
+    ///
+    /// The member lane finds its member among the runtimes registered for
+    /// the default mob, by name. A member of another mob is named by that
+    /// mob's identity runtime alone, so for another mob this lane knows no
+    /// such identity: nothing is reserved, and the default mob's member of
+    /// the name gets nothing.
+    pub(crate) async fn send_for_mob(
+        &self,
+        request: ConsoleSendRequest,
+        mob: Option<&meerkat_mob::MobId>,
+        scope: &ConsoleSendScope,
+        sender: Option<&ConsoleSender>,
+    ) -> Result<ConsoleInteractionAccepted, ConsoleSendError> {
+        validate_send_request(&request)?;
+        if self.names_another_mob(mob)? {
+            return Err(ConsoleSendError::UnknownIdentity(request.identity));
+        }
+        Box::pin(self.send_scoped(request, scope, sender)).await
+    }
+
+    /// [`Self::binary_blob_store_for_identity`] for a member of the mob
+    /// `mob`, as [`Self::reserve_identity_first_interaction_for_mob`] takes
+    /// it: the upload store of that mob's member, found among the members
+    /// of that mob alone, in that mob's runtime. A mob whose console events
+    /// are not registered answers an unknown identity, as a member the mob
+    /// does not have: nothing of another mob's members is told.
+    ///
+    /// The mob is read as every lookup of a mob's members reads it
+    /// ([`Self::mob_of_a_lookup`]), which is not how a send reads its mob
+    /// ([`mob_of_send`]): a lookup records nothing, so it needs no word on
+    /// the host's default mob to find a registered mob.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "called by the console's door once it serves a send with uploads for a mob beside the default mob"
+        )
+    )]
+    pub(crate) async fn binary_blob_store_for_member(
+        &self,
+        identity: &str,
+        mob: Option<&meerkat_mob::MobId>,
+    ) -> Result<Option<Arc<dyn BinaryBlobStore>>, ConsoleSendError> {
+        let mob = self.mob_of_a_lookup(mob);
+        Box::pin(self.binary_blob_store_of(mob.as_ref(), identity)).await
+    }
+
+    /// Whether a send for `mob` is for a mob beside the host's default mob
+    /// ([`mob_of_send`]).
+    fn names_another_mob(
+        &self,
+        mob: Option<&meerkat_mob::MobId>,
+    ) -> Result<bool, ConsoleSendError> {
+        let owner = self
+            .inner
+            .projection_owner
+            .as_deref()
+            .unwrap_or(&self.inner);
+        Ok(mob_of_send(owner, mob)?.is_some())
+    }
+
+    /// The host tells this console its default mob: a send that names that
+    /// mob by its id is the default mob's send. The first word stands.
+    pub(crate) fn tell_default_mob(&self, default_mob: crate::member_key::DefaultMob) {
+        let owner = self
+            .inner
+            .projection_owner
+            .as_deref()
+            .unwrap_or(&self.inner);
+        let _ = owner.default_mob.set(default_mob);
+    }
+
+    /// The default mob the host told this console
+    /// ([`Self::tell_default_mob`]); none for a console that was not told.
+    pub(crate) fn default_mob(&self) -> Option<&crate::member_key::DefaultMob> {
+        self.inner
+            .projection_owner
+            .as_deref()
+            .unwrap_or(&self.inner)
+            .default_mob
+            .get()
     }
 
     async fn reserve_identity_first_send(
         &self,
         request: ConsoleSendRequest,
+        mob: Option<&meerkat_mob::MobId>,
         session_id: Option<&str>,
         scope: &ConsoleSendScope,
         sender: Option<&ConsoleSender>,
@@ -3799,19 +5207,61 @@ impl MetaConsoleAggregator {
     ) -> Result<ScopedReservation, ConsoleSendError> {
         validate_send_request(&request)?;
         let _content = content_input_from_value(&request.content)?;
-        let (runtime_key, host_policy) =
-            Box::pin(self.runtime_key_for_identity_first_send(&request.identity)).await?;
+        let owner = self
+            .inner
+            .projection_owner
+            .as_deref()
+            .unwrap_or(&self.inner);
+        let send_mob = mob_of_send(owner, mob)?;
+        // A send to a member of another mob of the host is recorded with
+        // that mob's registration, found by the mob's own key and never by
+        // a walk by name: its frame is under that key, redacted by that
+        // registration's policy and witnessed by that mob's member. A mob
+        // with no registration has no send: nothing is recorded for the
+        // default mob's member of the name.
+        let (runtime_key, host_policy, entry) = match &send_mob {
+            None => {
+                let (runtime_key, host_policy) =
+                    Box::pin(self.runtime_key_for_identity_first_send(&request.identity)).await?;
+                let entry = owner
+                    .runtimes
+                    .read()
+                    .ok()
+                    .and_then(|entries| entries.get(&runtime_key).cloned());
+                (runtime_key, host_policy, entry)
+            }
+            Some(send_mob) => {
+                let Some(entry) = registered_entry(owner, &send_mob.runtime_key)
+                    .filter(|entry| entry.mob.as_ref() == Some(send_mob.mob))
+                else {
+                    return Err(ConsoleSendError::UnknownIdentity(request.identity));
+                };
+                (
+                    send_mob.runtime_key.clone(),
+                    entry.visibility_policy.clone(),
+                    Some(entry),
+                )
+            }
+        };
         let handling_mode_value = request
             .handling_mode
             .as_deref()
             .unwrap_or("queue")
             .to_string();
-        let dedupe_key = scope.dedupe_key(
-            &runtime_key,
-            &request.identity,
-            &request.origin,
-            &request.idempotency_key,
-        );
+        let dedupe_key = match &send_mob {
+            None => scope.dedupe_key(
+                &runtime_key,
+                &request.identity,
+                &request.origin,
+                &request.idempotency_key,
+            ),
+            Some(send_mob) => send_mob.dedupe_key(
+                scope,
+                &request.identity,
+                &request.origin,
+                &request.idempotency_key,
+            ),
+        };
         let request_fingerprint = send_request_fingerprint(
             &request.origin,
             request.origin_kind,
@@ -3822,7 +5272,7 @@ impl MetaConsoleAggregator {
         if let Some(existing) = self
             .inner
             .store
-            .frame_by_dedupe_key(&dedupe_key)
+            .frame_by_dedupe_key_of_mob(send_mob.as_ref().map(|send_mob| send_mob.mob), &dedupe_key)
             .await
             .map_err(ConsoleSendError::Log)?
         {
@@ -3854,16 +5304,6 @@ impl MetaConsoleAggregator {
         let frame_id = stable_frame_id(&dedupe_key);
         let claim = self.claim_scoped_send(scope, &frame_id);
         let interaction_id = identity_first_interaction_uuid(&dedupe_key);
-        let owner = self
-            .inner
-            .projection_owner
-            .as_deref()
-            .unwrap_or(&self.inner);
-        let entry = owner
-            .runtimes
-            .read()
-            .ok()
-            .and_then(|entries| entries.get(&runtime_key).cloned());
         let provenance = match (entry, session_id) {
             (Some(entry), Some(session_id)) => {
                 member_provenance_for_identity(
@@ -3886,6 +5326,7 @@ impl MetaConsoleAggregator {
             .is_scoped()
             .then(|| ConsoleSendThread::of_send(provenance.as_ref(), sender));
         let mut new_frame = NewConsoleFrame {
+            mob_id: send_mob.as_ref().map(|send_mob| send_mob.mob.clone()),
             id: Some(frame_id),
             dedupe_key,
             timestamp_ms: current_time_ms(),
@@ -3917,7 +5358,7 @@ impl MetaConsoleAggregator {
             payload.insert(GOVERNED_SEND_FIELD.to_string(), Value::Bool(true));
         }
         let witness = FrameWitness::of_capture(new_frame.source.member_provenance.take());
-        let outcome = append_frame(&self.inner, new_frame, witness)
+        let outcome = append_frame(&self.inner, new_frame, witness, FrameWriter::SendOrMark)
             .await
             .map_err(ConsoleSendError::Log)?;
         if outcome.disposition == AppendDisposition::Existing {
@@ -4067,8 +5508,24 @@ impl MetaConsoleAggregator {
         &self,
         input_frame_id: &str,
     ) -> Result<(), ConsoleSendError> {
+        self.mark_interaction_delivery_failed_of_mob(None, input_frame_id)
+            .await
+    }
+
+    /// [`Self::mark_interaction_delivery_failed`] for the send `input_frame_id`
+    /// of the mob `mob` (none for the host's default mob), as the door that
+    /// made the send resolved it: a frame of another mob under the id is
+    /// left as it is. The forms of the marks that name no mob are the
+    /// default mob's.
+    pub async fn mark_interaction_delivery_failed_of_mob(
+        &self,
+        mob: Option<&meerkat_mob::MobId>,
+        input_frame_id: &str,
+    ) -> Result<(), ConsoleSendError> {
+        let mob = self.mob_as_stored(mob);
         update_frame_status_and_emit(
             &self.inner,
+            mob.as_ref(),
             input_frame_id,
             ConsoleFrameStatus::DeliveryFailed,
         )
@@ -4091,6 +5548,18 @@ impl MetaConsoleAggregator {
         input_frame_id: &str,
         hold: &crate::identity_first::GovernedHold,
     ) -> Result<(), ConsoleSendError> {
+        self.mark_interaction_delivery_held_of_mob(None, input_frame_id, hold)
+            .await
+    }
+
+    /// [`Self::mark_interaction_delivery_held`] for the send of the mob `mob`
+    /// (none for the host's default mob).
+    pub async fn mark_interaction_delivery_held_of_mob(
+        &self,
+        mob: Option<&meerkat_mob::MobId>,
+        input_frame_id: &str,
+        hold: &crate::identity_first::GovernedHold,
+    ) -> Result<(), ConsoleSendError> {
         let delivery_hold = json!({
             "condition": hold.condition.as_str(),
             "waited_ms": u64::try_from(hold.waited.as_millis()).unwrap_or(u64::MAX),
@@ -4098,6 +5567,7 @@ impl MetaConsoleAggregator {
             "retryable": true,
         });
         self.transition_send(
+            mob,
             input_frame_id,
             SendTransition::MarkHeld,
             Some(("delivery_hold", delivery_hold)),
@@ -4108,11 +5578,30 @@ impl MetaConsoleAggregator {
 
     /// A governed send's dispatch begins: `StartDispatch`, applied to the
     /// send's own state (accepted).
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "the console's door marks a send through the form that takes its mob; the rows of a send that names no mob call this one"
+        )
+    )]
     pub(crate) async fn mark_interaction_dispatching(
         &self,
         input_frame_id: &str,
     ) -> Result<(), ConsoleSendError> {
+        self.mark_interaction_dispatching_of_mob(None, input_frame_id)
+            .await
+    }
+
+    /// [`Self::mark_interaction_dispatching`] for the send of the mob `mob`
+    /// (none for the host's default mob).
+    pub(crate) async fn mark_interaction_dispatching_of_mob(
+        &self,
+        mob: Option<&meerkat_mob::MobId>,
+        input_frame_id: &str,
+    ) -> Result<(), ConsoleSendError> {
         self.transition_send(
+            mob,
             input_frame_id,
             SendTransition::StartDispatch,
             None,
@@ -4132,7 +5621,20 @@ impl MetaConsoleAggregator {
         input_frame_id: &str,
         session_id: &meerkat_core::types::SessionId,
     ) -> Result<(), ConsoleSendError> {
+        self.mark_interaction_submitted_of_mob(None, input_frame_id, session_id)
+            .await
+    }
+
+    /// [`Self::mark_interaction_submitted`] for the send of the mob `mob`
+    /// (none for the host's default mob).
+    pub(crate) async fn mark_interaction_submitted_of_mob(
+        &self,
+        mob: Option<&meerkat_mob::MobId>,
+        input_frame_id: &str,
+        session_id: &meerkat_core::types::SessionId,
+    ) -> Result<(), ConsoleSendError> {
         self.transition_send(
+            mob,
             input_frame_id,
             SendTransition::MarkSubmitted,
             Some((
@@ -4159,8 +5661,20 @@ impl MetaConsoleAggregator {
         &self,
         input_frame_id: &str,
     ) -> Result<(), ConsoleSendError> {
+        self.mark_interaction_unresolved_of_mob(None, input_frame_id)
+            .await
+    }
+
+    /// [`Self::mark_interaction_unresolved`] for the send of the mob `mob`
+    /// (none for the host's default mob).
+    pub(crate) async fn mark_interaction_unresolved_of_mob(
+        &self,
+        mob: Option<&meerkat_mob::MobId>,
+        input_frame_id: &str,
+    ) -> Result<(), ConsoleSendError> {
         self.note_submission_unresolved(input_frame_id);
         self.transition_send(
+            mob,
             input_frame_id,
             SendTransition::MarkUnresolved,
             Some((
@@ -4201,20 +5715,24 @@ impl MetaConsoleAggregator {
         self.inner.store.supports_send_transitions()
     }
 
-    /// Apply `transition` to the send's own state, atomically in the store,
-    /// recording `note`; `refused` when the send machine refuses it from
-    /// the state the frame records (nothing changed).
+    /// Apply `transition` to the own state of the send `input_frame_id` of
+    /// the mob `mob` (none for the host's default mob), atomically in the
+    /// store, recording `note`; `refused` when the send machine refuses it
+    /// from the state the frame records, or the mob has no such send
+    /// (nothing changed).
     async fn transition_send(
         &self,
+        mob: Option<&meerkat_mob::MobId>,
         input_frame_id: &str,
         transition: SendTransition,
         note: Option<(&'static str, Value)>,
         refused: &'static str,
     ) -> Result<(), ConsoleSendError> {
+        let mob = self.mob_as_stored(mob);
         let Some(updated) = self
             .inner
             .store
-            .transition_send_frame(input_frame_id, transition, note)
+            .transition_send_frame_of_mob(mob.as_ref(), input_frame_id, transition, note)
             .await
             .map_err(ConsoleSendError::Log)?
         else {
@@ -4257,7 +5775,8 @@ impl MetaConsoleAggregator {
         let Some(updated) = self
             .inner
             .store
-            .transition_send_frame(
+            .transition_send_frame_of_mob(
+                frame.mob_id.as_ref(),
                 &frame.id,
                 SendTransition::MarkDeliveryFailed,
                 Some((
@@ -4281,14 +5800,34 @@ impl MetaConsoleAggregator {
     /// compare-and-set, so of concurrent replays exactly one gets `true` and
     /// dispatches; one that finds the hold taken gets `false` and dispatches
     /// nothing.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "the console's door marks a send through the form that takes its mob; the rows of a send that names no mob call this one"
+        )
+    )]
     pub(crate) async fn take_interaction_delivery_hold(
         &self,
         input_frame_id: &str,
     ) -> Result<bool, ConsoleSendError> {
+        self.take_interaction_delivery_hold_of_mob(None, input_frame_id)
+            .await
+    }
+
+    /// [`Self::take_interaction_delivery_hold`] for the send of the mob `mob`
+    /// (none for the host's default mob): the hold of a frame of another mob
+    /// under the id is not taken.
+    pub(crate) async fn take_interaction_delivery_hold_of_mob(
+        &self,
+        mob: Option<&meerkat_mob::MobId>,
+        input_frame_id: &str,
+    ) -> Result<bool, ConsoleSendError> {
+        let mob = self.mob_as_stored(mob);
         let Some(taken) = self
             .inner
             .store
-            .take_send_frame_hold(input_frame_id)
+            .take_send_frame_hold_of_mob(mob.as_ref(), input_frame_id)
             .await
             .map_err(ConsoleSendError::Log)?
         else {
@@ -4310,9 +5849,27 @@ impl MetaConsoleAggregator {
         &self,
         input_frame_id: &str,
     ) -> Result<(), ConsoleSendError> {
-        update_frame_status_and_emit(&self.inner, input_frame_id, ConsoleFrameStatus::Delivered)
+        self.mark_interaction_delivered_of_mob(None, input_frame_id)
             .await
-            .map_err(ConsoleSendError::Log)?;
+    }
+
+    /// [`Self::mark_interaction_delivered`] for the send of the mob `mob`
+    /// (none for the host's default mob): a frame of another mob under the
+    /// id is left as it is.
+    pub async fn mark_interaction_delivered_of_mob(
+        &self,
+        mob: Option<&meerkat_mob::MobId>,
+        input_frame_id: &str,
+    ) -> Result<(), ConsoleSendError> {
+        let mob = self.mob_as_stored(mob);
+        update_frame_status_and_emit(
+            &self.inner,
+            mob.as_ref(),
+            input_frame_id,
+            ConsoleFrameStatus::Delivered,
+        )
+        .await
+        .map_err(ConsoleSendError::Log)?;
         Ok(())
     }
 
@@ -4321,8 +5878,22 @@ impl MetaConsoleAggregator {
         input_frame_id: &str,
         interaction_id: &str,
     ) -> Result<(), ConsoleSendError> {
+        self.mark_steer_interaction_delivered_of_mob(None, input_frame_id, interaction_id)
+            .await
+    }
+
+    /// [`Self::mark_steer_interaction_delivered`] for the send of the mob
+    /// `mob` (none for the host's default mob).
+    pub async fn mark_steer_interaction_delivered_of_mob(
+        &self,
+        mob: Option<&meerkat_mob::MobId>,
+        input_frame_id: &str,
+        interaction_id: &str,
+    ) -> Result<(), ConsoleSendError> {
+        let mob = self.mob_as_stored(mob);
         let Some(updated) = update_frame_status_and_emit(
             &self.inner,
+            mob.as_ref(),
             input_frame_id,
             ConsoleFrameStatus::Delivered,
         )
@@ -4341,12 +5912,29 @@ impl MetaConsoleAggregator {
         &self,
         identity: &str,
     ) -> Result<Option<Arc<dyn BinaryBlobStore>>, ConsoleSendError> {
+        Box::pin(self.binary_blob_store_of(None, identity)).await
+    }
+
+    /// The upload store of the member `identity` of the mob `mob`: of the
+    /// mob whose console events are registered here, or (none) of the
+    /// host's default mob. The member is looked for among the members of
+    /// that mob alone, and the store is that mob's runtime's: on a host,
+    /// the launch's one upload store, which every mob of the launch has
+    /// ([`Self::binary_blob_stores_of_mob`]). A mob whose
+    /// console events are not registered has no member, as a mob no host
+    /// has: both answer an unknown identity, and nothing of another mob's
+    /// members is told.
+    async fn binary_blob_store_of(
+        &self,
+        mob: Option<&meerkat_mob::MobId>,
+        identity: &str,
+    ) -> Result<Option<Arc<dyn BinaryBlobStore>>, ConsoleSendError> {
         if identity.trim().is_empty() {
             return Err(ConsoleSendError::InvalidRequest(
                 "identity must be non-empty".to_string(),
             ));
         }
-        let Some(resolved) = Box::pin(self.resolve_send_member(identity)).await? else {
+        let Some(resolved) = Box::pin(self.resolve_send_member_of(mob, identity)).await? else {
             return Err(ConsoleSendError::UnknownIdentity(identity.to_string()));
         };
         let Some(record) = identity_record_for_resolved_member(&resolved).await else {
@@ -4365,9 +5953,27 @@ impl MetaConsoleAggregator {
     }
 
     pub fn binary_blob_stores(&self) -> Vec<Arc<dyn BinaryBlobStore>> {
-        self.inner
-            .runtimes
-            .read()
+        self.binary_blob_stores_of_mob(None)
+    }
+
+    /// The upload stores a blob read of the mob `mob` walks: the stores of
+    /// the runtimes registered for the host's default mob (none), or the
+    /// store of the runtime of the mob `mob`, a mob the host serves beside
+    /// its default mob ([`Self::mob_of_a_lookup`]). A mob whose console
+    /// events are not registered has no store, and nor has a blank id: its
+    /// read finds no blob, as for a blob nobody stored.
+    ///
+    /// The list says whether the mob is served. Every mob of one launch
+    /// has the launch's one upload store (a hosted mob's runtime takes the
+    /// launch's process part whole), so on a host this answers the same
+    /// store for the default mob and for every registered mob. A blob's
+    /// address is its content's.
+    pub(crate) fn binary_blob_stores_of_mob(
+        &self,
+        mob: Option<&meerkat_mob::MobId>,
+    ) -> Vec<Arc<dyn BinaryBlobStore>> {
+        let mob = self.mob_of_a_lookup(mob);
+        self.entries_of_mob(mob.as_ref())
             .map(|entries| {
                 entries
                     .values()
@@ -4377,11 +5983,39 @@ impl MetaConsoleAggregator {
             .unwrap_or_default()
     }
 
+    /// The mob a lookup of a mob's members (its upload store, its
+    /// inspection, the stores its blob read walks) is asked for, as the
+    /// registrations name it. By the registration's own rule
+    /// ([`Self::register_mob_console_events`]) a mob is found by the
+    /// registration under its id:
+    ///
+    /// - no mob named is the host's default mob, and so is the default
+    ///   mob's id on a console that was told it ([`Self::tell_default_mob`]);
+    /// - any other id is the mob registered under it, whether or not the
+    ///   console was told its default mob. On a console that was never
+    ///   told, the default mob's own id is such an id: no registration is
+    ///   under it;
+    /// - a blank id names no mob and no registration is under it
+    ///   ([`Self::entries_of_mob`]): it is never read as the default mob.
+    fn mob_of_a_lookup(&self, mob: Option<&meerkat_mob::MobId>) -> Option<meerkat_mob::MobId> {
+        self.mob_as_stored(mob)
+    }
+
     async fn resolve_send_member(
         &self,
         identity: &str,
     ) -> Result<Option<ResolvedConsoleMember>, ConsoleSendError> {
-        let mut matches = Box::pin(self.resolve_visible_members(identity)).await;
+        Box::pin(self.resolve_send_member_of(None, identity)).await
+    }
+
+    /// [`Self::resolve_send_member`] among the members of the mob `mob`
+    /// alone ([`Self::entries_of_mob`]).
+    async fn resolve_send_member_of(
+        &self,
+        mob: Option<&meerkat_mob::MobId>,
+        identity: &str,
+    ) -> Result<Option<ResolvedConsoleMember>, ConsoleSendError> {
+        let mut matches = Box::pin(self.resolve_visible_members_of(mob, identity)).await;
         // Retiring generations remain visible for history and inspection, but
         // they must not make a durable send alias ambiguous when exactly one
         // active/addressable generation can receive the message. A durable
@@ -4407,7 +6041,7 @@ impl MetaConsoleAggregator {
                     return Err(ConsoleSendError::InvalidRequest(stale_error));
                 }
                 if let Some(stale_error) =
-                    Box::pin(self.durable_send_binding_error(identity)).await?
+                    Box::pin(self.durable_send_binding_error_of(mob, identity)).await?
                 {
                     return Err(ConsoleSendError::InvalidRequest(stale_error));
                 }
@@ -4431,7 +6065,9 @@ impl MetaConsoleAggregator {
             {
                 return Err(ConsoleSendError::InvalidRequest(stale_error));
             }
-            if let Some(stale_error) = Box::pin(self.durable_send_binding_error(identity)).await? {
+            if let Some(stale_error) =
+                Box::pin(self.durable_send_binding_error_of(mob, identity)).await?
+            {
                 return Err(ConsoleSendError::InvalidRequest(stale_error));
             }
             return Ok(Some(resolved));
@@ -4448,7 +6084,9 @@ impl MetaConsoleAggregator {
             });
         }
         let Some(resolved) = matches.into_iter().next() else {
-            if let Some(stale_error) = Box::pin(self.durable_send_binding_error(identity)).await? {
+            if let Some(stale_error) =
+                Box::pin(self.durable_send_binding_error_of(mob, identity)).await?
+            {
                 return Err(ConsoleSendError::InvalidRequest(stale_error));
             }
             return Ok(None);
@@ -4459,28 +6097,38 @@ impl MetaConsoleAggregator {
         {
             return Err(ConsoleSendError::InvalidRequest(stale_error));
         }
-        if let Some(stale_error) = Box::pin(self.durable_send_binding_error(identity)).await? {
+        if let Some(stale_error) =
+            Box::pin(self.durable_send_binding_error_of(mob, identity)).await?
+        {
             return Err(ConsoleSendError::InvalidRequest(stale_error));
         }
         Ok(Some(resolved))
     }
 
+    #[cfg(test)]
     async fn durable_send_binding_error(
         &self,
         identity: &str,
     ) -> Result<Option<String>, ConsoleSendError> {
+        Box::pin(self.durable_send_binding_error_of(None, identity)).await
+    }
+
+    /// The stale binding of the durable identity `identity` among the
+    /// registrations of the mob `mob` alone ([`Self::entries_of_mob`]).
+    async fn durable_send_binding_error_of(
+        &self,
+        mob: Option<&meerkat_mob::MobId>,
+        identity: &str,
+    ) -> Result<Option<String>, ConsoleSendError> {
         let entries = self
-            .inner
-            .runtimes
-            .read()
-            .map_err(|_| ConsoleSendError::Log(runtime_registry_lock_error()))?
-            .clone();
+            .entries_of_mob(mob)
+            .ok_or_else(|| ConsoleSendError::Log(runtime_registry_lock_error()))?;
         if entries.values().any(|entry| {
             requested_identity_is_runtime_member_alias(identity, &entry.identity_namespace)
         }) {
             return Ok(None);
         }
-        let live_records = Box::pin(self.live_records_for_identity(identity)).await;
+        let live_records = Box::pin(self.live_records_for_identity_of(mob, identity)).await;
         let mut durable_matches = Vec::new();
         for entry in entries.values() {
             let Some(identity_runtime) = entry.identity_runtime.clone() else {
@@ -4530,7 +6178,8 @@ impl MetaConsoleAggregator {
         else {
             return Ok(None);
         };
-        let durable_live_records = Box::pin(self.live_records_for_durable_record(
+        let durable_live_records = Box::pin(self.live_records_for_durable_record_of(
+            mob,
             &entry,
             identity,
             &durable_record,
@@ -4544,14 +6193,51 @@ impl MetaConsoleAggregator {
         ))
     }
 
+    /// The registrations a walk of the members of the mob `mob` reads, by
+    /// runtime key: every runtime registered for the host's default mob
+    /// (none), or the one registration of the console events of the mob
+    /// `mob`, a mob the host serves beside its default mob, as this
+    /// aggregator reads it ([`mob_entry_as_read`]). A mob whose console
+    /// events are not registered has none, as a mob no host has: a walk
+    /// then finds no member. So has a blank id, which names no mob: the
+    /// registration refuses one, and it is never read as the default mob.
+    /// `None` when the registry cannot be read.
+    fn entries_of_mob(
+        &self,
+        mob: Option<&meerkat_mob::MobId>,
+    ) -> Option<BTreeMap<String, RuntimeEntry>> {
+        match mob {
+            None => self
+                .inner
+                .runtimes
+                .read()
+                .ok()
+                .map(|entries| entries.clone()),
+            Some(mob) if !crate::member_key::names_a_mob(mob) => Some(BTreeMap::new()),
+            Some(mob) => Some(
+                mob_entry_as_read(&self.inner, &mob_runtime_key(mob))
+                    .filter(|entry| entry.mob.as_ref() == Some(mob))
+                    .map(|entry| (entry.runtime_key.clone(), entry))
+                    .into_iter()
+                    .collect(),
+            ),
+        }
+    }
+
+    #[cfg(test)]
     async fn resolve_members(&self, identity: &str) -> Vec<ResolvedConsoleMember> {
-        let entries = self
-            .inner
-            .runtimes
-            .read()
-            .ok()
-            .map(|entries| entries.clone())
-            .unwrap_or_default();
+        Box::pin(self.resolve_members_of(None, identity)).await
+    }
+
+    /// The members the name `identity` matches among the members of the
+    /// mob `mob` alone ([`Self::entries_of_mob`]): two mobs' members of one
+    /// name are two members.
+    async fn resolve_members_of(
+        &self,
+        mob: Option<&meerkat_mob::MobId>,
+        identity: &str,
+    ) -> Vec<ResolvedConsoleMember> {
+        let entries = self.entries_of_mob(mob).unwrap_or_default();
         let mut exact_matches: Vec<(String, ResolvedConsoleMember)> = Vec::new();
         let mut label_matches: Vec<(String, ResolvedConsoleMember)> = Vec::new();
         for entry in entries.values() {
@@ -4583,20 +6269,47 @@ impl MetaConsoleAggregator {
                     }
                 }
             }
+            let mut entry_exact = Vec::new();
+            let mut entry_label = Vec::new();
             for resolved in Box::pin(member_sources_for_entry(entry)).await {
+                // A handle with a scope reads the string for the members of
+                // the mob its scope names, and for no other.
+                if self
+                    .member_scope
+                    .as_ref()
+                    .is_some_and(|scope| !scope.admits(&resolved))
+                {
+                    continue;
+                }
+                let named = requested_member_match(&resolved, &raw_identities, &mids);
+                if named == RequestedMemberMatch::No {
+                    continue;
+                }
                 let session_id = resolved
                     .handle
                     .resolve_bridge_session_id_observation(&resolved.member.agent_identity)
                     .await
                     .map(|sid| sid.to_string())
                     .unwrap_or_default();
-                if mids.contains(&resolved.member.agent_identity) {
-                    exact_matches.push((session_id, resolved));
-                } else if resolved_member_matches_raw_identities(&resolved, &raw_identities, &mids)
-                {
-                    label_matches.push((session_id, resolved));
+                if named == RequestedMemberMatch::ByName {
+                    entry_exact.push((session_id, resolved));
+                } else {
+                    entry_label.push((session_id, resolved));
                 }
             }
+            // A string that names a primary member names that member, as
+            // before nested members were named: a nested member whose mob
+            // and name spell the same string is not reached through it.
+            if entry_exact
+                .iter()
+                .chain(&entry_label)
+                .any(|(_, resolved)| !resolved.nested())
+            {
+                entry_exact.retain(|(_, resolved)| !resolved.nested());
+                entry_label.retain(|(_, resolved)| !resolved.nested());
+            }
+            exact_matches.extend(entry_exact);
+            label_matches.extend(entry_label);
         }
         let mut matches = exact_matches;
         matches.extend(label_matches);
@@ -4614,8 +6327,18 @@ impl MetaConsoleAggregator {
     }
 
     async fn resolve_visible_members(&self, identity: &str) -> Vec<ResolvedConsoleMember> {
+        Box::pin(self.resolve_visible_members_of(None, identity)).await
+    }
+
+    /// [`Self::resolve_visible_members`] among the members of the mob `mob`
+    /// alone.
+    async fn resolve_visible_members_of(
+        &self,
+        mob: Option<&meerkat_mob::MobId>,
+        identity: &str,
+    ) -> Vec<ResolvedConsoleMember> {
         let mut visible = Vec::new();
-        for resolved in Box::pin(self.resolve_members(identity)).await {
+        for resolved in Box::pin(self.resolve_members_of(mob, identity)).await {
             let Some(record) = identity_record_for_resolved_member(&resolved).await else {
                 continue;
             };
@@ -4627,8 +6350,18 @@ impl MetaConsoleAggregator {
     }
 
     async fn live_records_for_identity(&self, identity: &str) -> Vec<ConsoleIdentityRecord> {
+        Box::pin(self.live_records_for_identity_of(None, identity)).await
+    }
+
+    /// [`Self::live_records_for_identity`] among the members of the mob
+    /// `mob` alone.
+    async fn live_records_for_identity_of(
+        &self,
+        mob: Option<&meerkat_mob::MobId>,
+        identity: &str,
+    ) -> Vec<ConsoleIdentityRecord> {
         let mut records = Vec::new();
-        for resolved in Box::pin(self.resolve_members(identity)).await {
+        for resolved in Box::pin(self.resolve_members_of(mob, identity)).await {
             let Some(record) = identity_record_for_resolved_member(&resolved).await else {
                 continue;
             };
@@ -4646,10 +6379,30 @@ impl MetaConsoleAggregator {
         durable: &ConsoleIdentityRecord,
         requested_live_records: &[ConsoleIdentityRecord],
     ) -> Vec<ConsoleIdentityRecord> {
+        Box::pin(self.live_records_for_durable_record_of(
+            None,
+            entry,
+            requested_identity,
+            durable,
+            requested_live_records,
+        ))
+        .await
+    }
+
+    /// [`Self::live_records_for_durable_record`] among the members of the
+    /// mob `mob` alone, the mob `entry` is a registration of.
+    async fn live_records_for_durable_record_of(
+        &self,
+        mob: Option<&meerkat_mob::MobId>,
+        entry: &RuntimeEntry,
+        requested_identity: &str,
+        durable: &ConsoleIdentityRecord,
+        requested_live_records: &[ConsoleIdentityRecord],
+    ) -> Vec<ConsoleIdentityRecord> {
         let mut records = if durable.identity == requested_identity {
             requested_live_records.to_vec()
         } else {
-            Box::pin(self.live_records_for_identity(&durable.identity)).await
+            Box::pin(self.live_records_for_identity_of(mob, &durable.identity)).await
         };
         for runtime_record in Box::pin(live_records_for_runtime_member(
             entry,
@@ -4706,7 +6459,7 @@ async fn live_records_for_runtime_member(
 ) -> Vec<ConsoleIdentityRecord> {
     let mut records = Vec::new();
     for resolved in Box::pin(member_sources_for_entry(entry)).await {
-        if resolved.runtime_identity != runtime_member_id {
+        if resolved.nested() || resolved.runtime_identity != runtime_member_id {
             continue;
         }
         let Some(record) = identity_record_for_resolved_member(&resolved).await else {
@@ -4939,15 +6692,13 @@ async fn stale_generated_members_for_runtime_entry(
     };
     let primary_handle = entry.runtime.handle();
     let primary_mob_id = primary_handle.mob_id().to_string();
-    let mut handles = vec![(primary_mob_id.clone(), primary_handle)];
+    let mut handles = vec![(primary_mob_id, primary_handle)];
+    // An older generation of the identity is looked for in the
+    // registration's own mob and in the mobs below it, and in no other mob
+    // the host serves: the member of that name there is another mob's.
     if let Some(state) = entry.runtime.agent_mob_mcp_state() {
-        for (mob_id, handle) in Box::pin(state.mob_handles_snapshot())
-            .await
-            .unwrap_or_default()
-        {
-            if mob_id.as_str() != primary_mob_id {
-                handles.push((mob_id.to_string(), handle));
-            }
+        for (mob_id, handle) in Box::pin(mobs_below_the_registration(entry, &state)).await {
+            handles.push((mob_id.to_string(), handle));
         }
     }
     let mut seen_handles = BTreeSet::new();
@@ -4971,6 +6722,41 @@ async fn stale_generated_members_for_runtime_entry(
         }
     }
     stale_members
+}
+
+/// Test seam: the members [`stale_generated_members_for_runtime_entry`]
+/// names for the generated alias `alias`, asked for every runtime
+/// registered with `console` for the default mob: each member with the id
+/// of the mob that holds it and its public name.
+#[cfg(test)]
+pub(crate) async fn stale_generated_members_for_test(
+    console: &MetaConsoleAggregator,
+    alias: &str,
+    include_current: bool,
+) -> Vec<(String, String)> {
+    let entries: Vec<RuntimeEntry> = console
+        .inner
+        .runtimes
+        .read()
+        .map(|entries| entries.values().cloned().collect())
+        .unwrap_or_default();
+    let mut named = Vec::new();
+    for entry in &entries {
+        for (handle, member) in Box::pin(stale_generated_members_for_runtime_entry(
+            entry,
+            alias,
+            include_current,
+        ))
+        .await
+        {
+            named.push((
+                handle.mob_id().to_string(),
+                crate::member_comms_id::runtime_alias_str(member.as_str()).into_owned(),
+            ));
+        }
+    }
+    named.sort();
+    named
 }
 
 async fn retire_captured_console_members(
@@ -5164,87 +6950,166 @@ async fn collect_identity_records(
         .clone();
     let mut identities = Vec::new();
     for entry in entries.values() {
-        // One listing of the entry's members, taken when this read first
-        // needs it, decides every record below (see `member_cut`).
-        let cut = MemberCut::new(entry);
-        let mut identity_display_names = BTreeMap::new();
-        if let Some(identity_runtime) = entry.identity_runtime.as_ref() {
-            let topology_peers =
-                identity_runtime_topology_peers(entry, identity_runtime.as_ref()).await;
-            for status in identity_runtime.statuses().await? {
-                let mut record = identity_record_for_status(entry, &status);
-                record.topology_peers = topology_peers
-                    .get(&record.identity)
-                    .cloned()
-                    .unwrap_or_default();
-                if let (Some(session), Some(name)) = (&record.session_id, &status.display_name) {
-                    identity_display_names.insert(
-                        record.identity.clone(),
-                        (session.clone(), name.as_str().to_owned()),
-                    );
-                }
-                if Box::pin(console_identity_record_visible_in(&cut, &record)).await {
-                    identities.push(record);
-                }
+        Box::pin(collect_entry_identity_records(
+            inner,
+            entry,
+            &entries,
+            mode,
+            &mut identities,
+        ))
+        .await?;
+    }
+    Ok(dedupe_identity_records(identities))
+}
+
+/// [`collect_identity_records`] for the agents of the mobs the host serves
+/// beside its default mob: the records of each mob's registration
+/// ([`mob_entries_as_read`]), under that registration's runtime key. They
+/// are deduplicated mob by mob: two mobs' agents of one name are two
+/// agents.
+async fn collect_mob_identity_records(
+    inner: &Arc<AggregatorInner>,
+    mode: IdentityCollectionMode,
+) -> ConsoleLogResult<Vec<ConsoleIdentityRecord>> {
+    let entries = mob_entries_as_read(inner);
+    let mut identities = Vec::new();
+    for entry in entries.values() {
+        let mut of_the_mob = Vec::new();
+        Box::pin(collect_entry_identity_records(
+            inner,
+            entry,
+            &entries,
+            mode,
+            &mut of_the_mob,
+        ))
+        .await?;
+        identities.extend(dedupe_identity_records(of_the_mob));
+    }
+    Ok(identities)
+}
+
+/// The identity records of one registration `entry`, pushed onto
+/// `identities`; `entries` is the registry `entry` is of, for the peers its
+/// members are wired to.
+async fn collect_entry_identity_records(
+    inner: &Arc<AggregatorInner>,
+    entry: &RuntimeEntry,
+    entries: &BTreeMap<String, RuntimeEntry>,
+    mode: IdentityCollectionMode,
+    identities: &mut Vec<ConsoleIdentityRecord>,
+) -> ConsoleLogResult<()> {
+    // One listing of the entry's members, taken when this read first
+    // needs it, decides every record below (see `member_cut`).
+    let cut = MemberCut::new(entry);
+    let mut identity_display_names = BTreeMap::new();
+    if let Some(identity_runtime) = entry.identity_runtime.as_ref() {
+        let topology_peers =
+            identity_runtime_topology_peers(entry, identity_runtime.as_ref()).await;
+        for status in identity_runtime.statuses().await? {
+            let mut record = identity_record_for_status(entry, &status);
+            record.topology_peers = topology_peers
+                .get(&record.identity)
+                .cloned()
+                .unwrap_or_default();
+            if let (Some(session), Some(name)) = (&record.session_id, &status.display_name) {
+                identity_display_names.insert(
+                    record.identity.clone(),
+                    (session.clone(), name.as_str().to_owned()),
+                );
             }
-            if mode == IdentityCollectionMode::CachedOnly {
-                continue;
+            if Box::pin(console_identity_record_visible_in(&cut, &record)).await {
+                identities.push(record);
             }
         }
-        // The live members, as `member_sources_for_entry` lists them: from
-        // the listings the records above took, or listed now, bounded for an
-        // identity runtime's entry as before (the same listings the bound
-        // always covered).
-        let members = if cut.unhidden_listed() || entry.identity_runtime.is_none() {
-            Some(Box::pin(cut.unhidden()).await)
-        } else {
-            match Box::pin(tokio::time::timeout(
-                IDENTITY_FIRST_LIVE_MEMBER_REFRESH_WAIT,
-                cut.unhidden(),
-            ))
-            .await
-            {
-                Ok(members) => Some(members),
-                Err(_) => {
-                    tracing::warn!(
-                        runtime_key = %entry.runtime_key,
-                        "identity-first live member refresh timed out; keeping cached identity read model"
-                    );
-                    None
-                }
+        if mode == IdentityCollectionMode::CachedOnly {
+            return Ok(());
+        }
+    }
+    // The live members, as `member_sources_for_entry` lists them: from
+    // the listings the records above took, or listed now, bounded for an
+    // identity runtime's entry as before (the same listings the bound
+    // always covered).
+    let members = if cut.unhidden_listed() || entry.identity_runtime.is_none() {
+        Some(Box::pin(cut.unhidden()).await)
+    } else {
+        match Box::pin(tokio::time::timeout(
+            IDENTITY_FIRST_LIVE_MEMBER_REFRESH_WAIT,
+            cut.unhidden(),
+        ))
+        .await
+        {
+            Ok(members) => Some(members),
+            Err(_) => {
+                tracing::warn!(
+                    runtime_key = %entry.runtime_key,
+                    "identity-first live member refresh timed out; keeping cached identity read model"
+                );
+                None
             }
-        };
-        for member in members.into_iter().flatten() {
-            let resolved = &member.resolved;
-            if let Some(record) = member.record().await {
-                let mut record = record.clone();
-                record.topology_peers = resolved
-                    .member
-                    .wired_to
-                    .iter()
-                    .map(|peer| {
-                        project_topology_peer(
-                            peer.as_str(),
-                            &entry.identity_namespace,
-                            Some(&entries),
-                        )
-                    })
-                    .collect();
-                // Live binding and wiring come from the mob; display names come
-                // from its matching durable identity, never another session.
-                if let Some((session, name)) = identity_display_names.get(&record.identity)
-                    && record.session_id.as_ref() == Some(session)
-                {
-                    record.display_name.clone_from(name);
-                }
-                Box::pin(capture_member_provenance_in(inner, &cut, resolved, &record)).await;
-                if Box::pin(resolved_member_visible_in(&cut, resolved, &record)).await {
-                    identities.push(record);
-                }
+        }
+    };
+    for member in members.into_iter().flatten() {
+        let resolved = &member.resolved;
+        if let Some(record) = member.record().await {
+            let mut record = record.clone();
+            record.topology_peers = resolved
+                .member
+                .wired_to
+                .iter()
+                .map(|peer| {
+                    project_topology_peer(peer.as_str(), &entry.identity_namespace, Some(entries))
+                })
+                .collect();
+            // Live binding and wiring come from the mob; display names come
+            // from its matching durable identity, never another session.
+            if let Some((session, name)) = identity_display_names.get(&record.identity)
+                && record.session_id.as_ref() == Some(session)
+            {
+                record.display_name.clone_from(name);
+            }
+            Box::pin(capture_member_provenance_in(inner, &cut, resolved, &record)).await;
+            if Box::pin(resolved_member_visible_in(&cut, resolved, &record)).await {
+                identities.push(record);
             }
         }
     }
-    Ok(dedupe_identity_records(identities))
+    Ok(())
+}
+
+/// The registrations of the console events of the mobs the host serves
+/// beside its default mob, by runtime key, as the aggregator `inner` reads
+/// them: the canonical projector's own (a policy view holds none), each
+/// with its wrapper's identity runtime as it is now and, for a view, under
+/// the view's own policy.
+fn mob_entries_as_read(inner: &AggregatorInner) -> BTreeMap<String, RuntimeEntry> {
+    let owner = inner.projection_owner.as_deref().unwrap_or(inner);
+    let mut entries = owner
+        .mob_runtimes
+        .read()
+        .map(|entries| entries.clone())
+        .unwrap_or_default();
+    for entry in entries.values_mut() {
+        entry.identity_runtime = entry.runtime.installed_identity_runtime();
+        if let Some(policy) = inner.view_policy.as_ref() {
+            entry.visibility_policy = policy.clone();
+        }
+    }
+    entries
+}
+
+/// [`mob_entries_as_read`] for the one registration under `runtime_key`.
+fn mob_entry_as_read(inner: &AggregatorInner, runtime_key: &str) -> Option<RuntimeEntry> {
+    let owner = inner.projection_owner.as_deref().unwrap_or(inner);
+    let mut entry = owner
+        .mob_runtimes
+        .read()
+        .ok()
+        .and_then(|entries| entries.get(runtime_key).cloned())?;
+    entry.identity_runtime = entry.runtime.installed_identity_runtime();
+    if let Some(policy) = inner.view_policy.as_ref() {
+        entry.visibility_policy = policy.clone();
+    }
+    Some(entry)
 }
 
 // A local roster ID and an external canonical comms name are different
@@ -5468,17 +7333,52 @@ async fn member_sources_for_entry_with_hidden(
     include_hidden: bool,
 ) -> Vec<ResolvedConsoleMember> {
     let mut resolved = Box::pin(primary_member_sources(entry)).await;
-    if include_hidden || entry.visibility_policy.include_implicit_delegate_members() {
-        // A council participant is listed only with the hidden members, on
-        // every policy (see `council`).
-        resolved.extend(
-            Box::pin(delegate_member_sources(entry))
-                .await
-                .into_iter()
-                .filter(|member| include_hidden || !member.council_participant),
-        );
+    // The registration of another mob's console events speaks for that
+    // mob's own members: the mob set it shares with its host lists every
+    // mob of the host, and none of them is a mob its members made.
+    if entry.mob.is_some() {
+        return resolved;
     }
+    // Under a policy that lists no nested member the nested mobs are not
+    // read for the listing at all.
+    if !include_hidden && !entry.visibility_policy.include_nested_mob_members() {
+        return resolved;
+    }
+    let primary_mob_id = entry.runtime.handle().mob_id().to_string();
+    resolved.extend(
+        Box::pin(delegate_member_sources(entry))
+            .await
+            .into_iter()
+            .filter(|member| {
+                // A council participant is listed only with the hidden
+                // members, on every policy (see `council`).
+                include_hidden
+                    || (member.listed
+                        && !member.council_participant
+                        && !nested_member_unnamed(member)
+                        && !policy_hides_nested_member(
+                            entry.visibility_policy.as_ref(),
+                            &primary_mob_id,
+                            &member.source_mob_id,
+                            member.member.role.as_str(),
+                        ))
+            }),
+    );
     resolved
+}
+
+/// Whether the nested member `nested` has no console name: its mob's id or
+/// its name there cannot be composed into one
+/// ([`crate::console_member_ref::nested_member_identity`]). Such a member
+/// is listed nowhere. A nested member whose string a primary member's name
+/// spells is listed beside that member: each of the two is named by the
+/// mob it sits in and its name there.
+fn nested_member_unnamed(nested: &ResolvedConsoleMember) -> bool {
+    crate::console_member_ref::nested_member_identity(
+        &nested.source_mob_id,
+        &nested.runtime_identity,
+    )
+    .is_none()
 }
 
 /// The members of the primary mob of `entry`'s runtime.
@@ -5504,14 +7404,83 @@ async fn primary_member_sources(entry: &RuntimeEntry) -> Vec<ResolvedConsoleMemb
             )
             .into_owned(),
             source_mob_id: primary_mob_id.clone(),
+            listed: true,
             council_participant: false,
             member,
         })
         .collect()
 }
 
-/// The members of the implicit delegate mobs `entry`'s runtime manages,
-/// mob by mob; none without a mob tool state.
+/// The mobs below `entry`'s registration in its runtime's mob set `state`:
+/// the mobs a member of this runtime made. Every walk over the set's mobs
+/// on behalf of a registration takes its mobs from here.
+///
+/// Left out: the registration's own mob, and every mob the host serves
+/// beside its default mob. Such a mob shares the runtime's mob set and is
+/// below no registration: its members are that mob's own, read by a
+/// request that names the mob, and an identity or a member's name is a
+/// name inside it. It has console events of its own with the host
+/// ([`ConsoleEventStore::mobs_with_a_store`]), which is how it is told
+/// from a mob a member made. The registration of such a mob's own console
+/// events has no mob below it here: the set it shares with its host lists
+/// every mob of the host.
+async fn mobs_below_the_registration(
+    entry: &RuntimeEntry,
+    state: &meerkat_mob_mcp::MobMcpState,
+) -> Vec<(meerkat_mob::MobId, MobHandle)> {
+    if entry.mob.is_some() {
+        return Vec::new();
+    }
+    let primary_mob_id = entry.runtime.handle().mob_id().to_string();
+    let served_beside = entry.console_events.mobs_with_a_store();
+    Box::pin(state.mob_handles_snapshot())
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(mob_id, _)| mob_id.as_str() != primary_mob_id && !served_beside.contains(mob_id))
+        .collect()
+}
+
+/// Test builds only: the ids of the mobs below the registration a host
+/// makes for `runtime` (its launch mob's own registration, which names no
+/// mob), read through [`mobs_below_the_registration`], as the walk over the
+/// mobs a member made reads them.
+#[cfg(test)]
+pub(crate) async fn mobs_below_a_host_registration_in_tests(
+    runtime: &crate::UnifiedRuntime,
+) -> Vec<meerkat_mob::MobId> {
+    let entry = RuntimeEntry {
+        mob: None,
+        registration_id: uuid::Uuid::new_v4(),
+        runtime_key: "host".to_string(),
+        identity_namespace: "test".to_string(),
+        runtime: runtime.mob_runtime().clone(),
+        identity_runtime: None,
+        identity_owner: None,
+        memory_panel: None,
+        console_events: runtime.console_events(),
+        visibility_policy: Arc::new(AllowAllConsoleVisibilityPolicy),
+    };
+    let Some(state) = entry.runtime.agent_mob_mcp_state() else {
+        return Vec::new();
+    };
+    Box::pin(mobs_below_the_registration(&entry, &state))
+        .await
+        .into_iter()
+        .map(|(mob_id, _)| mob_id)
+        .collect()
+}
+
+/// The members of the mobs below `entry`'s registration
+/// ([`mobs_below_the_registration`]), mob by mob; none without a mob tool
+/// state. A mob the host serves beside its default mob is below no
+/// registration and none of its members is among them. The members of
+/// the mobs the console lists ([`crate::console_mob_listing`]: the nested
+/// mobs, the implicit delegate mobs among them) come first and are marked
+/// listed; the members of the mobs it does not list follow, unlisted, so
+/// that a read can tell a frame one of them wrote. Each member also
+/// carries whether a temporary council owns its mob
+/// ([`council::council_owns_mob`]).
 async fn delegate_member_sources(entry: &RuntimeEntry) -> Vec<ResolvedConsoleMember> {
     let Some(state) = entry.runtime.agent_mob_mcp_state() else {
         return Vec::new();
@@ -5521,15 +7490,34 @@ async fn delegate_member_sources(entry: &RuntimeEntry) -> Vec<ResolvedConsoleMem
         entry.registration_id,
         member_cut::listings::Listing::Delegates,
     );
-    let primary_mob_id = entry.runtime.handle().mob_id().to_string();
+    // The mobs below the registration, each as the mob it was when it was
+    // read: a mob the host serves beside its default mob is none of them,
+    // listed by the console or not, and neither is a later mob under the
+    // id of one that was.
+    let below: BTreeMap<String, meerkat_core::service::MobIncarnationId> =
+        Box::pin(mobs_below_the_registration(entry, &state))
+            .await
+            .into_iter()
+            .map(|(mob_id, handle)| (mob_id.to_string(), handle.incarnation()))
+            .collect();
+    let listing = Box::pin(crate::console_mob_listing::console_mob_listing(
+        &entry.runtime,
+        &entry.identity_namespace,
+    ))
+    .await;
+    let mobs = listing
+        .listed
+        .into_iter()
+        .map(|mob| (mob.mob_id, mob.handle, true))
+        .chain(
+            listing
+                .unlisted
+                .into_iter()
+                .map(|(mob_id, handle)| (mob_id, handle, false)),
+        )
+        .filter(|(mob_id, handle, _)| below.get(mob_id) == Some(&handle.incarnation()));
     let mut resolved = Vec::new();
-    for (mob_id, handle) in Box::pin(state.mob_handles_snapshot())
-        .await
-        .unwrap_or_default()
-    {
-        if mob_id.as_str() == primary_mob_id {
-            continue;
-        }
+    for (mob_id, handle, listed) in mobs {
         // Decided once per mob, from the council's own record, which is
         // read after the members are listed: a council's record is durable
         // before its seating, so the seats of a council admitted over the
@@ -5551,7 +7539,8 @@ async fn delegate_member_sources(entry: &RuntimeEntry) -> Vec<ResolvedConsoleMem
                     member.agent_identity.as_str(),
                 )
                 .into_owned(),
-                source_mob_id: mob_id.to_string(),
+                source_mob_id: mob_id.clone(),
+                listed,
                 council_participant,
                 member,
             });
@@ -5576,14 +7565,14 @@ async fn dispatch_message_to_resolved_member(
     // A name the identity runtime refuses (Core holds it for an identity the
     // runtime has not registered, or its entry could not be read) is refused
     // typed, never sent through the raw member door.
-    let identity = match resolved.entry.identity_runtime.as_ref() {
+    let identity = match resolved.identity_runtime() {
         Some(identity_runtime) => identity_runtime
             .identity_for_member_mutation(&resolved.runtime_identity)
             .await
             .map_err(|error| ConsoleSendError::RuntimeOperation(Box::new(error)))?,
         None => None,
     };
-    if let Some(identity_runtime) = resolved.entry.identity_runtime.as_ref()
+    if let Some(identity_runtime) = resolved.identity_runtime()
         && let Some(identity) = identity
     {
         identity_runtime
@@ -5673,6 +7662,7 @@ fn spawn_console_send_dispatch(
                 let _ = dispatching.apply(SendTransition::MarkDelivered);
                 if let Err(err) = update_frame_status_and_emit(
                     &inner,
+                    user_frame.mob_id.as_ref(),
                     &user_frame.id,
                     ConsoleFrameStatus::Delivered,
                 )
@@ -5702,6 +7692,7 @@ fn spawn_console_send_dispatch(
                 // `delivery_failed`: anyone who observes that status (a stream
                 // subscriber, a timeline query) can already read why.
                 let failure_frame = NewConsoleFrame {
+                    mob_id: user_frame.mob_id.clone(),
                     id: None,
                     dedupe_key: format!("delivery-failed:{}", user_frame.id),
                     timestamp_ms: current_time_ms(),
@@ -5724,8 +7715,13 @@ fn spawn_console_send_dispatch(
                     parent_frame_id: Some(user_frame.id.clone()),
                     caused_by_frame_id: Some(user_frame.id.clone()),
                 };
-                if let Err(append_err) =
-                    append_and_emit_with_policy(&inner, failure_frame, host_policy).await
+                if let Err(append_err) = append_and_emit_written_by(
+                    &inner,
+                    failure_frame,
+                    host_policy,
+                    FrameWriter::SendOrMark,
+                )
+                .await
                 {
                     tracing::warn!(
                         error = %append_err,
@@ -5734,6 +7730,7 @@ fn spawn_console_send_dispatch(
                 }
                 if let Err(update_err) = update_frame_status_and_emit(
                     &inner,
+                    user_frame.mob_id.as_ref(),
                     &user_frame.id,
                     ConsoleFrameStatus::DeliveryFailed,
                 )
@@ -5750,14 +7747,41 @@ fn spawn_console_send_dispatch(
     });
 }
 
+/// The payload policy of a record a Console send writes beside its own
+/// frame `user_frame`. A send of the default mob takes the host's policy of
+/// its runtime's key. A send that names a mob takes the policy of that
+/// mob's registration, found by the frame's own key as its reservation
+/// found it: a mob's console events are no runtime of the default mob, so
+/// the host's policies hold none under that key. A mob whose registration
+/// is gone has no producer: the record is not written.
+fn send_record_payload_policy(
+    inner: &AggregatorInner,
+    user_frame: &ConsoleFrame,
+) -> ConsoleLogResult<Arc<dyn ConsoleVisibilityPolicy>> {
+    let Some(mob) = user_frame.mob_id.as_ref() else {
+        return capture_host_payload_policy(inner, &user_frame.runtime_key, None);
+    };
+    let owner = inner.projection_owner.as_deref().unwrap_or(inner);
+    registered_entry(owner, &user_frame.runtime_key)
+        .filter(|entry| entry.mob.as_ref() == Some(mob))
+        .map(|entry| entry.visibility_policy)
+        .ok_or_else(|| {
+            std::io::Error::other("console producer registration is no longer current").into()
+        })
+}
+
 async fn append_steer_delivery_terminal(
     inner: &AggregatorInner,
     user_frame: &ConsoleFrame,
     interaction_id: &str,
 ) -> ConsoleLogResult<AppendOutcome> {
-    append_and_emit(
+    let policy = send_record_payload_policy(inner, user_frame)?;
+    // A Console send's own record: its writer is the send's
+    // ([`FrameWriter::SendOrMark`]).
+    append_and_emit_written_by(
         inner,
         NewConsoleFrame {
+            mob_id: user_frame.mob_id.clone(),
             id: None,
             dedupe_key: format!("steer-delivered:{}", user_frame.id),
             timestamp_ms: current_time_ms(),
@@ -5783,6 +7807,8 @@ async fn append_steer_delivery_terminal(
             parent_frame_id: Some(user_frame.id.clone()),
             caused_by_frame_id: Some(user_frame.id.clone()),
         },
+        policy,
+        FrameWriter::SendOrMark,
     )
     .await
 }
@@ -5890,12 +7916,9 @@ async fn backfill_session_history(
     if !inner.options.session_history_backfill_enabled {
         return Ok(());
     }
-    let Some(entry) = inner
-        .runtimes
-        .read()
-        .ok()
-        .and_then(|entries| entries.get(&runtime_key).cloned())
-    else {
+    // A runtime registered for the default mob, or the console events of
+    // another mob of the host: the members of the registration's own mob.
+    let Some(entry) = registered_entry(&inner, &runtime_key) else {
         return Ok(());
     };
     let members = Box::pin(member_sources_for_entry(&entry)).await;
@@ -5907,7 +7930,7 @@ async fn backfill_session_history(
         // read the pass makes of it loads that session too, while nothing
         // of it changes until it runs. Its wake changes the machine state,
         // and the next pass reads it; an explicit read of its timeline reads
-        // it on demand (`session_backfill_targets_for_identity`).
+        // it on demand (`session_backfill_targets_for_identity_of`).
         if resolved
             .handle
             .member_unmaterialized(&resolved.member.agent_identity)
@@ -6025,6 +8048,11 @@ struct RuntimeNoticeObservation {
     retained_bytes: usize,
     frontier_anchor: Option<(String, String)>,
     restoration_search: Option<HistoryRestorationSearch>,
+    /// The mob the observed member is of when its registration is the
+    /// console events of a mob beside the host's default mob
+    /// ([`mob_registered_under`]): every read of the member's stored frames
+    /// by its name names it.
+    mob_id: Option<meerkat_mob::MobId>,
 }
 
 impl Default for RuntimeNoticeObservation {
@@ -6051,6 +8079,7 @@ impl Default for RuntimeNoticeObservation {
             retained_bytes: 0,
             frontier_anchor: None,
             restoration_search: None,
+            mob_id: None,
         }
     }
 }
@@ -6280,9 +8309,11 @@ async fn observe_runtime_notice_attempts_with_cache(
         identity.to_string(),
         session_id.to_string(),
     );
-    let observed_through = inner
-        .store
-        .latest_cursor()
+    // The member's frames are read by its name in the registration's own
+    // mob, here and by every later read of this observation's prefix, and
+    // they end where that mob's frames end.
+    let mob = mob_registered_under(inner, runtime_key);
+    let observed_through = newest_cursor_of_mob(inner.store.as_ref(), mob.as_ref())
         .await?
         .and_then(|cursor| cursor.seq())
         .unwrap_or(0);
@@ -6299,9 +8330,7 @@ async fn observe_runtime_notice_attempts_with_cache(
         RuntimeNoticeObservation::default()
     };
     let anchor_valid = if let Some((dedupe, id)) = &observation.frontier_anchor {
-        inner
-            .store
-            .frame_by_dedupe_key(dedupe)
+        frame_of_registration_by_key(inner, runtime_key, dedupe)
             .await?
             .is_some_and(|frame| frame.id == *id)
     } else {
@@ -6315,6 +8344,7 @@ async fn observe_runtime_notice_attempts_with_cache(
         observation = RuntimeNoticeObservation::default();
     }
     observation.prefix_revision = prefix_revision.clone();
+    observation.mob_id = mob;
     let mut prefix_digest = Sha256::new();
     if observation.observed_through == observed_through {
         if prefix_revision.is_none() {
@@ -6333,6 +8363,7 @@ async fn observe_runtime_notice_attempts_with_cache(
             .store
             .query_frames(ConsoleTimelineQuery {
                 identity: Some(identity.to_string()),
+                mob_id: observation.mob_id.clone(),
                 after: after.clone(),
                 limit: 1_000,
                 ..Default::default()
@@ -6738,6 +8769,7 @@ fn assistant_history_snapshot_frame_inner(
         }
     }
     Some(NewConsoleFrame {
+        mob_id: None,
         id: None,
         dedupe_key: format!(
             "{prefix}{}:{}:{}:{digest}",
@@ -6791,6 +8823,7 @@ async fn assistant_history_prefix_is_current(
                 .store
                 .query_frames(ConsoleTimelineQuery {
                     identity: Some(identity.to_string()),
+                    mob_id: observation.mob_id.clone(),
                     after: after.clone(),
                     limit: 1_000,
                     ..Default::default()
@@ -6868,10 +8901,8 @@ async fn restore_current_history_frames(
         {
             continue;
         }
-        if let Some(frame) = inner
-            .store
-            .frame_by_dedupe_key(&candidate.dedupe_key)
-            .await?
+        if let Some(frame) =
+            frame_of_registration_by_key(inner, runtime_key, &candidate.dedupe_key).await?
             && frame.runtime_key == runtime_key
             && frame.identity == identity
             && frame.session_id.as_deref() == Some(session_id)
@@ -6978,6 +9009,7 @@ async fn restore_current_history_frames(
             .store
             .query_frames(ConsoleTimelineQuery {
                 identity: Some(identity.to_string()),
+                mob_id: observation.mob_id.clone(),
                 after: after.clone(),
                 limit: 1_000,
                 ..Default::default()
@@ -7191,11 +9223,232 @@ fn current_history_mapping(
 }
 
 fn runtime_entry_is_current(inner: &AggregatorInner, entry: &RuntimeEntry) -> bool {
-    inner.runtimes.read().is_ok_and(|entries| {
+    // The registration of another mob's console events is kept apart from
+    // the runtimes registered for the default mob, by the canonical
+    // projector alone: it is current among its own kind there.
+    let registry = if entry.mob.is_some() {
+        &inner
+            .projection_owner
+            .as_deref()
+            .unwrap_or(inner)
+            .mob_runtimes
+    } else {
+        &inner.runtimes
+    };
+    registry.read().is_ok_and(|entries| {
         entries
             .get(&entry.runtime_key)
             .is_some_and(|current| current.registration_id == entry.registration_id)
     })
+}
+
+/// The newest stored frame of one mob (none: the host's default mob): the
+/// end of that mob's frames in a log that holds the frames of several
+/// mobs. It is read by the store's read of one mob's frames
+/// ([`ConsoleLogStore::query_windowed_frames_of_mob`]), so a frame of
+/// another mob, later or earlier, is not taken for it. A store that does
+/// not read one mob's frames itself ([`ConsoleLogStore::reads_one_mob`]) is
+/// asked its own newest cursor.
+async fn newest_cursor_of_mob(
+    store: &dyn ConsoleLogStore,
+    mob: Option<&meerkat_mob::MobId>,
+) -> ConsoleLogResult<Option<ConsoleCursor>> {
+    if !store.reads_one_mob() {
+        return store.latest_cursor().await;
+    }
+    let newest = store
+        .query_windowed_frames_of_mob(ConsoleTimelineWindowQuery {
+            mob_id: mob.cloned(),
+            mode: ConsoleTimelineMode::Recent,
+            limit: 1,
+            ..Default::default()
+        })
+        .await?;
+    Ok(newest.latest_cursor.or(newest.next_cursor))
+}
+
+/// The frame that holds `dedupe_key` among the frames of the mob whose
+/// console events are registered under `runtime_key` (the default mob's
+/// for a runtime registered for it): a registration's member has frames of
+/// that mob alone, so a session history pass of one mob's member never
+/// takes another mob's frame for its own.
+async fn frame_of_registration_by_key(
+    inner: &AggregatorInner,
+    runtime_key: &str,
+    dedupe_key: &str,
+) -> ConsoleLogResult<Option<ConsoleFrame>> {
+    let mob = mob_registered_under(inner, runtime_key);
+    inner
+        .store
+        .frame_by_dedupe_key_of_mob(mob.as_ref(), dedupe_key)
+        .await
+}
+
+/// The mob whose console events are registered under `runtime_key`
+/// ([`AggregatorInner::mob_runtimes`]): none for a runtime registered for
+/// the default mob. A read of a member's stored frames by its name names
+/// this mob, so the session history of a member of one mob never reads the
+/// frames of another mob's member of the same name.
+fn mob_registered_under(inner: &AggregatorInner, runtime_key: &str) -> Option<meerkat_mob::MobId> {
+    // The canonical projector alone holds these registrations.
+    inner
+        .projection_owner
+        .as_deref()
+        .unwrap_or(inner)
+        .mob_runtimes
+        .read()
+        .ok()
+        .and_then(|entries| entries.get(runtime_key).and_then(|entry| entry.mob.clone()))
+}
+
+/// The runtime key the console events of the mob `mob`, a mob a host serves
+/// beside its default mob, are registered and stored under. It is this
+/// projector's own name for that registration: no reader takes a mob from
+/// it (a frame names its mob itself), and it is never the key of a runtime
+/// registered for the default mob, so a watermark, a witness or a delta
+/// block kept under a key is one registration's alone.
+fn mob_runtime_key(mob: &meerkat_mob::MobId) -> String {
+    mob_writers::runtime_key_of(mob)
+}
+
+/// The registration a mob's own sweep was started for ended: the sweep
+/// is given no write permit and settles nothing more.
+struct SweepRegistrationEnded;
+
+/// The gates of the writers under the ids of the host's other mobs, as
+/// `inner` reaches them: its owner's for a policy view, its own otherwise.
+fn mob_writers_of(inner: &AggregatorInner) -> &mob_writers::MobWriters {
+    inner
+        .projection_owner
+        .as_deref()
+        .unwrap_or(inner)
+        .mob_writers
+        .get_or_init(mob_writers::MobWriters::default)
+}
+
+/// A permit for one write of `entry`'s registration, when `entry` is the
+/// registration of a mob's console events: none for a registration that
+/// ended or that the key no longer holds ([`mob_writers`]). A runtime
+/// registered for the default mob has no gate: the answer is `Ok(None)`.
+fn mob_write_permit(
+    inner: &AggregatorInner,
+    entry: &RuntimeEntry,
+) -> ConsoleLogResult<Option<mob_writers::WritePermit>> {
+    if entry.mob.is_none() {
+        return Ok(None);
+    }
+    mob_writers_of(inner)
+        .permit(&entry.runtime_key, entry.registration_id)
+        .map(Some)
+        .ok_or_else(|| {
+            std::io::Error::other(format!(
+                "the registration of the console events under `{}` ended: nothing more is \
+                 written for it",
+                entry.runtime_key
+            ))
+            .into()
+        })
+}
+
+/// A mob beside the host's default mob that a Console send is for: the mob
+/// as a stored frame names it, the host's default mob (a send's key reads
+/// both), and the runtime key the mob's console events are registered
+/// under, which is the key of every frame of its sends.
+struct SendMob<'a> {
+    mob: &'a meerkat_mob::MobId,
+    default_mob: crate::member_key::DefaultMob,
+    runtime_key: String,
+}
+
+impl SendMob<'_> {
+    /// The dedupe key of the send to `identity` in this mob.
+    fn dedupe_key(
+        &self,
+        scope: &ConsoleSendScope,
+        identity: &str,
+        origin: &str,
+        idempotency_key: &str,
+    ) -> String {
+        scope.member_dedupe_key(
+            &self.runtime_key,
+            &self.default_mob,
+            self.mob,
+            identity,
+            origin,
+            idempotency_key,
+        )
+    }
+}
+
+/// The mob a Console send for `mob` is recorded under: none for the host's
+/// default mob (a send that names no mob, an empty one, or the default mob
+/// by its id, as a send's dedupe key reads a mob), the mob for any other.
+/// The caller hands the mob as a stored record names it, so a door that
+/// took the default mob's id off its request hands none. A mob of white
+/// space alone is not empty: it is a mob no console events are registered
+/// for, and a send for it finds no agent.
+///
+/// A console that was never told its host's default mob cannot tell that
+/// mob's id from another mob's: it records no send for a mob it is named.
+fn mob_of_send<'a>(
+    owner: &AggregatorInner,
+    mob: Option<&'a meerkat_mob::MobId>,
+) -> Result<Option<SendMob<'a>>, ConsoleSendError> {
+    let Some(mob) = mob.filter(|mob| !mob.as_str().is_empty()) else {
+        return Ok(None);
+    };
+    let Some(default_mob) = owner.default_mob.get() else {
+        return Err(ConsoleSendError::State(
+            "this console was not told its host's default mob, so it records no send for a mob \
+             a request names",
+        ));
+    };
+    if default_mob.is(mob) {
+        return Ok(None);
+    }
+    Ok(Some(SendMob {
+        mob,
+        default_mob: default_mob.clone(),
+        runtime_key: mob_runtime_key(mob),
+    }))
+}
+
+/// The registration of the runtime key `runtime_key` with the projector
+/// `inner`: a runtime registered for the default mob, or the console events
+/// of another mob of the host ([`AggregatorInner::mob_runtimes`]). The
+/// projection of a registration's own console events, the witness of its
+/// own frames and the passes over its own members' session histories ask
+/// here; every read that walks the registered runtimes reads `runtimes`
+/// alone.
+fn registered_entry(inner: &AggregatorInner, runtime_key: &str) -> Option<RuntimeEntry> {
+    if let Some(entry) = inner
+        .runtimes
+        .read()
+        .ok()
+        .and_then(|entries| entries.get(runtime_key).cloned())
+    {
+        return Some(entry);
+    }
+    inner
+        .mob_runtimes
+        .read()
+        .ok()
+        .and_then(|entries| entries.get(runtime_key).cloned())
+        .map(|mut entry| {
+            // A mob's identity runtime is attached to its wrapper after the
+            // mob's entry is made, and detached when it quiesces: the
+            // registration reads it there each time, so it never holds one
+            // the mob no longer has.
+            entry.identity_runtime = entry.runtime.installed_identity_runtime();
+            entry
+        })
+}
+
+/// Whether `entry` is the current registration of its key
+/// ([`registered_entry`]).
+fn registered_entry_is_current(inner: &AggregatorInner, entry: &RuntimeEntry) -> bool {
+    registered_entry(inner, &entry.runtime_key)
+        .is_some_and(|current| current.registration_id == entry.registration_id)
 }
 
 fn runtime_notice_snapshot_frame(
@@ -7321,6 +9574,7 @@ fn runtime_notice_snapshot_frame(
         payload["removed_history_frame_ids"] = json!([]);
     }
     Some(NewConsoleFrame {
+        mob_id: None,
         id: None,
         dedupe_key: format!(
             "runtime-notice-snapshot-v2:{runtime_key}:{session_id}:{}:{}:{}:{state_digest}:{}",
@@ -7813,8 +10067,14 @@ where
             }
             if let Some(mut snapshot) = notice_snapshot {
                 snapshot.source.member_provenance = provenance.clone();
-                append_and_emit_with_policy(&inner, snapshot, entry.visibility_policy.clone())
-                    .await?;
+                snapshot.mob_id.clone_from(&entry.mob);
+                append_and_emit_written_by(
+                    &inner,
+                    snapshot,
+                    entry.visibility_policy.clone(),
+                    FrameWriter::Registration(&entry),
+                )
+                .await?;
             }
             if let Some(mut snapshot) = assistant_snapshot {
                 if !runtime_entry_is_current(&inner, &entry)
@@ -7830,8 +10090,14 @@ where
                     ).into());
                 }
                 snapshot.source.member_provenance = provenance.clone();
-                append_and_emit_with_policy(&inner, snapshot, entry.visibility_policy.clone())
-                    .await?;
+                snapshot.mob_id.clone_from(&entry.mob);
+                append_and_emit_written_by(
+                    &inner,
+                    snapshot,
+                    entry.visibility_policy.clone(),
+                    FrameWriter::Registration(&entry),
+                )
+                .await?;
             }
             notice_observation.verified_assistant_settled = assistant_history_settled;
             if assistant_history_settled {
@@ -7950,6 +10216,9 @@ where
                 if frame.identity != record.identity {
                     continue;
                 }
+                // The frame is of the registration's own mob: stamped
+                // before anything reads the member's stored frames for it.
+                frame.mob_id.clone_from(&entry.mob);
                 let current_canonical = assistant_identity_history
                     && frame.identity == record.identity
                     && frame.session_id.as_deref() == Some(session_id.as_str());
@@ -7968,7 +10237,13 @@ where
                 {
                     continue;
                 }
-                append_and_emit_with_policy(&inner, frame, entry.visibility_policy.clone()).await?;
+                append_and_emit_written_by(
+                    &inner,
+                    frame,
+                    entry.visibility_policy.clone(),
+                    FrameWriter::Registration(&entry),
+                )
+                .await?;
             }
         }
         let Some(next_offset) = advance_backfill_offset(offset, base_offset, messages.len()) else {
@@ -8007,10 +10282,14 @@ where
             .runtimes
             .read()
             .map_err(|_| runtime_registry_lock_error())?;
-        if registrations
-            .get(&entry.runtime_key)
-            .is_some_and(|current| current.registration_id == entry.registration_id)
-        {
+        let registered = if entry.mob.is_some() {
+            runtime_entry_is_current(&inner, &entry)
+        } else {
+            registrations
+                .get(&entry.runtime_key)
+                .is_some_and(|current| current.registration_id == entry.registration_id)
+        };
+        if registered {
             inner
                 .session_pending_read_authorities
                 .lock()
@@ -8024,9 +10303,13 @@ where
                 .runtimes
                 .read()
                 .map_err(|_| runtime_registry_lock_error())?;
-            registrations
-                .get(&entry.runtime_key)
-                .is_some_and(|current| current.registration_id == entry.registration_id)
+            if entry.mob.is_some() {
+                runtime_entry_is_current(&inner, &entry)
+            } else {
+                registrations
+                    .get(&entry.runtime_key)
+                    .is_some_and(|current| current.registration_id == entry.registration_id)
+            }
         };
         if !registered {
             return Ok(());
@@ -8135,7 +10418,17 @@ fn spawn_session_history_backfill(
     });
 }
 
-fn spawn_session_history_discovery_loop(inner: Arc<AggregatorInner>, runtime_key: String) {
+/// Read the session histories of `runtime_key`'s registration again at each
+/// interval, for as long as it stands. A runtime registered for the default
+/// mob is followed while its key is registered (`registration` is none). The
+/// console events of another mob are registered anew each time the mob gets
+/// an entry, under the same key: their loop names its own registration and
+/// ends when that one is gone or replaced.
+fn spawn_session_history_discovery_loop(
+    inner: Arc<AggregatorInner>,
+    runtime_key: String,
+    registration: Option<uuid::Uuid>,
+) {
     if !inner.options.session_history_backfill_enabled {
         return;
     }
@@ -8144,11 +10437,15 @@ fn spawn_session_history_discovery_loop(inner: Arc<AggregatorInner>, runtime_key
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             interval.tick().await;
-            let runtime_still_registered = inner
-                .runtimes
-                .read()
-                .is_ok_and(|entries| entries.contains_key(&runtime_key));
-            if !runtime_still_registered {
+            let still_registered = match registration {
+                None => inner
+                    .runtimes
+                    .read()
+                    .is_ok_and(|entries| entries.contains_key(&runtime_key)),
+                Some(registration) => registered_entry(&inner, &runtime_key)
+                    .is_some_and(|entry| entry.registration_id == registration),
+            };
+            if !still_registered {
                 break;
             }
             spawn_session_history_backfill(
@@ -8160,20 +10457,79 @@ fn spawn_session_history_discovery_loop(inner: Arc<AggregatorInner>, runtime_key
     });
 }
 
+/// A session history pass that was asked for, as a row reads it: recorded
+/// where the pass is asked, whether or not this console makes passes.
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum HistoryPassAsked {
+    /// A pass for the member `identity` of the mob `mob` (none: the default
+    /// mob), which finds its member by that name among that mob's members.
+    OfMember {
+        mob: Option<meerkat_mob::MobId>,
+        identity: String,
+    },
+    /// A pass for one member that was found: the runtime key of the
+    /// registration it was found in, and its session.
+    OfFoundMember {
+        runtime_key: String,
+        session_id: String,
+    },
+}
+
+/// Record that the pass `asked` was asked for, with the canonical projector.
+#[cfg(test)]
+fn record_history_pass_asked(inner: &AggregatorInner, asked: HistoryPassAsked) {
+    inner
+        .projection_owner
+        .as_deref()
+        .unwrap_or(inner)
+        .history_passes_asked
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push(asked);
+}
+
+#[cfg(test)]
+impl MetaConsoleAggregator {
+    /// The session history passes asked for so far, in order.
+    pub(crate) fn history_passes_asked(&self) -> Vec<HistoryPassAsked> {
+        self.inner
+            .projection_owner
+            .as_deref()
+            .unwrap_or(&self.inner)
+            .history_passes_asked
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
+
 fn spawn_session_history_backfill_target(
     inner: Arc<AggregatorInner>,
     target: SessionBackfillTarget,
     force_refresh: bool,
 ) {
+    #[cfg(test)]
+    record_history_pass_asked(
+        &inner,
+        HistoryPassAsked::OfFoundMember {
+            runtime_key: target.entry.runtime_key.clone(),
+            session_id: target.session_id.clone(),
+        },
+    );
     let (inner, target) = if let Some(owner) = inner.projection_owner.as_ref() {
-        let Some(entry) = owner
-            .runtimes
-            .read()
-            .ok()
-            .and_then(|entries| entries.get(&target.entry.runtime_key).cloned())
-        else {
+        let Some(entry) = registered_entry(owner, &target.entry.runtime_key) else {
             return;
         };
+        // A pass over a session of a mob's member is the pass of the
+        // registration its member was FOUND in. The owner's entry takes the
+        // found one's place only while it is that registration: where the
+        // key holds another by now (the mob was destroyed and one made
+        // under its id), the pass is dropped, never handed to the mob that
+        // holds the id now.
+        if target.entry.mob.is_some() && entry.registration_id != target.entry.registration_id {
+            return;
+        }
         (owner.clone(), SessionBackfillTarget { entry, ..target })
     } else {
         (inner, target)
@@ -8582,10 +10938,16 @@ async fn run_targeted_session_history_backfill(
             .runtimes
             .read()
             .map_err(|_| runtime_registry_lock_error())?;
-        if registrations
-            .get(&target.entry.runtime_key)
-            .is_none_or(|entry| entry.registration_id != target.entry.registration_id)
-        {
+        // A target of another mob's console events is current among the
+        // registrations of its own kind.
+        let current = if target.entry.mob.is_some() {
+            runtime_entry_is_current(&inner, &target.entry)
+        } else {
+            registrations
+                .get(&target.entry.runtime_key)
+                .is_some_and(|entry| entry.registration_id == target.entry.registration_id)
+        };
+        if !current {
             return Ok(());
         }
         match active.entry(active_key.clone()) {
@@ -8642,28 +11004,50 @@ fn targeted_session_history_active_key(
     )
 }
 
+/// Ask for the session-history pass of the member `identity` of `mob`: of
+/// the mob whose console events are registered here, or (none) of the
+/// default mob. The member is found by its name among the members of that
+/// mob alone.
 fn spawn_session_history_backfill_for_identity(
     inner: Arc<AggregatorInner>,
+    mob: Option<meerkat_mob::MobId>,
     identity: String,
     force_refresh: bool,
     assistant_refresh: AssistantHistoryRefreshReason,
 ) {
     let inner = inner.projection_owner.as_ref().unwrap_or(&inner).clone();
+    #[cfg(test)]
+    record_history_pass_asked(
+        &inner,
+        HistoryPassAsked::OfMember {
+            mob: mob.clone(),
+            identity: identity.clone(),
+        },
+    );
     if !inner.options.session_history_backfill_enabled {
         return;
     }
     let activity = BackfillActivity::begin(&inner);
     tokio::spawn(async move {
         let _activity = activity;
-        for mut target in Box::pin(session_backfill_targets_for_identity(&inner, &identity)).await {
+        for mut target in Box::pin(session_backfill_targets_for_identity_of(
+            &inner,
+            mob.as_ref(),
+            &identity,
+        ))
+        .await
+        {
             target.assistant_refresh = assistant_refresh.clone();
             spawn_session_history_backfill_target(inner.clone(), target, force_refresh);
         }
     });
 }
 
+/// [`spawn_session_history_backfill_for_identity`], for a session no pass
+/// has read yet.
 fn spawn_opportunistic_session_history_backfill_for_identity(
     inner: Arc<AggregatorInner>,
+    mob: Option<meerkat_mob::MobId>,
     identity: String,
 ) {
     let inner = inner.projection_owner.as_ref().unwrap_or(&inner).clone();
@@ -8673,7 +11057,13 @@ fn spawn_opportunistic_session_history_backfill_for_identity(
     let activity = BackfillActivity::begin(&inner);
     tokio::spawn(async move {
         let _activity = activity;
-        for target in Box::pin(session_backfill_targets_for_identity(&inner, &identity)).await {
+        for target in Box::pin(session_backfill_targets_for_identity_of(
+            &inner,
+            mob.as_ref(),
+            &identity,
+        ))
+        .await
+        {
             if !Box::pin(first_opportunistic_backfill(&inner, &target)).await {
                 continue;
             }
@@ -8682,29 +11072,42 @@ fn spawn_opportunistic_session_history_backfill_for_identity(
     });
 }
 
+/// Test seam: the first session-history target of the member `identity`
+/// over the runtimes registered for the default mob.
 #[cfg(test)]
 async fn session_backfill_target_for_identity(
     inner: &AggregatorInner,
     identity: &str,
 ) -> Option<SessionBackfillTarget> {
-    session_backfill_targets_for_identity(inner, identity)
+    session_backfill_targets_for_identity_of(inner, None, identity)
         .await
         .into_iter()
         .next()
 }
 
-async fn session_backfill_targets_for_identity(
+/// The session-history targets of the member `identity` of `mob`: over the
+/// runtimes registered for the default mob (none), or over the one
+/// registration of the console events of the mob `mob`. Two mobs' members
+/// of one name are two members: each is found among its own mob's.
+async fn session_backfill_targets_for_identity_of(
     inner: &AggregatorInner,
+    mob: Option<&meerkat_mob::MobId>,
     identity: &str,
 ) -> Vec<SessionBackfillTarget> {
-    let entries = inner
-        .runtimes
-        .read()
-        .ok()
-        .map(|entries| entries.clone())
-        .unwrap_or_default();
+    let entries: Vec<RuntimeEntry> = match mob {
+        None => inner
+            .runtimes
+            .read()
+            .ok()
+            .map(|entries| entries.values().cloned().collect())
+            .unwrap_or_default(),
+        Some(mob) => registered_entry(inner, &mob_runtime_key(mob))
+            .filter(|entry| entry.mob.as_ref() == Some(mob))
+            .into_iter()
+            .collect(),
+    };
     let mut targets = Vec::new();
-    for entry in entries.values() {
+    for entry in &entries {
         let raw_identities = namespace_match_candidates(identity, &entry.identity_namespace);
         if raw_identities.is_empty() {
             continue;
@@ -8713,13 +11116,19 @@ async fn session_backfill_targets_for_identity(
             .iter()
             .map(|raw_identity| crate::member_comms_id::mob_member_id(raw_identity.as_str()))
             .collect::<Vec<_>>();
-        for resolved in Box::pin(member_sources_for_entry(entry))
+        let mut named: Vec<_> = Box::pin(member_sources_for_entry(entry))
             .await
             .into_iter()
             .filter(|candidate| {
-                resolved_member_matches_raw_identities(candidate, &raw_identities, &mids)
+                requested_member_match(candidate, &raw_identities, &mids)
+                    != RequestedMemberMatch::No
             })
-        {
+            .collect();
+        // A string that names a primary member names that member only.
+        if named.iter().any(|candidate| !candidate.nested()) {
+            named.retain(|candidate| !candidate.nested());
+        }
+        for resolved in named {
             let Some(record) = identity_record_for_resolved_member(&resolved).await else {
                 continue;
             };
@@ -8746,20 +11155,62 @@ async fn session_backfill_targets_for_identity(
     targets
 }
 
-fn resolved_member_matches_raw_identities(
+/// How a requested identity names a listed member.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RequestedMemberMatch {
+    No,
+    /// By the member's own name: a primary member's roster name, or a
+    /// nested member's mob and name.
+    ByName,
+    /// By the durable identity a primary member is: the one its
+    /// `agent_identity` label projects, or its identity entry.
+    ByIdentityLabel,
+}
+
+/// Whether, and how, one of `raw_identities` (the requested identity without
+/// the entry's namespace; `mids` are their roster ids) names `resolved`. A
+/// primary member is named by its bare name, as it always was, or by the
+/// durable identity it is
+/// ([`crate::member_comms_id::resolve_member_identity`]). A nested member is
+/// named only by its mob and name ([`crate::console_member_ref`]): a bare
+/// name never names it, and no label or identity entry does.
+fn requested_member_match(
     resolved: &ResolvedConsoleMember,
     raw_identities: &[String],
     mids: &[AgentIdentity],
-) -> bool {
-    mids.contains(&resolved.member.agent_identity)
-        || crate::member_comms_id::resolve_member_identity(
-            &resolved.handle,
-            &resolved.member.agent_identity,
-            &resolved.member.labels,
-        )
-        .is_some_and(|agent_identity| raw_identities.iter().any(|raw| agent_identity == *raw))
+) -> RequestedMemberMatch {
+    if resolved.nested() {
+        let named = raw_identities.iter().any(|raw| {
+            crate::console_member_ref::parse_nested_member_identity(raw).is_some_and(
+                |(mob_id, name)| {
+                    mob_id == resolved.source_mob_id && name == resolved.runtime_identity
+                },
+            )
+        });
+        return if named {
+            RequestedMemberMatch::ByName
+        } else {
+            RequestedMemberMatch::No
+        };
+    }
+    if mids.contains(&resolved.member.agent_identity) {
+        RequestedMemberMatch::ByName
+    } else if crate::member_comms_id::resolve_member_identity(
+        &resolved.handle,
+        &resolved.member.agent_identity,
+        &resolved.member.labels,
+    )
+    .is_some_and(|agent_identity| raw_identities.iter().any(|raw| agent_identity == *raw))
+    {
+        RequestedMemberMatch::ByIdentityLabel
+    } else {
+        RequestedMemberMatch::No
+    }
 }
 
+/// The events a runtime registered for the default mob missed while its
+/// live projection lagged. A mob's registration recovers its own
+/// ([`recover_lagged_mob_events`]).
 async fn recover_lagged_source_events(
     inner: Arc<AggregatorInner>,
     runtime_key: &str,
@@ -8777,14 +11228,19 @@ async fn recover_lagged_source_events(
             }
         }
         Err(err) => {
+            // The gap marker is the default mob's and is appended whatever
+            // the registry holds by now, as before a frame was told its
+            // writer: it names no mob, so it needs no registration.
             append_source_gap(
                 &inner,
                 runtime_key,
+                None,
                 format!(
                     "{}:{}:{}",
                     err.error, err.stream, err.requested_last_event_id
                 ),
                 policy,
+                FrameWriter::NoRegistration,
             )
             .await?;
         }
@@ -8795,12 +11251,20 @@ async fn recover_lagged_source_events(
 async fn append_source_gap(
     inner: &AggregatorInner,
     runtime_key: &str,
+    mob: Option<meerkat_mob::MobId>,
     reason: String,
     policy: Arc<dyn ConsoleVisibilityPolicy>,
+    writer: FrameWriter<'_>,
 ) -> ConsoleLogResult<()> {
+    // The broadcast below reaches every open stream and names the runtime
+    // key: a gap in another mob's console events is told to no stream (the
+    // stored gap frame is that mob's, read by a request that names it).
+    let of_another_mob = mob.is_some();
     append_and_emit_runtime_plane(
         inner,
         NewConsoleFrame {
+            // The gap is in the console events of the registration's mob.
+            mob_id: mob,
             id: None,
             dedupe_key: format!("source-gap:{runtime_key}:{}", current_time_ms()),
             timestamp_ms: current_time_ms(),
@@ -8827,13 +11291,23 @@ async fn append_source_gap(
             caused_by_frame_id: None,
         },
         policy,
+        writer,
     )
     .await?;
+    if of_another_mob {
+        return Ok(());
+    }
+    // The event is the default mob's (another mob's returned above): the
+    // cursor it names is the default mob's newest, the end its readers'
+    // cursors are held against.
     let _ = inner
         .event_tx
         .send(ConsoleTimelineEvent::ReplayUnavailable {
             requested_cursor: format!("source-gap:{runtime_key}"),
-            latest_cursor: inner.store.latest_cursor().await.ok().flatten(),
+            latest_cursor: newest_cursor_of_mob(inner.store.as_ref(), None)
+                .await
+                .ok()
+                .flatten(),
         });
     Ok(())
 }
@@ -8869,9 +11343,12 @@ async fn append_backfill_gap(
     reason: String,
 ) -> ConsoleLogResult<()> {
     let runtime_key = &entry.runtime_key;
-    append_and_emit_with_policy(
+    append_and_emit_written_by(
         inner,
         NewConsoleFrame {
+            // The gap is in the history of a member of the registration's
+            // mob.
+            mob_id: entry.mob.clone(),
             id: None,
             // Stable per (runtime, identity, session): repeated failures for
             // the same session collapse to one gap frame instead of minting a
@@ -8902,24 +11379,176 @@ async fn append_backfill_gap(
             caused_by_frame_id: None,
         },
         entry.visibility_policy.clone(),
+        FrameWriter::Registration(entry),
     )
     .await?;
     Ok(())
 }
 
+/// A console event that a registration's replay, its live projection or
+/// its recovery after a lag could not write. Those tasks have no caller to
+/// answer, so the failure is said in a warning that names the task
+/// (`replay`, `live projection`, `lag recovery`): the event's frame is not
+/// in the log (a store that fails or refuses a read the frame needs, such
+/// as the read of the send it names, ends here). A recovery after a lag
+/// ends at its first failure: an event it replays and could not write, or
+/// the gap marker it writes where the events the lag lost are no longer
+/// held. Either way the events the live projection missed are not in the
+/// log.
+fn warn_event_not_written(runtime_key: &str, task: &'static str, error: &ConsoleLogError) {
+    tracing::warn!(
+        runtime_key,
+        task,
+        %error,
+        "a console event was not written to the console log"
+    );
+}
+
+/// What became of a console event handed to a mob's registration.
+enum WrittenForRegistration {
+    /// The event was projected under a permit of the registration.
+    Written,
+    /// The registration ended (or the key holds another): nothing of the
+    /// event was written, and nothing more of that registration's is.
+    RegistrationEnded,
+}
+
+/// Project one console event of a mob FOR THE REGISTRATION `entry`, the
+/// one its task was started under: under one permit of that registration,
+/// held across the event's frame, its delta compaction and its cursor
+/// ([`mob_writers`]). The registration is handed in and never looked up by
+/// its key: a task of a registration that ended writes nothing, also where
+/// another registration holds the key by then.
+///
+/// A registration that ends BETWEEN this permit and the event's frame
+/// append gives the append no permit of its own: the frame is not written
+/// and the event is dropped here. Nothing is lost by it: the end of a
+/// registration projects what its mob's store holds before it ends it, and
+/// an event already written is not written twice.
+async fn project_mob_console_event(
+    inner: &Arc<AggregatorInner>,
+    entry: &RuntimeEntry,
+    envelope: crate::console_contracts::ConsoleIdentityEventEnvelope,
+) -> ConsoleLogResult<WrittenForRegistration> {
+    let Some(_in_flight) = mob_writers_of(inner).permit(&entry.runtime_key, entry.registration_id)
+    else {
+        return Ok(WrittenForRegistration::RegistrationEnded);
+    };
+    // A mob's identity runtime is attached to its wrapper after the mob's
+    // entry is made, and detached when it quiesces: read there each time,
+    // as a lookup of the registration does.
+    let mut entry = entry.clone();
+    entry.identity_runtime = entry.runtime.installed_identity_runtime();
+    project_console_event_for(inner.clone(), entry, envelope).await?;
+    Ok(WrittenForRegistration::Written)
+}
+
+/// The events a mob's registration missed while its live projection
+/// lagged, projected for that registration: from the cursor of the last
+/// event IT wrote (kept in its gate; a store's watermark under the key is
+/// not read: it would be whatever mob wrote under the key last); an event
+/// already written is not written twice.
+///
+/// A registration that wrote no event has no cursor to replay from. After
+/// a lag its store no longer holds every event it was sent (a store keeps
+/// no more events than the smallest live channel holds), so the loss is
+/// said first, in the mob's gap frame (`lagged:<stream>:`, no position was
+/// asked for), and then what the store still holds is replayed.
+async fn recover_lagged_mob_events(
+    inner: &Arc<AggregatorInner>,
+    entry: &RuntimeEntry,
+    console_events: &ConsoleEventStore,
+) -> ConsoleLogResult<WrittenForRegistration> {
+    let cursor = mob_writers_of(inner).cursor(&entry.runtime_key, entry.registration_id);
+    if cursor.is_none() {
+        if mob_write_permit(inner, entry).is_err() {
+            return Ok(WrittenForRegistration::RegistrationEnded);
+        }
+        append_source_gap(
+            inner,
+            &entry.runtime_key,
+            entry.mob.clone(),
+            format!(
+                "lagged:{}:",
+                crate::console_contracts::ALL_EVENTS_STREAM_NAME
+            ),
+            entry.visibility_policy.clone(),
+            FrameWriter::Registration(entry),
+        )
+        .await?;
+    }
+    match console_events.replay_all(cursor.as_deref()).await {
+        Ok(events) => {
+            for envelope in events {
+                if matches!(
+                    project_mob_console_event(inner, entry, envelope).await?,
+                    WrittenForRegistration::RegistrationEnded
+                ) {
+                    return Ok(WrittenForRegistration::RegistrationEnded);
+                }
+            }
+        }
+        Err(err) => {
+            if mob_write_permit(inner, entry).is_err() {
+                return Ok(WrittenForRegistration::RegistrationEnded);
+            }
+            append_source_gap(
+                inner,
+                &entry.runtime_key,
+                entry.mob.clone(),
+                format!(
+                    "{}:{}:{}",
+                    err.error, err.stream, err.requested_last_event_id
+                ),
+                entry.visibility_policy.clone(),
+                FrameWriter::Registration(entry),
+            )
+            .await?;
+        }
+    }
+    Ok(WrittenForRegistration::Written)
+}
+
+/// Project one console event of the runtime registered under
+/// `runtime_key`. The console events of a mob the host serves beside its
+/// default mob are not projected by their key: each is projected for the
+/// registration its task was started under ([`project_mob_console_event`]),
+/// so a registration found under a mob's key here writes nothing.
 async fn project_console_event(
     inner: Arc<AggregatorInner>,
     runtime_key: &str,
     envelope: crate::console_contracts::ConsoleIdentityEventEnvelope,
 ) -> ConsoleLogResult<()> {
-    let Some(entry) = inner
-        .runtimes
-        .read()
-        .ok()
-        .and_then(|entries| entries.get(runtime_key).cloned())
-    else {
+    let Some(entry) = registered_entry(&inner, runtime_key) else {
         return Ok(());
     };
+    if entry.mob.is_some() {
+        tracing::debug!(
+            runtime_key,
+            "a mob's console event is projected for its registration, not by its key"
+        );
+        return Ok(());
+    }
+    project_console_event_for(inner, entry, envelope).await
+}
+
+/// Project one console event for the registration `entry`.
+async fn project_console_event_for(
+    inner: Arc<AggregatorInner>,
+    entry: RuntimeEntry,
+    envelope: crate::console_contracts::ConsoleIdentityEventEnvelope,
+) -> ConsoleLogResult<()> {
+    // The store of a mob beside the default mob opens with a marker of its
+    // own making (`runtime_bootstrapped`, under the system identity): it
+    // says when the host first named the mob, which is no event of the mob.
+    // Nothing is stored for it, so a mob that records nothing leaves the
+    // console log as it was, its schema version included.
+    if entry.mob.is_some()
+        && envelope.identity == SYSTEM_EVENT_IDENTITY
+        && envelope.event_type == "runtime_bootstrapped"
+    {
+        return Ok(());
+    }
     let mut frame = frame_from_console_event(&entry, envelope);
     retain_legacy_reasoning_replay_key(inner.store.as_ref(), &mut frame).await?;
     // A frame is witnessed by what the event itself names, never by its
@@ -8933,7 +11562,7 @@ async fn project_console_event(
         &frame,
         matches!(frame.kind.as_str(), "interaction_started" | "run_started"),
     )
-    .await;
+    .await?;
     // A spawn's kickoff is the record of the member that spawn made: it is
     // written only with the witness of the session it names. One that names
     // no session, or a session whose member cannot be read, is not written.
@@ -8970,7 +11599,13 @@ async fn project_console_event(
     if frame.identity == SYSTEM_EVENT_IDENTITY {
         // The runtime's event store writes only its own events under the
         // system identity; it refuses every member event under one.
-        append_and_emit_runtime_plane(&inner, frame, entry.visibility_policy.clone()).await?;
+        append_and_emit_runtime_plane(
+            &inner,
+            frame,
+            entry.visibility_policy.clone(),
+            FrameWriter::Registration(&entry),
+        )
+        .await?;
     } else if crate::console_contracts::is_runtime_plane_identity(&frame.identity) {
         // No runtime event carries the gap-marker identity: drop it, and
         // still advance past it below.
@@ -8988,26 +11623,42 @@ async fn project_console_event(
     } else {
         append_member_console_event(&inner, &entry, frame).await?;
     }
-    inner
-        .store
-        .record_source_watermark(
-            &entry.runtime_key,
-            ConsoleFrameSourceKind::ConsoleEvent,
-            &source_cursor,
-        )
-        .await?;
+    if entry.mob.is_some() {
+        // A mob's registration keeps the cursor of the last event it wrote
+        // in its own gate, and no store's watermark under the mob's key is
+        // written or read: whatever mob held the id next would read it.
+        mob_writers_of(&inner).wrote(&entry.runtime_key, entry.registration_id, &source_cursor);
+    } else {
+        inner
+            .store
+            .record_source_watermark(
+                &entry.runtime_key,
+                ConsoleFrameSourceKind::ConsoleEvent,
+                &source_cursor,
+            )
+            .await?;
+    }
+    // The session-history passes and the tool application refresh below
+    // find their member by its name among the members of the registration's
+    // own mob: an event of another mob's member asks for that mob's member,
+    // never for the default mob's member of that name.
     if let Some(identity) = refresh_identity {
         spawn_session_history_backfill_for_identity(
             inner.clone(),
+            entry.mob.clone(),
             identity,
             true,
             assistant_refresh,
         );
     } else if let Some(identity) = opportunistic_refresh_identity {
-        spawn_opportunistic_session_history_backfill_for_identity(inner.clone(), identity);
+        spawn_opportunistic_session_history_backfill_for_identity(
+            inner.clone(),
+            entry.mob.clone(),
+            identity,
+        );
     }
     if let Some(identity) = application_refresh_identity {
-        tool_application_projection::spawn_for_identity(inner, identity);
+        tool_application_projection::spawn_for_identity(inner, entry.mob.clone(), identity);
     }
     Ok(())
 }
@@ -9024,7 +11675,8 @@ async fn append_member_console_event(
     let policy = entry.visibility_policy.clone();
     match delta_compaction::BlockRow::of(&frame) {
         None => {
-            append_and_emit_with_policy(inner, frame, policy).await?;
+            append_and_emit_written_by(inner, frame, policy, FrameWriter::Registration(entry))
+                .await?;
         }
         Some(delta_compaction::BlockRow::Delta {
             key,
@@ -9035,7 +11687,9 @@ async fn append_member_console_event(
             if blocks.replays_removed_delta(&entry.runtime_key, &key, source_sequence, now_ms) {
                 return Ok(());
             }
-            let outcome = append_and_emit_with_policy(inner, frame, policy).await?;
+            let outcome =
+                append_and_emit_written_by(inner, frame, policy, FrameWriter::Registration(entry))
+                    .await?;
             if let Some(cursor) = outcome.frame.cursor.seq() {
                 blocks.delta_stored(&entry.runtime_key, key, cursor, now_ms);
             }
@@ -9044,7 +11698,9 @@ async fn append_member_console_event(
             key,
             source_sequence,
         }) => {
-            let outcome = append_and_emit_with_policy(inner, frame, policy).await?;
+            let outcome =
+                append_and_emit_written_by(inner, frame, policy, FrameWriter::Registration(entry))
+                    .await?;
             if outcome.disposition != AppendDisposition::Inserted {
                 return Ok(());
             }
@@ -9064,7 +11720,9 @@ async fn append_member_console_event(
                 key.assistant_message_id.clone(),
                 ConsoleCursor::from_seq(first_delta),
                 ConsoleCursor::from_seq(complete),
-            );
+            )
+            // The block's member is of the registration's mob.
+            .in_mob(entry.mob.clone());
             match inner.store.compact_message_deltas(&compaction).await {
                 Ok(0) => {}
                 Ok(_) => blocks.compacted(&entry.runtime_key, &key, source_sequence),
@@ -9148,21 +11806,75 @@ fn redact_frame(policy: &dyn ConsoleVisibilityPolicy, frame: &mut NewConsoleFram
     }
 }
 
+/// Who writes a frame, as the one write point asks it
+/// ([`append_frame`]). A frame that names a mob the host serves beside its
+/// default mob is written for a registration of that mob's console events,
+/// under a permit of that registration ([`mob_writers`]), or not at all.
+///
+/// Every caller names its writer. A frame that names a mob has two: a
+/// registration of that mob's console events, and a Console send's own
+/// records.
+#[derive(Clone, Copy)]
+enum FrameWriter<'a> {
+    /// A frame of the default mob written for no registration: the gap
+    /// marker of a runtime's failed lag recovery, and the test seams that
+    /// append a frame as such a writer does. A frame that names a mob is
+    /// REFUSED: no frame of a hosted mob is written this way.
+    NoRegistration,
+    /// The frame is written for this registration. For the registration of
+    /// a mob's console events it takes a permit of that registration, and
+    /// the frame is under that registration's key; for a runtime registered
+    /// for the default mob there is no permit, and a frame that names a mob
+    /// is refused.
+    Registration(&'a RuntimeEntry),
+    /// A Console send's own record, a reply appended to a send's thread,
+    /// and the marker of a frame's update. They are held to their
+    /// registration with the send's own change, not here: until then they
+    /// pass.
+    SendOrMark,
+    /// Test builds only: a row stages a frame as the projection would have
+    /// written it, on a console that may hold no registration of the frame's
+    /// mob. Any frame is taken. No product code names it.
+    #[cfg(test)]
+    Staged,
+}
+
+/// Test seam: stage a frame as the projection appends a member's frame,
+/// with the host's payload policy of the frame's key
+/// ([`FrameWriter::Staged`]): a frame that names a mob is taken on a
+/// console with no registration of that mob. A runtime-plane identity is
+/// refused, as for every member frame.
+#[cfg(test)]
 async fn append_and_emit(
     inner: &AggregatorInner,
     frame: NewConsoleFrame,
 ) -> ConsoleLogResult<AppendOutcome> {
     let policy = capture_host_payload_policy(inner, &frame.runtime_key, None)?;
-    append_and_emit_with_policy(inner, frame, policy).await
+    append_and_emit_written_by(inner, frame, policy, FrameWriter::Staged).await
 }
 
-/// Append a frame attributed to a member. A runtime-plane identity is
-/// refused: the console treats frames under one as the runtime's own, and
-/// only [`append_and_emit_runtime_plane`] writes those.
+/// Test seam: append a frame attributed to a member, for a writer with no
+/// registration ([`FrameWriter::NoRegistration`]). A runtime-plane identity
+/// is refused: the console treats frames under one as the runtime's own,
+/// and only [`append_and_emit_runtime_plane`] writes those.
+#[cfg(test)]
 async fn append_and_emit_with_policy(
     inner: &AggregatorInner,
     frame: NewConsoleFrame,
     policy: Arc<dyn ConsoleVisibilityPolicy>,
+) -> ConsoleLogResult<AppendOutcome> {
+    append_and_emit_written_by(inner, frame, policy, FrameWriter::NoRegistration).await
+}
+
+/// Append a frame attributed to a member for the writer `writer`. A
+/// runtime-plane identity is refused: the console treats frames under one
+/// as the runtime's own, and only [`append_and_emit_runtime_plane`] writes
+/// those.
+async fn append_and_emit_written_by(
+    inner: &AggregatorInner,
+    frame: NewConsoleFrame,
+    policy: Arc<dyn ConsoleVisibilityPolicy>,
+    writer: FrameWriter<'_>,
 ) -> ConsoleLogResult<AppendOutcome> {
     if crate::console_contracts::is_runtime_plane_identity(&frame.identity) {
         return Err(format!(
@@ -9171,7 +11883,7 @@ async fn append_and_emit_with_policy(
         )
         .into());
     }
-    append_and_emit_frame(inner, frame, policy).await
+    append_and_emit_frame(inner, frame, policy, writer).await
 }
 
 /// Append one of the runtime's own frames under a runtime-plane identity: a
@@ -9181,23 +11893,25 @@ async fn append_and_emit_runtime_plane(
     inner: &AggregatorInner,
     frame: NewConsoleFrame,
     policy: Arc<dyn ConsoleVisibilityPolicy>,
+    writer: FrameWriter<'_>,
 ) -> ConsoleLogResult<AppendOutcome> {
-    append_and_emit_frame(inner, frame, policy).await
+    append_and_emit_frame(inner, frame, policy, writer).await
 }
 
 async fn append_and_emit_frame(
     inner: &AggregatorInner,
     mut frame: NewConsoleFrame,
     policy: Arc<dyn ConsoleVisibilityPolicy>,
+    writer: FrameWriter<'_>,
 ) -> ConsoleLogResult<AppendOutcome> {
     // A writer that captured its member itself hands the witness over with
     // the frame; every other frame's witness is captured here.
     let witness = match frame.source.member_provenance.take() {
         Some(provenance) => FrameWitness::Member(Box::new(provenance)),
-        None => capture_frame_witness(inner, &frame).await,
+        None => capture_frame_witness(inner, &frame).await?,
     };
     redact_frame(policy.as_ref(), &mut frame);
-    let outcome = append_frame(inner, frame, witness).await?;
+    let outcome = append_frame(inner, frame, witness, writer).await?;
     if outcome.disposition == AppendDisposition::Inserted {
         let _ = inner.event_tx.send(ConsoleTimelineEvent::ConsoleFrame {
             frame: outcome.frame.clone(),
@@ -9211,11 +11925,45 @@ async fn append_and_emit_frame(
 /// merges each acting frame the log stores. The writer says the frame's
 /// member witness (`witness`): the stored frame holds exactly it, whatever
 /// the frame was built with.
+///
+/// A frame that names a mob is stored only for a writer that is held to a
+/// registration of that mob's console events, under a permit of that
+/// registration, which is kept until the log answered
+/// ([`FrameWriter`]). There is no other way in for such a frame.
 async fn append_frame(
     inner: &AggregatorInner,
     mut frame: NewConsoleFrame,
     witness: FrameWitness,
+    writer: FrameWriter<'_>,
 ) -> ConsoleLogResult<AppendOutcome> {
+    let _in_flight = match writer {
+        FrameWriter::Registration(entry) => {
+            if entry.mob.is_some() != frame.mob_id.is_some()
+                || (entry.mob.is_some() && entry.runtime_key != frame.runtime_key)
+            {
+                return Err(std::io::Error::other(format!(
+                    "a frame under `{}` is not written for the registration under `{}`",
+                    frame.runtime_key, entry.runtime_key
+                ))
+                .into());
+            }
+            mob_write_permit(inner, entry)?
+        }
+        FrameWriter::SendOrMark => None,
+        #[cfg(test)]
+        FrameWriter::Staged => None,
+        FrameWriter::NoRegistration => {
+            if frame.mob_id.is_some() {
+                return Err(std::io::Error::other(format!(
+                    "a frame under `{}` names a mob and comes with no registration of that \
+                     mob's console events: it is not written",
+                    frame.runtime_key
+                ))
+                .into());
+            }
+            None
+        }
+    };
     frame.source.member_provenance = match witness {
         FrameWitness::Member(provenance) => Some(*provenance),
         FrameWitness::NoMember(reason) => {
@@ -9234,12 +11982,20 @@ async fn append_frame(
         .await
 }
 
+/// Set the status of the frame `frame_id` of the mob `mob` (none for the
+/// host's default mob, as a stored frame names it) and emit the change. A
+/// frame of another mob under the id is not changed.
 async fn update_frame_status_and_emit(
     inner: &AggregatorInner,
+    mob: Option<&meerkat_mob::MobId>,
     frame_id: &str,
     status: ConsoleFrameStatus,
 ) -> ConsoleLogResult<Option<ConsoleFrame>> {
-    let Some(updated) = inner.store.update_frame_status(frame_id, status).await? else {
+    let Some(updated) = inner
+        .store
+        .update_frame_status_of_mob(mob, frame_id, status)
+        .await?
+    else {
         return Ok(None);
     };
     emit_frame_updated(inner, updated).await
@@ -9251,6 +12007,7 @@ async fn emit_frame_updated(
     updated: ConsoleFrame,
 ) -> ConsoleLogResult<Option<ConsoleFrame>> {
     let update_marker = NewConsoleFrame {
+        mob_id: updated.mob_id.clone(),
         id: None,
         dedupe_key: format!("frame-update:{}:{}", updated.id, updated.frame_version),
         timestamp_ms: updated.updated_at_ms.unwrap_or_else(current_time_ms),
@@ -9274,7 +12031,7 @@ async fn emit_frame_updated(
         caused_by_frame_id: Some(updated.id.clone()),
     };
     let witness = FrameWitness::of_source_frame(updated.source.member_provenance.as_ref());
-    let outcome = append_frame(inner, update_marker, witness).await?;
+    let outcome = append_frame(inner, update_marker, witness, FrameWriter::SendOrMark).await?;
     if outcome.disposition == AppendDisposition::Inserted {
         let _ = inner.event_tx.send(ConsoleTimelineEvent::ConsoleFrame {
             frame: outcome.frame,
@@ -9308,7 +12065,9 @@ async fn retain_legacy_reasoning_replay_key(
         scope,
         hash_short(&normalize_transcript_fingerprint_text(text))
     );
-    if let Some(existing) = store.frame_by_dedupe_key(&legacy_key).await?
+    if let Some(existing) = store
+        .frame_by_dedupe_key_of_mob(frame.mob_id.as_ref(), &legacy_key)
+        .await?
         && Some(existing.id.as_str()) == frame.id.as_deref()
         && existing.source_event_id == frame.source_event_id
         && existing.runtime_key == frame.runtime_key
@@ -9375,6 +12134,9 @@ fn frame_from_console_event(
     // within one turn. Only a replay of the same source event is a duplicate.
     let dedupe_key = format!("console-event:{}:{}", entry.runtime_key, event_id);
     NewConsoleFrame {
+        // The frame is of the mob its registration's console events are:
+        // none for the default mob.
+        mob_id: entry.mob.clone(),
         id: Some(event_id.clone()),
         dedupe_key,
         timestamp_ms: envelope.timestamp_ms,
@@ -9461,6 +12223,7 @@ fn session_history_assistant_image_frames(
         .iter()
         .enumerate()
         .map(|(image_idx, image)| NewConsoleFrame {
+            mob_id: None,
             id: None,
             // Key on the stable image identity so a backfill frame and any live
             // `assistant_image` frame for the same image collapse on dedupe.
@@ -9540,7 +12303,7 @@ fn frames_from_session_history_message_with_namespace(
                 if !result.settlement_failures.is_empty() {
                     payload["settlement_failures"] = json!(result.settlement_failures);
                 }
-                let mut frames = vec![NewConsoleFrame {
+                let mut frames = vec![NewConsoleFrame { mob_id: None,
                     id: None,
                     dedupe_key: format!(
                         "session-history:{runtime_key}:{session_id}:{offset}:{idx}:{payload_hash}"
@@ -9711,6 +12474,7 @@ fn frames_from_session_history_message_with_namespace(
         Message::System(_) | Message::ToolResults { .. } => return Vec::new(),
     };
     let mut frames = vec![NewConsoleFrame {
+        mob_id: None,
         id: None,
         dedupe_key: format!("session-history:{runtime_key}:{session_id}:{offset}:{payload_hash}"),
         timestamp_ms,
@@ -9888,6 +12652,7 @@ fn history_tool_call_frame(
         run_id,
     } = step;
     NewConsoleFrame {
+        mob_id: None,
         id: None,
         dedupe_key: format!(
             "session-history:{runtime_key}:{session_id}:{offset}:{cursor_tag}:{tool_idx}:{payload_hash}"
@@ -9981,7 +12746,7 @@ fn spawn_initial_message_frames_from_assistant(
                     "created_at": assistant.created_at,
                 }),
             };
-            frames.push(NewConsoleFrame {
+            frames.push(NewConsoleFrame { mob_id: None,
                 id: None,
                 dedupe_key: format!(
                     "session-history:{runtime_key}:{session_id}:{offset}:spawn-initial:{tool_idx}:{spawn_idx}:{payload_hash}"
@@ -10153,6 +12918,7 @@ async fn history_frame_has_existing_counterpart(
         let page = inner
             .store
             .query_frames(ConsoleTimelineQuery {
+                mob_id: frame.mob_id.clone(),
                 identity: Some(frame.identity.clone()),
                 conversation_id: frame.conversation_id.clone(),
                 after,
@@ -10495,6 +13261,19 @@ enum FrameProjection {
     Stored,
 }
 
+/// Whose frames a timeline scan reads from the store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TimelineMobScope {
+    /// The store's plain read, which names no mob: a query's mob applies
+    /// only together with an identity. Without one the stores of this crate
+    /// answer the default mob's frames alone, and a store that does not
+    /// select by mob answers every frame it holds.
+    EveryMob,
+    /// The frames of the one mob the query names (none for the host's
+    /// default mob), whoever their member.
+    OneMob,
+}
+
 /// `agent.view` for one caller on one stored timeline frame. This is the
 /// one decision every timeline surface applies (window, RPC page, stream
 /// snapshot and live frames, update markers), always to the frame as
@@ -10538,6 +13317,9 @@ pub(crate) fn timeline_frame_visible_to(
             return false;
         }
     }
+    // The frame's identity is a name in the frame's own mob: the member
+    // of that name in another mob is not the one the frame is about.
+    let view = &view.in_stored_mob(frame.mob_id.as_ref());
     if crate::console_contracts::is_runtime_plane_identity(&frame.identity) {
         // A runtime-plane record names no member. One that carries text
         // written from memory records, or that speaks of a member it does
@@ -10558,6 +13340,22 @@ pub(crate) fn timeline_frame_visible_to(
         .as_ref()
         .filter(|provenance| provenance.identity.identity == frame.identity)
     {
+        // A frame the owner captured for a member of a mob nested under
+        // the frame's mob, under the string the door of that mob gives
+        // the member, is decided in the nested mob's own entries: a
+        // member of the frame's mob that holds the same string is
+        // another member.
+        Some(provenance)
+            if provenance.source_mob_id != provenance.primary_mob_id
+                && crate::console_member_ref::nested_member_name(
+                    &frame.identity,
+                    &provenance.source_mob_id,
+                )
+                .is_some() =>
+        {
+            view.in_nested_mob(&meerkat_mob::MobId::from(provenance.source_mob_id.as_str()))
+                .can_view_captured_member(&captured_lineage(provenance))
+        }
         Some(provenance) => view.can_view_captured_member(&captured_lineage(provenance)),
         None => view.can_view_uncaptured_member(&frame.identity),
     }
@@ -10636,18 +13434,27 @@ fn runtime_plane_record_text(frame: &ConsoleFrame) -> bool {
 
 /// One caller's [`timeline_frame_visible_to`] over the frames of one
 /// request, cached per everything the decision reads of a frame (runtime,
-/// identity, captured provenance, and whether it is a runtime-plane record
-/// that carries text written from memory records): a restricted caller
-/// scanning many hidden frames decides each distinct member context once.
+/// mob, identity, captured provenance, and whether it is a runtime-plane
+/// record that carries text written from memory records): a restricted
+/// caller scanning many hidden frames decides each distinct member context
+/// once.
 pub(crate) struct TimelineFrameDecider {
     view: crate::access::AccessView,
     decisions: std::sync::Mutex<HashMap<FrameDecisionKey, bool>>,
 }
 
 /// (runtime key, frame identity, encoded captured provenance,
-/// [`runtime_plane_record_text`]): every input of the decision for a frame
-/// that is no update marker. An input added to the decision belongs here.
-type FrameDecisionKey = (String, String, Option<String>, bool);
+/// [`runtime_plane_record_text`], frame mob): every input of the decision
+/// for a frame that is no update marker. The identity is a name in the
+/// frame's mob, so two mobs' members of one name are two member contexts.
+/// An input added to the decision belongs here.
+type FrameDecisionKey = (
+    String,
+    String,
+    Option<String>,
+    bool,
+    Option<meerkat_mob::MobId>,
+);
 
 impl TimelineFrameDecider {
     pub(crate) fn new(view: crate::access::AccessView) -> Self {
@@ -10674,6 +13481,7 @@ impl TimelineFrameDecider {
             frame.identity.clone(),
             provenance,
             runtime_plane_record_text(frame),
+            frame.mob_id.clone(),
         );
         if let Some(visible) = self
             .decisions
@@ -10748,7 +13556,23 @@ async fn frame_is_visible_cached(
             return Ok(false);
         }
     }
-    let entry = {
+    // A frame of a mob the host serves beside its default mob is decided
+    // under that mob's own registration (its members, its identity runtime),
+    // read from the canonical projector as it is now and under this
+    // aggregator's policy: a view made before the host served the mob reads
+    // it too. A frame that names a mob whose registration is not held now
+    // falls to the rule below and is not served by a console that has
+    // runtimes: a mob that is not loaded, whose frames are served again
+    // once a request loads it, and a mob that was destroyed, whose frames
+    // stay until a create under its id.
+    let of_its_mob = match frame.mob_id.as_ref() {
+        Some(mob) => mob_entry_as_read(inner, &frame.runtime_key)
+            .filter(|entry| entry.mob.as_ref() == Some(mob)),
+        None => None,
+    };
+    let entry = if let Some(entry) = of_its_mob {
+        entry
+    } else {
         let entries = inner
             .runtimes
             .read()
@@ -10837,13 +13661,27 @@ async fn identity_record_for_member(
 ) -> Option<ConsoleIdentityRecord> {
     // Roster ids are comms-safe encodings (meerkat 0.7 MemberCommsName);
     // identity records carry the public alias.
-    let runtime_member_id =
+    let alias =
         crate::member_comms_id::runtime_alias_str(member.agent_identity.as_str()).into_owned();
-    let resolved_identity = crate::member_comms_id::resolve_member_identity(
-        handle,
-        &member.agent_identity,
-        &member.labels,
-    );
+    // The member's mob is the roster it was read from. A member of a mob
+    // other than the primary one is named by its mob and name, and is no
+    // identity of the runtime's: no label and no identity entry of its own
+    // mob names it otherwise.
+    let nested_mob_id =
+        (handle.mob_id() != entry.runtime.handle().mob_id()).then(|| handle.mob_id().to_string());
+    let runtime_member_id = match nested_mob_id.as_deref() {
+        Some(mob_id) => crate::console_member_ref::nested_member_identity(mob_id, &alias)?,
+        None => alias.clone(),
+    };
+    let resolved_identity = if nested_mob_id.is_some() {
+        None
+    } else {
+        crate::member_comms_id::resolve_member_identity(
+            handle,
+            &member.agent_identity,
+            &member.labels,
+        )
+    };
     let durable_identity = resolved_identity
         .as_deref()
         .unwrap_or(runtime_member_id.as_str());
@@ -10866,6 +13704,15 @@ async fn identity_record_for_member(
         .await
         .map(|sid| sid.to_string());
     let mut labels = member.labels.clone();
+    // Which mob a member sits in and who created that mob are the console's
+    // own facts: a value a member or its spawner wrote under these labels
+    // says nothing.
+    labels.remove("source_mob_id");
+    labels.remove("delegate_host_identity");
+    if let Some(mob_id) = nested_mob_id.as_deref() {
+        labels.remove("agent_identity");
+        labels.insert("source_mob_id".to_string(), mob_id.to_string());
+    }
     // The record's `role` is the member's role in its mob, which only its
     // roster row says. A label named `role` that the member carries (its
     // spawn chose it) never stands in its place: the identity list and the
@@ -10918,10 +13765,24 @@ async fn identity_record_for_member(
         }
     };
     crate::side_chat::project_side_chat_lineage(&mut labels, side_chat.as_ref());
-    let display_name = labels
-        .get("display_name")
-        .cloned()
-        .unwrap_or_else(|| runtime_member_id.clone());
+    // As the console's walk records it: a nested mob's member with no
+    // private owner of its own takes its mob's, the person the mob is
+    // private to, or the owner no caller is for a mob whose owner cannot be
+    // told (its creation record leaves it undecided, or the record of who
+    // each mob is private to has not read it).
+    if let Some(mob_id) = nested_mob_id.as_deref() {
+        entry.runtime.private_owners().give_mob_owner(
+            mob_id,
+            entry
+                .runtime
+                .console_mob_records()
+                .owner_undecidable(mob_id),
+            &mut labels,
+        );
+    }
+    // A member is shown under its own name, never under the form that
+    // holds its mob.
+    let display_name = labels.get("display_name").cloned().unwrap_or(alias);
     Some(ConsoleIdentityRecord {
         identity,
         display_name,
@@ -10940,7 +13801,19 @@ async fn identity_record_for_member(
         topology_peers: member
             .wired_to
             .iter()
-            .map(|peer| project_topology_peer(peer.as_str(), &entry.identity_namespace, None))
+            .filter_map(|peer| match nested_mob_id.as_deref() {
+                // A nested member's peers sit in its own mob.
+                Some(mob_id) => crate::console_member_ref::nested_member_identity(
+                    mob_id,
+                    &crate::member_comms_id::runtime_alias_str(peer.as_str()),
+                )
+                .map(|peer| apply_namespace(&peer, &entry.identity_namespace)),
+                None => Some(project_topology_peer(
+                    peer.as_str(),
+                    &entry.identity_namespace,
+                    None,
+                )),
+            })
             .collect(),
         labels,
     })
@@ -11010,8 +13883,11 @@ fn identity_record_for_status(
     crate::console_spawn::sanitize_unverified_lineage_labels(&mut labels);
     // Nor does a declaration say which mob the record is of: a record made
     // from a status is of its runtime's own mob, and a record of that mob
-    // names none (`identity_record_for_resolved_member`).
+    // names none (`identity_record_for_resolved_member`). Nor does it say
+    // which member created a mob: only the console's walk of the mobs
+    // writes that, on a nested mob's member.
     labels.remove("source_mob_id");
+    labels.remove("delegate_host_identity");
     // The record's role is the identity's profile, as the record of a
     // live member carries the member's role: a rule that names a role
     // decides both. A `role` the declaration names stays.
@@ -13335,6 +16211,7 @@ comms = true
         runtime: &UnifiedRuntime,
     ) -> RuntimeEntry {
         RuntimeEntry {
+            mob: None,
             registration_id: uuid::Uuid::new_v4(),
             runtime_key: runtime_key.to_string(),
             identity_namespace: "test".to_string(),
@@ -14145,6 +17022,7 @@ comms = true
         .await;
 
         let entry = RuntimeEntry {
+            mob: None,
             registration_id: uuid::Uuid::new_v4(),
             runtime_key: "runtime-a".to_string(),
             identity_namespace: String::new(),
@@ -14223,6 +17101,7 @@ comms = true
         let outcome = aggregator
             .store()
             .append_if_absent(NewConsoleFrame {
+                mob_id: None,
                 id: None,
                 dedupe_key: "late-member-live-frame".to_string(),
                 timestamp_ms: 1,
@@ -14462,8 +17341,13 @@ comms = true
         frame.payload = json!({"content":"Live public content."});
         append_and_emit(&aggregator.inner, frame).await?;
         receive_until(&mut stream, "Live public content.").await;
-        update_frame_status_and_emit(&aggregator.inner, &stored.id, ConsoleFrameStatus::Delivered)
-            .await?;
+        update_frame_status_and_emit(
+            &aggregator.inner,
+            None,
+            &stored.id,
+            ConsoleFrameStatus::Delivered,
+        )
+        .await?;
         let marker = receive_until(&mut stream, "frame_updated").await;
         assert!(marker.contains("Exact public content."));
         let raw = aggregator
@@ -14493,17 +17377,31 @@ comms = true
     async fn retired_member_history_keeps_policy_provenance_after_store_reopen()
     -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let primary = build_empty_runtime(&unique_console_mob_id("provenance-primary")).await;
-        let delegate = build_empty_runtime(&unique_console_mob_id("provenance-lower")).await;
+        // The member of the primary mob that makes the lower mob.
+        spawn_trusted_identity_projected_member(
+            &primary,
+            SpawnMemberSpec::from_wire("worker".to_string(), "maker".to_string(), None, None, None),
+        )
+        .await;
+        // The lower member is an implicit delegate member (role `delegate`
+        // in a mob nested under the primary mob): the member the restricted
+        // policy below hides.
+        let delegate = super::member_cut_tests::MemberMadeMob::made_by(
+            &primary,
+            "maker",
+            &unique_console_mob_id("provenance-lower"),
+        )
+        .await;
         let alias = "history-reviewer";
         delegate
-            .spawn(SpawnMemberSpec::from_wire(
-                "worker".to_string(),
+            .seat(SpawnMemberSpec::from_wire(
+                "delegate".to_string(),
                 alias.to_string(),
                 Some("Retained private review history.".into()),
                 None,
                 None,
             ))
-            .await?;
+            .await;
         primary
             .mob_runtime()
             .agent_mob_mcp_state()
@@ -14513,6 +17411,7 @@ comms = true
                 delegate.mob_handle().clone(),
             )
             .await;
+        delegate.read_by_the_owner_record_of(&primary).await;
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("console.sqlite");
         let store = Arc::new(SqliteConsoleLogStore::open(&path)?);
@@ -14528,20 +17427,24 @@ comms = true
             .write()
             .expect("registry")
             .insert("runtime-a".to_string(), entry.clone());
-        let identity = format!("test/{alias}");
+        // The lower member as the console names it: its mob and name.
+        let lower_name: &'static str =
+            Box::leak(format!("{}/{alias}", delegate.mob_handle().mob_id()).into_boxed_str());
+        let identity = format!("test/{lower_name}");
         let target = session_backfill_target_for_identity(&owner.inner, &identity)
             .await
             .expect("lower member target");
         wait_for_runtime_session_history_text(
-            &delegate,
+            &primary,
             &target.session_id,
             "Retained private review history.",
             Duration::from_secs(5),
         )
         .await?;
-        // These independent test runtimes have distinct session services. Supply
-        // the real lower service's history through the canonical admission seam.
-        let page = delegate
+        // The lower mob lives on the primary's session service: its member's
+        // history is read there and supplied through the canonical admission
+        // seam.
+        let page = primary
             .mob_runtime()
             .read_session_history(&target.session_id, 0, Some(100))
             .await?;
@@ -14624,7 +17527,7 @@ comms = true
         }
         let hidden_lower =
             owner.policy_view(Arc::new(HideImplicitDelegateMembersConsoleVisibilityPolicy));
-        let hidden_member = owner.policy_view(Arc::new(HideRuntimeMemberOnly("history-reviewer")));
+        let hidden_member = owner.policy_view(Arc::new(HideRuntimeMemberOnly(lower_name)));
         for view in [&hidden_lower, &hidden_member] {
             assert_retired_history_policy(view, &identity, &raw.frames).await?;
         }
@@ -14675,7 +17578,7 @@ comms = true
         let restricted =
             reopened.policy_view(Arc::new(HideImplicitDelegateMembersConsoleVisibilityPolicy));
         assert_retired_history_policy(&restricted, &identity, &raw.frames).await?;
-        let member_only = reopened.policy_view(Arc::new(HideRuntimeMemberOnly("history-reviewer")));
+        let member_only = reopened.policy_view(Arc::new(HideRuntimeMemberOnly(lower_name)));
         assert_retired_history_policy(&member_only, &identity, &raw.frames).await?;
         let legacy_frame = frame_from_session_history_message(
             "runtime-a",
@@ -14841,6 +17744,7 @@ comms = true
         let appended = aggregator
             .store()
             .append_if_absent(NewConsoleFrame {
+                mob_id: None,
                 id: None,
                 dedupe_key: "member-hidden-frame".to_string(),
                 timestamp_ms: 1,
@@ -14875,6 +17779,7 @@ comms = true
         let identity_only = aggregator
             .store()
             .append_if_absent(NewConsoleFrame {
+                mob_id: None,
                 id: None,
                 dedupe_key: "member-hidden-identity-only-frame".to_string(),
                 timestamp_ms: 2,
@@ -14991,6 +17896,7 @@ comms = true
         .await;
 
         let entry = RuntimeEntry {
+            mob: None,
             registration_id: uuid::Uuid::new_v4(),
             runtime_key: "runtime-a".to_string(),
             identity_namespace: String::new(),
@@ -15131,15 +18037,17 @@ comms = true
             assert_eq!(record.runtime_member_id, identity);
             // Selected by the identity it resolves to, not only by its
             // member id (none is given here).
-            assert!(
-                resolved_member_matches_raw_identities(&matches[0], &[identity.to_string()], &[]),
+            assert_eq!(
+                requested_member_match(&matches[0], &[identity.to_string()], &[]),
+                RequestedMemberMatch::ByIdentityLabel,
                 "{identity}'s member is selected by its identity"
             );
         }
         let helper = aggregator.resolve_visible_members("helper").await;
         assert_eq!(helper.len(), 1);
-        assert!(
-            !resolved_member_matches_raw_identities(&helper[0], &["helper".to_string()], &[]),
+        assert_eq!(
+            requested_member_match(&helper[0], &["helper".to_string()], &[]),
+            RequestedMemberMatch::No,
             "a plain worker is selected by its member id only"
         );
 
@@ -15452,6 +18360,7 @@ comms = true
             .insert(
                 "runtime-a".to_string(),
                 RuntimeEntry {
+                    mob: None,
                     registration_id: uuid::Uuid::new_v4(),
                     runtime_key: "runtime-a".to_string(),
                     identity_namespace: String::new(),
@@ -15637,6 +18546,7 @@ comms = true
             .insert(
                 "runtime-a".to_string(),
                 RuntimeEntry {
+                    mob: None,
                     registration_id: uuid::Uuid::new_v4(),
                     runtime_key: "runtime-a".to_string(),
                     identity_namespace: String::new(),
@@ -15746,6 +18656,7 @@ comms = true
             .insert(
                 "runtime-a".to_string(),
                 RuntimeEntry {
+                    mob: None,
                     registration_id: uuid::Uuid::new_v4(),
                     runtime_key: "runtime-a".to_string(),
                     identity_namespace: String::new(),
@@ -15919,6 +18830,7 @@ comms = true
             .insert(
                 "runtime-a".to_string(),
                 RuntimeEntry {
+                    mob: None,
                     registration_id: uuid::Uuid::new_v4(),
                     runtime_key: "runtime-a".to_string(),
                     identity_namespace: String::new(),
@@ -16033,6 +18945,7 @@ comms = true
             runtimes.insert(
                 "a-hidden".to_string(),
                 RuntimeEntry {
+                    mob: None,
                     registration_id: uuid::Uuid::new_v4(),
                     runtime_key: "a-hidden".to_string(),
                     identity_namespace: String::new(),
@@ -16047,6 +18960,7 @@ comms = true
             runtimes.insert(
                 "b-visible".to_string(),
                 RuntimeEntry {
+                    mob: None,
                     registration_id: uuid::Uuid::new_v4(),
                     runtime_key: "b-visible".to_string(),
                     identity_namespace: String::new(),
@@ -16072,7 +18986,7 @@ comms = true
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn inspect_identity_rejects_cross_source_wrong_projection_for_runtime_member()
+    async fn inspect_identity_decides_a_durable_identity_without_a_nested_mobs_row_of_its_name()
     -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let runtime = build_empty_runtime("identity-cross-source-primary-test").await;
         let mut primary_labels = BTreeMap::new();
@@ -16161,6 +19075,7 @@ comms = true
             .insert(
                 "runtime-a".to_string(),
                 RuntimeEntry {
+                    mob: None,
                     registration_id: uuid::Uuid::new_v4(),
                     runtime_key: "runtime-a".to_string(),
                     identity_namespace: String::new(),
@@ -16173,14 +19088,19 @@ comms = true
                 },
             );
 
+        // A nested mob's row is named by its mob and name: a row there with
+        // the runtime name of the identity's binding, projecting another
+        // identity by a label, neither answers for the identity nor makes
+        // it ambiguous. The answer is the primary mob's alone (here the
+        // binding and the live row name different sessions).
         let err = aggregator
             .inspect_identity("review:singleton")
             .await
-            .expect_err("cross-source wrong projection must not be hidden by primary source");
+            .expect_err("the binding and the primary row name different sessions");
         assert!(
-            err.to_string()
-                .contains("projects identity other:singleton")
-                || err.to_string().contains("ambiguous live identity alias"),
+            err.to_string().contains("stale durable identity alias")
+                && !err.to_string().contains("other:singleton")
+                && !err.to_string().contains("ambiguous live identity alias"),
             "unexpected error: {err}"
         );
 
@@ -16262,6 +19182,7 @@ comms = true
             .insert(
                 "default".to_string(),
                 RuntimeEntry {
+                    mob: None,
                     registration_id: uuid::Uuid::new_v4(),
                     runtime_key: "default".to_string(),
                     identity_namespace: String::new(),
@@ -16406,6 +19327,7 @@ comms = true
             .insert(
                 "default".to_string(),
                 RuntimeEntry {
+                    mob: None,
                     registration_id: uuid::Uuid::new_v4(),
                     runtime_key: "default".to_string(),
                     identity_namespace: String::new(),
@@ -16549,6 +19471,7 @@ comms = true
             .insert(
                 "default".to_string(),
                 RuntimeEntry {
+                    mob: None,
                     registration_id: uuid::Uuid::new_v4(),
                     runtime_key: "default".to_string(),
                     identity_namespace: String::new(),
@@ -16691,6 +19614,7 @@ comms = true
             .insert(
                 "runtime-a".to_string(),
                 RuntimeEntry {
+                    mob: None,
                     registration_id: uuid::Uuid::new_v4(),
                     runtime_key: "runtime-a".to_string(),
                     identity_namespace: String::new(),
@@ -17373,6 +20297,7 @@ comms = true
     async fn query_timeline_reads_from_aggregate_store() {
         let aggregator = MetaConsoleAggregator::in_memory();
         let frame = NewConsoleFrame {
+            mob_id: None,
             id: None,
             dedupe_key: "event-1".to_string(),
             timestamp_ms: 1,
@@ -17460,10 +20385,11 @@ comms = true
         frame.identity = SYSTEM_EVENT_IDENTITY.into();
         let policy = capture_host_payload_policy(&view.inner, &frame.runtime_key, None)
             .expect("host payload policy");
-        let stored = append_and_emit_runtime_plane(&view.inner, frame, policy)
-            .await
-            .expect("append")
-            .frame;
+        let stored =
+            append_and_emit_runtime_plane(&view.inner, frame, policy, FrameWriter::NoRegistration)
+                .await
+                .expect("append")
+                .frame;
         assert_eq!(stored.payload["content"], "[host redacted]");
         assert_eq!(stored.status, ConsoleFrameStatus::Redacted);
         let ConsoleTimelineEvent::ConsoleFrame { frame } =
@@ -17554,10 +20480,15 @@ comms = true
                 .is_err(),
             "missing producer cannot silently use AllowAll"
         );
-        let first = append_and_emit_runtime_plane(&aggregator.inner, frame.clone(), policy.clone())
-            .await
-            .expect("already admitted source")
-            .frame;
+        let first = append_and_emit_runtime_plane(
+            &aggregator.inner,
+            frame.clone(),
+            policy.clone(),
+            FrameWriter::NoRegistration,
+        )
+        .await
+        .expect("already admitted source")
+        .frame;
         let mut replacement = entry;
         replacement.registration_id = uuid::Uuid::new_v4();
         replacement.visibility_policy = Arc::new(AllowAllConsoleVisibilityPolicy);
@@ -17568,10 +20499,15 @@ comms = true
             .expect("registry")
             .insert("runtime-a".into(), replacement);
         frame.dedupe_key = "replaced-source".into();
-        let second = append_and_emit_runtime_plane(&aggregator.inner, frame, policy)
-            .await
-            .expect("captured policy")
-            .frame;
+        let second = append_and_emit_runtime_plane(
+            &aggregator.inner,
+            frame,
+            policy,
+            FrameWriter::NoRegistration,
+        )
+        .await
+        .expect("captured policy")
+        .frame;
         for stored in [first, second] {
             assert_eq!(stored.payload, json!({"content":"[host redacted]"}));
             let ConsoleTimelineEvent::ConsoleFrame { frame } =
@@ -18771,6 +21707,7 @@ comms = true
         aggregator
             .store()
             .append_if_absent(NewConsoleFrame {
+                mob_id: None,
                 id: None,
                 dedupe_key: "anchored-user-input".to_string(),
                 timestamp_ms: 1,
@@ -18799,6 +21736,7 @@ comms = true
             aggregator
                 .store()
                 .append_if_absent(NewConsoleFrame {
+                    mob_id: None,
                     id: None,
                     dedupe_key: format!("noisy-tail-{idx}"),
                     timestamp_ms: idx,
@@ -18915,6 +21853,7 @@ comms = true
             aggregator
                 .store()
                 .append_if_absent(NewConsoleFrame {
+                    mob_id: None,
                     id: None,
                     dedupe_key: format!("recent-hidden-gap-{idx}"),
                     timestamp_ms: idx,
@@ -19039,6 +21978,7 @@ comms = true
             aggregator
                 .store()
                 .append_if_absent(NewConsoleFrame {
+                    mob_id: None,
                     id: None,
                     dedupe_key: format!("hidden-gap-{idx}"),
                     timestamp_ms: idx,
@@ -19067,6 +22007,7 @@ comms = true
         aggregator
             .store()
             .append_if_absent(NewConsoleFrame {
+                mob_id: None,
                 id: None,
                 dedupe_key: "visible-after-gap".to_string(),
                 timestamp_ms: 1_501,
@@ -19117,6 +22058,7 @@ comms = true
             aggregator
                 .store()
                 .append_if_absent(NewConsoleFrame {
+                    mob_id: None,
                     id: None,
                     dedupe_key: format!("visible-{idx}"),
                     timestamp_ms: idx,
@@ -19192,6 +22134,7 @@ comms = true
             );
         let inserted = store
             .append_if_absent(NewConsoleFrame {
+                mob_id: None,
                 id: None,
                 dedupe_key: "event-1".to_string(),
                 timestamp_ms: 1,
@@ -19240,6 +22183,7 @@ comms = true
     #[test]
     fn legacy_timeline_struct_literals_remain_source_compatible() {
         let query = ConsoleTimelineQuery {
+            mob_id: None,
             identity: Some("agent-a".to_string()),
             conversation_id: None,
             after: Some(ConsoleCursor::from("console:1")),
@@ -19273,6 +22217,7 @@ comms = true
             );
         store
             .append_if_absent(NewConsoleFrame {
+                mob_id: None,
                 id: None,
                 dedupe_key: "event-1".to_string(),
                 timestamp_ms: 1,
@@ -19528,6 +22473,7 @@ comms = true
 
         store
             .append_if_absent(NewConsoleFrame {
+                mob_id: None,
                 id: None,
                 dedupe_key: "stale-session-history-agent-a".to_string(),
                 timestamp_ms: 10,
@@ -19767,6 +22713,7 @@ comms = true
         for idx in 0..5_000 {
             store
                 .append_if_absent(NewConsoleFrame {
+                    mob_id: None,
                     id: None,
                     dedupe_key: format!("event-{idx}"),
                     timestamp_ms: idx,
@@ -19852,6 +22799,7 @@ comms = true
         .expect("spawned member kickoff is readable before live-frame race");
         store
             .append_if_absent(NewConsoleFrame {
+                mob_id: None,
                 id: None,
                 dedupe_key: "live-tool-before-history".to_string(),
                 timestamp_ms: 10,
@@ -19943,6 +22891,7 @@ comms = true
         for idx in 0..1_000 {
             store
                 .append_if_absent(NewConsoleFrame {
+                    mob_id: None,
                     id: None,
                     dedupe_key: format!("event-{idx}"),
                     timestamp_ms: idx,
@@ -20241,6 +23190,7 @@ comms = true
     async fn status_updates_get_replayable_aggregate_cursors() {
         let aggregator = MetaConsoleAggregator::in_memory();
         let frame = NewConsoleFrame {
+            mob_id: None,
             id: None,
             dedupe_key: "send-1".to_string(),
             timestamp_ms: 1,
@@ -20271,6 +23221,7 @@ comms = true
 
         update_frame_status_and_emit(
             &aggregator.inner,
+            None,
             &inserted.frame.id,
             ConsoleFrameStatus::Delivered,
         )
@@ -20303,6 +23254,7 @@ comms = true
     async fn steer_delivery_appends_terminal_control_frame() {
         let aggregator = MetaConsoleAggregator::in_memory();
         let frame = NewConsoleFrame {
+            mob_id: None,
             id: None,
             dedupe_key: "send-steer-1".to_string(),
             timestamp_ms: 1,
@@ -21323,6 +24275,7 @@ comms = true
 
     fn counterpart_lineage_frame(key: &str, kind: &str, payload: Value) -> NewConsoleFrame {
         NewConsoleFrame {
+            mob_id: None,
             id: None,
             dedupe_key: key.to_string(),
             timestamp_ms: 2_000,
@@ -21805,6 +24758,7 @@ comms = true
             aggregator
                 .store()
                 .append_if_absent(NewConsoleFrame {
+                    mob_id: None,
                     id: None,
                     dedupe_key: format!("filler-{idx}"),
                     timestamp_ms: idx,
@@ -21833,6 +24787,7 @@ comms = true
         aggregator
             .store()
             .append_if_absent(NewConsoleFrame {
+                mob_id: None,
                 id: None,
                 dedupe_key: "live-user-input".to_string(),
                 timestamp_ms: 2_000,
@@ -21859,6 +24814,7 @@ comms = true
             .expect("append live input");
 
         let history = NewConsoleFrame {
+            mob_id: None,
             id: None,
             dedupe_key: "history-user-input".to_string(),
             timestamp_ms: 3_000,
@@ -21895,6 +24851,7 @@ comms = true
         aggregator
             .store()
             .append_if_absent(NewConsoleFrame {
+                mob_id: None,
                 id: None,
                 dedupe_key: "live-user-input".to_string(),
                 timestamp_ms: 2_000,
@@ -21921,6 +24878,7 @@ comms = true
             .expect("append live input");
 
         let history = NewConsoleFrame {
+            mob_id: None,
             id: None,
             dedupe_key: "history-user-input".to_string(),
             timestamp_ms: 3_000,
@@ -21957,6 +24915,7 @@ comms = true
         aggregator
             .store()
             .append_if_absent(NewConsoleFrame {
+                mob_id: None,
                 id: None,
                 dedupe_key: "live-user-input".to_string(),
                 timestamp_ms: 2_000,
@@ -21983,6 +24942,7 @@ comms = true
             .expect("append live input");
 
         let history = NewConsoleFrame {
+            mob_id: None,
             id: None,
             dedupe_key: "history-user-input".to_string(),
             timestamp_ms: 3_000,
@@ -22021,6 +24981,7 @@ comms = true
         aggregator
             .store()
             .append_if_absent(NewConsoleFrame {
+                mob_id: None,
                 id: None,
                 dedupe_key: "live-tool-result".to_string(),
                 timestamp_ms: 2_000,
@@ -22051,6 +25012,7 @@ comms = true
             .expect("append live tool result");
 
         let history = NewConsoleFrame {
+            mob_id: None,
             id: None,
             dedupe_key: "history-tool-result".to_string(),
             timestamp_ms: 3_000,
@@ -22093,6 +25055,7 @@ comms = true
             aggregator
                 .store()
                 .append_if_absent(NewConsoleFrame {
+                    mob_id: None,
                     id: None,
                     dedupe_key: format!("live-delta-{idx}"),
                     timestamp_ms: 2_000 + idx as u64,
@@ -22120,6 +25083,7 @@ comms = true
         }
 
         let history = NewConsoleFrame {
+            mob_id: None,
             id: None,
             dedupe_key: "history-assistant-complete".to_string(),
             timestamp_ms: 3_000,

@@ -55,7 +55,10 @@ Meerkat is pre-1.0, and patch releases can carry declared breaking changes.
 - `rkat storage doctor` reports no new problems.
 - An SDK `connect()` succeeds.
 
-## Unreleased
+## Upgrading to 0.9.18
+
+This section is for systems running 0.9.17. The full list of changes is in
+the CHANGELOG under `## [0.9.18]`.
 
 ### Gemini provider default: Argon to Neon
 
@@ -96,7 +99,7 @@ change does not establish Neon availability in that installer.
 
 ### A custom `gemini-4-neon` entry
 
-The unreleased catalog includes `gemini-4-neon`. Model IDs must be unique across
+The 0.9.18 catalog includes `gemini-4-neon`. Model IDs must be unique across
 built-in, custom and self-hosted entries. Remove any custom
 `[models.gemini-4-neon]` entry from realm/project configurations and mob
 definitions before upgrading, or validation refuses the duplicate ID.
@@ -106,6 +109,135 @@ API tier. Its provider default is separate from the global and image defaults.
 See [Providers](/concepts/providers) for the synchronous limits. If rolling
 back to 0.9.17, restore the custom entry where you still select Neon; that
 release has no built-in Neon row.
+
+### Steers join the next model request
+
+A change of timing, with no type, wire or schema change. It concerns hosts
+that send more than one `steer` input into a running turn.
+
+Do not rely on a model decision between consecutive eligible steers. In
+0.9.17 one durable steer joined a running turn per model boundary, so steers
+that waited together reached the model one request apart. Now, at a
+boundary where a durable steer has registered its claim, the eligible prefix
+of the durable steers that wait in the steer lane joins, in admission order,
+and the next model request is the first to carry them. An acknowledged
+admission is not inclusion in a request. No setting keeps one steer per
+model boundary.
+
+If distinct decisions matter, match the earlier steer to a model decision
+before you send the next one. Its `boundary_append_applied` names the
+`input_id` and the `run_id` of the turn that applied it, and that run's next
+successful `turn_completed` says the model has answered a request that
+carried it. The match is by stream order: `turn_completed` carries no run id
+and no success flag, so take the next one on the session's stream after the
+applied event and before that run ends (`run_completed` or `run_failed`).
+The applied event alone is neither a response nor the durable
+consumption of the input. The next steer then joins a later boundary, or the
+follow-up turn when the run ends first. An earlier steer that itself takes
+the follow-up turn publishes no `boundary_append_applied`: read its
+`last_run_id` with `session/input_status` and take that run's first
+successful `turn_completed`.
+
+When that `turn_completed` does not come (the call failed, the run discarded
+what it applied, or the run reached its terminal or was replayed without
+it), do not wait without a limit and do not resend the steer on your own.
+Reconcile with `session/input_status` (the input's state and its
+`last_run_id`), `boundary_appends_discarded` and retained history.
+
+A steer admitted after a request's input is fixed waits for the next
+boundary, even when its admission was acknowledged before the request was
+composed or sent. A caller cannot tell the two instants apart, so an
+admission acknowledged before the request left does not mean the steer is in
+that request.
+
+Each input keeps its own input id. A successful in-turn application that the
+run retains is exactly once per input: its transcript rows, its delivery
+witness and its `boundary_append_applied`. Several of those events can now
+precede one model request, so match a delivery by `input_id`, not by one
+event or one new transcript row per request. Later requests carry the rows as
+transcript history, which is not another delivery.
+
+A steer withdrawn with `session/recall_input` (or
+`MeerkatMachine::recall_queued_input`) before it joins a run joins no
+request and gets no row from then on, and the steers behind it are not
+delayed. The recall withdraws the queued delivery; it does not undo what a
+model saw of the steer in an earlier turn that applied it and returned it to
+the queue. After the join a recall answers `not_queued` while the run holds
+the steer, and `already_terminal` once the input has ended.
+
+A durable steer that was admitted and still waits when its session is loaded
+again from the store joins the resumed run's next model request when that
+run resumes, once, with the steers that waited beside it in admission order.
+A durable steer admitted after the load and before their work has begun
+joins that request behind them.
+It does not wait for a follow-up turn. With no run to resume it starts the
+next run as its own input. The limits are in
+[Durable steer](/reference/session-contracts#durable-steer).
+
+Unchanged: no model request in flight is cancelled; steers still waiting when
+the run ends take the follow-up turn in arrival order; an input that only a
+fresh turn applies, and a directed delivery, never join a running turn. The
+contract and its two cutoffs are in
+[Durable steer](/reference/session-contracts#durable-steer).
+
+### Meta 0.9.18
+
+The full list is in `meta/CHANGELOG.md` under `## [0.9.18]`.
+
+- Console: the console the stock gateways serve now lists the mobs nested
+  under the gateway's own mob (the mobs its agents create with the mob
+  tools) with their members.
+  Through 0.9.17 it hid every member of every such mob. After the upgrade
+  those members are listed, and can be inspected, read and sent to, by
+  every caller the access rules let see them: every caller of a console
+  with no access configuration (a member private to a person stays
+  private to that person), an access admin, and under a configuration any
+  caller a rule allows. A nested member is decided as an agent of its
+  own: by its identity `<mob id>/<name>`, its role in its mob, its labels
+  (`source_mob_id` names its mob) and its spawn ancestors. So an allow
+  rule that matches by role, by label, by `"*"` or on the member that
+  spawned it now also shows the nested members it matches, and a deny
+  rule hides them the same way. **Do:** before the upgrade, read the
+  allow rules that match by role, by label or by `"*"`; to grant one
+  nested mob's members alone, select them with `match_labels = {
+  source_mob_id = "<mob id>" }`, a label only the console writes. To
+  keep nested mobs hidden as in 0.9.17, launch `rpc_gateway` with
+  `runtime_options.console_list_nested_mobs = false` (Python
+  `.console_list_nested_mobs(False)`, TypeScript
+  `.consoleListNestedMobs(false)`), or `meta_gateway` with the
+  `meta/init` param `console_list_nested_mobs: false` or the environment
+  variable `META_CONSOLE_LIST_NESTED_MOBS=false`. A Rust host that builds
+  the stock console itself passes
+  `stock_console_visibility_policy(NestedMobListing::Hidden)`; the
+  Upgrade section of `meta/CHANGELOG.md` names each call.
+- Spawns into a mob an agent created: Meta refuses a spawn while it cannot
+  say for certain who that mob is private to. The caller (an agent's spawn
+  tool, an SDK or RPC spawn, a schedule delivery) gets the spawn's wiring
+  error. When nothing says for certain who the agent that
+  created the mob is private to (its own mob did not restore and is
+  quarantined, say), the error reads `who mob '<id>' is private to is not
+  known: nothing says for certain who the member that created it is private
+  to (its mob cannot be read here, or that mob's records no longer name the
+  member); the spawn can be made again once they do`. It clears when Meta
+  can read that agent's mob again and its records name the agent, with no
+  restart: Meta then reads the created mob again by itself, and a spawn
+  made after that read is seated. A spawn Meta refuses with `who mob
+  '<id>' is private to is not known yet (the private-owner record is
+  still being read); retry the spawn` is made again. **Do:** bring the mob
+  of the agent that created the mob back (`meta/status` lists a mob that
+  did not restore), then make the spawn again, and once more if it is
+  still refused.
+  When the mob of the agent that created it will not be hosted again,
+  destroy the created mob and create it again.
+- The upgrade relabels no member: a member of a mob an agent created keeps
+  the `console.private_to` label it was seated with, or none, and the
+  label is decided only for spawns made after the upgrade. Where the agent
+  that created a mob carries the label and a member of the mob does not,
+  the Console lists that member to the mob's owner and the access admins
+  only: a member of a mob that is private to a person is that person's on
+  the Console, whatever its own row says. **Do:** to have a member's label
+  decided anew, retire it and have it spawned again, or destroy the mob
+  and have it created again.
 
 ## Upgrading to 0.9.17
 
@@ -5410,7 +5542,9 @@ mode with leading zeros (`'0755'`; unquoted it reads as `755.0`).
   by exactly one follow-up turn. 0.9.3 showed peer and text-only prompt
   steers to one model request and never stored them. History now holds their
   rows, `boundary_append_applied` reports them, and each incoming comms
-  notice publishes one `peer_content_ingested`.
+  notice publishes one `peer_content_ingested`. From 0.9.18 the eligible
+  steers waiting at a boundary with a registered claim join it together: see
+  [Steers join the next model request](#steers-join-the-next-model-request).
 - **Replies name what they answer:** the model's peer message notice gains a
   `Delivery ID: <id>` line and, for a reply, an `In reply to: <id>` line.
   `reply_to_peer` can answer a message that joined the running turn.

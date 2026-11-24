@@ -44,6 +44,11 @@ impl MetaRuntimeHandle {
     fn scoped_idempotency_key(route_id: &str, idempotency_key: &str) -> String {
         format!("{route_id}:{idempotency_key}")
     }
+    /// The key of a mob's deliveries in the history: none for the host's
+    /// default mob.
+    fn delivery_history_key(mob_id: Option<&meerkat_mob::MobId>) -> Option<String> {
+        mob_id.map(|mob_id| mob_id.as_str().to_string())
+    }
     fn trusted_resolution_for_delivery(
         &self,
         provided: &RoutingResolution,
@@ -95,8 +100,14 @@ impl MetaRuntimeHandle {
         }
         if let Some(existing) = self
             .delivery_history
-            .iter()
-            .find(|record| record.delivery_id == entry.delivery_id)
+            .get(&Self::delivery_history_key(
+                provided_resolution.mob_id.as_ref(),
+            ))
+            .and_then(|deliveries| {
+                deliveries
+                    .iter()
+                    .find(|record| record.delivery_id == entry.delivery_id)
+            })
         {
             return Ok(Some(existing.clone()));
         }
@@ -127,6 +138,17 @@ impl MetaRuntimeHandle {
         &mut self,
         request: DeliverySendRequest,
     ) -> Result<DeliveryRecord, DeliverySendError> {
+        // A send is for one mob (the mob its request names, none being the
+        // default mob) and takes a resolution of that mob only. This is
+        // judged before anything else, a keyed replay included, so that a
+        // send with another mob's resolution reaches neither the delivery
+        // module nor the history.
+        if request.resolution.mob_id != request.mob_id {
+            return Err(DeliverySendError::ResolutionOfAnotherMob {
+                resolution_mob_id: request.resolution.mob_id.clone(),
+                request_mob_id: request.mob_id.clone(),
+            });
+        }
         if !self.is_module_loaded("delivery") {
             return Err(DeliverySendError::DeliveryModuleNotLoaded);
         }
@@ -258,6 +280,7 @@ impl MetaRuntimeHandle {
         let record = DeliveryRecord {
             delivery_id: delivery_id.clone(),
             route_id: trusted_resolution.route_id.clone(),
+            mob_id: request.mob_id.clone(),
             recipient: trusted_resolution.recipient.clone(),
             sink: trusted_resolution.sink.clone(),
             target_module: trusted_resolution.target_module.clone(),
@@ -270,6 +293,24 @@ impl MetaRuntimeHandle {
             sink_adapter: boundary_outcome.sink_adapter,
         };
 
+        // The event names the delivery's mob as the record does: left out
+        // for the default mob.
+        let mut event_payload = serde_json::json!({
+            "delivery_id": record.delivery_id,
+            "route_id": record.route_id,
+            "recipient": record.recipient,
+            "sink": record.sink,
+            "status": record.status,
+            "attempts": record.attempts,
+        });
+        if let (Some(mob_id), Some(members)) =
+            (record.mob_id.as_ref(), event_payload.as_object_mut())
+        {
+            members.insert(
+                "mob_id".to_string(),
+                Value::String(mob_id.as_str().to_string()),
+            );
+        }
         insert_event_sorted(
             &mut self.merged_events,
             EventEnvelope {
@@ -279,14 +320,7 @@ impl MetaRuntimeHandle {
                 event: UnifiedEvent::Module(ModuleEvent {
                     module: "delivery".to_string(),
                     event_type: "send".to_string(),
-                    payload: serde_json::json!({
-                        "delivery_id": record.delivery_id,
-                        "route_id": record.route_id,
-                        "recipient": record.recipient,
-                        "sink": record.sink,
-                        "status": record.status,
-                        "attempts": record.attempts,
-                    }),
+                    payload: event_payload,
                 }),
             },
         );
@@ -306,27 +340,69 @@ impl MetaRuntimeHandle {
                 .or_default()
                 .push(scoped_key);
         }
-        self.delivery_history.push(record.clone());
-        while self.delivery_history.len() > DELIVERY_HISTORY_LIMIT_MAX {
-            let evicted = self.delivery_history.remove(0);
-            if let Some(scoped_keys) = self
-                .delivery_idempotency_by_delivery
-                .remove(&evicted.delivery_id)
-            {
-                for scoped_key in scoped_keys {
-                    self.delivery_idempotency.remove(&scoped_key);
-                }
-            }
+        // A mob keeps its own newest deliveries: only this mob's oldest are
+        // dropped, and with each its idempotency entries.
+        let deliveries = self
+            .delivery_history
+            .entry(Self::delivery_history_key(record.mob_id.as_ref()))
+            .or_default();
+        deliveries.push(record.clone());
+        let mut dropped = Vec::new();
+        while deliveries.len() > DELIVERY_HISTORY_LIMIT_MAX {
+            dropped.push(deliveries.remove(0).delivery_id);
+        }
+        for delivery_id in dropped {
+            self.forget_delivery_idempotency(&delivery_id);
         }
 
         Ok(record)
     }
 
-    /// Test seam: keep `record` in the delivery history, as a send that
-    /// produced it would.
+    /// Drop the idempotency entries of a delivery the history no longer
+    /// keeps.
+    fn forget_delivery_idempotency(&mut self, delivery_id: &str) {
+        if let Some(scoped_keys) = self.delivery_idempotency_by_delivery.remove(delivery_id) {
+            for scoped_key in scoped_keys {
+                self.delivery_idempotency.remove(&scoped_key);
+            }
+        }
+    }
+
+    /// Forget what the host keeps of one mob: its routes, the resolutions
+    /// made for it, its delivery history and the idempotency entries of
+    /// those deliveries. The approvals the host still holds that name the
+    /// mob are withdrawn by the host
+    /// ([`Self::withdraw_gating_action`]); the audit keeps its
+    /// entries. Asked before a mob is created under the id, for what an
+    /// earlier mob of that id left: the mob created under it starts with
+    /// none of it and is asked for none of those approvals. The default
+    /// mob's are never forgotten this way.
+    pub fn forget_mob(&mut self, mob_id: &meerkat_mob::MobId) {
+        self.runtime_routes
+            .retain(|_, route| route.mob_id.as_ref() != Some(mob_id));
+        let forgotten = self
+            .delivery_history
+            .remove(&Self::delivery_history_key(Some(mob_id)))
+            .unwrap_or_default();
+        for record in forgotten {
+            self.forget_delivery_idempotency(&record.delivery_id);
+        }
+        self.routing_resolutions
+            .retain(|_, resolution| resolution.mob_id.as_ref() != Some(mob_id));
+        let kept = &self.routing_resolutions;
+        self.routing_resolution_order
+            .retain(|route_id| kept.contains_key(route_id));
+        self.withdraw_gating_requests_of_mob(mob_id);
+    }
+
+    /// Test seam: keep `record` in the delivery history of its mob, as a
+    /// send that produced it would.
     #[cfg(test)]
     pub(crate) fn record_delivery_for_test(&mut self, record: DeliveryRecord) {
-        self.delivery_history.push(record);
+        self.delivery_history
+            .entry(Self::delivery_history_key(record.mob_id.as_ref()))
+            .or_default()
+            .push(record);
     }
 
     pub fn delivery_history(&self, request: DeliveryHistoryRequest) -> DeliveryHistoryResponse {
@@ -341,8 +417,12 @@ impl MetaRuntimeHandle {
             .map(|value| value.trim())
             .filter(|value| !value.is_empty());
 
+        // The deliveries of the mob the request names, and of no other.
         let deliveries = self
             .delivery_history
+            .get(&Self::delivery_history_key(request.mob_id.as_ref()))
+            .map(Vec::as_slice)
+            .unwrap_or_default()
             .iter()
             .filter(|record| {
                 recipient_filter

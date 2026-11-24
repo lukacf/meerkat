@@ -1196,7 +1196,9 @@ export function WorkGraphPanel({
             tone="ok"
             value={counts.ready}
             foot={counts.ready ? "can start now" : "nothing can start yet"}
-            title={model.readySource === "server" ? "Open, unblocked and due, as the runtime reports" : undefined}
+            title={model.readySource === "server"
+              ? "Counts loaded items that the runtime reports as ready and for which the snapshot records no blockers. Panel filters do not change this count."
+              : undefined}
             testId="workgraph-glance:ready"
           />
           <FigureTile

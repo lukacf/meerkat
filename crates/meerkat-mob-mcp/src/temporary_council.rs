@@ -1735,7 +1735,21 @@ impl TemporaryCouncilCoordinator {
             .await
             .map_err(TemporaryCouncilError::store)?;
         let mut sweep = TemporaryCouncilRecoverySweep::default();
+        let awaiting_launch = self.state.launch_serve_awaited().await;
         for record in unfinished {
+            // A council over members of the default mob is cleaned up
+            // through that mob. While the default mob awaits its launch's
+            // serve, a lookup of it waits; the sweep recovers its records
+            // one after another, so it leaves this one unfinished and goes
+            // on. A sweep after the serve takes it up.
+            if let Some(default_mob_id) = awaiting_launch.as_ref()
+                && record
+                    .participants
+                    .iter()
+                    .any(|participant| &participant.source_mob_id == default_mob_id)
+            {
+                continue;
+            }
             let council_id = record.council_id.clone();
             let claim_lease_expires_at = record.claim_lease_expires_at;
             match self.recover_reserved(record).await {
@@ -2704,6 +2718,14 @@ impl CouncilRun {
                 custody.target_identity.clone(),
             )
             .with_creation_source(meerkat_mob::MemberCreationSourceWitness::unavailable());
+            // A participant of a council a session convened is seated for
+            // that session: its seat record names the convener's seat as the
+            // set seals it now, from the session the council recorded, never
+            // from the call. A council with no convener seals nothing.
+            if let Some(convener) = self.record.convener.as_ref() {
+                spec =
+                    spec.with_seat_creator(self.state.seat_creator_of(&convener.session_id).await);
+            }
             // A council drives explicit bounded turns, so the seated branch is
             // turn-driven regardless of the template profile's mode: an
             // autonomous inbox loop cannot serve a tracked bounded turn.

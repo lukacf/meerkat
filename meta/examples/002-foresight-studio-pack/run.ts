@@ -68,7 +68,7 @@ type ToolContext = {
 };
 
 const here = dirname(fileURLToPath(import.meta.url));
-const repoRoot = resolve(here, "../..");
+const repoRoot = resolve(here, "../../..");
 const configDir = join(here, "config");
 const scenarioPath = join(here, "scenario.yaml");
 const scenario = YAML.parse(readFileSync(scenarioPath, "utf-8")) as Scenario;

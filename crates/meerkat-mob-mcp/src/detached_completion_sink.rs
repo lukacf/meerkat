@@ -355,12 +355,13 @@ impl RetainedJobSource for MobJobOwner {
         };
         match producer {
             ContinuationProducer::ForkOff => {
-                let handles: Vec<MobHandle> = state
-                    .managed_mob_handles()
-                    .await
-                    .into_iter()
-                    .map(|(_, handle)| handle)
-                    .collect();
+                // The loaded mobs and whether a known mob is not loaded, from
+                // one read of the set: a job none of the loaded mobs holds
+                // may be held by a mob that is only dormant.
+                let (handles, a_mob_is_not_loaded) =
+                    state.managed_mob_handles_and_any_unloaded().await;
+                let handles: Vec<MobHandle> =
+                    handles.into_iter().map(|(_, handle)| handle).collect();
                 let mut found = Vec::new();
                 for handle in handles {
                     match handle.fork_job_terminals().await {
@@ -390,6 +391,15 @@ impl RetainedJobSource for MobJobOwner {
                     Err(found) if found.is_empty() && !state.mob_set_complete() => {
                         RetainedJobLookup::Unavailable(format!(
                             "no mob of this host holds fork_off job {job_id} before its mobs are restored"
+                        ))
+                    }
+                    // Not found among the loaded mobs while the set knows a
+                    // mob it has not loaded: that mob may hold the job, so
+                    // the completion waits. An absent job is refused for
+                    // good, and a dormant mob is not gone.
+                    Err(found) if found.is_empty() && a_mob_is_not_loaded => {
+                        RetainedJobLookup::Unavailable(format!(
+                            "no loaded mob of this host holds fork_off job {job_id}, and a mob that may hold it is not loaded"
                         ))
                     }
                     // None, or a job id a host gave to more than one child:
@@ -446,13 +456,53 @@ pub(crate) struct HostContinuationResolver {
     pub(crate) state: Weak<MobMcpState>,
 }
 
+/// One served mob, as the lookup a member owner's address is read through:
+/// the handle comes from one read of the hosted set, so the roster that
+/// answers is the roster of the mob that read found served.
+struct ServedMob {
+    mob_id: MobId,
+    handle: MobHandle,
+}
+
+#[async_trait::async_trait]
+impl meerkat_mob::continuation::MobHandleLookup for ServedMob {
+    async fn mob_handle(&self, mob_id: &MobId) -> Option<MobHandle> {
+        (&self.mob_id == mob_id).then(|| self.handle.clone())
+    }
+}
+
 #[async_trait::async_trait]
 impl ContinuationAddressResolver for HostContinuationResolver {
+    /// A member owner's current address is read from its mob's roster. A
+    /// completion is owed to that member whether or not its mob is served
+    /// now: a mob that is known and not loaded is loaded for it, and a mob
+    /// whose idle unload is admitted is waited for, as a delivery to the
+    /// member does ([`Self::resolve_address`]). "No such owner" drops the
+    /// completion for good, so it is answered only by the roster of the
+    /// served mob, or for a mob no set of this host serves. A mob that is
+    /// known and cannot be served now answers an error, which keeps the
+    /// completion owed.
     async fn current_address(
         &self,
         owner: &ContinuationOwner,
     ) -> Result<Option<LogicalRuntimeId>, String> {
-        self.mobs.current_address(owner).await
+        let (ContinuationOwner::Member { mob_id, .. }, Some(state)) = (owner, self.state.upgrade())
+        else {
+            return self.mobs.current_address(owner).await;
+        };
+        let mob_id = MobId::from(mob_id.as_str());
+        match state.served_mob_handle(&mob_id).await {
+            Ok(Some(handle)) => {
+                meerkat_mob::continuation::MobContinuationResolver::new(Arc::new(ServedMob {
+                    mob_id,
+                    handle,
+                }))
+                .current_address(owner)
+                .await
+            }
+            Ok(None) => Ok(None),
+            Err(error) => Err(format!("mob {mob_id} is known and not served now: {error}")),
+        }
     }
 
     async fn member_address_of_session(
@@ -487,20 +537,33 @@ impl ContinuationAddressResolver for HostContinuationResolver {
             });
         };
         if let Some(member) = member {
-            // A member of a mob this host does not manage waits for its
-            // handle, unless the mob is gone for good.
-            if resolution == AddressResolution::NotServed
-                && state
-                    .mob_is_retired(&MobId::from(member.mob_id.as_str()))
-                    .await
-            {
-                return Ok(AddressResolution::Retired);
+            if resolution == AddressResolution::NotServed {
+                let mob_id = MobId::from(member.mob_id.as_str());
+                // A delivery addresses the member: a mob that is known and
+                // not loaded is loaded for it, and the member is resolved
+                // again through its mob.
+                if state.load_if_unloaded(&mob_id).await {
+                    return self.mobs.resolve_address(address).await;
+                }
+                // A member of a mob this host does not manage waits for its
+                // handle, unless the mob is gone for good.
+                if state.mob_is_retired(&mob_id).await {
+                    return Ok(AddressResolution::Retired);
+                }
             }
             return Ok(resolution);
         }
         let AddressResolution::Session(session_id) = &resolution else {
             return Ok(resolution);
         };
+        // A delivery addresses a plain owner session, which names no mob.
+        // The jobs it is owed for ran in its implicit delegation mob, whose
+        // id is derived from the session: a mob under that id that is known
+        // and not loaded is loaded for the delivery, so the job owner finds
+        // the job where it ran.
+        state
+            .load_if_unloaded(&meerkat_mob::MobDefinition::implicit(&session_id.to_string(), "").id)
+            .await;
         // A session that does not read is not served now, and its absence
         // proves nothing (see `observe_address`): retired only on its own
         // lifecycle proof, otherwise it waits unserved with its rows owed

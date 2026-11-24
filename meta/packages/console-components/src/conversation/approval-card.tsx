@@ -16,6 +16,7 @@ import {
   RelativeTime,
   TechnicalId,
   agentDisplayName,
+  agentOpenable,
   countdownTone,
   cx,
   formatAbsoluteTime,
@@ -171,7 +172,7 @@ function AskedLine({ request, waiting, testId }: { request: PendingApproval; wai
   const actor = request.actorId;
   const origin = request.origin?.identity;
   const originName = origin ? agentDisplayName(origin, directory) || origin : "";
-  const openChat = origin && navigation?.openAgent ? () => navigation.openAgent?.(origin, "chat") : null;
+  const openChat = origin && navigation?.openAgent && agentOpenable(origin, directory) ? () => navigation.openAgent?.(origin, "chat") : null;
   // A request from the actor's own chat names that chat once: "Open the
   // chat" when the host can open it, nothing more when it cannot.
   const ownChat = Boolean(origin && actor && origin === actor);
@@ -460,7 +461,7 @@ export function PrivateReplyCard({ item, onDismiss }: {
   const navigation = useConsoleNavigation();
   const identity = item.origin.identity;
   const name = agentDisplayName(identity, directory) || identity;
-  const openChat = navigation?.openAgent ? () => navigation.openAgent?.(identity, "chat") : null;
+  const openChat = navigation?.openAgent && agentOpenable(identity, directory) ? () => navigation.openAgent?.(identity, "chat") : null;
   return (
     <article
       className="cc-approval cc-private-reply"

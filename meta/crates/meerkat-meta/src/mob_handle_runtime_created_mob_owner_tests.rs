@@ -156,9 +156,9 @@ async fn a_mob_created_under_a_used_id_by_a_shared_member_seats_shared_members()
         .expect("the create under the used id");
     assert_eq!(
         owners.owner_of(mob_id.as_str(), "worker-a").as_deref(),
-        Some(PERSON_A),
-        "a create leaves what the record holds of members: a name the later mob has not seated \
-         still answers the earlier member's person"
+        None,
+        "a create forgets the members the record held under the id: a name the later mob has \
+         not seated answers no earlier member's person"
     );
     assert_eq!(
         owners.recorded_mob_owner(mob_id.as_str()),
@@ -416,7 +416,10 @@ fn schedules_of(
 ) {
     let service = meerkat::ScheduleService::new(Arc::new(meerkat::MemoryScheduleStore::new()));
     let registry = crate::schedule_wiring::ScheduleMobTargetRegistry::default();
-    registry.adopt_mob_runtime(runtime);
+    registry.adopt_mob_runtime(
+        runtime,
+        &crate::member_key::DefaultMob::new(runtime.handle().mob_id().clone()),
+    );
     let release = Arc::new(crate::schedule_wiring::MobAgentSchedules::new(
         service.clone(),
         registry,
@@ -563,7 +566,10 @@ async fn a_create_is_refused_when_the_schedules_cannot_be_read() {
     let host = Host::new();
     let runtime = declared_runtime(dir.path(), &host).await;
     let registry = crate::schedule_wiring::ScheduleMobTargetRegistry::default();
-    registry.adopt_mob_runtime(&runtime);
+    registry.adopt_mob_runtime(
+        &runtime,
+        &crate::member_key::DefaultMob::new(runtime.handle().mob_id().clone()),
+    );
     runtime
         .mob_schedules()
         .bind(Arc::new(crate::schedule_wiring::MobAgentSchedules::new(

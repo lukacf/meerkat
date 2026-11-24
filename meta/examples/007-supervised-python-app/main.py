@@ -25,6 +25,7 @@ from meerkat_meta import DurableAgentSpec, Meta, TurnOutputStatus
 from meerkat_meta.errors import (
     GatewayStartupCleanupError,
     InitOutcomeUnknownError,
+    StorageResolutionError,
     TransportReaderFailedError,
 )
 
@@ -159,21 +160,21 @@ def kill_gateway() -> None:
 
 
 async def step_mistakes(state_dir: Path, gateway: str, runtime) -> None:
-    # Mistake one: a second runtime on a state directory that is in use. The
-    # gateway refuses it. In the 0.9.15 SDK the refusal arrives wrapped: the
-    # sentence that says why is in `startup_error`.
+    # Only the state-in-use refusal is expected. The 0.9.15 SDK could
+    # wrap it during startup cleanup; 0.9.18 raises it directly.
     try:
-        second = await builder(state_dir, gateway, init_deadline=30).build()
-    except GatewayStartupCleanupError as error:
-        reason = str(error.startup_error)
-        in_use = "in use by another Meta runtime" in reason
-        print(
-            f"[6] a second runtime on the same state was refused, state in use: {yes_no(in_use)}"
-        )
-    else:
-        await stop(second)
-        print("[6] a second runtime on the same state STARTED: this must not happen")
-    await stop(runtime)
+        try:
+            second = await builder(state_dir, gateway, init_deadline=30).build()
+        except (StorageResolutionError, GatewayStartupCleanupError) as error:
+            refusal = error.startup_error if isinstance(error, GatewayStartupCleanupError) else error
+            if "in use by another Meta runtime" not in str(refusal):
+                raise
+            print("[6] a second runtime on the same state was refused, state in use: yes")
+        else:
+            await stop(second)
+            raise RuntimeError("a second runtime on the same state unexpectedly started")
+    finally:
+        await stop(runtime)
     # Mistake two: treating an unknown outcome as a refusal. When the wait
     # for the start ends without an answer, the gateway may already have
     # changed state. The error says how far the start got; it does not say

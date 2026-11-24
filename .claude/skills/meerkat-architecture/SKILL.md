@@ -583,8 +583,7 @@ Since 0.9.8 (the 0.9.9 release):
   root.
 - **Quarantined mob stores.** A persisted mob store that does not restore is
   quarantined, kept as found with no actor, and the realm's other mobs
-  restore. `MobStoreRestoreLifecycleMachine` (record-scoped, volatile,
-  clock-free) owns each quarantined store: its class (`store_unavailable`,
+  restore. Its record keeps the class (`store_unavailable`,
   `store_unreadable`, `resume_refused`), which re-attempts it admits (an
   explicit `mob/restore_retry` for any class, an on-demand one only while
   the store could not serve), and the one re-attempt in flight. MobMachine
@@ -594,6 +593,43 @@ Since 0.9.8 (the 0.9.9 release):
   for a stopped writer's re-acquire (`SessionCheckpointer::dispatch_fence_ready`,
   `SelfFence::dispatch_window`, `SelfFence::lost`); a gap suspends the run
   through the machine (`FenceGap`), and only another writer ends the session.
+
+After 0.9.15 (on main, in no release yet):
+
+- **The hosted mob set.** `MobMcpState` keeps one
+  `MobStoreRestoreLifecycleMachine` record per mob store
+  (`crates/meerkat-mob-mcp/src/hosted_set.rs`): dormant, loading, managed,
+  unloading, held, quarantined, retrying or gone. Its managed, held,
+  quarantined, dormant and destroyed sets are reads of the records' phases,
+  and a move between sets is one transition under the set's one lock; only
+  that module applies the machine's inputs, and no shell code reads a
+  record's origin. The facts about the set as a whole are the state of a
+  second machine, `MobHostedSetLifecycleMachine`, one state per set (how
+  far the pass over the stores from before came, whether a census is owed
+  and complete, whether a host inserted a handle, whether every mob is
+  known). `MobRestorePolicy::Eager` (the default, every Meerkat surface)
+  loads every store when the set is first used, each in the step that
+  lists it. `MobRestorePolicy::OnDemand` takes a census of the store files
+  and opens none: a lookup loads its mob (one load, shared by concurrent
+  lookups), the start loads only the mobs the runtime store's obligation
+  scan names, a sweep after ready does the eager pass's other duties one
+  store at a time, and an idle mob is unloaded in two steps of its record.
+  The record admits the unload (only for a store the set can load again);
+  then the mob's own actor answers `close_if_idle`, within a bound (no
+  answer is read as busy). The record's `served` is true exactly in
+  Managed (invariant `a_mob_is_handed_out_exactly_while_managed`), so a mob
+  whose unload is admitted is not handed out: a lookup by id, a destroy, a
+  WorkGraph flow and a completion owed to a member wait for the answer
+  (the waiting lookup, `managed_handle`). It is not
+  hidden either: the readers that hand out no handle (`mob_list`, the
+  inventory, reads of a mob's own facts, and a member lookup, which reads
+  the roster of every mob whose actor runs and waits for no unload) see it
+  until its actor closed, and it is dormant only once that actor has
+  ended. A destroy holds its mob
+  with an owner lease, so the actor declines an unload under it, and never
+  answers an unload for the actor. An unload that is taken up again reads
+  what the actor did before from the mob's own admission (closed idle),
+  and the unload's shutdown is bounded.
 
 ## Runtime Dogma (first review lens)
 

@@ -4,7 +4,7 @@ description: "Trusted route resolution and MCP-backed delivery with optional bou
 icon: "paper-plane"
 ---
 
-*Mirrored from Meerkat Meta main at [d5cab02de5b7](https://github.com/lukacf/meerkat/commit/d5cab02de5b7831af23df8bd862c80448b3c6f36) on 2026-11-20; Meta version 0.9.17 at that commit.*
+*Mirrored from Meerkat Meta main at [5f09cda4ef4a](https://github.com/lukacf/meerkat/commit/5f09cda4ef4ac96d41b72f5fe7413b7da4c4454c) on 2026-11-24; Meta version 0.9.18 at that commit.*
 
 Meta separates route selection from message dispatch. The runtime owns trusted routing resolutions, rate limiting, bounded delivery history, and optional idempotency. The `router` and `delivery` modules provide the external MCP boundaries.
 
@@ -32,6 +32,7 @@ A mutable route override and a resolved route are different types:
 ```rust
 pub struct RuntimeRoute {
     pub route_key: String,
+    pub mob_id: Option<MobId>,
     pub recipient: String,
     pub channel: Option<String>,
     pub sink: String,
@@ -73,6 +74,8 @@ Runtime routes can be listed, added, and deleted through:
 
 Runtime routes may use `*` recipient and channel matches. A matching route is applied after the router MCP response.
 
+A route belongs to one mob: `mob_id` names it, and a route without one is the default mob's (the mob the launch names). A recipient may be a member, and identities are names inside a mob, so a route is keyed by its mob and its `route_key` and applies only to the resolves of its own mob (`RoutingResolveRequest.mob_id`, again the default mob without one), a `*` route included. A route or a resolve of the default mob is serialized without `mob_id`. On the stdio gateway the route RPCs and `meta/routing/resolve` act on the routes of the mob the request names with its top-level `mob_id` (the default mob without one): the request's mob is the route's mob, and a route carries no `mob_id` of its own in a request. The routing config file names no mob yet: a route in it is the default mob's, and a `mob_id` in a config file entry is ignored. A Rust host names the default mob by leaving `mob_id` out: a route it gives the default mob's own id is kept under that id, and no resolve of the default mob matches it. A blank `mob_id` (empty, or only white space) names no mob: a route or a delete that carries one is refused (`RuntimeRouteMutationError::EmptyMobId`), and a resolve that carries one matches no route.
+
 ### Mob-member routes
 
 When the unified runtime reconciles its active roster and the router module is loaded, it manages one route per member:
@@ -80,6 +83,7 @@ When the unified runtime reconciles its active roster and the router module is l
 ```rust
 RuntimeRoute {
     route_key: format!("mob.member.{member_id}"),
+    mob_id: None,
     recipient: member_id,
     channel: Some("notification".to_string()),
     sink: "mob_member".to_string(),

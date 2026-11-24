@@ -711,6 +711,7 @@ pub use meerkat_machine_types::{
     ModelRoutingHandoffRealization, ModelRoutingRealtimePolicy, ResolvedSessionLlmReconfigure,
     SessionLlmCapabilitySurface, SessionLlmCapabilitySurfaceStatus, SessionLlmReconfigureHost,
     SessionLlmReconfigureReport, SessionLlmReconfigureRequest, SessionToolVisibilityDelta,
+    TargetSessionLlmInspection,
 };
 #[doc(hidden)]
 pub use meerkat_machine_types::{

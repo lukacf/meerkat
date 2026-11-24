@@ -91,6 +91,12 @@ impl Selector {
             .all(|(key, value)| labels.get(key) == Some(value));
         identity_matches && profile_matches && labels_match
     }
+
+    /// Whether the selector lists identities: it then selects by an
+    /// agent's name.
+    pub(crate) fn names_identities(&self) -> bool {
+        !self.identity.is_empty()
+    }
 }
 
 /// A validated selector over requesters: every given field must match. A
@@ -175,6 +181,9 @@ impl PeerRule {
 pub struct PeerPolicy {
     rules: Vec<PeerRule>,
     default: PeerOutcome,
+    /// Whether a rule that names peers may only tighten
+    /// ([`IdentityCreationPolicy::for_a_mob_beside_the_launch_mob`]).
+    names_only_tighten: bool,
 }
 
 impl PeerPolicy {
@@ -186,6 +195,13 @@ impl PeerPolicy {
     /// The outcome when no rule matches.
     pub fn default_outcome(&self) -> PeerOutcome {
         self.default
+    }
+
+    /// Whether a rule whose target names peers may only tighten what the
+    /// rules that name none give (the default included): true for the
+    /// policy as a mob beside the launch mob applies it.
+    pub(crate) fn names_only_tighten(&self) -> bool {
+        self.names_only_tighten
     }
 }
 
@@ -261,6 +277,12 @@ impl ApprovalRule {
             && self.target.matches(Some(identity), Some(profile), labels)
     }
 
+    /// Whether the rule selects by an agent's name: its requester or its
+    /// target lists identities.
+    pub(crate) fn names_agents(&self) -> bool {
+        self.requester.agent.names_identities() || self.target.names_identities()
+    }
+
     /// The outcome it gives.
     pub fn outcome(&self) -> &OutcomeRule {
         &self.outcome
@@ -316,6 +338,9 @@ pub struct ApprovalPolicy {
     rules: Vec<ApprovalRule>,
     default: OutcomeRule,
     timeouts: Timeouts,
+    /// Whether a rule that names agents may only tighten
+    /// ([`IdentityCreationPolicy::for_a_mob_beside_the_launch_mob`]).
+    names_only_tighten: bool,
 }
 
 impl ApprovalPolicy {
@@ -332,6 +357,14 @@ impl ApprovalPolicy {
     /// The timeouts.
     pub fn timeouts(&self) -> Timeouts {
         self.timeouts
+    }
+
+    /// Whether a rule that names agents may only tighten what the rules
+    /// that name none give (the default when none governs), taking part
+    /// only where it is strictly stricter: true for the policy as a mob
+    /// beside the launch mob applies it.
+    pub(crate) fn names_agents_only_to_tighten(&self) -> bool {
+        self.names_only_tighten
     }
 }
 
@@ -474,6 +507,29 @@ impl IdentityCreationPolicy {
     /// The approval rules.
     pub fn approval(&self) -> &ApprovalPolicy {
         &self.approval
+    }
+
+    /// This policy as a mob a host serves beside its launch mob applies
+    /// it. A launch has one policy, and its host writes a rule that names
+    /// an agent with the launch mob's agents in mind (also there a name
+    /// may be chosen by whoever is allowed to create an agent, and the
+    /// launch mob applies the policy as it is written). In another mob of
+    /// the host a rule by name was written for none of its agents. So in
+    /// such a mob a rule that names agents (an approval rule whose
+    /// requester or target lists identities, a peer rule whose target
+    /// does) may only tighten: the rules that name no agent give an
+    /// outcome first, the default when none governs, and a rule by name
+    /// takes part only where it is strictly stricter than that. One that
+    /// is as strict takes no part, so it chooses no approver, no time
+    /// limit and no refusal. A name denies and asks for a decision there
+    /// as in the launch mob; it never allows what the other rules do not.
+    /// Profiles and authority labels select as in the launch mob.
+    #[must_use]
+    pub(crate) fn for_a_mob_beside_the_launch_mob(&self) -> Self {
+        let mut policy = self.clone();
+        policy.peers.names_only_tighten = true;
+        policy.approval.names_only_tighten = true;
+        policy
     }
 
     /// Refuse what a launch cannot name in this release: the approval
@@ -1098,6 +1154,7 @@ fn peer_policy(config: &PeersConfig) -> Result<PeerPolicy, PolicyRefusal> {
     Ok(PeerPolicy {
         rules,
         default: config.default,
+        names_only_tighten: false,
     })
 }
 
@@ -1135,6 +1192,7 @@ fn approval_policy(config: &ApprovalConfig) -> Result<ApprovalPolicy, PolicyRefu
         rules,
         default,
         timeouts,
+        names_only_tighten: false,
     })
 }
 

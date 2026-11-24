@@ -7763,12 +7763,12 @@ async fn admit_resumed_run(
             // answer. The next wake of the loop, or the session's next
             // registration, asks again; nothing asks on a timer. The driver
             // notes the round, once the machine has accepted the hold, for a
-            // host that reads the held run.
-            let held = driver.lock().await.hold_resumed_run_for_admission(
-                &run_id,
-                cause,
-                crate::resumed_run_admission::bounded_undecided_reason(&detail),
-            );
+            // host that reads the held run; the note keeps the reason cut at
+            // its bound.
+            let held = driver
+                .lock()
+                .await
+                .hold_resumed_run_for_admission(&run_id, cause, &detail);
             match held {
                 Ok(()) => {
                     tracing::warn!(

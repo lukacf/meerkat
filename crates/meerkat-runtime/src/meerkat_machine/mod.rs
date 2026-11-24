@@ -15495,6 +15495,9 @@ mod durability_gate_wait_tests;
 mod commit_deadline_tests;
 
 #[cfg(test)]
+mod pending_resumed_run_read_tests;
+
+#[cfg(test)]
 mod lost_admission_ack_tests;
 
 #[cfg(all(test, not(target_arch = "wasm32")))]

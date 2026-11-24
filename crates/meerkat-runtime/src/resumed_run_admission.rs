@@ -177,8 +177,11 @@ pub struct PendingResumedRun {
     /// How long this registration has marked the run, by this process's
     /// monotonic clock. It starts when the registration marks the run and
     /// starts over at every registration. It is an observation of when: no
-    /// decision reads it.
-    pub marked_for: Duration,
+    /// decision reads it. `None` when this registration holds no stamp of
+    /// the mark of this run (the machine marks a run the registration did
+    /// not stamp): the time is then not known, which a zero duration could
+    /// not say apart from a run marked this instant.
+    pub marked_for: Option<Duration>,
     /// A stop of the run is recorded and its settlement has not committed:
     /// the run never resumes, and it is answered until the runtime loop has
     /// settled it, which waits for the session's store to take writes. A
@@ -254,7 +257,7 @@ pub enum ResumedRunAdmissionUndecidedCause {
 
 /// `reason`, cut to [`RESUMED_RUN_ADMISSION_REASON_MAX_BYTES`] at a character
 /// boundary.
-pub(crate) fn bounded_undecided_reason(reason: &str) -> String {
+fn bounded_undecided_reason(reason: &str) -> String {
     if reason.len() <= RESUMED_RUN_ADMISSION_REASON_MAX_BYTES {
         return reason.to_string();
     }
@@ -282,13 +285,17 @@ impl UndecidedRoundsNote {
     /// `cause` and with `reason`. A note of the same run counts on and keeps
     /// the time of its first round; a note of another run, or none, starts
     /// over. The caller notes only a round whose hold the machine accepted.
+    /// The note keeps `reason` cut at
+    /// [`RESUMED_RUN_ADMISSION_REASON_MAX_BYTES`]: the bound is applied
+    /// here, where the reason is stored, so it holds for every caller.
     pub(crate) fn note_round(
         note: &mut Option<Self>,
         run_id: &RunId,
         cause: ResumedRunAdmissionUndecidedCause,
-        reason: String,
+        reason: &str,
         now: meerkat_core::time_compat::Instant,
     ) {
+        let reason = bounded_undecided_reason(reason);
         match note.as_mut() {
             Some(noted) if &noted.run_id == run_id => {
                 noted.rounds = noted.rounds.saturating_add(1);
@@ -613,7 +620,7 @@ mod tests {
                 &mut note,
                 run_id,
                 ResumedRunAdmissionUndecidedCause::AnsweredUnavailable,
-                format!("round {round}"),
+                &format!("round {round}"),
                 at,
             );
         }
@@ -716,7 +723,7 @@ mod tests {
             &mut note,
             &second,
             ResumedRunAdmissionUndecidedCause::TimedOut,
-            "the second run's round".to_string(),
+            "the second run's round",
             later,
         );
         let now = later + Duration::from_secs(5);
@@ -761,5 +768,33 @@ mod tests {
         let cut = bounded_undecided_reason(&wide);
         assert_eq!(cut.len(), RESUMED_RUN_ADMISSION_REASON_MAX_BYTES - 1);
         assert!(wide.starts_with(&cut));
+    }
+
+    /// The bound is applied where the reason is stored: a note written with
+    /// a reason past the bound keeps the cut reason, at its first round and
+    /// at a later one, whoever the caller is.
+    #[test]
+    fn a_note_keeps_its_reason_cut_at_the_bound_at_every_round() {
+        let run_id = RunId::new();
+        let at = meerkat_core::time_compat::Instant::now();
+        let wide = "r".repeat(RESUMED_RUN_ADMISSION_REASON_MAX_BYTES * 3);
+        let mut note = None;
+        for round in 1..=2_u64 {
+            UndecidedRoundsNote::note_round(
+                &mut note,
+                &run_id,
+                ResumedRunAdmissionUndecidedCause::AnsweredUnavailable,
+                &wide,
+                at,
+            );
+            let observed = note.as_ref().expect("a noted round").observed(at);
+            assert_eq!(observed.rounds, round);
+            assert_eq!(
+                observed.reason.len(),
+                RESUMED_RUN_ADMISSION_REASON_MAX_BYTES,
+                "round {round} keeps the reason cut at the bound"
+            );
+            assert!(wide.starts_with(&observed.reason));
+        }
     }
 }

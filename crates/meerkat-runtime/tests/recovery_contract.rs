@@ -7156,17 +7156,59 @@ async fn a_superseded_answer_after_an_undecided_one_settles_the_run_as_refused()
 // A host's poll of a run that waits: `MeerkatMachine::pending_resumed_run`.
 // ---------------------------------------------------------------------------
 
-/// What a poll answers for `session_id`'s marked run. The session is
-/// readable in these rows.
+/// What a poll answers for `session_id`'s marked run. A poll that answers
+/// "not readable now" is asked again, for at most five seconds: the read
+/// waits only its bound (100 ms) for the session's state, and on a loaded
+/// host a task can hold that state for longer without a defect. The row
+/// that holds the state on purpose asserts that answer by itself.
 async fn polled(
     machine: &MeerkatMachine,
     session_id: &SessionId,
 ) -> Option<meerkat_runtime::PendingResumedRun> {
-    match machine.pending_resumed_run(session_id).await {
-        None => None,
-        Some(meerkat_runtime::PendingResumedRunRead::Pending(run)) => Some(run),
-        Some(other) => panic!("the session is readable: {other:?}"),
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match machine.pending_resumed_run(session_id).await {
+            None => return None,
+            Some(meerkat_runtime::PendingResumedRunRead::Pending(run)) => return Some(run),
+            Some(other) => {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "the session stays not readable: {other:?}"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        }
     }
+}
+
+/// What a poll of every session answers, each session readable (asked again
+/// as [`polled`] is).
+async fn polled_all(machine: &MeerkatMachine) -> Vec<meerkat_runtime::PendingResumedRun> {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let reads = machine.pending_resumed_runs().await;
+        let mut pending = Vec::new();
+        for read in &reads {
+            if let meerkat_runtime::PendingResumedRunRead::Pending(run) = read {
+                pending.push(run.clone());
+            }
+        }
+        if pending.len() == reads.len() {
+            return pending;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "a session stays not readable: {reads:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+/// How long the registration has marked the polled run: these rows'
+/// registrations stamp every mark.
+fn marked_for(run: &meerkat_runtime::PendingResumedRun) -> std::time::Duration {
+    run.marked_for
+        .expect("the registration stamped the mark of its run")
 }
 
 /// The undecided rounds a poll answers for `session_id`'s held run: the
@@ -7226,7 +7268,7 @@ async fn a_poll_answers_a_marked_run_from_its_registration_before_any_executor_i
             .expect("persistent machine"),
     );
     assert_eq!(
-        machine.pending_resumed_run(&session_id).await,
+        polled(&machine, &session_id).await,
         None,
         "a session with no registration in this process is not answered"
     );
@@ -7254,17 +7296,16 @@ async fn a_poll_answers_a_marked_run_from_its_registration_before_any_executor_i
         meerkat_runtime::ResumedRunAdmissionState::MarkedNotHeld
     );
     assert!(
-        later.marked_for >= first.marked_for + std::time::Duration::from_secs(1),
+        marked_for(&later) >= marked_for(&first) + std::time::Duration::from_secs(1),
         "the time since the mark grows: {:?} then {:?}",
         first.marked_for,
         later.marked_for
     );
-    let all = machine.pending_resumed_runs().await;
+    let all = polled_all(&machine).await;
     assert!(
         matches!(
             all.as_slice(),
-            [meerkat_runtime::PendingResumedRunRead::Pending(run)]
-                if run.session_id == session_id && run.run_id == run_id
+            [run] if run.session_id == session_id && run.run_id == run_id
         ),
         "the poll of every session names this one run: {all:?}"
     );
@@ -7335,8 +7376,8 @@ async fn a_poll_answers_the_held_run_with_its_rounds_cause_and_reason_and_change
         "one undecided round, its cause and the admission's own reason"
     );
     assert!(
-        held.marked_for >= std::time::Duration::from_secs(4)
-            && held.marked_for < std::time::Duration::from_mins(2),
+        marked_for(&held) >= std::time::Duration::from_secs(4)
+            && marked_for(&held) < std::time::Duration::from_mins(2),
         "the time since the registration's mark covers the round: {:?}",
         held.marked_for
     );
@@ -7345,7 +7386,7 @@ async fn a_poll_answers_the_held_run_with_its_rounds_cause_and_reason_and_change
 
     // 200 polls over about two seconds of real time.
     let first_rounds = polled_rounds(&machine, &session_id).await;
-    let mut previous = held.marked_for;
+    let mut previous = marked_for(&held);
     for _ in 0..200 {
         let again = polled(&machine, &session_id)
             .await
@@ -7353,10 +7394,10 @@ async fn a_poll_answers_the_held_run_with_its_rounds_cause_and_reason_and_change
         assert_eq!(again.run_id, run_id);
         assert!(!again.stop_requested);
         assert!(
-            again.marked_for >= previous,
+            marked_for(&again) >= previous,
             "the time since the mark never goes back"
         );
-        previous = again.marked_for;
+        previous = marked_for(&again);
         assert_eq!(
             polled_rounds(&machine, &session_id).await,
             first_rounds,
@@ -7424,11 +7465,11 @@ async fn a_poll_answers_the_held_run_with_its_rounds_cause_and_reason_and_change
     );
     wait_until_no_run_is_polled(&machine, &session_id).await;
     assert_eq!(
-        machine.pending_resumed_run(&session_id).await,
+        polled(&machine, &session_id).await,
         None,
         "a run that resumed is answered no more"
     );
-    assert!(machine.pending_resumed_runs().await.is_empty());
+    assert!(polled_all(&machine).await.is_empty());
 }
 
 /// The existing stop of a marked run ends a run held for its admission: the
@@ -7456,7 +7497,7 @@ async fn a_stop_of_the_run_a_poll_names_settles_the_held_run_and_the_poll_answer
         .expect("the stop of the held run is accepted");
     wait_until_no_run_is_polled(&machine, &session_id).await;
     assert_eq!(
-        machine.pending_resumed_run(&session_id).await,
+        polled(&machine, &session_id).await,
         None,
         "the settled run is answered no more"
     );
@@ -7526,7 +7567,7 @@ async fn the_retained_run_settle_ends_the_held_run_and_the_poll_answers_nothing(
         "the settle answers settled for the held run: {settlement:?}"
     );
     assert_eq!(
-        machine.pending_resumed_run(&session_id).await,
+        polled(&machine, &session_id).await,
         None,
         "the settled run is answered no more"
     );
@@ -7584,7 +7625,7 @@ async fn a_new_registration_starts_the_poll_over_and_its_reason_is_bounded() {
         "the next registration starts with no round"
     );
     assert!(
-        marked_again.marked_for < first.marked_for,
+        marked_for(&marked_again) < marked_for(&first),
         "its time starts at its own mark: {:?} against {:?}",
         marked_again.marked_for,
         first.marked_for
@@ -7701,6 +7742,23 @@ async fn a_runtime_holding_the_kept_run_behind(
         MeerkatMachine::persistent(store.clone() as Arc<dyn RuntimeStore>, memory_blob_store())
             .expect("persistent machine"),
     );
+    let executor =
+        a_registration_holding_the_kept_run_behind(&machine, store, session_id, run_id, admission)
+            .await;
+    (machine, executor)
+}
+
+/// A registration of `session_id` in `machine` that marks the kept run
+/// `run_id`, with `admission` bound and an executor attached, once a poll
+/// answers the run held with a round noted (see
+/// [`a_runtime_holding_the_kept_run_behind`]).
+async fn a_registration_holding_the_kept_run_behind(
+    machine: &Arc<MeerkatMachine>,
+    store: &Arc<InMemoryRuntimeStore>,
+    session_id: &SessionId,
+    run_id: &RunId,
+    admission: Arc<dyn meerkat_runtime::resumed_run_admission::ResumedRunAdmission>,
+) -> PublishingRuns {
     machine
         .register_session(session_id.clone())
         .await
@@ -7723,17 +7781,19 @@ async fn a_runtime_holding_the_kept_run_behind(
         .ensure_session_with_executor(session_id.clone(), Box::new(executor.clone()))
         .await
         .expect("attach the executor");
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_mins(1);
-    while polled_rounds(&machine, session_id).await.is_none()
+    // Three minutes: six times the longest round (about 30 s), for a slow
+    // host.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_mins(3);
+    while polled_rounds(machine, session_id).await.is_none()
         && tokio::time::Instant::now() < deadline
     {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
     assert!(
-        polled_rounds(&machine, session_id).await.is_some(),
+        polled_rounds(machine, session_id).await.is_some(),
         "the machine holds the run after its first undecided round"
     );
-    (machine, executor)
+    executor
 }
 
 /// Wait, bounded, until a poll answers `rounds` undecided rounds.
@@ -7835,7 +7895,7 @@ async fn an_admission_that_times_out_leaves_the_run_held_and_polled_as_timed_out
         "the held run resumes once, then the later input runs"
     );
     wait_until_no_run_is_polled(&machine, &session_id).await;
-    assert_eq!(machine.pending_resumed_run(&session_id).await, None);
+    assert_eq!(polled(&machine, &session_id).await, None);
 }
 
 /// A recorded stop that is not yet settled is still answered, and says so.
@@ -7905,13 +7965,13 @@ async fn a_recorded_stop_is_polled_as_requested_until_its_settlement_commits() {
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
     while let Some(still) = polled(&machine, &session_id).await {
         assert!(still.stop_requested);
+        let meerkat_runtime::ResumedRunAdmissionState::Held(held) = &still.admission else {
+            panic!("the stopped run reads held until its settlement commits: {still:?}");
+        };
         assert_eq!(
-            polled_rounds(&machine, &session_id)
-                .await
-                .map(|(rounds, _, _)| rounds)
-                .unwrap_or(1),
-            1,
-            "the refused hold of the stopped run notes no round"
+            held.undecided.as_ref().map(|undecided| undecided.rounds),
+            Some(1),
+            "the refused hold of the stopped run notes no round and forgets none"
         );
         assert!(
             tokio::time::Instant::now() < deadline,
@@ -7946,7 +8006,7 @@ async fn a_recorded_stop_is_polled_as_requested_until_its_settlement_commits() {
         vec![later.id().clone()],
         "nothing of the stopped run runs, and the input queued behind it runs"
     );
-    assert_eq!(machine.pending_resumed_run(&session_id).await, None);
+    assert_eq!(polled(&machine, &session_id).await, None);
 }
 
 /// No drift between registrations. One registration holds the run for two
@@ -7957,6 +8017,17 @@ async fn a_recorded_stop_is_polled_as_requested_until_its_settlement_commits() {
 /// undecided: its own note counts three rounds. The second registration
 /// answers its own: one round, its own reason, and times that do not reach
 /// back before it stood. Real time: about 6 s for each round.
+///
+/// The later registration is a second machine over the same store, as a
+/// restart is staged in this file: an unregister waits for the session's
+/// runtime loop to end, so the row cannot hold an earlier loop's ask in
+/// flight under a later registration inside one machine. What keeps a
+/// registration's note its own inside one machine is that the loop writes
+/// it through its own driver; the driver rows pin that
+/// (`a_second_run_held_in_one_registration_starts_its_rounds_over`,
+/// `a_recycle_keeps_the_held_runs_note_and_the_time_since_its_mark`), and
+/// `two_held_sessions_of_one_machine_are_each_polled_with_their_own_rounds`
+/// pins that one machine keeps no note across sessions.
 #[tokio::test]
 async fn an_earlier_registrations_rounds_never_show_under_a_later_registration() {
     let store = Arc::new(InMemoryRuntimeStore::new());
@@ -8027,7 +8098,7 @@ async fn an_earlier_registrations_rounds_never_show_under_a_later_registration()
         .expect("the second registration answers the run it holds");
     assert_eq!(answered.run_id, run_id);
     assert!(
-        answered.marked_for <= since_replaced,
+        marked_for(&answered) <= since_replaced,
         "its time since the mark does not reach back before it stood: {:?} against {:?}",
         answered.marked_for,
         since_replaced
@@ -8044,6 +8115,324 @@ async fn an_earlier_registrations_rounds_never_show_under_a_later_registration()
     assert!(
         undecided.undecided_for <= since_replaced,
         "its undecided time does not reach back before it stood"
+    );
+}
+
+/// A settlement whose write fails is never polled as nothing, and the
+/// registration that replaces it starts the poll over inside one machine.
+///
+/// The run is held for two rounds, and an input is accepted behind it. The
+/// retained-run settle is asked while the store fails its next lifecycle
+/// write: the settlement does not commit, the call answers the
+/// registration's reload refusal, and the registration needs a durability
+/// reload. Until the reload a poll of the session, and the poll of every
+/// session, answer `NotReadableNow` naming the session (asserted here on
+/// purpose: a registration that needs a reload is not read, and it is not
+/// answered as no run either); the run's input keeps no terminal and nothing
+/// runs. The reload discards the registration and the session registers
+/// again in the same machine, with another admission: the poll answers the
+/// same run, its stop not asked (the stop the failed settlement recorded
+/// went with its registration), held with one round and the second
+/// admission's reason, its times not reaching back before the reload. A
+/// settle then commits: the poll answers nothing, the run's input holds one
+/// finalized terminal, cancelled, and the input accepted behind the run runs
+/// once. Real time: about 6 s for each round.
+#[tokio::test]
+async fn a_held_runs_settlement_whose_write_fails_is_polled_as_not_readable_until_the_reload_starts_over()
+ {
+    let store = Arc::new(InMemoryRuntimeStore::new());
+    let (session_id, run_id, input) =
+        a_kept_run(&store, InputLifecycleState::AppliedPendingConsumption).await;
+    let runtime_id = LogicalRuntimeId::for_session(&session_id);
+    let first_reason = "the first registration's gate cannot reach its store";
+    let (machine, first_executor) = a_runtime_holding_the_kept_run_behind(
+        &store,
+        &session_id,
+        &run_id,
+        GatedResume::unavailable(first_reason, false) as _,
+    )
+    .await;
+    let later = make_prompt("an input accepted while the run is held");
+    let (outcome, _waiter) = machine
+        .accept_input_with_completion(&session_id, later.clone())
+        .await
+        .expect("the later input is accepted");
+    assert!(outcome.is_accepted());
+    wait_for_polled_rounds(&machine, &session_id, 2).await;
+    assert_eq!(
+        polled_rounds(&machine, &session_id)
+            .await
+            .map(|(rounds, _, reason)| (rounds, reason)),
+        Some((2, first_reason.to_string())),
+        "the first registration holds the run for two rounds"
+    );
+
+    // The runtime loop's write of the settlement fails.
+    store.fail_next_machine_lifecycle_commit();
+    let refused = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        machine.settle_retained_run(&session_id),
+    )
+    .await
+    .expect("the settle answers once its settlement ended");
+    assert!(
+        matches!(
+            refused,
+            Err(meerkat_runtime::RuntimeDriverError::RecoveryRepairBlocked { .. })
+        ),
+        "a settlement that did not commit answers the reload refusal, not {refused:?}"
+    );
+    assert!(
+        machine
+            .durability_reload_required(&session_id)
+            .await
+            .is_some(),
+        "the registration needs a durability reload"
+    );
+    let read = machine.pending_resumed_run(&session_id).await;
+    assert!(
+        matches!(
+            &read,
+            Some(meerkat_runtime::PendingResumedRunRead::NotReadableNow { session_id: named })
+                if named == &session_id
+        ),
+        "a registration that needs a reload is polled as not readable now, never as no run: \
+         {read:?}"
+    );
+    let all = machine.pending_resumed_runs().await;
+    assert!(
+        matches!(
+            all.as_slice(),
+            [meerkat_runtime::PendingResumedRunRead::NotReadableNow { session_id: named }]
+                if named == &session_id
+        ),
+        "the poll of every session lists it the same way: {all:?}"
+    );
+    assert!(
+        matches!(
+            stored_terminal(&store, &runtime_id, input.id()).await,
+            Some((_, None))
+        ),
+        "the run's input keeps no terminal"
+    );
+    assert!(first_executor.runs.applied().is_empty(), "nothing runs");
+
+    // The reload: the degraded registration is discarded, and the session
+    // registers again in the same machine, with another admission.
+    let replaced = std::time::Instant::now();
+    let witness = machine
+        .current_session_registration_witness(&session_id)
+        .await
+        .expect("the degraded registration");
+    machine
+        .recover_or_discard_reload_required_registration_if_current(&witness)
+        .await
+        .expect("the reload discards the degraded registration");
+    let second_reason = "the second registration's gate cannot reach its store";
+    let executor = a_registration_holding_the_kept_run_behind(
+        &machine,
+        &store,
+        &session_id,
+        &run_id,
+        GatedResume::unavailable(second_reason, false) as _,
+    )
+    .await;
+    let again = polled(&machine, &session_id)
+        .await
+        .expect("the registration after the reload answers the run");
+    let since_replaced = replaced.elapsed();
+    assert_eq!(again.run_id, run_id, "the same run, under its original id");
+    assert!(
+        !again.stop_requested,
+        "the stop the failed settlement recorded went with its registration"
+    );
+    let meerkat_runtime::ResumedRunAdmissionState::Held(held) = &again.admission else {
+        panic!("the registration after the reload holds the run: {again:?}");
+    };
+    let undecided = held
+        .undecided
+        .as_ref()
+        .expect("the registration after the reload noted its own round");
+    assert_eq!(
+        (undecided.rounds, undecided.reason.as_str()),
+        (1, second_reason),
+        "its rounds and its reason start over: they are not the discarded registration's"
+    );
+    assert!(
+        marked_for(&again) <= since_replaced && undecided.undecided_for <= since_replaced,
+        "its times do not reach back before the reload: {again:?}"
+    );
+
+    let settled = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        machine.settle_retained_run(&session_id),
+    )
+    .await
+    .expect("the settle after the reload answers")
+    .expect("the settle after the reload is accepted");
+    assert!(
+        matches!(
+            &settled,
+            meerkat_runtime::RetainedRunSettlement::Settled { run_id: settled_run, .. }
+                if settled_run == &run_id
+        ),
+        "after the reload the held run is settled: {settled:?}"
+    );
+    wait_until_no_run_is_polled(&machine, &session_id).await;
+    assert_eq!(
+        polled(&machine, &session_id).await,
+        None,
+        "the settled run is answered no more"
+    );
+    assert_eq!(
+        stored_terminal(&store, &runtime_id, input.id()).await,
+        SETTLED_ROW,
+        "the run's input ends cancelled"
+    );
+    // The terminal is committed; its receipt is finalized a moment later.
+    let receipt_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    let receipt = loop {
+        let read = machine
+            .input_terminal_receipt(
+                &session_id,
+                meerkat_runtime::terminal_status::InteractionSelector::InputId(input.id().clone()),
+            )
+            .await
+            .expect("the input's receipt reads")
+            .expect("the input has a receipt");
+        if read.report.is_resolved() || tokio::time::Instant::now() >= receipt_deadline {
+            break read;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    };
+    let meerkat_runtime::terminal_status::InputTerminalReceiptRead::Finalized(receipt) =
+        receipt.report
+    else {
+        panic!(
+            "the run's input holds one finalized terminal, not {:?}",
+            receipt.report
+        );
+    };
+    assert_eq!(
+        receipt.terminal(),
+        &InputTerminalOutcome::Abandoned {
+            reason: meerkat_runtime::input_state::InputAbandonReason::Cancelled,
+        }
+    );
+    assert_eq!(
+        wait_for_applied(&executor.runs, 1).await,
+        vec![later.id().clone()],
+        "the input accepted behind the run runs once, under the registration after the reload"
+    );
+    assert!(
+        first_executor.runs.applied().is_empty(),
+        "nothing ran under the discarded registration"
+    );
+}
+
+/// One machine, two sessions, each with a run a restart left open and its
+/// own admission: each session's poll answers its own run with its own
+/// rounds and reason, a round asked of one session moves only that
+/// session's count, and the poll of every session lists both, in session id
+/// order. Real time: about 6 s for each round.
+#[tokio::test]
+async fn two_held_sessions_of_one_machine_are_each_polled_with_their_own_rounds() {
+    let store = Arc::new(InMemoryRuntimeStore::new());
+    let (first_session, first_run, _first_input) =
+        a_kept_run(&store, InputLifecycleState::AppliedPendingConsumption).await;
+    let (second_session, second_run, _second_input) =
+        a_kept_run(&store, InputLifecycleState::AppliedPendingConsumption).await;
+    let first_reason = "the first session's store is unreachable";
+    let second_reason = "the second session's store is unreachable";
+    let machine = Arc::new(
+        MeerkatMachine::persistent(store.clone() as Arc<dyn RuntimeStore>, memory_blob_store())
+            .expect("persistent machine"),
+    );
+    for (session_id, run_id, reason) in [
+        (&first_session, &first_run, first_reason),
+        (&second_session, &second_run, second_reason),
+    ] {
+        machine
+            .register_session(session_id.clone())
+            .await
+            .expect("the session's runtime registers");
+        assert_eq!(
+            machine.resumable_run_id(session_id).await,
+            Some(run_id.clone()),
+            "the registration keeps the run resumable"
+        );
+        let registration = machine
+            .current_session_registration_witness(session_id)
+            .await
+            .expect("the registration");
+        machine
+            .bind_resumed_run_admission(
+                &registration,
+                Arc::new(UnavailableWith(reason.to_string())) as _,
+            )
+            .await
+            .expect("bind the admission");
+        machine
+            .ensure_session_with_executor(
+                session_id.clone(),
+                Box::new(PublishingRuns::resuming(&store, session_id)),
+            )
+            .await
+            .expect("attach the executor");
+    }
+    wait_for_polled_rounds(&machine, &first_session, 1).await;
+    wait_for_polled_rounds(&machine, &second_session, 1).await;
+
+    // One more round of the first session only.
+    let (outcome, _waiter) = machine
+        .accept_input_with_completion(&first_session, make_prompt("a wake of the first session"))
+        .await
+        .expect("the input is accepted");
+    assert!(outcome.is_accepted());
+    wait_for_polled_rounds(&machine, &first_session, 2).await;
+
+    let cause = meerkat_runtime::ResumedRunAdmissionUndecidedCause::AnsweredUnavailable;
+    assert_eq!(
+        polled_rounds(&machine, &first_session).await,
+        Some((2, cause, first_reason.to_string())),
+        "the first session's own rounds and reason"
+    );
+    assert_eq!(
+        polled_rounds(&machine, &second_session).await,
+        Some((1, cause, second_reason.to_string())),
+        "the second session's own rounds and reason, unmoved by the first session's round"
+    );
+
+    let mut expected = vec![
+        (first_session.clone(), first_run.clone(), 2, first_reason),
+        (second_session.clone(), second_run.clone(), 1, second_reason),
+    ];
+    expected.sort_by_key(|(session_id, _, _, _)| session_id.to_string());
+    let listed: Vec<_> = polled_all(&machine)
+        .await
+        .into_iter()
+        .map(|run| {
+            let meerkat_runtime::ResumedRunAdmissionState::Held(held) = run.admission else {
+                panic!("each session's run reads held");
+            };
+            let undecided = held.undecided.expect("each session's rounds are noted");
+            (
+                run.session_id,
+                run.run_id,
+                undecided.rounds,
+                undecided.reason,
+            )
+        })
+        .collect();
+    assert_eq!(
+        listed,
+        expected
+            .into_iter()
+            .map(|(session_id, run_id, rounds, reason)| {
+                (session_id, run_id, rounds, reason.to_string())
+            })
+            .collect::<Vec<_>>(),
+        "the poll of every session lists both, in session id order, each with its own"
     );
 }
 

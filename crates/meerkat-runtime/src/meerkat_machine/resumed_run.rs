@@ -903,7 +903,7 @@ impl super::driver::DriverEntry {
         &mut self,
         run_id: &meerkat_core::lifecycle::RunId,
         cause: crate::resumed_run_admission::ResumedRunAdmissionUndecidedCause,
-        reason: String,
+        reason: &str,
     ) -> Result<(), crate::RuntimeDriverError> {
         self.shell_driver_mut()
             .hold_resumed_run_for_admission(run_id, cause, reason)

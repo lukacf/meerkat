@@ -1061,7 +1061,7 @@ impl EphemeralRuntimeDriver {
         &mut self,
         run_id: &RunId,
         cause: crate::resumed_run_admission::ResumedRunAdmissionUndecidedCause,
-        reason: String,
+        reason: &str,
     ) -> Result<(), RuntimeDriverError> {
         self.dsl_apply(
             mm_dsl::MeerkatMachineInput::HoldResumedRunForAdmission {
@@ -7409,19 +7409,18 @@ impl EphemeralRuntimeDriver {
     }
 
     /// How long this registration has marked `run_id` resumable at `now`, by
-    /// the stamp taken when its mark was applied. Zero for a run the stamp
-    /// does not name. The caller reads the machine's mark first.
+    /// the stamp taken when its mark was applied. `None` for a run the stamp
+    /// does not name: not stamped is not zero. The caller reads the
+    /// machine's mark first.
     pub(crate) fn resumable_mark_elapsed(
         &self,
         run_id: &RunId,
         now: meerkat_core::time_compat::Instant,
-    ) -> std::time::Duration {
+    ) -> Option<std::time::Duration> {
         self.resumable_mark_clock
             .as_ref()
             .filter(|(marked, _)| marked == run_id)
-            .map_or(std::time::Duration::ZERO, |(_, at)| {
-                now.saturating_duration_since(*at)
-            })
+            .map(|(_, at)| now.saturating_duration_since(*at))
     }
 
     /// The inputs `run_id` still holds: associated with it and Staged,
@@ -11052,7 +11051,7 @@ mod tests {
             .hold_resumed_run_for_admission(
                 run_id,
                 crate::resumed_run_admission::ResumedRunAdmissionUndecidedCause::AnsweredUnavailable,
-                reason.to_string(),
+                reason,
             )
             .expect("the machine holds the marked run");
     }
@@ -11141,7 +11140,7 @@ mod tests {
             .hold_resumed_run_for_admission(
                 &second,
                 crate::resumed_run_admission::ResumedRunAdmissionUndecidedCause::TimedOut,
-                "second run, round one".to_string(),
+                "second run, round one",
             )
             .expect("the machine holds the second run");
         assert_eq!(
@@ -11169,7 +11168,7 @@ mod tests {
                 .hold_resumed_run_for_admission(
                     &unmarked,
                     crate::resumed_run_admission::ResumedRunAdmissionUndecidedCause::TimedOut,
-                    "a run the machine does not mark".to_string(),
+                    "a run the machine does not mark",
                 )
                 .is_err(),
             "the machine refuses to hold a run it does not mark"
@@ -11195,8 +11194,9 @@ mod tests {
         assert!(driver.mark_run_resumable(&run_id));
         hold_unavailable(&mut driver, &run_id, "before the recycle");
         std::thread::sleep(std::time::Duration::from_millis(30));
-        let before =
-            driver.resumable_mark_elapsed(&run_id, meerkat_core::time_compat::Instant::now());
+        let before = driver
+            .resumable_mark_elapsed(&run_id, meerkat_core::time_compat::Instant::now())
+            .expect("the mark of the run is stamped");
         driver
             .recycle_preserving_work()
             .expect("the driver recycles");
@@ -11206,16 +11206,17 @@ mod tests {
             "the recycle keeps the held run's note"
         );
         assert!(
-            driver.resumable_mark_elapsed(&run_id, meerkat_core::time_compat::Instant::now())
-                >= before,
+            driver
+                .resumable_mark_elapsed(&run_id, meerkat_core::time_compat::Instant::now())
+                .is_some_and(|elapsed| elapsed >= before),
             "and the time since its mark goes on"
         );
     }
 
     /// The time since a run's mark starts at the mark, goes on when the same
     /// run is marked again (a mark restored after a reset or a destroy that
-    /// failed), starts over for a suspension's mark, and is zero for a run
-    /// the stamp does not name.
+    /// failed), starts over for a suspension's mark, and is not known (never
+    /// zero) for a run the stamp does not name.
     #[test]
     fn the_time_since_a_mark_goes_on_for_the_same_run_and_starts_over_for_a_suspension() {
         let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("mark-stamp"));
@@ -11224,19 +11225,21 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(30));
         driver.note_resumable_mark(&run_id);
         assert!(
-            driver.resumable_mark_elapsed(&run_id, meerkat_core::time_compat::Instant::now())
-                >= std::time::Duration::from_millis(30),
+            driver
+                .resumable_mark_elapsed(&run_id, meerkat_core::time_compat::Instant::now())
+                .is_some_and(|elapsed| elapsed >= std::time::Duration::from_millis(30)),
             "the same run marked again keeps its stamp"
         );
         assert_eq!(
             driver.resumable_mark_elapsed(&RunId::new(), meerkat_core::time_compat::Instant::now()),
-            std::time::Duration::ZERO,
-            "another run has no time of this stamp"
+            None,
+            "another run has no time of this stamp: not known, never zero"
         );
         driver.restamp_resumable_mark(&run_id);
         assert!(
-            driver.resumable_mark_elapsed(&run_id, meerkat_core::time_compat::Instant::now())
-                < std::time::Duration::from_millis(30),
+            driver
+                .resumable_mark_elapsed(&run_id, meerkat_core::time_compat::Instant::now())
+                .is_some_and(|elapsed| elapsed < std::time::Duration::from_millis(30)),
             "a suspension's mark starts the time over"
         );
     }

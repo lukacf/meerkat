@@ -53,6 +53,22 @@ them.
 
 - Configured self-hosted Chat Completions and Responses clients now describe an engine-authored closed set of string choices as a string enum in the outgoing tool schema. An optional parameter still stays out of `required`. The schema no longer advertises a description for each choice or an explicit `null` alternative.
 
+### Security
+
+- `url` is updated from 2.5.8 to 2.5.9 for RUSTSEC-2026-0592, in
+  Cargo.lock and in the example workspaces' lockfiles; `form_urlencoded`
+  moves from 1.2.2 to 1.2.3 with it, because `url` 2.5.9 requires it. No
+  manifest changes: the workspace requirement `url = "2.5"` already admits
+  2.5.9, so a build that resolves `url` with a lock of its own can move
+  without waiting for a release. The advisory is about `Url::origin()` on a
+  `blob:` URL: through 2.5.8 it took the origin of the inner URL whatever
+  its scheme, calling itself once per nested `blob:` prefix without a
+  limit, so one long enough URL overflowed the stack and ended the process.
+  In 2.5.9 `Url::origin()` takes the inner URL's origin only when its
+  scheme is `http`, `https` or `file`, and returns an opaque origin
+  otherwise. `url` 2.5.9 also moves a few parser edge cases toward the URL
+  Standard, among them the percent-encoding of `^` in a path.
+
 ### Upgrade notes
 
 - After a denial, do not resend the input: it ran on the retained model. Changing or clearing the level does not revive the denied switch. To use the target, choose a supported level or explicitly clear the held level, then request the switch again.

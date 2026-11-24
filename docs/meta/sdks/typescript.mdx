@@ -4,7 +4,7 @@ description: "TypeScript SDK for Meta with type-safe contracts, parity tests, an
 icon: "js"
 ---
 
-*Mirrored from Meerkat Meta main at [dca30fbb4416](https://github.com/lukacf/meerkat/commit/dca30fbb4416907692283c67dcf9db1b0480bdf5) on 2026-11-22; Meta version 0.9.17 at that commit.*
+*Mirrored from Meerkat Meta main at [030a93b70822](https://github.com/lukacf/meerkat/commit/030a93b70822c779db4662ef79973e3c24fc6d0d) on 2026-11-24; Meta version 0.9.18 at that commit.*
 
 The TypeScript SDK (`@rkat/meta-sdk`) provides type-safe access to the Meta JSON-RPC gateway from Node.js.
 
@@ -43,7 +43,7 @@ Then create `config/mob.toml`:
 id = "typescript-quickstart"
 
 [profiles.worker]
-model = "gpt-6-astra"
+model = "gpt-6.2-astra"
 runtime_mode = "turn_driven"
 external_addressable = true
 
@@ -105,6 +105,11 @@ turn it started (see [Waiting for a turn](#waiting-for-a-turn)); a build
 without a roster provider refuses it with
 `identity-first runtime not configured`. Run again, the program reuses
 the state under `.meta/state`.
+
+The same program as a project to copy is
+[`008-typescript-quickstart`](https://github.com/lukacf/meerkat/tree/main/meta/examples/008-typescript-quickstart).
+It sends twice, the second time with `sendAndWaitOutcome`, and run twice it
+shows that the agent kept what the first run told it.
 
 ### Knowledge memory and a Console config
 
@@ -974,6 +979,168 @@ export interface RosterContext {
 }
 ```
 
+## More than one mob on a gateway
+
+A gateway hosts the mob its launch names and can host more. `rt.mobHandle()`
+is the handle of the launch's own mob. `rt.mob(mobId)` is the same
+`MobHandle` for a mob named by its id, and `rt.mobs` creates, lists and reads
+the mobs of the host, and stops, resumes, redefines and destroys them.
+
+```typescript
+import { readFileSync } from "node:fs";
+
+const entry = await rt.mobs.create(readFileSync("research.toml", "utf8"));
+for (const mob of await rt.mobs.list()) {
+  console.log(mob.mobId, mob.default, mob.state);
+}
+
+const research = rt.mob(entry.mobId);            // sends nothing
+const members = await research.listMembers();    // every call carries mob_id
+await research.send(members[0].agentIdentity, "Review PR #42");
+```
+
+**The hosting calls.** `rt.mobs` has six calls, and each asks the gateway
+every time: the SDK keeps no list of mobs and no state of one.
+
+| Call | Wire method | Resolves |
+|------|-------------|----------|
+| `mobs.create(mobConfig)` | `meta/mobs/create` | the new mob's `HostedMob`; `mobConfig` is the mob definition as TOML text, and the mob's id is the definition's `[mob] id` |
+| `mobs.list()` | `meta/mobs/list` | `HostedMob[]`, the launch's own mob first; loads no mob |
+| `mobs.get(mobId)` | `meta/mobs/get` | one `HostedMob`; loads the mob when the host created it and it is not loaded |
+| `mobs.lifecycle(mobId, action)` | `meta/mobs/lifecycle` | `MobLifecycleResult`: the mob's entry (`mob`) and, for a stop, its stop report (`stopReport`); `action` is `"stop"` or `"resume"` |
+| `mobs.redefine(mobId, mobConfig, expectedRevision)` | `meta/mobs/redefine` | `MobRedefineResult`: the mob's entry and the update's `receipt` (`MobRedefineReceipt`: `previousRevision`, `committedRevision`, `projectionRevision`, `eventCursor`, `declaredFields`); `expectedRevision` is the mob's `revision` (below) |
+| `mobs.destroy(mobId)` | `meta/mobs/destroy` | `MobDestroyResult`: `mobId` and the `destroyReport`; removes the mob's storage |
+
+A `HostedMob` has `mobId`, `default` (true for the mob the launch names) and
+`state`, and when the gateway sent them `provenance`, `failure`,
+`quarantine` and `revision` (`null` otherwise). `state` says where the mob
+stands. `creating`, `running`, `completed` and `destroyed` are the lifecycle
+of a loaded mob. `stopped` is the mob's own stop and holds whether the host
+has the mob loaded or not: the host's records keep it, across a restart too.
+`dormant` says that the host knows the mob, has not loaded it and does not
+know it as stopped. `quarantined` says that its store could not be opened or
+restored, and `held` that a mob one of the host's agents created waits for
+its owner. The list
+(`HOSTED_MOB_STATES`, `HostedMobState`) is open: a state newer than this SDK
+is kept as its text and `knownState` is false, so read `state` as advice.
+`provenance` (the kind of the mob's creation record: `host`, `member` or
+another kind) is `null` for a quarantined or held mob, and for a mob that is
+not loaded and whose store the host has not read yet: for a short time after
+a start such a mob reads `dormant`, a stopped one too, until the host has
+read its store, which it does by itself.
+
+`mobs.list` loads nothing: it answers from the host's records. `mobs.get`
+loads the mob it names when the host created it and it is not loaded, as its
+store has it: a stopped mob loads stopped, no agent of it runs and nothing is
+started. A mob one of the host's agents created is answered from the records
+and is not loaded by a `get`. A load that fails rejects with what a
+`lifecycle` of that mob would reject with, unless the host's records show
+what became of the mob: a store that cannot be opened is kept quarantined,
+and the entry says so.
+
+`revision` is the revision of the mob's definition: a whole number that every
+committed redefinition advances. A mob that was never redefined reports the
+revision its create recorded. `mobs.get` carries it for a loaded mob, which a
+mob the host created is after a `get`, and so does the entry in a `create`,
+`lifecycle` or `redefine` answer; an entry of `mobs.list` never carries it,
+and a `quarantined` or `held` mob has `null`.
+
+```typescript
+await rt.mobs.lifecycle("research", "stop");
+const entry = await rt.mobs.get("research");
+if (entry.revision !== null) {
+  await rt.mobs.redefine("research", readFileSync("research.toml", "utf8"), entry.revision);
+  await rt.mobs.lifecycle("research", "resume");
+}
+```
+
+Read `(await mobs.get(mobId)).revision` before a `redefine` and pass it as
+`expectedRevision`: the `get` loads a mob the host created, so its entry
+carries the revision. A `quarantined` or `held` mob has none.
+
+The calls need the gateway's `hosted_mobs` feature capability
+(`supportsHostedMobs`). Their own refusals reject with
+`MobHostingRefusedError` (code `-32059`) with `kind`, `mobId`, `retryable`
+and `detail`. The kinds (`MOB_HOSTING_REFUSAL_KINDS`,
+`MobHostingRefusalKind`) are a closed list: `mob_exists` (a create under an
+id a mob of the host has, loaded or not), `invalid_mob_id`, `default_mob`
+(a destroy, a redefinition, a stop or a resume of the mob the launch
+names), `mob_not_stopped` (a
+redefinition of a mob that is not stopped: stop the mob, redefine it, resume
+it) and `mob_busy` (a redefinition of a stopped mob that still holds
+something: the one kind with `retryable` true; its `detail` ends with
+`held: ` and one closed word for each thing held, `work`, `roster` or
+`owner`, or the word `unanswered`). A kind newer than this SDK is still
+this error, with `knownKind` false.
+
+`lifecycle`, `redefine` and `destroy` name their mob themselves: there is no
+default, so none of them can reach the launch's own mob by omission. A stop
+and a resume are the mob's own. The launch's own mob is not stopped or
+resumed through `lifecycle` (`default_mob`): its host stops it by its own
+means. A
+storage refusal with code `-32014` rejects with `StorageResolutionError`, even
+when it carries no structured `data`; the error keeps its message and code.
+These answers remain plain `RpcError` with their data: a mob the host does
+not have (`foreign_mob_target`), a mob whose store did not load
+(`mob_quarantined`; such a mob cannot be destroyed through `destroy`). A
+call that lacks what the wire requires (an id or a definition that is not
+text, another action, a revision that is not
+a whole number or is negative) is refused before anything is sent, with a
+`TypeError`. An answer the SDK cannot read rejects with
+`ContractMismatchError` instead, so the two are told apart: the request was
+sent and the gateway acted on it. That is an answer without its entry, its
+id or a member of its receipt, a stop answered without its stop report, and
+a report that is not an object.
+
+**A handle for a named mob.** Obtaining `rt.mob(mobId)` sends nothing and
+loads nothing, and it does not say whether the host has such a mob. Every
+call of the handle then carries `mob_id`: in each JSON-RPC request, in the
+multipart upload of `send` with attachments and `uploadBlob`, and as
+`?mob_id=` on the streams of `subscribeAgent` and `subscribeMob`. A call on a
+mob the host does not have rejects with a plain `RpcError` (`-32602`, data
+`kind` `foreign_mob_target`). `handle.mobId` is the id, and `null` on the
+handle of the launch's own mob, whose requests name no mob, as before.
+
+A method with a `mobId` of its own keeps it: the announcement methods that
+take `mobId` (`announce`, `announcementGet`, `announcementAuditList` and the
+`announcementSource*` methods) and an event query's `mobId` (`queryEvents`,
+`queryMobEvents`, `subscribeMobEvents`) send the value you pass, and the
+handle's id when you pass none.
+
+The agent memory calls of a handle send `realm` beside the mob when you give
+one, as you gave it, and leave it out otherwise: the gateway then takes the
+memory realm of the mob the request names.
+
+A gateway of an earlier release ignores `mob_id` and answers for its own mob.
+So a named handle first reads the gateway's `mob_addressing` feature
+capability (`supportsMobAddressing`), once per started gateway, and without
+it every call rejects with `CapabilityUnavailableError` and nothing else is
+sent. The handle of the launch's own mob reads it before one call only, a
+`queryEvents` whose query names a mob, and refuses that query without it:
+such a gateway would answer the query without an error and for its own mob.
+
+`rt.jobs`, `rt.monitors` and the realm MCP calls are the host's whichever mob
+is named; they stay on the runtime.
+
+**Providers under a host with more than one mob.** The three callbacks that
+build a member name the member's mob: `customizeBuild`'s
+`AgentBuildContext.mobId`, `afterCreate`'s context (`mobId`), and the
+`context` a topology provider's `computeEdges` is given (`mob_id`, in the
+wire's spelling as the rest of that object). A host that names none serves
+its own mob only, and the contexts then have no `mobId` (no `mob_id` in the
+topology context): they are whole as they were before a host could name a
+mob. A `mob_id` that is not text is refused: the callback answers an error
+(`ContractMismatchError`) and the customizer or the provider is not asked.
+The callback tools a customizer registers with `draft.registerTool` are kept
+per mob and identity, so a build of `analyst` in one mob leaves the tools of
+`analyst` in another in place. An SDK older than this one keeps them per
+identity name alone: under a host with two mobs, a build of a member in one
+mob releases the callback tools of the member with the same name in the
+other. A mob created under the id of a destroyed mob starts with none of that
+mob's callback tools: the gateway names each mob's incarnation with the build
+(`mob_incarnation` beside `mob_id`), and the first member build of the later
+mob releases every tool kept under that mob id.
+
 ## Mob announcements
 
 `Meta.builder().mobAnnouncements()` sends `runtime_options.mob_announcements`
@@ -1255,6 +1422,10 @@ const runtime = await Meta.builder()
   .gateway("/path/to/rpc_gateway")
   .build();
 ```
+
+`handle.queryEvents(query)` reads the declared event log. A gateway with no
+event log configured reads as an empty list through the SDK: an empty result
+does not show that no event happened.
 
 The resolved picture is the typed storage census: `StatusResult.storage` /
 `CapabilitiesResult.storage` parse the gateway's `storage` object into

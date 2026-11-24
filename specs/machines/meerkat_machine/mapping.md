@@ -464,6 +464,24 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RequestUntilChangedSwitchTurnTranscriptUnsupportedRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `RequestFiniteSwitchTurnReasoningEffortRefusedIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequestFiniteSwitchTurnReasoningEffortRefusedAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequestFiniteSwitchTurnReasoningEffortRefusedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequestUntilChangedSwitchTurnReasoningEffortRefusedIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequestUntilChangedSwitchTurnReasoningEffortRefusedAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequestUntilChangedSwitchTurnReasoningEffortRefusedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RequestFiniteSwitchTurnApprovalUnavailableIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)

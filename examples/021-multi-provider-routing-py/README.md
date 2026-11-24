@@ -22,11 +22,13 @@ The reasoning-effort part needs Meerkat 0.9.15 or later, in the SDK and in
 the runtime it talks to: an older runtime makes the SDK raise
 `CapabilityUnavailableError` before it sends anything.
 
+The OpenAI path uses `gpt-6.2-astra`, added to the runtime catalog in 0.9.17.
+
 ## Supported Providers
 | Provider | Models | Env Var |
 |----------|--------|---------|
 | Anthropic | `claude-opus-5-5`, `claude-sonnet-5-5` | `ANTHROPIC_API_KEY` |
-| OpenAI | `gpt-6-astra` | `OPENAI_API_KEY` |
+| OpenAI | `gpt-6.2-astra` | `OPENAI_API_KEY` |
 | Gemini | `gemini-4-hydrogen`, `gemini-4-argon` | `GEMINI_API_KEY` |
 
 ## Run

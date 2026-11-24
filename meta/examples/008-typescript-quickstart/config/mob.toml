@@ -4,7 +4,7 @@
 id = "typescript-quickstart"
 
 [profiles.worker]
-model = "gpt-6-astra"
+model = "gpt-6.2-astra"
 # A turn_driven agent runs when it is sent something, and its turn can be
 # waited for by a ticket. The default mode, autonomous_host, cannot be.
 runtime_mode = "turn_driven"

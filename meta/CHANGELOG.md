@@ -44,11 +44,15 @@ memory steward.
   release from 0.9.9 to 0.9.18, 0.9.17 and 0.9.18 among them, knows
   neither, and refuses an access rule that names an action it does not
   know and a steward block that holds a key it does not support. The
-  memory database takes no new form: this change adds no migration and
-  no column, and a purged record is the row it was, tombstoned or
-  superseded, with its text emptied as the Added entry on the purge
-  describes. A purge cannot be undone on any release: going back does
-  not bring the blanked text back.
+  step holds for the access file as it stands on disk, with the rules a
+  Console edit saved to it: an earlier gateway does not start on a file
+  in which a rule names `mob.memory.delete`, so remove the action there
+  before going back. The memory database takes no new form: this change
+  adds no migration and no column, and a purged record is the row it
+  was, tombstoned or superseded, with its text emptied as the Added
+  entry on the purge describes; 0.9.16, 0.9.17 and 0.9.18 read it as
+  that record, with empty text. A purge cannot be undone on any
+  release: going back does not bring the blanked text back.
 
 ### Added
 

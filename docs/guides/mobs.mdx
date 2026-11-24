@@ -108,12 +108,20 @@ default), or a shorter `max_run_secs`. When the wait ends, or the calling
 turn is interrupted, before the helper has answered, the helper's run is
 cancelled and the helper is retired, and the call answers a typed error
 (`delegate_helper_ended`) that names the helper's mob and member id and says
-what became of the helper. A helper stays only when the error says it
+what became of the helper. A tool call the helper makes is bounded by what
+the call still waits, less room for the helper to report, so a helper's slow
+tool times out inside the helper and the helper reports it; a `delegate` the
+helper makes itself waits what is left, and is refused before anything is
+started when that is under 30 seconds. A helper's long model call, and a
+helper placed on another host, are not bounded that way. A helper stays only
+when the error says it
 could not be ended (`retirement_failed`, `mob_not_running`) or when its
 call ended with its host: a restarted host restores it seated and idle. It
 then stays until its owner's session is archived (for an owner that is a
 mob member retired by its mob: until the host's next start) or it is
-retired with `mob_retire_member`. On a Meta
+retired with `mob_retire_member` by a session that manages the mob (the
+error's `session_manages_mob` says whether the caller does), or by the host.
+On a Meta
 gateway the idle sweep retires it once it has been idle for
 `implicit_delegate_idle_retire_secs` (300 seconds by default). See
 [`delegate`: its wait and how it ends](/reference/builtin-tools#delegate-its-wait-and-how-it-ends).

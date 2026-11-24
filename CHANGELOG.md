@@ -85,9 +85,48 @@ them.
     default_timeout`, 10 minutes by default). The new optional argument
     `max_run_secs` sets a shorter wait; a longer one is clamped and the
     answer says so (`max_run_limited_by: "call_deadline"`). To let
-    delegations run longer, raise `[tools.tool_timeouts] delegate`: set
-    above the other tool deadlines, it also lets a helper's own slow tool
-    time out first, so that the helper reports it.
+    delegations run longer, raise `[tools.tool_timeouts] delegate`: it
+    stays the one knob for a longer wait.
+  - A helper's own tool calls are bounded by what the `delegate` that waits
+    for it has left, less room for the helper to report (30 seconds, or a
+    quarter of what is left when that is shorter). A helper's slow tool
+    therefore ends inside the helper, the helper reports it, and the caller
+    gets a result where it got an error: with the defaults a tool that the
+    helper starts at once is cut after 555 seconds, against the call's wait
+    of 585. The narrowest deadline wins, so a tool with a shorter
+    configured deadline keeps it, and no tool gets longer than its own; a
+    helper's `fork_off` and `council` calls, which own their deadline, are
+    bounded too. The timeout such a tool reports, and the timed-out event
+    of the helper's session, carry the shorter number. Outside a
+    `delegate` nothing changes. Not covered, and unchanged: a helper's long
+    model call (the report is itself a model call, so the delegate's wait
+    ends first: the helper is cancelled and retired and the caller gets the
+    typed error, with no partial output); a helper placed on another host
+    (the bound is set in the calling host's process and does not travel:
+    there the helper's tools run under that host's own tool deadlines); and
+    a mob that runs without the runtime adapter (a standalone embedding
+    whose sessions are not runtime-backed).
+  - A nested `delegate` (one a helper makes) inherits what the delegate
+    above it has left: it reads that bound as its call's deadline, so with
+    the defaults the levels wait 585, 540 and 495 seconds. When the bound
+    leaves a nested call less than 30 seconds, the call is refused before
+    anything is started (no mob, no helper): `execution_failed` with
+    `kind` `delegate_helper_ended`, `reason` `not_started`, `helper`
+    `not_seated`, `max_run_secs` (what was left), `max_run_limited_by:
+    "call_deadline"` and no `mob_id`. A caller's own short `max_run_secs`
+    and an operator's short deadline are not held to that floor.
+  - The text of `delegate_helper_ended` says what the caller can do, by
+    what became of the helper and by what the calling session may do, and
+    the data carries the latter as `session_manages_mob`. A helper that is
+    gone leaves nothing to do, and the ids are for the record. For a helper
+    that is or may still be a member, a session that manages its implicit
+    mob (it does once one of its delegates has returned a result) is given
+    `mob_check_member` and `mob_retire_member` with the ids; a session that
+    does not is told that those tools are refused for it while the helper
+    is a member, and that the ids are for the host. The ids grant nothing:
+    the manage scope still leaves only with a result. A control-scope
+    refusal of the helper's seat now answers `access_denied` with no data,
+    where it answered `execution_failed` with the mob and member id.
   - A bounded call owns ending its helper even when the call is dropped:
     when the calling turn is interrupted, or a deadline outside the tool
     cuts the call, the run cancels and retires its helper. The cancel and the
@@ -110,7 +149,15 @@ them.
     `DelegationRunFailure`, `DelegationExecutionError::MaxRunElapsed` and
     `RunLost`, and `ToolDispatchContext::dispatch_started` /
     `with_dispatch_started` (`meerkat-core`: the agent loop tells each call
-    when its dispatch started) are new, and additive.
+    when its dispatch started) are new, and additive. So are the pieces of
+    the helper's inner deadline: `meerkat_core::ToolCallOuterBound` and
+    `ToolCallOuterBoundSlot`, `AgentBuilder::with_tool_call_outer_bound`,
+    `SessionRuntimeBindings::tool_call_outer_bound`,
+    `ToolDispatchContext::outer_call_bound` / `with_outer_call_bound`,
+    `MeerkatMachine::session_tool_call_outer_bound` (`meerkat-runtime`) and
+    `DelegationExecutionService::HELPER_REPORT_RESERVE`. A call bounded this
+    way has one more contributor in its deadline chain, with the existing
+    owner `ToolDeadlineOwner::DirectCaller`.
   - Embedders that wrap the agent mob tools in a dispatcher of their own:
     `delegate`'s catalog entry now says that the tool owns its deadline, so
     the agent loop's default tool deadline no longer cuts it, and the tool
@@ -123,6 +170,8 @@ them.
   See [`delegate`: its wait and how it ends](docs/reference/builtin-tools.mdx).
 
 ### Upgrade notes
+
+- Tool calls made by a `delegate` helper are bounded by the delegate's remaining wait: the timeout a helper's tool reports can be shorter than its configured deadline (555 seconds against 600 with the defaults, for a tool the helper starts at once). Nested delegates inherit their parent's remaining wait and can be refused when too little is left (under 30 seconds). The one knob for longer delegations stays the `delegate` entry of the tool deadline table (`[tools.tool_timeouts] delegate`): to keep a long tool deadline inside helpers, set that entry above it by more than 45 seconds. A helper's long model call and a helper placed on another host are not covered: see the `delegate` entry under Changed.
 
 - After a denial, do not resend the input: it ran on the retained model. Changing or clearing the level does not revive the denied switch. To use the target, choose a supported level or explicitly clear the held level, then request the switch again.
 

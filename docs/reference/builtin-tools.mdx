@@ -405,12 +405,39 @@ bounded result, and retires the helper. The tool owns its wait:
   tooling and policy) answer `delegate_helper_ended` with `helper:
   not_seated`. So the answer comes before the call's deadline, and the
   calling turn is never held by a helper that cannot be started or ended.
+- **A helper's own tool calls end before the call's wait.** A tool call the
+  helper makes is bounded by what the `delegate` that waits for it has left,
+  less room for the helper to report: 30 seconds, or a quarter of what is left
+  when that is shorter. A helper's slow tool therefore times out inside the
+  helper, the helper reports the timeout, and the call returns the helper's
+  result. With the defaults the call's deadline is 600 seconds, its wait 585,
+  and a tool the helper starts at once is cut after 555. The bound is one more
+  deadline of the helper's call, and the narrowest deadline wins: a tool with a
+  shorter configured deadline keeps it, and no tool gets longer than its own.
+  The timeout such a tool reports, and the timed-out event of the helper's
+  session, carry the number that applied, which can be shorter than the tool's
+  configured deadline. A helper's `fork_off` and `council` calls, which own
+  their deadline, are bounded the same way. Outside a `delegate` nothing
+  changes.
 - **The one knob for longer delegations** is `[tools.tool_timeouts] delegate`.
-  A helper's own tool calls run under the same tool deadlines as its caller's,
-  so with the defaults a helper's slow tool and the `delegate` that waits for
-  it end at about the same time. Set `delegate` above the other tool deadlines
-  to have a helper's tool time out first, so that the helper reports it and
-  the call completes.
+  It sets how long the call may run, and through the call's wait what a
+  helper's tools get. To keep a long tool deadline inside helpers (a shell
+  timeout of 20 minutes, say), set `delegate` above it by more than 45
+  seconds.
+- **What the inner deadline does not cover.**
+  - A helper's long model call. The helper's report is itself a model call, so
+    no deadline can make the helper report a model call that does not return.
+    The call's wait ends first: the helper is cancelled and retired, and the
+    call answers the typed error with no partial output. (A model's own call
+    timeout, where it is shorter than the wait, fails the helper's turn
+    instead, and the call answers `turn_failed`.)
+  - A helper placed on another host (`placement`). The bound is set in the
+    calling host's process and does not travel: there the helper's tools run
+    under that host's own tool deadlines. The call's wait still ends on the
+    calling host.
+  - A mob that runs without the runtime adapter (a standalone embedding whose
+    sessions are not runtime-backed): its helpers run under their own tool
+    deadlines alone.
 - **A call that ends without the helper's result ends the helper.** When the
   wait elapses, the helper's run is cancelled and the helper is retired, and
   the call answers a typed tool error, `execution_failed` with `data.kind`
@@ -422,22 +449,56 @@ bounded result, and retires the helper. The tool owns its wait:
   call, and a later member under the same member id are not touched. A helper
   whose turn completed before the cancel reached it is answered as a completed
   call.
-- **Nesting.** A helper that delegates is a caller like any other: its call is
-  bounded by its own deadline. When an outer call ends its helper, that
-  helper's own waiting `delegate` call is dropped with its turn, which ends
+- **Nesting.** A `delegate` that a helper makes inherits what the delegate
+  above it has left: the bound on the helper's tool calls is the deadline its
+  own `delegate` call reads, so each level waits less than the one above it
+  (585, 540 and 495 seconds with the defaults) and ends before it. When that
+  bound leaves a nested call less than 30 seconds, the call is refused before
+  anything is started: no mob is made for the calling helper and no helper is
+  seated. The refusal is `delegate_helper_ended` with `reason: not_started`,
+  `helper: not_seated`, `max_run_secs` (what was left) and
+  `max_run_limited_by: "call_deadline"`; it carries the `member_id` the call
+  gave and no `mob_id`, since no mob is involved. A caller's own short
+  `max_run_secs`, and an operator's short deadline, are not held to that floor.
+  When an outer call is dropped (its calling turn is interrupted), its helper's
+  own waiting `delegate` call is dropped with the helper's turn, which ends
   the inner helper the same way.
 
 `delegate_helper_ended` carries:
 
 | Field | Meaning |
 |-------|---------|
-| `reason` | `max_run_elapsed` (the wait elapsed), `turn_failed` (the helper's turn failed), `not_started` (the helper's turn could not be admitted) or `run_lost` (the engine lost the task that ran the call, a defect: see `unknown`). More reasons may be added. |
-| `helper` | What became of the helper: `cancelled_and_retired`; `retired` (after a failed or unadmitted turn); `already_gone` (it had been retired or replaced by another hand when the wait elapsed, and nothing else was cancelled or retired); `not_seated` (the wait was used up before a helper was started: there is nothing to cancel or retire, and the answer carries no `member_ref` and no `session_id`); `end_pending` (its cancel and retirement were still under way when the call had to answer, and go on without it); `mob_not_running` (its mob takes no commands any more, for example it was shut down, so the helper could not be ended; a mob that was stopped and can be resumed still retires the helper); `retirement_failed` (it is still a member); `unknown` (with `run_lost`: if a helper was seated, its cancel and retirement go on without the call). After `end_pending` and `unknown`, `mob_check_member` with the `mob_id` and `member_id` of the error answers `member_retired` once the helper is gone (`member_not_found` if it never was seated); a helper that stays, and one reported `retirement_failed` or `mob_not_running`, is retired with `mob_retire_member`. More values may be added. |
+| `reason` | `max_run_elapsed` (the wait elapsed), `turn_failed` (the helper's turn failed), `not_started` (the helper's turn could not be admitted; or, with `helper: not_seated`, a nested call was refused because the delegate above it has too little left) or `run_lost` (the engine lost the task that ran the call, a defect: see `unknown`). More reasons may be added. |
+| `helper` | What became of the helper: `cancelled_and_retired`; `retired` (after a failed or unadmitted turn); `already_gone` (it had been retired or replaced by another hand when the wait elapsed, and nothing else was cancelled or retired); `not_seated` (no helper was started, because the wait was used up first or because a nested call was refused: there is nothing to cancel or retire, and the answer carries no `member_ref` and no `session_id`); `end_pending` (its cancel and retirement were still under way when the call had to answer, and go on without it); `mob_not_running` (its mob takes no commands any more, for example it was shut down, so the helper could not be ended; a mob that was stopped and can be resumed still retires the helper); `retirement_failed` (it is still a member); `unknown` (with `run_lost`: if a helper was seated, its cancel and retirement go on without the call). More values may be added. |
+| `session_manages_mob` | Whether the calling session may use the member tools on the helper's mob: `true` when it holds manage scope over its implicit mob, which a `delegate` of its own that returned a result brought it. It reports the scope and grants none. |
 | `mob_id` | The mob that holds the helper: the calling session's implicit mob. |
 | `member_id`, `member_ref` | The helper's member id (the one the call gave) and its addressable reference. |
 | `session_id` | The helper's session, when one was bound. |
-| `max_run_secs`, `max_run_limited_by` | The wait that applied, for `max_run_elapsed`. |
+| `max_run_secs`, `max_run_limited_by` | The wait that applied, for `max_run_elapsed`; for a refused nested call, the wait that was left. |
 | `error`, `cancel_error`, `retirement_error` | The failure texts, when there are any. |
+
+**What to do about the helper.** The error's text ends with it, by what became
+of the helper and by what the calling session may do:
+
+- The helper is gone (`cancelled_and_retired`, `retired`, `already_gone`,
+  `not_seated`): nothing is left to do, and the ids are for the record.
+- The helper is still a member (`retirement_failed`, `mob_not_running`), and
+  `session_manages_mob` is `true`: `mob_check_member` reads it and
+  `mob_retire_member` retires it, with the `mob_id` and `member_id` of the
+  error (for `mob_not_running`, once the mob runs again).
+- The helper is still a member and `session_manages_mob` is `false`: those two
+  tools are refused for this session (`access_denied`, with no data), and the
+  ids are for the host, which can retire the helper with `mob/retire` or
+  `MobHandle::retire`. A session gets the manage scope with the first result a
+  `delegate` of its own returns; an error brings none, and the ids give no
+  right.
+- The call cannot tell what became of the helper (`end_pending`, `unknown`):
+  the text says so. `mob_check_member` with the ids answers `member_retired`
+  once the helper is gone (`member_not_found` if it never was seated), for
+  every caller; a helper that stays is checked and retired as above.
+
+A session the host's member tool audience hides the helper from is told that
+the two tools do not reach the helper, whatever its scope.
 
 `member_ref` and `session_id` are left out, and the helper's session is not in
 the error's text, for a helper that the host's member tool audience hides
@@ -453,12 +514,16 @@ exists, every `delegate` answer names it: the result (`mob_id`) and every
 error (`data.mob_id`, with `data.member_id`), so the model can address the
 helper in the right mob after a call that did not return a result. A refusal
 before that point (an argument error, a missing authority, a child policy
-refusal, an implicit mob that could not be created because of another mob)
+refusal, a nested call refused for want of time, an implicit mob that could
+not be created because of another mob)
 carries no mob id: no mob is involved yet. Two refusals name a mob in their
 own form instead: an implicit mob that did not restore (quarantined) answers
 as any quarantined mob does, with its id, and a mob registered under the
 implicit id that is not the session's own answers `access_denied` with no
-data. The per-member tools are unchanged: a member id looked up in a mob that
+data. A permission refusal carries no ids at any point: a mob that refuses
+the helper's seat because the caller's principal lacks the control scope
+answers `access_denied` with no data too. The per-member tools are unchanged:
+a member id looked up in a mob that
 does not hold it still answers `member_not_found` for that mob.
 
 **A helper that should outlive the call** is not a `delegate` helper: seat it

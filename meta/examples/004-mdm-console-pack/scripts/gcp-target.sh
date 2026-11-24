@@ -2,7 +2,6 @@
 set -euo pipefail
 
 pack_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-repo_root="$(cd "${pack_dir}/../.." && pwd)"
 env_file="${MDM_GCP_ENV_FILE:-${pack_dir}/.env.gcp}"
 state_dir="${pack_dir}/.state"
 bindings_dir="${state_dir}/bindings"
@@ -109,12 +108,7 @@ internal_ip() {
 }
 
 sync_repo() {
-  tar -C "$repo_root" \
-    --exclude ./target \
-    --exclude ./node_modules \
-    --exclude ./examples/node_modules \
-    --exclude ./examples/004-mdm-console-pack/.state \
-    -czf - . | "${ssh_base[@]}" --command "
+  "${pack_dir}/scripts/gcp-source-archive.sh" | "${ssh_base[@]}" --command "
       set -euo pipefail
       rm -rf ~/meerkat-meta.next
       mkdir -p ~/meerkat-meta.next
@@ -163,8 +157,7 @@ remote_start() {
     mkdir -p ~/.cache/mdm-mob-target /tmp/mdm-mob-target
     if [[ -f /tmp/mdm-${id}.pid ]]; then kill \"\$(cat /tmp/mdm-${id}.pid)\" 2>/dev/null || true; fi
     rm -f /tmp/mdm-mob-target/${id}.json
-    ./scripts/repo-cargo build -p meerkat-meta --example mdm_mob_target
-    target_bin=\"\$(./scripts/repo-cargo --print-env | awk -F= '\$1 == \"CARGO_TARGET_DIR\" { print \$2 }')/debug/examples/mdm_mob_target\"
+    target_bin=\"\$(./meta/examples/004-mdm-console-pack/scripts/build-gcp-target.sh)\"
     nohup \"\$target_bin\" \
       --id '${id}' \
       --name '${name}' \

@@ -63,6 +63,14 @@ until it writes a binding, and upserts that binding into
 
 For a GCP target:
 
+The launcher uploads build inputs from the **committed `HEAD`** of the unified
+repository, not your working tree. Commit source changes you want to test.
+The archive includes the workspace lockfile, the target source, and the
+assets its crates embed; it excludes Git history and local files such as
+`.env.gcp` and target bindings. The separate environment-forwarding step is
+unchanged. On the VM, Cargo builds the locked `mdm_mob_target` example for
+the Rust host target without requiring a Git checkout.
+
 ```bash
 cd examples/004-mdm-console-pack
 cp deploy/gcp.env.example .env.gcp

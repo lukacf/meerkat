@@ -30334,9 +30334,9 @@ mod tests {
     /// The deferred catalog notice follows the session's tool filters. A
     /// tool they do not allow is not offered, in the notice's text or in its
     /// typed delta, and it is offered as new once they allow it. A tool that
-    /// was offered and is later disallowed is reported once as no longer
-    /// available, as a tool its source dropped is; the next boundary under
-    /// the same filter says nothing.
+    /// was offered, is still deferred, and is later disallowed is reported
+    /// once as no longer available, as a tool its source dropped is; the
+    /// next boundary under the same filter says nothing.
     #[cfg(feature = "workspace-tests")]
     #[tokio::test]
     async fn deferred_catalog_notice_follows_the_session_tool_filters() {

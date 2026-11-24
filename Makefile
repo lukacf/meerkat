@@ -344,6 +344,7 @@ rust-lane-doctor:
 ci-lanes-selftest:
 	@echo "$(GREEN)Self-testing the CI lane classifier (fail-closed contracts)...$(NC)"
 	@node scripts/ci-cargo-lanes-selftest.mjs
+	@node scripts/ci-nightly-examples-selftest.mjs
 	@echo "$(GREEN)Checking that the exact-profile lanes' inputs cover every case they select...$(NC)"
 	@node scripts/ci-guard-lane-inputs-selftest.mjs
 	@echo "$(GREEN)Self-testing release-projection evidence reuse (classifier, plan, evidence, gate)...$(NC)"

@@ -41,6 +41,12 @@ name: Nightly
 #   meta-docs-lag     - docs/meta mirror vs main: fails while a main commit
 #                       that changed meta/docs after the mirrored one is not
 #                       mirrored (publication has stalled silently)
+#   example-standalone - the standalone example workspaces 034 and 035
+#                       (their tests, then 035's script fixtures); no
+#                       other workflow builds them. It measures: each
+#                       target's seconds go to the job summary
+#   meta-example-006  - Meta example pack 006's keyless script, which
+#                       no other workflow runs
 
 # Hosted-runner slots. The account runs at most 40 hosted jobs at once,
 # shared with every pull request and main push, and nightly once held 22 of
@@ -51,7 +57,9 @@ name: Nightly
 #      in parallel);
 #   2. then five sequential chains: each job `needs` the previous one and
 #      runs under !cancelled(), so a red job never skips the rest:
-#        release-packaging (143-304 min) > meta-docs-lag (2)
+#        release-packaging (143-304 min) > meta-docs-lag (2) >
+#          example-standalone (not measured yet) > meta-example-006
+#          (not measured yet)
 #        e2e-system (47-360) > sdk-web (4-29) > audit (1) >
 #          machine-verify-deep (3-8, and about 40 for its whole-domain
 #          audit)
@@ -1282,3 +1290,153 @@ jobs:
           python3 scripts/check-meta-docs-lag.py \
             --manifest docs/meta/_source.json \
             --max-lag 0
+
+  # Examples 034 and 035 are Cargo workspaces of their own: no workspace lane
+  # compiles them, and ci.yml only checks their lock files. This job builds
+  # both against the checkout's crates with their committed locks and runs
+  # their tests (the examples Makefile's `standalone` target is exactly
+  # these two targets), then example 035's script fixtures. It is here and
+  # not in ci.yml, and no gate reads it: a failing example test opens the
+  # nightly failures issue and cannot hold a release. Its first purpose is
+  # to MEASURE: no hosted run of these builds exists (one job once ran
+  # example 035's tests alone in 1909 s), so the step writes each target's
+  # seconds, Cargo's own "Finished" lines and its total into the job
+  # summary. Both targets run even when the first fails; the step then
+  # fails.
+  example-standalone:
+    name: Standalone examples
+    needs: meta-docs-lag
+    if: ${{ !cancelled() && !inputs.graph_only }}
+    runs-on: ubuntu-24.04
+    # Not measured on a hosted runner yet: the limit is generous on purpose
+    # and is to be set from the first nights' summaries.
+    timeout-minutes: 150
+    env:
+      RUSTC_WRAPPER: sccache
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+
+      - name: Setup sccache
+        id: sccache
+        continue-on-error: true
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.18.0
+
+      - name: Compile without sccache when its install failed
+        if: ${{ steps.sccache.outcome == 'failure' }}
+        shell: bash
+        run: |
+          echo "::warning::sccache-action did not install sccache (see its Setup sccache step); this job compiles without sccache"
+          echo "RUSTC_WRAPPER=" >> "${GITHUB_ENV}"
+
+      - name: Setup mold linker
+        uses: ./.github/actions/setup-mold-ci
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: nightly-example-standalone
+          # Registry only, as in the other nightly jobs.
+          cache-targets: "false"
+          cache-on-failure: true
+
+      - name: Standalone example tests (034 and 035), timed
+        shell: bash
+        run: |
+          codemob() {
+            make -C examples codemob
+          }
+          mdm() {
+            make -C examples mdm
+          }
+          status=0
+          timed() {
+            local name="$1" begun="${SECONDS}" result=passed
+            "${name}" 2>&1 | tee "${RUNNER_TEMP}/standalone-${name}.log" || { result=failed; status=1; }
+            printf '| make -C examples %s | %s | %s |\n' "${name}" "$((SECONDS - begun))" "${result}" >> "${GITHUB_STEP_SUMMARY}"
+            sed -e 's/\x1b\[[0-9;]*m//g' "${RUNNER_TEMP}/standalone-${name}.log" \
+              | grep -E 'Finished .* target\(s\) in ' \
+              | while IFS= read -r line; do
+                  printf '| Cargo, in %s: %s | | |\n' "${name}" "$(echo ${line})" >> "${GITHUB_STEP_SUMMARY}"
+                done || true
+          }
+          printf '%s\n' '### Standalone examples' '' '| part | seconds | result |' '| --- | --- | --- |' >> "${GITHUB_STEP_SUMMARY}"
+          timed codemob
+          timed mdm
+          printf '| both targets | %s | |\n' "${SECONDS}" >> "${GITHUB_STEP_SUMMARY}"
+          exit "${status}"
+
+      - name: Example 035 script fixtures
+        working-directory: examples/035-mdm-tux-rs
+        run: python3 scripts/test-scripts.py
+
+  # Meta's example pack 006 (long-term agents): its keyless script builds
+  # rpc_gateway through the root wrapper, runs the pack's Python and
+  # TypeScript programs twice each against it and checks what they print.
+  # No workflow ran it. Here and not in Meta CI, for the same reason as the
+  # job above; its seconds go to the job summary too.
+  meta-example-006:
+    name: Meta long-term agents example (keyless)
+    needs: example-standalone
+    if: ${{ !cancelled() && !inputs.graph_only }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      RUSTC_WRAPPER: sccache
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+
+      - name: Setup sccache
+        id: sccache
+        continue-on-error: true
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.18.0
+
+      - name: Compile without sccache when its install failed
+        if: ${{ steps.sccache.outcome == 'failure' }}
+        shell: bash
+        run: |
+          echo "::warning::sccache-action did not install sccache (see its Setup sccache step); this job compiles without sccache"
+          echo "RUSTC_WRAPPER=" >> "${GITHUB_ENV}"
+
+      - name: Setup mold linker
+        uses: ./.github/actions/setup-mold-ci
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: nightly-meta-example-006
+          # Registry only, as in the other nightly jobs.
+          cache-targets: "false"
+          cache-on-failure: true
+
+      - name: Setup Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "20"
+
+      - name: Long-term agents example (keyless), timed
+        shell: bash
+        run: |
+          example() {
+            meta/examples/006-long-term-agents/examples.sh
+          }
+          status=0
+          example || status=1
+          printf '%s\n' '### Meta long-term agents example' '' "seconds: ${SECONDS}; result: $([[ "${status}" == 0 ]] && echo passed || echo failed)" >> "${GITHUB_STEP_SUMMARY}"
+          exit "${status}"

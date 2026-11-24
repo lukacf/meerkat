@@ -585,10 +585,10 @@ class Scanner:
         repositories = alternatives((MONOREPO, *RETIRED_REPOSITORIES))
         # The tag ends at the next part of the path, at the end of the URL, and where a fragment or
         # a query starts; a mark that ends the sentence after it (`.`, `,`, `;`, `:`, `!`) is not
-        # its last character.
+        # its last character. The characters that end it are stated once, for both places.
+        ends = r"/\s\"'`)<>\]\\#?"
         self.release_re = re.compile(
-            rf"github\.com/{OWNER}/({repositories})/releases/(?:download|tag)/"
-            r"([^/\s\"'`)<>\]\\#?]*[^/\s\"'`)<>\]\\#?.,;:!])")
+            rf"github\.com/{OWNER}/({repositories})/releases/(?:download|tag)/([^{ends}]*[^{ends}.,;:!])")
         self.retired_git_re = re.compile(
             rf"git\+https://github\.com/{OWNER}/({alternatives(RETIRED_REPOSITORIES)})(?:\.git)?\b")
         self.asset_re = re.compile(

@@ -26,6 +26,7 @@
         "target": "test:host_launch_sites",
         "scope": "target",
         "tests": [
+          "every_composition_of_the_schedule_tools_attaches_a_write_judge",
           "every_mob_session_service_impl_answers_the_recorded_sections_read",
           "every_process_launch_in_shipped_code_is_confined_or_a_typed_exemption",
           "the_mob_incarnation_witness_has_one_constructor",
@@ -2103,17 +2104,30 @@
         ]
       }
     ],
-    "meta/docs/rct/console-rest-sse-contract-v0.5.0.json": [
+    "meta/docs/rct/console-rest-sse-contract-v0.6.0.json": [
       {
         "package": "meerkat-meta",
         "target": "test:console_route_auth",
         "scope": "target",
         "tests": [
+          "console_contract_names_the_mob_of_a_request_on_every_door",
           "console_contract_requests_take_no_interaction_or_frame_ids",
-          "phase0_contract_004_console_rest_sse_contract_version_is_pinned_and_enforced"
+          "phase0_contract_004_console_rest_sse_contract_version_is_pinned_and_enforced",
+          "the_experience_names_the_version_of_the_checked_in_contract_document"
         ],
         "sources": [
           "meta/crates/meerkat-meta/tests/console_route_auth.rs"
+        ]
+      },
+      {
+        "package": "meerkat-meta",
+        "target": "lib",
+        "scope": "target",
+        "tests": [
+          "the_gateways_methods_of_the_host_and_member_words_are_the_contract_documents"
+        ],
+        "sources": [
+          "meta/crates/meerkat-meta/src/console_hosted_mobs_tests.rs"
         ]
       }
     ],
@@ -2983,6 +2997,16 @@
     ]
   },
   "not_readers": [
+    {
+      "source": "crates/meerkat-cli/src/main.rs",
+      "literal": "cli_unread_project_sections(workspace_root)",
+      "why": "Reads the .rkat/config.toml of the project rkat runs in, a runtime convention of the host's own project root; reads nothing in the checkout."
+    },
+    {
+      "source": "crates/meerkat-cli/src/main.rs",
+      "literal": "report_cli_unread_project_sections(workspace_root)",
+      "why": "Warns about the .rkat/config.toml of the project rkat runs in, a runtime convention of the host's own project root; reads nothing in the checkout."
+    },
     {
       "source": "crates/meerkat-cli/tests/cli_auth_flow.rs",
       "literal": "derive_workspace_realm_id(workspace_root)",

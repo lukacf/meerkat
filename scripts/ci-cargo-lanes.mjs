@@ -340,6 +340,12 @@ export const UNIT_SOLO_PACKAGES = ["xtask"];
 // would add a second job's setup and an artifact transfer to the path. The
 // lane counts once toward the plan's shard cap.
 export const PARTITIONED_UNIT_PACKAGES = [{ package: "meerkat-runtime", partitions: 2 }];
+// Packages whose unit tests never build in one row: a packed row holding
+// both gives `apart` a row of its own; the other rows stay as packed.
+// meerkat-comms' tests need meerkat-runtime, which compiled beside
+// meerkat-core's unit test in the core+8 row: 14.4 GiB in two rustc
+// processes; hosted runners (15 GiB) dropped that row on the 0.9.16 tree.
+export const UNIT_ROWS_APART = [{ keep: "meerkat-core", apart: "meerkat-comms" }];
 const HEAVY_ANCHOR = "meerkat-mob";
 
 // Hook-parity rows (see the header). Every row runs on the hook's test-thread
@@ -2070,6 +2076,17 @@ function packShards(pkgs, weights, maxShards, model = null) {
     .sort((a, b) => b.estimated_cost - a.estimated_cost || a.name.localeCompare(b.name));
 }
 
+// The packed unit rows with each UNIT_ROWS_APART pair apart: a row holding
+// both becomes the row without `apart` and a row of `apart` alone.
+function unitRowsApart(shards, weights, model) {
+  return shards.flatMap((shard) => {
+    const rule = UNIT_ROWS_APART.find(({ keep, apart }) => shard.packages.includes(keep) && shard.packages.includes(apart));
+    if (!rule) return [shard];
+    const rest = shard.packages.filter((name) => name !== rule.apart);
+    return [...unitRowsApart(packShards(rest, weights, 1, model), weights, model), ...packShards([rule.apart], weights, 1, model)];
+  });
+}
+
 // The lane script's kind(lib) lane: the one a plan without a lib row leaves
 // to the push-to-main and nightly unit lanes.
 function hookLibLane(hook) {
@@ -2939,7 +2956,7 @@ function plan(args) {
     );
     result.unit_shards = [
       ...byProduct(result.unit_packages.filter((name) => !soloUnits.includes(name))).flatMap(([product, names]) =>
-        packWithinBudget(names, weights, Math.max(1, shardCap - soloUnits.length), model).map((shard) => withProduct(shard, product)),
+        unitRowsApart(packWithinBudget(names, weights, Math.max(1, shardCap - soloUnits.length), model), weights, model).map((shard) => withProduct(shard, product)),
       ),
       ...soloUnits.flatMap((name) =>
         partitionRows(withProduct(packShards([name], weights, 1, model)[0], productOf.get(name)), partitionedUnits.get(name)),
@@ -2965,7 +2982,7 @@ function plan(args) {
       ...(unitOnMain ? result.unit_shards : []),
       ...byProduct(mainUnitScope.filter((name) => !archivedPackages.has(name) && !unitOnMainPackages.has(name))).flatMap(
         ([product, names]) =>
-          packShards(names, weights, product === CORE ? args.workspaceShards : Math.min(PRODUCT_MAIN_UNIT_SHARDS, names.length), model)
+          unitRowsApart(packShards(names, weights, product === CORE ? args.workspaceShards : Math.min(PRODUCT_MAIN_UNIT_SHARDS, names.length), model), weights, model)
             .map((shard) => withProduct(shard, product)),
       ),
     ];

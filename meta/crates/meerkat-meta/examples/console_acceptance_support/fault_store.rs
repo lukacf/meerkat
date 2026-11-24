@@ -38,6 +38,7 @@ impl FaultStore {
 // A stalled page must contain a frame: empty pages are valid legacy terminals.
 fn repeated_frame(cursor: Option<&ConsoleCursor>) -> ConsoleFrame {
     ConsoleFrame {
+        mob_id: None,
         id: "stalled-frame".into(),
         cursor: cursor.cloned().unwrap_or_else(|| "console:0".into()),
         dedupe_key: "stalled-frame".into(),

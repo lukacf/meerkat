@@ -42,9 +42,22 @@
 //! * **Caller authorization** ([`ControlAuthorizer`]) - the calling
 //!   gateway signs its requests with its own keypair, and the serving
 //!   gateway matches that identity against a [`ControlGrantTable`] that
-//!   binds it to specific verbs and a member scope. Anything outside the
-//!   grant is refused before dispatch with a typed
-//!   [`ControlAuthzDenial`].
+//!   binds it to specific verbs, a member scope and the mobs of this
+//!   gateway it reaches (the default mob unless the grant lists mobs; the
+//!   request's signed audience names its mob). Anything outside the grant
+//!   is refused before dispatch with a typed [`ControlAuthzDenial`], and a
+//!   mob outside the grant exactly as a mob this gateway does not have.
+//!
+//! An admitted request is served on the mob its audience names. A listener
+//! of a host with more mobs than its default mob is given the host's mobs
+//! (a crate-private router over the host's mob set): the host verbs answer
+//! the host's own facts and load no mob, and a request that names a member
+//! of another mob is dispatched to a handler over that mob's own entry.
+//!
+//! A request made with the serving gateway's own key (the envelope names
+//! it and the signature verifies) is refused before either, whatever its
+//! verb, with [`HOST_OWN_KEY_CONTROL_CODE`]: a gateway's own control
+//! listener is not a way to connect two mobs it hosts.
 //!
 //! [`ControlAuthorizer::open`] remains available only for an explicit
 //! compatibility choice. Configured runtime listeners default to an empty
@@ -202,16 +215,54 @@ impl BoundControlListener {
         signer: ControlSignerSlot,
         authorizer: std::sync::Arc<ControlAuthorizer>,
     ) {
+        self.serve_all(ControlServing {
+            handler,
+            signer,
+            authorizer,
+            mobs: None,
+        })
+        .await;
+    }
+
+    /// [`Self::serve_with_authorizer`] on a host that serves other mobs
+    /// beside its default mob: `handler` serves the default mob and the
+    /// host verbs, and a request whose signed audience names another mob
+    /// the caller's grant reaches is served on that mob's own entry, which
+    /// `mobs` resolves.
+    pub(crate) async fn serve_on_host(
+        self,
+        handler: std::sync::Arc<dyn ControlHandler>,
+        signer: ControlSignerSlot,
+        authorizer: std::sync::Arc<ControlAuthorizer>,
+        mobs: std::sync::Arc<dyn ControlHostedMobRouter>,
+    ) {
+        self.serve_all(ControlServing {
+            handler,
+            signer,
+            authorizer,
+            mobs: Some(mobs),
+        })
+        .await;
+    }
+
+    async fn serve_all(self, serving: ControlServing) {
         match self {
-            Self::Tcp { listener, .. } => {
-                serve_tcp_control_with_authorizer(listener, handler, signer, authorizer).await;
-            }
+            Self::Tcp { listener, .. } => serve_tcp(listener, serving).await,
             #[cfg(unix)]
-            Self::Uds { listener, .. } => {
-                serve_uds_control_with_authorizer(listener, handler, signer, authorizer).await;
-            }
+            Self::Uds { listener, .. } => serve_uds(listener, serving).await,
         }
     }
+}
+
+/// What a control listener serves each connection from.
+#[derive(Clone)]
+struct ControlServing {
+    /// Serves the host's default mob, and the host verbs for every mob.
+    handler: std::sync::Arc<dyn ControlHandler>,
+    signer: ControlSignerSlot,
+    authorizer: std::sync::Arc<ControlAuthorizer>,
+    /// The host's other mobs. `None`: a listener of one mob.
+    mobs: Option<std::sync::Arc<dyn ControlHostedMobRouter>>,
 }
 
 /// Maximum control payload size. Control messages are tiny (a few hundred
@@ -223,6 +274,20 @@ pub(crate) const MAX_CONTROL_PAYLOAD: u32 = 64 * 1024;
 /// dispatch on the remote side is sub-millisecond. We give it 5s to absorb
 /// scheduler pauses, network latency, and lazy-spawn warm-up.
 pub const DEFAULT_CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long a request waits for the first read of the record of the
+/// members its mob keeps apart from other callers, while that read is on
+/// its first attempt (a request can be the one that loaded its mob). It is
+/// the control channel's own bound, well inside the time a default caller
+/// waits for an answer ([`DEFAULT_CONTROL_TIMEOUT`]): the answer of a read
+/// that is still owed after it reaches such a caller.
+pub(crate) const MEMBERS_APART_READ_WAIT: Duration = Duration::from_secs(2);
+
+// Twice the wait fits inside the time a default caller waits.
+const _: () = assert!(
+    MEMBERS_APART_READ_WAIT.as_millis() * 2 <= DEFAULT_CONTROL_TIMEOUT.as_millis(),
+    "a request's wait for its mob's first read must end well inside a default caller's wait"
+);
 
 /// Cross-mob control request. One variant per control operation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -753,8 +818,10 @@ pub struct ControlCaller {
     /// Which peer this request was minted for - the contact-directory mob
     /// id the caller dialed. Signed material, so a captured request cannot
     /// be replayed against a DIFFERENT gateway where the same caller also
-    /// holds a grant. Enforced only when the serving authorizer was built
-    /// with an expected audience (see
+    /// holds a grant. It also names the mob of the serving gateway the
+    /// request is for, which a grant's mobs are matched against (see
+    /// [`ControlMobScope`]). Enforced only when the serving authorizer was
+    /// built with an expected audience (see
     /// [`ControlAuthorizer::with_grants_for_audience`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audience: Option<String>,
@@ -1101,13 +1168,20 @@ pub enum ControlAuthzDenial {
     CallerNotGranted { pubkey_b64: String },
     /// The caller holds a grant, but not for this verb.
     VerbNotGranted { label: String, verb: ControlVerb },
-    /// The caller holds a grant for this verb, but not on this member.
+    /// The caller holds a grant for this verb, but not on this member of a
+    /// mob the grant reaches. (On a listener that was told no audience, and
+    /// so knows no mob id, a grant that lists mob ids reaches no member.)
     MemberNotGranted {
         label: String,
         verb: ControlVerb,
         member: String,
     },
-    /// The request was minted for a different gateway.
+    /// The request was minted for a mob this gateway does not answer the
+    /// caller for: its audience is no mob of this gateway, or it is a mob
+    /// the caller's grant does not reach. The two are one refusal, value
+    /// for value, so a caller learns nothing about a mob outside its grant.
+    /// `expected` names the gateway's default mob when the caller's grant
+    /// reaches the default mob, and is empty otherwise.
     AudienceMismatch {
         label: String,
         expected: String,
@@ -1197,6 +1271,17 @@ impl std::fmt::Display for ControlAuthzDenial {
                 f,
                 "caller '{label}' is not granted control verb '{verb}' on member '{member}'"
             ),
+            // A caller whose grant does not reach the default mob is told
+            // nothing but the id it sent: `expected` is empty for it.
+            Self::AudienceMismatch {
+                label,
+                expected,
+                presented,
+            } if expected.is_empty() => write!(
+                f,
+                "caller '{label}' presented a request minted for '{presented}', which this \
+                 gateway does not answer for"
+            ),
             Self::AudienceMismatch {
                 label,
                 expected,
@@ -1216,6 +1301,50 @@ impl std::fmt::Display for ControlAuthzDenial {
 }
 
 impl std::error::Error for ControlAuthzDenial {}
+
+/// The code a control listener refuses a request with when the request was
+/// made with this gateway's own key.
+///
+/// A gateway never serves its own control requests: the loopback through
+/// its own listener would be a second way to connect two mobs it hosts.
+/// The rule has no verb list, so the read-only verbs are refused too. This
+/// is not one of the [`CONTROL_AUTHZ_DENIAL_CODES`]: no grant admits such a
+/// request, so a wider grant is not the remedy.
+pub const HOST_OWN_KEY_CONTROL_CODE: &str = "host_own_key";
+
+/// What a control listener answers a request made with `own_keys`, the key
+/// this gateway itself signs with: a request whose caller envelope names
+/// that key and whose signature verifies against it. `None` for every
+/// other request, and for a gateway that has no key installed.
+///
+/// Only a signature that verifies makes a request this gateway's own. A
+/// claim of the key without one falls through to the authorizer and gets
+/// the answer any unverified claim gets, so on a listener that enforces
+/// grants a caller without a grant cannot use this refusal to test whether
+/// a key is this gateway's. The signature is checked for every key an
+/// envelope names, this gateway's or not, so the work done before the
+/// answer does not depend on whose key was named either.
+fn host_own_key_refusal(
+    request: &ControlRequest,
+    own_keys: Option<&crate::auth::peer_keys::GatewayPeerKeys>,
+) -> Option<ControlResponse> {
+    let own_keys = own_keys?;
+    let caller = request.caller()?;
+    let claimed = crate::auth::peer_keys::decode_pubkey_b64(&caller.pubkey_b64).ok()?;
+    let verified = verify_caller_signature(&claimed, caller, request).is_ok();
+    if !verified || claimed != own_keys.pubkey_bytes() {
+        return None;
+    }
+    Some(ControlResponse::Err {
+        code: HOST_OWN_KEY_CONTROL_CODE.to_string(),
+        message: format!(
+            "this gateway does not serve a control request made with its own key, so \
+             '{verb}' is refused: its own control listener is not a way to connect two \
+             mobs it hosts, and no control grant changes that",
+            verb = request.verb()
+        ),
+    })
+}
 
 /// Which members of the local mob a grant reaches.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1277,12 +1406,231 @@ fn normalize_member_alias(member: &str) -> String {
     crate::member_comms_id::runtime_alias_str(member).into_owned()
 }
 
+/// Which of the host's mobs a grant reaches.
+///
+/// A request names its mob with the signed audience (see [`ControlCaller`]).
+/// A grant that names no mob reaches the host's default mob only (the mob
+/// the launch names), which is what every grant written before grants could
+/// list mobs means.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum ControlMobScope {
+    /// The grant names no mob: it reaches the host's default mob only.
+    #[default]
+    DefaultMob,
+    /// Every mob of the host, present and future.
+    All,
+    /// Only these mobs. The default mob is named by its id like any other;
+    /// an id that is no mob of the host reaches nothing.
+    Mobs(BTreeSet<meerkat_mob::MobId>),
+}
+
+impl ControlMobScope {
+    /// Build a mob scope from mob ids. `*` anywhere in the list widens to
+    /// [`Self::All`]. An empty list reaches no mob; use
+    /// [`Self::DefaultMob`] for a grant that names none.
+    pub fn mobs<I, S>(ids: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut set = BTreeSet::new();
+        for id in ids {
+            let id = id.as_ref();
+            if id == "*" {
+                return Self::All;
+            }
+            set.insert(meerkat_mob::MobId::from(id));
+        }
+        Self::Mobs(set)
+    }
+
+    /// Whether this scope reaches the mob a request is for.
+    fn reaches(&self, mob: &AddressedMob<'_>) -> bool {
+        match (self, mob) {
+            (Self::All, _) => true,
+            (Self::DefaultMob, AddressedMob::Default(_) | AddressedMob::UnnamedDefault) => true,
+            (Self::DefaultMob, AddressedMob::Other(_)) => false,
+            (Self::Mobs(mobs), AddressedMob::Default(id) | AddressedMob::Other(id)) => {
+                mobs.contains(*id)
+            }
+            // A listener that was told no audience knows no id for its one
+            // mob, so no listed id can be shown to name it.
+            (Self::Mobs(_), AddressedMob::UnnamedDefault) => false,
+        }
+    }
+}
+
+/// The mob one request is for, as the audience check resolved it. Resolved
+/// once per request, before the grant is consulted.
+enum AddressedMob<'a> {
+    /// The host's default mob, named by the audience the authorizer was
+    /// built for.
+    Default(&'a str),
+    /// Another mob of the host, named by the request's signed audience.
+    Other(&'a str),
+    /// The one mob of a listener that was told no audience: the audience
+    /// of a request is not checked there and never selects a mob.
+    UnnamedDefault,
+}
+
+/// "Is this id a mob of this host", asked at most once per request by the
+/// audience check, and only about an id the caller's grant reaches.
+///
+/// The owner of the host's mob set answers it from the set's own records,
+/// without loading a mob. The authorizer keeps no list of mobs: it knows
+/// the default mob (the audience it was built for) and asks for every
+/// other id. This is the form for a host that can answer at once; a
+/// listener whose mob set answers asynchronously puts the same question
+/// between [`ControlAuthorizer::begin`] and [`PendingAudience::finish`].
+pub(crate) trait ControlHostedMobs {
+    /// Whether `mob_id` is a mob of this host. Asked only about an id
+    /// other than the default mob's, which the authorizer already knows.
+    fn hosts_mob(&self, mob_id: &meerkat_mob::MobId) -> bool;
+}
+
+/// A host with no mob beside its default mob.
+struct NoOtherMob;
+
+impl ControlHostedMobs for NoOtherMob {
+    fn hosts_mob(&self, _mob_id: &meerkat_mob::MobId) -> bool {
+        false
+    }
+}
+
+/// The mob a request the grant policy admitted is for. It is the only
+/// thing a listener routes a request on: never a second reading of the
+/// request's envelope, whose audience an open listener and a listener
+/// that was told no audience do not check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AdmittedMob {
+    /// The host's default mob: named by the audience the authorizer was
+    /// built for, or the one mob of a listener that checks no audience.
+    Default,
+    /// Another mob of the host, which the signed audience named, the
+    /// caller's grant reaches and the host said it serves.
+    Other(AdmittedOtherMob),
+}
+
+/// A mob of the host other than its default mob, admitted for one request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AdmittedOtherMob {
+    mob_id: meerkat_mob::MobId,
+    /// What the request is answered when the host no longer serves the
+    /// mob by the time the request is routed: the refusal it would have
+    /// got had the mob been gone a moment earlier.
+    not_served: ControlAuthzDenial,
+    /// Whether the caller's grant reaches the host's default mob too. A
+    /// caller whose grant does not is told nothing about that mob, its id
+    /// included: not in a refusal, and not in the host's facts.
+    names_the_default_mob: bool,
+}
+
+impl AdmittedOtherMob {
+    /// The id of the admitted mob.
+    pub(crate) fn mob_id(&self) -> &meerkat_mob::MobId {
+        &self.mob_id
+    }
+
+    /// The refusal for a mob the host does not serve.
+    pub(crate) fn not_served(&self) -> &ControlAuthzDenial {
+        &self.not_served
+    }
+}
+
+/// What the grant policy admitted for one request: the caller, and the mob
+/// the request is for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ControlAdmission {
+    /// The admitted caller; `None` on a listener that enforces no grants.
+    pub(crate) caller: Option<AuthorizedCaller>,
+    /// The mob the request is served on.
+    pub(crate) mob: AdmittedMob,
+}
+
+/// Where the grant policy stands for one request after everything it can
+/// decide alone.
+pub(crate) enum AuthorizeStep<'a> {
+    /// Admitted: no question for the host.
+    Admitted(ControlAdmission),
+    /// The signed audience names a mob other than the default mob, and the
+    /// caller's grant reaches it: whether the host serves that mob is the
+    /// one question left.
+    AskHost(PendingAudience<'a>),
+}
+
+/// A request whose admission waits for the host's answer about one mob.
+pub(crate) struct PendingAudience<'a> {
+    grant: &'a ControlGrant,
+    pubkey: [u8; 32],
+    request: &'a ControlRequest,
+    mob: AdmittedOtherMob,
+}
+
+impl PendingAudience<'_> {
+    /// The mob to ask the host about.
+    pub(crate) fn mob_id(&self) -> &meerkat_mob::MobId {
+        self.mob.mob_id()
+    }
+
+    /// Finish the check with the host's answer. A mob the host does not
+    /// serve is refused exactly as a mob the grant does not reach; for a
+    /// mob it serves, the grant's verbs and members decide.
+    pub(crate) fn finish(self, hosted: bool) -> Result<ControlAdmission, ControlAuthzDenial> {
+        if !hosted {
+            return Err(self.mob.not_served);
+        }
+        self.grant.permits(
+            self.request.verb(),
+            &AddressedMob::Other(self.mob.mob_id.as_str()),
+            self.request.remote_member(),
+        )?;
+        Ok(ControlAdmission {
+            caller: Some(AuthorizedCaller {
+                label: self.grant.label().to_string(),
+                pubkey: self.pubkey,
+            }),
+            mob: AdmittedMob::Other(self.mob),
+        })
+    }
+}
+
+/// What a [`ControlHostedMobRouter`] answers, when it has asked the host's
+/// mob set.
+pub(crate) type HostedMobAnswer<'a, T> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
+
+/// The mobs a control listener serves beside the host's default mob.
+///
+/// The host's mob set owns which mobs those are and whether one is loaded;
+/// the listener holds none of it and asks per request. A listener without
+/// one serves the default mob alone.
+pub(crate) trait ControlHostedMobRouter: Send + Sync + 'static {
+    /// Whether `mob_id` is a mob this host serves, answered from the mob
+    /// set's own records: it loads no mob. Asked by the audience check,
+    /// only about an id the caller's grant reaches.
+    fn serves<'a>(&'a self, mob_id: &'a meerkat_mob::MobId) -> HostedMobAnswer<'a, bool>;
+
+    /// The handler over the entry of the mob `mob_id`, for one request of
+    /// `verb`: its handle, its identity runtime, its session service, and
+    /// for a keyed inject verb the mob's own receiver. This is the lookup
+    /// that loads a mob the set knows and has not loaded; it is asked only
+    /// for an admitted request that names a member. `None` when the host
+    /// does not serve the mob any more.
+    fn handler_for<'a>(
+        &'a self,
+        mob_id: &'a meerkat_mob::MobId,
+        verb: ControlVerb,
+    ) -> HostedMobAnswer<'a, Option<std::sync::Arc<dyn ControlHandler>>>;
+}
+
 /// What one caller identity may do on this gateway's control channel.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ControlGrant {
     label: String,
     verbs: BTreeSet<ControlVerb>,
     members: ControlMemberScope,
+    mobs: ControlMobScope,
 }
 
 impl ControlGrant {
@@ -1298,7 +1646,15 @@ impl ControlGrant {
             label: label.into(),
             verbs: verbs.into_iter().collect(),
             members,
+            mobs: ControlMobScope::DefaultMob,
         }
+    }
+
+    /// The same grant over `mobs` instead of the host's default mob only.
+    #[must_use]
+    pub fn with_mobs(mut self, mobs: ControlMobScope) -> Self {
+        self.mobs = mobs;
+        self
     }
 
     /// Operator-facing caller name.
@@ -1316,13 +1672,23 @@ impl ControlGrant {
         &self.members
     }
 
+    /// Mobs of the host this caller may reach.
+    pub fn mobs(&self) -> &ControlMobScope {
+        &self.mobs
+    }
+
     /// Check one request against this grant.
     ///
     /// ORDER IS LOAD-BEARING: the verb check runs first and unconditionally,
     /// so the host-plane exemption below is only ever reachable for a verb
     /// the operator named explicitly. Hoisting the exemption above the verb
     /// check would turn it into a bypass.
-    fn permits(&self, verb: ControlVerb, member: &str) -> Result<(), ControlAuthzDenial> {
+    fn permits(
+        &self,
+        verb: ControlVerb,
+        mob: &AddressedMob<'_>,
+        member: &str,
+    ) -> Result<(), ControlAuthzDenial> {
         if !self.verbs.contains(&verb) {
             return Err(ControlAuthzDenial::VerbNotGranted {
                 label: self.label.clone(),
@@ -1330,14 +1696,20 @@ impl ControlGrant {
             });
         }
         // Host-plane verbs address the serving gateway itself, so there is
-        // no member to scope. Requiring `members = ["*"]` to reach them
-        // would be worse than exempting them: an operator granting a
-        // read-only host projection would have to widen the SAME grant's
-        // `inject` to every member to do it.
+        // no member to scope. (Their audience was held against this grant's
+        // mobs like any other request's before this is reached.) Requiring
+        // `members = ["*"]`
+        // to reach them would be worse than exempting them: an operator
+        // granting a read-only host projection would have to widen the SAME
+        // grant's `inject` to every member to do it.
         if verb.is_host_plane() {
             return Ok(());
         }
-        if !self.members.contains(member) {
+        // A member is a member of one mob. The audience check has already
+        // refused a mob this grant does not reach; what is left for the
+        // mob scope here is a listener that was told no audience, where a
+        // grant that lists mob ids reaches no member.
+        if !self.mobs.reaches(mob) || !self.members.contains(member) {
             return Err(ControlAuthzDenial::MemberNotGranted {
                 label: self.label.clone(),
                 verb,
@@ -1392,6 +1764,7 @@ impl ControlGrantTable {
     /// pubkey = "ed25519:KioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKio="
     /// verbs = ["lookup_member", "wire", "unwire"]
     /// members = ["bob"]          # omit, or ["*"], for every member
+    /// mobs = ["mob-second"]      # omit for the default mob; ["*"] for every mob
     /// ```
     ///
     /// Returns `Ok(None)` when the section is ABSENT, which is what keeps
@@ -1401,8 +1774,8 @@ impl ControlGrantTable {
     /// an operator who wrote the section and listed nobody meant deny-all.
     ///
     /// Keys inside a caller entry are CLOSED: anything other than
-    /// `pubkey`, `verbs`, `members` is an error rather than an ignored
-    /// key. See the check in the loop for why silence there widens.
+    /// `pubkey`, `verbs`, `members`, `mobs` is an error rather than an
+    /// ignored key. See the check in the loop for why silence there widens.
     pub fn from_toml(text: &str) -> Result<Option<Self>, ControlGrantConfigError> {
         let table: toml::Value =
             toml::from_str(text).map_err(|err| ControlGrantConfigError::Parse(err.to_string()))?;
@@ -1432,12 +1805,12 @@ impl ControlGrantTable {
             // key a newer config carries but this binary cannot enforce.
             // Notes belong in `#` comments, which never reach this map.
             for (key, _) in entry {
-                if !matches!(key.as_str(), "pubkey" | "verbs" | "members") {
+                if !matches!(key.as_str(), "pubkey" | "verbs" | "members" | "mobs") {
                     return Err(ControlGrantConfigError::InvalidField {
                         label: label.clone(),
                         detail: format!(
                             "unknown key '{key}'; a control grant accepts only pubkey, verbs, \
-                             and members (did you mean 'members'?)"
+                             members, and mobs (did you mean 'members' or 'mobs'?)"
                         ),
                     });
                 }
@@ -1528,8 +1901,65 @@ impl ControlGrantTable {
                     ControlMemberScope::members(aliases)
                 }
             };
+            // An absent `mobs` is the default mob, which is what every
+            // grant written before grants could list mobs means. A `mobs`
+            // the operator wrote must name something: an empty list or an
+            // empty id is refused, never read as the default mob (wider
+            // than what was written for a grant meant for another mob) and
+            // never as every mob.
+            let mobs = match entry.get("mobs") {
+                None => ControlMobScope::DefaultMob,
+                Some(value) => {
+                    let items =
+                        value
+                            .as_array()
+                            .ok_or_else(|| ControlGrantConfigError::InvalidField {
+                                label: label.clone(),
+                                detail: "'mobs' must be an array of mob ids".to_string(),
+                            })?;
+                    if items.is_empty() {
+                        return Err(ControlGrantConfigError::InvalidField {
+                            label: label.clone(),
+                            detail: "'mobs' is empty; omit it for the default mob, or list the \
+                                     mob ids (or \"*\") the caller may reach"
+                                .to_string(),
+                        });
+                    }
+                    let mut ids = Vec::with_capacity(items.len());
+                    for item in items {
+                        let id =
+                            item.as_str()
+                                .ok_or_else(|| ControlGrantConfigError::InvalidField {
+                                    label: label.clone(),
+                                    detail: "'mobs' entries must be strings".to_string(),
+                                })?;
+                        if id.is_empty() {
+                            return Err(ControlGrantConfigError::InvalidField {
+                                label: label.clone(),
+                                detail: "'mobs' entries must not be empty".to_string(),
+                            });
+                        }
+                        // A mob id is matched exactly, so an id with
+                        // whitespace around it would load and reach no mob.
+                        if id.trim() != id {
+                            return Err(ControlGrantConfigError::InvalidField {
+                                label: label.clone(),
+                                detail: format!(
+                                    "'mobs' entry {id:?} begins or ends with whitespace; a mob \
+                                     id is matched exactly"
+                                ),
+                            });
+                        }
+                        ids.push(id);
+                    }
+                    ControlMobScope::mobs(ids)
+                }
+            };
             labels_by_pubkey.insert(pubkey, label.clone());
-            out.insert(pubkey, ControlGrant::new(label.clone(), verbs, members));
+            out.insert(
+                pubkey,
+                ControlGrant::new(label.clone(), verbs, members).with_mobs(mobs),
+            );
         }
         Ok(Some(out))
     }
@@ -1613,7 +2043,9 @@ impl ControlAuthorizer {
     }
 
     /// Enforce `table`. An EMPTY table refuses every caller; emptiness is
-    /// never a fallback to [`Self::open`].
+    /// never a fallback to [`Self::open`]. The authorizer is told no
+    /// audience, so it knows no mob id: a grant that lists mob ids reaches
+    /// nothing here (see [`Self::with_grants_for_audience`]).
     pub fn with_grants(table: ControlGrantTable) -> Self {
         Self::Grants {
             table,
@@ -1625,6 +2057,12 @@ impl ControlAuthorizer {
     /// for `audience` - the mob id peers name this gateway by. Use when
     /// one caller holds grants on several gateways and a captured request
     /// must not be replayable across them.
+    ///
+    /// `audience` is the gateway's default mob (the mob its launch names):
+    /// a grant without `mobs` reaches that mob only, and a grant that lists
+    /// mobs reaches it only by this id. An authorizer built without an
+    /// audience ([`Self::with_grants`]) knows no mob id, so a grant that
+    /// lists mob ids matches nothing there.
     pub fn with_grants_for_audience(table: ControlGrantTable, audience: impl Into<String>) -> Self {
         Self::Grants {
             table,
@@ -1635,11 +2073,33 @@ impl ControlAuthorizer {
     /// Parse a `[control_grants]` section into an authorizer: absent
     /// section yields [`Self::Open`], present section yields
     /// [`Self::Grants`].
+    ///
+    /// The authorizer this builds was told no audience, so it knows no mob
+    /// id and a grant that lists mob ids could match nothing. Such a grant
+    /// is a configuration error here, not a grant that silently reaches no
+    /// one: a host that lists mobs parses the table with
+    /// [`ControlGrantTable::from_toml`] and builds the authorizer with
+    /// [`Self::with_grants_for_audience`]. A grant without `mobs`, or with
+    /// `mobs = ["*"]`, loads.
     pub fn from_toml(text: &str) -> Result<Self, ControlGrantConfigError> {
-        Ok(match ControlGrantTable::from_toml(text)? {
-            Some(table) => Self::with_grants(table),
-            None => Self::Open,
-        })
+        let Some(table) = ControlGrantTable::from_toml(text)? else {
+            return Ok(Self::Open);
+        };
+        if let Some(grant) = table
+            .grants
+            .values()
+            .find(|grant| matches!(grant.mobs, ControlMobScope::Mobs(_)))
+        {
+            return Err(ControlGrantConfigError::InvalidField {
+                label: grant.label.clone(),
+                detail: "'mobs' lists mob ids, which only an authorizer that was told its \
+                         default mob can match; build it with \
+                         ControlAuthorizer::with_grants_for_audience, or grant every mob \
+                         with [\"*\"]"
+                    .to_string(),
+            });
+        }
+        Ok(Self::with_grants(table))
     }
 
     /// Whether this authorizer refuses anything at all.
@@ -1649,10 +2109,64 @@ impl ControlAuthorizer {
 
     /// Authorize one request. `Ok(None)` means the listener does not
     /// enforce grants; `Ok(Some(caller))` names the admitted caller.
+    ///
+    /// This is the form of a listener that serves one mob: a request for
+    /// any other mob is refused as one minted for another gateway.
     pub fn authorize(
         &self,
         request: &ControlRequest,
     ) -> Result<Option<AuthorizedCaller>, ControlAuthzDenial> {
+        self.authorize_on_host(request, &NoOtherMob)
+    }
+
+    /// [`Self::authorize`] on a host whose mobs `hosted` answers for at
+    /// once.
+    pub(crate) fn authorize_on_host(
+        &self,
+        request: &ControlRequest,
+        hosted: &dyn ControlHostedMobs,
+    ) -> Result<Option<AuthorizedCaller>, ControlAuthzDenial> {
+        self.admit_on_host(request, hosted)
+            .map(|admission| admission.caller)
+    }
+
+    /// [`Self::authorize_on_host`], with the mob the request was admitted
+    /// for: [`Self::begin`], the question, and [`PendingAudience::finish`]
+    /// in one call.
+    pub(crate) fn admit_on_host(
+        &self,
+        request: &ControlRequest,
+        hosted: &dyn ControlHostedMobs,
+    ) -> Result<ControlAdmission, ControlAuthzDenial> {
+        match self.begin(request)? {
+            AuthorizeStep::Admitted(admission) => Ok(admission),
+            AuthorizeStep::AskHost(pending) => {
+                let hosted = hosted.hosts_mob(pending.mob_id());
+                pending.finish(hosted)
+            }
+        }
+    }
+
+    /// Everything the grant policy decides without the host: the caller's
+    /// credential, its grant, and the mob its signed audience names.
+    ///
+    /// The audience must be a mob the caller's grant reaches and the host
+    /// serves. The default mob is the audience this authorizer was built
+    /// for. Any other id is first held against the grant's mobs: an id the
+    /// grant does not reach is refused here, and the host is never asked
+    /// about it. For an id the grant reaches the answer is
+    /// [`AuthorizeStep::AskHost`], and a mob the host does not serve gets
+    /// the same refusal, value for value. So nothing a caller is answered
+    /// tells a mob outside its grant from an id no mob has, the default
+    /// mob included.
+    ///
+    /// A listener that enforces no grants, and an authorizer that was told
+    /// no audience, check no audience: every request they admit is the
+    /// default mob's, whatever its envelope names.
+    pub(crate) fn begin<'a>(
+        &'a self,
+        request: &'a ControlRequest,
+    ) -> Result<AuthorizeStep<'a>, ControlAuthzDenial> {
         let verb = request.verb();
         let Self::Grants {
             table,
@@ -1664,7 +2178,10 @@ impl ControlAuthorizer {
             if verb.is_keyed_inject_plane() {
                 return Err(ControlAuthzDenial::GrantsRequired { verb });
             }
-            return Ok(None);
+            return Ok(AuthorizeStep::Admitted(ControlAdmission {
+                caller: None,
+                mob: AdmittedMob::Default,
+            }));
         };
         let Some(caller) = request.caller() else {
             return Err(ControlAuthzDenial::UnauthenticatedCaller { verb });
@@ -1685,24 +2202,61 @@ impl ControlAuthorizer {
                 pubkey_b64: caller.pubkey_b64.clone(),
             });
         };
-        if let Some(expected) = expected_audience.as_deref() {
-            let presented = caller.audience.as_deref().unwrap_or("");
-            if presented != expected {
-                return Err(ControlAuthzDenial::AudienceMismatch {
+        let mob = match expected_audience.as_deref() {
+            Some(default_mob) => {
+                let presented = caller.audience.as_deref().unwrap_or("");
+                // The one refusal for an audience that is no mob of the
+                // host in the grant's reach. It names the default mob only
+                // to a caller whose grant reaches the default mob.
+                let mismatch = || ControlAuthzDenial::AudienceMismatch {
                     label: grant.label().to_string(),
-                    expected: expected.to_string(),
+                    expected: if grant.mobs.reaches(&AddressedMob::Default(default_mob)) {
+                        default_mob.to_string()
+                    } else {
+                        String::new()
+                    },
                     presented: presented.to_string(),
-                });
+                };
+                let addressed = if presented == default_mob {
+                    AddressedMob::Default(default_mob)
+                } else {
+                    AddressedMob::Other(presented)
+                };
+                // ORDER IS LOAD-BEARING: the grant's reach is read before
+                // the host is asked, so a mob outside the grant is never a
+                // question for the host and never answered differently
+                // from an id no mob has.
+                if presented.is_empty() || !grant.mobs.reaches(&addressed) {
+                    return Err(mismatch());
+                }
+                if let AddressedMob::Other(other) = addressed {
+                    let names_the_default_mob =
+                        grant.mobs.reaches(&AddressedMob::Default(default_mob));
+                    return Ok(AuthorizeStep::AskHost(PendingAudience {
+                        grant,
+                        pubkey,
+                        request,
+                        mob: AdmittedOtherMob {
+                            mob_id: meerkat_mob::MobId::from(other),
+                            not_served: mismatch(),
+                            names_the_default_mob,
+                        },
+                    }));
+                }
+                addressed
             }
-        }
-        grant.permits(verb, request.remote_member())?;
-        Ok(Some(AuthorizedCaller {
-            label: grant.label().to_string(),
-            pubkey,
+            None => AddressedMob::UnnamedDefault,
+        };
+        grant.permits(verb, &mob, request.remote_member())?;
+        Ok(AuthorizeStep::Admitted(ControlAdmission {
+            caller: Some(AuthorizedCaller {
+                label: grant.label().to_string(),
+                pubkey,
+            }),
+            mob: AdmittedMob::Default,
         }))
     }
 }
-
 fn verify_caller_signature(
     pubkey: &[u8; 32],
     caller: &ControlCaller,
@@ -1943,6 +2497,75 @@ pub struct MobHandleControlHandler {
     /// member and admits no member input: `Wire`, `Unwire` and `Inject`
     /// are refused with [`CANDIDATE_LAUNCH_CONTROL_CODE`].
     candidate_launch: bool,
+    /// Which members the member verbs answer as a name no member has.
+    members_apart: MembersApart,
+}
+
+/// Which members of a mob a peer gateway's control request does not reach.
+///
+/// A member that is kept apart from other callers (its roster entry carries
+/// the label that keeps it apart, or the runtime's record of its members
+/// says so) is answered, by every verb that names a member, exactly as a
+/// name no member has: nothing is read of it, nothing is wired to it and
+/// nothing reaches its session, whatever the caller's grant lists. The
+/// roster entry's own label is read for every handler. A runtime attaches
+/// its record too; while that record still owes its first read it cannot
+/// tell, and every name is answered as a name no member has until the read
+/// has succeeded. A handler built without the record has the roster
+/// entries' labels alone.
+#[derive(Clone, Default)]
+pub(crate) struct MembersApart {
+    record: Option<crate::private_owners::PrivateOwners>,
+}
+
+impl MembersApart {
+    /// Over a runtime's record of who its members are kept apart for.
+    pub(crate) fn of_the_runtime(record: crate::private_owners::PrivateOwners) -> Self {
+        Self {
+            record: Some(record),
+        }
+    }
+
+    /// Whether the roster member `member` of `handle`'s mob is answered as
+    /// a name no member has. A member the record cannot tell yet (it has
+    /// not read the durable records of the member's mob, which is never so
+    /// for the launch's own mob) is answered so too.
+    async fn holds(
+        &self,
+        handle: &meerkat_mob::MobHandle,
+        member: &meerkat_mob::AgentIdentity,
+    ) -> bool {
+        if let Some(record) = &self.record
+            && (record.first_read_pending()
+                || record
+                    .owner_of(handle.mob_id().as_str(), member.as_str())
+                    .is_some()
+                || matches!(
+                    record.person_for_a_reader(handle.mob_id().as_str(), member.as_str()),
+                    crate::mob_announcements::MemberPerson::NotKnown
+                ))
+        {
+            return true;
+        }
+        matches!(
+            handle.get_member(member).await,
+            Ok(Some(entry)) if crate::access::private_owner(&entry.labels).is_some()
+        )
+    }
+}
+
+/// What a verb that reads a member answers a name the mob's roster does not
+/// hold.
+fn no_such_member(remote_member: &str, mob_id: &str) -> (String, String) {
+    (
+        "unknown_member".to_string(),
+        format!("member '{remote_member}' not in mob '{mob_id}'"),
+    )
+}
+
+/// What Core answers a command for a roster id no member has.
+fn member_not_found(member: &meerkat_mob::AgentIdentity) -> String {
+    meerkat_mob::MobError::MemberNotFound(member.clone()).to_string()
 }
 
 /// How the handler resolves the durable identity authority for generated
@@ -1985,6 +2608,7 @@ impl MobHandleControlHandler {
             host_facts: empty_host_facts_provider(),
             keyed_inject: super::keyed_inject::pending_keyed_inject_slot(),
             candidate_launch: false,
+            members_apart: MembersApart::default(),
         }
     }
 
@@ -2001,6 +2625,7 @@ impl MobHandleControlHandler {
             host_facts: empty_host_facts_provider(),
             keyed_inject: super::keyed_inject::pending_keyed_inject_slot(),
             candidate_launch: false,
+            members_apart: MembersApart::default(),
         }
     }
 
@@ -2020,6 +2645,7 @@ impl MobHandleControlHandler {
             host_facts: empty_host_facts_provider(),
             keyed_inject: super::keyed_inject::pending_keyed_inject_slot(),
             candidate_launch: false,
+            members_apart: MembersApart::default(),
         }
     }
 
@@ -2078,6 +2704,15 @@ impl MobHandleControlHandler {
     #[must_use]
     pub(crate) fn with_candidate_launch(mut self, candidate_launch: bool) -> Self {
         self.candidate_launch = candidate_launch;
+        self
+    }
+
+    /// Answer the members `apart` holds as names no member has (see
+    /// [`MembersApart`]). A runtime gives its listener's handler its own
+    /// record.
+    #[must_use]
+    pub(crate) fn with_members_apart(mut self, apart: MembersApart) -> Self {
+        self.members_apart = apart;
         self
     }
 }
@@ -2169,6 +2804,7 @@ impl ControlHandler for MobHandleControlHandler {
         let host_facts = self.host_facts.clone();
         let keyed_inject = self.keyed_inject.clone();
         let candidate_launch = self.candidate_launch;
+        let members_apart = self.members_apart.clone();
         Box::pin(async move {
             if candidate_launch
                 && let Some(refusal) = candidate_launch_control_refusal(request.verb())
@@ -2200,6 +2836,7 @@ impl ControlHandler for MobHandleControlHandler {
                             wire: true,
                         },
                         identity_runtime.as_ref(),
+                        &members_apart,
                     )
                     .await
                 }
@@ -2223,6 +2860,7 @@ impl ControlHandler for MobHandleControlHandler {
                             wire: false,
                         },
                         identity_runtime.as_ref(),
+                        &members_apart,
                     )
                     .await
                 }
@@ -2232,7 +2870,14 @@ impl ControlHandler for MobHandleControlHandler {
                     nonce: _,
                     caller: _,
                 } => {
-                    handle_inject(&handle, &remote_member, content, identity_runtime.as_ref()).await
+                    handle_inject(
+                        &handle,
+                        &remote_member,
+                        content,
+                        identity_runtime.as_ref(),
+                        &members_apart,
+                    )
+                    .await
                 }
                 ControlRequest::LookupMember {
                     remote_member,
@@ -2244,6 +2889,7 @@ impl ControlHandler for MobHandleControlHandler {
                         session_service.as_ref(),
                         &remote_member,
                         identity_runtime.as_ref(),
+                        &members_apart,
                     )
                     .await
                 }
@@ -2362,12 +3008,84 @@ where
         }
     }
     if crate::member_comms_id::is_reserved_generated_alias(&member_alias) {
-        return Err((
-            "identity_authority_unavailable".to_string(),
-            format!("generated member alias '{member_alias}' requires the owning IdentityRuntime"),
-        ));
+        return Err(generated_alias_without_identity_runtime(&member_alias));
     }
     operation().await
+}
+
+/// What a member verb answers a generated alias on a handler that has no
+/// identity runtime to ask whose alias it is.
+fn generated_alias_without_identity_runtime(member_alias: &str) -> (String, String) {
+    (
+        "identity_authority_unavailable".to_string(),
+        format!("generated member alias '{member_alias}' requires the owning IdentityRuntime"),
+    )
+}
+
+/// The answer for `remote_member` when the member it names is kept apart
+/// from other callers; `None` when it is not, and the verb goes on.
+///
+/// Every member verb asks this once, before its identity runtime or its
+/// roster is consulted for the member, so nothing of the member decides the
+/// answer: not whether it is registered, not whether it has a member now,
+/// not which of its incarnations is current. The answer is the one this
+/// handler gives a name no member has IN THE SAME SPELLING:
+/// - a generated alias (`rt:<name>:<n>`, whatever the number) answers as
+///   the alias of an identity the identity runtime does not hold, or, on a
+///   handler without an identity runtime, as any generated alias does;
+/// - a plain name answers what `plain_name` builds from the name as it is
+///   spelled and the roster id it stands for: the verb's own answer for a
+///   name its roster does not hold.
+///
+/// Kept apart is: what [`MembersApart::holds`] says of the roster member
+/// the name stands for, or, with an identity runtime, that the registered
+/// row of the identity the name stands for carries the label (an identity
+/// that has no member yet has no roster entry to read).
+///
+/// A name in the reserved alias space that is no generated alias names no
+/// member and no identity: the verb refuses the spelling itself.
+async fn answer_for_a_member_kept_apart(
+    apart: &MembersApart,
+    handle: &meerkat_mob::MobHandle,
+    remote_member: &str,
+    identity_runtime: Option<&std::sync::Arc<crate::identity_first::IdentityRuntime>>,
+    plain_name: impl FnOnce(&str, &meerkat_mob::AgentIdentity) -> (String, String),
+) -> Option<(String, String)> {
+    let alias = crate::member_comms_id::runtime_alias_str(remote_member).into_owned();
+    let generated =
+        crate::identity_first::IdentityRuntime::identity_for_generated_member_alias(&alias);
+    let (roster_member, identity) = match &generated {
+        Some(identity) => (
+            crate::member_comms_id::mob_member_id(identity.as_str()),
+            Some(identity.clone()),
+        ),
+        None if crate::member_comms_id::is_reserved_generated_alias(&alias) => return None,
+        None => (
+            crate::member_comms_id::roster_member_id_for_supplied_id(&alias),
+            crate::identity_first::AgentIdentity::parse(&alias).ok(),
+        ),
+    };
+    let registered_apart = match (identity_runtime, &identity) {
+        (Some(runtime), Some(identity)) => {
+            runtime
+                .registered_spec(identity)
+                .await
+                .is_ok_and(|registered| {
+                    crate::access::private_owner(&registered.spec.labels).is_some()
+                })
+        }
+        _ => false,
+    };
+    if !registered_apart && !apart.holds(handle, &roster_member).await {
+        return None;
+    }
+    Some(match generated {
+        Some(identity) if identity_runtime.is_some() => control_identity_error(
+            crate::identity_first::IdentityRuntimeError::UnknownIdentity(identity),
+        ),
+        Some(_) => generated_alias_without_identity_runtime(&alias),
+        None => plain_name(&alias, &roster_member),
+    })
 }
 
 struct WireControlParams<'a> {
@@ -2427,11 +3145,25 @@ async fn handle_wire(
     handle: &meerkat_mob::MobHandle,
     params: WireControlParams<'_>,
     identity_runtime: Option<&std::sync::Arc<crate::identity_first::IdentityRuntime>>,
+    apart: &MembersApart,
 ) -> ControlResponse {
     let spec = match build_remote_wire_descriptor(&params) {
         Ok(spec) => spec,
         Err((code, message)) => return ControlResponse::Err { code, message },
     };
+    // A member kept apart is no member for a peer: the answer is the one
+    // the same spelling of a name no member has gets, and nothing is wired.
+    if let Some((code, message)) = answer_for_a_member_kept_apart(
+        apart,
+        handle,
+        params.remote_member,
+        identity_runtime,
+        |_, roster_member| ("mob_error".to_string(), member_not_found(roster_member)),
+    )
+    .await
+    {
+        return ControlResponse::Err { code, message };
+    }
     // The control plane speaks the public alias space; the local roster
     // holds comms-safe encoded ids (meerkat 0.7 MemberCommsName), so encode
     // at this boundary.
@@ -2468,6 +3200,7 @@ async fn handle_inject(
     remote_member: &str,
     content: serde_json::Value,
     identity_runtime: Option<&std::sync::Arc<crate::identity_first::IdentityRuntime>>,
+    apart: &MembersApart,
 ) -> ControlResponse {
     let content_input: meerkat_core::ContentInput = match serde_json::from_value(content) {
         Ok(c) => c,
@@ -2484,6 +3217,25 @@ async fn handle_inject(
     // preparation apply, and Core wakes it when it is dormant. The door takes
     // the identity's own lifecycle lock and checks a generated alias itself.
     let member_alias = crate::member_comms_id::runtime_alias_str(remote_member).into_owned();
+    // A member kept apart is no member for a peer: neither its identity door
+    // nor its raw door is tried, and the answer is the one the same spelling
+    // of a name no member has gets.
+    if let Some((code, message)) = answer_for_a_member_kept_apart(
+        apart,
+        handle,
+        remote_member,
+        identity_runtime,
+        |_, roster_member| {
+            (
+                "unknown_member".to_string(),
+                member_not_found(roster_member),
+            )
+        },
+    )
+    .await
+    {
+        return ControlResponse::Err { code, message };
+    }
     // A name the identity runtime refuses (Core holds it for an identity the
     // runtime has not registered, or its entry could not be read) is refused
     // typed, never sent through the raw member door.
@@ -2552,7 +3304,22 @@ async fn handle_lookup_member(
     session_service: Option<&std::sync::Arc<dyn meerkat_mob::MobSessionService>>,
     remote_member: &str,
     identity_runtime: Option<&std::sync::Arc<crate::identity_first::IdentityRuntime>>,
+    apart: &MembersApart,
 ) -> ControlResponse {
+    // A member kept apart is no member for a peer: nothing of its roster
+    // entry is read out, and the answer is the one the same spelling of a
+    // name no member has gets.
+    if let Some((code, message)) = answer_for_a_member_kept_apart(
+        apart,
+        handle,
+        remote_member,
+        identity_runtime,
+        |alias, _| no_such_member(alias, handle.mob_id().as_str()),
+    )
+    .await
+    {
+        return ControlResponse::Err { code, message };
+    }
     let operation_handle = handle.clone();
     let operation_service = session_service.cloned();
     let operation_member = crate::member_comms_id::runtime_alias_str(remote_member).into_owned();
@@ -2736,10 +3503,7 @@ pub(crate) async fn handle_lookup_member_raw(
     let entry = match handle.get_member(&mid).await {
         Ok(Some(e)) => e,
         Ok(None) => {
-            return Err((
-                "unknown_member".to_string(),
-                format!("member '{remote_member}' not in mob '{mob_id}'"),
-            ));
+            return Err(no_such_member(remote_member, &mob_id));
         }
         // A faulted lookup is a mob error, not an unknown member.
         Err(err) => {
@@ -2817,6 +3581,19 @@ pub async fn serve_tcp_control_with_authorizer(
     signer: ControlSignerSlot,
     authorizer: std::sync::Arc<ControlAuthorizer>,
 ) {
+    serve_tcp(
+        listener,
+        ControlServing {
+            handler,
+            signer,
+            authorizer,
+            mobs: None,
+        },
+    )
+    .await;
+}
+
+async fn serve_tcp(listener: TcpListener, serving: ControlServing) {
     loop {
         let (stream, _peer_addr) = match listener.accept().await {
             Ok(pair) => pair,
@@ -2825,10 +3602,7 @@ pub async fn serve_tcp_control_with_authorizer(
                 return;
             }
         };
-        let handler = handler.clone();
-        let signer = std::sync::Arc::clone(&signer);
-        let authorizer = std::sync::Arc::clone(&authorizer);
-        tokio::spawn(serve_one_tcp(stream, handler, signer, authorizer));
+        tokio::spawn(serve_one_tcp(stream, serving.clone()));
     }
 }
 
@@ -2856,6 +3630,20 @@ pub async fn serve_uds_control_with_authorizer(
     signer: ControlSignerSlot,
     authorizer: std::sync::Arc<ControlAuthorizer>,
 ) {
+    serve_uds(
+        listener,
+        ControlServing {
+            handler,
+            signer,
+            authorizer,
+            mobs: None,
+        },
+    )
+    .await;
+}
+
+#[cfg(unix)]
+async fn serve_uds(listener: UnixListener, serving: ControlServing) {
     loop {
         let (stream, _peer_addr) = match listener.accept().await {
             Ok(pair) => pair,
@@ -2864,40 +3652,44 @@ pub async fn serve_uds_control_with_authorizer(
                 return;
             }
         };
-        let handler = handler.clone();
-        let signer = std::sync::Arc::clone(&signer);
-        let authorizer = std::sync::Arc::clone(&authorizer);
-        tokio::spawn(serve_one_uds(stream, handler, signer, authorizer));
+        tokio::spawn(serve_one_uds(stream, serving.clone()));
     }
 }
 
-async fn serve_one_tcp(
-    stream: TcpStream,
-    handler: std::sync::Arc<dyn ControlHandler>,
-    signer: ControlSignerSlot,
-    authorizer: std::sync::Arc<ControlAuthorizer>,
-) {
+async fn serve_one_tcp(stream: TcpStream, serving: ControlServing) {
     let mut s = ControlStream::Tcp(stream);
-    serve_one(&mut s, handler, signer, authorizer).await;
+    serve_one(&mut s, serving).await;
 }
 
 #[cfg(unix)]
-async fn serve_one_uds(
-    stream: UnixStream,
-    handler: std::sync::Arc<dyn ControlHandler>,
-    signer: ControlSignerSlot,
-    authorizer: std::sync::Arc<ControlAuthorizer>,
-) {
+async fn serve_one_uds(stream: UnixStream, serving: ControlServing) {
     let mut s = ControlStream::Uds(stream);
-    serve_one(&mut s, handler, signer, authorizer).await;
+    serve_one(&mut s, serving).await;
 }
 
-async fn serve_one(
-    stream: &mut ControlStream,
-    handler: std::sync::Arc<dyn ControlHandler>,
-    signer: ControlSignerSlot,
-    authorizer: std::sync::Arc<ControlAuthorizer>,
-) {
+/// Write the grant policy's refusal of one request.
+async fn refuse(stream: &mut ControlStream, verb: ControlVerb, denial: &ControlAuthzDenial) {
+    tracing::warn!(
+        code = denial.code(),
+        verb = %verb,
+        reason = %denial,
+        "cross-mob control request refused by grant policy"
+    );
+    let response = ControlResponse::Err {
+        code: denial.code().to_string(),
+        message: denial.to_string(),
+    };
+    let response_payload = serde_json::to_vec(&response).unwrap_or_default();
+    let _ = stream.write_frame(&response_payload).await;
+}
+
+async fn serve_one(stream: &mut ControlStream, serving: ControlServing) {
+    let ControlServing {
+        handler,
+        signer,
+        authorizer,
+        mobs,
+    } = serving;
     let payload = match stream.read_frame().await {
         Ok(buf) => buf,
         Err(err) => {
@@ -2922,33 +3714,98 @@ async fn serve_one(
     // has to cover every ControlHandler implementation rather than only
     // the one that happens to be mounted.
     let verb = request.verb();
-    let admitted = match authorizer.authorize(&request) {
-        Ok(None) => None,
-        Ok(Some(caller)) => {
-            tracing::debug!(
-                caller = %caller.label,
-                verb = %verb,
-                "cross-mob control request admitted by grant"
-            );
-            Some(caller)
-        }
-        Err(denial) => {
-            tracing::warn!(
-                code = denial.code(),
-                verb = %verb,
-                reason = %denial,
-                "cross-mob control request refused by grant policy"
-            );
-            let response = ControlResponse::Err {
-                code: denial.code().to_string(),
-                message: denial.to_string(),
-            };
-            let response_payload = serde_json::to_vec(&response).unwrap_or_default();
-            let _ = stream.write_frame(&response_payload).await;
-            return;
+    // A request made with the gateway's own key first, before the grant
+    // table is read: no grant admits it. The key is read from the signer
+    // slot per request, where it lives; hosts install it after the
+    // listener exists. Only a verified signature reaches the refusal and
+    // its warning; a mere claim of the key goes on to the authorizer.
+    let own_keys = signer
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    if let Some(response) = host_own_key_refusal(&request, own_keys.as_deref()) {
+        tracing::warn!(
+            code = HOST_OWN_KEY_CONTROL_CODE,
+            verb = %verb,
+            "cross-mob control request refused: it was made with this gateway's own key"
+        );
+        let response_payload = serde_json::to_vec(&response).unwrap_or_default();
+        let _ = stream.write_frame(&response_payload).await;
+        return;
+    }
+    // The grant policy decides alone up to one question: whether the host
+    // serves the mob the signed audience names. It is asked only about a
+    // mob the caller's grant reaches, and answered from the mob set's own
+    // records, so authorization loads no mob. A listener of one mob has no
+    // other mob.
+    let admission = {
+        let step = match authorizer.begin(&request) {
+            Ok(step) => step,
+            Err(denial) => {
+                refuse(stream, verb, &denial).await;
+                return;
+            }
+        };
+        let admitted = match step {
+            AuthorizeStep::Admitted(admission) => Ok(admission),
+            AuthorizeStep::AskHost(pending) => {
+                let hosted = match &mobs {
+                    Some(mobs) => mobs.serves(pending.mob_id()).await,
+                    None => false,
+                };
+                pending.finish(hosted)
+            }
+        };
+        match admitted {
+            Ok(admission) => admission,
+            Err(denial) => {
+                refuse(stream, verb, &denial).await;
+                return;
+            }
         }
     };
-    let mut response = handler.handle_admitted(request, admitted).await;
+    if let Some(caller) = &admission.caller {
+        tracing::debug!(
+            caller = %caller.label,
+            verb = %verb,
+            "cross-mob control request admitted by grant"
+        );
+    }
+    // Route on the mob the grant policy admitted the request for, and on
+    // nothing else: the envelope is not read again.
+    let handler = match &admission.mob {
+        AdmittedMob::Default => handler,
+        // The host verbs answer the host's own facts: they name no member,
+        // resolve no mob and load none.
+        AdmittedMob::Other(_) if verb.is_host_plane() => handler,
+        // A verb that names a member is served on its mob's own entry. This
+        // is the lookup that loads a mob the set has not loaded.
+        AdmittedMob::Other(other) => {
+            let of_the_mob = match &mobs {
+                Some(mobs) => mobs.handler_for(other.mob_id(), verb).await,
+                None => None,
+            };
+            match of_the_mob {
+                Some(handler) => handler,
+                // The host stopped serving the mob since it was asked: the
+                // answer is the one a moment earlier would have got.
+                None => {
+                    refuse(stream, verb, other.not_served()).await;
+                    return;
+                }
+            }
+        }
+    };
+    let mut response = handler.handle_admitted(request, admission.caller).await;
+    // The host's facts name the host by its default mob's id. A caller
+    // whose grant does not reach that mob is told nothing about it: for
+    // that caller the host goes by the mob the request was signed for.
+    if let AdmittedMob::Other(other) = &admission.mob
+        && !other.names_the_default_mob
+        && let ControlResponse::Host { facts, .. } = &mut response
+    {
+        facts.host_label = other.mob_id().to_string();
+    }
     // Bind the response to this gateway's pinned identity and to the exact
     // request bytes. Re-read per request: hosts install keys after the
     // listener exists.
@@ -3606,13 +4463,20 @@ mod tests {
             ))
             .await?;
 
-        let lookup =
-            handle_lookup_member(&handle, None, "rt:worker:0", Some(&identity_runtime)).await;
+        let lookup = handle_lookup_member(
+            &handle,
+            None,
+            "rt:worker:0",
+            Some(&identity_runtime),
+            &MembersApart::default(),
+        )
+        .await;
         let injected = handle_inject(
             &handle,
             "rt:worker:0",
             serde_json::json!("hello"),
             Some(&identity_runtime),
+            &MembersApart::default(),
         )
         .await;
         let remote_peer_id =
@@ -3628,6 +4492,7 @@ mod tests {
                 wire: true,
             },
             Some(&identity_runtime),
+            &MembersApart::default(),
         )
         .await;
         assert_eq!(
@@ -4060,6 +4925,836 @@ mod tests {
             .authorize(&signed_as(&keys, None, inject_request("bob")))
             .expect_err("an audience-less request must not spend on a bound listener");
         assert_eq!(missing.code(), "audience_mismatch");
+    }
+
+    // -- the mob a request is for (the signed audience) and a grant's mobs --
+
+    /// Stand-in for the owner of the host's mob set: the mobs the host has
+    /// beside its default mob, and how often it was asked.
+    #[derive(Default)]
+    struct HostedMobs {
+        others: std::sync::Mutex<std::collections::BTreeSet<String>>,
+        asked: AtomicUsize,
+    }
+
+    impl HostedMobs {
+        fn with(others: &[&str]) -> Self {
+            let hosted = Self::default();
+            for mob in others {
+                hosted.create(mob);
+            }
+            hosted
+        }
+
+        fn create(&self, mob: &str) {
+            self.others.lock().unwrap().insert(mob.to_string());
+        }
+
+        fn destroy(&self, mob: &str) {
+            self.others.lock().unwrap().remove(mob);
+        }
+
+        fn asked(&self) -> usize {
+            self.asked.load(Ordering::SeqCst)
+        }
+    }
+
+    impl ControlHostedMobs for HostedMobs {
+        fn hosts_mob(&self, mob_id: &meerkat_mob::MobId) -> bool {
+            self.asked.fetch_add(1, Ordering::SeqCst);
+            self.others.lock().unwrap().contains(mob_id.as_str())
+        }
+    }
+
+    const DEFAULT_MOB: &str = "mob-default";
+    const SECOND_MOB: &str = "mob-second";
+
+    fn authorizer_for_default_mob(
+        keys: &crate::auth::peer_keys::GatewayPeerKeys,
+        verbs: &[ControlVerb],
+        mobs: Option<ControlMobScope>,
+    ) -> ControlAuthorizer {
+        let mut grant =
+            ControlGrant::new("peer-mob", verbs.iter().copied(), ControlMemberScope::All);
+        if let Some(mobs) = mobs {
+            grant = grant.with_mobs(mobs);
+        }
+        let mut table = ControlGrantTable::new();
+        table.insert(keys.pubkey_bytes(), grant);
+        ControlAuthorizer::with_grants_for_audience(table, DEFAULT_MOB)
+    }
+
+    /// A grant written before grants could list mobs keeps meaning the
+    /// default mob: it admits there, and a request for a second mob of the
+    /// same host is refused as one for a mob the host does not have.
+    #[test]
+    fn grant_without_mobs_refuses_a_second_mob() {
+        let keys = crate::auth::peer_keys::GatewayPeerKeys::ephemeral();
+        let authorizer = authorizer_for_default_mob(&keys, ControlVerb::all(), None);
+        let hosted = HostedMobs::with(&[SECOND_MOB]);
+
+        authorizer
+            .authorize_on_host(
+                &signed_as(&keys, Some(DEFAULT_MOB), inject_request("worker")),
+                &hosted,
+            )
+            .expect("the default mob is what a grant without mobs reaches");
+        let denial = authorizer
+            .authorize_on_host(
+                &signed_as(&keys, Some(SECOND_MOB), inject_request("worker")),
+                &hosted,
+            )
+            .expect_err("a grant without mobs reaches no second mob");
+        assert_eq!(
+            denial,
+            ControlAuthzDenial::AudienceMismatch {
+                label: "peer-mob".to_string(),
+                expected: DEFAULT_MOB.to_string(),
+                presented: SECOND_MOB.to_string(),
+            }
+        );
+    }
+
+    fn one_request_of_each_verb(member: &str) -> Vec<ControlRequest> {
+        let wire = |wire: bool| {
+            let (remote_member, local_peer_spec_address, local_comms_name, local_peer_id) = (
+                member.to_string(),
+                "tcp://127.0.0.1:9001".to_string(),
+                "far/role/alice".to_string(),
+                "00000000-0000-4000-8000-000000000001".to_string(),
+            );
+            if wire {
+                ControlRequest::Wire {
+                    remote_member,
+                    local_peer_spec_address,
+                    local_comms_name,
+                    local_peer_id,
+                    local_pubkey_b64: None,
+                    nonce: Some("n".to_string()),
+                    caller: None,
+                }
+            } else {
+                ControlRequest::Unwire {
+                    remote_member,
+                    local_peer_spec_address,
+                    local_comms_name,
+                    local_peer_id,
+                    local_pubkey_b64: None,
+                    nonce: Some("n".to_string()),
+                    caller: None,
+                }
+            }
+        };
+        let requests = vec![
+            wire(true),
+            wire(false),
+            inject_request(member),
+            lookup_request(member),
+            ControlRequest::HostDescribe {
+                nonce: Some("n".to_string()),
+                caller: None,
+            },
+            ControlRequest::HostHealth {
+                nonce: Some("n".to_string()),
+                caller: None,
+            },
+            ControlRequest::InjectKeyed {
+                remote_member: member.to_string(),
+                delivery_key: "batch-1".to_string(),
+                content_digest: "digest".to_string(),
+                summary: "1 announcement".to_string(),
+                body: "a body".to_string(),
+                issued_at_ms: 1,
+                nonce: "n".to_string(),
+                caller: None,
+            },
+            ControlRequest::InjectStatus {
+                remote_member: member.to_string(),
+                delivery_key: "batch-1".to_string(),
+                with_input: false,
+                issued_at_ms: 1,
+                nonce: "n".to_string(),
+                caller: None,
+            },
+        ];
+        assert_eq!(
+            requests.len(),
+            ControlVerb::all().len(),
+            "one request of each control verb"
+        );
+        requests
+    }
+
+    /// A mob the caller's grant does not reach is refused exactly as a mob
+    /// the host does not have: the same refusal, value for value, whether
+    /// the host has the mob or not, for every verb, the host verbs too. The
+    /// host is not asked about such a mob.
+    #[test]
+    fn a_mob_the_grant_does_not_reach_is_refused_as_a_mob_the_host_does_not_have() {
+        let keys = crate::auth::peer_keys::GatewayPeerKeys::ephemeral();
+        let has_the_mob = HostedMobs::with(&[SECOND_MOB]);
+        let has_no_such_mob = HostedMobs::default();
+        for mobs in [
+            None,
+            Some(ControlMobScope::mobs([DEFAULT_MOB])),
+            Some(ControlMobScope::mobs(["mob-third"])),
+            Some(ControlMobScope::mobs(Vec::<&str>::new())),
+        ] {
+            let authorizer = authorizer_for_default_mob(&keys, ControlVerb::all(), mobs.clone());
+            for request in one_request_of_each_verb("worker") {
+                let verb = request.verb();
+                let request = signed_as(&keys, Some(SECOND_MOB), request);
+                let where_hosted = authorizer
+                    .authorize_on_host(&request, &has_the_mob)
+                    .expect_err("the grant does not reach the mob");
+                let where_absent = authorizer
+                    .authorize_on_host(&request, &has_no_such_mob)
+                    .expect_err("the host has no such mob");
+                assert_eq!(
+                    where_hosted, where_absent,
+                    "{verb} under {mobs:?}: one refusal, whether the host has the mob or not"
+                );
+                assert_eq!(where_hosted.to_string(), where_absent.to_string());
+                assert_eq!(where_hosted.code(), "audience_mismatch", "{verb}");
+            }
+        }
+        assert_eq!(
+            (has_the_mob.asked(), has_no_such_mob.asked()),
+            (0, 0),
+            "a mob the grant does not reach is no question for the host"
+        );
+    }
+
+    /// The default mob is no exception: a grant that lists other mobs only
+    /// does not reach it, and a request for it is refused as a request for
+    /// an id no mob has. The refusal names the default mob only to a caller
+    /// whose grant reaches the default mob, where it is the text every
+    /// earlier grant has always got.
+    #[test]
+    fn a_refusal_names_the_default_mob_only_to_a_grant_that_reaches_it() {
+        let keys = crate::auth::peer_keys::GatewayPeerKeys::ephemeral();
+        let hosted = HostedMobs::with(&[SECOND_MOB]);
+        let refusal = |mobs: Option<ControlMobScope>, audience: &str| {
+            authorizer_for_default_mob(&keys, ControlVerb::all(), mobs)
+                .authorize_on_host(
+                    &signed_as(&keys, Some(audience), lookup_request("worker")),
+                    &hosted,
+                )
+                .expect_err("no mob of the host in the grant's reach")
+        };
+
+        // A grant that reaches the default mob: today's refusal, to the byte.
+        for mobs in [
+            None,
+            Some(ControlMobScope::All),
+            Some(ControlMobScope::mobs([DEFAULT_MOB, SECOND_MOB])),
+        ] {
+            let denial = refusal(mobs.clone(), "mob-elsewhere");
+            assert_eq!(denial.code(), "audience_mismatch");
+            assert_eq!(
+                denial.to_string(),
+                "caller 'peer-mob' presented a request minted for 'mob-elsewhere', but this \
+                 gateway answers for 'mob-default'",
+                "under {mobs:?}"
+            );
+        }
+
+        // A grant that lists another mob only does not reach the default
+        // mob: nothing in a refusal names it, and its own id is refused as
+        // any other id outside the grant.
+        let second_only = Some(ControlMobScope::mobs([SECOND_MOB]));
+        let for_the_default = refusal(second_only.clone(), DEFAULT_MOB);
+        let for_no_mob = refusal(second_only, "mob-elsewhere");
+        for denial in [&for_the_default, &for_no_mob] {
+            assert_eq!(denial.code(), "audience_mismatch");
+            assert!(
+                matches!(denial, ControlAuthzDenial::AudienceMismatch { expected, .. }
+                    if expected.is_empty()),
+                "the refusal carries no mob the caller did not name: {denial:?}"
+            );
+        }
+        assert_eq!(
+            for_no_mob.to_string(),
+            "caller 'peer-mob' presented a request minted for 'mob-elsewhere', which this \
+             gateway does not answer for"
+        );
+        assert!(
+            !for_no_mob.to_string().contains(DEFAULT_MOB),
+            "the default mob is not named to a grant that does not reach it"
+        );
+        assert_eq!(
+            for_the_default.to_string().replace(DEFAULT_MOB, "<id>"),
+            for_no_mob.to_string().replace("mob-elsewhere", "<id>"),
+            "the default mob's id is refused as an id no mob has"
+        );
+        assert_eq!(
+            hosted.asked(),
+            1,
+            "only the grant for every mob reaches an id the host has to be asked about"
+        );
+    }
+
+    /// A grant that lists the second mob, or every mob, admits a request
+    /// whose audience names it.
+    #[test]
+    fn grant_with_mobs_admits_it() {
+        let keys = crate::auth::peer_keys::GatewayPeerKeys::ephemeral();
+        let hosted = HostedMobs::with(&[SECOND_MOB]);
+        for mobs in [
+            ControlMobScope::mobs([SECOND_MOB]),
+            ControlMobScope::mobs([DEFAULT_MOB, SECOND_MOB]),
+            ControlMobScope::All,
+        ] {
+            let authorizer =
+                authorizer_for_default_mob(&keys, ControlVerb::all(), Some(mobs.clone()));
+            let admitted = authorizer
+                .authorize_on_host(
+                    &signed_as(&keys, Some(SECOND_MOB), inject_request("worker")),
+                    &hosted,
+                )
+                .unwrap_or_else(|denial| panic!("{mobs:?} must admit the second mob: {denial}"))
+                .expect("enforcing mode names the caller");
+            assert_eq!(admitted.label, "peer-mob");
+        }
+    }
+
+    /// The audience check asks whether the id is a mob of the host: an id
+    /// the host does not have is the existing `audience_mismatch`, whatever
+    /// the grant lists, and a mob the host has is not.
+    #[test]
+    fn audience_of_an_unknown_mob_is_audience_mismatch() {
+        let keys = crate::auth::peer_keys::GatewayPeerKeys::ephemeral();
+        let authorizer =
+            authorizer_for_default_mob(&keys, ControlVerb::all(), Some(ControlMobScope::All));
+        let hosted = HostedMobs::with(&[SECOND_MOB]);
+
+        // Positive control: the audience check passes for a mob the host has.
+        authorizer
+            .authorize_on_host(
+                &signed_as(&keys, Some(SECOND_MOB), lookup_request("worker")),
+                &hosted,
+            )
+            .expect("a second mob of the host is an audience of the host");
+
+        let denial = authorizer
+            .authorize_on_host(
+                &signed_as(&keys, Some("mob-elsewhere"), lookup_request("worker")),
+                &hosted,
+            )
+            .expect_err("a mob the host does not have is not its audience");
+        assert_eq!(
+            denial,
+            ControlAuthzDenial::AudienceMismatch {
+                label: "peer-mob".to_string(),
+                expected: DEFAULT_MOB.to_string(),
+                presented: "mob-elsewhere".to_string(),
+            }
+        );
+        let missing = authorizer
+            .authorize_on_host(&signed_as(&keys, None, lookup_request("worker")), &hosted)
+            .expect_err("a request without an audience names no mob of the host");
+        assert_eq!(missing.code(), "audience_mismatch");
+        let empty = authorizer
+            .authorize_on_host(
+                &signed_as(&keys, Some(""), lookup_request("worker")),
+                &hosted,
+            )
+            .expect_err("an empty audience names no mob of the host");
+        assert_eq!(empty.code(), "audience_mismatch");
+        assert_eq!(
+            hosted.asked(),
+            2,
+            "only a non-empty id other than the default mob's is a question for the host"
+        );
+    }
+
+    /// The audience names a mob by its exact id. An id that extends the
+    /// default mob's, is a prefix of it, or differs from it by case is
+    /// another id: not the default mob, and no mob of a host that has no
+    /// such mob.
+    #[test]
+    fn audience_is_matched_exactly() {
+        let keys = crate::auth::peer_keys::GatewayPeerKeys::ephemeral();
+        let authorizer =
+            authorizer_for_default_mob(&keys, ControlVerb::all(), Some(ControlMobScope::All));
+        let hosted = HostedMobs::with(&[SECOND_MOB]);
+        for audience in [
+            "mob-default-2",
+            "mob-defaul",
+            "MOB-DEFAULT",
+            "Mob-Default",
+            " mob-default",
+            "mob-default ",
+        ] {
+            let request = signed_as(&keys, Some(audience), inject_request("worker"));
+            for denial in [
+                authorizer.authorize(&request),
+                authorizer.authorize_on_host(&request, &hosted),
+            ] {
+                assert_eq!(
+                    denial
+                        .expect_err("another id than the default mob's")
+                        .code(),
+                    "audience_mismatch",
+                    "audience {audience:?}"
+                );
+            }
+        }
+        // Positive control: the exact id is the default mob.
+        authorizer
+            .authorize(&signed_as(
+                &keys,
+                Some(DEFAULT_MOB),
+                inject_request("worker"),
+            ))
+            .expect("the default mob by its exact id");
+    }
+
+    /// A grant's mobs are matched by their exact id too: a listed id that
+    /// is a prefix of the request's mob, extends it, or differs by case
+    /// does not reach it, and a mob the grant does not reach is refused as
+    /// a mob the host does not have.
+    #[test]
+    fn grant_mobs_are_matched_exactly() {
+        let keys = crate::auth::peer_keys::GatewayPeerKeys::ephemeral();
+        let hosted = HostedMobs::with(&[SECOND_MOB]);
+        let near_misses = authorizer_for_default_mob(
+            &keys,
+            ControlVerb::all(),
+            Some(ControlMobScope::mobs([
+                "mob-sec",
+                "mob-second-2",
+                "MOB-SECOND",
+                "mob-def",
+                "mob-default-2",
+                "MOB-DEFAULT",
+            ])),
+        );
+        for audience in [DEFAULT_MOB, SECOND_MOB] {
+            let denial = near_misses
+                .authorize_on_host(
+                    &signed_as(&keys, Some(audience), inject_request("worker")),
+                    &hosted,
+                )
+                .expect_err("no listed id is this mob's id");
+            assert_eq!(denial.code(), "audience_mismatch", "mob {audience}");
+        }
+        assert_eq!(
+            hosted.asked(),
+            0,
+            "no listed id is the request's mob, so the host is not asked"
+        );
+        // Positive control: the exact ids reach both mobs.
+        let exact = authorizer_for_default_mob(
+            &keys,
+            ControlVerb::all(),
+            Some(ControlMobScope::mobs([DEFAULT_MOB, SECOND_MOB])),
+        );
+        for audience in [DEFAULT_MOB, SECOND_MOB] {
+            exact
+                .authorize_on_host(
+                    &signed_as(&keys, Some(audience), inject_request("worker")),
+                    &hosted,
+                )
+                .expect("the listed id");
+        }
+    }
+
+    /// The host verbs name no mob, and still need an audience this host
+    /// answers for: a host verb minted for another gateway is not served
+    /// here.
+    #[test]
+    fn host_verbs_need_an_audience_of_the_host() {
+        let keys = crate::auth::peer_keys::GatewayPeerKeys::ephemeral();
+        let hosted = HostedMobs::with(&[SECOND_MOB]);
+        let authorizer = authorizer_for_default_mob(
+            &keys,
+            &[ControlVerb::HostDescribe, ControlVerb::HostHealth],
+            Some(ControlMobScope::All),
+        );
+        let describe = |audience: Option<&str>| {
+            signed_as(
+                &keys,
+                audience,
+                ControlRequest::HostDescribe {
+                    nonce: Some("n".to_string()),
+                    caller: None,
+                },
+            )
+        };
+        for audience in [Some("mob-elsewhere"), Some(""), None] {
+            for denial in [
+                authorizer.authorize(&describe(audience)),
+                authorizer.authorize_on_host(&describe(audience), &hosted),
+            ] {
+                assert_eq!(
+                    denial.expect_err("not an audience of this host").code(),
+                    "audience_mismatch",
+                    "audience {audience:?}"
+                );
+            }
+        }
+        // Positive control: the same verb for an audience of the host.
+        authorizer
+            .authorize(&describe(Some(DEFAULT_MOB)))
+            .expect("the default mob is an audience of the host");
+    }
+
+    /// The authorizer keeps no list of the host's mobs: it asks per
+    /// request, so a mob created after the authorizer was built is an
+    /// audience and a destroyed one no longer is.
+    #[test]
+    fn audience_check_asks_the_host_on_every_request() {
+        let keys = crate::auth::peer_keys::GatewayPeerKeys::ephemeral();
+        let authorizer =
+            authorizer_for_default_mob(&keys, ControlVerb::all(), Some(ControlMobScope::All));
+        let hosted = HostedMobs::default();
+        let request = signed_as(&keys, Some(SECOND_MOB), lookup_request("worker"));
+
+        let before = authorizer
+            .authorize_on_host(&request, &hosted)
+            .expect_err("the host does not have the mob yet");
+        assert_eq!(before.code(), "audience_mismatch");
+
+        hosted.create(SECOND_MOB);
+        authorizer
+            .authorize_on_host(&request, &hosted)
+            .expect("a mob created after the authorizer was built is an audience");
+
+        hosted.destroy(SECOND_MOB);
+        let after = authorizer
+            .authorize_on_host(&request, &hosted)
+            .expect_err("a destroyed mob is no audience");
+        assert_eq!(after.code(), "audience_mismatch");
+        assert_eq!(hosted.asked(), 3, "one question per request");
+    }
+
+    /// Only a caller that holds a grant, with a verified signature, makes
+    /// the authorizer ask about a mob, and never about the default mob.
+    #[test]
+    fn caller_without_a_grant_never_reaches_the_mob_lookup() {
+        let granted = crate::auth::peer_keys::GatewayPeerKeys::ephemeral();
+        let stranger = crate::auth::peer_keys::GatewayPeerKeys::ephemeral();
+        let authorizer =
+            authorizer_for_default_mob(&granted, ControlVerb::all(), Some(ControlMobScope::All));
+        let hosted = HostedMobs::with(&[SECOND_MOB]);
+
+        let unknown = authorizer
+            .authorize_on_host(
+                &signed_as(&stranger, Some(SECOND_MOB), lookup_request("worker")),
+                &hosted,
+            )
+            .expect_err("a stranger holds no grant");
+        assert_eq!(unknown.code(), "caller_not_granted");
+
+        let unsigned = authorizer
+            .authorize_on_host(&lookup_request("worker"), &hosted)
+            .expect_err("no credential");
+        assert_eq!(unsigned.code(), "unauthenticated_caller");
+
+        let mut moved = signed_as(&granted, Some(SECOND_MOB), lookup_request("worker"));
+        let caller = moved.caller().cloned().expect("signed");
+        moved = lookup_request("someone-else");
+        moved.set_caller(Some(caller));
+        let forged = authorizer
+            .authorize_on_host(&moved, &hosted)
+            .expect_err("a moved signature does not verify");
+        assert_eq!(forged.code(), "invalid_caller_signature");
+
+        authorizer
+            .authorize_on_host(
+                &signed_as(&granted, Some(DEFAULT_MOB), lookup_request("worker")),
+                &hosted,
+            )
+            .expect("the default mob is admitted");
+        assert_eq!(
+            hosted.asked(),
+            0,
+            "none of these requests is a reason to ask about a mob"
+        );
+    }
+
+    /// A grant that lists mobs names the default mob by its id like any
+    /// other: listing only the second mob does not reach the default mob,
+    /// and a mob outside the list is refused as a mob the host does not
+    /// have.
+    #[test]
+    fn grant_that_lists_mobs_reaches_the_default_mob_only_by_its_id() {
+        let keys = crate::auth::peer_keys::GatewayPeerKeys::ephemeral();
+        let hosted = HostedMobs::with(&[SECOND_MOB]);
+        let for_default = signed_as(&keys, Some(DEFAULT_MOB), inject_request("worker"));
+
+        let second_only = authorizer_for_default_mob(
+            &keys,
+            ControlVerb::all(),
+            Some(ControlMobScope::mobs([SECOND_MOB])),
+        );
+        let denial = second_only
+            .authorize_on_host(&for_default, &hosted)
+            .expect_err("the default mob is not in the list");
+        assert_eq!(denial.code(), "audience_mismatch");
+        // The public entry point, on a host with no second mob, agrees.
+        assert_eq!(
+            second_only
+                .authorize(&for_default)
+                .expect_err("the default mob is not in the list")
+                .code(),
+            "audience_mismatch"
+        );
+
+        let by_id = authorizer_for_default_mob(
+            &keys,
+            ControlVerb::all(),
+            Some(ControlMobScope::mobs([DEFAULT_MOB])),
+        );
+        by_id
+            .authorize_on_host(&for_default, &hosted)
+            .expect("the default mob named by its id");
+        let other = by_id
+            .authorize_on_host(
+                &signed_as(&keys, Some(SECOND_MOB), inject_request("worker")),
+                &hosted,
+            )
+            .expect_err("the second mob is not in the list");
+        assert_eq!(other.code(), "audience_mismatch");
+
+        let none = authorizer_for_default_mob(
+            &keys,
+            ControlVerb::all(),
+            Some(ControlMobScope::mobs(Vec::<&str>::new())),
+        );
+        assert_eq!(
+            none.authorize_on_host(&for_default, &hosted)
+                .expect_err("an empty list reaches no mob")
+                .code(),
+            "audience_mismatch"
+        );
+        assert_eq!(
+            hosted.asked(),
+            0,
+            "a mob outside the list is no question for the host"
+        );
+    }
+
+    /// An authorizer bound to an empty audience (a launch whose mob has no
+    /// id) admits no granted request: an empty audience names no mob, so a
+    /// request signed for it is refused as one signed for an id that is no
+    /// mob of the host, under a grant that reaches every mob.
+    #[test]
+    fn an_authorizer_bound_to_an_empty_audience_admits_no_granted_request() {
+        let keys = crate::auth::peer_keys::GatewayPeerKeys::ephemeral();
+        let mut table = ControlGrantTable::new();
+        table.insert(
+            keys.pubkey_bytes(),
+            ControlGrant::new(
+                "peer-mob",
+                ControlVerb::all().iter().copied(),
+                ControlMemberScope::All,
+            )
+            .with_mobs(ControlMobScope::All),
+        );
+        let authorizer = ControlAuthorizer::with_grants_for_audience(table, "");
+        let hosted = HostedMobs::with(&[]);
+        for audience in ["", DEFAULT_MOB] {
+            let denial = authorizer
+                .authorize_on_host(
+                    &signed_as(&keys, Some(audience), lookup_request("alice")),
+                    &hosted,
+                )
+                .expect_err("no audience is a mob of a host whose default mob has no id");
+            assert_eq!(denial.code(), "audience_mismatch", "audience '{audience}'");
+        }
+    }
+
+    /// The host verbs name no member, and they still need an audience the
+    /// grant reaches: a grant that names the verb admits it for a mob in
+    /// its reach, whatever members it lists, and refuses it for a mob
+    /// outside as for a mob the host does not have. The audience comes
+    /// first, then the verb.
+    #[test]
+    fn host_verbs_need_an_audience_the_grant_reaches() {
+        let keys = crate::auth::peer_keys::GatewayPeerKeys::ephemeral();
+        let hosted = HostedMobs::with(&[SECOND_MOB]);
+        let describe = |audience: &str| {
+            signed_as(
+                &keys,
+                Some(audience),
+                ControlRequest::HostDescribe {
+                    nonce: Some("n".to_string()),
+                    caller: None,
+                },
+            )
+        };
+        let health = |audience: &str| {
+            signed_as(
+                &keys,
+                Some(audience),
+                ControlRequest::HostHealth {
+                    nonce: Some("n".to_string()),
+                    caller: None,
+                },
+            )
+        };
+
+        let second_only = authorizer_for_default_mob(
+            &keys,
+            &[ControlVerb::HostDescribe],
+            Some(ControlMobScope::mobs([SECOND_MOB])),
+        );
+        second_only
+            .authorize_on_host(&describe(SECOND_MOB), &hosted)
+            .expect("a mob in the grant's reach is an audience for a host verb");
+        assert_eq!(
+            second_only
+                .authorize_on_host(&describe(DEFAULT_MOB), &hosted)
+                .expect_err("the default mob is outside the grant")
+                .code(),
+            "audience_mismatch"
+        );
+        assert_eq!(
+            second_only
+                .authorize_on_host(&health(SECOND_MOB), &hosted)
+                .expect_err("host_health is not named")
+                .code(),
+            "verb_not_granted"
+        );
+        assert_eq!(
+            second_only
+                .authorize_on_host(&health(DEFAULT_MOB), &hosted)
+                .expect_err("outside the grant, whatever the verb")
+                .code(),
+            "audience_mismatch",
+            "a verb the grant lacks is not told for a mob outside the grant"
+        );
+
+        // A grant without mobs: the default mob is its one audience.
+        let default_only = authorizer_for_default_mob(&keys, &[ControlVerb::HostDescribe], None);
+        default_only
+            .authorize_on_host(&describe(DEFAULT_MOB), &hosted)
+            .expect("the default mob");
+        assert_eq!(
+            default_only
+                .authorize_on_host(&describe(SECOND_MOB), &hosted)
+                .expect_err("a grant without mobs reaches no second mob")
+                .code(),
+            "audience_mismatch"
+        );
+
+        // The members of a grant never scope a host verb.
+        let mut table = ControlGrantTable::new();
+        table.insert(
+            keys.pubkey_bytes(),
+            ControlGrant::new(
+                "peer-mob",
+                [ControlVerb::HostDescribe],
+                ControlMemberScope::members(["alice"]),
+            )
+            .with_mobs(ControlMobScope::All),
+        );
+        ControlAuthorizer::with_grants_for_audience(table, DEFAULT_MOB)
+            .authorize_on_host(&describe(SECOND_MOB), &hosted)
+            .expect("the host plane is not scoped by member");
+    }
+
+    /// The keyed inject verbs name a member of one mob: a grant without
+    /// mobs serves them for the default mob and refuses them for a second
+    /// mob as for a mob the host does not have.
+    #[test]
+    fn keyed_inject_verbs_are_scoped_by_mob() {
+        let keys = crate::auth::peer_keys::GatewayPeerKeys::ephemeral();
+        let hosted = HostedMobs::with(&[SECOND_MOB]);
+        let status = |audience: &str| {
+            signed_as(
+                &keys,
+                Some(audience),
+                ControlRequest::InjectStatus {
+                    remote_member: "worker".into(),
+                    delivery_key: "batch-1".into(),
+                    with_input: false,
+                    issued_at_ms: 1,
+                    nonce: "n".into(),
+                    caller: None,
+                },
+            )
+        };
+        let default_only = authorizer_for_default_mob(&keys, &[ControlVerb::InjectStatus], None);
+        default_only
+            .authorize_on_host(&status(DEFAULT_MOB), &hosted)
+            .expect("the default mob");
+        assert_eq!(
+            default_only
+                .authorize_on_host(&status(SECOND_MOB), &hosted)
+                .expect_err("a grant without mobs reaches no second mob")
+                .code(),
+            "audience_mismatch"
+        );
+        let both = authorizer_for_default_mob(
+            &keys,
+            &[ControlVerb::InjectStatus],
+            Some(ControlMobScope::All),
+        );
+        both.authorize_on_host(&status(SECOND_MOB), &hosted)
+            .expect("every mob");
+        // A mob in reach, a member outside the grant: the member refusal.
+        let mut table = ControlGrantTable::new();
+        table.insert(
+            keys.pubkey_bytes(),
+            ControlGrant::new(
+                "peer-mob",
+                [ControlVerb::InjectStatus],
+                ControlMemberScope::members(["alice"]),
+            )
+            .with_mobs(ControlMobScope::All),
+        );
+        assert_eq!(
+            ControlAuthorizer::with_grants_for_audience(table, DEFAULT_MOB)
+                .authorize_on_host(&status(SECOND_MOB), &hosted)
+                .expect_err("worker is outside the grant's members")
+                .code(),
+            "member_not_granted",
+            "the member refusal says: the mob is in reach, the member is not"
+        );
+    }
+
+    /// An authorizer that was told no audience knows no mob id: every
+    /// request is its one mob's. A grant without mobs and a grant for every
+    /// mob admit as before; a grant that lists mob ids matches nothing, and
+    /// the unchecked audience of the request never selects a mob.
+    #[test]
+    fn authorizer_without_an_audience_matches_no_listed_mob() {
+        let keys = crate::auth::peer_keys::GatewayPeerKeys::ephemeral();
+        let hosted = HostedMobs::with(&[SECOND_MOB]);
+        let authorizer_with = |mobs: Option<ControlMobScope>| {
+            let mut grant = ControlGrant::new(
+                "peer-mob",
+                ControlVerb::all().iter().copied(),
+                ControlMemberScope::All,
+            );
+            if let Some(mobs) = mobs {
+                grant = grant.with_mobs(mobs);
+            }
+            let mut table = ControlGrantTable::new();
+            table.insert(keys.pubkey_bytes(), grant);
+            ControlAuthorizer::with_grants(table)
+        };
+        for audience in [None, Some(DEFAULT_MOB), Some(SECOND_MOB)] {
+            let request = signed_as(&keys, audience, inject_request("worker"));
+            authorizer_with(None)
+                .authorize_on_host(&request, &hosted)
+                .expect("a grant without mobs is the listener's one mob's");
+            authorizer_with(Some(ControlMobScope::All))
+                .authorize_on_host(&request, &hosted)
+                .expect("every mob");
+            let denial = authorizer_with(Some(ControlMobScope::mobs([DEFAULT_MOB, SECOND_MOB])))
+                .authorize_on_host(&request, &hosted)
+                .expect_err("no mob id is known, so no listed id matches");
+            assert_eq!(denial.code(), "member_not_granted");
+        }
+        assert_eq!(
+            hosted.asked(),
+            0,
+            "an unchecked audience is never resolved to a mob"
+        );
     }
 
     /// The signing payload is derived from a decoded request on both
@@ -4561,6 +6256,566 @@ mod tests {
         let grant = table.get(&[42u8; 32]).expect("filed");
         assert!(grant.members().contains("bob"));
         assert!(!grant.members().contains("carol"));
+    }
+
+    /// A `[control_grants]` entry written before grants could list mobs
+    /// parses to the table it always parsed to: a grant of the default mob.
+    #[test]
+    fn grant_toml_without_mobs_parses_to_the_same_table() {
+        let parsed = ControlGrantTable::from_toml(&format!(
+            r#"
+            [control_grants.ops-mob]
+            pubkey = "{TEST_PUBKEY_B64}"
+            verbs = ["inject", "lookup_member"]
+            members = ["bob"]
+            "#
+        ))
+        .expect("parse")
+        .expect("section is present");
+        let mut built = ControlGrantTable::new();
+        built.insert(
+            [42u8; 32],
+            ControlGrant::new(
+                "ops-mob",
+                [ControlVerb::Inject, ControlVerb::LookupMember],
+                ControlMemberScope::members(["bob"]),
+            ),
+        );
+        assert_eq!(parsed, built);
+        assert_eq!(
+            parsed.get(&[42u8; 32]).expect("filed").mobs(),
+            &ControlMobScope::DefaultMob
+        );
+    }
+
+    /// `mobs` lists the mobs of the host a grant reaches, `*` every mob.
+    #[test]
+    fn grant_toml_parses_the_mobs_scope() {
+        let grant_with = |mobs: &str| {
+            ControlGrantTable::from_toml(&format!(
+                r#"
+                [control_grants.ops-mob]
+                pubkey = "{TEST_PUBKEY_B64}"
+                verbs = ["inject"]
+                mobs = {mobs}
+                "#
+            ))
+            .unwrap_or_else(|error| panic!("mobs = {mobs} must parse: {error}"))
+            .expect("section is present")
+            .get(&[42u8; 32])
+            .expect("filed")
+            .clone()
+        };
+        assert_eq!(
+            grant_with(r#"["mob-second", "mob-default"]"#).mobs(),
+            &ControlMobScope::Mobs(
+                [
+                    meerkat_mob::MobId::from("mob-default"),
+                    meerkat_mob::MobId::from("mob-second"),
+                ]
+                .into_iter()
+                .collect()
+            )
+        );
+        assert_eq!(grant_with(r#"["*"]"#).mobs(), &ControlMobScope::All);
+        assert_eq!(
+            grant_with(r#"["mob-second", "*"]"#).mobs(),
+            &ControlMobScope::All
+        );
+        // The member scope is untouched by the mob scope.
+        assert_eq!(
+            grant_with(r#"["mob-second"]"#).members(),
+            &ControlMemberScope::All
+        );
+    }
+
+    /// A `mobs` an operator wrote and that names nothing is a configuration
+    /// error, never the default mob and never every mob.
+    #[test]
+    fn grant_toml_refuses_an_empty_or_malformed_mobs_list() {
+        let detail_of = |mobs: &str| {
+            let error = ControlGrantTable::from_toml(&format!(
+                r#"
+                [control_grants.ops-mob]
+                pubkey = "{TEST_PUBKEY_B64}"
+                verbs = ["inject"]
+                mobs = {mobs}
+                "#
+            ))
+            .expect_err("must fail closed");
+            match error {
+                ControlGrantConfigError::InvalidField { label, detail } => {
+                    assert_eq!(label, "ops-mob");
+                    detail
+                }
+                other => panic!("expected an invalid field, got {other:?}"),
+            }
+        };
+        assert!(
+            detail_of("[]").contains("'mobs' is empty"),
+            "an empty list is refused as empty"
+        );
+        assert!(
+            detail_of(r#""mob-second""#).contains("'mobs' must be an array"),
+            "a bare string is not a list"
+        );
+        assert!(
+            detail_of("[1]").contains("'mobs' entries must be strings"),
+            "entries are mob ids"
+        );
+        assert!(
+            detail_of(r#"[""]"#).contains("'mobs' entries must not be empty"),
+            "an empty id names no mob"
+        );
+        // An id with whitespace around it would load and match no mob.
+        for padded in [
+            r#"[" "]"#,
+            r#"["mob-second "]"#,
+            r#"[" mob-second"]"#,
+            r#"["mob-second\n"]"#,
+            r#"["mob-default", "\tmob-second"]"#,
+        ] {
+            assert!(
+                detail_of(padded).contains("whitespace"),
+                "mobs = {padded} is refused for its whitespace"
+            );
+        }
+
+        // The singular spelling is an unknown key, as for `member`.
+        let typo = ControlGrantTable::from_toml(&format!(
+            r#"
+            [control_grants.ops-mob]
+            pubkey = "{TEST_PUBKEY_B64}"
+            verbs = ["inject"]
+            mob = ["mob-second"]
+            "#
+        ))
+        .expect_err("a singular 'mob' typo must not silently grant the default mob");
+        assert!(matches!(typo, ControlGrantConfigError::InvalidField { .. }));
+    }
+
+    /// `ControlAuthorizer::from_toml` builds an authorizer that was told no
+    /// audience, where a listed mob id can match nothing. It refuses such a
+    /// grant when the configuration is read, instead of loading a grant that
+    /// reaches no one; a grant without mobs or for every mob loads.
+    #[test]
+    fn authorizer_from_toml_refuses_a_grant_that_lists_mob_ids() {
+        let section = |mobs: &str| {
+            format!(
+                r#"
+                [control_grants.ops-mob]
+                pubkey = "{TEST_PUBKEY_B64}"
+                verbs = ["inject"]
+                {mobs}
+                "#
+            )
+        };
+        let error = ControlAuthorizer::from_toml(&section(r#"mobs = ["mob-second"]"#))
+            .expect_err("a listed mob id cannot be matched without an audience");
+        match error {
+            ControlGrantConfigError::InvalidField { label, detail } => {
+                assert_eq!(label, "ops-mob");
+                assert!(
+                    detail.contains("with_grants_for_audience"),
+                    "names the way out: {detail}"
+                );
+            }
+            other => panic!("expected an invalid field, got {other:?}"),
+        }
+        for loads in ["", r#"mobs = ["*"]"#, r#"mobs = ["mob-second", "*"]"#] {
+            let authorizer = ControlAuthorizer::from_toml(&section(loads))
+                .unwrap_or_else(|error| panic!("{loads:?} must load: {error}"));
+            assert!(authorizer.is_enforcing());
+        }
+        // The table itself still parses: a host that binds an audience
+        // reads it through `ControlGrantTable::from_toml`.
+        ControlGrantTable::from_toml(&section(r#"mobs = ["mob-second"]"#))
+            .expect("the table parses")
+            .expect("section is present");
+    }
+
+    // -- the gateway's own key --
+
+    /// Counts what reaches the handler.
+    struct CountingEcho {
+        dispatched: Arc<AtomicUsize>,
+    }
+
+    impl ControlHandler for CountingEcho {
+        fn handle(
+            &self,
+            request: ControlRequest,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ControlResponse> + Send + '_>>
+        {
+            static ECHO: EchoHandler = EchoHandler;
+            self.dispatched.fetch_add(1, Ordering::SeqCst);
+            ECHO.handle(request)
+        }
+    }
+
+    /// Serve `authorizer` over TCP for a gateway whose key is `own_keys`,
+    /// counting what reaches the handler.
+    async fn serve_counted(
+        authorizer: ControlAuthorizer,
+        own_keys: &crate::auth::peer_keys::GatewayPeerKeys,
+    ) -> (
+        RemoteEndpoint,
+        Arc<AtomicUsize>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let dispatched = Arc::new(AtomicUsize::new(0));
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let endpoint = RemoteEndpoint::Tcp(listener.local_addr().expect("addr").to_string());
+        let handler: Arc<dyn ControlHandler> = Arc::new(CountingEcho {
+            dispatched: Arc::clone(&dispatched),
+        });
+        let server = tokio::spawn(serve_tcp_control_with_authorizer(
+            listener,
+            handler,
+            signer_with(own_keys.clone()),
+            Arc::new(authorizer),
+        ));
+        (endpoint, dispatched, server)
+    }
+
+    /// One control exchange, as the listener answers it.
+    async fn exchange(endpoint: &RemoteEndpoint, request: &ControlRequest) -> ControlResponse {
+        RemoteControlClient::send(endpoint, request, DEFAULT_CONTROL_TIMEOUT)
+            .await
+            .expect("control rpc")
+    }
+
+    fn refusal_of(response: &ControlResponse) -> Option<(&str, &str)> {
+        match response {
+            ControlResponse::Err { code, message } => Some((code.as_str(), message.as_str())),
+            _ => None,
+        }
+    }
+
+    /// `request` with its caller key respelled and its signature untouched.
+    /// The signed text does not cover the spelling of the key, so the
+    /// signature still verifies.
+    fn respelled(mut request: ControlRequest, spell: impl Fn(&str) -> String) -> ControlRequest {
+        let caller = request.caller().cloned().expect("signed");
+        request.set_caller(Some(ControlCaller {
+            pubkey_b64: spell(&caller.pubkey_b64),
+            ..caller
+        }));
+        request
+    }
+
+    /// `request` signed by `signer` and naming `claimed` as its caller: a
+    /// claim whose signature does not verify.
+    fn claiming(
+        claimed: &crate::auth::peer_keys::GatewayPeerKeys,
+        signer: &crate::auth::peer_keys::GatewayPeerKeys,
+        request: ControlRequest,
+    ) -> ControlRequest {
+        respelled(signed_as(signer, Some(DEFAULT_MOB), request), |_| {
+            claimed.pubkey_b64()
+        })
+    }
+
+    fn full_grant() -> ControlGrant {
+        ControlGrant::new(
+            "everything",
+            ControlVerb::all().iter().copied(),
+            ControlMemberScope::All,
+        )
+        .with_mobs(ControlMobScope::All)
+    }
+
+    fn status_request(member: &str) -> ControlRequest {
+        ControlRequest::InjectStatus {
+            remote_member: member.to_string(),
+            delivery_key: "batch-1".to_string(),
+            with_input: false,
+            issued_at_ms: 1,
+            nonce: "n".to_string(),
+            caller: None,
+        }
+    }
+
+    fn describe_request() -> ControlRequest {
+        ControlRequest::HostDescribe {
+            nonce: Some("n".to_string()),
+            caller: None,
+        }
+    }
+
+    /// A request made with this gateway's own key is refused before the
+    /// grant table is read, whatever the table says about that key: no
+    /// grant, a grant without the verb, a grant for everything. Every verb
+    /// is refused, the read-only ones too, the handler never runs, and
+    /// another gateway is served by the same listener.
+    #[tokio::test]
+    async fn request_from_the_gateways_own_key_is_refused_before_the_grant_table() {
+        let own_keys = crate::auth::peer_keys::GatewayPeerKeys::ephemeral();
+        let peer_keys = crate::auth::peer_keys::GatewayPeerKeys::ephemeral();
+        let own_grants = [
+            None,
+            Some(ControlGrant::new(
+                "health-only",
+                [ControlVerb::HostHealth],
+                ControlMemberScope::All,
+            )),
+            Some(full_grant()),
+        ];
+        for own_grant in own_grants {
+            let filed = own_grant
+                .as_ref()
+                .map_or("no grant", ControlGrant::label)
+                .to_string();
+            let mut table = ControlGrantTable::new();
+            if let Some(grant) = own_grant {
+                table.insert(own_keys.pubkey_bytes(), grant);
+            }
+            table.insert(peer_keys.pubkey_bytes(), full_grant());
+            let (endpoint, dispatched, server) = serve_counted(
+                ControlAuthorizer::with_grants_for_audience(table, DEFAULT_MOB),
+                &own_keys,
+            )
+            .await;
+
+            for request in [
+                lookup_request("alice"),
+                inject_request("alice"),
+                describe_request(),
+                status_request("alice"),
+            ] {
+                let verb = request.verb();
+                let answer =
+                    exchange(&endpoint, &signed_as(&own_keys, Some(DEFAULT_MOB), request)).await;
+                assert_eq!(
+                    refusal_of(&answer).map(|(code, _)| code),
+                    Some(HOST_OWN_KEY_CONTROL_CODE),
+                    "own key filed with {filed}, verb {verb}: {answer:?}"
+                );
+            }
+            assert_eq!(
+                dispatched.load(Ordering::SeqCst),
+                0,
+                "a refused request never reaches the handler"
+            );
+
+            // Positive control: another gateway with a grant is served.
+            let served = exchange(
+                &endpoint,
+                &signed_as(&peer_keys, Some(DEFAULT_MOB), lookup_request("alice")),
+            )
+            .await;
+            assert!(
+                matches!(served, ControlResponse::Member { .. }),
+                "got {served:?}"
+            );
+            assert_eq!(dispatched.load(Ordering::SeqCst), 1);
+            server.abort();
+        }
+    }
+
+    /// A listener that enforces no grants refuses a request made with this
+    /// gateway's own key too, ahead of every other answer it has; every
+    /// other caller is served as before.
+    #[tokio::test]
+    async fn open_listener_refuses_the_gateways_own_key() {
+        let own_keys = crate::auth::peer_keys::GatewayPeerKeys::ephemeral();
+        let peer_keys = crate::auth::peer_keys::GatewayPeerKeys::ephemeral();
+        let (endpoint, dispatched, server) =
+            serve_counted(ControlAuthorizer::open(), &own_keys).await;
+
+        for request in [lookup_request("alice"), status_request("alice")] {
+            let verb = request.verb();
+            let answer = exchange(&endpoint, &signed_as(&own_keys, None, request)).await;
+            assert_eq!(
+                refusal_of(&answer).map(|(code, _)| code),
+                Some(HOST_OWN_KEY_CONTROL_CODE),
+                "verb {verb}: {answer:?}"
+            );
+        }
+        assert_eq!(dispatched.load(Ordering::SeqCst), 0);
+
+        // Another gateway's keyed verb gets the open listener's own answer.
+        let keyed = exchange(
+            &endpoint,
+            &signed_as(&peer_keys, None, status_request("alice")),
+        )
+        .await;
+        assert_eq!(
+            refusal_of(&keyed).map(|(code, _)| code),
+            Some("grants_required")
+        );
+        let peer = exchange(
+            &endpoint,
+            &signed_as(&peer_keys, None, lookup_request("alice")),
+        )
+        .await;
+        assert!(
+            matches!(peer, ControlResponse::Member { .. }),
+            "got {peer:?}"
+        );
+        let anonymous = exchange(&endpoint, &lookup_request("alice")).await;
+        assert!(
+            matches!(anonymous, ControlResponse::Member { .. }),
+            "got {anonymous:?}"
+        );
+        assert_eq!(dispatched.load(Ordering::SeqCst), 2);
+        server.abort();
+    }
+
+    /// A caller without a signature that verifies cannot tell whether the
+    /// key it names is this gateway's: it gets the answer any such claim
+    /// gets, on a listener with grants and on one without, and the
+    /// listener's own-key refusal (and its warning) is not reached.
+    #[tokio::test]
+    async fn unverified_claim_of_the_gateways_key_is_answered_like_any_other() {
+        let own_keys = crate::auth::peer_keys::GatewayPeerKeys::ephemeral();
+        let stranger_keys = crate::auth::peer_keys::GatewayPeerKeys::ephemeral();
+        let attacker_keys = crate::auth::peer_keys::GatewayPeerKeys::ephemeral();
+        let forged_own = claiming(&own_keys, &attacker_keys, lookup_request("alice"));
+        let forged_stranger = claiming(&stranger_keys, &attacker_keys, lookup_request("alice"));
+        let unsigned = |keys: &crate::auth::peer_keys::GatewayPeerKeys| {
+            let mut request = lookup_request("alice");
+            request.set_caller(Some(ControlCaller {
+                pubkey_b64: keys.pubkey_b64(),
+                sig_b64: String::new(),
+                audience: Some(DEFAULT_MOB.to_string()),
+            }));
+            request
+        };
+        // What an answer says once the key the caller itself sent is taken
+        // out of it.
+        let shape = |response: &ControlResponse, keys: &crate::auth::peer_keys::GatewayPeerKeys| {
+            let (code, message) = refusal_of(response).expect("a refusal");
+            (
+                code.to_string(),
+                message.replace(&keys.pubkey_b64(), "<key>"),
+            )
+        };
+
+        // A listener with grants, where the gateway's own key even holds one.
+        let mut table = ControlGrantTable::new();
+        table.insert(own_keys.pubkey_bytes(), full_grant());
+        let (endpoint, dispatched, server) = serve_counted(
+            ControlAuthorizer::with_grants_for_audience(table, DEFAULT_MOB),
+            &own_keys,
+        )
+        .await;
+        let own_answer = exchange(&endpoint, &forged_own).await;
+        let stranger_answer = exchange(&endpoint, &forged_stranger).await;
+        assert_eq!(
+            shape(&own_answer, &own_keys),
+            shape(&stranger_answer, &stranger_keys)
+        );
+        assert_eq!(
+            refusal_of(&own_answer).map(|(code, _)| code),
+            Some("invalid_caller_signature")
+        );
+        let own_unsigned = exchange(&endpoint, &unsigned(&own_keys)).await;
+        let stranger_unsigned = exchange(&endpoint, &unsigned(&stranger_keys)).await;
+        assert_eq!(
+            shape(&own_unsigned, &own_keys),
+            shape(&stranger_unsigned, &stranger_keys)
+        );
+        assert_eq!(
+            refusal_of(&own_unsigned).map(|(code, _)| code),
+            Some("invalid_caller_credential")
+        );
+        assert_eq!(dispatched.load(Ordering::SeqCst), 0);
+        server.abort();
+
+        // A listener without grants verifies no signature for anyone: both
+        // claims are served.
+        let (endpoint, dispatched, server) =
+            serve_counted(ControlAuthorizer::open(), &own_keys).await;
+        for request in [&forged_own, &forged_stranger, &unsigned(&own_keys)] {
+            let answer = exchange(&endpoint, request).await;
+            assert!(
+                matches!(answer, ControlResponse::Member { .. }),
+                "got {answer:?}"
+            );
+        }
+        assert_eq!(dispatched.load(Ordering::SeqCst), 3);
+        server.abort();
+
+        // The function the listener calls, whose answer is the only thing
+        // that writes the own-key warning.
+        assert!(host_own_key_refusal(&forged_own, Some(&own_keys)).is_none());
+        assert!(host_own_key_refusal(&unsigned(&own_keys), Some(&own_keys)).is_none());
+    }
+
+    /// The refusal is not a grant refusal: no grant admits the gateway's
+    /// own key, so a caller must never read it as "ask for a wider grant".
+    /// The eight denial codes stay eight: the array's length is in its type.
+    #[test]
+    fn host_own_key_is_not_an_authorization_denial() {
+        assert!(!ControlAuthzDenial::is_denial_code(
+            HOST_OWN_KEY_CONTROL_CODE
+        ));
+        let eight: [&str; 8] = CONTROL_AUTHZ_DENIAL_CODES;
+        assert!(!eight.contains(&HOST_OWN_KEY_CONTROL_CODE));
+        // POSITIVE CONTROL: the classifier does recognise a real denial.
+        assert!(ControlAuthzDenial::is_denial_code("member_not_granted"));
+    }
+
+    /// The exact function the listener calls. It refuses a request whose
+    /// signature verifies against this gateway's key, however the key is
+    /// spelled in the envelope and whatever the verb, and nothing else. A
+    /// gateway without a key has no caller to recognise as itself.
+    #[test]
+    fn own_key_refusal_needs_the_gateways_key_and_a_signature_that_verifies() {
+        let own_keys = crate::auth::peer_keys::GatewayPeerKeys::ephemeral();
+        let other_keys = crate::auth::peer_keys::GatewayPeerKeys::ephemeral();
+        let own = signed_as(&own_keys, Some(DEFAULT_MOB), lookup_request("alice"));
+        let other = signed_as(&other_keys, Some(DEFAULT_MOB), lookup_request("alice"));
+
+        assert!(host_own_key_refusal(&own, None).is_none());
+        assert!(host_own_key_refusal(&other, Some(&own_keys)).is_none());
+        assert!(host_own_key_refusal(&lookup_request("alice"), Some(&own_keys)).is_none());
+
+        for request in [
+            lookup_request("alice"),
+            inject_request("alice"),
+            describe_request(),
+            status_request("alice"),
+        ] {
+            let verb = request.verb();
+            let signed = signed_as(&own_keys, Some(DEFAULT_MOB), request);
+            match host_own_key_refusal(&signed, Some(&own_keys)) {
+                Some(ControlResponse::Err { code, message }) => {
+                    assert_eq!(code, HOST_OWN_KEY_CONTROL_CODE);
+                    assert!(message.contains(verb.as_str()), "names the verb: {message}");
+                }
+                other => panic!("expected the own-key refusal for {verb}, got {other:?}"),
+            }
+        }
+
+        // Every spelling the authorizer would read as the gateway's key is
+        // refused: the prefixed one, and one padded with whitespace.
+        let prefixed = respelled(own.clone(), |key| format!("ed25519:{key}"));
+        assert!(host_own_key_refusal(&prefixed, Some(&own_keys)).is_some());
+        let padded = respelled(own.clone(), |key| format!("  ed25519:{key}\n"));
+        assert!(host_own_key_refusal(&padded, Some(&own_keys)).is_some());
+
+        // A claim of the gateway's key whose signature does not verify is
+        // not the gateway: the authorizer answers it like any other claim.
+        let forged = claiming(&own_keys, &other_keys, lookup_request("alice"));
+        assert!(host_own_key_refusal(&forged, Some(&own_keys)).is_none());
+        let moved = {
+            let caller = own.caller().cloned().expect("signed");
+            let mut request = lookup_request("someone-else");
+            request.set_caller(Some(caller));
+            request
+        };
+        assert!(
+            host_own_key_refusal(&moved, Some(&own_keys)).is_none(),
+            "a signature moved to another request does not verify"
+        );
+
+        let undecodable = respelled(own, |_| "not-base64!!".to_string());
+        assert!(
+            host_own_key_refusal(&undecodable, Some(&own_keys)).is_none(),
+            "an unusable credential is the authorizer's to refuse"
+        );
     }
 
     /// End to end over a real socket: the grant-enforcing listener refuses

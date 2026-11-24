@@ -65,7 +65,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
     // its own identity: sampling parameters are not sent, max_output_tokens
     // is the synchronous cap, and call_timeout_secs and
     // stream_inactivity_timeout_secs are the same 900 s. Not a default
-    // model: the Gemini default stays gemini-4-argon.
+    // model: the provider default is selected separately in catalog.rs.
     ModelCapabilities {
         id: "gemini-4-carbon",
         provider: Provider::Gemini,
@@ -136,7 +136,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
     // is the synchronous cap. Thinking budgets are not documented for this
     // model (thinking_level only). call_timeout_secs and
     // stream_inactivity_timeout_secs follow Google's 15-minute client-timeout
-    // guidance. Default Gemini model since 0.9.1
+    // guidance. Default Gemini model from 0.9.1 through 0.9.17
     // (paid Gemini API tier only; the Google OAuth login route keeps its own
     // default).
     ModelCapabilities {
@@ -250,11 +250,78 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
     // documented; these are not called out separately): image_tool_results,
     // supports_forced_tool_choice.
     //
-    // Not a default model: the Gemini default stays gemini-4-argon.
+    // Not a default model: the provider default is selected in catalog.rs.
     ModelCapabilities {
         id: "gemini-4-hydrogen",
         provider: Provider::Gemini,
         display_name: "Gemini 4 Hydrogen",
+        tier: ModelTier::Recommended,
+        release_stage: ModelReleaseStage::Stable,
+        model_family: "gemini-4",
+        context_window: Some(1_048_576),
+        max_input_tokens: None,
+        max_output_tokens: Some(65_536),
+        context_window_beta: None,
+        max_output_tokens_beta: None,
+        vision: true,
+        image_tool_results: true,
+        inline_video: true,
+        realtime: false,
+        realtime_supports_provider_managed_turns: false,
+        realtime_supports_explicit_commit: false,
+        realtime_interrupt_supported: false,
+        realtime_transcript_supported: false,
+        transcription_companion_model: None,
+        image_generation: false,
+        supports_temperature: false,
+        supports_top_p: false,
+        supports_top_k: false,
+        thinking: ThinkingSupport::GeminiThinkingLevel,
+        anthropic_disabled_thinking: AnthropicDisabledThinking::Refused,
+        supports_reasoning: false,
+        effort_levels: GEMINI_LOW_TO_HIGH,
+        openai_responses_params: None,
+        supports_web_search: true,
+        supports_mid_conversation_system_messages: false,
+        supports_inference_geo: false,
+        supports_compaction: false,
+        supports_structured_output: true,
+        supports_legacy_penalties: false,
+        supports_thinking_budget_legacy: false,
+        beta_headers: &[],
+        call_timeout_secs: Some(900),
+        // The stream can stay silent while the model thinks, as on Gemini 4
+        // Argon: the same window bounds the silence like the call.
+        stream_inactivity_timeout_secs: Some(900),
+        supports_forced_tool_choice: true,
+    },
+    // Gemini 4 Neon: stable, paid Gemini API tiers; the Gemini provider default.
+    // First-party generateContent evidence checked 2026-11-20:
+    // https://aistudio.google.com/docs/models/gemini-4-neon
+    // https://aistudio.google.com/docs/whats-new-gemini-4-neon
+    // https://aistudio.google.com/docs/thinking?generate-content=true
+    // https://aistudio.google.com/docs/function-calling?generate-content=true
+    // https://aistudio.google.com/api-reference/generate-content
+    //
+    // The unified window includes input, thinking and output. Standard
+    // synchronous output is capped at 65,536; longer output needs the
+    // separate long-decode continuation/background protocol.
+    // Google lists low/medium/high/xhigh, default high. The existing typed
+    // Gemini tag can send only low/medium/high for this model; neutral xhigh
+    // is refused locally. Do not advertise a level the adapter cannot send.
+    // No sampling knobs or explicit caching; leave the provider default
+    // thinking level unset on the wire. HTTP timeout guidance is >= 15 min.
+    //
+    // Image tool results use the adapter's existing text functionResponse
+    // followed by sibling Content.parts inlineData, covered by image input
+    // and the mixed-part generateContent schema; this is not a claim about
+    // nested functionResponse.parts. Function-calling ANY mode and the
+    // supported-model table establish forced tool choice for Neon.
+    // The provider default is selected separately in catalog.rs.
+    ModelCapabilities {
+        id: "gemini-4-neon",
+        provider: Provider::Gemini,
+        display_name: "Gemini 4 Neon",
         tier: ModelTier::Recommended,
         release_stage: ModelReleaseStage::Stable,
         model_family: "gemini-4",

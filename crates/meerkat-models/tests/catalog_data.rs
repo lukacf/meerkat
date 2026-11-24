@@ -227,18 +227,18 @@ fn claude_fable_5_2_is_cataloged_without_changing_the_defaults() {
 }
 
 #[test]
-fn gemini_4_argon_owns_the_gemini_default() {
-    assert_eq!(default_model(Provider::Gemini), Some("gemini-4-argon"));
-    let entry = entry_for(Provider::Gemini, "gemini-4-argon")
-        .expect("gemini-4-argon must be in the catalog");
+fn gemini_4_neon_owns_the_gemini_default() {
+    assert_eq!(default_model(Provider::Gemini), Some("gemini-4-neon"));
+    let entry =
+        entry_for(Provider::Gemini, "gemini-4-neon").expect("gemini-4-neon must be in the catalog");
     assert_eq!(entry.provider, "gemini");
-    assert_eq!(entry.display_name, "Gemini 4 Argon");
+    assert_eq!(entry.display_name, "Gemini 4 Neon");
     assert_eq!(entry.tier, ModelTier::Recommended);
     let defaults = provider_defaults()
         .iter()
         .find(|defaults| defaults.provider == "gemini")
         .expect("gemini provider defaults");
-    assert_eq!(defaults.default_model_id, "gemini-4-argon");
+    assert_eq!(defaults.default_model_id, "gemini-4-neon");
     // The platform-wide default stays OpenAI-owned.
     assert_eq!(global_default_model(), "gpt-6-astra");
 }
@@ -263,7 +263,7 @@ fn gemini_4_carbon_is_cataloged_without_changing_the_defaults() {
         "gemini-4-carbon must be in the Gemini allowlist"
     );
     assert_eq!(infer_provider(id), Some(Provider::Gemini));
-    assert_eq!(default_model(Provider::Gemini), Some("gemini-4-argon"));
+    assert_eq!(default_model(Provider::Gemini), Some("gemini-4-neon"));
     assert_eq!(global_default_model(), "gpt-6-astra");
 }
 
@@ -288,8 +288,88 @@ fn gemini_4_hydrogen_is_cataloged_without_changing_the_defaults() {
         "gemini-4-hydrogen must be in the Gemini allowlist"
     );
     assert_eq!(infer_provider(id), Some(Provider::Gemini));
-    assert_eq!(default_model(Provider::Gemini), Some("gemini-4-argon"));
+    assert_eq!(default_model(Provider::Gemini), Some("gemini-4-neon"));
     assert_eq!(global_default_model(), "gpt-6-astra");
+}
+
+/// Neon is the Gemini default on paid API tiers, with the synchronous output cap.
+#[test]
+fn gemini_4_neon_is_cataloged_without_changing_global_or_image_defaults() {
+    let id = "gemini-4-neon";
+    let entry = entry_for(Provider::Gemini, id).expect("gemini-4-neon must be in the catalog");
+    assert_eq!(entry.provider, "gemini");
+    assert_eq!(entry.display_name, "Gemini 4 Neon");
+    assert_eq!(entry.tier, ModelTier::Recommended);
+    assert_eq!(entry.release_stage, meerkat_core::ModelReleaseStage::Stable);
+    assert_eq!(entry.context_window, Some(1_048_576));
+    assert_eq!(entry.max_input_tokens, None);
+    assert_eq!(entry.max_output_tokens, Some(65_536));
+    assert!(
+        allowed_models(Provider::Gemini).any(|allowed| allowed == id),
+        "gemini-4-neon must be in the Gemini allowlist"
+    );
+    assert_eq!(infer_provider(id), Some(Provider::Gemini));
+    assert_eq!(default_model(Provider::Gemini), Some("gemini-4-neon"));
+    assert_eq!(global_default_model(), "gpt-6-astra");
+    let caps = capabilities_for(Provider::Gemini, id).expect("Neon capabilities");
+    assert_eq!(caps.thinking, ThinkingSupport::GeminiThinkingLevel);
+    assert_eq!(
+        caps.effort_levels,
+        [EffortLevel::Low, EffortLevel::Medium, EffortLevel::High]
+    );
+    assert!(!caps.supports_temperature && !caps.supports_top_p && !caps.supports_top_k);
+    assert!(caps.vision && caps.inline_video && caps.image_tool_results);
+    assert!(
+        caps.supports_structured_output
+            && caps.supports_web_search
+            && caps.supports_forced_tool_choice
+    );
+    assert!(!caps.realtime && !caps.image_generation && !caps.supports_thinking_budget_legacy);
+    assert_eq!(caps.call_timeout_secs, Some(900));
+    assert_eq!(caps.stream_inactivity_timeout_secs, Some(900));
+}
+
+#[test]
+fn gemini_default_and_discovery_keep_hydrogen_and_supported_pro_available() {
+    let config = meerkat_core::Config::default();
+    assert!(config.models.gemini.is_empty());
+    let registry = config.model_registry(canonical()).expect("registry");
+    assert_eq!(
+        registry.default_model(Provider::Gemini),
+        Some("gemini-4-neon")
+    );
+    assert_eq!(
+        default_image_generation_model(Provider::Gemini).map(|profile| profile.model_id),
+        Some(IMAGE_DEFAULT_GEMINI)
+    );
+    assert_eq!(global_default_model(), "gpt-6-astra");
+
+    let grouped = provider_defaults()
+        .iter()
+        .find(|p| p.provider == "gemini")
+        .expect("Gemini discovery");
+    assert_eq!(grouped.default_model_id, "gemini-4-neon");
+    for (id, tier) in [
+        ("gemini-4-neon", ModelTier::Recommended),
+        ("gemini-4-hydrogen", ModelTier::Recommended),
+        ("gemini-4-argon", ModelTier::Recommended),
+        ("gemini-3.1-pro-preview", ModelTier::Supported),
+    ] {
+        let discovered = grouped
+            .models
+            .iter()
+            .find(|m| m.id == id)
+            .expect("discoverable model");
+        assert_eq!(discovered.tier, tier, "{id}");
+        assert!(allowed_models(Provider::Gemini).any(|model| model == id));
+        assert_eq!(
+            registry
+                .entry_for_provider(Provider::Gemini, id)
+                .expect("explicit selection")
+                .id,
+            id
+        );
+    }
 }
 
 #[test]
@@ -753,6 +833,8 @@ fn gpt_6_sol_and_luna_are_cataloged_without_changing_the_openai_default() {
         ("gpt-6-sol", "GPT-6 Sol"),
         ("gpt-6.1-sol", "GPT-6.1 Sol"),
         ("gpt-6.1-terra", "GPT-6.1 Terra"),
+        ("gpt-6.2-astra", "GPT-6.2 Astra"),
+        ("gpt-6.2-sol", "GPT-6.2 Sol"),
         ("gpt-6-luna", "GPT-6 Luna"),
     ] {
         let entry = entry_for(Provider::OpenAI, id)
@@ -1653,7 +1735,7 @@ fn gemini_4_hydrogen_capability_row_matches_the_official_model_page() {
     assert_eq!(hydrogen_as_argon, format!("{argon:?}"));
 }
 
-/// The provider-neutral `reasoning_effort` on Gemini 4 Hydrogen, resolved as
+/// The provider-neutral `reasoning_effort` on Gemini 4 Hydrogen and Neon, resolved as
 /// every door resolves it (`resolve_reasoning_effort`, on the direct
 /// generateContent route, against the catalog row). Google's thinking guide
 /// lists low, medium, high (the default) and xhigh for the model, and no
@@ -1663,7 +1745,7 @@ fn gemini_4_hydrogen_capability_row_matches_the_official_model_page() {
 ///   refused as `unsupported_level` with the row's levels and `catalog` as
 ///   their source, and the request's params are left as they were.
 #[test]
-fn gemini_4_hydrogen_reasoning_effort_resolves_low_to_high_and_refuses_xhigh() {
+fn gemini_4_hydrogen_and_neon_reasoning_effort_resolves_low_to_high_and_refuses_xhigh() {
     use meerkat_core::lifecycle::run_primitive::{
         GeminiThinkingLevel, ProviderParamsOverride, ProviderTag,
     };
@@ -1673,76 +1755,77 @@ fn gemini_4_hydrogen_reasoning_effort_resolves_low_to_high_and_refuses_xhigh() {
         supported_reasoning_levels,
     };
 
-    let id = "gemini-4-hydrogen";
-    let row = capabilities_for(Provider::Gemini, id);
-    assert!(row.is_some(), "gemini-4-hydrogen must be in the catalog");
-    let route = direct_route_observation(Provider::Gemini);
-    let resolve = |level: EffortLevel, params: &mut Option<ProviderParamsOverride>| {
-        resolve_reasoning_effort(
-            ReasoningResolveInput::new(
-                level,
-                Provider::Gemini,
-                id,
-                route.as_ref(),
-                row,
-                ReasoningEffortDecidedBy::Request,
-            ),
-            params,
-            ReasoningResolveMode::Strict,
-        )
-    };
+    for id in ["gemini-4-hydrogen", "gemini-4-neon"] {
+        let row = capabilities_for(Provider::Gemini, id);
+        assert!(row.is_some(), "{id} must be in the catalog");
+        let route = direct_route_observation(Provider::Gemini);
+        let resolve = |level: EffortLevel, params: &mut Option<ProviderParamsOverride>| {
+            resolve_reasoning_effort(
+                ReasoningResolveInput::new(
+                    level,
+                    Provider::Gemini,
+                    id,
+                    route.as_ref(),
+                    row,
+                    ReasoningEffortDecidedBy::Request,
+                ),
+                params,
+                ReasoningResolveMode::Strict,
+            )
+        };
 
-    assert_eq!(
-        supported_reasoning_levels(Provider::Gemini, route.as_ref(), row),
-        ReasoningLevelFacts::Stated {
-            levels: vec![EffortLevel::Low, EffortLevel::Medium, EffortLevel::High],
-            source: ReasoningFactsSource::Catalog,
+        assert_eq!(
+            supported_reasoning_levels(Provider::Gemini, route.as_ref(), row),
+            ReasoningLevelFacts::Stated {
+                levels: vec![EffortLevel::Low, EffortLevel::Medium, EffortLevel::High],
+                source: ReasoningFactsSource::Catalog,
+            }
+        );
+
+        for level in [EffortLevel::Low, EffortLevel::Medium, EffortLevel::High] {
+            let mut params = None;
+            let resolution = resolve(level, &mut params).expect("a level the row states resolves");
+            assert_eq!(resolution.level, level);
+            assert_eq!(
+                resolution.fields,
+                ["generationConfig.thinkingConfig.thinkingLevel"]
+            );
+            assert_eq!(resolution.facts, ReasoningFactsSource::Catalog);
+            let written = match params.and_then(|params| params.provider_tag) {
+                Some(ProviderTag::Gemini(tag)) => tag.thinking_level,
+                other => panic!("{level:?}: expected the Gemini tag, got {other:?}"),
+            };
+            let expected = match level {
+                EffortLevel::Low => GeminiThinkingLevel::Low,
+                EffortLevel::Medium => GeminiThinkingLevel::Medium,
+                _ => GeminiThinkingLevel::High,
+            };
+            assert_eq!(written, Some(expected), "{level:?}");
         }
-    );
 
-    for level in [EffortLevel::Low, EffortLevel::Medium, EffortLevel::High] {
-        let mut params = None;
-        let resolution = resolve(level, &mut params).expect("a level the row states resolves");
-        assert_eq!(resolution.level, level);
-        assert_eq!(
-            resolution.fields,
-            ["generationConfig.thinkingConfig.thinkingLevel"]
-        );
-        assert_eq!(resolution.facts, ReasoningFactsSource::Catalog);
-        let written = match params.and_then(|params| params.provider_tag) {
-            Some(ProviderTag::Gemini(tag)) => tag.thinking_level,
-            other => panic!("{level:?}: expected the Gemini tag, got {other:?}"),
-        };
-        let expected = match level {
-            EffortLevel::Low => GeminiThinkingLevel::Low,
-            EffortLevel::Medium => GeminiThinkingLevel::Medium,
-            _ => GeminiThinkingLevel::High,
-        };
-        assert_eq!(written, Some(expected), "{level:?}");
-    }
-
-    for level in [
-        EffortLevel::None,
-        EffortLevel::Minimal,
-        EffortLevel::Xhigh,
-        EffortLevel::Max,
-    ] {
-        let mut params = None;
-        let refusal = resolve(level, &mut params).expect_err("a level the row does not state");
-        assert!(params.is_none(), "{level:?}: a refusal writes nothing");
-        assert_eq!(
-            serde_json::to_value(&refusal).expect("a refusal serializes"),
-            serde_json::json!({
-                "requested": level.as_wire_str(),
-                "provider": "gemini",
-                "model": id,
-                "route": { "backend": "google_genai", "api": "generate_content" },
-                "reason": "unsupported_level",
-                "supported": ["low", "medium", "high"],
-                "facts": "catalog",
-            }),
-            "{level:?}"
-        );
+        for level in [
+            EffortLevel::None,
+            EffortLevel::Minimal,
+            EffortLevel::Xhigh,
+            EffortLevel::Max,
+        ] {
+            let mut params = None;
+            let refusal = resolve(level, &mut params).expect_err("a level the row does not state");
+            assert!(params.is_none(), "{level:?}: a refusal writes nothing");
+            assert_eq!(
+                serde_json::to_value(&refusal).expect("a refusal serializes"),
+                serde_json::json!({
+                    "requested": level.as_wire_str(),
+                    "provider": "gemini",
+                    "model": id,
+                    "route": { "backend": "google_genai", "api": "generate_content" },
+                    "reason": "unsupported_level",
+                    "supported": ["low", "medium", "high"],
+                    "facts": "catalog",
+                }),
+                "{level:?}"
+            );
+        }
     }
 }
 
@@ -1964,9 +2047,10 @@ fn stream_inactivity_windows_follow_documented_long_silent_responses() {
             // Google: set client timeouts to at least 15 minutes (Argon);
             // stream read timeouts of 15 to 20 minutes (the Gemini 4 long
             // decode guidance, which names Carbon and Hydrogen too).
-            (Provider::Gemini, "gemini-4-argon" | "gemini-4-carbon" | "gemini-4-hydrogen") => {
-                Some(900)
-            }
+            (
+                Provider::Gemini,
+                "gemini-4-argon" | "gemini-4-carbon" | "gemini-4-hydrogen" | "gemini-4-neon",
+            ) => Some(900),
             // OpenAI: requests may take several minutes; no streaming.
             (Provider::OpenAI, "gpt-5.5-pro") => Some(7200),
             _ => None,
@@ -2311,6 +2395,8 @@ mod schema {
             "gpt-6-sol",
             "gpt-6.1-sol",
             "gpt-6.1-terra",
+            "gpt-6.2-astra",
+            "gpt-6.2-sol",
             "gpt-6-luna",
             "gpt-5.6-sol",
             "gpt-5.6-terra",
@@ -2485,6 +2571,7 @@ mod schema {
             "gemini-4-carbon",
             "gemini-4-argon",
             "gemini-4-hydrogen",
+            "gemini-4-neon",
             "gemini-3.8-flash",
             "gemini-3.7-flash",
             "gemini-3.1-pro-preview",
@@ -2587,4 +2674,57 @@ fn gpt_6_1_terra_uses_the_sol_luna_effort_ladder() {
     assert!(!caps.inline_video && !caps.realtime && !caps.image_generation);
     assert!(caps.supports_web_search && caps.supports_structured_output);
     assert!(caps.openai_responses_params.is_some());
+}
+
+/// GPT-6.2 Astra and GPT-6.2 Sol: OpenAI documents that the API rejects
+/// requests that set reasoning effort to `none` and lists no other level.
+/// Live calls to the Responses API on 17 Nov 2026 accepted `low`, `medium`,
+/// `high`, `xhigh` and `max` and refused `none` and `minimal` on both, so the
+/// rows list exactly `low` through `max`. Text/image input, text output; the
+/// model pages list the Realtime endpoint as not supported. Adding them
+/// moves no default.
+/// Sources:
+///   - https://developers.openai.com/api/docs/models/gpt-6.2-astra
+///   - https://developers.openai.com/api/docs/models/gpt-6.2-sol
+///   - https://developers.openai.com/api/docs/guides/reasoning
+#[test]
+fn gpt_6_2_astra_and_sol_never_offer_effort_none() {
+    for id in ["gpt-6.2-astra", "gpt-6.2-sol"] {
+        let caps =
+            capabilities_for(Provider::OpenAI, id).unwrap_or_else(|| panic!("{id} capabilities"));
+        assert_eq!(
+            caps.effort_levels,
+            &[
+                EffortLevel::Low,
+                EffortLevel::Medium,
+                EffortLevel::High,
+                EffortLevel::Xhigh,
+                EffortLevel::Max,
+            ],
+            "{id}"
+        );
+        assert!(
+            !caps.effort_levels.contains(&EffortLevel::None)
+                && !caps.effort_levels.contains(&EffortLevel::Minimal),
+            "{id} must not offer `none` or `minimal`"
+        );
+        assert!(caps.supports_reasoning, "{id}");
+        assert_eq!(caps.tier, ModelTier::Supported, "{id}");
+        assert_eq!(caps.model_family, "gpt-6", "{id}");
+        assert_eq!(caps.context_window, Some(1_050_000), "{id}");
+        assert_eq!(caps.max_input_tokens, Some(922_000), "{id}");
+        assert_eq!(caps.max_output_tokens, Some(128_000), "{id}");
+        assert!(caps.vision && caps.image_tool_results, "{id}");
+        assert!(
+            !caps.inline_video && !caps.realtime && !caps.image_generation,
+            "{id}"
+        );
+        assert!(
+            caps.supports_web_search && caps.supports_structured_output,
+            "{id}"
+        );
+        assert!(caps.openai_responses_params.is_some(), "{id}");
+    }
+    assert_eq!(default_model(Provider::OpenAI), Some("gpt-6-astra"));
+    assert_eq!(global_default_model(), "gpt-6-astra");
 }

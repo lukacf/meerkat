@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import base64
 import email.utils
+import gzip
 import hashlib
 import http.server
 import importlib.util
@@ -75,12 +76,15 @@ META_CRATES = ("meta-extension-state", "meerkat-meta")
 
 def _targz(files: dict[str, bytes]) -> bytes:
     buffer = io.BytesIO()
-    with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
-        for name, payload in files.items():
-            info = tarfile.TarInfo(name)
-            info.size = len(payload)
-            info.mtime = 0
-            archive.addfile(info, io.BytesIO(payload))
+    # A fixed time in the gzip header: the same files give the same bytes in
+    # any second (tarfile's "w:gz" writes the current one).
+    with gzip.GzipFile(fileobj=buffer, mode="wb", mtime=0) as stream:
+        with tarfile.open(fileobj=stream, mode="w") as archive:
+            for name, payload in files.items():
+                info = tarfile.TarInfo(name)
+                info.size = len(payload)
+                info.mtime = 0
+                archive.addfile(info, io.BytesIO(payload))
     return buffer.getvalue()
 
 
@@ -93,9 +97,16 @@ def wheel(name: str, version: str) -> tuple[str, bytes]:
     dist = name.replace("-", "_")
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w") as archive:
-        archive.writestr(f"{dist}-{version}.dist-info/METADATA",
-                         f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n")
-        archive.writestr(f"{dist}/__init__.py", "")
+        for member, text in (
+            (f"{dist}-{version}.dist-info/METADATA",
+             f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n"),
+            (f"{dist}/__init__.py", ""),
+        ):
+            # A fixed entry time, for the same reason as in _targz (a name
+            # alone gets the current time).
+            entry = zipfile.ZipInfo(member, date_time=(1980, 1, 1, 0, 0, 0))
+            entry.external_attr = 0o600 << 16
+            archive.writestr(entry, text)
     return f"{dist}-{version}-py3-none-any.whl", buffer.getvalue()
 
 

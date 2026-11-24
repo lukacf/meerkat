@@ -278,6 +278,18 @@ impl MobActor {
         probed: Option<SeatChunkProbe>,
     ) -> Result<DormantSeatPlanEntry, MobError> {
         let agent_identity = spec.identity.clone();
+        // Who seats the member, from what the handle's entries observed of
+        // the call: a dormant seat has no operation owner and is no copy.
+        let seat_record = crate::runtime::seat_lineage::compose_seat(
+            &spec.seat,
+            &crate::runtime::seat_lineage::SeatStepFacts {
+                fork_seat: matches!(
+                    spec.launch_mode,
+                    crate::launch::MemberLaunchMode::Fork { .. }
+                ),
+                ..Default::default()
+            },
+        );
         let (minted, admission) = match probed {
             Some(SeatChunkProbe {
                 generation,
@@ -665,6 +677,7 @@ impl MobActor {
             labels: spec.labels.clone().unwrap_or_default(),
             continuity_intent,
             creation_origin: spec.creation_origin.clone(),
+            seat_record,
             effective_profile_override,
             effective_model_override,
             definition_wiring: spec.definition_wiring,
@@ -2173,6 +2186,15 @@ impl MobActor {
             Some(candidate.seat_build.inputs.clone()).filter(|inputs| !inputs.is_empty()),
         );
         spawned.creation = creation;
+        // The next incarnation keeps the seat record of the member's life:
+        // its row stores what the incarnation it follows holds, and none
+        // after a row that holds none.
+        spawned.seat_lineage = match crate::runtime::seat_lineage::CarriedSeat::of(
+            self.roster.read().await.member_seat(identity).as_ref(),
+        ) {
+            crate::runtime::seat_lineage::CarriedSeat::Kept(seat) => seat.to_stored(),
+            crate::runtime::seat_lineage::CarriedSeat::OlderRow => None,
+        };
         spawned.runtime_mode = candidate.runtime_mode;
         spawned.labels = candidate.labels.clone();
         spawned.continuity_intent = candidate.continuity_intent.clone();
@@ -2471,6 +2493,11 @@ impl StagedSeat {
         // What the unborn session's first build applies.
         .with_seat_build_inputs(candidate.unborn_seat_build_inputs());
         event.creation = self.creation.clone();
+        // Durable: who seated the member, as the seat's plan composed it.
+        event.seat_lineage = candidate
+            .seat_record
+            .as_ref()
+            .and_then(crate::MemberSeat::to_stored);
         event.runtime_mode = candidate.runtime_mode;
         event.labels = candidate.labels.clone();
         event.continuity_intent = candidate.continuity_intent.clone();

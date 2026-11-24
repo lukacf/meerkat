@@ -511,6 +511,25 @@ fn is_synthesizing_release(version: &str) -> bool {
     parts.next().is_none() && major == 0 && minor == 8 && (9..29).contains(&patch)
 }
 
+/// The mob id the composition manifest beside `mob_storage_path` records
+/// (its `definition.id`): the mob the persistent storage was created for.
+///
+/// `None` when there is no manifest. A manifest that cannot be read, is not
+/// a manifest, or is of a schema this build cannot judge is the refusal
+/// [`verify_before_resume`] raises for it. The id of a mob never changes in
+/// its event log, so the recorded id names the stored mob for as long as
+/// the storage lives; a launch that supplies no mob id of its own takes it,
+/// and its definition is still judged before the resume.
+pub fn recorded_definition_id(
+    mob_storage_path: &Path,
+) -> Result<Option<meerkat_mob::MobId>, MobCompositionProvenanceError> {
+    let manifest = manifest_path(mob_storage_path);
+    let Some(bytes) = read_manifest_file(&manifest)? else {
+        return Ok(None);
+    };
+    Ok(Some(parse_manifest(&manifest, &bytes)?.definition.id))
+}
+
 /// Verify a non-empty storage path was created for the supplied composition.
 ///
 /// Called on the resume branch, before the builder is constructed, so every
@@ -1066,6 +1085,54 @@ pub fn persistent_mob_storage(
     Ok((storage, MobStorageProvenance::persistent(path)))
 }
 
+/// The place of a launch's mob store, declared and not opened: the launch
+/// names where its mob's store is, and the mob set it declares its mob to
+/// opens the store, creates the mob in it when it holds none and loads it
+/// when it holds one (`MobBootstrapSpec::declared`).
+///
+/// Opaque for the reason [`MobStorageProvenance`] is: the place and what is
+/// declared about it are one value, so a launch cannot name one store and
+/// have another's composition verified. A file is declared by
+/// [`declared_mob_store`], a store in memory by [`Self::in_memory`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeclaredMobStore {
+    /// The store's file; `None` for a store in memory.
+    file: Option<PathBuf>,
+    provenance: MobStorageProvenance,
+}
+
+impl DeclaredMobStore {
+    /// A mob store in memory: it holds no mob when the process starts and
+    /// nothing of it outlives the process
+    /// ([`MobStorageProvenance::declared_ephemeral`]).
+    pub fn in_memory() -> Self {
+        Self {
+            file: None,
+            provenance: MobStorageProvenance::declared_ephemeral(),
+        }
+    }
+
+    /// The store's file, when the store is one. The file need not exist.
+    pub fn file(&self) -> Option<&Path> {
+        self.file.as_deref()
+    }
+
+    /// What is declared about the store.
+    pub fn provenance(&self) -> &MobStorageProvenance {
+        &self.provenance
+    }
+}
+
+/// Declare the persistent mob store at `path` without opening it: the
+/// declared form of [`persistent_mob_storage`]. The file need not exist: the
+/// mob set the store is declared to creates it.
+pub fn declared_mob_store(path: PathBuf) -> DeclaredMobStore {
+    DeclaredMobStore {
+        file: Some(path.clone()),
+        provenance: MobStorageProvenance::persistent(path),
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
@@ -1252,6 +1319,50 @@ mod tests {
             serde_json::to_vec_pretty(manifest).expect("manifest serializes"),
         )
         .expect("write manifest");
+    }
+
+    /// The recorded mob id is read from the manifest beside the storage:
+    /// none without a manifest, the definition's id from a current manifest
+    /// and from a predecessor's, and the manifest's own refusal when it
+    /// cannot be judged.
+    #[test]
+    fn the_recorded_definition_id_is_read_from_the_manifest_beside_the_storage() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let storage = temp.path().join("event_log.sqlite3");
+        assert_eq!(
+            recorded_definition_id(&storage).expect("no manifest is not a refusal"),
+            None
+        );
+
+        let recorded = definition("gpt-5.5");
+        record_on_create(&storage, &recorded, CompositionAuthority::Authoritative)
+            .expect("the manifest is recorded");
+        assert_eq!(
+            recorded_definition_id(&storage).expect("a current manifest reads"),
+            Some(recorded.id.clone())
+        );
+
+        write_manifest_beside(&storage, &predecessor_manifest(&recorded, "0.8.26"));
+        assert_eq!(
+            recorded_definition_id(&storage).expect("a predecessor manifest reads"),
+            Some(recorded.id)
+        );
+
+        std::fs::write(manifest_path(&storage), b"not a manifest").expect("write manifest");
+        assert!(matches!(
+            recorded_definition_id(&storage),
+            Err(MobCompositionProvenanceError::Malformed { .. })
+        ));
+
+        write_manifest_beside(
+            &storage,
+            &json!({ "manifest_version": MANIFEST_VERSION + 1 }),
+        );
+        assert!(matches!(
+            recorded_definition_id(&storage),
+            Err(MobCompositionProvenanceError::UnsupportedVersion { found, supported, .. })
+                if found == MANIFEST_VERSION + 1 && supported == MANIFEST_VERSION
+        ));
     }
 
     /// The predecessor spelling of the creator field reads as the creator

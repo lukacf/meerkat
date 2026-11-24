@@ -55,6 +55,7 @@ impl ReplayStore {
             store
                 .inner
                 .append_if_absent(NewConsoleFrame {
+                    mob_id: None,
                     id: None,
                     dedupe_key: format!("replay-frame-{seq}"),
                     timestamp_ms: seq,
@@ -692,4 +693,138 @@ async fn a_stream_decides_on_an_agent_as_it_is_now_after_the_bound_with_an_acces
         Some(controller),
     )
     .await;
+}
+
+/// One stored frame of `agent-a`, of the mob `mob_id` (none: the mob the
+/// console serves), with the dedupe key `key`.
+fn frame_of_mob(key: &str, mob_id: Option<&str>) -> NewConsoleFrame {
+    NewConsoleFrame {
+        mob_id: mob_id.map(meerkat_mob::MobId::from),
+        id: None,
+        dedupe_key: key.to_string(),
+        timestamp_ms: 1,
+        runtime_key: "runtime-a".to_string(),
+        identity: "agent-a".to_string(),
+        conversation_id: Some("agent-a".to_string()),
+        session_id: None,
+        kind: "text_delta".to_string(),
+        status: ConsoleFrameStatus::Completed,
+        payload: json!({ "delta": key }),
+        source: ConsoleFrameSource {
+            member_provenance: None,
+            kind: ConsoleFrameSourceKind::ConsoleEvent,
+            source_cursor: None,
+        },
+        source_event_id: Some(key.to_string()),
+        interaction_id: None,
+        turn_id: None,
+        run_id: None,
+        parent_frame_id: None,
+        caused_by_frame_id: None,
+    }
+}
+
+/// The timeline stream replays the frames of the mob it serves and no frame
+/// of another mob, also to a caller who may read both: the host's one log
+/// holds a frame of another mob between two of the served mob's, and the
+/// replay sends the two, by their own cursors. With an identity it is that
+/// member's frames in the served mob (which holds today).
+#[tokio::test]
+async fn the_timeline_stream_replays_the_served_mobs_frames_alone() {
+    let store = Arc::new(InMemoryConsoleLogStore::new());
+    for (key, mob_id) in [
+        ("of-the-served-mob-1", None),
+        ("of-another-mob", Some("second")),
+        ("of-the-served-mob-2", None),
+    ] {
+        store
+            .append_if_absent(frame_of_mob(key, mob_id))
+            .await
+            .expect("append a frame");
+    }
+    let app =
+        console_json_router_with_aggregator(open_console(), MetaConsoleAggregator::new(store));
+
+    let mut sse = open_stream(&app, "console:0")
+        .await
+        .expect("the stream opens");
+    let (sent, complete) = sse.frames_until(is_named("snapshot_complete")).await;
+    assert_eq!(
+        sent,
+        [1, 3],
+        "the replay sends the served mob's frames and none of another mob's"
+    );
+    assert_eq!(
+        complete.id.as_deref(),
+        Some("console:3"),
+        "the replay completes at the newest frame of the served mob"
+    );
+
+    let request = axum::http::Request::builder()
+        .uri("/console/timeline/stream?identity=agent-a")
+        .header("last-event-id", "console:0")
+        .body(Body::empty())
+        .expect("request");
+    let response = tokio::time::timeout(DEADLINE, app.clone().oneshot(request))
+        .await
+        .expect("the stream of one agent answers")
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut of_the_agent = Sse {
+        body: response.into_body().into_data_stream(),
+        buffered: String::new(),
+    };
+    let (sent, _) = of_the_agent
+        .frames_until(is_named("snapshot_complete"))
+        .await;
+    assert_eq!(
+        sent,
+        [1, 3],
+        "the replay for one agent sends that member's frames in the served mob"
+    );
+}
+
+/// After its replay the timeline stream sends the frames of the mob it
+/// serves as they are written, and no frame of another mob, also to a caller
+/// who may read both: a frame of another mob's member of the same name,
+/// written between two of the served mob's, is no event of this stream.
+#[tokio::test]
+async fn the_timeline_stream_sends_the_served_mobs_live_frames_alone() {
+    let store = Arc::new(InMemoryConsoleLogStore::new());
+    store
+        .append_if_absent(frame_of_mob("stored-of-the-served-mob", None))
+        .await
+        .expect("append a frame");
+    let aggregator = MetaConsoleAggregator::new(store);
+    let app = console_json_router_with_aggregator(open_console(), aggregator.clone());
+
+    let mut sse = open_stream(&app, "console:0")
+        .await
+        .expect("the stream opens");
+    let (replayed, _) = sse.frames_until(is_named("snapshot_complete")).await;
+    assert_eq!(replayed, [1], "the replay sends the stored frame");
+
+    for (key, mob_id) in [
+        ("live-of-the-served-mob-1", None),
+        ("live-of-another-mob", Some("second")),
+        ("live-of-the-served-mob-2", None),
+    ] {
+        aggregator
+            .append_and_emit_for_test(frame_of_mob(key, mob_id))
+            .await
+            .expect("append a live frame");
+    }
+    let mut live = Vec::new();
+    while live.last() != Some(&4) {
+        match sse.next(DEADLINE).await {
+            Read::Event(event) if event.name == "console_frame" => live.push(cursor_seq(&event)),
+            Read::Event(_) => {}
+            Read::Ended | Read::Quiet => panic!("the live frames stopped at {live:?}"),
+        }
+    }
+    assert_eq!(
+        live,
+        [2, 4],
+        "the stream sends the served mob's live frames and none of another mob's"
+    );
 }

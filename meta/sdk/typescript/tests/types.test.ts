@@ -231,11 +231,11 @@ describe("parseIdentityResolvedToolsResult", () => {
 describe("parseStatusResult", () => {
   it("parses valid wire-format object", () => {
     const result = parseStatusResult({
-      contract_version: "0.5.0",
+      contract_version: "0.6.0",
       running: true,
       loaded_modules: ["mod_a", "mod_b"],
     });
-    assert.equal(result.contractVersion, "0.5.0");
+    assert.equal(result.contractVersion, "0.6.0");
     assert.equal(result.running, true);
     assert.deepEqual(result.loadedModules, ["mod_a", "mod_b"]);
   });
@@ -270,11 +270,11 @@ describe("parseStatusResult", () => {
 describe("parseCapabilitiesResult", () => {
   it("parses valid wire-format object", () => {
     const result = parseCapabilitiesResult({
-      contract_version: "0.5.0",
+      contract_version: "0.6.0",
       methods: ["status", "spawn"],
       loaded_modules: ["core"],
     });
-    assert.equal(result.contractVersion, "0.5.0");
+    assert.equal(result.contractVersion, "0.6.0");
     assert.deepEqual(result.methods, ["status", "spawn"]);
     assert.deepEqual(result.loadedModules, ["core"]);
     assert.equal(result.workgraph, false);
@@ -1122,6 +1122,19 @@ describe("parseGatingOrigin", () => {
     });
   });
 
+  it("keeps the mob of a member that is not the default mob's", () => {
+    assert.deepEqual(parseGatingOrigin({ identity: "alice", mob_id: "second" }), {
+      identity: "alice",
+      conversationId: null,
+      interactionId: null,
+      mobId: "second",
+    });
+    // An origin that names no mob is a member of the default mob.
+    for (const value of [{ identity: "alice" }, { identity: "alice", mob_id: " " }]) {
+      assert.equal("mobId" in (parseGatingOrigin(value) ?? {}), false);
+    }
+  });
+
   it("returns null for an absent or malformed origin", () => {
     for (const value of [
       undefined, null, "person:alice", [], {}, { identity: "" }, { identity: 3 },
@@ -1424,6 +1437,41 @@ describe("parsePersistedEvent", () => {
       assert.equal(result.event.agentId, "agent-1");
       assert.equal(result.event.eventType, "run_completed");
       assert.deepEqual(result.event.payload, { ok: true });
+    }
+  });
+
+  it("reads the mob of an event of another mob and no mob otherwise", () => {
+    // Two rows of one member name, as a host of two mobs answers them: the
+    // row of the second mob names its mob, the launch mob's row names none.
+    const rowWithoutMob = {
+      id: "evt-second",
+      seq: 8,
+      timestamp_ms: 1700000000004,
+      member_id: "desk",
+      event: { kind: "agent", agent_id: "desk", event_type: "run_completed" },
+    };
+    const row = {
+      ...rowWithoutMob,
+      mob_id: "second-mob",
+      mob_incarnation: "0190d6c3-7a1b-7c3e-8f2a-5b6c7d8e9f01",
+    };
+    const ofTheSecondMob = parsePersistedEvent(row);
+    const ofTheLaunchMob = parsePersistedEvent(rowWithoutMob);
+    assert.equal(ofTheSecondMob.mobId, "second-mob");
+    assert.equal(ofTheSecondMob.mobIncarnation, "0190d6c3-7a1b-7c3e-8f2a-5b6c7d8e9f01");
+    assert.equal(ofTheLaunchMob.mobId, null);
+    assert.equal(ofTheLaunchMob.mobIncarnation, null);
+    assert.equal(ofTheSecondMob.memberId, "desk");
+    assert.equal(ofTheLaunchMob.memberId, "desk");
+    assert.deepEqual(ofTheSecondMob.event, ofTheLaunchMob.event);
+    for (const notAString of [null, 7, { id: "second-mob" }, ["second-mob"]]) {
+      const read = parsePersistedEvent({
+        ...row,
+        mob_id: notAString,
+        mob_incarnation: notAString,
+      });
+      assert.equal(read.mobId, null);
+      assert.equal(read.mobIncarnation, null);
     }
   });
 

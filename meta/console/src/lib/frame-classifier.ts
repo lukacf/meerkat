@@ -10,6 +10,7 @@ import { normalizeStatusWord, type Tone } from "../../../packages/console-compon
 import { agentDisplayName, type AgentDirectory } from "../../../packages/console-components/src/panel-kit/agents";
 import { humanizeEnum } from "../../../packages/console-components/src/panel-kit/format";
 import { memberKickoffNotice, memberKickoffPhaseLabel } from "../../../packages/console-core/src/member-kickoff";
+import { memberReferenceKeys } from "../../../packages/console-core/src/member-ref";
 import { stripPeerTransportScaffold } from "./adapters";
 import { describeFailure, summarizeFailureData } from "./failure-summary";
 import { isOpenLoopNudge, quarantineVerdictWords } from "./memory-event-words";
@@ -205,10 +206,6 @@ function snippetOf(value: string): string | undefined {
   return text.length > SNIPPET_MAX ? `${text.slice(0, SNIPPET_MAX - 3).trimEnd()}...` : text;
 }
 
-function lastPathSegment(value: string): string {
-  return value.split("/").filter(Boolean).pop() || value;
-}
-
 /** Model providers by the name a failure gives them. */
 const PROVIDER_WORDS: Readonly<Record<string, string>> = {
   anthropic: "Anthropic",
@@ -289,12 +286,21 @@ function memoryAuthorSegment(author: string): FrameSegment | null {
   return trimmed;
 }
 
-/** A peer reference as the directory knows it: its canonical key when known. */
+/**
+ * A peer reference as the directory knows it: its canonical key when known,
+ * else its last path segment ("team/role/member" reads "member"). A
+ * reference into a nested mob the directory holds members of names that
+ * mob's member, never a member of the same name in another mob.
+ */
 function peerKey(reference: string, directory: AgentDirectory | undefined): string {
-  const trimmed = reference.trim();
+  const trimmed = reference.trim().replace(/\/+$/, "");
   if (!trimmed) return "";
-  const entry = directory?.lookup(trimmed) ?? directory?.lookup(lastPathSegment(trimmed));
-  return entry?.id || lastPathSegment(trimmed);
+  const lookup = memberReferenceKeys(trimmed, directory?.nestedMobIds);
+  for (const key of lookup.keys) {
+    const entry = directory?.lookup(key);
+    if (entry) return entry.id;
+  }
+  return lookup.keys[lookup.keys.length - 1]!;
 }
 
 function runIdOf(frame: ConsoleFrame, data: Data): string {

@@ -12,6 +12,9 @@ export interface ConsoleAttentionOrigin {
   interactionId: string;
   /** The request's `user_input` frame. */
   inputFrameId: string;
+  /** The mob the entry carries beside the agent's name (the pair of a
+   * frame); absent for an entry that carries none. */
+  mobId?: string;
 }
 
 export interface ConsoleAttentionItem {
@@ -71,6 +74,7 @@ export function normalizeConsoleAttention(result: unknown): ConsoleAttentionItem
     const identity = stringOf(origin?.identity);
     const interactionId = stringOf(origin?.interaction_id);
     const inputFrameId = stringOf(origin?.input_frame_id);
+    const mobId = stringOf(origin?.mob_id);
     const createdAtMs = typeof record.created_at_ms === "number" && Number.isFinite(record.created_at_ms)
       ? record.created_at_ms
       : null;
@@ -85,7 +89,7 @@ export function normalizeConsoleAttention(result: unknown): ConsoleAttentionItem
         ? `${text.slice(0, CONSOLE_ATTENTION_LIMITS.textLength - 1)}…`
         : text,
       redacted,
-      origin: { identity, interactionId, inputFrameId },
+      origin: { identity, interactionId, inputFrameId, ...(mobId ? { mobId } : {}) },
     });
   }
   return items;

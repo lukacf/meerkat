@@ -7145,6 +7145,7 @@ mod tests {
             "session_runtime_loop",
             "session_run_start",
             "session_liveness",
+            "session_run_settlement",
         ] {
             assert_eq!(
                 checks.get(measured).and_then(serde_json::Value::as_str),
@@ -7189,6 +7190,7 @@ mod tests {
             "session_runtime_loop",
             "session_run_start",
             "session_liveness",
+            "session_run_settlement",
         ]
         .into_iter()
         .filter_map(|key| checks.get(key).and_then(serde_json::Value::as_str))
@@ -12854,7 +12856,10 @@ mod tests {
                     call(
                         &router,
                         "session/create",
-                        keep_alive_create(&format!("keep-alive-fails-at-once-{round}")),
+                        // The flavor is part of the name: both flavors' tests
+                        // can run at once in one process, and a comms name
+                        // is held for the whole process.
+                        keep_alive_create(&format!("keep-alive-fails-at-once-{flavor}-{round}")),
                     ),
                 )
                 .await
@@ -25370,6 +25375,27 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
         assert_eq!(final_config["config"]["max_tokens"], new_max_tokens);
     }
 
+    /// 12a. `config/patch` changes the REST listener's bind host: the RPC
+    /// config methods write the `rest` table.
+    #[tokio::test]
+    async fn config_patch_changes_the_rest_bind_host() {
+        let (router, _notif_rx) = test_router().await;
+
+        let patch_req = make_request(
+            "config/patch",
+            serde_json::json!({"rest": {"host": "0.0.0.0"}}),
+        );
+        let patch_resp = router.dispatch(patch_req).await.unwrap();
+        assert_eq!(
+            result_value(&patch_resp)["config"]["rest"]["host"],
+            "0.0.0.0"
+        );
+
+        let get_req = make_request_no_params("config/get");
+        let get_resp = router.dispatch(get_req).await.unwrap();
+        assert_eq!(result_value(&get_resp)["config"]["rest"]["host"], "0.0.0.0");
+    }
+
     /// 12b. `config/patch` does not re-enable retired legacy skill alias ingress.
     #[tokio::test]
     async fn config_patch_keeps_legacy_skill_references_rejected() {
@@ -29946,6 +29972,8 @@ provider_params = { provider_tag = { provider = "anthropic", cache_control = "di
         use super::caller_idempotency_key::keyed_router;
         use super::*;
 
+        /// A session whose first turn has run and whose runtime loop is at
+        /// rest (see [`session_at_rest`]).
         async fn create_session(router: &MethodRouter) -> String {
             let resp = router
                 .dispatch(make_request(
@@ -29954,14 +29982,51 @@ provider_params = { provider_tag = { provider = "anthropic", cache_control = "di
                 ))
                 .await
                 .unwrap();
-            result_value(&resp)["session_id"]
+            let session_id = result_value(&resp)["session_id"]
                 .as_str()
                 .expect("session id")
-                .to_string()
+                .to_string();
+            session_at_rest(router, &session_id).await;
+            session_id
         }
 
-        /// Queue one external event on an idle session and return its input
-        /// id. Nothing runs it until the session's next turn.
+        /// Wait until the session's runtime loop is parked with no run
+        /// current. A turn's call answers before the loop has looked at its
+        /// queue for the last time, and that look takes an event admitted
+        /// without a wake as a turn of its own, so an event queued right
+        /// after the create's answer may not stay queued. The park is a
+        /// positive event, published only while nothing is buffered for the
+        /// loop, and the pass that ran the first turn cleared it: a park seen
+        /// after the create's answer is after that last look. This holds for
+        /// a fixture without background hooks, as this module's is: the park
+        /// says nothing about a pending hook completion, which can wake a
+        /// parked loop into another look.
+        async fn session_at_rest(router: &MethodRouter, session_id: &str) {
+            let sid = meerkat_core::SessionId::parse(session_id).expect("session id");
+            let mut parked = router.runtime_adapter.runtime_loop_parked();
+            loop {
+                tokio::time::timeout(
+                    Duration::from_mins(1),
+                    parked.wait_for(|sessions| sessions.contains(&sid)),
+                )
+                .await
+                .expect("the session's runtime loop parks after its first turn")
+                .expect("runtime-loop park watch");
+                if router.runtime_adapter.current_run(&sid).await.is_none() {
+                    break;
+                }
+                tokio::time::timeout(
+                    Duration::from_mins(1),
+                    router.runtime_adapter.wait_current_run_settled(&sid),
+                )
+                .await
+                .expect("the session's current run settles");
+            }
+        }
+
+        /// Queue one external event on a session at rest (every session of
+        /// this module is, from [`create_session`]) and return its input id.
+        /// Nothing runs it until the session's next turn.
         async fn queue_event(router: &MethodRouter, session_id: &str, body: &str) -> String {
             let admitted = result_value(
                 &router

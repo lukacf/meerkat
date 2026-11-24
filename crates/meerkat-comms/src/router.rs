@@ -40,6 +40,32 @@ type TrustDescriptorMap = std::collections::BTreeMap<
     std::collections::BTreeMap<GeneratedCommsTrustAuthoritySourceKind, TrustEntry>,
 >;
 
+/// Test-only checkpoint of one removal: it is told whether the removal found
+/// another source's descriptor for the peer.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+type TrustRemovalCheckpoint = Box<dyn FnMut(bool)>;
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+thread_local! {
+    /// The calling thread's checkpoint for its next
+    /// [`Router::remove_trusted_peer_for_source`]. The removal runs it once,
+    /// after it has read the peer's remaining source descriptors and
+    /// immediately before it writes the union trust row, while it holds its
+    /// source guards. A thread that armed nothing is unaffected, and nothing
+    /// outside test builds has the slot.
+    static TRUST_REMOVAL_CHECKPOINT: std::cell::RefCell<Option<TrustRemovalCheckpoint>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Run and disarm the calling thread's removal checkpoint, if it armed one.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+fn run_trust_removal_checkpoint(remaining_source: bool) {
+    let checkpoint = TRUST_REMOVAL_CHECKPOINT.with(|slot| slot.borrow_mut().take());
+    if let Some(mut checkpoint) = checkpoint {
+        checkpoint(remaining_source);
+    }
+}
+
 /// Derive the canonical [`PeerId`] for a signing [`crate::identity::PubKey`].
 ///
 /// Thin wrapper over [`crate::identity::PubKey::to_peer_id`] — kept for
@@ -505,55 +531,54 @@ impl Router {
         peer_id: &PeerId,
         source_kind: GeneratedCommsTrustAuthoritySourceKind,
     ) -> bool {
-        let source_removed = {
-            let mut sources = self.trusted_peer_sources.write();
-            let Some(peer_sources) = sources.get_mut(peer_id) else {
-                return false;
-            };
-            if !peer_sources.remove(&source_kind) {
-                return false;
-            }
-            if peer_sources.is_empty() {
-                sources.remove(peer_id);
-            }
-            true
+        // The same three write guards as `add_trusted_peer_for_source`, in the
+        // same order, held to the end. The read of the peer's remaining
+        // sources and the write of the union row are one step, so two
+        // removals, or a removal and an add, of one peer never interleave.
+        let mut sources = self.trusted_peer_sources.write();
+        let mut descriptors_by_source = self.trusted_peer_descriptors_by_source.write();
+        let mut private_sources = self.private_peer_sources.write();
+
+        let Some(peer_sources) = sources.get_mut(peer_id) else {
+            return false;
         };
-        if !source_removed {
+        if !peer_sources.remove(&source_kind) {
             return false;
         }
-        let remaining_descriptor = {
-            let mut descriptors_by_source = self.trusted_peer_descriptors_by_source.write();
-            let Some(descriptors) = descriptors_by_source.get_mut(peer_id) else {
-                return false;
-            };
-            descriptors.remove(&source_kind);
-            let remaining = descriptors.values().next().cloned();
-            if descriptors.is_empty() {
-                descriptors_by_source.remove(peer_id);
-            }
-            remaining
+        if peer_sources.is_empty() {
+            sources.remove(peer_id);
+        }
+        let Some(descriptors) = descriptors_by_source.get_mut(peer_id) else {
+            return false;
         };
-        {
-            let mut private_sources = self.private_peer_sources.write();
-            if let Some(peer_sources) = private_sources.get_mut(peer_id) {
-                peer_sources.remove(&source_kind);
-                if peer_sources.is_empty() {
-                    private_sources.remove(peer_id);
-                }
+        descriptors.remove(&source_kind);
+        let remaining_descriptor = descriptors.values().next().cloned();
+        if descriptors.is_empty() {
+            descriptors_by_source.remove(peer_id);
+        }
+        if let Some(peer_sources) = private_sources.get_mut(peer_id) {
+            peer_sources.remove(&source_kind);
+            if peer_sources.is_empty() {
+                private_sources.remove(peer_id);
             }
         }
         if let Some(peer) = remaining_descriptor {
+            #[cfg(all(test, not(target_arch = "wasm32")))]
+            run_trust_removal_checkpoint(true);
             // Another generated source still owns this trust row; the union
             // projection becomes that source's descriptor.
             return self.trusted_peers.write().upsert(peer).is_ok();
         }
-        if self.trusted_peer_sources.read().contains_key(peer_id) {
+        // The guards are held: read the held map, never lock it again.
+        if sources.contains_key(peer_id) {
             return true;
         }
+        #[cfg(all(test, not(target_arch = "wasm32")))]
+        run_trust_removal_checkpoint(false);
         if self.trusted_peers.write().remove(peer_id).is_none() {
             return false;
         }
-        self.private_peer_sources.write().remove(peer_id);
+        private_sources.remove(peer_id);
         true
     }
 
@@ -1661,6 +1686,336 @@ mod tests {
             "the last private source removal clears directory privacy"
         );
         assert!(router.private_peer_ids().is_empty());
+    }
+
+    /// Bound for every wait of the removal-ordering rows. Reaching it is a
+    /// failure of a row's harness, never its verdict.
+    #[cfg(not(target_arch = "wasm32"))]
+    const REMOVAL_ROW_BOUND: Duration = Duration::from_secs(20);
+
+    /// Arm the calling thread's checkpoint for its next source removal.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn arm_trust_removal_checkpoint(checkpoint: impl FnMut(bool) + 'static) {
+        TRUST_REMOVAL_CHECKPOINT.with(|slot| *slot.borrow_mut() = Some(Box::new(checkpoint)));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn wait_finished<T>(handle: &std::thread::JoinHandle<T>, what: &str) {
+        let deadline = std::time::Instant::now() + REMOVAL_ROW_BOUND;
+        while !handle.is_finished() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{what} did not finish within the bound: a failure of the row's harness"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn finish_within_bound<T>(handle: std::thread::JoinHandle<T>, what: &str) -> T {
+        wait_finished(&handle, what);
+        handle.join().expect("the worker thread did not panic")
+    }
+
+    /// Control: a lone removal of a peer's only source clears the union row,
+    /// and a repeated removal of that source reports nothing removed.
+    #[test]
+    fn lone_removal_of_the_last_trust_source_clears_the_peer_row() {
+        let pubkey = [46u8; 32];
+        let peer_id = PeerId::from_ed25519_pubkey(&pubkey);
+        let source = GeneratedCommsTrustAuthoritySourceKind::MobMachineMemberTrustWiring;
+
+        let router = test_router();
+        router
+            .add_trusted_peer_for_source(
+                peer("only-source", pubkey, "inproc://only-source"),
+                source,
+                true,
+            )
+            .expect("add the only source");
+        assert!(router.trusted_peers_snapshot().contains(&peer_id));
+
+        assert!(router.remove_trusted_peer_for_source(&peer_id, source));
+        assert!(!router.has_trust_source(&peer_id, source));
+        assert!(router.trusted_peers_for_source(source).is_empty());
+        assert!(!router.is_private_peer_id(&peer_id));
+        assert!(
+            !router.trusted_peers_snapshot().contains(&peer_id),
+            "the last source is gone: the union row goes with it"
+        );
+        assert!(!router.has_peers());
+        assert!(
+            !router.remove_trusted_peer_for_source(&peer_id, source),
+            "a source that is not there is not removed twice"
+        );
+    }
+
+    /// Control: a removal while another source stands keeps the union row,
+    /// which becomes the standing source's descriptor.
+    #[test]
+    fn removal_with_another_trust_source_standing_keeps_the_peer_row() {
+        let pubkey = [47u8; 32];
+        let peer_id = PeerId::from_ed25519_pubkey(&pubkey);
+        let leaving = GeneratedCommsTrustAuthoritySourceKind::MobMachineMemberTrustWiring;
+        let standing = GeneratedCommsTrustAuthoritySourceKind::MobMachineExternalPeerTrustWiring;
+
+        let router = test_router();
+        router
+            .add_trusted_peer_for_source(
+                peer("leaving-name", pubkey, "inproc://two-sources"),
+                leaving,
+                false,
+            )
+            .expect("add the leaving source");
+        router
+            .add_trusted_peer_for_source(
+                peer("standing-name", pubkey, "inproc://two-sources"),
+                standing,
+                true,
+            )
+            .expect("add the standing source");
+
+        assert!(router.remove_trusted_peer_for_source(&peer_id, leaving));
+        assert!(!router.has_trust_source(&peer_id, leaving));
+        assert!(router.has_trust_source(&peer_id, standing));
+        assert!(router.trusted_peers_for_source(leaving).is_empty());
+        assert_eq!(router.trusted_peers_for_source(standing).len(), 1);
+        assert!(router.is_private_peer_id(&peer_id));
+        let row = router.trusted_peers_snapshot();
+        let row = row
+            .get(&peer_id)
+            .expect("a source stands: the union row stands");
+        assert_eq!(row.name.as_str(), "standing-name");
+    }
+
+    /// Two removals of a peer's last two sources at the same time. The first
+    /// is parked at its checkpoint, after it has read the other source's
+    /// descriptor and before it writes the union row. The read and the row
+    /// write of one removal are one step: the second removal reaches its own
+    /// row write only after the first one's, and once both have returned the
+    /// peer has no source and no row.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn concurrent_last_trust_source_removals_leave_no_peer_row() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::mpsc;
+        use std::thread;
+
+        let pubkey = [48u8; 32];
+        let peer_id = PeerId::from_ed25519_pubkey(&pubkey);
+        let first_source = GeneratedCommsTrustAuthoritySourceKind::MobMachineMemberTrustWiring;
+        let second_source =
+            GeneratedCommsTrustAuthoritySourceKind::MobMachineExternalPeerTrustWiring;
+        let entry = || peer("two-removals", pubkey, "inproc://two-removals");
+
+        let router = Arc::new(test_router());
+        router
+            .add_trusted_peer_for_source(entry(), first_source, true)
+            .expect("add the first source");
+        router
+            .add_trusted_peer_for_source(entry(), second_source, true)
+            .expect("add the second source");
+        assert!(router.trusted_peers_snapshot().contains(&peer_id));
+
+        // The first removal: parked at its checkpoint until the row lets go.
+        let (reached_tx, reached_rx) = mpsc::channel::<bool>();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let first = {
+            let router = Arc::clone(&router);
+            thread::spawn(move || {
+                arm_trust_removal_checkpoint(move |remaining_source| {
+                    let _ = reached_tx.send(remaining_source);
+                    // A dropped sender (the row failed) also lets go.
+                    let _ = release_rx.recv_timeout(REMOVAL_ROW_BOUND);
+                });
+                router.remove_trusted_peer_for_source(&peer_id, first_source)
+            })
+        };
+        let first_saw_remaining = reached_rx
+            .recv_timeout(REMOVAL_ROW_BOUND)
+            .expect("the first removal reaches its checkpoint");
+        assert!(
+            first_saw_remaining,
+            "the first removal read the second source's descriptor"
+        );
+
+        // Read before the second removal exists, so nothing else touches the
+        // guard: does the parked removal hold the source guard? That decides
+        // what the second removal can do meanwhile, not the clock.
+        let source_guard_free = router.trusted_peer_sources.try_write().is_some();
+
+        // The second removal: records, at its own checkpoint, whether the
+        // first one had already been let go.
+        let first_let_go = Arc::new(AtomicBool::new(false));
+        let (starting_tx, starting_rx) = mpsc::channel::<()>();
+        let (second_seen_tx, second_seen_rx) = mpsc::channel::<(bool, bool)>();
+        let second = {
+            let router = Arc::clone(&router);
+            let first_let_go = Arc::clone(&first_let_go);
+            thread::spawn(move || {
+                arm_trust_removal_checkpoint(move |remaining_source| {
+                    let _ = second_seen_tx
+                        .send((remaining_source, first_let_go.load(Ordering::SeqCst)));
+                });
+                let _ = starting_tx.send(());
+                router.remove_trusted_peer_for_source(&peer_id, second_source)
+            })
+        };
+        starting_rx
+            .recv_timeout(REMOVAL_ROW_BOUND)
+            .expect("the second removal starts");
+        if source_guard_free {
+            // Nothing holds the second removal back: it runs to its end while
+            // the first is still parked.
+            wait_finished(&second, "the second removal");
+        } else {
+            assert!(
+                !second.is_finished(),
+                "the second removal cannot finish while the first holds the source guard"
+            );
+        }
+        first_let_go.store(true, Ordering::SeqCst);
+        release_tx
+            .send(())
+            .expect("the first removal is parked at its checkpoint");
+
+        assert!(
+            finish_within_bound(first, "the first removal"),
+            "the first removal removed its source"
+        );
+        assert!(
+            finish_within_bound(second, "the second removal"),
+            "the second removal removed its source"
+        );
+        let (second_saw_remaining, second_after_first) = second_seen_rx
+            .recv_timeout(REMOVAL_ROW_BOUND)
+            .expect("the second removal reached its checkpoint");
+        assert!(
+            !second_saw_remaining,
+            "the second removal found no other source's descriptor"
+        );
+
+        assert!(!router.has_trust_source(&peer_id, first_source));
+        assert!(!router.has_trust_source(&peer_id, second_source));
+        assert!(!router.trusted_peer_sources.read().contains_key(&peer_id));
+        assert!(
+            !router
+                .trusted_peer_descriptors_by_source
+                .read()
+                .contains_key(&peer_id)
+        );
+        assert!(!router.is_private_peer_id(&peer_id));
+        assert_eq!(
+            (
+                router.trusted_peers_snapshot().contains(&peer_id),
+                second_after_first
+            ),
+            (false, true),
+            "(union row present, second removal's row write after the first one's): both \
+             removals returned, so no row may stand without a source, and the second removal \
+             waits for the first"
+        );
+        assert!(!router.has_peers());
+    }
+
+    /// A removal of a peer's last source at the same time as an add of
+    /// another source for that peer. The removal is parked at its checkpoint,
+    /// after it has found no other source and before it clears the union row.
+    /// The add comes wholly before or wholly after the removal: once both
+    /// have returned, the added source stands with its row and its
+    /// visibility.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn trust_source_removal_racing_an_add_keeps_the_added_source_row() {
+        use std::sync::mpsc;
+        use std::thread;
+
+        let pubkey = [49u8; 32];
+        let peer_id = PeerId::from_ed25519_pubkey(&pubkey);
+        let leaving = GeneratedCommsTrustAuthoritySourceKind::MobMachineMemberTrustWiring;
+        let arriving = GeneratedCommsTrustAuthoritySourceKind::MobMachineExternalPeerTrustWiring;
+        let entry = || peer("removal-and-add", pubkey, "inproc://removal-and-add");
+
+        let router = Arc::new(test_router());
+        router
+            .add_trusted_peer_for_source(entry(), leaving, false)
+            .expect("add the leaving source");
+
+        // The removal: parked at its checkpoint until the row lets go.
+        let (reached_tx, reached_rx) = mpsc::channel::<bool>();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let removal = {
+            let router = Arc::clone(&router);
+            thread::spawn(move || {
+                arm_trust_removal_checkpoint(move |remaining_source| {
+                    let _ = reached_tx.send(remaining_source);
+                    // A dropped sender (the row failed) also lets go.
+                    let _ = release_rx.recv_timeout(REMOVAL_ROW_BOUND);
+                });
+                router.remove_trusted_peer_for_source(&peer_id, leaving)
+            })
+        };
+        let removal_saw_remaining = reached_rx
+            .recv_timeout(REMOVAL_ROW_BOUND)
+            .expect("the removal reaches its checkpoint");
+        assert!(
+            !removal_saw_remaining,
+            "the removal found no other source's descriptor"
+        );
+
+        // Read before the add exists, so nothing else touches the guard.
+        let source_guard_free = router.trusted_peer_sources.try_write().is_some();
+
+        let (starting_tx, starting_rx) = mpsc::channel::<()>();
+        let add = {
+            let router = Arc::clone(&router);
+            let entry = entry();
+            thread::spawn(move || {
+                let _ = starting_tx.send(());
+                matches!(
+                    router.add_trusted_peer_for_source(entry, arriving, true),
+                    Ok(true)
+                )
+            })
+        };
+        starting_rx
+            .recv_timeout(REMOVAL_ROW_BOUND)
+            .expect("the add starts");
+        if source_guard_free {
+            // Nothing holds the add back: it runs to its end while the
+            // removal is still parked.
+            wait_finished(&add, "the add");
+        } else {
+            assert!(
+                !add.is_finished(),
+                "the add cannot finish while the removal holds the source guard"
+            );
+        }
+        release_tx
+            .send(())
+            .expect("the removal is parked at its checkpoint");
+
+        assert!(
+            finish_within_bound(removal, "the removal"),
+            "the removal removed its source"
+        );
+        assert!(
+            finish_within_bound(add, "the add"),
+            "the add created its source"
+        );
+
+        assert!(!router.has_trust_source(&peer_id, leaving));
+        assert!(router.has_trust_source(&peer_id, arriving));
+        assert_eq!(router.trusted_peers_for_source(arriving).len(), 1);
+        assert_eq!(
+            (
+                router.trusted_peers_snapshot().contains(&peer_id),
+                router.is_private_peer_id(&peer_id)
+            ),
+            (true, true),
+            "(union row present, peer private): the added source stands, so its row and its \
+             visibility stand with it"
+        );
     }
 
     /// Ask 5 gate: the router is the single outbound taint-stamping choke

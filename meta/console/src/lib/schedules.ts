@@ -672,6 +672,22 @@ function rpcErrorOf(error: unknown): { code: unknown; message: unknown; kind: st
 }
 
 /**
+ * Marks a failed schedule command as one for an agent of a team other than
+ * the console's own. `team` is that agent's team by its name for people.
+ * The refusal "no schedule would be sent" has two reasons under one kind
+ * (no schedule host at all, or one that sends for the console's own team's
+ * agents only), and for such an agent the console cannot tell which: it
+ * then says, in its own words, what is true of both. The gateway's message
+ * for it names the agent and its team by their ids.
+ */
+export function scheduleErrorOfAnotherTeam<T>(error: T, team: string | null | undefined): T {
+  if (error && typeof error === "object") {
+    Object.defineProperty(error, "scheduleAgentTeam", { value: team ?? "", configurable: true, enumerable: false });
+  }
+  return error;
+}
+
+/**
  * The viewer-facing message for a failed schedule command, keyed by the
  * refusal's `data.kind`. Server text is shown only for invalid params (the
  * gateway's reason the schedule is not valid).
@@ -702,8 +718,17 @@ export function scheduleErrorMessage(error: unknown, command: ConsoleScheduleCom
       return "This agent takes no console messages, so it cannot be scheduled.";
     case "governed_target":
       return "This agent admits only governed input, which needs you present, so a schedule cannot send to it.";
-    case "schedule_host_unavailable":
+    case "schedule_host_unavailable": {
+      // For an agent of another team the kind has two reasons the console
+      // cannot tell apart: one sentence that is true of both, and that says
+      // nothing of the teams schedules may be sent for.
+      const team = (error as { scheduleAgentTeam?: unknown } | null)?.scheduleAgentTeam;
+      if (typeof team === "string") {
+        const nothing = command === CONSOLE_SCHEDULE_COMMANDS.create ? "Nothing was saved." : "Nothing was changed.";
+        return `This gateway sends no schedules for agents of ${team.trim() || "this agent's team"}, so a schedule for this agent would never be sent. ${nothing}`;
+      }
       return "No schedule host sends this gateway's schedules, so a schedule would never be sent.";
+    }
     default:
       break;
   }

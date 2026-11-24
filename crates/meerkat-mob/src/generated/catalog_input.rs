@@ -263,6 +263,7 @@ pub enum MobMachineCatalogInput {
     ResolveMemberDispatchAdmission,
     RecordMemberDispatchAdmissionLineage,
     RecordMemberInstructionLineage,
+    AuthorizeExternalPeerReciprocalTrustRemoval,
 }
 
 impl MobMachineCatalogInput {
@@ -526,6 +527,7 @@ impl MobMachineCatalogInput {
         Self::ResolveMemberDispatchAdmission,
         Self::RecordMemberDispatchAdmissionLineage,
         Self::RecordMemberInstructionLineage,
+        Self::AuthorizeExternalPeerReciprocalTrustRemoval,
     ];
 
     #[must_use]
@@ -792,6 +794,7 @@ impl MobMachineCatalogInput {
             Self::ResolveMemberDispatchAdmission => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::ResolveMemberDispatchAdmission,
             Self::RecordMemberDispatchAdmissionLineage => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::RecordMemberDispatchAdmissionLineage,
             Self::RecordMemberInstructionLineage => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::RecordMemberInstructionLineage,
+            Self::AuthorizeExternalPeerReciprocalTrustRemoval => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::AuthorizeExternalPeerReciprocalTrustRemoval,
         }
     }
 
@@ -1083,6 +1086,9 @@ impl MobMachineCatalogInput {
             Self::ResolveMemberDispatchAdmission => "ResolveMemberDispatchAdmission",
             Self::RecordMemberDispatchAdmissionLineage => "RecordMemberDispatchAdmissionLineage",
             Self::RecordMemberInstructionLineage => "RecordMemberInstructionLineage",
+            Self::AuthorizeExternalPeerReciprocalTrustRemoval => {
+                "AuthorizeExternalPeerReciprocalTrustRemoval"
+            }
         }
     }
 }

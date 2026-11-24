@@ -1306,6 +1306,27 @@ impl MobOperatorToolDispatcher {
         crate::CreationSourceCapture::classify(captured)
     }
 
+    /// The calling member's seat, sealed by this mob's own handle from
+    /// MobMachine's bindings for the session the call is dispatched from:
+    /// for the seat record of what the call seats. No other hosted roster
+    /// is asked at this door, and nothing of the call's arguments is read.
+    /// `None` for a call dispatched from no session.
+    async fn seal_calling_member(
+        &self,
+        owner: Option<&SessionId>,
+    ) -> Option<crate::MemberSeatCreator> {
+        let session = owner?.clone();
+        let handle = self.handle.clone();
+        Some(
+            meerkat_runtime::stack_relief::relieve_caller_stack(move || async move {
+                handle
+                    .seal_seat_creator(&session, crate::SeatSealer::Mob)
+                    .await
+            })
+            .await,
+        )
+    }
+
     pub(crate) fn new(
         handle: MobHandle,
         enable_mob: bool,
@@ -2365,6 +2386,9 @@ impl MobOperatorToolDispatcher {
                         .await
                         .into_admitted_witness(call.name),
                 );
+                if let Some(creator) = self.seal_calling_member(owner).await {
+                    spec = spec.with_seat_creator(creator);
+                }
                 // Resolve launch mode: explicit launch_mode takes precedence,
                 // then legacy resume_session_id, then default (Fresh).
                 if let Some(launch_mode) = args.launch_mode {
@@ -2456,6 +2480,7 @@ impl MobOperatorToolDispatcher {
                     .capture_creation_source(owner)
                     .await
                     .into_admitted_witness(call.name);
+                let seat_creator = self.seal_calling_member(owner).await;
                 let mut specs = args
                     .specs
                     .into_iter()
@@ -2468,6 +2493,9 @@ impl MobOperatorToolDispatcher {
                             spec.backend,
                         )
                         .with_creation_source(creation_source.clone());
+                        if let Some(creator) = seat_creator.clone() {
+                            spawn_spec = spawn_spec.with_seat_creator(creator);
+                        }
                         if let Some(launch_mode) = spec.launch_mode {
                             spawn_spec = spawn_spec.with_launch_mode(launch_mode);
                         } else if let Some(session_id) =

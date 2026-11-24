@@ -4431,6 +4431,9 @@ fn comms_trust_bundle_composition() -> CompositionSchema {
     let reciprocal_imports = [
         "use crate::machines::mob_machine::{ExternalPeerEdge, ExternalPeerKey, MemberPeerEndpoint, MobMachineEffect, MobMachineTransition, PeerId};",
     ];
+    let reciprocal_removal_imports = [
+        "use crate::machines::mob_machine::{ExternalPeerEdge, ExternalPeerKey, MobMachineEffect, MobMachineTransition, PeerId};",
+    ];
     CompositionSchema {
         name: comp_id("comms_trust_bundle"),
         machines: vec![
@@ -4602,6 +4605,23 @@ fn comms_trust_bundle_composition() -> CompositionSchema {
                 obligation_fields: &["key", "edge", "peer_id", "peer_endpoint", "epoch"],
                 module_path: "crates/meerkat-mob/src/generated/protocol_mob_external_peer_reciprocal_trust.rs",
                 required_imports: &reciprocal_imports,
+                effect_enum_path: "crate::machines::mob_machine::MobMachineEffect",
+                transition_type_path: "crate::machines::mob_machine::MobMachineTransition",
+            }),
+            trust_handoff_protocol(TrustHandoffProtocolSpec {
+                name: "mob_external_peer_reciprocal_trust_removal",
+                producer_instance: "mob",
+                effect_variant: "ExternalPeerReciprocalTrustRemovalRequested",
+                realizing_actor: "mob_comms_trust_owner",
+                source_kind:
+                    CommsTrustAuthoritySourceKind::MobMachineExternalPeerReciprocalTrustRemoval,
+                row_owner_kind: Some(
+                    CommsTrustAuthoritySourceKind::MobMachineExternalPeerTrustWiring,
+                ),
+                allowed_operations: &[CommsTrustAuthorityOperation::PublicRemove],
+                obligation_fields: &["key", "edge", "peer_id", "epoch"],
+                module_path: "crates/meerkat-mob/src/generated/protocol_mob_external_peer_reciprocal_trust_removal.rs",
+                required_imports: &reciprocal_removal_imports,
                 effect_enum_path: "crate::machines::mob_machine::MobMachineEffect",
                 transition_type_path: "crate::machines::mob_machine::MobMachineTransition",
             }),

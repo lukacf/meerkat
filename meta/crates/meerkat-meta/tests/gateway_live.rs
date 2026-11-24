@@ -168,6 +168,23 @@ fn experimental_init_params(state_dir: &tempfile::TempDir) -> Value {
     })
 }
 
+/// The live capabilities a `meta/capabilities` answer lists: the entries of
+/// `feature_capabilities` that begin with `live.`, in the order listed.
+///
+/// These rows pin which live capabilities a gateway advertises. The list
+/// also holds the capabilities of other features, and what a gateway lists
+/// of those is not a fact of the live surface: a row that compares the whole
+/// list fails each time another feature gains a capability.
+fn live_capabilities(caps: &Value) -> Vec<&str> {
+    caps["result"]["feature_capabilities"]
+        .as_array()
+        .expect("feature_capabilities")
+        .iter()
+        .map(|capability| capability.as_str().expect("a capability is a string"))
+        .filter(|capability| capability.starts_with("live."))
+        .collect()
+}
+
 #[test]
 fn live_methods_answer_unavailable_without_opt_in() {
     let state_dir = tempfile::tempdir().expect("state dir");
@@ -191,9 +208,10 @@ fn live_methods_answer_unavailable_without_opt_in() {
         "jsonrpc": "2.0", "id": "caps", "method": "meta/capabilities", "params": {}
     }));
     let caps = gateway.wait_for_response("caps", Duration::from_secs(15));
-    assert_eq!(
-        caps["result"]["feature_capabilities"],
-        json!(["flow_role_targets", "flow_run_idempotency_key"])
+    let live = live_capabilities(&caps);
+    assert!(
+        live.is_empty(),
+        "a gateway without the live opt-in lists no live capability: {live:?}"
     );
     let methods = caps["result"]["methods"].as_array().expect("methods");
     assert!(!methods.iter().any(|m| m == "meta/live/open"), "{caps}");
@@ -216,13 +234,11 @@ fn openai_live_registration_is_app_opt_in_without_http_mount() {
     }));
     let caps = gateway.wait_for_response("caps", Duration::from_secs(15));
     assert_eq!(
-        caps["result"]["feature_capabilities"],
-        json!([
+        live_capabilities(&caps),
+        [
             "live.execution_identity.v1",
-            "live.execution.client_context.v1",
-            "flow_role_targets",
-            "flow_run_idempotency_key"
-        ]),
+            "live.execution.client_context.v1"
+        ],
         "the public gpt-live-1 build must advertise only strict identity selection and client-context execution"
     );
     let methods = caps["result"]["methods"].as_array().expect("methods");
@@ -255,13 +271,11 @@ fn experimental_live_registration_is_app_opt_in_without_http_mount() {
     }));
     let caps = gateway.wait_for_response("caps", Duration::from_secs(15));
     assert_eq!(
-        caps["result"]["feature_capabilities"],
-        json!([
+        live_capabilities(&caps),
+        [
             "live.execution_identity.v1",
-            "live.execution.client_context.v1",
-            "flow_role_targets",
-            "flow_run_idempotency_key"
-        ]),
+            "live.execution.client_context.v1"
+        ],
         "the qualified experimental build must advertise only strict identity selection and client-context execution"
     );
     let methods = caps["result"]["methods"].as_array().expect("methods");
@@ -293,10 +307,10 @@ fn live_opt_in_advertises_methods_and_mounts_the_ws_route() {
         "jsonrpc": "2.0", "id": "caps", "method": "meta/capabilities", "params": {}
     }));
     let caps = gateway.wait_for_response("caps", Duration::from_secs(15));
-    assert_eq!(
-        caps["result"]["feature_capabilities"],
-        json!(["flow_role_targets", "flow_run_idempotency_key"]),
-        "ordinary live attachment must not advertise experimental execution identity"
+    let live = live_capabilities(&caps);
+    assert!(
+        live.is_empty(),
+        "ordinary live attachment must not advertise experimental execution identity: {live:?}"
     );
     let methods = caps["result"]["methods"].as_array().expect("methods");
     for method in [

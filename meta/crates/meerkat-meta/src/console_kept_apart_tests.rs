@@ -454,11 +454,11 @@ async fn only_the_kept_apart_rules_read_what_a_view_says_of_its_console() -> Tes
         let held = controller.decision_fence(None, None);
         assert_eq!(held.enforced(), unstated.enforced(), "{rules}");
         assert_eq!(
-            held.can_view_agent("alpha"),
+            held.can_view_agent_in(None, "alpha"),
             unstated.can_view_agent("alpha"),
             "{rules}"
         );
-        assert!(!held.can_view_agent("side"), "{rules}");
+        assert!(!held.can_view_agent_in(None, "side"), "{rules}");
     }
 
     // The stock send gate for a host's viewer the console did not identify,
@@ -483,6 +483,7 @@ async fn only_the_kept_apart_rules_read_what_a_view_says_of_its_console() -> Tes
 /// member witness.
 fn no_witness_frame(identity: &str, canary: &str) -> NewConsoleFrame {
     NewConsoleFrame {
+        mob_id: None,
         id: None,
         dedupe_key: format!("kept-apart-row:{identity}:{canary}"),
         timestamp_ms: 2_000,
@@ -938,8 +939,11 @@ async fn an_ended_members_console_schedules_wait_for_the_first_read_of_who_membe
         crate::schedule_wiring::ScheduleFiringHostBinding::external_driver(),
     );
     let mut schedule_of = BTreeMap::new();
+    let default_mob = crate::member_key::DefaultMob::new(runtime.handle().mob_id().clone());
     for member in ["alpha", "alpha-side", "beta"] {
         let send = crate::console_schedules::ConsoleScheduledSend::new(
+            &default_mob,
+            default_mob.mob_id(),
             member.to_string(),
             format!("scheduled-for-{member}"),
             crate::console_schedules::ConsoleScheduleSender::Human {
@@ -2682,6 +2686,93 @@ async fn a_session_the_caller_may_not_know_is_answered_as_one_nobody_ran_on_by_b
             .await?
             .is_none(),
         "nobody is seated"
+    );
+    Ok(())
+}
+
+/// On a console that identifies nobody, with the access rules on, the
+/// session of a member the console's access cache does not know is not
+/// attached by a caller a rule refuses through what a name does not carry:
+/// under a deny by role the attach is refused, as the memory panel refuses
+/// such a member's memory. Where no such rule applies the name decides.
+#[tokio::test]
+async fn a_session_whose_owner_the_console_does_not_know_is_refused_under_a_deny_its_name_cannot_decide()
+-> TestResult {
+    use crate::identity_first::core_test_bridge::{CoreReadsBridge, bind_live};
+    const MOB: &str = "kept-apart-unknown-owner-rules";
+    let state = tempfile::tempdir()?;
+    let runtime = persistent_gateway_runtime_in(state.path(), MOB, "", "").await?;
+    // Core's member history binds a session to a member no roster holds
+    // any more and the console's cache never recorded.
+    let session = meerkat_core::types::SessionId::new();
+    let bridge = Arc::new(CoreReadsBridge::default());
+    bind_live(
+        &bridge.core,
+        &crate::identity_first::AgentIdentity::parse("ended-worker").expect("identity"),
+        &meerkat_mob::ProfileName::from("worker"),
+        0,
+        Some(session.clone()),
+    )
+    .expect("the member history binds the session");
+    let identity_runtime = Arc::new(crate::identity_first::IdentityRuntime::new(
+        crate::identity_first::IdentityRuntimeConfig {
+            continuity_store: Arc::new(crate::identity_first::LocalContinuityStore::in_memory()?),
+            lease_provider: Arc::new(crate::identity_first::LocalLeaseProvider::new()),
+            runtime_instance_id: MOB.to_string(),
+            has_runtime_store: true,
+            durability_policy: crate::identity_first::DurabilityPolicy::SyncWriteThrough,
+            bridge: Some(bridge.clone()),
+            default_timeout: None,
+        },
+    ));
+    let every_agent = AccessRule {
+        id: "every-caller-drives-every-agent".to_string(),
+        actions: vec!["agent.*".to_string()],
+        agents: vec!["*".to_string()],
+        ..AccessRule::default()
+    };
+    let no_workers = AccessRule {
+        id: "no-caller-reaches-the-workers".to_string(),
+        effect: AccessEffect::Deny,
+        actions: vec!["agent.*".to_string()],
+        roles: vec!["worker".to_string()],
+        ..AccessRule::default()
+    };
+    let mut answers = Vec::new();
+    for rules in [
+        vec![every_agent.clone(), no_workers],
+        vec![every_agent.clone()],
+    ] {
+        // The one operator of a console that identifies nobody.
+        let operator = AccessController::new(AccessControlConfig {
+            enabled: true,
+            admins: vec![ROOT.to_string()],
+            rules,
+            ..AccessControlConfig::default()
+        })
+        .expect("access controller")
+        .view_for_caller(None, None)
+        .on_console(false);
+        assert!(!operator.knows_agent("ended-worker"));
+        answers.push(
+            match attached_session_decision(
+                Some(&operator),
+                &runtime,
+                Some(&identity_runtime),
+                &session,
+            )
+            .await
+            {
+                SessionAttachDecision::Allowed => "allowed",
+                SessionAttachDecision::Absent => "absent",
+                SessionAttachDecision::Denied(_) => "denied",
+            },
+        );
+    }
+    assert_eq!(
+        answers,
+        ["denied", "allowed"],
+        "under a deny by role, then with no such rule"
     );
     Ok(())
 }

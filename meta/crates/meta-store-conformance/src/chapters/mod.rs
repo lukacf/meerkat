@@ -10,6 +10,7 @@
 //! |-------------------------------------|------------|
 //! | [`event_log`]                       | every `EventLogStore` |
 //! | [`console_log`]                     | every `ConsoleLogStore` |
+//! | [`console_log_mobs`]                | every `ConsoleLogStore` of a host that creates a mob beside its default mob |
 //! | [`binary_blobs`]                    | every `BinaryBlobStore` |
 //! | [`legacy_blob_layout`]              | the bundled `ObjectStoreBlobStore::local` only |
 //! | [`agent_memory`]                    | every `AgentMemoryProvider` |
@@ -20,6 +21,7 @@
 mod agent_memory;
 mod blobs;
 mod console_log;
+mod console_log_mobs;
 mod event_log;
 mod extension_documents;
 mod legacy_data;
@@ -27,6 +29,7 @@ mod legacy_data;
 pub use agent_memory::agent_memory;
 pub use blobs::{binary_blobs, legacy_blob_layout};
 pub use console_log::console_log;
+pub use console_log_mobs::console_log_mobs;
 pub use event_log::event_log;
 pub use extension_documents::{mob_id_holders, mob_references};
 pub use legacy_data::legacy_memory_database;

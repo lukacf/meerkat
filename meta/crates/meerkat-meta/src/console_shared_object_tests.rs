@@ -229,3 +229,184 @@ async fn admin_revoke_without_principal_revokes_own_sessions() -> TestResult {
     }
     Ok(())
 }
+
+/// A rule that lists mobs keeps them through the console: the configuration
+/// the console reads names the rule's `mobs`, and the rule saved back with
+/// another edit (as the Console's rule editor sends it) still lists them. A
+/// rule that lists none is read and saved without the field.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn member_keyed_access_a_rule_saved_through_the_console_keeps_its_mobs() -> TestResult {
+    let access = AccessController::new(crate::access::AccessControlConfig {
+        enabled: true,
+        admins: vec![BOB.to_string()],
+        rules: vec![
+            AccessRule {
+                id: "harbor-desks".to_string(),
+                subjects: vec!["*".to_string()],
+                actions: vec!["agent.view".to_string()],
+                mobs: vec!["harbor".to_string(), "quay".to_string()],
+                ..AccessRule::default()
+            },
+            AccessRule {
+                id: "desks".to_string(),
+                subjects: vec!["*".to_string()],
+                actions: vec!["agent.view".to_string()],
+                ..AccessRule::default()
+            },
+        ],
+        ..crate::access::AccessControlConfig::default()
+    })
+    .map_err(|error| format!("{error:?}"))?;
+    let router = console_json_router_with_state(ConsoleJsonState {
+        access: Some(access.clone()),
+        ..state()
+    });
+    let bob = bob();
+    let read = console_rpc_as(&router, Some(&bob), "meta/access/get", json!({})).await;
+    assert!(read["error"].is_null(), "{read:#}");
+    let rules = read["result"]["config"]["rules"].clone();
+    assert_eq!(rules[0]["mobs"], json!(["harbor", "quay"]), "{read:#}");
+    assert!(rules[1].get("mobs").is_none(), "{read:#}");
+
+    let owner = access
+        .edit_identity()
+        .ok_or("the access owner has an edit identity")?
+        .to_string();
+    let mut revision = read["result"]["revision"]
+        .as_u64()
+        .ok_or("the read names a revision")?;
+    for (index, id) in [(0, "harbor-desks"), (1, "desks")] {
+        let mut edited = rules[index].clone();
+        edited["actions"] = json!(["agent.view", "agent.send"]);
+        edited["description"] = json!(format!("{id}, edited"));
+        let saved = console_rpc_as(
+            &router,
+            Some(&bob),
+            "meta/access/rules/upsert",
+            json!({
+                "checked_v1": {
+                    "owner_instance": owner,
+                    "expected_revision": revision,
+                    "rule": edited,
+                }
+            }),
+        )
+        .await;
+        assert!(saved["error"].is_null(), "{id}: {saved:#}");
+        revision += 1;
+        assert_eq!(saved["result"]["revision"], json!(revision), "{id}");
+    }
+
+    let (config, _) = access.snapshot();
+    assert_eq!(config.rules[0].mobs, ["harbor", "quay"]);
+    assert!(
+        config.rules[0]
+            .actions
+            .iter()
+            .any(|action| action == "agent.send")
+    );
+    assert_eq!(
+        config.rules[0].description.as_deref(),
+        Some("harbor-desks, edited")
+    );
+    assert!(config.rules[1].mobs.is_empty());
+    let reread = console_rpc_as(&router, Some(&bob), "meta/access/get", json!({})).await;
+    let rules = &reread["result"]["config"]["rules"];
+    assert_eq!(rules[0]["mobs"], json!(["harbor", "quay"]), "{reread:#}");
+    assert_eq!(rules[0]["description"], json!("harbor-desks, edited"));
+    assert!(rules[1].get("mobs").is_none(), "{reread:#}");
+    Ok(())
+}
+
+/// The runtime has no create-only access write: `rules/upsert` under the ID
+/// of an existing rule replaces that rule whole, the mobs it lists included.
+/// What keeps a client's new rule from replacing a rule the client has not
+/// seen is the revision its write is made against: a rule created since
+/// that revision makes the write a conflict, and the rule stays as it is.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn member_keyed_access_a_new_rule_does_not_replace_a_rule_created_since_its_read()
+-> TestResult {
+    let access = AccessController::new(crate::access::AccessControlConfig {
+        enabled: true,
+        admins: vec![BOB.to_string()],
+        ..crate::access::AccessControlConfig::default()
+    })
+    .map_err(|error| format!("{error:?}"))?;
+    let router = console_json_router_with_state(ConsoleJsonState {
+        access: Some(access.clone()),
+        ..state()
+    });
+    let bob = bob();
+    let owner = access
+        .edit_identity()
+        .ok_or("the access owner has an edit identity")?
+        .to_string();
+    let read = console_rpc_as(&router, Some(&bob), "meta/access/get", json!({})).await;
+    let seen = read["result"]["revision"]
+        .as_u64()
+        .ok_or("the read names a revision")?;
+    let upsert = |expected_revision: u64, rule: serde_json::Value| {
+        console_rpc_as(
+            &router,
+            Some(&bob),
+            "meta/access/rules/upsert",
+            json!({
+                "checked_v1": {
+                    "owner_instance": owner,
+                    "expected_revision": expected_revision,
+                    "rule": rule,
+                }
+            }),
+        )
+    };
+    let for_the_harbor = json!({
+        "id": "harbor-desks",
+        "subjects": ["*"],
+        "actions": ["agent.view"],
+        "mobs": ["harbor"],
+        "description": "for the harbor",
+    });
+    let new_rule = json!({
+        "id": "harbor-desks",
+        "subjects": ["*"],
+        "actions": ["agent.view"],
+        "description": "a new rule",
+    });
+
+    // Someone else creates the rule after the client's read.
+    let created = upsert(seen, for_the_harbor).await;
+    assert_eq!(
+        created["result"]["revision"],
+        json!(seen + 1),
+        "{created:#}"
+    );
+    // The client's new rule under that ID was made against the earlier
+    // revision: it is a conflict, and the rule keeps its mobs.
+    let stale = upsert(seen, new_rule.clone()).await;
+    assert_eq!(
+        stale["error"]["data"]["kind"],
+        json!("access_revision_conflict"),
+        "{stale:#}"
+    );
+    let (config, _) = access.snapshot();
+    assert_eq!(config.rules.len(), 1);
+    assert_eq!(config.rules[0].mobs, ["harbor"]);
+    assert_eq!(
+        config.rules[0].description.as_deref(),
+        Some("for the harbor")
+    );
+
+    // Made against the current revision, the same write replaces the rule
+    // whole: a client that creates a rule checks the ID itself.
+    let replaced = upsert(seen + 1, new_rule).await;
+    assert_eq!(
+        replaced["result"]["revision"],
+        json!(seen + 2),
+        "{replaced:#}"
+    );
+    let (config, _) = access.snapshot();
+    assert_eq!(config.rules.len(), 1);
+    assert!(config.rules[0].mobs.is_empty());
+    assert_eq!(config.rules[0].description.as_deref(), Some("a new rule"));
+    Ok(())
+}

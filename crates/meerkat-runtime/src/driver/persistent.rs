@@ -336,9 +336,12 @@ impl PersistentRuntimeDriver {
         let mut observed = Vec::with_capacity(rows.len());
         let mut exact_observations = Vec::with_capacity(rows.len());
         for (bundle, row_digest) in rows {
+            // A row of the nonterminal set is unfinished work, never a
+            // pending terminal carrier.
             let disposition =
                 crate::meerkat_machine::driver::machine_classify_recovered_input_durability(
                     &bundle.state,
+                    false,
                 )?;
             exact_observations.push((bundle.state.input_id.clone(), row_digest, disposition));
             observed.push(bundle);
@@ -350,11 +353,19 @@ impl PersistentRuntimeDriver {
         // mutation, including these terminal rows, so the final recovery CAS
         // still fences this second indexed observation without hashing or
         // rescanning historical terminal rows.
+        //
+        // Every row of this observation is a pending terminal carrier: the
+        // generated durability classification is told so and keeps it
+        // whatever its durability, so the store's pending terminal owners
+        // and the recovered driver agree and a batch one run consumed is
+        // never split.
         let pending_terminal = self.durable_pending_terminal_input_states().await?;
         let mut observed_ids = observed
             .iter()
             .map(|stored| stored.state.input_id.clone())
             .collect::<std::collections::HashSet<_>>();
+        let mut pending_terminal_carriers =
+            std::collections::HashSet::with_capacity(pending_terminal.len());
         for stored in pending_terminal {
             if !observed_ids.insert(stored.state.input_id.clone()) {
                 return Err(RuntimeDriverError::RecoveryCorruption {
@@ -365,6 +376,7 @@ impl PersistentRuntimeDriver {
                     ),
                 });
             }
+            pending_terminal_carriers.insert(stored.state.input_id.clone());
             observed.push(stored);
         }
 
@@ -373,6 +385,7 @@ impl PersistentRuntimeDriver {
             &self.runtime_id,
             &mut self.inner,
             observed,
+            &pending_terminal_carriers,
             recovered_unregister_progress,
             resumable_run,
         )

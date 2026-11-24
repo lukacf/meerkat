@@ -32,6 +32,10 @@ use super::{
 /// infer validation or success beyond its typed terminal/truncation status.
 pub const BOUNDED_DELEGATION_REPORT_INSTRUCTION_V1: &str = "MEERKAT_BOUNDED_DELEGATION_REPORT_V1\nAfter doing the requested work, end with a clear, concise report of the work performed and the final result. This is a loose best-effort completion report, not a structured schema or success guarantee.";
 
+/// The profile a fresh delegation helper runs under: the one profile of a
+/// session's implicit delegation mob.
+pub(crate) const DELEGATION_HELPER_PROFILE: &str = "delegate";
+
 #[must_use]
 pub fn render_bounded_delegation_task(task: &str) -> String {
     format!("{task}\n\n{BOUNDED_DELEGATION_REPORT_INSTRUCTION_V1}")
@@ -75,6 +79,10 @@ pub enum DelegationExecutionSource {
 pub struct DelegationMemberOptions {
     /// Sealed runtime source proof, independent of optional comms wiring.
     pub creation_source: Option<crate::MemberCreationSourceWitness>,
+    /// The calling member's seat as a mob's handle sealed it
+    /// ([`crate::MobHandle::seal_seat_creator`]), for the helper's seat
+    /// record alone.
+    pub seat_creator: Option<crate::MemberSeatCreator>,
     pub placement: Option<HostId>,
     pub additional_instructions: Option<Vec<String>>,
     pub inherited_tool_filter: Option<meerkat_core::InheritedToolVisibilityAuthority>,
@@ -257,6 +265,9 @@ pub struct DelegationTerminalizedExecution {
     identity: AgentIdentity,
     terminal: DelegationTurnTerminal,
     live: Option<LiveDelegationTerminalEvidence>,
+    /// Armed only by [`DelegationExecutionService::execute`]: retires the
+    /// helper when the call is dropped before its own retirement.
+    abandon_guard: Option<super::handle::ProvisionedChildRetireOnDrop>,
 }
 
 impl DelegationTerminalizedExecution {
@@ -298,6 +309,7 @@ pub struct DelegationExecutionHandle {
     turn_handle: WorkTurnHandle,
     live_admission: Option<meerkat_runtime::live_execution::LiveDelegationExecutionAdmission>,
     cancellation_target: DelegationCancellationTarget,
+    abandon_guard: Option<super::handle::ProvisionedChildRetireOnDrop>,
 }
 
 #[derive(Clone)]
@@ -473,6 +485,7 @@ impl DelegationExecutionHandle {
             turn_handle,
             live_admission,
             cancellation_target: _,
+            abandon_guard,
         } = self;
         let terminal = match turn_handle.wait_bounded(result_spec).await {
             Ok(turn) => DelegationTurnTerminal::Completed(turn),
@@ -487,6 +500,7 @@ impl DelegationExecutionHandle {
                 operation: admission.operation().clone(),
                 worker_ownership: admission.worker_ownership(),
             }),
+            abandon_guard,
         }
     }
 }
@@ -622,6 +636,19 @@ impl DelegationExecutionService {
     pub async fn start(
         &self,
         request: DelegationExecutionRequest,
+    ) -> Result<DelegationExecutionHandle, DelegationExecutionError> {
+        Box::pin(self.start_owning(request, false)).await
+    }
+
+    /// [`Self::start`]. With `retire_abandoned`, the started helper is
+    /// retired on a detached task when its handle (or the terminal made
+    /// from it) is dropped still armed: the caller owns the helper's whole
+    /// life and disarms it after its own retirement.
+    #[allow(clippy::result_large_err)]
+    async fn start_owning(
+        &self,
+        request: DelegationExecutionRequest,
+        retire_abandoned: bool,
     ) -> Result<DelegationExecutionHandle, DelegationExecutionError> {
         tracing::debug!("delegation service received a bounded execution request");
         let DelegationExecutionRequest {
@@ -790,6 +817,7 @@ impl DelegationExecutionService {
                         session_id,
                         delivery_identity,
                     },
+                    abandon_guard: None,
                 });
             }
         }
@@ -803,7 +831,7 @@ impl DelegationExecutionService {
             DelegationExecutionSource::ExistingMember => {
                 return Err(DelegationExecutionError::ExistingMemberAdmissionRequired);
             }
-            DelegationExecutionSource::Fresh => ProfileName::from("delegate"),
+            DelegationExecutionSource::Fresh => ProfileName::from(DELEGATION_HELPER_PROFILE),
             DelegationExecutionSource::DurableFork {
                 source_identity, ..
             } => {
@@ -829,6 +857,7 @@ impl DelegationExecutionService {
                 .creation_source
                 .unwrap_or_else(crate::MemberCreationSourceWitness::unavailable),
         );
+        spec.seat.creator = member.seat_creator;
         spec.initial_message = None;
         spec.runtime_mode = Some(MobRuntimeMode::TurnDriven);
         spec.auto_wire_parent = false;
@@ -908,6 +937,12 @@ impl DelegationExecutionService {
             }
         };
 
+        // From the helper's spawn on, a call that owns the helper's whole
+        // life and is dropped before its own retirement retires the helper.
+        let abandon_guard = retire_abandoned.then(|| {
+            super::handle::ProvisionedChildRetireOnDrop::arm(self.handle.clone(), identity.clone())
+        });
+
         let wired = match parent.as_ref() {
             Some(parent) => self.wire_parent(&identity, parent).await,
             None => false,
@@ -964,6 +999,10 @@ impl DelegationExecutionService {
                 } else {
                     self.handle.retire(identity).await.err()
                 };
+                // The retirement was asked for here; its debt is reported.
+                if let Some(guard) = abandon_guard {
+                    guard.disarm();
+                }
                 return Err(DelegationExecutionError::WorkAdmission {
                     error,
                     retirement_error,
@@ -979,6 +1018,7 @@ impl DelegationExecutionService {
             turn_handle,
             live_admission,
             cancellation_target: DelegationCancellationTarget::OwnedMember,
+            abandon_guard,
         })
     }
 
@@ -1063,7 +1103,7 @@ impl DelegationExecutionService {
         if request.live_admission.is_some() {
             return Err(DelegationExecutionError::LiveLifecycleRequired);
         }
-        let handle = self.start(request).await?;
+        let handle = Box::pin(self.start_owning(request, true)).await?;
         let terminal = handle.await_terminal().await;
         let retirement_error = self
             .retire_terminalized(&terminal)
@@ -1076,7 +1116,12 @@ impl DelegationExecutionService {
             identity: _,
             terminal,
             live,
+            abandon_guard,
         } = terminal;
+        // The helper's retirement was asked for above; its debt is reported.
+        if let Some(guard) = abandon_guard {
+            guard.disarm();
+        }
         let spawn = spawn.ok_or(DelegationExecutionError::ExistingMemberAdmissionRequired)?;
         match terminal {
             DelegationTurnTerminal::Completed(turn) => Ok(DelegationExecutionOutcome {
@@ -1105,6 +1150,12 @@ impl DelegationExecutionService {
         let Some(helper_peer_id) = entry.peer_id() else {
             return false;
         };
+        // Two runtimes built on one key (two session runtimes of one realm
+        // under tcp or uds comms) have one peer id. Wiring them would file
+        // each store's own key in it, so the helper is not wired.
+        if helper_peer_id == parent.peer_id {
+            return false;
+        }
         let Ok(helper_comms_name) = meerkat_core::MemberCommsName::new(
             self.handle.definition().id.as_str(),
             entry.role.as_str(),

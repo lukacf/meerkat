@@ -300,7 +300,11 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # its goals to be reported violated, so the fake reports those too.
 # durable_in_turn_steer_audit.sh also requires AuditLateNeverJoins reported
 # violated once per content input kind, and AuditCapacityRefusalNeverReached
-# reported violated under a run contributor bound of one.
+# reported violated under a run contributor bound of one. Its recovery scene
+# (--recovery-scene --mutants) requires the success line for three runs,
+# AuditLateNeverJoins violated for the row that never left its lane, and
+# AuditLateHoldsNoClass or AuditGovernedRecoveredInputHoldsNoClass violated
+# for each seeded defect.
 # live_unregister_cleanup_audit.sh also walks a TLC state-graph dump
 # (-dump dot <base>), so the fake writes a one-state graph whose state is
 # unregistered.
@@ -358,7 +362,7 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # runner's coverage parsing stays pinned to that form.
 # empty_resume_residency_audit.sh requires its four witnesses violated, and
 # with --mutants each seeded defect's invariant or property violated.
-# switch_turn_withdrawal_audit.sh requires its five witnesses violated, and
+# switch_turn_withdrawal_audit.sh requires its seven witnesses violated, and
 # with --mutants each seeded defect's property or invariant violated.
 # durable_tail_classification_audit.sh requires its Ready witness violated,
 # and with --mutants each seeded defect's target invariant violated.
@@ -450,6 +454,14 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # AuditLateNeverInBatchRun or AuditRunsShareOneKey violated for each seeded
 # requester defect and the action property AuditSteerLaneFifo violated for
 # each seeded order defect.
+# durable_multi_steer_audit.sh requires the success line for its two safety
+# runs, its six witnesses (AuditEarlyNeverAllRetainedAtFirstBoundary twice,
+# AuditHeadNeverRecalledWithOthersRetained,
+# AuditMiddleNeverRecalledWithOthersRetained,
+# AuditNeverMixedOutcomesAtFirstBoundary,
+# AuditAfterNeverJoinsTheNextBoundary) violated, and with --mutants
+# AuditJoinNotBeforeItsBoundary, AuditRecalledNeverJoined and the action
+# property AuditRecallKeepsTheOthers violated, one for each seeded defect.
 printf '%s\n' \
   '#!/bin/sh' \
   'printf "%s\n" "$JAVA_TOOL_OPTIONS" > "$TLC_JAVA_OPTIONS_CAPTURE"' \
@@ -463,7 +475,17 @@ printf '%s\n' \
   'echo "Error: Invariant AuditLateNeverInBatchRun is violated."' \
   'echo "Error: Invariant AuditEarlyNeverRunsAlone is violated."' \
   'echo "Error: Action property AuditSteerLaneFifo is violated."' \
+  'echo "Error: Invariant AuditEarlyNeverAllRetainedAtFirstBoundary is violated."' \
+  'echo "Error: Invariant AuditHeadNeverRecalledWithOthersRetained is violated."' \
+  'echo "Error: Invariant AuditMiddleNeverRecalledWithOthersRetained is violated."' \
+  'echo "Error: Invariant AuditNeverMixedOutcomesAtFirstBoundary is violated."' \
+  'echo "Error: Invariant AuditAfterNeverJoinsTheNextBoundary is violated."' \
+  'echo "Error: Invariant AuditJoinNotBeforeItsBoundary is violated."' \
+  'echo "Error: Invariant AuditRecalledNeverJoined is violated."' \
+  'echo "Error: Action property AuditRecallKeepsTheOthers is violated."' \
   'echo "Error: Invariant AuditCapacityRefusalNeverReached is violated."' \
+  'echo "Error: Invariant AuditLateHoldsNoClass is violated."' \
+  'echo "Error: Invariant AuditGovernedRecoveredInputHoldsNoClass is violated."' \
   'echo "Error: Invariant AuditNeverReopensAfterFailedRealization is violated."' \
   'echo "Error: Invariant NotGoalDeliveredConfirmed is violated."' \
   'echo "Error: Invariant NotGoalNotDelivered is violated."' \
@@ -803,6 +825,10 @@ printf '%s\n' \
   'echo "Error: Action property AuditCompleteSettlesTheRequest is violated."' \
   'echo "Error: Action property NotAuditWitnessFiniteConflictRefused is violated."' \
   'echo "Error: Invariant AuditNoDenialUnderThePendingSwitch is violated."' \
+  'echo "Error: Action property AuditStagedOnlyOnAdmittingEvidence is violated."' \
+  'echo "Error: Action property AuditEffortDenialOnlyOnARefusal is violated."' \
+  'echo "Error: Action property NotAuditWitnessEffortRefusedWhilePending is violated."' \
+  'echo "Error: Action property NotAuditWitnessUnreadableLevelsStaged is violated."' \
   'echo "Error: Action property NotAuditWitnessBuildPreparationRetryRecorded is violated."' \
   'echo "Error: Action property NotAuditWitnessBuildPreparationRetryRefusedWake is violated."' \
   'echo "Error: Action property NotAuditWitnessBuildPreparationRetryResolved is violated."' \

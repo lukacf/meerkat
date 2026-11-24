@@ -5574,6 +5574,31 @@ impl Drop for RunSettlementPublication {
 }
 
 impl RuntimeLoopAuthorityBinding {
+    /// Start the boundary work of a durable steer that waits beside the run
+    /// `run_id` this loop has just resumed. `queue_authority` is the loop's
+    /// queue authority, which is the session mutation gate.
+    async fn start_waiting_steer_boundary_work(
+        &self,
+        driver: &crate::meerkat_machine::SharedDriver,
+        run_id: &RunId,
+        queue_authority: &crate::tokio::sync::OwnedMutexGuard<()>,
+    ) {
+        #[cfg(test)]
+        if self.detached_test_gate.is_some() {
+            return;
+        }
+        if let Some(machine) = self.machine.upgrade() {
+            machine
+                .start_waiting_steer_boundary_work(
+                    &self.session_id,
+                    driver,
+                    run_id,
+                    queue_authority,
+                )
+                .await;
+        }
+    }
+
     /// Require a cold reload of this loop's session runtime: nothing the live
     /// runtime realizes is committed until registration reloads it from
     /// durable state.
@@ -9495,6 +9520,15 @@ async fn process_queue(
                         FailedBatchBacklogOutcome::Stopped(should_stop) => return should_stop,
                     }
                 }
+                // A durable steer that was waiting for this run's boundary
+                // when the run stopped running has no work left to register
+                // it there. Start that work under queue authority, before the
+                // resumed run is dispatched.
+                if resumed_run_id.is_some() {
+                    authority_binding
+                        .start_waiting_steer_boundary_work(driver, &run_id, &queue_authority_guard)
+                        .await;
+                }
                 drop(queue_authority_guard);
 
                 let directed_interaction_ids = staged_directed_interaction_ids;
@@ -9828,6 +9862,26 @@ async fn process_queue(
                         // host may drop its completed-tool markers for it.
                         authority_binding.release_ended_run_tool_markers(&run_id);
 
+                        // From here to the end of this run's finalization the
+                        // session starts nothing further, and none of the
+                        // steps is bounded. This reports, in its own task,
+                        // for as long as the run's terminal work stays
+                        // unsettled: while a step below does not return, and
+                        // after this loop left with the work unsettled, which
+                        // is why dropping the handle does not end it. It
+                        // never acts. See `RunSettlementWatchdog`.
+                        let settlement_watchdog = crate::run_progress::RunSettlementWatchdog::spawn(
+                            std::sync::Arc::new(crate::run_progress::LedgerRunSettlement::new(
+                                driver,
+                                run_id.clone(),
+                            )),
+                            authority_binding.session_id.clone(),
+                            run_id.clone(),
+                            input_ids.clone(),
+                            crate::run_progress::Instant::now(),
+                            crate::run_progress::RUN_SETTLEMENT_NOTICE,
+                        );
+
                         // Acknowledge the exact store commit before any
                         // derived compaction projection advances that same
                         // store-owned authority (HeadCanonical intent cleanup
@@ -10011,6 +10065,9 @@ async fn process_queue(
                         )
                         .await;
                         if terminal_publication.is_ok() {
+                            // This loop settled the run's terminal work
+                            // itself: nothing is left to report.
+                            settlement_watchdog.settled();
                             let total_ms = finalization_elapsed_ms();
                             tracing::debug!(
                                 %run_id,
@@ -10018,6 +10075,7 @@ async fn process_queue(
                                 "runtime run terminal receipt persisted"
                             );
                             tracing::info!(
+                                session_id = %authority_binding.session_id,
                                 %run_id,
                                 commit_ms,
                                 receipt_ms = total_ms.saturating_sub(receipt_started_ms),

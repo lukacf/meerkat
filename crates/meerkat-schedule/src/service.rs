@@ -39,6 +39,14 @@ pub struct ScheduleService {
     /// probe's attaching surface owns it, so no clone of this service keeps
     /// a stopped surface's hosts alive.
     identity_target_probes: Arc<std::sync::Mutex<Vec<Weak<dyn ScheduleIdentityTargetProbe>>>>,
+    /// The host's judge of the schedule writes its agents' own turns make
+    /// ([`crate::ScheduleWriteJudge`]), shared across all clones of this
+    /// service, so the agent-facing tools of every session ask the one the
+    /// host attached. `None` on a host that judges none.
+    write_judge: Arc<std::sync::Mutex<Option<Arc<dyn crate::ScheduleWriteJudge>>>>,
+    /// Whether the host allows its agents' schedules to create sessions
+    /// ([`Self::allow_agent_session_creation`]). Shared by every clone.
+    agent_session_creation: Arc<std::sync::atomic::AtomicBool>,
 }
 
 struct ExpectedScheduleTransition {
@@ -238,7 +246,58 @@ impl ScheduleService {
             planning_lock: Arc::new(Mutex::new(())),
             mutation_generation,
             identity_target_probes: Arc::new(std::sync::Mutex::new(Vec::new())),
+            write_judge: Arc::new(std::sync::Mutex::new(None)),
+            agent_session_creation: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
+    }
+
+    /// Attach the host's judge of the schedule writes its agents' own turns
+    /// make ([`crate::ScheduleWriteJudge`]). Every clone of this service
+    /// shares it, so the agent-facing schedule tools built over any clone
+    /// ask it for each create and update a session's turn makes. A later
+    /// attach replaces an earlier one. The service's own `create` and
+    /// `update`, a host's writes, are never judged.
+    ///
+    /// The service keeps the judge for as long as any clone lives: a judge
+    /// holds what it reads weakly.
+    pub fn attach_write_judge(&self, judge: Arc<dyn crate::ScheduleWriteJudge>) {
+        *self
+            .write_judge
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(judge);
+    }
+
+    /// The judge a host attached ([`Self::attach_write_judge`]), if any.
+    pub fn write_judge(&self) -> Option<Arc<dyn crate::ScheduleWriteJudge>> {
+        self.write_judge
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Say whether this host's agents may write a schedule that creates a
+    /// session or a helper when it fires (a target that is a session
+    /// created on demand; a target that spawns or forks a helper), or that
+    /// sends into a session other than the writer's own. Off until a host
+    /// says otherwise, from its own configuration
+    /// (`[tools] agent_schedules_may_create_sessions`): the session a fire
+    /// creates is built as the host builds a session by default and not as
+    /// the writer's was built, so the agent-facing schedule tools over any
+    /// clone of this service refuse such a write from a session's turn
+    /// unless the dispatch carries the host's own statements about the
+    /// writer (for a helper: that its build mounts the mob tools). The
+    /// service's own `create` and `update`, a host's writes, are never
+    /// asked.
+    pub fn allow_agent_session_creation(&self, allowed: bool) {
+        self.agent_session_creation
+            .store(allowed, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Whether the host allowed its agents' schedules to create sessions
+    /// ([`Self::allow_agent_session_creation`]).
+    pub fn agent_session_creation_allowed(&self) -> bool {
+        self.agent_session_creation
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Attach a surface's create-time identity-target deliverability probe.

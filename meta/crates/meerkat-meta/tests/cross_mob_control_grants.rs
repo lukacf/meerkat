@@ -21,8 +21,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use meerkat_meta::GatewayPeerKeys;
 use meerkat_meta::contact_directory::{ContactEntry, MobTransport};
 use meerkat_meta::runtime::cross_mob_control::{
-    ControlAuthorizer, ControlGrant, ControlGrantTable, ControlHandler, ControlMemberScope,
-    ControlRequest, ControlResponse, ControlVerb, serve_tcp_control_with_authorizer,
+    ControlAuthorizer, ControlAuthzDenial, ControlGrant, ControlGrantTable, ControlHandler,
+    ControlMemberScope, ControlMobScope, ControlRequest, ControlResponse, ControlSignerSlot,
+    ControlVerb, HOST_OWN_KEY_CONTROL_CODE, serve_tcp_control_with_authorizer,
     unsigned_control_signer,
 };
 use meerkat_meta::runtime::cross_mob_remote::{RemoteMobError, RemoteMobProxy};
@@ -293,4 +294,196 @@ fn authorizer_config_seam_distinguishes_absent_from_empty() {
     ))
     .expect("parse");
     assert!(populated.is_enforcing());
+}
+
+async fn serve_counting(
+    authorizer: ControlAuthorizer,
+    signer: ControlSignerSlot,
+) -> (
+    std::net::SocketAddr,
+    Arc<AtomicUsize>,
+    tokio::task::JoinHandle<()>,
+) {
+    let dispatched = Arc::new(AtomicUsize::new(0));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let handler: Arc<dyn ControlHandler> = Arc::new(CountingHandler {
+        dispatched: Arc::clone(&dispatched),
+    });
+    let server = tokio::spawn(serve_tcp_control_with_authorizer(
+        listener,
+        handler,
+        signer,
+        Arc::new(authorizer),
+    ));
+    (addr, dispatched, server)
+}
+
+fn rejected_code(error: &RemoteMobError) -> Option<&str> {
+    match error {
+        RemoteMobError::Rejected { code, .. } => Some(code.as_str()),
+        _ => None,
+    }
+}
+
+/// A grant reaches the gateway's default mob unless it lists mobs, and a
+/// grant that lists mobs reaches the default mob only by its id. The mob a
+/// request is for is the audience its caller signed (the contact's mob id),
+/// and a request for a mob outside the grant's mobs is refused before the
+/// handler runs, as a request for a mob the gateway does not have.
+#[tokio::test]
+async fn grant_mobs_scope_is_enforced_before_the_handler() {
+    const DEFAULT_MOB: &str = "mob-default";
+    let default_keys = Arc::new(GatewayPeerKeys::ephemeral());
+    let listed_keys = Arc::new(GatewayPeerKeys::ephemeral());
+    let elsewhere_keys = Arc::new(GatewayPeerKeys::ephemeral());
+    let every_keys = Arc::new(GatewayPeerKeys::ephemeral());
+    let table = ControlGrantTable::from_toml(&format!(
+        r#"
+        [control_grants.unlisted]
+        pubkey = "{}"
+        verbs = ["inject"]
+
+        [control_grants.listed]
+        pubkey = "{}"
+        verbs = ["inject"]
+        mobs = ["mob-default", "mob-second"]
+
+        [control_grants.elsewhere]
+        pubkey = "{}"
+        verbs = ["inject"]
+        mobs = ["mob-second"]
+
+        [control_grants.every]
+        pubkey = "{}"
+        verbs = ["inject"]
+        mobs = ["*"]
+        "#,
+        default_keys.pubkey_b64(),
+        listed_keys.pubkey_b64(),
+        elsewhere_keys.pubkey_b64(),
+        every_keys.pubkey_b64(),
+    ))
+    .expect("parse")
+    .expect("section is present");
+    assert_eq!(
+        table
+            .get(&elsewhere_keys.pubkey_bytes())
+            .expect("filed")
+            .mobs(),
+        &ControlMobScope::mobs(["mob-second"])
+    );
+    let (addr, dispatched, server) = serve_counting(
+        ControlAuthorizer::with_grants_for_audience(table, DEFAULT_MOB),
+        unsigned_control_signer(),
+    )
+    .await;
+    let entry = contact(DEFAULT_MOB, &addr.to_string());
+    let proxy_for = |keys: &Arc<GatewayPeerKeys>| {
+        RemoteMobProxy::from_entry_with_caller(&entry, Some(Arc::clone(keys)))
+            .expect("tcp is supported")
+            .expect("tcp yields a proxy")
+    };
+
+    for (admitted, keys) in [&default_keys, &listed_keys, &every_keys]
+        .into_iter()
+        .enumerate()
+    {
+        proxy_for(keys)
+            .inject_message("bob", serde_json::json!({"text": "hello"}))
+            .await
+            .expect("a grant that reaches the default mob is admitted there");
+        assert_eq!(dispatched.load(Ordering::SeqCst), admitted + 1);
+    }
+
+    let outside = proxy_for(&elsewhere_keys)
+        .inject_message("bob", serde_json::json!({"text": "hello"}))
+        .await
+        .expect_err("a grant that lists only another mob does not reach the default mob");
+    assert_eq!(
+        rejected_code(&outside),
+        Some("audience_mismatch"),
+        "got {:?}",
+        outside
+    );
+
+    // A mob this gateway does not have is no audience of it, whatever a
+    // grant lists.
+    let second = contact("mob-second", &addr.to_string());
+    for keys in [&elsewhere_keys, &every_keys] {
+        let unknown = RemoteMobProxy::from_entry_with_caller(&second, Some(Arc::clone(keys)))
+            .expect("tcp is supported")
+            .expect("tcp yields a proxy")
+            .inject_message("bob", serde_json::json!({"text": "hello"}))
+            .await
+            .expect_err("the gateway has no such mob");
+        assert_eq!(
+            rejected_code(&unknown),
+            Some("audience_mismatch"),
+            "got {:?}",
+            unknown
+        );
+    }
+    assert_eq!(
+        dispatched.load(Ordering::SeqCst),
+        3,
+        "refused requests must not reach the handler"
+    );
+    server.abort();
+}
+
+/// A gateway never serves a control request made with its own key: the
+/// loopback through its own listener is refused before the grant table is
+/// read, with its own code, which is not a grant refusal.
+#[tokio::test]
+async fn listener_refuses_its_own_key_whatever_the_grants_say() {
+    let own_keys = Arc::new(GatewayPeerKeys::ephemeral());
+    let peer_keys = Arc::new(GatewayPeerKeys::ephemeral());
+    let mut table = ControlGrantTable::new();
+    for keys in [&own_keys, &peer_keys] {
+        table.insert(
+            keys.pubkey_bytes(),
+            ControlGrant::new(
+                "everything",
+                ControlVerb::all().iter().copied(),
+                ControlMemberScope::All,
+            )
+            .with_mobs(ControlMobScope::All),
+        );
+    }
+    let signer: ControlSignerSlot = Arc::new(std::sync::RwLock::new(Some(Arc::clone(&own_keys))));
+    let (addr, dispatched, server) = serve_counting(
+        ControlAuthorizer::with_grants_for_audience(table, "mob-default"),
+        signer,
+    )
+    .await;
+    let entry = contact("mob-default", &addr.to_string());
+
+    let own = RemoteMobProxy::from_entry_with_caller(&entry, Some(Arc::clone(&own_keys)))
+        .expect("tcp is supported")
+        .expect("tcp yields a proxy")
+        .inject_message("bob", serde_json::json!({"text": "hello"}))
+        .await
+        .expect_err("the gateway's own key is never served");
+    assert_eq!(
+        rejected_code(&own),
+        Some(HOST_OWN_KEY_CONTROL_CODE),
+        "got {:?}",
+        own
+    );
+    assert!(!ControlAuthzDenial::is_denial_code(
+        HOST_OWN_KEY_CONTROL_CODE
+    ));
+    assert_eq!(dispatched.load(Ordering::SeqCst), 0);
+
+    RemoteMobProxy::from_entry_with_caller(&entry, Some(peer_keys))
+        .expect("tcp is supported")
+        .expect("tcp yields a proxy")
+        .inject_message("bob", serde_json::json!({"text": "hello"}))
+        .await
+        .expect("another gateway with the same grant is served");
+    assert_eq!(dispatched.load(Ordering::SeqCst), 1);
+    server.abort();
 }

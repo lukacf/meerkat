@@ -1,3 +1,6 @@
+// The shared rigs here use the crate's test faults and test-only readers:
+// the target needs `test-support`, as the crate's test command passes it.
+#![cfg(feature = "test-support")]
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 //! Phase 0 external-boundary contract tests for runtime receipt/replay recovery.
 //!

@@ -12891,6 +12891,11 @@ pub mod inputs {
         pub agent_identity: AgentIdentity,
         pub root_identity: AgentIdentity,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AuthorizeExternalPeerReciprocalTrustRemoval {
+        pub key: ExternalPeerKey,
+        pub agent_identity: AgentIdentity,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -13162,6 +13167,9 @@ pub enum Input {
     ResolveMemberDispatchAdmission(inputs::ResolveMemberDispatchAdmission),
     RecordMemberDispatchAdmissionLineage(inputs::RecordMemberDispatchAdmissionLineage),
     RecordMemberInstructionLineage(inputs::RecordMemberInstructionLineage),
+    AuthorizeExternalPeerReciprocalTrustRemoval(
+        inputs::AuthorizeExternalPeerReciprocalTrustRemoval,
+    ),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -13511,6 +13519,9 @@ impl Input {
                 InputKind::RecordMemberDispatchAdmissionLineage
             }
             Self::RecordMemberInstructionLineage(_) => InputKind::RecordMemberInstructionLineage,
+            Self::AuthorizeExternalPeerReciprocalTrustRemoval(_) => {
+                InputKind::AuthorizeExternalPeerReciprocalTrustRemoval
+            }
         }
     }
 }
@@ -13775,6 +13786,7 @@ pub enum InputKind {
     ResolveMemberDispatchAdmission,
     RecordMemberDispatchAdmissionLineage,
     RecordMemberInstructionLineage,
+    AuthorizeExternalPeerReciprocalTrustRemoval,
 }
 
 pub mod signals {
@@ -15894,6 +15906,13 @@ pub mod effects {
         pub host_answer: MemberDispatchAdmissionHostAnswer,
         pub verdict: MemberDispatchAdmissionVerdict,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ExternalPeerReciprocalTrustRemovalRequested {
+        pub key: ExternalPeerKey,
+        pub edge: ExternalPeerEdge,
+        pub peer_id: PeerId,
+        pub epoch: u64,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -16107,6 +16126,9 @@ pub enum Effect {
     IdentityEnded(effects::IdentityEnded),
     DeclaredRosterSealRefused(effects::DeclaredRosterSealRefused),
     MemberDispatchAdmissionResolved(effects::MemberDispatchAdmissionResolved),
+    ExternalPeerReciprocalTrustRemovalRequested(
+        effects::ExternalPeerReciprocalTrustRemovalRequested,
+    ),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -16315,6 +16337,7 @@ pub enum EffectKind {
     IdentityEnded,
     DeclaredRosterSealRefused,
     MemberDispatchAdmissionResolved,
+    ExternalPeerReciprocalTrustRemovalRequested,
 }
 
 pub mod command_capabilities {
@@ -18494,6 +18517,8 @@ pub enum TransitionId {
     SetOperatorInstructionAdvanceSlotLimitExceededStopped,
     RecordMemberInstructionLineageRunning,
     RecordMemberInstructionLineageStopped,
+    AuthorizeExternalPeerReciprocalTrustRemovalRunning,
+    AuthorizeExternalPeerReciprocalTrustRemovalStopped,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

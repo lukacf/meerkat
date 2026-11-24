@@ -4,7 +4,7 @@ description: "Server-Sent Events for real-time Meta interaction and event subscr
 icon: "bolt"
 ---
 
-*Mirrored from Meerkat Meta main at [de520227a811](https://github.com/lukacf/meerkat/commit/de520227a81178fce9ffea3abcafa4a7bddfbf27) on 2026-11-17; Meta version 0.9.16 at that commit.*
+*Mirrored from Meerkat Meta main at [6372543dee87](https://github.com/lukacf/meerkat/commit/6372543dee877e30cf411bacc1317110927dfebc) on 2026-11-24; Meta version 0.9.18 at that commit.*
 
 Meta uses Server-Sent Events (SSE) for several live HTTP streams:
 
@@ -40,6 +40,37 @@ anonymous. A token without `exp` never lapses. A revocation of the token's
 principal (`meta/console/revoke_sessions`), or a sign-out of the token's
 login (`meta/console/sign_out`), ends the stream at once, with or without
 `exp`, and its reconnect is refused with **401**.
+
+## The mob of a stream (`mob_id`)
+
+Every stream route takes a `mob_id` query parameter that names the mob the
+stream is for; a request without it is for the launch mob. The route knows
+its caller first (**401** for a request without valid credentials where
+sign-in is required). An id the route does not serve to its caller, an
+empty one included, is refused before a stream opens with HTTP **404** and
+`{"error":"foreign_mob_target","requested_mob_id":"<id>"}`: the same answer
+for an id no mob has and for a mob the caller may not address. The routes:
+`GET /agents/{agent_id}/events`, `GET /mob/events`,
+`GET /meta/mob_events/stream` (where `mob_id` names the mob whose ledger is
+read), `GET /meta/workgraph/facts/stream`, `GET /console/timeline/stream`,
+`GET /console/identity/{identity}/stream` and `GET /console/gating/stream`.
+The first four serve the mob the request names, on a host of more than one
+mob: the stream is read from that mob, the caller is judged in it, and a
+mob that is not loaded is loaded (before the stream's own access rule is
+judged). An open stream of a mob other than the
+launch mob keeps that mob loaded until the stream ends; a mob that is
+destroyed or shut down ends its streams (a stopped mob keeps them open),
+and opening the stream of a destroyed mob again is answered
+**404** as above. The WorkGraph fact stream of a mob that has no WorkGraph
+view answers **404** with `{"error":"workgraph_unavailable"}` to a caller
+who may address the mob. The three Console streams serve the launch mob
+only. See "The mob of a
+request" in the [HTTP reference](/meta/api/rest) for the capability a client
+checks before it sends `mob_id`.
+
+A `GET /meta/workgraph/facts/stream` route that a host mounts by itself,
+outside the runtime's router, knows no mob by an id: it refuses every
+`mob_id` a request names.
 
 ## Agent event stream
 
@@ -141,6 +172,35 @@ semantics: without `after`, `since` switches to `recent`. `recent` returns a
 bounded seed page (`limit` sizes it); anchored `since` replays all retained
 matching backlog, sent page by page as it is read, whatever `limit` says. A
 non-empty `Last-Event-ID` header overrides the URL's `after`.
+
+### Frames of every mob (`mobs=*`)
+
+On a gateway that hosts more than one mob (see "Every mob the caller may
+address" in the [HTTP reference](/meta/api/rest)),
+`GET /console/timeline/stream?mobs=*` serves the frames of every mob the
+caller may address on the one stream, each frame judged for the caller in
+its own mob. Without `mobs` the stream serves the launch mob's frames, as
+before. A mob that is not loaded has no frame on the stream, in its replay
+or live, and the stream's cursor moves past that mob's stored frames: once
+the mob is loaded, read them from no cursor with
+`meta/console/query_timeline` naming `mob_id`.
+
+A frame of a mob other than the launch mob names it in `mob_id`, beside
+`identity`: `mob_id` is the hosted mob at the top of the member's tree,
+and `identity` is the member's name as that mob knows it. A frame of the
+launch mob carries no `mob_id`. The two are the two parts of the member's
+row key (`<mob_id>/<identity>`; `identity` alone for the launch mob's
+door): file a frame by them. A frame carries neither `member_mob_id` nor
+`member_name`.
+
+The stream has one cursor per connection, whatever the set of mobs is:
+resume with `Last-Event-ID` as before. The cursor is opaque: compare it and
+resume with it, and read nothing from the distance between two values.
+Keep no cursor per mob; repair a gap per open conversation with
+`meta/console/query_timeline` naming `mob_id` and `identity`. The stream
+has no end frame for a mob: when a mob is no longer listed to the caller
+its frames stop, and the mob leaves the list at the next read of the
+experience.
 
 ### Timeline frame format
 
@@ -315,7 +375,7 @@ race window between snapshot and live subscription.
 | Param | Type | Notes |
 |-------|------|-------|
 | `after_seq` | u64 | Resume from this cursor (exclusive). When omitted, starts at the current `latest_cursor` (live tail only). |
-| `mob_id` | string | Filter by mob id |
+| `mob_id` | string | The mob whose ledger is read (see "The mob of a stream" above) |
 | `run_id` | string | Filter by flow run id |
 | `step_id` | string | Filter by flow step id |
 | `event_types` | comma-separated | e.g. `flow_started,step_completed` |

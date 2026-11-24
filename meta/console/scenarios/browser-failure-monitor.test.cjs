@@ -20,6 +20,7 @@ function setup(options = {}) {
     frame: () => options.frame || (options.page ? { page: () => options.page } : frame),
     isNavigationRequest: () => Boolean(options.navigation),
     redirectedFrom: () => options.redirectedFrom || null,
+    response: async () => options.answer === undefined ? null : { ok: () => (options.status ?? 200) < 400, json: async () => options.answer },
   });
   const start = item => { context.emit("request", item); return item; };
   const fail = item => context.emit("requestfailed", item);
@@ -254,30 +255,543 @@ test("finished requests and allowances from completed actions cannot hide later 
   assert.equal(s.monitor.errors.length, 2);
 });
 
-test("initialization allows one exact same-origin unscoped seed and stream request", async () => {
-  const s = setup();
-  await s.monitor.navigation(s.page, "initial host", async () => {
-    s.fail(s.start(s.request({ method: "POST", url: `${origin}/console/rpc`, body: seed })));
-    s.fail(s.start(s.request({ url: `${origin}/console/timeline/stream` })));
-  });
-  s.monitor.assertClean();
-  assert.equal(s.monitor.expected.length, 2);
-  assert(s.monitor.expected.every(item => item.reason === "initial host: authority initialization"));
+// While a document initializes the console cancels its own unscoped
+// subscription (a recent-page read, then the stream) and starts it again:
+// when the experience names its scope and, on a gateway whose capabilities
+// list mob addressing, once more after it has read the experience for every
+// mob; from then on the read and the stream ask for every mob (`mobs=*`).
+// A cancelled read or stream is the console's own only when the next read or
+// stream of that subscription begins after it, in the same action.
+const everyMobSeed = { ...seed, params: { ...seed.params, mobs: "*" } };
+const seedOf = (s, options = {}) => s.request({
+  method: "POST", url: `${origin}${options.prefix || ""}/console/rpc`, body: options.body || seed,
+  ...(options.page ? { page: options.page } : {}),
+});
+const streamOf = (s, options = {}) => s.request({
+  url: `${origin}${options.prefix || ""}/console/timeline/stream${options.query || ""}`,
+  ...(options.page ? { page: options.page } : {}), ...(options.error ? { error: options.error } : {}),
 });
 
-test("initialization cannot forgive duplicate seeds, scoped reads, writes, foreign origins, or wrong failures", async () => {
+test("initialization allows a cancelled seed or stream once the subscription's next request replaces it", async () => {
+  for (const [first, second] of [
+    [s => seedOf(s), s => streamOf(s)],
+    [s => streamOf(s), s => streamOf(s, { query: "?mobs=*" })],
+    [s => streamOf(s, { query: "?mobs=*" }), s => streamOf(s, { query: "?mobs=*" })],
+    [s => seedOf(s), s => seedOf(s, { body: everyMobSeed })],
+  ]) {
+    const s = setup();
+    await s.monitor.navigation(s.page, "initial host", async () => {
+      s.fail(s.start(first(s)));
+      assert.equal(s.monitor.expected.length, 0, "a cancelled start is the console's own only once its successor begins");
+      assert.throws(() => s.monitor.assertClean(), /replacement evidence is still pending/);
+      s.fail(s.start(second(s)));
+      assert.equal(s.monitor.expected.length, 1);
+      s.start(seedOf(s, { body: everyMobSeed }));
+      assert.equal(s.monitor.expected.length, 2);
+    });
+    s.monitor.assertClean();
+    assert(s.monitor.failures.every(item => item.expected === true && item.reason === "initial host: authority initialization"));
+  }
+});
+
+// The browser reports a successor's start before the failure of the start it
+// replaces: the console cancels the old request and sends the new one in the
+// same turn, and the cancellation's report arrives later.
+test("a successor that the browser reports before the cancelled start's failure replaces it", async () => {
+  const s = setup();
+  await s.monitor.navigation(s.page, "initial host", async () => {
+    const first = s.start(seedOf(s));
+    const second = s.start(seedOf(s));
+    s.fail(first);
+    assert.equal(s.monitor.expected.length, 1, "the later start is already there");
+    s.start(seedOf(s, { body: everyMobSeed }));
+    s.fail(second);
+    assert.equal(s.monitor.expected.length, 2);
+  });
+  s.monitor.assertClean();
+  assert(s.monitor.failures.every(item => item.expected === true && item.reason === "initial host: authority initialization"));
+});
+
+test("an earlier start replaces nothing: the latest start cancelled with nothing after it is a failed replacement", async () => {
+  const s = setup();
+  await s.monitor.navigation(s.page, "initial host", async () => {
+    s.start(seedOf(s));
+    s.fail(s.start(seedOf(s, { body: everyMobSeed })));
+  });
+  assert.equal(s.monitor.expected.length, 0);
+  assert.equal(s.monitor.errors.length, 1);
+});
+
+test("a third cancelled start stays unexpected when its successor is reported first", async () => {
+  const s = setup();
+  await s.monitor.navigation(s.page, "initial host", async () => {
+    const first = s.start(seedOf(s));
+    const second = s.start(seedOf(s));
+    s.fail(first);
+    const third = s.start(seedOf(s, { body: everyMobSeed }));
+    s.fail(second);
+    s.start(seedOf(s, { body: everyMobSeed }));
+    s.fail(third);
+  });
+  assert.equal(s.monitor.expected.length, 2);
+  assert.equal(s.monitor.errors.length, 1);
+});
+
+test("a cancelled seed or stream that no successor follows in its action is a failed replacement", async () => {
+  const s = setup();
+  await s.monitor.navigation(s.page, "initial host", async () => {
+    s.fail(s.start(seedOf(s)));
+    s.fail(s.start(streamOf(s, { query: "?mobs=*" })));
+  });
+  // The stream replaced the seed; nothing replaced the stream.
+  assert.equal(s.monitor.expected.length, 1);
+  assert.equal(s.monitor.errors.length, 1);
+  assert.match(s.monitor.errors[0], /timeline\/stream\?mobs=\*: net::ERR_ABORTED/);
+  assert.throws(() => s.monitor.assertClean(), /unexpected browser/);
+  // A successor that begins after the action proves nothing.
+  s.start(seedOf(s));
+  assert.equal(s.monitor.expected.length, 1);
+  assert.equal(s.monitor.errors.length, 1);
+});
+
+test("initialization cannot forgive a third cancelled start even when a successor follows it", async () => {
+  const s = setup();
+  await s.monitor.navigation(s.page, "initial host", async () => {
+    s.fail(s.start(seedOf(s)));
+    s.fail(s.start(streamOf(s)));
+    s.fail(s.start(streamOf(s, { query: "?mobs=*" })));
+    s.start(seedOf(s, { body: everyMobSeed }));
+  });
+  assert.equal(s.monitor.expected.length, 2);
+  assert.equal(s.monitor.errors.length, 1);
+  assert.match(s.monitor.errors[0], /timeline\/stream\?mobs=\*: net::ERR_ABORTED/);
+});
+
+test("a successor cannot forgive scoped reads, writes, foreign origins, streams that name a mob or a member, or wrong failures", async () => {
   const s = setup();
   await s.monitor.navigation(s.page, "initial host", async () => {
     const options = { method: "POST", url: `${origin}/console/rpc`, body: seed };
-    s.fail(s.start(s.request(options)));
-    s.fail(s.start(s.request(options)));
     s.fail(s.start(s.request({ ...options, body: { ...seed, params: { ...seed.params, identity: "router:main" } } })));
+    s.fail(s.start(s.request({ ...options, body: { ...seed, params: { ...seed.params, mobs: "support" } } })));
+    s.fail(s.start(s.request({ ...options, body: { ...seed, params: { ...seed.params, mob_id: "support" } } })));
     s.fail(s.start(s.request({ ...options, body: { method: "meta/console/send", params: { content: "do not hide" } } })));
     s.fail(s.start(s.request({ ...options, url: "http://foreign.test/console/rpc" })));
-    s.fail(s.start(s.request({ url: `${origin}/console/timeline/stream`, error: "net::ERR_FAILED" })));
+    s.fail(s.start(streamOf(s, { query: "?mobs=support" })));
+    s.fail(s.start(streamOf(s, { query: "?mobs=*&identity=router%3Amain" })));
+    s.fail(s.start(streamOf(s, { query: "?identity=router%3Amain" })));
+    s.fail(s.start(streamOf(s, { query: "?mob_id=support" })));
+    s.fail(s.start(streamOf(s, { error: "net::ERR_FAILED" })));
+    s.start(seedOf(s));
+  });
+  assert.equal(s.monitor.expected.length, 0);
+  assert.equal(s.monitor.errors.length, 10);
+});
+
+test("prefixed initialization only allows a replaced start of the explicitly selected next authority", async () => {
+  const s = setup({ initializationPrefixes: ["/scope-a", "/scope-b"] });
+  await s.monitor.during(s.page, "switch to B", async () => {
+    s.fail(s.start(streamOf(s, { prefix: "/scope-b" })));
+    s.fail(s.start(seedOf(s, { prefix: "/scope-b" })));
+    s.fail(s.start(streamOf(s, { prefix: "/scope-a" })));
+    s.fail(s.start(streamOf(s, { prefix: "/scope-b-extra" })));
+    s.start(seedOf(s, { prefix: "/scope-b", body: everyMobSeed }));
+  }, { priorRequests: () => false, initialize: ["/scope-b"] });
+  assert.equal(s.monitor.expected.length, 2);
+  assert.equal(s.monitor.errors.length, 2);
+});
+
+test("a request under another prefix is no successor", async () => {
+  const s = setup({ initializationPrefixes: ["/scope-a", "/scope-b"] });
+  await s.monitor.during(s.page, "switch to B", async () => {
+    s.fail(s.start(streamOf(s, { prefix: "/scope-b", query: "?mobs=*" })));
+    s.start(seedOf(s, { prefix: "/scope-a" }));
+  }, { priorRequests: () => false, initialize: ["/scope-b"] });
+  assert.equal(s.monitor.expected.length, 0);
+  assert.equal(s.monitor.errors.length, 1);
+});
+
+test("a second replaced start needs a successor that asks for every mob: a gateway that lists no mob addressing replaces one", async () => {
+  const s = setup();
+  await s.monitor.navigation(s.page, "initial host", async () => {
+    s.fail(s.start(seedOf(s)));
+    s.fail(s.start(seedOf(s)));
+    s.start(seedOf(s));
   });
   assert.equal(s.monitor.expected.length, 1);
-  assert.equal(s.monitor.errors.length, 5);
+  assert.equal(s.monitor.errors.length, 1);
+});
+
+// An initializing action ends on the console's own last initializing start,
+// as the browser's requests show it, and then no earlier: the answer to its
+// capabilities reads; where one lists mob addressing, the answer to the
+// experience read for every mob and then the start that follows it having
+// gone on unreplaced: its read finished and its stream answered before any
+// newer unscoped read began.
+const capabilitiesOf = (s, answer, prefix = "", status = 200) => s.request({
+  method: "POST", url: `${origin}${prefix}/console/rpc`, body: { method: "meta/capabilities", params: {} }, answer, status,
+});
+const answered = (s, item) => s.context.emit("response", { request: () => item, ok: () => true });
+const listsMobAddressing = { result: { feature_capabilities: ["mob_addressing"] } };
+const everyMobExperienceOf = (s, prefix = "") => s.request({ url: `${origin}${prefix}/console/experience?mobs=*` });
+const finish = (s, item) => s.context.emit("requestfinished", item);
+const turns = () => new Promise(resolve => setImmediate(resolve));
+
+test("on a gateway that lists mob addressing an initializing action ends on the start after the every-mob experience read having gone on unreplaced", async () => {
+  const s = setup();
+  const capabilities = capabilitiesOf(s, listsMobAddressing);
+  const experience = everyMobExperienceOf(s);
+  let stream; let ended = false;
+  const action = s.monitor.navigation(s.page, "initial host", async () => {
+    s.commit();
+    s.start(capabilities);
+    finish(s, s.start(seedOf(s)));
+    stream = s.start(streamOf(s));
+  }).then(() => { ended = true; });
+  await turns();
+  assert.equal(ended, false, "the capabilities answer is still out");
+  finish(s, capabilities); await turns();
+  assert.equal(ended, false, "the experience read for every mob is still out");
+  s.start(experience); finish(s, s.start(seedOf(s))); await turns();
+  assert.equal(ended, false, "a read before that answer is not the last start");
+  finish(s, experience); await turns();
+  assert.equal(ended, false, "no read has begun after that answer");
+  // What the action awaited is long there; the console now replaces its start.
+  s.fail(stream);
+  const last = s.start(seedOf(s, { body: everyMobSeed })); await turns();
+  assert.equal(ended, false, "the last start's read is still out");
+  finish(s, last); await turns();
+  assert.equal(ended, false, "its stream has not begun");
+  const lastStream = s.start(streamOf(s, { query: "?mobs=*" })); await turns();
+  assert.equal(ended, false, "its stream has not answered");
+  answered(s, lastStream);
+  await action;
+  assert.equal(ended, true);
+  s.monitor.assertClean();
+  assert.equal(s.monitor.expected.length, 1, "the start replaced before the witness is inside the action");
+});
+
+test("when the every-mob experience read answers before the second start's read, the action ends on the start that goes on unreplaced", async () => {
+  const s = setup();
+  const capabilities = capabilitiesOf(s, listsMobAddressing);
+  const experience = everyMobExperienceOf(s);
+  let ended = false;
+  let first;
+  const action = s.monitor.during(s.page, "initial host", async () => {
+    s.start(capabilities); s.start(experience);
+    first = s.start(seedOf(s));
+    finish(s, capabilities); finish(s, experience);
+  }, { priorRequests: () => false, initialize: true }).then(() => { ended = true; });
+  await turns();
+  // The second start: the first unscoped read after the every-mob answer, and the console still replaces it.
+  const second = s.start(seedOf(s, { body: everyMobSeed }));
+  s.fail(first); await turns();
+  assert.equal(ended, false, "the first read after the answer may be a start the console still replaces");
+  finish(s, second);
+  const secondStream = s.start(streamOf(s, { query: "?mobs=*" })); await turns();
+  assert.equal(ended, false);
+  const third = s.start(seedOf(s, { body: everyMobSeed }));
+  // The stream's answer is reported after the newer read began and before its own cancellation.
+  answered(s, secondStream); await turns();
+  assert.equal(ended, false, "a newer unscoped read began before that stream answered");
+  s.fail(secondStream);
+  finish(s, third);
+  answered(s, s.start(streamOf(s, { query: "?mobs=*" })));
+  await action;
+  s.monitor.assertClean();
+  assert.equal(s.monitor.expected.length, 2);
+});
+
+// The browser reports the request that replaces a start before the failure
+// of the start it replaces. An action does not end while an earlier request
+// of the same subscription is still in flight, so that failure is reported
+// inside the action whenever it comes.
+test("the action does not end while an earlier request of the subscription is still in flight", async () => {
+  for (const reported of ["after the last start's read is requested", "after the last start's stream has answered"]) {
+    const s = setup();
+    const capabilities = capabilitiesOf(s, listsMobAddressing);
+    const experience = everyMobExperienceOf(s);
+    let ended = false;
+    let replaced;
+    const action = s.monitor.during(s.page, "initial host", async () => {
+      // The second start begins before the every-mob experience read; its stream answers: the page shows live.
+      const second = s.start(seedOf(s));
+      s.start(capabilities); s.start(experience);
+      finish(s, capabilities); finish(s, experience);
+      finish(s, second);
+      replaced = s.start(streamOf(s, { query: "?mobs=*" }));
+      answered(s, replaced);
+    }, { priorRequests: () => false, initialize: true }).then(() => { ended = true; });
+    await turns();
+    const last = s.start(seedOf(s, { body: everyMobSeed }));
+    if (reported === "after the last start's read is requested") s.fail(replaced);
+    finish(s, last);
+    answered(s, s.start(streamOf(s, { query: "?mobs=*" }))); await turns();
+    if (reported === "after the last start's stream has answered") {
+      assert.equal(ended, false, "the replaced stream has not been reported cancelled");
+      s.fail(replaced);
+    }
+    await action;
+    s.monitor.assertClean();
+    assert.equal(s.monitor.expected.length, 1);
+  }
+});
+
+test("an earlier request whose end is never reported fails the action by name; another subscription or prefix holds nothing", async () => {
+  const never = setup({ initializationTimeoutMs: 20 });
+  const capabilities = capabilitiesOf(never, listsMobAddressing);
+  const experience = everyMobExperienceOf(never);
+  await assert.rejects(never.monitor.during(never.page, "initial host", async () => {
+    never.start(streamOf(never, { query: "?mobs=*" }));
+    never.start(capabilities); never.start(experience);
+    finish(never, capabilities); finish(never, experience);
+    finish(never, never.start(seedOf(never, { body: everyMobSeed })));
+    answered(never, never.start(streamOf(never, { query: "?mobs=*" })));
+  }, { priorRequests: () => false, initialize: true }), /initial host: the console's last initializing start was not seen: missing the end of an earlier request of its subscription that is still in flight/);
+
+  const other = setup({ initializationPrefixes: ["/scope-a", "/scope-b"], initializationTimeoutMs: 20 });
+  const asked = capabilitiesOf(other, listsMobAddressing, "/scope-b");
+  const read = everyMobExperienceOf(other, "/scope-b");
+  await other.monitor.during(other.page, "switch to B", async () => {
+    // In flight and never ended: a member's stream, a member's read, and the other prefix's unscoped stream and read.
+    other.start(streamOf(other, { prefix: "/scope-b", query: "?identity=router%3Amain" }));
+    other.start(other.request({ method: "POST", url: `${origin}/scope-b/console/rpc`, body: { ...seed, params: { ...seed.params, identity: "router:main" } } }));
+    other.start(streamOf(other, { prefix: "/scope-a", query: "?mobs=*" }));
+    other.start(seedOf(other, { prefix: "/scope-a" }));
+    other.start(asked); other.start(read);
+    finish(other, asked); finish(other, read);
+    finish(other, other.start(seedOf(other, { prefix: "/scope-b", body: everyMobSeed })));
+    answered(other, other.start(streamOf(other, { prefix: "/scope-b", query: "?mobs=*" })));
+  }, { priorRequests: () => false, initialize: ["/scope-b"] });
+  other.monitor.assertClean();
+});
+
+test("a held last start waits for the earlier held reads to be reported cancelled, and not for itself", async () => {
+  const s = setup();
+  const capabilities = capabilitiesOf(s, listsMobAddressing);
+  const experience = everyMobExperienceOf(s);
+  let ended = false;
+  let earlier;
+  const action = s.monitor.during(s.page, "initial host", async () => {
+    earlier = s.start(seedOf(s));
+    s.start(capabilities); s.start(experience);
+    finish(s, capabilities); finish(s, experience);
+    // The last start's read: the scenario holds it, it never finishes.
+    s.start(seedOf(s, { body: everyMobSeed }));
+  }, { priorRequests: () => false, initialize: true, lastStartHeld: true }).then(() => { ended = true; });
+  await turns();
+  assert.equal(ended, false, "the earlier held read has not been reported cancelled");
+  s.fail(earlier);
+  await action;
+  s.monitor.assertClean();
+  assert.equal(s.monitor.expected.length, 1);
+});
+
+test("two capabilities reads in one action: the action waits for both, and for the last start when either lists mob addressing", async () => {
+  const s = setup();
+  const plain = capabilitiesOf(s, { result: { feature_capabilities: [] } });
+  const listing = capabilitiesOf(s, listsMobAddressing);
+  const experience = everyMobExperienceOf(s);
+  let ended = false;
+  const action = s.monitor.during(s.page, "initial host", async () => {
+    s.start(plain); s.start(listing); s.start(experience);
+  }, { priorRequests: () => false, initialize: true }).then(() => { ended = true; });
+  finish(s, plain); await turns();
+  assert.equal(ended, false, "one capabilities read is still out");
+  finish(s, listing); finish(s, experience); await turns();
+  assert.equal(ended, false, "one of them lists mob addressing: the last start is still to come");
+  finish(s, s.start(seedOf(s, { body: everyMobSeed })));
+  answered(s, s.start(streamOf(s, { query: "?mobs=*" })));
+  await action;
+  s.monitor.assertClean();
+});
+
+test("a failed capabilities read is not the last word while the action is open: a retry that lists mob addressing is awaited", async () => {
+  const s = setup();
+  const failed = capabilitiesOf(s);
+  const retry = capabilitiesOf(s, listsMobAddressing);
+  const experience = everyMobExperienceOf(s);
+  let release; let ended = false;
+  const body = new Promise(resolve => { release = resolve; });
+  const action = s.monitor.during(s.page, "initial host", async () => {
+    s.start(failed); s.fail(failed);
+    await body;
+  }, { priorRequests: () => false, initialize: true }).then(() => { ended = true; });
+  await turns();
+  s.start(retry);
+  release(); await turns();
+  assert.equal(ended, false, "the retry's answer is still out");
+  finish(s, retry); await turns();
+  assert.equal(ended, false, "the retry lists mob addressing: the last start is still to come");
+  s.start(experience); s.fail(experience);
+  finish(s, s.start(seedOf(s, { body: everyMobSeed })));
+  answered(s, s.start(streamOf(s, { query: "?mobs=*" })));
+  await action;
+  assert.equal(s.monitor.errors.length, 2, "the failed capabilities read and the failed experience read are still reported");
+});
+
+test("a capabilities answer with an error status lists nothing, and a popup that sees the console ask its capabilities ends on the witness too", async () => {
+  const s = setup();
+  const refused = capabilitiesOf(s, listsMobAddressing, "", 503);
+  await s.monitor.during(s.page, "initial host", async () => { s.start(refused); finish(s, refused); }, { priorRequests: () => false, initialize: true });
+  const popup = new EventEmitter();
+  const capabilities = s.request({ page: popup, method: "POST", url: `${origin}/console/rpc`, body: { method: "meta/capabilities", params: {} }, answer: { result: {} } });
+  let ended = false;
+  const action = s.monitor.popup("explicit clone", async () => {
+    s.context.emit("page", popup);
+    s.start(capabilities);
+    return popup;
+  }).then(() => { ended = true; });
+  await turns();
+  assert.equal(ended, false, "the popup's capabilities answer is still out");
+  finish(s, capabilities);
+  await action;
+  s.monitor.assertClean();
+});
+
+test("on a gateway that lists no mob addressing, or whose capabilities read fails, the action ends on that answer", async () => {
+  for (const answer of [{ result: { feature_capabilities: ["other"] } }, { result: {} }, { error: { code: -32601, message: "Method not found" } }, "failed"]) {
+    const s = setup();
+    const capabilities = capabilitiesOf(s, answer === "failed" ? undefined : answer);
+    let ended = false;
+    const action = s.monitor.during(s.page, "initial host", async () => {
+      s.start(capabilities);
+      s.start(seedOf(s));
+    }, { priorRequests: () => false, initialize: true }).then(() => { ended = true; });
+    await turns();
+    assert.equal(ended, false, "the capabilities answer is still out");
+    if (answer === "failed") s.fail(capabilities); else finish(s, capabilities);
+    await action;
+    assert.equal(s.monitor.errors.length, answer === "failed" ? 1 : 0);
+  }
+});
+
+test("an action that never sees the console's last initializing start fails and names what is missing", async () => {
+  for (const [until, missing] of [
+    ["nothing", /initial host: the console's last initializing start was not seen: missing the answer to its capabilities read/],
+    ["capabilities", /missing the answer to its experience read for every mob/],
+    ["experience", /missing the unscoped read that follows its experience read for every mob/],
+    ["read", /missing the answer to the stream of that read with no newer unscoped read before it/],
+  ]) {
+    const s = setup({ initializationTimeoutMs: 20 });
+    const capabilities = capabilitiesOf(s, listsMobAddressing);
+    const experience = everyMobExperienceOf(s);
+    await assert.rejects(s.monitor.during(s.page, "initial host", async () => {
+      s.start(capabilities); s.start(experience); s.start(seedOf(s));
+      if (until !== "nothing") finish(s, capabilities);
+      if (until === "experience" || until === "read") finish(s, experience);
+      if (until === "read") finish(s, s.start(seedOf(s, { body: everyMobSeed })));
+    }, { priorRequests: () => false, initialize: true }), missing);
+    // The action is over: its scope is released and nothing of it is forgiven later.
+    await s.monitor.during(s.page, "later action", async () => {}, { priorRequests: () => false });
+  }
+  const prefixed = setup({ initializationPrefixes: ["/scope-a", "/scope-b"], initializationTimeoutMs: 20 });
+  await assert.rejects(prefixed.monitor.during(prefixed.page, "switch to B", async () => {
+    prefixed.start(capabilitiesOf(prefixed, listsMobAddressing, "/scope-b"));
+  }, { priorRequests: () => false, initialize: ["/scope-b"] }), /not seen under \/scope-b: missing the answer to its capabilities read/);
+});
+
+test("an action whose scenario holds the last start's read says so and ends once that read has begun", async () => {
+  for (const lastStartHeld of [true, false]) {
+    const s = setup({ initializationTimeoutMs: 20 });
+    const capabilities = capabilitiesOf(s, listsMobAddressing);
+    const experience = everyMobExperienceOf(s);
+    const action = s.monitor.during(s.page, "initial host", async () => {
+      s.start(capabilities); s.start(experience);
+      finish(s, capabilities); finish(s, experience);
+      s.start(seedOf(s, { body: everyMobSeed }));
+    }, { priorRequests: () => false, initialize: true, lastStartHeld });
+    if (lastStartHeld) await action;
+    else await assert.rejects(action, /missing the answer to the stream of that read with no newer unscoped read before it/);
+  }
+});
+
+test("a cancellation after the witness is outside the action and unexpected; one before it with no successor fails the action", async () => {
+  const after = setup();
+  const capabilities = capabilitiesOf(after, listsMobAddressing);
+  const experience = everyMobExperienceOf(after);
+  let last;
+  await after.monitor.during(after.page, "initial host", async () => {
+    after.start(capabilities); after.start(experience);
+    finish(after, capabilities); finish(after, experience);
+    finish(after, after.start(seedOf(after, { body: everyMobSeed })));
+    last = after.start(streamOf(after, { query: "?mobs=*" }));
+    answered(after, last);
+  }, { priorRequests: () => false, initialize: true });
+  after.fail(last);
+  after.start(seedOf(after, { body: everyMobSeed }));
+  assert.equal(after.monitor.expected.length, 0);
+  assert.equal(after.monitor.errors.length, 1);
+
+  const before = setup({ initializationTimeoutMs: 20 });
+  const asked = capabilitiesOf(before, listsMobAddressing);
+  const read = everyMobExperienceOf(before);
+  await assert.rejects(before.monitor.during(before.page, "initial host", async () => {
+    before.start(asked); before.start(read);
+    const stream = before.start(streamOf(before, { query: "?mobs=*" }));
+    finish(before, asked); finish(before, read);
+    before.fail(stream);
+  }, { priorRequests: () => false, initialize: true }), /missing the unscoped read that follows its experience read for every mob/);
+  assert.equal(before.monitor.expected.length, 0);
+  assert.equal(before.monitor.errors.length, 1, "the stream nothing replaced is a failed replacement");
+});
+
+test("the second replaced start is refused with only plain later starts, whichever the browser reports first", async () => {
+  const s = setup();
+  await s.monitor.navigation(s.page, "initial host", async () => {
+    const first = s.start(seedOf(s));
+    const second = s.start(seedOf(s));
+    s.fail(first);
+    s.start(seedOf(s));
+    s.fail(second);
+  });
+  assert.equal(s.monitor.expected.length, 1);
+  assert.equal(s.monitor.errors.length, 1);
+});
+
+test("a reload finds the old document's last stream as a prior request; one that begins inside the reload is a replaced start", async () => {
+  // The action before a reload ended on the old document's last start: its stream is in flight, a prior request.
+  const settled = setup();
+  const old = settled.start(streamOf(settled, { query: "?mobs=*" }));
+  await settled.monitor.navigation(settled.page, "reload", async () => {
+    settled.commit();
+    settled.fail(old);
+    const first = settled.start(seedOf(settled));
+    const second = settled.start(seedOf(settled, { body: everyMobSeed }));
+    settled.fail(first);
+    settled.start(seedOf(settled, { body: everyMobSeed }));
+    settled.fail(second);
+  });
+  settled.monitor.assertClean();
+  assert.deepEqual(settled.monitor.expected.map(item => item.reason), ["reload: prior document request", "reload: authority initialization", "reload: authority initialization"]);
+
+  // An old document that starts its subscription again after the reload began uses one of the two.
+  const late = setup();
+  await late.monitor.navigation(late.page, "reload", async () => {
+    const again = late.start(streamOf(late, { query: "?mobs=*" }));
+    late.commit();
+    late.fail(again);
+    const first = late.start(seedOf(late));
+    const second = late.start(seedOf(late, { body: everyMobSeed }));
+    late.fail(first);
+    late.start(seedOf(late, { body: everyMobSeed }));
+    late.fail(second);
+  });
+  assert.equal(late.monitor.expected.length, 2);
+  assert.equal(late.monitor.errors.length, 1, "the new document's second replaced start is then the third of the action");
+});
+
+test("a navigation counts the new document's requests only, and an action that saw no capabilities read waits for nothing", async () => {
+  const s = setup({ initializationTimeoutMs: 20 });
+  await s.monitor.navigation(s.page, "reload", async () => {
+    // The old document asks its capabilities once more before the new one commits.
+    s.start(capabilitiesOf(s, listsMobAddressing));
+    s.commit();
+    s.start(seedOf(s));
+  });
+  await s.monitor.during(s.page, "another prefix", async () => {
+    s.start(capabilitiesOf(s, listsMobAddressing, "/elsewhere"));
+  }, { priorRequests: () => false, initialize: true });
+  s.monitor.assertClean();
 });
 
 test("initialization allowance ends with its action even for the same request", async () => {
@@ -334,7 +848,8 @@ test("new popup initialization is bounded to one page and records that page's er
   const s = setup(); const popup = new EventEmitter();
   const returned = await s.monitor.popup("explicit clone", async () => {
     s.context.emit("page", popup);
-    s.fail(s.start(s.request({ page: popup, url: `${origin}/console/timeline/stream` })));
+    s.fail(s.start(streamOf(s, { page: popup })));
+    s.start(seedOf(s, { page: popup }));
     return popup;
   });
   assert.equal(returned, popup);
@@ -352,6 +867,7 @@ test("a popup request before the page event binds only that first known page", a
     s.context.emit("page", popup);
     s.fail(s.start(s.request({ page: popup, method: "POST", url: `${origin}/console/rpc`, body: seed })));
     s.fail(s.start(s.request({ page: unrelated, url: `${origin}/console/timeline/stream` })));
+    s.start(streamOf(s, { page: popup, query: "?mobs=*" }));
   });
   assert.equal(s.monitor.expected.length, 2);
   assert.equal(s.monitor.errors.length, 1);
@@ -366,6 +882,7 @@ test("a frame-unavailable popup request remains unexpected", async () => {
     s.fail(s.start(unknown));
     s.context.emit("page", popup);
     s.fail(s.start(s.request({ page: popup, url: `${origin}/console/timeline/stream` })));
+    s.start(seedOf(s, { page: popup }));
   });
   assert.equal(s.monitor.errors.length, 1);
   assert.equal(s.monitor.expected.length, 1);
@@ -404,18 +921,6 @@ test("stop removes listeners before explicit browser teardown", () => {
   assert.equal(s.monitor.errors.length, 0);
   assert.equal(s.context.listenerCount("requestfailed"), 0);
   assert.equal(s.context.listenerCount("weberror"), 0);
-});
-
-test("prefixed initialization only allows the explicitly selected next authority", async () => {
-  const s = setup({ initializationPrefixes: ["/scope-a", "/scope-b"] });
-  await s.monitor.during(s.page, "switch to B", async () => {
-    s.fail(s.start(s.request({ url: `${origin}/scope-b/console/timeline/stream` })));
-    s.fail(s.start(s.request({ method: "POST", url: `${origin}/scope-b/console/rpc`, body: seed })));
-    s.fail(s.start(s.request({ url: `${origin}/scope-a/console/timeline/stream` })));
-    s.fail(s.start(s.request({ url: `${origin}/scope-b-extra/console/timeline/stream` })));
-  }, { priorRequests: () => false, initialize: ["/scope-b"] });
-  assert.equal(s.monitor.expected.length, 2);
-  assert.equal(s.monitor.errors.length, 2);
 });
 
 test("unconfigured initialization authority cannot open an allowance", async () => {

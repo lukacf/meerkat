@@ -156,6 +156,74 @@ impl Default for AgentMemoryConfig {
     }
 }
 
+impl AgentMemoryConfig {
+    /// The memory realm of `mob_id` on a host whose default mob is
+    /// `default_mob`.
+    ///
+    /// Two mobs of one host may each have a member of the same name, so
+    /// each mob has a memory realm of its own. The default mob's is the
+    /// configured [`Self::realm`], which is where every record written
+    /// before a host served more than one mob is. Any other mob's is
+    /// derived from the mob: Meerkat's realm of that mob (`mob.<mob id>`),
+    /// the one owner of that form.
+    ///
+    /// The realm names a mob's memory; it does not keep two mobs' memory
+    /// apart by itself, since one store opens whatever realm it is asked
+    /// for. A host keeps each other mob's memory in a store of that mob's
+    /// own besides, a directory of the mob below the default mob's memory
+    /// root, and hands that store to that mob's owners alone.
+    ///
+    /// # Errors
+    /// [`AgentMemoryError::InvalidConfig`] when `mob_id` has no realm form,
+    /// or when its realm is the configured realm: the default mob and that
+    /// mob would then share every memory scope.
+    pub fn realm_of_mob(
+        &self,
+        default_mob: &crate::member_key::DefaultMob,
+        mob_id: &meerkat_mob::MobId,
+    ) -> Result<String, AgentMemoryError> {
+        if default_mob.is(mob_id) {
+            return Ok(self.realm.clone());
+        }
+        let realm = meerkat_core::connection::mob_realm_id(mob_id.as_str())
+            .map_err(|error| {
+                AgentMemoryError::InvalidConfig(format!(
+                    "mob {mob_id} has no memory realm: {error}"
+                ))
+            })?
+            .as_str()
+            .to_string();
+        if realm == self.realm {
+            return Err(AgentMemoryError::InvalidConfig(format!(
+                "the configured agent memory realm {realm:?} is the memory realm of mob \
+                 {mob_id}: the default mob {} would share its memory",
+                default_mob.mob_id()
+            )));
+        }
+        Ok(realm)
+    }
+
+    /// This configuration for the members of `mob_id`: the same in
+    /// everything but the realm, which is the mob's
+    /// ([`Self::realm_of_mob`]). Every owner that keys agent memory by an
+    /// identity (recall, the recorder tool, the distiller and the steward)
+    /// reads its realm from the configuration it is built with, so a mob's
+    /// owners are built with this one.
+    ///
+    /// # Errors
+    /// As [`Self::realm_of_mob`].
+    pub fn for_mob(
+        &self,
+        default_mob: &crate::member_key::DefaultMob,
+        mob_id: &meerkat_mob::MobId,
+    ) -> Result<Self, AgentMemoryError> {
+        Ok(Self {
+            realm: self.realm_of_mob(default_mob, mob_id)?,
+            ..self.clone()
+        })
+    }
+}
+
 /// §7.2 operator-scope activation semantics. `Off` keeps the scope schema
 /// present but unpopulated (the P0 posture); `Provisional` gives each
 /// console person an operator scope keyed by their caller scope, which a
@@ -264,6 +332,23 @@ pub trait AgentMemoryProvider: Send + Sync {
         &self,
         request: AgentMemoryRecallRequest,
     ) -> Result<Vec<AgentMemoryRecord>, AgentMemoryError>;
+
+    /// [`Self::recall`] over the active records of `scope` instead of the
+    /// identity scope `request` names: the request's selection, query and
+    /// bound apply, and its `identity` and `realm` are not consulted. It is
+    /// the recall of a member whose memory is kept in a scope no
+    /// `AgentIdentity` names (a member private to a person). The default
+    /// answers unsupported and never falls back to [`Self::recall`]: the
+    /// identity a request names is not that scope.
+    async fn recall_in_scope(
+        &self,
+        _scope: &MemoryScope,
+        _request: AgentMemoryRecallRequest,
+    ) -> Result<Vec<AgentMemoryRecord>, AgentMemoryError> {
+        Err(AgentMemoryError::Unsupported(
+            "provider does not support a recall in a given scope".to_string(),
+        ))
+    }
 
     async fn remember(
         &self,
@@ -507,6 +592,14 @@ pub trait AgentMemoryProvider: Send + Sync {
     fn as_tombstone_source(&self) -> Option<Arc<dyn crate::memory::distiller::TombstoneSource>> {
         None
     }
+
+    /// Meta's bundled SQLite store, when this provider is that store. A
+    /// build asks a storage provider's agent memory for it, to run the
+    /// store's first start's step over it as it does over the store it
+    /// opens itself.
+    fn as_bundled_store(&self) -> Option<crate::memory::sqlite_store::SqliteAgentMemoryStore> {
+        None
+    }
 }
 
 /// Build-time memory assembly (§9.1). Thin caller into the
@@ -519,6 +612,9 @@ pub struct AgentMemoryCustomizer {
     /// is not available at the identity customizer boundary (notably
     /// `RealmRef`). Explicit entries also allow per-profile overrides.
     profile_memory_policy: BTreeMap<meerkat_mob::ProfileName, bool>,
+    /// Which agents are listed their own memory only
+    /// ([`Self::with_own_memory_only`]); none without it.
+    own_memory_only: Option<crate::memory::own_memory_only::OwnMemoryOnly>,
 }
 
 /// Ambient per-turn memory injection plus inbound defanging. Thin caller
@@ -912,6 +1008,22 @@ impl AgentMemoryRuntimeInjector {
         self.coordinator.provider()
     }
 
+    /// Test builds only: whether this delivers with a distiller, and with
+    /// a steward.
+    #[cfg(test)]
+    pub(crate) fn engines_in_tests(&self) -> (bool, bool) {
+        (self.distiller.is_some(), self.steward.is_some())
+    }
+
+    /// Test builds only: the distiller this injector hands its members'
+    /// rotations to.
+    #[cfg(test)]
+    pub(crate) fn distiller_in_tests(
+        &self,
+    ) -> Option<Arc<crate::memory::distiller::DistillerEngine>> {
+        self.distiller.clone()
+    }
+
     pub fn config(&self) -> AgentMemoryConfig {
         self.coordinator.config()
     }
@@ -973,6 +1085,7 @@ impl AgentMemoryCustomizer {
             inner: None,
             coordinator: RecallCoordinator::new(provider, config),
             profile_memory_policy: BTreeMap::new(),
+            own_memory_only: None,
         }
     }
 
@@ -985,7 +1098,22 @@ impl AgentMemoryCustomizer {
             inner,
             coordinator: RecallCoordinator::new(provider, config),
             profile_memory_policy: BTreeMap::new(),
+            own_memory_only: None,
         }
+    }
+
+    /// The agents that are listed their own memory only: the memory index
+    /// of their build holds the records of their own scope and none of
+    /// their mob's shared scope or the realm's
+    /// ([`crate::memory::own_memory_only`]). `None`, or a rule that lists
+    /// no profile, withholds nothing.
+    #[must_use]
+    pub fn with_own_memory_only(
+        mut self,
+        rule: Option<crate::memory::own_memory_only::OwnMemoryOnly>,
+    ) -> Self {
+        self.own_memory_only = rule;
+        self
     }
 
     /// Set the identity-first memory-tool policy for one durable profile.
@@ -1010,6 +1138,26 @@ impl AgentMemoryCustomizer {
         self.coordinator = self.coordinator.with_mob_resolver(resolver);
         self
     }
+
+    /// Whether the memory index of `spec`'s build lists the shared scopes
+    /// beside the agent's own ([`Self::with_own_memory_only`]).
+    async fn shared_index_of(
+        &self,
+        context: &AgentBuildContext,
+        spec: &DurableAgentSpec,
+    ) -> crate::memory::coordinator::SharedIndex {
+        use crate::memory::coordinator::SharedIndex;
+        let Some(rule) = self.own_memory_only.as_ref() else {
+            return SharedIndex::Listed;
+        };
+        let handle = context.runtime_services.mob_handle();
+        let definition = handle.as_ref().map(meerkat_mob::MobHandle::definition);
+        if rule.restricts(spec, definition).await {
+            SharedIndex::Withheld
+        } else {
+            SharedIndex::Listed
+        }
+    }
 }
 
 fn profile_enables_agent_memory(
@@ -1026,7 +1174,12 @@ fn profile_enables_agent_memory(
     definition_profile_enables_agent_memory(handle.definition(), &spec.profile, explicit_policy)
 }
 
-fn definition_profile_enables_agent_memory(
+/// Whether an agent on `profile` gets agent memory: the host's explicit
+/// answer for the profile, else the mob definition's inline profile
+/// (`tools.memory`). A profile the definition only references fails closed.
+/// The one gate of an agent's own recorder, and of a side chat's
+/// ([`crate::memory::side_chat_memory`]).
+pub(crate) fn definition_profile_enables_agent_memory(
     definition: &meerkat_mob::MobDefinition,
     profile: &meerkat_mob::ProfileName,
     explicit_policy: &BTreeMap<meerkat_mob::ProfileName, bool>,
@@ -1061,12 +1214,14 @@ impl AgentCustomizer for AgentMemoryCustomizer {
             return Ok(());
         }
 
+        let shared = self.shared_index_of(context, spec).await;
         let injection = self
             .coordinator
-            .assemble_build_injection(
+            .assemble_build_injection_with(
                 &context.identity,
                 build_query_text(context, spec),
                 build_query_terms(context, spec),
+                shared,
             )
             .await
             .map_err(|err| CustomizerError::Io(err.to_string()))?;
@@ -1104,15 +1259,15 @@ impl AgentCustomizer for AgentMemoryCustomizer {
                      agent_memory.recorder_tool"
                 );
             }
-            let recorder = MemoryRecorder {
+            let recorder = MemoryRecorder::new(
                 provider,
-                identity: context.identity.clone(),
-                mob: context
+                config,
+                context.identity.clone(),
+                context
                     .runtime_services
                     .mob_handle()
                     .map(|handle| handle.mob_id().as_str().to_string()),
-                config,
-            };
+            );
             let inner_tools = draft.local_external_tools.dispatcher();
             draft.local_external_tools = super::types::LocalExternalToolOverlay::new(Arc::new(
                 RecorderToolDispatcher::new(inner_tools, recorder),
@@ -1398,12 +1553,54 @@ pub(crate) struct MemoryRecorder {
     identity: AgentIdentity,
     /// Mob scope key for `propose_to_mob`, when the build ran inside a mob.
     mob: Option<String>,
+    /// Where the member's own records are kept.
+    keeping: RecorderKeeping,
 }
+
+/// Where a recorder keeps its member's own records. The author of every
+/// record stays the member's name, whichever it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum MemberMemoryKept {
+    /// In the identity scope of the member's name.
+    UnderItsName,
+    /// In the identity scope of the person the member is private to and the
+    /// member's name
+    /// ([`crate::memory::records::IdentityScopeKey::PrivateMember`]). The
+    /// value is the member's private-owner label value.
+    UnderItsOwner(String),
+    /// Nowhere: every action of the member's `memory` tool answers this
+    /// text as a tool error.
+    Nowhere(&'static str),
+}
+
+/// What decides where a member's records are kept, asked at a `memory`
+/// call: `None` while it cannot tell yet.
+pub(crate) type MemberMemoryKeptLater = Arc<dyn Fn() -> Option<MemberMemoryKept> + Send + Sync>;
+
+/// [`MemberMemoryKept`], fixed at the build or decided at the member's
+/// first `memory` call that can be decided, and fixed from then on.
+enum RecorderKeeping {
+    Fixed(MemberMemoryKept),
+    Late {
+        decide: MemberMemoryKeptLater,
+        decided: std::sync::OnceLock<MemberMemoryKept>,
+    },
+}
+
+/// The answer of every `memory` action of a temporary council's participant
+/// that keeps no memory of its own.
+pub(crate) const COUNCIL_PARTICIPANT_KEEPS_NO_MEMORY: &str =
+    "a council participant keeps no memory of its own";
+
+/// The answer of every `memory` action while where the member's records are
+/// kept cannot be decided yet. Nothing is read or written.
+pub(crate) const MEMBER_MEMORY_NOT_READY: &str = "memory is not ready yet";
 
 impl MemoryRecorder {
     /// Shared constructor for the two recorder hosts: the identity-first
     /// `AgentMemoryCustomizer` and the classic-mob
-    /// `crate::memory::spawn_customizer::MemorySpawnCustomizer`.
+    /// `crate::memory::spawn_customizer::MemorySpawnCustomizer`. The
+    /// member's records are kept under its name.
     pub(crate) fn new(
         provider: Arc<dyn AgentMemoryProvider>,
         config: AgentMemoryConfig,
@@ -1415,14 +1612,51 @@ impl MemoryRecorder {
             config,
             identity,
             mob,
+            keeping: RecorderKeeping::Fixed(MemberMemoryKept::UnderItsName),
         }
     }
 
-    fn identity_scope(&self) -> MemoryScope {
-        MemoryScope::Identity {
+    /// This recorder, keeping its member's records as `kept` says.
+    pub(crate) fn kept(mut self, kept: MemberMemoryKept) -> Self {
+        self.keeping = RecorderKeeping::Fixed(kept);
+        self
+    }
+
+    /// This recorder, keeping its member's records as `decide` says at the
+    /// member's first `memory` call it can answer; until then every action
+    /// answers [`MEMBER_MEMORY_NOT_READY`].
+    pub(crate) fn kept_as_decided_later(mut self, decide: MemberMemoryKeptLater) -> Self {
+        self.keeping = RecorderKeeping::Late {
+            decide,
+            decided: std::sync::OnceLock::new(),
+        };
+        self
+    }
+
+    /// The scope the member's own records are kept in, or why no action
+    /// reaches one.
+    fn own_scope(&self) -> Result<MemoryScope, String> {
+        let kept = match &self.keeping {
+            RecorderKeeping::Fixed(kept) => kept.clone(),
+            RecorderKeeping::Late { decide, decided } => match decided.get() {
+                Some(kept) => kept.clone(),
+                None => {
+                    let kept = decide().ok_or_else(|| MEMBER_MEMORY_NOT_READY.to_string())?;
+                    decided.get_or_init(|| kept).clone()
+                }
+            },
+        };
+        let identity = match kept {
+            MemberMemoryKept::UnderItsName => self.identity.as_str().to_string(),
+            MemberMemoryKept::UnderItsOwner(owner) => {
+                crate::memory::records::private_member_scope_key(&owner, self.identity.as_str())
+            }
+            MemberMemoryKept::Nowhere(reason) => return Err(reason.to_string()),
+        };
+        Ok(MemoryScope::Identity {
             realm: self.config.realm.clone(),
-            identity: self.identity.as_str().to_string(),
-        }
+            identity,
+        })
     }
 
     fn mob_scope(&self) -> Option<MemoryScope> {
@@ -1433,14 +1667,16 @@ impl MemoryRecorder {
     }
 
     /// The typed memory operation a `memory` call with `action` performs:
-    /// that action on a scope this recorder pinned at build time (the
-    /// member's identity scope, or its mob scope for `propose_to_mob`),
-    /// never a scope named by the call's arguments.
+    /// that action on a scope this recorder pinned (the scope the member's
+    /// own records are kept in, or its mob scope for `propose_to_mob`),
+    /// never a scope named by the call's arguments. A member whose records
+    /// are kept nowhere performs none.
     fn operation_target(&self, action: &str) -> Result<meerkat_core::ToolOperationTarget, String> {
+        let own_scope = self.own_scope()?;
         let (scope, operation) = match action {
-            "remember" | "update" => (self.identity_scope(), meerkat_core::MemoryOperation::Write),
-            "forget" => (self.identity_scope(), meerkat_core::MemoryOperation::Delete),
-            "recall" => (self.identity_scope(), meerkat_core::MemoryOperation::Read),
+            "remember" | "update" => (own_scope, meerkat_core::MemoryOperation::Write),
+            "forget" => (own_scope, meerkat_core::MemoryOperation::Delete),
+            "recall" => (own_scope, meerkat_core::MemoryOperation::Read),
             "propose_to_mob" => (
                 self.mob_scope().ok_or_else(propose_outside_mob)?,
                 meerkat_core::MemoryOperation::Propose,
@@ -1595,6 +1831,9 @@ impl MemoryRecorder {
         args: MemoryToolArgs,
         operator_requester: Option<&meerkat_core::PrincipalRef>,
     ) -> Result<String, MemoryToolFailure> {
+        // Every action reads or writes the scope the member's own records
+        // are kept in, or answers why it reaches none.
+        let own_scope = self.own_scope()?;
         match args.action.as_str() {
             "remember" => {
                 let record = self.new_record(&args, "remember")?;
@@ -1603,7 +1842,7 @@ impl MemoryRecorder {
                 }
                 let receipt = self
                     .provider
-                    .remember_authored(&self.identity_scope(), record, self.author())
+                    .remember_authored(&own_scope, record, self.author())
                     .await
                     .map_err(|err| err.to_string())?;
                 Ok(self.describe_receipt("Stored", &receipt))
@@ -1621,7 +1860,7 @@ impl MemoryRecorder {
                 let record = self.new_record(&args, "update")?;
                 let receipt = self
                     .provider
-                    .supersede_authored(&self.identity_scope(), prior, record, self.author())
+                    .supersede_authored(&own_scope, prior, record, self.author())
                     .await
                     .map_err(|err| err.to_string())?;
                 let mut message = self.describe_receipt("Updated: new record", &receipt);
@@ -1642,7 +1881,7 @@ impl MemoryRecorder {
                     .ok_or_else(|| "`memory_id` is required for action \"forget\"".to_string())?;
                 let result = self
                     .provider
-                    .forget_authored(&self.identity_scope(), memory_id, self.author())
+                    .forget_authored(&own_scope, memory_id, self.author())
                     .await
                     .map_err(|err| err.to_string())?;
                 if result.deleted {
@@ -1671,18 +1910,23 @@ impl MemoryRecorder {
                 } else {
                     AgentMemorySelection::Always
                 };
-                let records = self
-                    .provider
-                    .recall(AgentMemoryRecallRequest {
-                        identity: self.identity.clone(),
-                        realm: self.config.realm.clone(),
-                        query_text,
-                        query_terms: Vec::new(),
-                        selection,
-                        max_entries,
-                    })
-                    .await
-                    .map_err(|err| err.to_string())?;
+                let request = AgentMemoryRecallRequest {
+                    identity: self.identity.clone(),
+                    realm: self.config.realm.clone(),
+                    query_text,
+                    query_terms: Vec::new(),
+                    selection,
+                    max_entries,
+                };
+                // A scope kept under an owner is no identity's: it is
+                // recalled as a scope, never as the request's identity,
+                // which would be the member's bare name.
+                let recalled = if own_scope.kept_apart_by_its_key() {
+                    self.provider.recall_in_scope(&own_scope, request).await
+                } else {
+                    self.provider.recall(request).await
+                };
+                let records = recalled.map_err(|err| err.to_string())?;
                 // §9.2: an explicit pull is the strongest mechanical
                 // usefulness signal. Telemetry never fails the read.
                 if !records.is_empty() {
@@ -1763,24 +2007,103 @@ fn unknown_memory_action(action: &str) -> String {
 /// re-enter session semantic memory (§8.2).
 pub(crate) struct RecorderToolDispatcher {
     inner: Option<Arc<dyn meerkat_core::agent::AgentToolDispatcher>>,
-    tools: Arc<[Arc<meerkat_core::ToolDef>]>,
-    recorder: MemoryRecorder,
+    binding: RecorderBinding,
+    /// The `memory` tool this recorder serves.
+    memory_tool: Arc<meerkat_core::ToolDef>,
     /// The `memory` tool's execution owner: every plan this recorder
     /// resolves for it carries this key's witness with the call's typed
     /// memory operation target, and only such a plan dispatches.
     execution_authority_key: String,
 }
 
+/// The recorder a [`RecorderToolDispatcher`] serves its `memory` tool with.
+enum RecorderBinding {
+    /// A member's own recorder, composed again at each of the member's
+    /// builds: the tool list is the wrapped tools as they were then,
+    /// without a `memory` of theirs, then the recorder's.
+    Composed {
+        tools: Arc<[Arc<meerkat_core::ToolDef>]>,
+        recorder: Box<MemoryRecorder>,
+    },
+    /// A rebinding recorder, over tools another member's build publishes
+    /// into at any time: the tool list is the wrapped tools as they are at
+    /// each read, and what becomes of `memory` is asked at each read too.
+    Rebound(Arc<dyn ReboundRecorder>),
+}
+
+/// What a rebinding recorder ([`RecorderToolDispatcher::rebinding`]) does
+/// with the `memory` tool at one read of its member's tools.
+pub(crate) enum ReboundMemory<'a> {
+    /// The member's own `memory` tool, served with this recorder. A
+    /// `memory` tool of the wrapped tools is never listed or reached.
+    Own(&'a MemoryRecorder),
+    /// No `memory` tool. A `memory` tool of the wrapped tools is never
+    /// listed or reached.
+    Withheld,
+    /// The wrapped tools as they are, a `memory` tool of theirs included:
+    /// the composition binds no recorder, so that tool is a host's own.
+    Untouched,
+}
+
+/// Decides, at each read of a member's tools, what a rebinding recorder
+/// does with the `memory` tool: a recorder that is bound after the member
+/// was built is served from the read at which it can be built.
+pub(crate) trait ReboundRecorder: Send + Sync {
+    /// `inner_holds_memory`: whether the wrapped tools hold a `memory` tool
+    /// of their own now.
+    fn memory(&self, inner_holds_memory: bool) -> ReboundMemory<'_>;
+}
+
 static NEXT_RECORDER_EXECUTION_AUTHORITY_ID: AtomicU64 = AtomicU64::new(1);
 
 impl RecorderToolDispatcher {
+    /// The wrapped tools' owner of `tool_name`: every name but `memory`,
+    /// and `memory` too where a rebinding recorder leaves the wrapped tools
+    /// untouched.
     fn wrapped_owner(
         &self,
         tool_name: &str,
     ) -> Option<&Arc<dyn meerkat_core::AgentToolDispatcher>> {
-        (tool_name != MEMORY_TOOL_NAME)
+        (tool_name != MEMORY_TOOL_NAME || self.untouched())
             .then_some(self.inner.as_ref())
             .flatten()
+    }
+
+    /// Whether the wrapped tools hold a `memory` tool of their own now.
+    fn inner_holds_memory(&self) -> bool {
+        self.inner.as_ref().is_some_and(|inner| {
+            inner
+                .tools()
+                .iter()
+                .any(|tool| tool.name.as_ref() == MEMORY_TOOL_NAME)
+        })
+    }
+
+    /// Whether this is a rebinding recorder whose composition binds no
+    /// recorder: the wrapped tools are served as they are.
+    fn untouched(&self) -> bool {
+        match &self.binding {
+            RecorderBinding::Composed { .. } => false,
+            RecorderBinding::Rebound(late) => {
+                matches!(
+                    late.memory(self.inner_holds_memory()),
+                    ReboundMemory::Untouched
+                )
+            }
+        }
+    }
+
+    /// The recorder this dispatcher serves `memory` with now; `None` while
+    /// it offers no `memory` tool of its own. Only an offered tool is
+    /// listed, resolved or dispatched.
+    fn recorder_now(&self) -> Option<&MemoryRecorder> {
+        match &self.binding {
+            RecorderBinding::Composed { recorder, .. } => Some(recorder),
+            RecorderBinding::Rebound(late) => match late.memory(self.inner_holds_memory()) {
+                ReboundMemory::Own(recorder) => Some(recorder),
+                ReboundMemory::Withheld | ReboundMemory::Untouched => None,
+            },
+        }
     }
 
     /// The typed memory operation the `memory` call performs, from its
@@ -1790,7 +2113,9 @@ impl RecorderToolDispatcher {
         call: meerkat_core::types::ToolCallView<'_>,
     ) -> Result<meerkat_core::ToolOperationTarget, String> {
         let args: MemoryToolArgs = call.parse_args().map_err(|err| err.to_string())?;
-        self.recorder.operation_target(&args.action)
+        self.recorder_now()
+            .ok_or_else(|| format!("no `{MEMORY_TOOL_NAME}` tool is offered"))?
+            .operation_target(&args.action)
     }
 
     /// Whether this recorder resolved `plan` for exactly the `memory` call's
@@ -1818,46 +2143,62 @@ impl RecorderToolDispatcher {
         inner: Option<Arc<dyn meerkat_core::agent::AgentToolDispatcher>>,
         recorder: MemoryRecorder,
     ) -> Self {
-        Self::composed(inner, recorder, true)
-    }
-
-    /// The `memory` tool of `inner`, a build's tool overlay that already
-    /// carries one bound to another identity (a console side chat inherits
-    /// its source's overlay), bound to `recorder` instead: the inner `memory`
-    /// tool is replaced, and every other tool stays `inner`'s, in its order.
-    pub(crate) fn rebinding(
-        inner: Arc<dyn meerkat_core::agent::AgentToolDispatcher>,
-        recorder: MemoryRecorder,
-    ) -> Self {
-        Self::composed(Some(inner), recorder, false)
-    }
-
-    fn composed(
-        inner: Option<Arc<dyn meerkat_core::agent::AgentToolDispatcher>>,
-        recorder: MemoryRecorder,
-        warn_on_shadow: bool,
-    ) -> Self {
         let mut tools: Vec<Arc<meerkat_core::ToolDef>> = Vec::new();
         if let Some(inner) = inner.as_ref() {
             for tool in inner.tools().iter() {
                 if tool.name.as_ref() == MEMORY_TOOL_NAME {
-                    if warn_on_shadow {
-                        tracing::warn!(
-                            "external tool named '{MEMORY_TOOL_NAME}' is shadowed by the agent \
-                             memory recorder; rename the external tool or disable \
-                             agent_memory.recorder_tool"
-                        );
-                    }
+                    tracing::warn!(
+                        "external tool named '{MEMORY_TOOL_NAME}' is shadowed by the agent \
+                         memory recorder; rename the external tool or disable \
+                         agent_memory.recorder_tool"
+                    );
                     continue;
                 }
                 tools.push(tool.clone());
             }
         }
-        tools.push(Arc::new(memory_tool_def()));
+        let memory_tool = Arc::new(memory_tool_def());
+        tools.push(Arc::clone(&memory_tool));
+        Self::composed(
+            inner,
+            RecorderBinding::Composed {
+                tools: tools.into(),
+                recorder: Box::new(recorder),
+            },
+            memory_tool,
+        )
+    }
+
+    /// The tools of `inner`, a build's tool overlay that another member's
+    /// build publishes into (a console side chat inherits its source's
+    /// overlay), with their `memory` tool bound as `late` says at each
+    /// read: the list is `inner`'s as it is then, in its order, without a
+    /// `memory` of `inner`'s, then the member's own while `late` answers a
+    /// recorder ([`ReboundMemory::Own`]). So a tool the other build
+    /// publishes later is served, and its `memory` never is; a recorder
+    /// that is bound after this member was built serves it from the read
+    /// at which `late` can build it. Where `late` leaves the tools
+    /// untouched ([`ReboundMemory::Untouched`]) the list is `inner`'s.
+    pub(crate) fn rebinding(
+        inner: Option<Arc<dyn meerkat_core::agent::AgentToolDispatcher>>,
+        late: Arc<dyn ReboundRecorder>,
+    ) -> Self {
+        Self::composed(
+            inner,
+            RecorderBinding::Rebound(late),
+            Arc::new(memory_tool_def()),
+        )
+    }
+
+    fn composed(
+        inner: Option<Arc<dyn meerkat_core::agent::AgentToolDispatcher>>,
+        binding: RecorderBinding,
+        memory_tool: Arc<meerkat_core::ToolDef>,
+    ) -> Self {
         Self {
             inner,
-            tools: tools.into(),
-            recorder,
+            binding,
+            memory_tool,
             execution_authority_key: format!(
                 "meta:agent-memory-recorder:{}",
                 NEXT_RECORDER_EXECUTION_AUTHORITY_ID.fetch_add(1, Ordering::Relaxed)
@@ -1896,6 +2237,7 @@ impl meerkat_core::agent::AgentToolDispatcher for RecorderToolDispatcher {
         if let meerkat_core::tool_application::ToolApplicationResolution::Call { name, .. } =
             &result
             && name == MEMORY_TOOL_NAME
+            && !self.untouched()
         {
             return Err(meerkat_core::ToolError::access_denied(name));
         }
@@ -2041,7 +2383,45 @@ impl meerkat_core::agent::AgentToolDispatcher for RecorderToolDispatcher {
     }
 
     fn tools(&self) -> Arc<[Arc<meerkat_core::ToolDef>]> {
-        self.tools.clone()
+        let late = match &self.binding {
+            RecorderBinding::Composed { tools, .. } => return tools.clone(),
+            RecorderBinding::Rebound(late) => late,
+        };
+        let Some(inner) = self.inner.as_ref() else {
+            return match late.memory(false) {
+                ReboundMemory::Own(_) => Arc::from([Arc::clone(&self.memory_tool)]),
+                ReboundMemory::Withheld | ReboundMemory::Untouched => Arc::from([]),
+            };
+        };
+        // One read of the wrapped tools decides the whole list.
+        let wrapped = inner.tools();
+        let holds_memory = wrapped
+            .iter()
+            .any(|tool| tool.name.as_ref() == MEMORY_TOOL_NAME);
+        let own = match late.memory(holds_memory) {
+            ReboundMemory::Untouched => return wrapped,
+            ReboundMemory::Own(_) => true,
+            ReboundMemory::Withheld => false,
+        };
+        let mut tools: Vec<Arc<meerkat_core::ToolDef>> = wrapped
+            .iter()
+            .filter(|tool| tool.name.as_ref() != MEMORY_TOOL_NAME)
+            .cloned()
+            .collect();
+        if own {
+            tools.push(Arc::clone(&self.memory_tool));
+        }
+        tools.into()
+    }
+
+    /// A rebinding recorder wraps tools another member's build publishes
+    /// into: their pending sources are theirs to report. A member's own
+    /// recorder reports none, as before.
+    fn pending_catalog_sources(&self) -> Arc<[String]> {
+        match (&self.binding, self.inner.as_ref()) {
+            (RecorderBinding::Rebound(_), Some(inner)) => inner.pending_catalog_sources(),
+            _ => Arc::from([]),
+        }
     }
 
     /// The recorder adds exactly one inline tool over the wrapped surface, so
@@ -2061,7 +2441,16 @@ impl meerkat_core::agent::AgentToolDispatcher for RecorderToolDispatcher {
 
     /// Inner entries except a shadowed `memory`, then the recorder tool as a
     /// visible inline session entry - the same order `tools()` advertises.
+    /// Where a rebinding recorder leaves the wrapped tools untouched, the
+    /// catalog is theirs.
     fn tool_catalog(&self) -> Arc<[meerkat_core::ToolCatalogEntry]> {
+        if self.untouched() {
+            return self
+                .inner
+                .as_ref()
+                .map(|inner| inner.tool_catalog())
+                .unwrap_or_else(|| Arc::from([]));
+        }
         let mut catalog: Vec<meerkat_core::ToolCatalogEntry> = self
             .inner
             .as_ref()
@@ -2074,13 +2463,9 @@ impl meerkat_core::agent::AgentToolDispatcher for RecorderToolDispatcher {
                     .collect()
             })
             .unwrap_or_default();
-        if let Some(memory) = self
-            .tools
-            .iter()
-            .find(|tool| tool.name.as_ref() == MEMORY_TOOL_NAME)
-        {
+        if self.recorder_now().is_some() {
             catalog.push(meerkat_core::ToolCatalogEntry::session_inline(
-                Arc::clone(memory),
+                Arc::clone(&self.memory_tool),
                 true,
             ));
         }
@@ -2100,7 +2485,7 @@ impl meerkat_core::agent::AgentToolDispatcher for RecorderToolDispatcher {
         call: meerkat_core::types::ToolCallView<'_>,
         context: &meerkat_core::agent::ToolDispatchContext,
     ) -> Result<meerkat_core::ops::ToolDispatchOutcome, meerkat_core::error::ToolError> {
-        if call.name != MEMORY_TOOL_NAME {
+        if call.name != MEMORY_TOOL_NAME || self.untouched() {
             return match self.inner.as_ref() {
                 Some(inner) => inner.dispatch_with_context(call, context).await,
                 None => Err(meerkat_core::error::ToolError::NotFound {
@@ -2108,6 +2493,13 @@ impl meerkat_core::agent::AgentToolDispatcher for RecorderToolDispatcher {
                 }),
             };
         }
+        // A `memory` tool this recorder does not offer now is no tool of
+        // its member: the wrapped tools' own `memory` is never reached.
+        let Some(recorder) = self.recorder_now() else {
+            return Err(meerkat_core::error::ToolError::NotFound {
+                name: call.name.to_string(),
+            });
+        };
         let args: MemoryToolArgs =
             call.parse_args()
                 .map_err(|err| meerkat_core::error::ToolError::InvalidArguments {
@@ -2119,7 +2511,7 @@ impl meerkat_core::agent::AgentToolDispatcher for RecorderToolDispatcher {
         // forwards this dispatch but resolved its own plan never writes.
         // Ungoverned dispatch is unchanged.
         context.require_authorized_operation_target(call, || {
-            self.recorder
+            recorder
                 .operation_target(&args.action)
                 .map_err(|reason| meerkat_core::ToolError::invalid_arguments(call.name, reason))
         })?;
@@ -2131,7 +2523,7 @@ impl meerkat_core::agent::AgentToolDispatcher for RecorderToolDispatcher {
         } else {
             context.direct_requester()
         };
-        let (text, is_error) = match self.recorder.handle(args, operator_requester).await {
+        let (text, is_error) = match recorder.handle(args, operator_requester).await {
             Ok(text) => (text, false),
             Err(MemoryToolFailure::Failed(text)) => (text, true),
             // A person's own fact this run cannot file: a typed tool error.
@@ -5112,5 +5504,545 @@ memory = false
             "distiller-scope record must inject: {injected_text}"
         );
         Ok(())
+    }
+
+    /// The agents a host listed as reading their own memory only
+    /// ([`crate::memory::own_memory_only`]): what their build is listed, and
+    /// what the builds beside them are.
+    mod own_memory_only_rows {
+        use super::*;
+        use crate::memory::coordinator::MobScopeResolver;
+        use crate::memory::own_memory_only::{LineageAbove, OwnMemoryOnly, TrustedLineage};
+        use crate::memory::records::MemoryKind;
+        use std::collections::{BTreeMap, BTreeSet};
+
+        const MOB_ALPHA: &str = "mob:alpha";
+        const MOB_BETA: &str = "mob:beta";
+        const ALPHA_SHARED_ID: &str = "mem-alpha-shared";
+        const ALPHA_SHARED_TITLE: &str = "Alpha rota";
+        const BETA_SHARED_ID: &str = "mem-beta-shared";
+        const BETA_SHARED_TITLE: &str = "Beta rota";
+        const REALM_ID: &str = "mem-realm";
+        const REALM_TITLE: &str = "Realm notice";
+        const OWN_ID: &str = "mem-own";
+        const OWN_TITLE: &str = "Own note";
+
+        fn meta(id: &str, title: &str) -> RecordMeta {
+            RecordMeta {
+                id: id.to_string(),
+                kind: MemoryKind::Fact,
+                title: title.to_string(),
+                description: String::new(),
+                age_days: 0,
+                rank: None,
+            }
+        }
+
+        /// The memory store of one mob: one record in the asking identity's
+        /// own scope, one in the mob's shared scope and one in the realm's.
+        /// It keeps every scope it was asked a manifest for, in order.
+        struct MobStore {
+            mob: &'static str,
+            shared: (&'static str, &'static str),
+            asked: Mutex<Vec<MemoryScope>>,
+        }
+
+        impl MobStore {
+            fn of_alpha() -> Arc<Self> {
+                Arc::new(Self {
+                    mob: MOB_ALPHA,
+                    shared: (ALPHA_SHARED_ID, ALPHA_SHARED_TITLE),
+                    asked: Mutex::new(Vec::new()),
+                })
+            }
+
+            fn of_beta() -> Arc<Self> {
+                Arc::new(Self {
+                    mob: MOB_BETA,
+                    shared: (BETA_SHARED_ID, BETA_SHARED_TITLE),
+                    asked: Mutex::new(Vec::new()),
+                })
+            }
+
+            fn asked(&self) -> Vec<MemoryScope> {
+                self.asked
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone()
+            }
+        }
+
+        #[async_trait]
+        impl AgentMemoryProvider for MobStore {
+            async fn recall(
+                &self,
+                _request: AgentMemoryRecallRequest,
+            ) -> Result<Vec<AgentMemoryRecord>, AgentMemoryError> {
+                Ok(Vec::new())
+            }
+
+            async fn forget(
+                &self,
+                _realm: &str,
+                _identity: &AgentIdentity,
+                memory_id: &str,
+            ) -> Result<AgentMemoryForgetResult, AgentMemoryError> {
+                Ok(AgentMemoryForgetResult {
+                    memory_id: memory_id.to_string(),
+                    deleted: false,
+                })
+            }
+
+            fn supports_manifest(&self) -> bool {
+                true
+            }
+
+            async fn manifest(
+                &self,
+                scopes: &[MemoryScope],
+                _tier: ManifestTier,
+            ) -> Result<Vec<RecordMeta>, AgentMemoryError> {
+                let mut out = Vec::new();
+                for scope in scopes {
+                    self.asked
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(scope.clone());
+                    match scope {
+                        MemoryScope::Identity { .. } => out.push(meta(OWN_ID, OWN_TITLE)),
+                        MemoryScope::Mob { mob, .. } if mob == self.mob => {
+                            out.push(meta(self.shared.0, self.shared.1));
+                        }
+                        MemoryScope::Realm { .. } => out.push(meta(REALM_ID, REALM_TITLE)),
+                        _ => {}
+                    }
+                }
+                Ok(out)
+            }
+        }
+
+        /// Every identity of a mob's store is bound to that mob.
+        struct BoundTo(&'static str);
+
+        impl MobScopeResolver for BoundTo {
+            fn active_mobs(&self, _realm: &str, _identity: &str) -> Vec<String> {
+                vec![self.0.to_string()]
+            }
+        }
+
+        /// A lineage as a mob's records would say it: for each identity,
+        /// what is above it. An identity the map does not hold cannot be
+        /// read.
+        struct RecordedLineage(BTreeMap<&'static str, LineageAbove>);
+
+        #[async_trait]
+        impl TrustedLineage for RecordedLineage {
+            async fn above(&self, identity: &AgentIdentity) -> LineageAbove {
+                self.0
+                    .get(identity.as_str())
+                    .cloned()
+                    .unwrap_or(LineageAbove::Unreadable)
+            }
+        }
+
+        fn agent(name: &str) -> Result<AgentIdentity, Box<dyn Error>> {
+            AgentIdentity::parse(name).map_err(|err| {
+                std::io::Error::other(format!("test identity {name} should parse: {err}")).into()
+            })
+        }
+
+        fn spec_of(name: &str, profile: &str) -> Result<DurableAgentSpec, Box<dyn Error>> {
+            let mut spec = durable_spec()?;
+            spec.identity = agent(name)?;
+            spec.profile = ProfileName::from(profile);
+            Ok(spec)
+        }
+
+        fn context_of(name: &str) -> Result<AgentBuildContext, Box<dyn Error>> {
+            let mut context = build_context()?;
+            context.identity = agent(name)?;
+            Ok(context)
+        }
+
+        /// The agents the host declared: `identity:guest` and
+        /// `identity:staff` in each mob.
+        fn declared() -> BTreeMap<&'static str, LineageAbove> {
+            BTreeMap::from([
+                ("identity:guest", LineageAbove::HostDeclared),
+                ("identity:staff", LineageAbove::HostDeclared),
+            ])
+        }
+
+        /// The host listed the profile `guest`.
+        fn rule(lineage: BTreeMap<&'static str, LineageAbove>) -> OwnMemoryOnly {
+            OwnMemoryOnly::new(
+                BTreeSet::from([ProfileName::from("guest")]),
+                Arc::new(RecordedLineage(lineage)),
+            )
+        }
+
+        /// The memory customizer of the mob `store` is the store of.
+        fn customizer(store: Arc<MobStore>, rule: Option<OwnMemoryOnly>) -> AgentMemoryCustomizer {
+            let mob = store.mob;
+            AgentMemoryCustomizer::new(store, AgentMemoryConfig::default())
+                .with_mob_resolver(Some(Arc::new(BoundTo(mob))))
+                .with_own_memory_only(rule)
+        }
+
+        /// The memory text a build of `name` on `profile` is given.
+        async fn build_text(
+            customizer: &AgentMemoryCustomizer,
+            name: &str,
+            profile: &str,
+        ) -> Result<String, Box<dyn Error>> {
+            let mut draft = draft();
+            customizer
+                .customize_build(&context_of(name)?, &spec_of(name, profile)?, &mut draft)
+                .await?;
+            Ok(draft.additional_instructions.join("\n"))
+        }
+
+        /// `text` with its envelope nonce left out: the nonce is minted by
+        /// each coordinator.
+        fn without_nonce(text: &str) -> String {
+            const MARKER: &str = "[mem-token:";
+            match text.find(MARKER) {
+                Some(start) => {
+                    let after = start + MARKER.len();
+                    let end = text[after..]
+                        .find(']')
+                        .map_or(text.len(), |end| after + end);
+                    format!("{}{}", &text[..after], &text[end..])
+                }
+                None => text.to_string(),
+            }
+        }
+
+        /// A listed profile's agent of mob alpha is listed its own record
+        /// and neither its mob's shared record nor the realm's.
+        #[tokio::test]
+        async fn an_own_memory_only_agent_of_mob_alpha_is_listed_no_shared_record_of_its_mob_or_realm()
+        -> Result<(), Box<dyn Error>> {
+            let text = build_text(
+                &customizer(MobStore::of_alpha(), Some(rule(declared()))),
+                "identity:guest",
+                "guest",
+            )
+            .await?;
+            assert!(text.contains(OWN_ID), "its own row stays: {text}");
+            assert!(text.contains("Identity records:"), "{text}");
+            for withheld in [
+                ALPHA_SHARED_ID,
+                ALPHA_SHARED_TITLE,
+                REALM_ID,
+                REALM_TITLE,
+                "Mob records:",
+                "Realm records:",
+            ] {
+                assert!(
+                    !text.contains(withheld),
+                    "{withheld:?} is withheld from a listed profile's agent: {text}"
+                );
+            }
+            Ok(())
+        }
+
+        /// For such a build the store is asked for the agent's own scope
+        /// and for no other: what is not read reaches no log, event or
+        /// count.
+        #[tokio::test]
+        async fn an_own_memory_only_build_asks_the_store_for_its_own_scope_alone()
+        -> Result<(), Box<dyn Error>> {
+            let store = MobStore::of_alpha();
+            build_text(
+                &customizer(store.clone(), Some(rule(declared()))),
+                "identity:guest",
+                "guest",
+            )
+            .await?;
+            let asked = store.asked();
+            assert!(!asked.is_empty(), "the agent's own scope is asked");
+            assert!(
+                asked.iter().all(|scope| matches!(
+                    scope,
+                    MemoryScope::Identity { identity, .. } if identity == "identity:guest"
+                )),
+                "only the agent's own scope is asked: {asked:?}"
+            );
+            Ok(())
+        }
+
+        /// An agent created by an own-memory-only agent is one too,
+        /// whatever profile its creation named.
+        #[tokio::test]
+        async fn an_agent_created_by_an_own_memory_only_agent_is_listed_no_shared_record()
+        -> Result<(), Box<dyn Error>> {
+            let mut lineage = declared();
+            lineage.insert(
+                "identity:made-by-guest",
+                LineageAbove::CreatedBy {
+                    identity: agent("identity:guest")?,
+                    profile: Some(ProfileName::from("guest")),
+                },
+            );
+            // And one more link down: created by the agent the guest created.
+            lineage.insert(
+                "identity:made-by-that",
+                LineageAbove::CreatedBy {
+                    identity: agent("identity:made-by-guest")?,
+                    profile: Some(ProfileName::from("staff")),
+                },
+            );
+            for name in ["identity:made-by-guest", "identity:made-by-that"] {
+                let text = build_text(
+                    &customizer(MobStore::of_alpha(), Some(rule(lineage.clone()))),
+                    name,
+                    "staff",
+                )
+                .await?;
+                assert!(text.contains(OWN_ID), "{name}: {text}");
+                assert!(!text.contains(ALPHA_SHARED_ID), "{name}: {text}");
+                assert!(!text.contains(REALM_ID), "{name}: {text}");
+            }
+            Ok(())
+        }
+
+        /// A link that cannot be read counts as own-memory-only: an agent
+        /// whose creator is no registered agent of the mob, and an agent
+        /// the records say nothing of.
+        #[tokio::test]
+        async fn an_agent_above_an_unreadable_link_is_listed_no_shared_record()
+        -> Result<(), Box<dyn Error>> {
+            let mut lineage = declared();
+            lineage.insert(
+                "identity:made-by-helper",
+                LineageAbove::CreatedBy {
+                    identity: agent("identity:helper")?,
+                    profile: None,
+                },
+            );
+            for name in ["identity:made-by-helper", "identity:unrecorded"] {
+                let text = build_text(
+                    &customizer(MobStore::of_alpha(), Some(rule(lineage.clone()))),
+                    name,
+                    "staff",
+                )
+                .await?;
+                assert!(
+                    !text.contains(ALPHA_SHARED_ID) && !text.contains(REALM_ID),
+                    "{name}: {text}"
+                );
+            }
+            Ok(())
+        }
+
+        /// A chain of creators longer than the walk follows counts as
+        /// own-memory-only, though no agent of it is on a listed profile.
+        #[tokio::test]
+        async fn an_agent_under_more_links_than_the_walk_follows_is_listed_no_shared_record()
+        -> Result<(), Box<dyn Error>> {
+            const CHAIN: [&str; 10] = [
+                "identity:link-0",
+                "identity:link-1",
+                "identity:link-2",
+                "identity:link-3",
+                "identity:link-4",
+                "identity:link-5",
+                "identity:link-6",
+                "identity:link-7",
+                "identity:link-8",
+                "identity:link-9",
+            ];
+            let mut lineage = BTreeMap::from([(CHAIN[0], LineageAbove::HostDeclared)]);
+            for pair in CHAIN.windows(2) {
+                lineage.insert(
+                    pair[1],
+                    LineageAbove::CreatedBy {
+                        identity: agent(pair[0])?,
+                        profile: Some(ProfileName::from("staff")),
+                    },
+                );
+            }
+            let short = build_text(
+                &customizer(MobStore::of_alpha(), Some(rule(lineage.clone()))),
+                CHAIN[2],
+                "staff",
+            )
+            .await?;
+            assert!(
+                short.contains(ALPHA_SHARED_ID),
+                "two links end at a declared agent: {short}"
+            );
+            let long = build_text(
+                &customizer(MobStore::of_alpha(), Some(rule(lineage))),
+                CHAIN[9],
+                "staff",
+            )
+            .await?;
+            assert!(!long.contains(ALPHA_SHARED_ID), "{long}");
+            Ok(())
+        }
+
+        /// The second mob: a listed profile's agent of mob beta is listed no
+        /// shared record of beta's store and no realm record.
+        #[tokio::test]
+        async fn an_own_memory_only_agent_of_mob_beta_is_listed_no_shared_record_of_its_mob_or_realm()
+        -> Result<(), Box<dyn Error>> {
+            let text = build_text(
+                &customizer(MobStore::of_beta(), Some(rule(declared()))),
+                "identity:guest",
+                "guest",
+            )
+            .await?;
+            assert!(text.contains(OWN_ID), "{text}");
+            for withheld in [BETA_SHARED_ID, BETA_SHARED_TITLE, REALM_ID, "Mob records:"] {
+                assert!(!text.contains(withheld), "{withheld}: {text}");
+            }
+            Ok(())
+        }
+
+        /// An unlisted profile's agent of mob alpha, beside the listed one,
+        /// is given byte for byte the text it is given with no rule: its
+        /// own record, mob alpha's and the realm's.
+        #[tokio::test]
+        async fn an_unlisted_agent_of_mob_alpha_is_given_the_text_it_was_given_before()
+        -> Result<(), Box<dyn Error>> {
+            let with_rule = build_text(
+                &customizer(MobStore::of_alpha(), Some(rule(declared()))),
+                "identity:staff",
+                "staff",
+            )
+            .await?;
+            let without = build_text(
+                &customizer(MobStore::of_alpha(), None),
+                "identity:staff",
+                "staff",
+            )
+            .await?;
+            assert_eq!(without_nonce(&with_rule), without_nonce(&without));
+            for listed in [OWN_ID, ALPHA_SHARED_ID, REALM_ID] {
+                assert!(without.contains(listed), "{listed}: {without}");
+            }
+            assert!(!without.contains(BETA_SHARED_ID), "{without}");
+            Ok(())
+        }
+
+        /// No rule, or a rule that lists no profile: nothing is withheld
+        /// and no lineage is read.
+        #[tokio::test]
+        async fn without_a_listed_profile_nothing_is_withheld_and_no_lineage_is_read()
+        -> Result<(), Box<dyn Error>> {
+            struct NeverAsked;
+            #[async_trait]
+            impl TrustedLineage for NeverAsked {
+                async fn above(&self, _identity: &AgentIdentity) -> LineageAbove {
+                    // A lineage read without a listed profile restricts the
+                    // build, which the assertions below then refuse.
+                    LineageAbove::Unreadable
+                }
+            }
+            let empty = OwnMemoryOnly::new(BTreeSet::new(), Arc::new(NeverAsked));
+            let with_empty = build_text(
+                &customizer(MobStore::of_alpha(), Some(empty)),
+                "identity:guest",
+                "guest",
+            )
+            .await?;
+            let without = build_text(
+                &customizer(MobStore::of_alpha(), None),
+                "identity:guest",
+                "guest",
+            )
+            .await?;
+            assert_eq!(without_nonce(&with_empty), without_nonce(&without));
+            assert!(without.contains(ALPHA_SHARED_ID), "{without}");
+            assert!(without.contains(REALM_ID), "{without}");
+            Ok(())
+        }
+
+        /// The second mob, unlisted: an unlisted profile's agent of mob beta
+        /// is listed beta's shared record.
+        #[tokio::test]
+        async fn an_unlisted_agent_of_mob_beta_is_listed_its_mobs_shared_record()
+        -> Result<(), Box<dyn Error>> {
+            let text = build_text(
+                &customizer(MobStore::of_beta(), Some(rule(declared()))),
+                "identity:staff",
+                "staff",
+            )
+            .await?;
+            assert!(text.contains(BETA_SHARED_ID), "{text}");
+            assert!(!text.contains(ALPHA_SHARED_ID), "{text}");
+            Ok(())
+        }
+
+        /// An agent created by an unlisted agent the host declared, on an
+        /// unlisted profile, is listed as before.
+        #[tokio::test]
+        async fn an_agent_created_by_an_unlisted_agent_is_listed_as_before()
+        -> Result<(), Box<dyn Error>> {
+            let mut lineage = declared();
+            lineage.insert(
+                "identity:made-by-staff",
+                LineageAbove::CreatedBy {
+                    identity: agent("identity:staff")?,
+                    profile: Some(ProfileName::from("staff")),
+                },
+            );
+            let text = build_text(
+                &customizer(MobStore::of_alpha(), Some(rule(lineage))),
+                "identity:made-by-staff",
+                "staff",
+            )
+            .await?;
+            assert!(text.contains(ALPHA_SHARED_ID), "{text}");
+            Ok(())
+        }
+
+        /// A label or a name a request can set decides nothing: an unlisted
+        /// agent whose labels name the listed profile, a creator and the
+        /// rule itself is listed as before.
+        #[tokio::test]
+        async fn a_label_a_request_set_decides_nothing() -> Result<(), Box<dyn Error>> {
+            let customizer = customizer(MobStore::of_alpha(), Some(rule(declared())));
+            let mut spec = spec_of("identity:staff", "staff")?;
+            for (key, value) in [
+                ("profile", "guest"),
+                ("profile_name", "guest"),
+                ("role", "guest"),
+                ("spawned_by", "identity:guest"),
+                ("own_memory_only", "true"),
+            ] {
+                spec.labels.insert(key.to_string(), value.to_string());
+            }
+            let mut draft = draft();
+            customizer
+                .customize_build(&context_of("identity:staff")?, &spec, &mut draft)
+                .await?;
+            let text = draft.additional_instructions.join("\n");
+            assert!(text.contains(ALPHA_SHARED_ID), "{text}");
+            Ok(())
+        }
+
+        /// The rule is configuration, held by no process: a customizer made
+        /// anew from the same rule withholds the same.
+        #[tokio::test]
+        async fn a_customizer_made_anew_from_the_same_rule_withholds_the_same()
+        -> Result<(), Box<dyn Error>> {
+            let first = build_text(
+                &customizer(MobStore::of_alpha(), Some(rule(declared()))),
+                "identity:guest",
+                "guest",
+            )
+            .await?;
+            let second = build_text(
+                &customizer(MobStore::of_alpha(), Some(rule(declared()))),
+                "identity:guest",
+                "guest",
+            )
+            .await?;
+            assert_eq!(without_nonce(&first), without_nonce(&second));
+            Ok(())
+        }
     }
 }

@@ -1038,6 +1038,11 @@ impl super::MobHandle {
             ScopeAdmissionSubject::DeclaredApply,
         )
         .await?;
+        // What this entry observes for each declared member's seat record.
+        let mut roster = roster;
+        for entry in &mut roster.entries {
+            entry.spec.observe_seat_entry(self, false);
+        }
         // One apply of the mob at a time (MobMachine's open fact): a second
         // one while this one runs is refused, typed and retryable. The open
         // fact is closed whatever the outcome, and when this call is dropped
@@ -2131,6 +2136,7 @@ impl super::MobHandle {
             Ok(super::identity_change::StoreOwnedSeatRow::Row {
                 labels,
                 label_restamp_owed: true,
+                ..
             }) => labels,
             Ok(_) => return None,
             Err(error) => return Some(failure_outcome(error)),

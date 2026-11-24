@@ -106,6 +106,12 @@ export interface SessionCreatedContext {
   readonly model: string;
   readonly labels: Record<string, string>;
   readonly systemPrompt: string | null;
+  /**
+   * The mob the member is in when an agent customizer's `afterCreate` is told
+   * one; absent when the host named none (a host of an earlier release, which
+   * serves its own mob only) and for a session builder's `afterCreate`.
+   */
+  readonly mobId?: string;
 }
 
 // -- Storage census (H1/H2 + M4) ------------------------------------------
@@ -996,6 +1002,13 @@ export interface GatingOrigin {
   readonly identity: string;
   readonly conversationId: string | null;
   readonly interactionId: string | null;
+  /**
+   * The mob `identity` is a member of, when it is not the host's default
+   * mob. Absent for a member of the default mob. Two mobs of one host may
+   * each have a member of the same name: the mob and the identity together
+   * name the member.
+   */
+  readonly mobId?: string;
 }
 
 /** Returns the origin, or null when it is absent or has no identity. */
@@ -1010,10 +1023,12 @@ export function parseGatingOrigin(raw: unknown): GatingOrigin | null {
   if (identity === null) {
     return null;
   }
+  const mobId = text(d.mob_id);
   return {
     identity,
     conversationId: text(d.conversation_id),
     interactionId: text(d.interaction_id),
+    ...(mobId === null ? {} : { mobId }),
   };
 }
 
@@ -1294,6 +1309,19 @@ export interface PersistedEvent {
   readonly seq: number;
   readonly timestampMs: number;
   readonly memberId: string | null;
+  /**
+   * The event's mob when the event is of a mob of the host other than the
+   * launch mob (or of a mob below that mob); `null` for an event of the
+   * launch mob and of every mob below it, which is every event of a host
+   * of one mob.
+   */
+  readonly mobId: string | null;
+  /**
+   * The incarnation of the mob `mobId` names that the event came from (a
+   * mob created under an id an earlier mob had is another incarnation);
+   * present where `mobId` is, `null` otherwise.
+   */
+  readonly mobIncarnation: string | null;
   readonly event: UnifiedEvent;
 }
 
@@ -1309,6 +1337,8 @@ export function parsePersistedEvent(raw: unknown): PersistedEvent {
     seq: Number(d.seq ?? 0),
     timestampMs: Number(d.timestamp_ms ?? 0),
     memberId: typeof d.member_id === "string" ? d.member_id : null,
+    mobId: typeof d.mob_id === "string" ? d.mob_id : null,
+    mobIncarnation: typeof d.mob_incarnation === "string" ? d.mob_incarnation : null,
     event,
   };
 }
@@ -1318,8 +1348,9 @@ export function parsePersistedEvent(raw: unknown): PersistedEvent {
 /**
  * Query parameters for historical event retrieval. `afterSeq` is the
  * pagination cursor — pass the highest seen `seq`/`cursor` to receive
- * only strictly-newer events. `mobId`, `runId`, `stepId`, `identity`
- * filter the structural mob-events surface (`meta/mob_events/query`).
+ * only strictly-newer events. `mobId` names the mob the request is for.
+ * `runId`, `stepId` and `identity` filter the structural mob-events
+ * surface (`meta/mob_events/query`).
  */
 export interface EventQuery {
   readonly sinceMs?: number;
@@ -3127,6 +3158,13 @@ export interface AgentBuildContext {
   readonly identity: string;
   readonly activePeers: readonly string[];
   readonly managedEdges: readonly ManagedPeerEdge[];
+  /**
+   * The mob the member is in, as the host named it with the callback; absent
+   * when the host named none (a host of an earlier release, which serves its
+   * own mob only). Two mobs of one host can each have a member called
+   * `identity`. On the wire the mob rides beside the context.
+   */
+  readonly mobId?: string;
 }
 
 export function parseAgentBuildContext(raw: unknown): AgentBuildContext {
@@ -6269,4 +6307,267 @@ export function supportsFlowRunIdempotencyKey(
     ? (capabilities as readonly string[])
     : (capabilities as CapabilitiesResult).featureCapabilities;
   return features.includes(FLOW_RUN_IDEMPOTENCY_KEY);
+}
+
+/**
+ * The `meta/capabilities` feature capability that says the gateway honours
+ * `mob_id` on a request.
+ */
+export const MOB_ADDRESSING = "mob_addressing" as const;
+
+/**
+ * Whether this gateway honours `mob_id` on a request: its
+ * `featureCapabilities` name `"mob_addressing"`. Takes a
+ * {@link CapabilitiesResult} or its `featureCapabilities`. A gateway without
+ * it ignores the id on most methods and answers for its own mob, so a caller
+ * checks this before naming a mob (a handle from `MetaRuntime.mob` does).
+ */
+export function supportsMobAddressing(
+  capabilities: CapabilitiesResult | readonly string[],
+): boolean {
+  const features = Array.isArray(capabilities)
+    ? (capabilities as readonly string[])
+    : (capabilities as CapabilitiesResult).featureCapabilities;
+  return features.includes(MOB_ADDRESSING);
+}
+
+/**
+ * The `meta/capabilities` feature capability that says the gateway serves
+ * the hosting calls (`meta/mobs/*`).
+ */
+export const HOSTED_MOBS = "hosted_mobs" as const;
+
+/**
+ * Whether this gateway serves the hosting calls (`meta/mobs/*`): its
+ * `featureCapabilities` name `"hosted_mobs"`. Takes a
+ * {@link CapabilitiesResult} or its `featureCapabilities`.
+ * `MetaRuntime.mobs` checks it before each call.
+ */
+export function supportsHostedMobs(
+  capabilities: CapabilitiesResult | readonly string[],
+): boolean {
+  const features = Array.isArray(capabilities)
+    ? (capabilities as readonly string[])
+    : (capabilities as CapabilitiesResult).featureCapabilities;
+  return features.includes(HOSTED_MOBS);
+}
+
+/**
+ * The states a hosted mob is listed with. The lifecycle of a loaded mob:
+ * `creating`, `running`, `completed`, `destroyed`. `stopped`: the mob's own
+ * stop, which holds whether the host has the mob loaded or not. `dormant`:
+ * the host knows the mob, has not loaded it and does not know it as stopped.
+ * `quarantined` (its store could not be opened or restored), `held` (a mob a
+ * member created, kept until its owner resolves). An open list: a state
+ * newer than this SDK is kept as its text.
+ */
+export const HOSTED_MOB_STATE_TOKENS = [
+  "creating",
+  "running",
+  "stopped",
+  "completed",
+  "destroyed",
+  "dormant",
+  "quarantined",
+  "held",
+] as const;
+/** One state this SDK lists for a hosted mob. */
+export type HostedMobState = (typeof HOSTED_MOB_STATE_TOKENS)[number];
+/** The hosted mob states this SDK lists, as a set. */
+export const HOSTED_MOB_STATES: ReadonlySet<string> = new Set(HOSTED_MOB_STATE_TOKENS);
+
+/**
+ * One mob of a host, as `meta/mobs/list`, `get` and `create` answer it.
+ *
+ * `default` is true for the mob the launch names: the mob a request without
+ * a `mob_id` addresses. `state` is one of {@link HOSTED_MOB_STATES}; a
+ * gateway newer than this SDK may send another, which is kept as its text
+ * with `knownState` false, so read it as advice and never as a closed set.
+ * `provenance` is the kind of the mob's creation record (`host`, `member`,
+ * `session`, ..., also an open list); it is `null` while the host has not
+ * read that record (for a short time after a start, for a mob that is not
+ * loaded; such a mob reads `dormant` until then, a stopped one too) and for
+ * a quarantined or held mob. `failure`
+ * is present when a loaded mob's actor has stopped, `quarantine` when the
+ * state is `quarantined`; both are the gateway's objects, unchanged.
+ *
+ * `revision` is the revision of the mob's definition, a whole number that
+ * every committed redefinition advances (a mob that was never redefined
+ * reports the revision its create recorded). It is what `rt.mobs.redefine`
+ * takes as `expectedRevision`. `get` carries it for a loaded mob (a `get`
+ * loads a mob the host created), and so does the entry of a `create`,
+ * `lifecycle` or `redefine` answer; an entry of `list` never carries it, and
+ * a quarantined or held mob has `null`. A value that is not a
+ * whole number reads as `null` too: it cannot be passed on, and it does not
+ * make the entry unreadable.
+ *
+ * The entry is what the gateway said when it was asked. The SDK keeps no
+ * list of mobs: ask again for the current one.
+ */
+export interface HostedMob {
+  readonly mobId: string;
+  readonly default: boolean;
+  readonly state: HostedMobState | (string & {});
+  /** Whether `state` is one of {@link HOSTED_MOB_STATES}. */
+  readonly knownState: boolean;
+  readonly provenance: string | null;
+  readonly failure: Readonly<Record<string, unknown>> | null;
+  readonly quarantine: Readonly<Record<string, unknown>> | null;
+  readonly revision: number | null;
+}
+
+/**
+ * Read one hosted mob entry. Throws `ContractMismatchError` without its id or
+ * state: an answer this SDK does not read, not a mistake in the caller's
+ * arguments.
+ */
+export function parseHostedMob(raw: unknown): HostedMob {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new ContractMismatchError("HostedMob must be an object");
+  }
+  const d = raw as Record<string, unknown>;
+  if (typeof d.mob_id !== "string") {
+    throw new ContractMismatchError("HostedMob.mob_id must be a string");
+  }
+  if (typeof d.state !== "string") {
+    throw new ContractMismatchError("HostedMob.state must be a string");
+  }
+  const object = (value: unknown): Readonly<Record<string, unknown>> | null =>
+    typeof value === "object" && value !== null && !Array.isArray(value)
+      ? { ...(value as Record<string, unknown>) }
+      : null;
+  return {
+    mobId: d.mob_id,
+    default: d.default === true,
+    state: d.state,
+    knownState: HOSTED_MOB_STATES.has(d.state),
+    provenance: typeof d.provenance === "string" ? d.provenance : null,
+    failure: object(d.failure),
+    quarantine: object(d.quarantine),
+    revision: typeof d.revision === "number" && Number.isInteger(d.revision) ? d.revision : null,
+  };
+}
+
+/**
+ * An answer of a hosting call, or a part of one, as an object. The request
+ * left and the gateway acted on it, so an answer that cannot be read is not a
+ * `TypeError` (that is for the caller's arguments, refused before anything is
+ * sent) but a `ContractMismatchError`.
+ */
+function hostingAnswer(raw: unknown, owner: string): Record<string, unknown> {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new ContractMismatchError(`${owner} must be an object`);
+  }
+  return raw as Record<string, unknown>;
+}
+
+/**
+ * A report as it came; `null` when none was sent. A report that is not an
+ * object is not read as "none": the answer is not one this SDK reads.
+ */
+function hostingReport(value: unknown, owner: string): Readonly<Record<string, unknown>> | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new ContractMismatchError(`${owner} must be an object`);
+  }
+  return { ...(value as Record<string, unknown>) };
+}
+
+/**
+ * What `meta/mobs/lifecycle` answers: the mob's entry after the stop or the
+ * resume, and for a stop the mob's own stop report as it came (`null` for a
+ * resume). A report that is not an object throws `ContractMismatchError`, and
+ * `rt.mobs.lifecycle` rejects with it for a stop answered without one.
+ */
+export interface MobLifecycleResult {
+  readonly mob: HostedMob;
+  readonly stopReport: Readonly<Record<string, unknown>> | null;
+}
+
+/** Read a `meta/mobs/lifecycle` answer. Throws `ContractMismatchError` without its entry. */
+export function parseMobLifecycleResult(raw: unknown): MobLifecycleResult {
+  const answer = hostingAnswer(raw, "MobLifecycleResult");
+  return {
+    mob: parseHostedMob(answer.mob),
+    stopReport: hostingReport(answer.stop_report, "MobLifecycleResult.stop_report"),
+  };
+}
+
+/**
+ * The receipt of a definition update: the revision it was made against, the
+ * revision the definition holds now, the projection revision and the cursor
+ * of the definition event, and the dotted paths that differed.
+ */
+export interface MobRedefineReceipt {
+  readonly mobId: string;
+  readonly previousRevision: number;
+  readonly committedRevision: number;
+  readonly projectionRevision: number;
+  readonly eventCursor: number;
+  readonly declaredFields: readonly string[];
+}
+
+/**
+ * What `meta/mobs/redefine` answers: the mob's entry and the receipt of the
+ * definition update.
+ */
+export interface MobRedefineResult {
+  readonly mob: HostedMob;
+  readonly receipt: MobRedefineReceipt;
+}
+
+/** Read a `meta/mobs/redefine` answer. Throws `ContractMismatchError` without its parts. */
+export function parseMobRedefineResult(raw: unknown): MobRedefineResult {
+  const answer = hostingAnswer(raw, "MobRedefineResult");
+  const mob = parseHostedMob(answer.mob);
+  const receipt = hostingAnswer(answer.receipt, "MobRedefineReceipt");
+  if (typeof receipt.mob_id !== "string") {
+    throw new ContractMismatchError("MobRedefineReceipt.mob_id must be a string");
+  }
+  const integer = (name: string): number => {
+    const value = receipt[name];
+    if (typeof value !== "number" || !Number.isInteger(value)) {
+      throw new ContractMismatchError(`MobRedefineReceipt.${name} must be an integer`);
+    }
+    return value;
+  };
+  const fields = receipt.declared_fields;
+  if (!Array.isArray(fields) || !fields.every((field) => typeof field === "string")) {
+    throw new ContractMismatchError(
+      "MobRedefineReceipt.declared_fields must be a list of strings",
+    );
+  }
+  return {
+    mob,
+    receipt: {
+      mobId: receipt.mob_id,
+      previousRevision: integer("previous_revision"),
+      committedRevision: integer("committed_revision"),
+      projectionRevision: integer("projection_revision"),
+      eventCursor: integer("event_cursor"),
+      declaredFields: [...(fields as string[])],
+    },
+  };
+}
+
+/**
+ * What `meta/mobs/destroy` answers: the id of the destroyed mob and the
+ * destroy report as it came (`null` when none was sent; one that is not an
+ * object throws `ContractMismatchError`).
+ */
+export interface MobDestroyResult {
+  readonly mobId: string;
+  readonly destroyReport: Readonly<Record<string, unknown>> | null;
+}
+
+/** Read a `meta/mobs/destroy` answer. Throws `ContractMismatchError` without the mob's id. */
+export function parseMobDestroyResult(raw: unknown): MobDestroyResult {
+  const answer = hostingAnswer(raw, "MobDestroyResult");
+  if (typeof answer.mob_id !== "string") {
+    throw new ContractMismatchError("MobDestroyResult.mob_id must be a string");
+  }
+  return {
+    mobId: answer.mob_id,
+    destroyReport: hostingReport(answer.destroy_report, "MobDestroyResult.destroy_report"),
+  };
 }

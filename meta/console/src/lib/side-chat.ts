@@ -108,6 +108,10 @@ export function sideChatForkOffered(input: {
 }): boolean {
   const agent = input.agent;
   if (input.readOnly || !input.offered || !input.canSpawnMembers || !agent) return false;
+  // The gateway forks the members of its own mob only, and the agent's row
+  // says so (`can_fork_side_chat`); a gateway that does not say leaves the
+  // fork offered as it was.
+  if (agent.affordances?.can_fork_side_chat === false) return false;
   return !(input.accessEnforcing && agent.affordances?.can_send_message === false);
 }
 
@@ -118,6 +122,17 @@ export function sideChatForkOffered(input: {
  */
 export function restartOffered(agent: ConsoleAgent | null | undefined): boolean {
   return sideChatSource(agent) === null;
+}
+
+/**
+ * Whether the console offers Reset for `agent`: where a restart is offered
+ * ({@link restartOffered}), unless the agent's row says the gateway does not
+ * reset it for the viewer (`can_reset`: a member of a nested mob, or an
+ * agent the viewer may not reset). A gateway that does not say leaves Reset
+ * offered as it was.
+ */
+export function resetOffered(agent: ConsoleAgent | null | undefined): boolean {
+  return restartOffered(agent) && agent?.affordances?.can_reset !== false;
 }
 
 /** The `source_member_id` a fork of `agent` names: its identity, else its member id. */

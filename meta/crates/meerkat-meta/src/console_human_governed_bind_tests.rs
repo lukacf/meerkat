@@ -2703,6 +2703,7 @@ async fn a_governed_send_through_a_store_without_send_states_is_refused_before_i
     let frames = crate::console_aggregator::ConsoleLogStore::query_frames(
         store.as_ref(),
         ConsoleTimelineQuery {
+            mob_id: None,
             identity: None,
             conversation_id: None,
             after: None,

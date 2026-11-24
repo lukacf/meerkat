@@ -1,4 +1,4 @@
-//! High-trust agent-authored durable script monitor tool.
+//! Agent-authored durable script monitor tool of the shell family.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -243,7 +243,7 @@ impl BuiltinTool for MonitorStartTool {
         ToolDef {
             audience: Default::default(),
             name: "monitor_start".into(),
-            description: "Start a high-trust durable script monitor. Framed JSONL emits typed notify/checkpoint/progress/complete events; notifications do not complete the job.".into(),
+            description: "Start a durable script monitor. Framed JSONL emits typed notify/checkpoint/progress/complete events; notifications do not complete the job.".into(),
             input_schema: crate::schema::schema_for::<MonitorStartInput>(),
             provenance: Some(ToolProvenance {
                 kind: ToolSourceKind::Shell,

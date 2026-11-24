@@ -42,7 +42,7 @@ arm64 archives are published with the release, listed in `index.json` and
 
 ```toml
 [dependencies]
-meerkat-meta = "0.9.16"
+meerkat-meta = "0.9.18"
 ```
 
 ## Bootstrap a runtime
@@ -227,6 +227,21 @@ output = await triage.dispatch_text_and_wait(
 )
 
 await personal.send_and_wait("What's happening today?", timeout=60)
+```
+
+To make a dispatch safe to repeat, give it an `idempotency_key` and a
+`correlation_id` together. A repeat with the same pair to the same agent
+starts no second turn in that agent's session. One of the two without the
+other is refused and nothing is delivered: `invalid delivery identity
+(idempotency key without a correlation id (half-pair))`. Give the correlation
+id as a canonical UUID:
+
+```python
+await triage.dispatch_text(
+    "New event from connector", origin="connector",
+    idempotency_key="event-42",
+    correlation_id="0b5f6f0e-6a1c-4f0e-9d6e-2f4a8c1d7e42",
+)
 ```
 
 <Note>

@@ -56,6 +56,7 @@ pub(crate) const FLOW_SYSTEM_MEMBER_ID_PREFIX: &str = "__flow_system_";
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use actor::IdentityStatusProjectionOrder;
 pub(crate) use builder::recover_definition_epoch_authority;
+pub(crate) use builder::recovered_public_phase_from_events;
 
 pub(crate) fn flow_system_member_id() -> AgentIdentity {
     crate::ids::AgentIdentity::flow_system_provenance()
@@ -407,6 +408,7 @@ mod rotation_intent;
 #[cfg(feature = "runtime-adapter")]
 mod run_drain;
 pub(crate) mod scope_gate;
+mod seat_lineage;
 mod session_service;
 mod spawn_policy;
 mod spawn_profile_authority;
@@ -480,7 +482,9 @@ use state::MobCommand;
 use tools::compose_external_tools_for_profile;
 
 pub use crate::roster::{MobMemberKickoffPhase, MobMemberKickoffSnapshot};
-pub use admission_close::{CloseIfIdleOutcome, MobAdmissionCloseReason, MobBusy};
+pub use admission_close::{
+    CloseIfIdleOutcome, MobAdmissionCloseReason, MobBusy, MobIdleObservation,
+};
 pub(crate) use builder::owner_bridge_binding_from_history;
 pub(crate) use builder::recovered_lifecycle_quiesce_intent;
 pub use builder::{
@@ -561,7 +565,7 @@ pub use held_spawn::HeldSpawnDeadline;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 pub use held_spawn::{HeldSpawn, HeldSpawnSettlement, HeldSpawnStart, abort_all_held};
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
-pub use host_schedule::HostObservationScheduleMobHost;
+pub use host_schedule::{HostObservationScheduleMobHost, HostResidentScheduleWriteJudge};
 pub use identity_entry::{
     EntryStanding, HistoryUnavailable, HostPreparationCause, IDENTITY_ENTRY_PAGE_MAX,
     IdentityCensus, IdentityEntryOrigin, IdentityEntryPage, IdentityEntryRead, IdentityEntryView,
@@ -613,6 +617,11 @@ pub use retirement_settlement::{
 use roster_authority::{RosterAuthority, RosterMutator};
 pub use rotation_intent::{MemberRespawn, MemberRotationRecord, ReleaseOutcome, RotationTarget};
 pub(crate) use rotation_intent::{RotationSuccessor, rotation_held_for_host};
+pub use seat_lineage::{
+    LineageClosed, MemberLineageStep, MemberLink, MemberLinkProof, MemberSeat, MemberSeatCreator,
+    MemberSeatKind, MobLineageCause, RecordedSeat, SeatNow, SeatRecorder, SeatSealer,
+};
+pub(crate) use seat_lineage::{SeatReading, StoredSeatLineage, seat_of_older_row};
 #[cfg(not(target_arch = "wasm32"))]
 pub use session_service::ControllerRouteObservation;
 pub use session_service::LiveDurableSourceObservation;

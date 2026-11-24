@@ -106,6 +106,8 @@ pub(super) struct SpawnPreparationCarry {
     /// The spawn's fork lineage for operator instructions, resolved at its
     /// admission: for its birth snapshot, its row and its seat's record.
     pub(super) instruction_lineage: super::operator_instructions::SpawnInstructionLineage,
+    /// Who seats the member, composed at the spawn's admission: for its row.
+    pub(super) seat_record: Option<crate::MemberSeat>,
     /// Whether the spawn acts for the identity entry of its name.
     pub(super) entry_custody: bool,
     /// Whether the spawn acts for the store-owned entry of its name.

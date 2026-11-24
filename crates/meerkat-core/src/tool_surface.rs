@@ -60,13 +60,12 @@ impl PreparedToolSurface {
     pub fn of(tools: &dyn AgentToolDispatcher, filters: &[ToolFilter]) -> Self {
         let identities: Vec<ToolIdentity> =
             tools.tools().iter().map(|tool| tool.identity()).collect();
+        // The session's own rule for names, so the projection is the list
+        // the session would be offered under these filters.
+        let composed = crate::tool_scope::ToolScope::compose(filters);
         let projected = identities
             .iter()
-            .filter(|identity| {
-                filters
-                    .iter()
-                    .all(|filter| filter_admits(filter, identity.name.as_str()))
-            })
+            .filter(|identity| composed.allows(identity.name.as_str()))
             .cloned()
             .collect();
         let catalog = if tools.tool_catalog_capabilities().exact_catalog {
@@ -101,14 +100,6 @@ impl PreparedToolSurface {
         self.tools.contains(identity)
             || matches!(&self.catalog, PreparedToolCatalog::Complete(entries)
                 if entries.iter().any(|entry| &entry.identity == identity))
-    }
-}
-
-fn filter_admits(filter: &ToolFilter, name: &str) -> bool {
-    match filter {
-        ToolFilter::All => true,
-        ToolFilter::Allow(names) => names.contains(name),
-        ToolFilter::Deny(names) => !names.contains(name),
     }
 }
 
@@ -361,5 +352,59 @@ mod tests {
         assert_eq!(surface.projected.len(), 1);
         assert_eq!(surface.projected[0].name.as_str(), "a");
         assert_eq!(surface.catalog, PreparedToolCatalog::VisibleOnly);
+    }
+
+    /// The projection follows the session's own rule for names: a filter
+    /// that closes `shell` leaves no `monitor_start` in it, as in the
+    /// session's real list.
+    #[test]
+    fn the_projection_leaves_out_a_monitor_start_whose_shell_is_closed() {
+        struct ShellFamily;
+        #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+        impl AgentToolDispatcher for ShellFamily {
+            fn tools(&self) -> Arc<[Arc<crate::types::ToolDef>]> {
+                ["shell", "shell_jobs", "monitor_start"]
+                    .into_iter()
+                    .map(|name| {
+                        Arc::new(crate::types::ToolDef::new(name, "", serde_json::json!({})))
+                    })
+                    .collect()
+            }
+
+            async fn dispatch(
+                &self,
+                _call: crate::types::ToolCallView<'_>,
+            ) -> Result<crate::ops::ToolDispatchOutcome, crate::error::ToolError> {
+                unreachable!("never dispatched")
+            }
+        }
+        let projected = |filter: ToolFilter| {
+            PreparedToolSurface::of(&ShellFamily, &[filter])
+                .projected
+                .iter()
+                .map(|identity| identity.name.to_string())
+                .collect::<Vec<_>>()
+        };
+        let names = |names: &[&str]| {
+            names
+                .iter()
+                .map(|name| crate::types::ToolName::from(*name))
+                .collect()
+        };
+        assert_eq!(
+            projected(ToolFilter::Deny(names(&["shell"]))),
+            ["shell_jobs"],
+            "a deny of shell closes the monitor"
+        );
+        assert_eq!(
+            projected(ToolFilter::Allow(names(&["monitor_start", "shell_jobs"]))),
+            ["shell_jobs"],
+            "an allow list without shell does not admit the monitor"
+        );
+        assert_eq!(
+            projected(ToolFilter::All),
+            ["shell", "shell_jobs", "monitor_start"]
+        );
     }
 }

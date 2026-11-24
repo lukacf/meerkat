@@ -4,7 +4,15 @@ use super::*;
 use meerkat_core::ToolApplicationObservation;
 use meerkat_mcp::apps::{MCP_APPS_EXTENSION, McpAppInvocation, tool_ui_resource_uri};
 
-pub(super) fn spawn_for_identity(inner: Arc<AggregatorInner>, identity: String) {
+/// Read the tool application observations of the member `identity` of
+/// `mob` (the mob whose console events are registered here; none: the
+/// default mob) and store their locators. The member is found by its name
+/// among the members of that mob alone.
+pub(super) fn spawn_for_identity(
+    inner: Arc<AggregatorInner>,
+    mob: Option<meerkat_mob::MobId>,
+    identity: String,
+) {
     let inner = inner.projection_owner.as_ref().unwrap_or(&inner).clone();
     let activity = BackfillActivity::begin(&inner);
     tokio::spawn(async move {
@@ -12,7 +20,13 @@ pub(super) fn spawn_for_identity(inner: Arc<AggregatorInner>, identity: String) 
         // This path never acquires the history reader's semaphore or lock.
         // An ephemeral history export can wait behind a model call while the
         // actor's accepted host observations are already available.
-        for target in Box::pin(session_backfill_targets_for_identity(&inner, &identity)).await {
+        for target in Box::pin(session_backfill_targets_for_identity_of(
+            &inner,
+            mob.as_ref(),
+            &identity,
+        ))
+        .await
+        {
             let key = (
                 target.entry.registration_id,
                 target.entry.runtime_key.clone(),
@@ -80,9 +94,11 @@ async fn append_observations(
     };
     // The same registration can rotate a member's session or change its
     // visibility during the native read. Re-resolve that association rather
-    // than applying policy to the stale record captured by the trigger.
-    let mut current = Box::pin(session_backfill_targets_for_identity(
+    // than applying policy to the stale record captured by the trigger. The
+    // member is looked for in the registration's own mob.
+    let mut current = Box::pin(session_backfill_targets_for_identity_of(
         inner,
+        entry.mob.as_ref(),
         &record.identity,
     ))
     .await
@@ -114,7 +130,15 @@ async fn append_observations(
             break;
         }
         frame.source.member_provenance = current_target.provenance.clone();
-        append_and_emit_with_policy(inner, frame, entry.visibility_policy.clone()).await?;
+        // The locator is of the registration's own mob.
+        frame.mob_id.clone_from(&entry.mob);
+        super::append_and_emit_written_by(
+            inner,
+            frame,
+            entry.visibility_policy.clone(),
+            super::FrameWriter::Registration(entry),
+        )
+        .await?;
     }
     Ok(())
 }
@@ -132,6 +156,7 @@ fn frame_from_observation(
         serde_json::from_value(observation.host_metadata.get(MCP_APPS_EXTENSION)?.clone()).ok()?;
     tool_ui_resource_uri(&invocation.tool)?;
     Some(NewConsoleFrame {
+        mob_id: None,
         id: None,
         dedupe_key: format!(
             "tool-application:{}",
@@ -213,7 +238,7 @@ mod tests {
             )
             .await
             .unwrap();
-        spawn_for_identity(aggregator.inner.clone(), identity.to_string());
+        spawn_for_identity(aggregator.inner.clone(), None, identity.to_string());
         tokio::time::timeout(Duration::from_secs(5), async {
             while service.application_read_calls() == 0 {
                 tokio::task::yield_now().await;
@@ -265,7 +290,7 @@ mod tests {
             observations: vec![observation_for_test()],
             gate: gate.clone(),
         });
-        spawn_for_identity(aggregator.inner.clone(), "test/agent-0".into());
+        spawn_for_identity(aggregator.inner.clone(), None, "test/agent-0".into());
         gate.wait_until_entered().await;
         visibility.0.store(false, Ordering::SeqCst);
         gate.release();
@@ -286,6 +311,94 @@ mod tests {
         );
         assert_eq!(service.read_calls(), 0);
         runtime.shutdown().await;
+    }
+
+    /// The live display of a tool's application for an agent of a mob the
+    /// host serves beside its default mob is stored under that mob. The
+    /// console events of such a mob are registered; a turn starts in its
+    /// agent. The start asks for that agent's observations, found among the
+    /// mob's own agents, and the locator frame names the mob and the key of
+    /// the mob's registration.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_second_mobs_agents_tool_application_is_stored_under_that_mob() {
+        let (_directory, runtime, service) =
+            super::super::tests::build_stress_runtime(1, Duration::ZERO).await;
+        let aggregator = MetaConsoleAggregator::in_memory_with_options(ConsoleAggregatorOptions {
+            session_history_backfill_enabled: false,
+            ..Default::default()
+        });
+        aggregator.tell_default_mob(crate::member_key::DefaultMob::new(
+            meerkat_mob::MobId::from("tool-rows-launch"),
+        ));
+        let mob = runtime.mob_runtime().handle().mob_id().clone();
+        aggregator
+            .register_mob_console_events(
+                &mob,
+                runtime.mob_runtime().clone(),
+                runtime.console_events(),
+                Arc::new(AllowAllConsoleVisibilityPolicy),
+            )
+            .expect("the second mob's console events register");
+        let gate = super::super::tests::HistoryReadGate::new();
+        service.script_application_observations(super::super::tests::ScriptedApplicationRead {
+            observations: vec![observation_for_test()],
+            gate: gate.clone(),
+        });
+        // A turn starts in the mob's agent.
+        runtime
+            .console_events()
+            .record_lifecycle("agent-0", "turn_started", json!({}))
+            .await;
+        let asked = tokio::time::timeout(Duration::from_secs(5), async {
+            while service.application_read_calls() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .is_ok();
+        gate.release();
+        let settled = tokio::time::timeout(
+            Duration::from_secs(5),
+            aggregator.history_backfill_converged(),
+        )
+        .await
+        .is_ok();
+        // The frames of the mob, by the store's read of one mob's frames: a
+        // read that names no mob answers the default mob's frames alone.
+        let locators: Vec<ConsoleFrame> = aggregator
+            .store()
+            .query_windowed_frames_of_mob(ConsoleTimelineWindowQuery {
+                mob_id: Some(mob.clone()),
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .frames
+            .into_iter()
+            .filter(|frame| frame.source.kind == ConsoleFrameSourceKind::ToolApplication)
+            .collect();
+        runtime.shutdown().await;
+        assert!(
+            asked,
+            "a turn that starts in a second mob's agent asks for that agent's tool applications"
+        );
+        assert!(settled, "the refresh settles");
+        assert_eq!(
+            locators
+                .iter()
+                .map(|frame| (
+                    frame.mob_id.clone(),
+                    frame.runtime_key.clone(),
+                    frame.identity.clone()
+                ))
+                .collect::<Vec<_>>(),
+            [(
+                Some(mob.clone()),
+                mob_runtime_key(&mob),
+                "agent-0".to_string()
+            )],
+            "one locator frame, under the mob and the key of its registration"
+        );
     }
 
     fn observation_for_test() -> ToolApplicationObservation {

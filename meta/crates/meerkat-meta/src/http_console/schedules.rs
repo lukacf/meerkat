@@ -26,6 +26,15 @@
 //! not know it, as for an agent that does not exist
 //! ([`acts_on_member_schedules`]).
 //!
+//! The agent a call names is an agent of the mob its request was served
+//! for: the call finds it in that mob and judges it there, whatever agents
+//! of that name the host's other mobs have. For a mob other than the host's
+//! default mob it is the agent that mob's identity runtime knows; a name it
+//! does not know is answered as a name no agent has. The fires reach the
+//! agents of the host's default mob, so a create, an update and a resume
+//! for an agent of another mob are refused (`schedule_host_unavailable`):
+//! the schedule would never be sent.
+//!
 //! [`ConsoleSendDoor`] is the Console's own send path for the fires: the
 //! Console's admission of the schedule's sender, then the very send
 //! `/console/send` runs once it has admitted its caller
@@ -97,10 +106,37 @@ pub(super) fn advertised_methods(runtime: &MobRuntime, can_mutate: bool) -> Vec<
     methods
 }
 
-/// Answer one console schedule method.
-pub(super) async fn handle(
+/// The mob a console schedule call is answered for, on its host.
+pub(super) struct ScheduleMob<'a> {
+    /// The host's default mob, as the host states it: a stored send that
+    /// names no mob is its agent's.
+    host_default_mob: &'a crate::member_key::DefaultMob,
+    /// The wrapper of the mob the request resolved: the call names its
+    /// agents.
+    runtime: &'a MobRuntime,
+}
+
+impl<'a> ScheduleMob<'a> {
+    /// The mob `runtime` wraps, on the host whose default mob is
+    /// `host_default_mob`.
+    pub(super) fn on_host(
+        host_default_mob: &'a crate::member_key::DefaultMob,
+        runtime: &'a MobRuntime,
+    ) -> Self {
+        Self {
+            host_default_mob,
+            runtime,
+        }
+    }
+}
+
+/// Answer one console schedule method for the mob `mob` names, on its host.
+/// The host's default mob is the one the host states, never the mob of the
+/// request's wrapper: a schedule of another mob's agent stores a send that
+/// names that mob.
+pub(super) async fn handle_for(
+    mob: ScheduleMob<'_>,
     request: &JsonRpcRequest,
-    runtime: &MobRuntime,
     identity_runtime: Option<&Arc<crate::identity_first::IdentityRuntime>>,
     aggregator: Option<&MetaConsoleAggregator>,
     principal: Option<&str>,
@@ -108,7 +144,11 @@ pub(super) async fn handle(
     governance: &ConsoleSendGovernance,
 ) -> Value {
     let response_id = request.id.clone().unwrap_or(Value::Null);
+    let runtime = mob.runtime;
     let call = ScheduleCall {
+        default_mob: mob.host_default_mob.clone(),
+        mob_id: runtime.handle().mob_id().clone(),
+        runtime,
         identity_runtime,
         aggregator,
         params: &request.params,
@@ -129,7 +169,19 @@ pub(super) async fn handle(
 /// One console schedule call: its params and caller, and what the console
 /// resolves its agent with.
 struct ScheduleCall<'a> {
+    /// The host's default mob, as the host states it: a stored send that
+    /// names no mob is its.
+    default_mob: crate::member_key::DefaultMob,
+    /// The mob whose agents the call names: the mob the request resolved.
+    mob_id: meerkat_mob::MobId,
+    /// The runtime whose mob the agents are members of: the list reads which
+    /// schedules are aimed at an agent from it.
+    runtime: &'a MobRuntime,
+    /// That mob's identity runtime.
     identity_runtime: Option<&'a Arc<crate::identity_first::IdentityRuntime>>,
+    /// The console's aggregator, built over the host's default mob. Its
+    /// records are read by name, for a call for the default mob alone
+    /// ([`known_target`]).
     aggregator: Option<&'a MetaConsoleAggregator>,
     params: &'a Value,
     principal: Option<&'a str>,
@@ -180,7 +232,9 @@ async fn list(
         .iter()
         .filter_map(|schedule| {
             let send = ConsoleScheduledSend::of_target(&schedule.target)?;
-            (send.identity == target || send.identity == identity).then_some((schedule, send))
+            (send.is_for(&call.default_mob, &call.mob_id, &target)
+                || send.is_for(&call.default_mob, &call.mob_id, identity))
+            .then_some((schedule, send))
         })
         .collect::<Vec<_>>();
     theirs.sort_by_key(|(schedule, _)| schedule.config.created_at_utc);
@@ -188,7 +242,169 @@ async fn list(
     for (schedule, send) in theirs {
         items.push(schedule_item(&schedules.service, schedule, &send, shows_sender).await);
     }
-    Ok(json!({ "identity": target, "schedules": items }))
+    let others = other_schedules(call, &schedules.service, &all, &[&target, identity]).await;
+    Ok(json!({ "identity": target, "schedules": items, "other_schedules": others }))
+}
+
+/// The schedules of `all` that are no Console schedules and whose target
+/// names the agent `names` spell (its name as the console resolves it, and
+/// as the caller wrote it), oldest first: the schedules an agent's schedule
+/// tools or a host wrote for it. A Console caller reads them beside the
+/// agent's Console schedules, and the Console's writes do not reach them.
+///
+/// A target names the agent as a member of the runtime's mob (a member
+/// target, or the source of a fork helper), by an identity (the
+/// `mob_member:` form for that mob, or the agent's name), or by a session
+/// Core's entry of the agent records. An entry that cannot be read leaves
+/// the agent's session schedules out.
+async fn other_schedules(
+    call: &ScheduleCall<'_>,
+    service: &ScheduleService,
+    all: &[Schedule],
+    names: &[&str],
+) -> Vec<Value> {
+    let mob = call.runtime.handle();
+    let mob_id = mob.mob_id().to_string();
+    let roster_id = |name: &str| {
+        crate::member_comms_id::mob_member_id_str(&crate::member_comms_id::runtime_alias_str(name))
+            .into_owned()
+    };
+    let agents = names.iter().map(|name| roster_id(name)).collect::<Vec<_>>();
+    let mut sessions = Vec::new();
+    for agent in &agents {
+        if let Ok(meerkat_mob::IdentityEntryRead::Entry(entry)) =
+            mob.identity_entry(&meerkat_mob::AgentIdentity::from(agent.as_str()))
+        {
+            if let meerkat_mob::EntryStanding::Seated(seated)
+            | meerkat_mob::EntryStanding::Retiring(seated) = &entry.standing
+                && let Some(session_id) = seated.session_id.as_ref()
+            {
+                sessions.push(session_id.to_string());
+            }
+            if let Some(session_id) = entry.archived_session.as_ref() {
+                sessions.push(session_id.to_string());
+            }
+        }
+    }
+    let names_agent =
+        |named_mob: &str, member: &str| named_mob == mob_id && agents.contains(&roster_id(member));
+    let mut theirs =
+        all.iter()
+            .filter(|schedule| ConsoleScheduledSend::of_target(&schedule.target).is_none())
+            .filter_map(|schedule| {
+                let (form, content) = match &schedule.target {
+                    meerkat::TargetBinding::Mob(binding) => match binding.as_ref() {
+                        meerkat::MobTargetBinding::Member {
+                            mob_id: named_mob,
+                            member_id,
+                            action: meerkat::ScheduledMobAction::Send { content, .. },
+                        } if names_agent(named_mob, member_id) => {
+                            ("member", Some(content.text_content()))
+                        }
+                        meerkat::MobTargetBinding::ForkHelper {
+                            mob_id: named_mob,
+                            source_member_id,
+                            prompt,
+                            ..
+                        } if names_agent(named_mob, source_member_id) => {
+                            ("fork_helper", Some(prompt.clone()))
+                        }
+                        _ => return None,
+                    },
+                    meerkat::TargetBinding::Identity(binding) => {
+                        let named = match meerkat::surface::parse_mob_member_schedule_identity(
+                            binding.identity(),
+                        ) {
+                            Some(named) => names_agent(&named.mob_id, &named.member),
+                            // A target that names no mob is the host's
+                            // default mob's agent, in every mob's view.
+                            None => {
+                                call.default_mob.is(&call.mob_id)
+                                    && agents.contains(&roster_id(binding.identity()))
+                            }
+                        };
+                        if !named {
+                            return None;
+                        }
+                        ("identity", prompt_text(binding.action()))
+                    }
+                    meerkat::TargetBinding::Session(session) => {
+                        let (session_id, action) = match session.as_ref() {
+                            meerkat::SessionTargetBinding::ExactSession { session_id, action }
+                            | meerkat::SessionTargetBinding::ResumableSession {
+                                session_id,
+                                action,
+                            } => (session_id, action),
+                            meerkat::SessionTargetBinding::MaterializeOnDemandSession {
+                                bound_session_id: Some(session_id),
+                                action,
+                                ..
+                            } => (session_id, action),
+                            meerkat::SessionTargetBinding::MaterializeOnDemandSession {
+                                ..
+                            } => {
+                                return None;
+                            }
+                        };
+                        if !sessions.contains(&session_id.to_string()) {
+                            return None;
+                        }
+                        ("session", prompt_text(action))
+                    }
+                    meerkat::TargetBinding::HostRunnable(_) => return None,
+                };
+                Some((schedule, form, content))
+            })
+            .collect::<Vec<_>>();
+    theirs.sort_by_key(|(schedule, _, _)| schedule.config.created_at_utc);
+    let mut items = Vec::with_capacity(theirs.len());
+    for (schedule, form, content) in theirs {
+        items.push(json!({
+            "schedule_id": schedule.schedule_id.to_string(),
+            "identity": names.first(),
+            "name": schedule.config.name,
+            "target": form,
+            "content": content,
+            "trigger": schedule.trigger,
+            "phase": schedule.phase,
+            "revision": schedule.revision.0,
+            "created_at_utc": schedule.config.created_at_utc,
+            "updated_at_utc": schedule.config.updated_at_utc,
+            "next_due_at_utc": next_due_at_utc(service, schedule).await,
+        }));
+    }
+    items
+}
+
+/// The text a scheduled prompt sends, when the action is a prompt.
+fn prompt_text(action: &meerkat::ScheduledSessionAction) -> Option<String> {
+    match action {
+        meerkat::ScheduledSessionAction::Prompt { prompt, .. } => Some(prompt.text_content()),
+        _ => None,
+    }
+}
+
+/// When the next occurrence of `schedule` is due, while it is active.
+async fn next_due_at_utc(
+    service: &ScheduleService,
+    schedule: &Schedule,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    if schedule.phase != SchedulePhase::Active {
+        return None;
+    }
+    service
+        .list_occurrences_matching(
+            &schedule.schedule_id,
+            OccurrenceFilter {
+                include_terminal: false,
+                limit: Some(1),
+                ..OccurrenceFilter::default()
+            },
+        )
+        .await
+        .ok()
+        .and_then(|occurrences| occurrences.into_iter().next())
+        .map(|occurrence| occurrence.due_at_utc)
 }
 
 async fn create(
@@ -205,7 +421,14 @@ async fn create(
     refuse_archived(call, &target).await?;
     #[cfg(test)]
     schedules.wait_at_write_hold().await;
-    let send = ConsoleScheduledSend::new(target, content, sender, now_epoch_seconds());
+    let send = ConsoleScheduledSend::new(
+        &call.default_mob,
+        &call.mob_id,
+        target,
+        content,
+        sender,
+        now_epoch_seconds(),
+    );
     caller_current(call)?;
     let schedule = schedules
         .service
@@ -550,9 +773,17 @@ struct ScheduleTarget {
     addressable: bool,
 }
 
-/// The agent `identity` names, as the console's send resolves it: the
-/// identity runtime's identity, else the console's identity record that
-/// names it by identity or runtime member id. `None` when nothing does.
+/// The agent `identity` names in the mob of the call, as the console's send
+/// resolves it: the identity runtime's identity, else, for the host's
+/// default mob, the console's identity record that names it by identity or
+/// runtime member id. `None` when nothing does.
+///
+/// An agent is named by its mob and its name. The identity runtime is the
+/// one of the call's mob. The console's records are read by name, and they
+/// are the records of the console's own aggregator, which is built over the
+/// host's default mob: they answer for a call for the default mob alone.
+/// For another mob of the host only that mob's identity runtime answers,
+/// and a name it does not know is no agent's.
 async fn known_target(
     call: &ScheduleCall<'_>,
     identity: &str,
@@ -566,6 +797,9 @@ async fn known_target(
             addressable: status.addressability
                 == crate::identity_first::AgentAddressability::Addressable,
         }));
+    }
+    if call.default_mob.stored(&call.mob_id).is_some() {
+        return Ok(None);
     }
     let Some(aggregator) = call.aggregator else {
         return Ok(None);
@@ -584,8 +818,10 @@ async fn known_target(
 
 /// The agent a schedule may be defined for, refused typed when the
 /// schedule could never be sent: no firing host drains the store, no agent
-/// has the name, the agent takes no human input, or its sends are governed
-/// (a governed send needs its human present, and a fire has none).
+/// of the call's mob has the name, the agent takes no human input, its
+/// sends are governed (a governed send needs its human present, and a fire
+/// has none), or the agent is of a mob whose console schedules no fire
+/// sends ([`refuse_a_mob_no_fire_reaches`]).
 async fn sendable_target(
     call: &ScheduleCall<'_>,
     schedules: &AttachedConsoleSchedules,
@@ -609,7 +845,25 @@ async fn sendable_target(
     if governed {
         return Err(governed_target(&target.identity));
     }
+    refuse_a_mob_no_fire_reaches(call, &target.identity)?;
     Ok(target.identity)
+}
+
+/// Refuse a schedule for an agent of a mob whose console schedules no fire
+/// sends. The Console's send path for the fires reaches the agents of the
+/// host's default mob ([`ConsoleSendDoor`]): a schedule for an agent of
+/// another mob would be stored, listed as active and never sent, so a
+/// create, an update and a resume for one are refused, and say so. A list,
+/// a pause and a delete stay. The refusal goes when the fires reach every
+/// mob the host serves.
+fn refuse_a_mob_no_fire_reaches(
+    call: &ScheduleCall<'_>,
+    identity: &str,
+) -> Result<(), JsonRpcError> {
+    match call.default_mob.stored(&call.mob_id) {
+        None => Ok(()),
+        Some(mob_id) => Err(schedule_fires_do_not_reach(mob_id, identity)),
+    }
 }
 
 /// The console schedule `schedule_id` of the agent `identity` names, with
@@ -632,9 +886,13 @@ async fn console_schedule(
     if schedule.phase == SchedulePhase::Deleted {
         return Err(schedule_not_found());
     }
-    if send.identity != identity {
+    // A schedule of an agent of the same name in another mob is another
+    // agent's.
+    if !send.is_for(&call.default_mob, &call.mob_id, identity) {
         let target = known_target(call, identity).await?;
-        if target.is_none_or(|target| target.identity != send.identity) {
+        if target
+            .is_none_or(|target| !send.is_for(&call.default_mob, &call.mob_id, &target.identity))
+        {
             return Err(schedule_not_found());
         }
     }
@@ -651,23 +909,7 @@ async fn schedule_item(
     send: &ConsoleScheduledSend,
     shows_sender: bool,
 ) -> Value {
-    let next_due_at_utc = if schedule.phase == SchedulePhase::Active {
-        service
-            .list_occurrences_matching(
-                &schedule.schedule_id,
-                OccurrenceFilter {
-                    include_terminal: false,
-                    limit: Some(1),
-                    ..OccurrenceFilter::default()
-                },
-            )
-            .await
-            .ok()
-            .and_then(|occurrences| occurrences.into_iter().next())
-            .map(|occurrence| occurrence.due_at_utc)
-    } else {
-        None
-    };
+    let next_due_at_utc = next_due_at_utc(service, schedule).await;
     let defined_at_utc = epoch_seconds_utc(send.defined_at);
     // Earlier senders are other callers' principals: shown with the sender,
     // to a caller who may send to the agent.
@@ -871,6 +1113,20 @@ fn schedule_host_unavailable() -> JsonRpcError {
     .with_data(json!({ "kind": "schedule_host_unavailable" }))
 }
 
+/// The refusal of a schedule for `identity` of the mob `mob_id`, whose
+/// console schedules no fire sends: the kind a schedule without a firing
+/// host is refused with, since nothing would send this one either.
+fn schedule_fires_do_not_reach(mob_id: &meerkat_mob::MobId, identity: &str) -> JsonRpcError {
+    JsonRpcError::new(
+        crate::rpc::CAPABILITY_UNAVAILABLE_CODE,
+        format!(
+            "this gateway sends the console schedules of its default mob's agents only, so a \
+             console schedule for {identity} of mob {mob_id} would never be sent"
+        ),
+    )
+    .with_data(json!({ "kind": "schedule_host_unavailable" }))
+}
+
 fn schedule_error(error: ScheduleDomainError) -> JsonRpcError {
     match &error {
         ScheduleDomainError::Store(ScheduleStoreError::ScheduleNotFound { .. }) => {
@@ -924,6 +1180,20 @@ impl crate::console_schedules::ConsoleScheduleDoor for ConsoleSendDoor {
     /// `delivery_key` in the sender's send scope, so a redelivered occurrence
     /// never sends twice.
     async fn send(&self, send: &ConsoleScheduledSend, delivery_key: &str) -> Result<(), String> {
+        // This send path reaches the agents of its runtime's mob. A send to
+        // an agent of another mob is never delivered to the agent of the
+        // same name here. The door's runtime is the launch mob's wrapper
+        // (the runtime installs the door from its default mob's entry), so
+        // its mob is the host's default mob.
+        let served = self.runtime.handle().mob_id().clone();
+        let default_mob = crate::member_key::DefaultMob::new(served.clone());
+        if send.mob(&default_mob) != served {
+            return Err(format!(
+                "the Console refused the scheduled send: its agent is a member of mob {}, \
+                 which this Console send path does not reach",
+                send.mob(&default_mob)
+            ));
+        }
         let sender = &send.sender;
         sender
             .admitted_now(&self.decisions, &self.session_fences, send.defined_at)
@@ -945,6 +1215,7 @@ impl crate::console_schedules::ConsoleScheduleDoor for ConsoleSendDoor {
             verification: None,
             side_chat_owner: None,
             sender: Some(scheduled_sender(sender, &self.decisions)),
+            served_mob: ServedMob::default(),
         };
         let request = ConsoleSendRequest {
             identity: send.identity.clone(),

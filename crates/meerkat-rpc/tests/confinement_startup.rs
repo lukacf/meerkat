@@ -1156,3 +1156,555 @@ auth_profile = "scripted"
         "two calls were refused as writes into the server's own files: {tool_results:#?}"
     );
 }
+
+/// Whether `name`, an entry at a realm's root, is one the server declares
+/// to its agents' file tools: a listed entry, or a side file of a listed
+/// file (the file's name followed by `-` or `.`, or the file's name
+/// without its extension followed by `.` and ending in `.lock`).
+fn declared_realm_entry(listed: &[PathBuf], realm: &Path, name: &str) -> bool {
+    listed
+        .iter()
+        .filter(|entry| entry.parent() == Some(realm))
+        .filter_map(|entry| entry.file_name()?.to_str())
+        .any(|declared| {
+            if name == declared {
+                return true;
+            }
+            let Some(stem) = declared
+                .rfind('.')
+                .filter(|index| *index > 0)
+                .map(|index| &declared[..index])
+            else {
+                return false;
+            };
+            name.strip_prefix(declared)
+                .is_some_and(|rest| rest.starts_with(['-', '.']))
+                || (name.ends_with(".lock")
+                    && name
+                        .strip_prefix(stem)
+                        .is_some_and(|rest| rest.starts_with('.')))
+        })
+}
+
+/// Started without `--context-root`, the stock server roots its agents'
+/// file tools in the realm directory. The realm's stores are refused there
+/// with their side files, an ordinary file is still written, and every
+/// entry the served realm holds at its root is one the server declares to
+/// those tools.
+#[cfg(unix)]
+#[test]
+fn rkat_rpc_file_tools_refuse_the_realms_stores() {
+    const REALM: &str = "file-tools-stores";
+    const MODEL: &str = "scripted-file-tools";
+    let binary = rkat_rpc_binary();
+    let temp = TempDir::new().expect("temp dir");
+    let base = temp.path().canonicalize().expect("canonical temp dir");
+    let home = base.join("home");
+    let state = base.join("realms");
+    let user_root = base.join("user");
+    let realm_dir = state.join(REALM);
+    for dir in [&home, &user_root, &realm_dir] {
+        std::fs::create_dir_all(dir).expect("fixture dir");
+    }
+
+    let add = |path: &str| {
+        format!("*** Begin Patch\n*** Add File: {path}\n+written by the model\n*** End Patch")
+    };
+    let refused_paths = [
+        "sessions.sqlite3.pre-0-1700000000",
+        "blobs/planted.bin",
+        "mobs/planted.db",
+    ];
+    let mut patches: Vec<String> = refused_paths.iter().map(|path| add(path)).collect();
+    patches.push(add("out.txt"));
+    let (port, tool_results) = scripted_file_tool_model(patches);
+    let document = format!(
+        r#"[self_hosted.servers.scripted]
+base_url = "http://127.0.0.1:{port}/v1"
+
+[self_hosted.models."{MODEL}"]
+server = "scripted"
+remote_model = "{MODEL}"
+
+[realm."{REALM}"]
+default_binding = "scripted"
+
+[realm."{REALM}".backend.scripted]
+provider = "self_hosted"
+backend_kind = "self_hosted"
+server = "scripted"
+
+[realm."{REALM}".auth.scripted]
+provider = "self_hosted"
+auth_method = "none"
+source = {{ kind = "platform_default" }}
+
+[realm."{REALM}".binding.scripted]
+backend_profile = "scripted"
+auth_profile = "scripted"
+"#
+    );
+    std::fs::write(realm_dir.join("config.toml"), &document).expect("realm document");
+
+    let mut command = Command::new(&binary);
+    for name in [
+        "RKAT_ANTHROPIC_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "RKAT_OPENAI_API_KEY",
+        "OPENAI_API_KEY",
+        "RKAT_GEMINI_API_KEY",
+        "GEMINI_API_KEY",
+        "RKAT_TEST_CLIENT",
+    ] {
+        command.env_remove(name);
+    }
+    command
+        .current_dir(&base)
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("XDG_DATA_HOME", home.join(".data"))
+        .args([
+            "--realm",
+            REALM,
+            "--state-root",
+            state.to_str().expect("utf-8 state root"),
+            "--user-config-root",
+            user_root.to_str().expect("utf-8 user root"),
+        ]);
+    let create = serde_json::json!({
+        "prompt": "Apply the patch.",
+        "model": MODEL,
+        "provider": "self_hosted",
+        "enable_shell": false,
+    });
+    let (run, responses) = run_rpc_command(
+        command,
+        &[
+            ("session/create", create.clone()),
+            ("session/create", create.clone()),
+            ("session/create", create.clone()),
+            ("session/create", create),
+        ],
+    );
+    assert!(
+        run.answered && run.status.success(),
+        "rkat-rpc serves and shuts down; exit={:?} stderr:\n{}",
+        run.status,
+        run.stderr
+    );
+    for id in 2..=5 {
+        assert!(
+            responses[&id].get("result").is_some(),
+            "session/create {id} ran its turn: {}",
+            responses[&id]
+        );
+    }
+    let tool_results = tool_results.lock().unwrap().clone();
+    assert_eq!(
+        tool_results.len(),
+        4,
+        "four apply_patch calls: {tool_results:#?}"
+    );
+    for path in refused_paths {
+        assert!(
+            !realm_dir.join(path).exists(),
+            "the file tool wrote {path}: {tool_results:#?}"
+        );
+    }
+    assert_eq!(
+        tool_results
+            .iter()
+            .filter(|result| result.contains("engine's own directory"))
+            .count(),
+        refused_paths.len(),
+        "each call on a store was refused: {tool_results:#?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(realm_dir.join("out.txt")).expect("the ordinary file"),
+        "written by the model\n",
+        "{tool_results:#?}"
+    );
+
+    let listed = meerkat::HostConfinement::realm_documents(&realm_dir);
+    let mut entries: Vec<String> = std::fs::read_dir(&realm_dir)
+        .expect("the realm directory")
+        .map(|entry| {
+            entry
+                .expect("a realm entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    entries.sort();
+    // The ordinary file is the agent's own, and the engine directory is
+    // refused without any declaration.
+    let undeclared: Vec<&String> = entries
+        .iter()
+        .filter(|name| !matches!(name.as_str(), "out.txt" | ".rkat"))
+        .filter(|name| !declared_realm_entry(&listed, &realm_dir, name))
+        .collect();
+    assert!(
+        undeclared.is_empty(),
+        "entries of the served realm the server does not declare: {undeclared:?} (all: {entries:?})"
+    );
+}
+
+/// A scripted OpenAI-compatible chat-completions server on loopback that
+/// makes the queued tool calls one after the other in ONE conversation:
+/// the first request is answered with the first call, each request that
+/// carries a tool result with the next, and the last with text. Returns its
+/// port and the tool results it was sent, in the order of the calls.
+fn scripted_tool_call_model(
+    calls: Vec<(&'static str, serde_json::Value)>,
+) -> (u16, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    use std::sync::{Arc, Mutex};
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind scripted model");
+    let port = listener
+        .local_addr()
+        .expect("scripted model address")
+        .port();
+    let queue = Arc::new(Mutex::new(
+        calls.into_iter().collect::<std::collections::VecDeque<_>>(),
+    ));
+    let results = Arc::new(Mutex::new(Vec::new()));
+    let served_results = Arc::clone(&results);
+    std::thread::spawn(move || {
+        for socket in listener.incoming().flatten() {
+            let queue = Arc::clone(&queue);
+            let results = Arc::clone(&served_results);
+            std::thread::spawn(move || {
+                let mut socket = socket;
+                let mut buffer = Vec::new();
+                let mut chunk = [0u8; 8192];
+                let header_end = loop {
+                    if let Some(position) =
+                        buffer.windows(4).position(|window| window == b"\r\n\r\n")
+                    {
+                        break position + 4;
+                    }
+                    match socket.read(&mut chunk) {
+                        Ok(0) | Err(_) => return,
+                        Ok(read) => buffer.extend_from_slice(&chunk[..read]),
+                    }
+                };
+                let headers = String::from_utf8_lossy(&buffer[..header_end]).to_ascii_lowercase();
+                let length = headers
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length:"))
+                    .and_then(|value| value.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                while buffer.len() < header_end + length {
+                    match socket.read(&mut chunk) {
+                        Ok(0) | Err(_) => return,
+                        Ok(read) => buffer.extend_from_slice(&chunk[..read]),
+                    }
+                }
+                let request: serde_json::Value =
+                    serde_json::from_slice(&buffer[header_end..header_end + length])
+                        .unwrap_or_default();
+                let last = request["messages"]
+                    .as_array()
+                    .and_then(|messages| messages.last())
+                    .cloned()
+                    .unwrap_or_default();
+                if last["role"].as_str() == Some("tool") {
+                    results.lock().unwrap().push(match &last["content"] {
+                        serde_json::Value::String(text) => text.clone(),
+                        other => other.to_string(),
+                    });
+                }
+                let chunk_of = |value: serde_json::Value| format!("data: {value}\n\n");
+                let mut body = String::new();
+                let next = queue.lock().unwrap().pop_front();
+                match next {
+                    Some((name, arguments)) => {
+                        let id = format!("call_{}", results.lock().unwrap().len() + 1);
+                        body.push_str(&chunk_of(serde_json::json!({
+                            "choices": [{
+                                "delta": { "tool_calls": [{
+                                    "index": 0,
+                                    "id": id,
+                                    "type": "function",
+                                    "function": { "name": name, "arguments": arguments.to_string() }
+                                }] },
+                                "finish_reason": null
+                            }]
+                        })));
+                        body.push_str(&chunk_of(serde_json::json!({
+                            "choices": [{ "delta": {}, "finish_reason": "tool_calls" }]
+                        })));
+                    }
+                    None => {
+                        body.push_str(&chunk_of(serde_json::json!({
+                            "choices": [{ "delta": { "content": "done" }, "finish_reason": null }]
+                        })));
+                        body.push_str(&chunk_of(serde_json::json!({
+                            "choices": [{ "delta": {}, "finish_reason": "stop" }]
+                        })));
+                    }
+                }
+                body.push_str(&chunk_of(serde_json::json!({
+                    "choices": [],
+                    "usage": { "prompt_tokens": 10, "completion_tokens": 2 }
+                })));
+                body.push_str("data: [DONE]\n\n");
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = socket.write_all(response.as_bytes());
+                let _ = socket.shutdown(std::net::Shutdown::Both);
+            });
+        }
+    });
+    (port, results)
+}
+
+/// One realm served by a started `rkat-rpc` without `--context-root`, on
+/// `backend`: a session uses the realm (it loads an ordinary file into the
+/// blob store and writes one), the host takes a config write, and the
+/// session's file tools are asked to write and to read every entry the
+/// server declares for the realm, a file under each declared directory and
+/// side files of declared files. Every such call is refused, nothing is
+/// planted, and every entry the realm then holds at its root is declared.
+#[cfg(unix)]
+fn served_realm_refuses_every_declared_entry(backend: &str) {
+    const REALM: &str = "file-tools-census";
+    const MODEL: &str = "scripted-file-tools";
+    let binary = rkat_rpc_binary();
+    let temp = TempDir::new().expect("temp dir");
+    let base = temp.path().canonicalize().expect("canonical temp dir");
+    let home = base.join("home");
+    let state = base.join("realms");
+    let user_root = base.join("user");
+    let realm_dir = state.join(REALM);
+    for dir in [&home, &user_root, &realm_dir] {
+        std::fs::create_dir_all(dir).expect("fixture dir");
+    }
+    std::fs::write(realm_dir.join("seed.txt"), "seed\n").expect("an ordinary file");
+
+    let add = |path: &str| {
+        serde_json::json!({
+            "patch": format!(
+                "*** Begin Patch\n*** Add File: {path}\n+written by the model\n*** End Patch"
+            )
+        })
+    };
+    let load = |path: &str| serde_json::json!({ "path": path, "media_type": "text/plain" });
+    // Each declared entry by its own name when it is a file, and a file
+    // under it when it is a directory; then side files of declared files.
+    let mut targets: Vec<String> = meerkat::HostConfinement::realm_documents(&realm_dir)
+        .iter()
+        .map(|entry| {
+            let name = entry
+                .file_name()
+                .and_then(|name| name.to_str())
+                .expect("a declared entry's name");
+            if name.rfind('.').is_some_and(|index| index > 0) {
+                name.to_owned()
+            } else {
+                format!("{name}/planted.txt")
+            }
+        })
+        .collect();
+    targets.extend(
+        [
+            "sessions.sqlite3-wal",
+            "sessions.sqlite3.planted",
+            "approvals.json.planted",
+            "config_state.planted.lock",
+            "admission.lock",
+            "realm.mfence",
+        ]
+        .map(str::to_owned),
+    );
+    let mut calls: Vec<(&'static str, serde_json::Value)> = vec![
+        ("blob_load_file", serde_json::json!({ "path": "seed.txt" })),
+        ("apply_patch", add("out.txt")),
+    ];
+    for target in &targets {
+        calls.push(("apply_patch", add(target)));
+        calls.push(("blob_load_file", load(target)));
+    }
+    let (port, tool_results) = scripted_tool_call_model(calls);
+    let document = format!(
+        r#"[self_hosted.servers.scripted]
+base_url = "http://127.0.0.1:{port}/v1"
+
+[self_hosted.models."{MODEL}"]
+server = "scripted"
+remote_model = "{MODEL}"
+
+[realm."{REALM}"]
+default_binding = "scripted"
+
+[realm."{REALM}".backend.scripted]
+provider = "self_hosted"
+backend_kind = "self_hosted"
+server = "scripted"
+
+[realm."{REALM}".auth.scripted]
+provider = "self_hosted"
+auth_method = "none"
+source = {{ kind = "platform_default" }}
+
+[realm."{REALM}".binding.scripted]
+backend_profile = "scripted"
+auth_profile = "scripted"
+"#
+    );
+    std::fs::write(realm_dir.join("config.toml"), &document).expect("realm document");
+
+    let mut command = Command::new(&binary);
+    for name in [
+        "RKAT_ANTHROPIC_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "RKAT_OPENAI_API_KEY",
+        "OPENAI_API_KEY",
+        "RKAT_GEMINI_API_KEY",
+        "GEMINI_API_KEY",
+        "RKAT_TEST_CLIENT",
+    ] {
+        command.env_remove(name);
+    }
+    command
+        .current_dir(&base)
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("XDG_DATA_HOME", home.join(".data"))
+        .args([
+            "--realm",
+            REALM,
+            "--realm-backend",
+            backend,
+            "--state-root",
+            state.to_str().expect("utf-8 state root"),
+            "--user-config-root",
+            user_root.to_str().expect("utf-8 user root"),
+        ]);
+    let create = serde_json::json!({
+        "prompt": "Use the file tools.",
+        "model": MODEL,
+        "provider": "self_hosted",
+        "enable_shell": false,
+    });
+    let (run, responses) = run_rpc_command(
+        command,
+        &[
+            ("session/create", create),
+            (
+                "config/patch",
+                serde_json::json!({ "patch": { "max_tokens": 2048 } }),
+            ),
+        ],
+    );
+    assert!(
+        run.answered && run.status.success(),
+        "{backend}: rkat-rpc serves and shuts down; exit={:?} stderr:\n{}",
+        run.status,
+        run.stderr
+    );
+    for id in 2..=3 {
+        assert!(
+            responses[&id].get("result").is_some(),
+            "{backend}: request {id} was answered with a result: {}",
+            responses[&id]
+        );
+    }
+
+    let tool_results = tool_results.lock().unwrap().clone();
+    assert_eq!(
+        tool_results.len(),
+        2 + 2 * targets.len(),
+        "{backend}: every scripted call was made: {tool_results:#?}"
+    );
+    assert!(
+        !tool_results[0].contains("engine's own directory"),
+        "{backend}: the ordinary file was loaded: {}",
+        tool_results[0]
+    );
+    assert_eq!(
+        std::fs::read_to_string(realm_dir.join("out.txt")).expect("the ordinary file"),
+        "written by the model\n",
+        "{backend}"
+    );
+    for (index, target) in targets.iter().enumerate() {
+        let written = &tool_results[2 + 2 * index];
+        let read = &tool_results[3 + 2 * index];
+        assert!(
+            written.contains("engine's own directory") && written.contains("do not write there"),
+            "{backend}: a write of {target} was refused: {written}"
+        );
+        assert!(
+            read.contains("engine's own directory") && read.contains("do not read there"),
+            "{backend}: a read of {target} was refused: {read}"
+        );
+    }
+    for planted in [
+        "sessions.sqlite3.planted",
+        "approvals.json.planted",
+        "config_state.planted.lock",
+    ] {
+        assert!(
+            !realm_dir.join(planted).exists(),
+            "{backend}: {planted} was written"
+        );
+    }
+    for target in targets
+        .iter()
+        .filter(|target| target.ends_with("/planted.txt"))
+    {
+        assert!(
+            !realm_dir.join(target).exists(),
+            "{backend}: {target} was written"
+        );
+    }
+
+    let listed = meerkat::HostConfinement::realm_documents(&realm_dir);
+    let mut entries: Vec<String> = std::fs::read_dir(&realm_dir)
+        .expect("the realm directory")
+        .map(|entry| {
+            entry
+                .expect("a realm entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    entries.sort();
+    for used in ["blobs", "config_state.json"] {
+        assert!(
+            entries.iter().any(|name| name == used),
+            "{backend}: the realm was used before it was listed ({used}): {entries:?}"
+        );
+    }
+    // The two ordinary files are the agent's own, and the engine directory
+    // is refused without any declaration.
+    let undeclared: Vec<&String> = entries
+        .iter()
+        .filter(|name| !matches!(name.as_str(), "seed.txt" | "out.txt" | ".rkat"))
+        .filter(|name| !declared_realm_entry(&listed, &realm_dir, name))
+        .collect();
+    assert!(
+        undeclared.is_empty(),
+        "{backend}: entries of the served realm the server does not declare: {undeclared:?} (all: {entries:?})"
+    );
+}
+
+/// The file tools of a realm served on the SQLite backend refuse every
+/// entry the server declares for it, and the used realm holds no other.
+#[cfg(unix)]
+#[test]
+fn rkat_rpc_file_tools_refuse_every_declared_entry_of_a_sqlite_realm() {
+    served_realm_refuses_every_declared_entry("sqlite");
+}
+
+/// The file tools of a realm served on the JSONL backend refuse every
+/// entry the server declares for it, and the used realm holds no other.
+#[cfg(unix)]
+#[test]
+fn rkat_rpc_file_tools_refuse_every_declared_entry_of_a_jsonl_realm() {
+    served_realm_refuses_every_declared_entry("jsonl");
+}

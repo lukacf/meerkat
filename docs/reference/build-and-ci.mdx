@@ -615,11 +615,12 @@ demand (`.github/workflows/nightly.yml`) on GitHub-hosted runners:
 
 ### Published crates standalone
 
-Since 0.9.4 every crate the release publishes passes its own tests in its
-unpacked package. `.github/workflows/published-crates-standalone.yml` runs
-daily, after the nightly chains, and on dispatch
+The Core standalone census tests the unpacked crates listed in
+`scripts/release-rust-crates.sh`. To see whether the tests passed, check the
+census results for the revision you are using. The workflow
+`.github/workflows/published-crates-standalone.yml` runs daily and on dispatch
 (`gh workflow run published-crates-standalone.yml --ref <branch>`). It
-packages every release crate and unpacks the packages into a synthetic
+packages the Core release crates and unpacks them into a synthetic
 workspace. Per crate, without sibling feature unification, it runs plain
 `cargo test` with the feature set the crate's
 `[package.metadata.meerkat.standalone-tests]` publishes (the crate's README
@@ -632,8 +633,20 @@ their README command sets `RUST_MIN_STACK=8388608`; the other crates' suites
 have not been measured at Rust's 2 MiB default and may need the same setting.
 The `fmt-governance` job of pull-request CI runs the static half
 (`make published-crates-standalone-selftest` and
-`make check-published-crates-standalone-guard`). Publication does not wait for
-the census yet.
+`make check-published-crates-standalone-guard`). The guard also reads each
+crate's lib sources: a test its `workspace-tests` feature gates must be
+declared in `ci/standalone-workspace-only.toml`, a declared test must be such
+a test, and the feature may gate test code only, so a gated test without its
+declaration fails the pull request instead of the next census. Publication
+does not wait for the census yet.
+
+Meta is not part of the Core census. Its published-floor check builds what
+a downstream application uses: the unpacked libraries and binaries, with
+Core dependencies resolved from crates.io. It runs `cargo check` in PR mode
+and `cargo build` in release mode, both with `--workspace --lib --bins`.
+Neither command runs tests. To run the Meta tests, use the repository
+checkout: the published `meerkat-meta` 0.9.18 archive omits the `tests/`
+directory and the test-only source files named in its package manifest.
 
 `rkat`'s docs-examples test parses
 `crates/meerkat-cli/tests/fixtures/doc_examples.txt`, which the package

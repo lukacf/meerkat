@@ -97,6 +97,24 @@ impl ConfinementConfig {
         self.slot(kind).as_ref().or(self.all.as_ref())
     }
 
+    /// Whether this selection and `other` require the same confinement of
+    /// every launch kind. `trusted_host` requires nothing, so it is the same
+    /// as no statement, and it does not matter whether a requirement is
+    /// stated in `all` or in the kind's own table.
+    #[must_use]
+    pub fn requires_the_same(&self, other: &Self) -> bool {
+        ConfinementLaunchKind::ALL
+            .into_iter()
+            .all(|kind| self.requirement(kind) == other.requirement(kind))
+    }
+
+    /// The confinement this selection requires of `kind`, `None` for the
+    /// trusted host.
+    fn requirement(&self, kind: ConfinementLaunchKind) -> Option<&LaunchConfinement> {
+        self.statement(kind)
+            .filter(|statement| statement.requires_confinement())
+    }
+
     fn slot(&self, kind: ConfinementLaunchKind) -> &Option<LaunchConfinement> {
         match kind {
             ConfinementLaunchKind::Shell => &self.shell,
@@ -540,6 +558,28 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
         let config = parse("[confinement.all]\nmode = \"workspace\"\n").unwrap();
         assert_eq!(config.all, Some(workspace()));
         assert!(parse("[confinement]\n").unwrap().is_empty());
+    }
+
+    /// Two selections require the same when every launch kind gets the same
+    /// requirement, wherever each states it; `trusted_host` requires
+    /// nothing.
+    #[test]
+    fn requirements_compare_per_launch_kind() {
+        let all = parse("[confinement.all]\nmode = \"workspace\"\n").unwrap();
+        let per_kind = parse(
+            "[confinement.shell]\nmode = \"workspace\"\n\n[confinement.command_hooks]\nmode = \"workspace\"\n\n[confinement.mcp_stdio]\nmode = \"workspace\"\n",
+        )
+        .unwrap();
+        let shell_only = parse("[confinement.shell]\nmode = \"workspace\"\n").unwrap();
+        let trusted = parse("[confinement.all]\nmode = \"trusted_host\"\n").unwrap();
+        let networked =
+            parse("[confinement.all]\nmode = \"workspace\"\nnetwork = \"unrestricted\"\n").unwrap();
+
+        assert!(all.requires_the_same(&per_kind) && per_kind.requires_the_same(&all));
+        assert!(trusted.requires_the_same(&ConfinementConfig::default()));
+        assert!(!all.requires_the_same(&shell_only));
+        assert!(!all.requires_the_same(&networked));
+        assert!(!all.requires_the_same(&trusted));
     }
 
     #[test]

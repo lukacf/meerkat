@@ -35,6 +35,1842 @@ them.
 
 ## [Unreleased]
 
+### Breaking
+
+- Behaviour-only (not measured by the gate): `brain_swap` still reports `staged` or `already_staged`, not the outcome. Previously the switch could take effect with an incompatible level and the next input would be refused. Now, before the next input, a target route that refuses the held level, alone or in combination with the session's other reasoning settings, is denied with `CapabilityPolicy`. The session keeps its model and level and runs the input there. The agent gets no later turn notice of the denial; the routing record and a host log warning identify it.
+- Rust API: both `MeerkatMachineInput::RequestFiniteSwitchTurn` and `MeerkatMachineInput::RequestUntilChangedSwitchTurn` gain `target_reasoning_effort` and `inspected_current_identity`. This applies to the inputs in `meerkat_machine_schema::catalog::dsl::meerkat_machine` and `meerkat_runtime::meerkat_machine::dsl`. In `meerkat-machine-kernels`, both `generated::meerkat::inputs::RequestFiniteSwitchTurn` and `generated::meerkat::inputs::RequestUntilChangedSwitchTurn` likewise gain `target_reasoning_effort: Option<TargetReasoningEffortVerdict>` and `inspected_current_identity: Option<SessionLlmIdentity>`.
+- Rust API: `meerkat-machine-kernels` adds six variants to `generated::meerkat::TransitionId`:
+  - `RequestFiniteSwitchTurnReasoningEffortRefusedIdle`
+  - `RequestFiniteSwitchTurnReasoningEffortRefusedAttached`
+  - `RequestFiniteSwitchTurnReasoningEffortRefusedRunning`
+  - `RequestUntilChangedSwitchTurnReasoningEffortRefusedIdle`
+  - `RequestUntilChangedSwitchTurnReasoningEffortRefusedAttached`
+  - `RequestUntilChangedSwitchTurnReasoningEffortRefusedRunning`
+
+### Changed
+
+- For a staged model switch, the compatibility check now covers the session's existing reasoning level when the target model's supported levels are available at decision time.
+
+- Configured self-hosted Chat Completions and Responses clients now describe an engine-authored closed set of string choices as a string enum in the outgoing tool schema. An optional parameter still stays out of `required`. The schema no longer advertises a description for each choice or an explicit `null` alternative.
+
+### Upgrade notes
+
+- After a denial, do not resend the input: it ran on the retained model. Changing or clearing the level does not revive the denied switch. To use the target, choose a supported level or explicitly clear the held level, then request the switch again.
+
+- Rust callers must supply both fields when constructing either switch-request input, update named patterns that omit `..`, and handle the six new variants in exhaustive `TransitionId` matches. An empty verdict field does not deliver a compatibility decision. A custom `SessionLlmReconfigureHost` that wants target identity inspection must implement `inspect_target_session_llm_identity`; otherwise the host remains responsible for its judge's acceptance.
+
+- If you inspect these request schemas, read the allowed strings from `enum`; do not rely on per-choice descriptions. Omission is still allowed for the optional parameter. This does not establish that sending `null` is equivalent to omitting it.
+
+  The tests inspected locally constructed requests for one built-in parameter. Unchanged controls included Chat Completions on the Copilot backend, one OpenAI Responses case at an alternate base URL, and non-engine schemas. No test used OpenAI at its default address or checked server acceptance. A boolean sub-schema (where the schema itself is the literal `true` or `false`) is outside this change.
+
+### Known limitations
+
+- On the stock host, a target whose client cannot be built is held. For a buildable target, **no source for supported levels** means the switch is denied. **An existing source that is temporarily unreadable** is different: the switch can take effect without a compatibility verdict. Requests on the target are then refused as retryable until the levels can be read. If the target does not support the held level, requests remain refused until the level or model changes.
+
+## [0.9.18] - 2026-11-23
+
+### Breaking
+
+- `meerkat-machine-schema` (and its re-export
+  `meerkat_mob::machines::mob_store_restore_lifecycle`):
+  `MobStoreRestoreLifecycleMachine` is version 2 and owns one mob store's
+  whole stay in a host's mob set, where version 1 owned only a quarantined
+  store. Its public types change with it:
+  - `MobStoreRestoreLifecyclePhase`: `Unclassified` is renamed `Dormant`,
+    `Released` is removed, and `Loading`, `Managed`, `Unloading`, `Held` and
+    `Gone` are added. A store a re-attempt released is now `Managed`, `Held` or
+    `Gone`. `Quarantined` and `Retrying` keep their meaning and move to later
+    positions.
+  - `MobStoreRestoreLifecycleInput` and
+    `MobStoreRestoreLifecycleInputVariant`: `Quarantine` is removed (a store is
+    quarantined by a failed `ResolveLoad`), and `Census`, `Register`,
+    `RequestLoad`, `ResolveLoad`, `RequestUnload`, `ResolveUnload`,
+    `ReleaseHeld` and `Destroy` are added. `RequestRetry` and `ResolveRetry` are
+    unchanged and move to later positions.
+  - `MobStoreRestoreLifecycleEffect` and
+    `MobStoreRestoreLifecycleEffectVariant`: `StoreListed`, `StoreRegistered`,
+    `LoadAdmitted`, `StoreLoaded`, `UnloadAdmitted`, `StoreUnloaded`,
+    `UnloadDeclined`, `HoldReleased` and `StoreGone` are added.
+    `StoreQuarantined`, `RetryAdmitted`, `StoreReleased`,
+    `StoreStillQuarantined` and `RequestRefused` are unchanged and move to later
+    positions.
+  - `MobStoreRestoreRefusal`: `AlreadyClassified` is removed, so `NotRetrying`
+    and `NotRetryable` move one position up, and `LoadInFlight`, `NotDormant`,
+    `NotLoading`, `NotManaged`, `NotHeld`, `HoldKept`, `NotReloadable`,
+    `UnloadInFlight`, `NotUnloading`, `AlreadyHosted` and `Gone` are added.
+  - `MobStoreRestoreLifecycleMachineState` gains the fields `origin:
+    MobStoreOrigin` (a new enum: `Persisted`, `Volatile`, `HostHandle`) and
+    `served: bool` (true only while the record is `Managed`: the mob is handed
+    out only then).
+  - `MobStoreUnloadOutcome` is a new enum (`Closed`, `Busy`): the answer of a
+    mob's actor to an admitted idle unload, carried by `ResolveUnload`.
+  - The invariants `unclassified_record_has_no_attempts` and
+    `released_record_was_attempted` are replaced by
+    `only_a_quarantine_holds_a_class`, `only_a_persisted_store_waits_unloaded`
+    and `a_mob_is_handed_out_exactly_while_managed` (`served` is true in
+    `Managed` and in no other phase).
+
+  The idle unload of a mob is two steps of its record, in the shape of a
+  load: `RequestUnload` is admitted only in `Managed` and only for a store
+  the set can load again (`origin` is `Persisted`; otherwise it is refused
+  `NotReloadable`) and moves the record to `Unloading`; `ResolveUnload`
+  carries the actor's answer (`Closed` returns the record to `Dormant`,
+  `Busy` to `Managed`). In `Unloading` a `Register`, a `RequestLoad` and a
+  `Destroy` are refused `UnloadInFlight`.
+
+  The record is volatile and never persisted, so no stored state changes.
+  Code that matches these enums exhaustively adds the new variants; code
+  that compares or casts their variants reads the new order.
+
+- `meerkat-machine-kernels`: the generated kernel of that machine
+  (`generated::mob_store_restore_lifecycle`) changes the same way. `Phase`,
+  `Input`, `InputKind`, `Effect` and `EffectKind` gain and lose the variants
+  named above (`Quarantined`, `Retrying`, `RequestRetry`, `ResolveRetry`,
+  `StoreQuarantined`, `RetryAdmitted`, `StoreReleased`, `StoreStillQuarantined`
+  and `RequestRefused` stay and change position, as `NotRetrying` and
+  `NotRetryable` do in `MobStoreRestoreRefusal`), `State` gains the fields
+  `origin` and `served`, and `MobStoreOrigin` and `MobStoreUnloadOutcome` are
+  new. `TransitionId` loses `QuarantineUnclassified`, `QuarantineQuarantined`,
+  `QuarantineRetrying`, `QuarantineReleased`, `RequestRetryUnclassified`,
+  `RequestRetryReleased`, `ResolveRetryRestored`, `ResolveRetryUnclassified`,
+  `ResolveRetryReleased` and now holds one variant per transition of version 2:
+  `CensusDormant`, `CensusGone`, `CensusHeld`, `CensusLoading`, `CensusManaged`,
+  `CensusQuarantined`, `CensusRetrying`, `CensusUnloading`, `DestroyDormant`,
+  `DestroyGone`, `DestroyHeld`, `DestroyLoading`, `DestroyManaged`,
+  `DestroyQuarantined`, `DestroyRetrying`, `DestroyUnloading`,
+  `RegisterDormant`, `RegisterGone`, `RegisterHeld`, `RegisterLoading`,
+  `RegisterManagedHostHandle`, `RegisterManagedRefused`, `RegisterQuarantined`,
+  `RegisterRetrying`, `RegisterUnloading`, `ReleaseHeldDormant`,
+  `ReleaseHeldGone`, `ReleaseHeldKept`, `ReleaseHeldLoading`,
+  `ReleaseHeldManaged`, `ReleaseHeldQuarantined`, `ReleaseHeldRetrying`,
+  `ReleaseHeldSettled`, `ReleaseHeldUnloading`, `ReleaseHeldWhileManaged`,
+  `RequestLoadDormant`, `RequestLoadGone`, `RequestLoadHeld`,
+  `RequestLoadLoading`, `RequestLoadManaged`, `RequestLoadQuarantined`,
+  `RequestLoadRetrying`, `RequestLoadUnloading`, `RequestRetryDormant`,
+  `RequestRetryGone`, `RequestRetryHeld`, `RequestRetryLoading`,
+  `RequestRetryManaged`, `RequestRetryQuarantined`,
+  `RequestRetryQuarantinedNotRetryable`, `RequestRetryRetrying`,
+  `RequestRetryUnloading`, `RequestUnloadDormant`, `RequestUnloadGone`,
+  `RequestUnloadHeld`, `RequestUnloadLoading`, `RequestUnloadManaged`,
+  `RequestUnloadManagedNotReloadable`, `RequestUnloadQuarantined`,
+  `RequestUnloadRetrying`, `RequestUnloadUnloading`, `ResolveLoadDormant`,
+  `ResolveLoadFailed`, `ResolveLoadGone`, `ResolveLoadHeld`,
+  `ResolveLoadManaged`, `ResolveLoadQuarantined`, `ResolveLoadRetrying`,
+  `ResolveLoadSettled`, `ResolveLoadUnloading`, `ResolveLoadWhileHeld`,
+  `ResolveLoadWhileManaged`, `ResolveRetryDormant`, `ResolveRetryFailed`,
+  `ResolveRetryGone`, `ResolveRetryHeld`, `ResolveRetryLoading`,
+  `ResolveRetryManaged`, `ResolveRetryQuarantined`, `ResolveRetrySettled`,
+  `ResolveRetryUnloading`, `ResolveRetryWhileHeld`, `ResolveRetryWhileManaged`,
+  `ResolveUnloadBusy`, `ResolveUnloadClosed`, `ResolveUnloadDormant`,
+  `ResolveUnloadGone`, `ResolveUnloadHeld`, `ResolveUnloadLoading`,
+  `ResolveUnloadQuarantined`, `ResolveUnloadRetrying`,
+  `ResolveUnloadWhileManaged`.
+
+- `meerkat-machine-schema` (and its re-export
+  `meerkat_mob::machines::mob_store_restore_lifecycle`),
+  `meerkat-machine-kernels`: the same machine is version 3 in this release,
+  not 2: the record of the store a host's launch declares (the host's
+  default mob, see Added) owns that the store is its launch's and whether
+  its mob still waits for the launch's first serve. On top of the changes
+  above:
+  - `MobStoreOrigin` gains `Declared` (after `HostHandle`).
+  - `MobStoreLoadTrigger` is a new enum (`Lookup`, `Pass`, `Launch`): what
+    asks for a load.
+  - `MobStoreRestoreLifecycleInput` and
+    `MobStoreRestoreLifecycleInputVariant` (the kernel's `Input` and
+    `InputKind`): `Declare { vacant: bool }` and `EndLaunchWait` are added
+    after `Register`, and `RequestLoad` is no longer a unit variant: it is
+    `RequestLoad { trigger: MobStoreLoadTrigger }`.
+  - `MobStoreRestoreLifecycleEffect` and
+    `MobStoreRestoreLifecycleEffectVariant` (the kernel's `Effect` and
+    `EffectKind`): `LaunchDeclared` and `LaunchWaitEnded` are added after
+    `StoreRegistered`.
+  - `MobStoreRestoreRefusal` gains `AwaitsLaunch`, `LaunchOwned`,
+    `NotAwaitingLaunch` and `NotDeclared`, after `Gone`. A `Register` that
+    names `Declared` is admitted only for a record `Declare` made the
+    declared one; for any other it is refused `NotDeclared`.
+  - `MobStoreRestoreLifecycleMachineState` (the kernel's `State`) gains the
+    fields `awaits_launch: bool` and `vacant: bool`.
+  - The invariants `only_a_declared_store_awaits_its_launch`,
+    `a_store_that_is_gone_awaits_no_launch`,
+    `a_store_whose_unload_is_admitted_awaits_no_launch`,
+    `a_declared_store_is_never_gone` and
+    `only_a_declared_store_that_is_not_loaded_is_vacant` are added, and
+    `only_a_persisted_store_waits_unloaded` now lets a declared store wait
+    as well.
+  - The kernel's `TransitionId` gains `DeclareDormant`,
+    `DeclareDormantDeclared`, `DeclareLoading`, `DeclareManaged`,
+    `DeclareUnloading`, `DeclareHeld`, `DeclareQuarantined`,
+    `DeclareRetrying`, `DeclareGone`, `EndLaunchWaitDormant`,
+    `EndLaunchWaitDormantNotAwaited`, `EndLaunchWaitLoading`,
+    `EndLaunchWaitLoadingNotAwaited`, `EndLaunchWaitManaged`,
+    `EndLaunchWaitManagedNotAwaited`, `EndLaunchWaitUnloading`,
+    `EndLaunchWaitHeld`,
+    `EndLaunchWaitHeldNotAwaited`, `EndLaunchWaitQuarantined`,
+    `EndLaunchWaitQuarantinedNotAwaited`, `EndLaunchWaitRetrying`,
+    `EndLaunchWaitRetryingNotAwaited`, `EndLaunchWaitGone`,
+    `RegisterDormantLaunchOwned`, `RegisterDormantNotDeclared`,
+    `RegisterManagedLaunchOwned`,
+    `RequestLoadDormantAwaitsLaunch`, `RequestLoadDormantVacant`,
+    `RequestLoadDormantLaunchOwned`, `RequestRetryQuarantinedAwaitsLaunch`,
+    `ResolveLoadSettledDeclared`, `ResolveRetrySettledDeclared`,
+    `ReleaseHeldSettledDeclared` and `DestroyManagedLaunchOwned`.
+
+  For a store that is not declared nothing changes but the shape of
+  `RequestLoad` (its trigger decides nothing there). A declared store's
+  record refuses a lookup's load and an on-demand re-attempt with
+  `AwaitsLaunch` until `EndLaunchWait`, refuses a pass's load, every
+  `Register` but one that names `Declared`, a host's handle and a `Destroy`
+  with `LaunchOwned`, refuses `RequestUnload` with `NotReloadable`, and
+  stays `Dormant` with `vacant` set where a load, a re-attempt or a
+  released hold of any other store ends `Gone`. The record is in process
+  only, as before: nothing stored names the new origin or fields.
+
+- `meerkat-machine-schema` (and its re-export
+  `meerkat_mob::machines::mob_store_restore_lifecycle`),
+  `meerkat-machine-kernels`: the same machine is version 4 in this release,
+  not 3: a mob the set itself runs keeps its id against a host's handle. On
+  top of the changes above, the kernel's `TransitionId` gains
+  `RegisterManagedHostHandleSetRun`. A `Register` that names `HostHandle`
+  is admitted over a managed record only when that record's own origin is
+  `HostHandle` (a host inserts its mob again); over the record of a store
+  the set loaded, or of a mob it created, it is refused `AlreadyHosted` and
+  the record does not change, where it was admitted before and the mob's
+  handle was replaced. The record is in process only: nothing stored names
+  the version.
+
+- `meerkat-machine-schema` (and its re-export
+  `meerkat_mob::machines::mob_store_restore_lifecycle`),
+  `meerkat-machine-kernels`: the same machine is version 5 in this release:
+  a create takes its mob's id before the mob is built. On top of the
+  changes above, `MobStoreRestoreLifecyclePhase` gains `Creating`, the
+  input enum `RequestCreate { launch }` and `ResolveCreate { outcome,
+  in_memory }`, the effect enum `CreateAdmitted` and `CreateReleased`,
+  `MobStoreRestoreRefusal` `CreateInFlight` and `NotCreating`, and the
+  kernel's `TransitionId` one arm of every input for the new phase and the
+  arms of the two new inputs; `MobStoreCreateOutcome` (`Created`, `Failed`)
+  is new. An exhaustive match over one of these enums must name the new
+  variants. The record is in process only: nothing stored names the
+  version or the phase.
+
+- `meerkat-machine-schema` (and its re-export
+  `meerkat_mob::machines::mob_store_restore_lifecycle`),
+  `meerkat-machine-kernels`: the same machine is version 6 in this release:
+  the stop of a mob that is not loaded is state of its store's record. On
+  top of the changes above, the state gains the field `stop`
+  (`MobStoreStop`: `Unread`, `NotStopped`, `Stopped`, a new enum),
+  `ResolveUnload` gains the field `stop` (what the mob answered about its
+  stop when its actor closed), the input enum gains `ReadStop { stopped }`
+  (the set's read of a dormant store, taken only while the record does not
+  know the answer), the effect enum `StopRead { stopped }`,
+  `MobStoreLoadTrigger` gains `Demand` (what originates work for the mob:
+  its load is refused for a stopped mob), `MobStoreRestoreRefusal` gains
+  `Stopped`, `StopUnread` and `StopKnown`, and the kernel's `TransitionId`
+  the arms of the new input and of a demand's load. A construction of
+  `ResolveUnload` must name `stop`, and an exhaustive match over one of
+  these enums the new variants. The record is in process only: nothing
+  stored names the version or the field.
+
+- `meerkat-machine-schema` (and its re-export
+  `meerkat_mob::machines::mob_store_restore_lifecycle`),
+  `meerkat-machine-kernels`: the same machine is version 7 in this release:
+  two more facts are the record's own. The state gains the field `known`
+  (the record stands for a store or a mob the set knows; false only for a
+  record filed for a create that has admitted nothing yet): a create is
+  admitted only by such a record, and a record a census listed, or whose
+  mob was loaded, registered or created and is not loaded now, refuses it
+  `AlreadyHosted`. The input `Register` is a host's handle only: it loses
+  the field `origin` and gains `holder_ended` (the mob the record manages
+  has ended without a destroy: its actor is over and its last phase is
+  not `Destroyed`). A host's handle over a mob the set itself
+  runs is refused while that mob runs and admitted once it has ended, and
+  a registration always gives the record the origin of a host's handle (a
+  create joins through `RequestCreate` and `ResolveCreate`). The kernel's
+  `TransitionId` gains `RequestCreateDormantKnown` and
+  `RegisterManagedHostHandleOverEnded` and loses
+  `RegisterDormantNotDeclared` and `RegisterManagedRefused`. A
+  construction of `Register` names `holder_ended` and no `origin`, and an
+  exhaustive match over `TransitionId` the changed arms. The record is in
+  process only: nothing stored names the version or the fields.
+
+  The arms the kernel's `TransitionId` gained with versions 5 and 6, by
+  name. With version 5: one arm of each input the machine already had, for
+  the new phase `Creating` (two of `EndLaunchWait`), `CensusCreating`,
+  `RegisterCreating`, `DeclareCreating`, `EndLaunchWaitCreating`,
+  `EndLaunchWaitCreatingNotAwaited`, `RequestLoadCreating`,
+  `ResolveLoadCreating`, `RequestRetryCreating`, `ResolveRetryCreating`,
+  `RequestUnloadCreating`, `ResolveUnloadCreating`, `ReleaseHeldCreating`
+  and `DestroyCreating`; for `RequestCreate`, `RequestCreateDormant`,
+  `RequestCreateDormantNotDeclared`, `RequestCreateDormantLaunch`,
+  `RequestCreateDormantLaunchHoldsAMob`, `RequestCreateDormantLaunchOwned`,
+  `RequestCreateLoading`, `RequestCreateManaged`, `RequestCreateUnloading`,
+  `RequestCreateHeld`, `RequestCreateQuarantined`, `RequestCreateRetrying`,
+  `RequestCreateGone` and `RequestCreateCreating`; for `ResolveCreate`,
+  `ResolveCreateCreated`, `ResolveCreateCreatedInMemory`,
+  `ResolveCreateCreatedDeclared`, `ResolveCreateFailed`,
+  `ResolveCreateFailedDeclared`, `ResolveCreateDormant`,
+  `ResolveCreateLoading`, `ResolveCreateManaged`, `ResolveCreateUnloading`,
+  `ResolveCreateHeld`, `ResolveCreateQuarantined`, `ResolveCreateRetrying`
+  and `ResolveCreateGone`. With version 6: for a load a demand asks,
+  `RequestLoadDormantDemand`, `RequestLoadDormantStopped` and
+  `RequestLoadDormantStopUnread`; for `ReadStop`, `ReadStopDormantStopped`,
+  `ReadStopDormantNotStopped`, `ReadStopDormantKnown`, `ReadStopLoading`,
+  `ReadStopManaged`, `ReadStopUnloading`, `ReadStopHeld`,
+  `ReadStopQuarantined`, `ReadStopRetrying`, `ReadStopGone` and
+  `ReadStopCreating`.
+
+- Behaviour-only (not measured by the gate): `meerkat-mob`:
+  `MobHandle::close_if_idle` keeps its signature, and a call whose caller
+  stopped waiting before the mob's actor reached the request (its future
+  was dropped, for one at a timeout) no longer closes the mob: the actor
+  skips a request nobody waits for, so a caller that read the missing
+  answer as "not closed" is not contradicted later. A caller that waits is
+  answered as before, and an actor that was already deciding the request
+  when its caller left still decides it. A caller that wants the mob
+  closed waits for the answer.
+
+- **Behavior:** Core's Gemini catalog default changes from `gemini-4-argon`
+  to `gemini-4-neon`. A Gemini session without an explicit model or applicable
+  configured/binding default now uses Neon. With thinking unset, Meerkat sends
+  no thinking override and Google's documented default changes from Argon's
+  `medium` to Neon's `high`. Browser bootstrap also uses Neon when Gemini is the
+  highest-priority configured provider and has no explicit/configured model.
+  The Gemini fallback web-search helper selects Neon directly from the catalog;
+  main-session model, config and binding pins do not override that helper.
+  Existing session models and explicit/configured session pins retain their
+  precedence. The global and image defaults are unchanged. No wire/schema
+  break is introduced.
+
+- `meerkat-machine-kernels`: the generated input struct `generated::meerkat::inputs::RecoverInputLifecycle` gains the public field `live_boundary_delivery: Option<LiveBoundaryDelivery>`. `meerkat-runtime`: the variant `RecoverInputLifecycle` of the public generated input enum `meerkat_machine::dsl::MeerkatMachineInput` gains the same field, and so does its expansion in `meerkat-machine-schema`. Code that builds any of these with a struct literal adds the field; `None` keeps the earlier behaviour. No variant is added and no enum order moves. No wire form and no stored form changes.
+
+- **Behavior:** (behaviour-only, not measured by the gate) steers into a
+  running turn, a change of timing with no type, wire or schema change: the
+  eligible prefix of the durable content steers that wait in the steer lane
+  now joins a boundary where a durable steer has registered its claim, in
+  admission order, so the next model request is the first to carry them.
+  An acknowledged admission is not inclusion in a request: the cutoff
+  decides that. In 0.9.17 one durable steer joined per model
+  boundary, and a steer admitted while an earlier one waited joined the
+  boundary after it (read from the source at tag `v0.9.17`:
+  `DurableSteerOrder`, `crates/meerkat-runtime/src/driver/ephemeral.rs` lines
+  306-320, and the Durable steer section of
+  `docs/reference/session-contracts.mdx` there). Where a claim is
+  registered, the cutoff of a request is the publication of that claim: one
+  step under the session mutation gate, after the eligible prefix of the
+  waiting steers is joined to the run and before the runner writes the rows
+  and composes the request. Admission and recall take the same gate: a steer
+  admitted before the cutoff, also one admitted after the runner parked at
+  the boundary, joins that request when it is in the eligible prefix, and a
+  steer admitted after it waits for the next eligible boundary or the
+  follow-up turn. At a boundary
+  with no durable steer (none registered, or a park on request-only
+  context alone) the input is fixed at the one check in which the runner
+  finds every delivery it is parked on resolved, no durable steer
+  registered and no acknowledged steer still on its way: an eligible steer
+  whose admission was acknowledged before that check is in the request,
+  unless it is recalled or its preparation fails first. Once a
+  durable steer has entered the boundary, the cutoff is its publication
+  under the session mutation gate, as at any boundary. A successful in-turn
+  application that the run retains is exactly once per input, as before:
+  its join, its delivery witness, its transcript rows and its
+  `boundary_append_applied`; steers that join one boundary have adjacent
+  rows and publish their events in admission order. The applied event is
+  neither the model's response nor the durable consumption of the input,
+  and the round commit is separate evidence (retained history). The joins
+  stop at the first durable steer that cannot
+  join the run (another requester's, one the run's bound of 256 contributors
+  refuses, one whose rows cannot be written in-turn, one whose join could
+  not be made durable): it keeps its place and no steer behind it overtakes
+  it. Unchanged: no model request in flight is cancelled, steers still
+  waiting when the run ends take the follow-up turn in arrival order, and an
+  input that only a fresh turn applies never joins a running turn. In our
+  held-tool test, 0.9.3 put the first steer in the next request and the
+  rest in a follow-up turn; 0.9.4 and the tested revision of `main`
+  delivered one per request; this change delivers the eligible waiting
+  prefix together. Other releases were not measured. See
+  [Durable steer](docs/reference/session-contracts.mdx#durable-steer) and
+  Upgrade notes.
+
+### Added
+
+- `meerkat-mob`: `MobStorage::read_stored_events(path, after_cursor, limit)`
+  reads one page of a mob store's journal from the store file with no
+  running mob: the structural events after a cursor, in cursor order, and
+  the journal's latest cursor, read in one read transaction
+  (`MobEventsPage`). It is the page a running mob's events view answers,
+  unfiltered. The page names the mob the journal belongs to
+  (`MobEventsPage::mob_id`: the mob the journal's first event names, read
+  in the same transaction), whatever the page holds; a journal that holds
+  no event names none. The file is opened read-only: a missing store is
+  refused and never created, a store an earlier release wrote is read as
+  it is and not migrated, and no fence, lease or write lock is taken, so
+  a store a mob runs on can be read beside its writer. The refusals are
+  typed (`MobStoredEventsReadError`: `StoreMissing`, `ForeignSchema`,
+  `Read`).
+
+- `meerkat-mob-mcp`: `MobMcpState::mob_events_without_load(mob_id,
+  after_cursor, limit)` reads one page of a hosted mob's journal and the
+  journal's latest cursor without loading the mob. `mob_events` and
+  `mob_latest_event_cursor` answer through the mob's handle, and a lookup
+  of a mob that is known and not loaded loads it; this read takes the
+  set's census first, as a listing does, and then loads no mob for the id
+  it is asked and changes nothing of the set. A managed mob answers
+  through its own handle. A mob that is known and not served by a loaded
+  handle (not loaded, its load or its idle unload in flight, or a child
+  mob held before activation) is read from its store's file with
+  `MobStorage::read_stored_events`, read-only. A quarantined store answers
+  its quarantine and is not read, and no restore is re-attempted; a mob no
+  set holds is `MobNotFound`, as is a store whose journal names another
+  mob or holds no event, for every page. A store this build cannot read
+  answers `StorageError` carrying the read's own refusal and is not
+  quarantined by the read. The page is not filtered: a caller that wants
+  a mob's spawns keeps those; it names its mob (`MobEventsPage::mob_id`).
+  It needs the console owner (`SubscribeEvents`), for a managed mob as
+  well: a mob that is not loaded has no running machine that could
+  resolve a per-mob grant.
+
+- `meerkat-mob`: `MobStorage::read_stored_creator(path, mob_id)` reads who
+  created a stored mob (`MobProvenance`) from the creation record in its
+  store file, with no running mob. It answers nothing when the record
+  proves nothing about the mob asked: the store holds no creation record,
+  the record is finalized, or the record names another mob. The file is
+  opened read-only, as
+  `MobStorage::read_stored_events` opens it: never created, never
+  migrated, no fence, lease or write lock. The refusals are typed
+  (`MobStoredCreationReadError`: `StoreMissing`, `ForeignSchema`, `Read`).
+  `MobStorage::read_creation_provenance(path)` is the same read without
+  the mob's id, for a caller that walks store files. It answers a
+  `StoredMobCreation`: who created the store's mob (`Recorded`), a store
+  that holds no mob (`NoMob`: no creation record, or a finalized one), or
+  a store that predates creation records (`PredatesCreationRecords`: an
+  earlier release wrote it and no later one has opened it for writing
+  since, so who created its mob is recorded nowhere).
+  `read_stored_creator` answers nothing for both of the last two.
+  On a host that loads its mobs on demand
+  (`MobRestorePolicy::OnDemand`), the schedule write's judge reads a mob
+  that is not loaded through it: the member that created another mob with
+  its own create may write a schedule that has the host act in that mob
+  (a helper to spawn there, one of its flows) while the mob is not loaded
+  or its load or idle unload is in flight, and that mob is neither loaded
+  nor restored for the question. (For a creator recorded as a member of
+  another mob, the rule still looks that recorded parent mob up with the
+  ordinary lookup, which loads it when it is not loaded.) A mob held
+  before activation, a quarantined mob and a destroyed mob stay out of
+  reach. A mob created before mob creation records existed has no
+  recorded creator, and a load does not add one (it records the creator
+  as not known): its creator's schedule write that acts in it is out of
+  reach whether the mob is loaded or not.
+
+- `meerkat-mob`: `MobActorTaskWatch::has_ended` says, without waiting,
+  whether a mob's actor task is over (its future returned, or the task was
+  lost).
+
+- `meerkat-machine-schema`, `meerkat-machine-kernels`, `meerkat-mob`: a new
+  canonical machine, `MobHostedSetLifecycleMachine`
+  (`meerkat_mob::machines::mob_hosted_set_lifecycle`), owns the facts about
+  a host's mob set as a whole, which no store's record can hold: how far
+  the pass over the stores the host has from before came (`Unrestored`,
+  `Attempted`, `Restored`; the first pass is named once), whether a census
+  of such stores is owed (a persistent mob root, or a declared default mob
+  with a store file), whether the census is complete (a pass finished, or
+  the host declared its own restore done), whether a host registered a
+  handle of its own, and whether every mob of the host is known. The mob
+  set (`meerkat-mob-mcp`) held these as plain fields beside its records;
+  it now applies the machine's inputs and reads its answers, and no
+  behaviour changes. One state per mob set, in process only: nothing is
+  stored. `MobMcpState::declare_mob_set_restored` keeps its signature.
+
+- `meerkat-mob-mcp`: `MobMcpState::persistent_mob_store_path(&mob_id)` names
+  the file a mob set with a persistent root keeps one mob's store in
+  (`None` for a set without a root, which keeps its mobs in memory). It
+  opens nothing. A host that keeps a file of its own for one mob names it
+  after this file, beside it, instead of spelling the store's name again.
+
+- `meerkat-mob-mcp`: a mob set can restore its persisted mobs on demand.
+  `MobMcpState::with_mob_restore_policy(MobRestorePolicy::OnDemand)` makes the
+  restore a census: the store files of the root are listed, each mob is
+  known and dormant, and no store is opened. A lookup of a dormant mob loads
+  that mob alone, and lookups that arrive together share the one load. At
+  start exactly the mobs whose members hold recovery work or pending
+  deliveries are loaded (one obligation scan of the runtime store; a member
+  session names its mob through its stored member binding, read without the
+  session's body; a scan that cannot tell loads every mob). What the eager
+  restore does for every store runs afterwards as a sweep over the dormant
+  stores, one at a time: a child mob whose owner was archived while the
+  process was down is torn down, an empty store is swept, an unreadable one
+  is quarantined. A store that cannot be read is so quarantined when it is
+  first read, by a request that names its mob or by that sweep, never by
+  the census. The scavenge of child mobs whose owner session was archived
+  runs the same sweep, so a dormant child of an owner archived while the
+  process runs is torn down too.
+
+  Every ten minutes each mob that has been loaded at least that long is put
+  to its store's record for an idle unload. The record admits it only for a
+  store the set can load again (a mob with in-memory storage, or one whose
+  handle the host inserted itself, is never unloaded). The mob's own actor
+  is then asked whether it is idle (`close_if_idle`), within 30 seconds: an
+  idle mob is shut down and is dormant again once its actor has ended, and
+  loads again at its next lookup; a mob with work in flight or a held owner
+  lease (`MobHandle::acquire_owner`) stays loaded, and so does one whose
+  actor gave no answer in time. From the step that admits the unload until
+  the actor's answer the mob is not handed out: a lookup of it, a destroy,
+  a WorkGraph flow, a completion owed to one of its members and a handle a
+  host inserts under its id wait for the answer. A member lookup does not
+  wait: it reads the mob's roster from its actor, which still runs. The
+  mob is not hidden in that time: `mob_list` and `MobInventory::managed`
+  list it until its actor closed, and no observer of the mob set
+  (`mob_set_changes`) is woken by the question. A destroy holds its mob
+  with an owner lease while it runs, so the mob's actor declines an unload
+  under it.
+
+  The default, `MobRestorePolicy::Eager`, restores every store when the set
+  is first used, and every Core surface keeps it. Meta's gateways select
+  `OnDemand` for the mobs they host (see the Meta changelog); a Rust host
+  that selects it should read "Limits in this release" in
+  the mobs guide first (which reads see served mobs only, a handle taken
+  just before the idle question, an actor that does not end, the fixed ten
+  minute period, no lease for an open event stream).
+
+- `meerkat-core`, `meerkat-mob-mcp`: a mob set that restores on demand can
+  answer the wake of a member's session whose mob is not loaded. A road that
+  holds only a session's id (a turn, comms sent as the member, a scheduled
+  session target, a session-addressed delivery, a cold attach) asks the
+  session-owner wake registry for the session's owner before it goes on. A
+  mob publishes its members' sessions there only while its actor runs, so
+  for a mob that is not loaded the road found no owner and went on as for a
+  session no mob holds.
+  `SessionOwnerWakeRegistry::publish_owner_of_unnamed_sessions` adds an
+  owner that `wake` asks when no entry names the session, or the entry's
+  owner answers that it no longer owns it
+  (`retract_owner_of_unnamed_sessions` removes it; `wake_published` asks the
+  entries alone). `owned` never asks such an owner, so a read or a cancel
+  loads nothing.
+  `MobMcpState::answer_wakes_of_unserved_member_sessions` is the host's
+  statement that its set is such an owner. The set reads the session's
+  stored member binding, loads the mob it names as work loads it, and the
+  loaded mob answers the wake. A stopped mob is not loaded for a wake, which
+  is refused in the retryable form (`SessionError::Busy`); so are a binding
+  that cannot be read while a mob may not be loaded, a held child mob, and a
+  wake that arrives while the census is taken. A wake re-attempts no
+  quarantined store (the one re-attempt a lookup by id makes on demand
+  stays with that lookup): over a store that is only unavailable it
+  answers busy, and over any other quarantined store, or a mob the state
+  destroyed, it is refused for good. A session with no binding, one whose
+  binding names a mob the set does not know, and a session of the host's
+  default mob are not the set's to answer. A set whose host does not state
+  it answers no wake, as before; Meta's launches state it over a declared
+  store, unless the launch is a candidate (see the Meta changelog).
+
+- `meerkat-mob-mcp`: `MobMcpState::unloaded_mob_member(mob_id)` reads what
+  the store of one mob that is known and not loaded holds of the mob's
+  members, without loading the mob: the incarnation the mob was created at
+  and the mob's member binding history (`UnloadedMobMember`), which holds
+  the binding of a member that sits on the roster, of one that left it and
+  of one whose name a later member holds. No roster row is read: a member
+  is found by the binding of its session and generation, never by the name
+  a row sits under. It opens that one store once, judged as a restore
+  judges it; no actor is built, no member is restored, the mob stays not
+  loaded and nothing is kept of the read, so each call opens the store and
+  replays its journal. It answers `None` for a mob that has an actor (ask
+  its handle), a mob whose idle unload is admitted and not answered yet, a
+  quarantined store, a store whose load is in flight and the declared
+  default store. It needs the console owner (`List`).
+
+- `meerkat-mob-mcp`: `MobInventory` gains `dormant`, the ids of the mobs that
+  are known and not loaded: no actor runs for them. A mob whose idle unload
+  is admitted stays in `managed` until its actor closed and ended. `dormant`
+  is empty under the eager policy, except for a store whose restore
+  panicked (below). A create under the id of a dormant mob is refused from
+  the set's records, without opening that mob's store.
+  `MobInventory::dormant_creation` names who created the dormant mobs (the
+  `MobProvenance` their creation recorded, by mob id), as far as the set
+  has read it without loading them: the sweep over the dormant mobs reads
+  it in the one open it makes of each store, and a mob the set created or
+  loaded keeps it once it is unloaded. A dormant mob that is absent there
+  has not been read (the sweep has not reached its store, the state runs
+  no sweep, or its creation record cannot be read); no listing opens a
+  store for it.
+  `MobMcpState::unloaded_mob_creation(mob_id)` answers it for one mob that
+  has no actor, without loading the mob: from the store's record when the
+  record keeps it, and otherwise, for a dormant mob, by opening that one
+  store once and keeping the answer in the record (a listing names it from
+  then on). The store of a quarantined mob is never opened for it: it
+  answers what the record kept before the store failed, or `None`. A mob
+  whose idle unload is admitted and not answered yet is answered from its
+  record too, without opening its store and without waiting for the
+  unload. A host that judges a request by who created the mob it names
+  does not have to wait for the sweep after a start.
+  `MobInventory::dormant_incarnation` names the dormant mobs' own
+  incarnations (the `MobIncarnationId` their creation recorded, by mob id),
+  read in the same opens and kept the same way, so that a read that needs
+  the incarnation of a mob that is not loaded loads nothing. A dormant mob
+  that is absent there has not been read, or its store holds no creation
+  record: nothing is guessed for it. The read of who created one mob keeps
+  the incarnation from the same open.
+  `MobInventory::dormant_stopped` names the dormant mobs that are stopped
+  (each is also in `dormant`). A mob an operator stopped stays stopped
+  while it is not loaded: the idle unload hands the store's record the
+  mob's own word, and after a restart the set reads it where it opens the
+  store anyway (the sweep, the read of who created one mob) or at the
+  first call below. A stopped mob whose store was not read yet is in
+  `dormant` only; no listing opens a store.
+  `MobMcpState::handle_for_work(mob_id)` is `handle_for` for the calls a
+  stopped mob refuses as work: a send to a member and a run of a flow,
+  each with or without an external delivery identity (`mob_member_send`,
+  `mob_member_send_with_external_identity`, `mob_run_flow_with_stream`,
+  `mob_run_flow_with_external_identity`). For a mob that is not loaded and
+  stopped it answers the loaded stopped mob's refusal
+  (`MobError::InvalidTransition` from `Stopped` to `Running`) and loads
+  nothing. Every other call loads a stopped mob, which answers it itself
+  and stays stopped: a read, an operator's verb, a keyed send, a turn
+  start, an ingress interaction, submitted work, the begin of an external
+  delivery and an agent's mob tools. The refusal is given without a load
+  where the mob set's console principal is the owner; for any other
+  principal the mob is loaded and answers for itself. A schedule that
+  fires for a member of a stopped mob that is not loaded therefore loads
+  the mob: its delivery begins as for a loaded stopped mob, the send is
+  refused, the occurrence ends with its delivery failed, and the mob is
+  unloaded again when it is idle.
+  The agent tool `mob_list` names the caller's own mobs that are not
+  loaded: a mob its session created with `mob_create` is listed with the
+  status `Dormant`, or `Stopped` when it was stopped before it was
+  unloaded, from what the set's records keep, with no load and no open of
+  a store. The list judges such a mob as it judges a loaded one: the
+  creation record proves the session's own create, and the verdict is the
+  mob machine's (`meerkat_mob::mob_machine_current_mob_admission`, new: a
+  stateless reading of the machine's per-mob admission). A mob the host
+  made for the session stays out, as it does while loaded. A mob the
+  caller holds a manage grant over (its delegation mob among them) is
+  listed the same way while it is not loaded: the grant is bound to the
+  mob's incarnation, which the set's record keeps for a mob it created or
+  loaded, so a grant over an earlier mob of the id lists nothing. A mob
+  whose record the set has not read yet is listed once it is loaded.
+
+- `meerkat-mob`: `MobStorage::recorded_phase` reads the lifecycle phase a
+  store's event log records for its mob, without building the mob and
+  without appending an event: the phase a resume would start the mob in
+  (`Stopped` after a completed stop, `Running` after the resume that ends
+  it, and `Running` for a mob whose actor only shut down), or `None` for a
+  store whose log holds no mob.
+
+- `meerkat-runtime`: `LogicalRuntimeId::session_id` is public: the session a
+  session runtime id names, `None` for a member delivery address.
+
+- `meerkat-mob-mcp`: a Rust host can hand the mob set its composition of the
+  mobs it creates itself, and its default mob.
+  `MobMcpState::with_host_mob_composition` installs a `HostMobComposition`:
+  the set asks it for every build of a mob whose creation records
+  `MobProvenance::Host`, and of the default mob, at the create and at each
+  load of the mob's store (`HostMobBuild` with `HostMobBuild::new` and
+  `HostMobBuild::mob_id`, `HostMobBuildStage`). Such a build starts clean:
+  `compose` gets a builder with nothing of the set's state-wide
+  configuration on it and gives it everything the mob needs;
+  `resume_expectation` can bind a load to a stored definition. The realm's
+  skill sources are not copied into such a mob's definition, so it defines
+  every skill its profiles name: a create whose inline profile, or whose
+  realm profile, names a skill the definition does not define is refused.
+  Two stated limits of that check: the default mob's own create is not
+  checked (it keeps the realm profiles of its own store, which the set
+  does not read), and a realm profile the realm's store does not hold is
+  left to the member's build, as before.
+  A refused
+  create leaves no mob behind (the store file of a further host mob is
+  removed again), and a refused load quarantines the store. A mob created
+  for an owner session is never given to the composition, and a child mob
+  keeps the child application tool policy. The restore passes do not wait
+  for a host mob's build: it runs on as the state's own task, is the one
+  load of its store, and holds the state's admission until it ends.
+  `MobMcpState::with_default_mob(DefaultMobDeclaration)` (it answers a
+  `Result`: a host composition has one default mob, and a second
+  declaration, or one made after the set was shared, is refused with
+  `MobError::WiringError` before anything is recorded) declares the mob a launch
+  names and the file of its store (`DefaultMobDeclaration::persistent`, any path, also
+  one under the set's root; `DefaultMobDeclaration::in_memory`; `default_mob_id`). A
+  declared file exists from the declaration on: the host's
+  forked-participant table is opened in it and is the one such table of the
+  host, used by temporary councils, every mob the set builds and the
+  default mob, ahead of the root's table and of
+  `with_forked_participant_store`. A persistent root configured after the
+  declaration (`try_with_persistent_storage_root`,
+  `with_persistent_storage_root`) opens no forked-participant table of its
+  own while the declared file's table is open, so it leaves no
+  `mobs/realm_forked_participants.db` that nothing reads (the root's
+  default temporary council store still lives in that file); a root
+  configured before the declaration has opened its table already. A table
+  that cannot be opened at the
+  declaration is tried again before the set's first pass; failing that, the
+  set runs with its own table and the default mob is not served in that
+  process, so a host never has two such tables. The set then creates or
+  loads the default mob itself: `serve_default_mob` takes the definition or a
+  `DefaultMobServe` (`DefaultMobServe::new`), which can also declare an
+  update of the stored definition (`declaring_update`, compare-and-swapped
+  on the revision the launch read, applied before the load), and answers
+  `DefaultMobServed` (with `declared_update`, the revision it committed). A
+  failed serve answers `DefaultMobServeError`: the failure (`error`) and
+  the revision of a declared update the serve committed before it failed,
+  which stays committed. `default_mob_stored_definition` reads what the
+  store holds before anything is built, through the open the serve then
+  loads with; a failed read answers its error and quarantines nothing.
+  Until the launch's first serve has ended, however it ends, every lookup,
+  delivery or completion that names the default mob waits, and no pass of
+  the set loads it: `MobInventory::dormant` names it under either restore
+  policy meanwhile. A stand-down releases the waiters with its own error.
+  The serve never changes the mob's phase (a stopped mob is served
+  stopped), re-attempts a quarantined default store once (with its declared
+  update applied first), and its create does not ask the create hook; a
+  create the composition refuses leaves the declared file with no mob in
+  it. The set quarantines the default store like any store, under the
+  default mob's id with the file kept as found, and never removes a file
+  with no mob in it at that place. The id is the launch's: every other
+  create under it and a handle a host inserts under it are refused at
+  once (`MobError::MobAlreadyExists`; `try_mob_insert_handle` answers it,
+  `mob_insert_handle` logs it), and
+  so is a destroy through the set (the agent tool included;
+  `MobError::WiringError`), and another store of the root that names it is
+  quarantined as a conflict. The default mob keeps the realm profiles of
+  its own store, and the idle unload never asks it. A council's outcome
+  owed to a member of a mob that is not served is never committed to that
+  member's session as a plain session: the re-link loads an ordinary
+  dormant mob for the delivery, and answers the new
+  `CouncilRelinkAction::AwaitingMob` (the outcome stays owed until that mob
+  is served) for the default mob that awaits its launch's serve and for a
+  held or quarantined mob. On a host that declares a default mob, the
+  outcome of a convener with no stored member binding, a plain session
+  included, stays owed while the default mob is not served (it awaits its
+  serve, or its store is quarantined), and so for as long as its store stays
+  quarantined. The recovery sweep logs what a pass leaves owed, one line
+  per mob with the number of outcomes and the state that holds them. That
+  the declared store is its launch's, and whether its mob still waits for
+  the launch's first serve, are facts of that store's record (see the
+  machine's version 3 under Breaking): the record is filed at the
+  declaration, for a default mob in memory as well, so a lookup of such a
+  mob waits for its launch's serve too. A state that sets neither behaves
+  as before (but see the two `meerkat-mob-mcp` entries under Changed
+  below: the continuation commit and the council re-link). No Core surface
+  sets a composition or a default mob; Meta's two gateways declare the mob
+  their launch names as the default mob of the mob set. See "Host mobs and
+  the default mob" in the mobs guide.
+- `meerkat-mob`, `meerkat-mob-mcp`: a member's seat row records who seated
+  the member, and `MobHandle::member_seat(identity)` reads it (`MemberSeat`:
+  its `MemberSeatKind`, the creating member's `RecordedSeat` for a kind
+  that has one, who recorded and sealed it). The kinds are the host's own
+  seat, the host's seat for a calling member or session, a calling member
+  or session, the mob's definition, a copy of another member, a schedule's
+  seat, and not shown; a seat row written before this release reads by its
+  older members, or as not recorded. The record is composed from what the
+  runtime observed, never from a name, a label or an argument of a call,
+  and it is a fact only: nothing reads it to allow or refuse, and a
+  member's creation record and the public events are unchanged. A host
+  says a seat is its own with `SpawnMemberSpec::attest_host_seat()`
+  (`SpawnMemberSpec::host_root` says it too); Core drops the attestation
+  wherever the spawn is sent for an agent or under an operation owner. A
+  helper a host's own call spawns through `MobHandle::spawn_helper` or
+  `fork_helper` is not attested and records not shown; the schedule host's
+  helpers go through `MobHandle::spawn_scheduled_helper` and
+  `fork_scheduled_helper` and record a schedule's seat. A door that seats
+  a member for a caller attaches the caller's seat as a mob's own handle
+  seals it (`MobHandle::seal_seat_creator`, `MemberSeatCreator`,
+  `SeatSealer`, `SpawnMemberSpec::with_seat_creator`,
+  `DelegationMemberOptions::seat_creator`). `MobHandle::seat_now(&RecordedSeat)`
+  answers whether a recorded seat still stands (`SeatNow`),
+  `MobHandle::member_lineage_step` where a member's lineage goes next
+  (`MemberLineageStep`), and `MobMcpState::lineage_of` and `mob_lineage`
+  (module `lineage`) follow it across the hosted mobs for the owner's
+  console, loading no mob. A link to another member is followed only by
+  its proof (`MemberLinkProof`), never by a name: the recorded seat with
+  `seat_now`, and a copy's source by the creation the copy records with
+  `MobHandle::creation_now`. An identity an agent asked for under the
+  host's rule alone reads closed. The record is one internal member of
+  the stored seat row: the stored schema does not move and an earlier
+  release ignores it.
+
+- `meerkat-mob`, `meerkat-mob-mcp`: one observation of whether a hosted
+  mob is idle, which decides nothing.
+  `MobHandle::observe_idle()` answers a `MobIdleObservation`: `busy`, the
+  `MobBusy` an idle close is decided on, and `admission_closed`, why the
+  mob's admission is closed when it is; `is_idle()` holds when nothing is
+  in flight and admission is open. The actor reads it on its serialized
+  admission path with the computation the close uses, and closes nothing,
+  takes no owner and waits for nothing.
+  `MobMcpState::mob_idle_observation(mob_id)` answers a `HostedMobIdle`
+  from one read of the hosted set, without loading the mob: `Observed`
+  with its actor's observation for a mob that is served, and `Unloading`,
+  `Held`, `Quarantined`, `Dormant`, `Loading`, `Changed`, `SetIncomplete`
+  or `Absent` otherwise, none of which means idle. It needs the console
+  owner (`List`), opens no store, takes no lease and starts no census: an
+  id no record names answers `SetIncomplete` until the set is complete,
+  and `Absent` only then. `Absent` is also the answer for an id whose
+  create is in flight, for a mob the set destroyed and for a declared
+  store that holds no mob yet. The observation of a served mob is given
+  only when the actor that answered still serves the mob; when its record
+  changed meanwhile, the record's answer by then is given. While the
+  actor answers, the read holds the set's admission, as the reads of the
+  set that open a store or wait do (a stand-down of the set waits for
+  it), and a clone of the set's handle of the mob, which it drops at the
+  answer.
+  Its limits. It covers the mob's own admission: a schedule that is due,
+  a delivery another owner holds for one of its members and the mobs its
+  members created are outside it. The counts are diagnostic. The native
+  work of the members' sessions (accepted inputs that are queued, held or
+  running, an open live channel) is read only when the actor's own counts
+  are idle, for the members with a bridge session in this process, and
+  reads as none in a build without the runtime adapter. The step between
+  the actor's delivery of a peer message and the member's accepted input
+  is not traced for it. A mob that is not loaded has no actor to ask and
+  answers `Dormant`: whether its store owes work is not read. A mob whose
+  unload is admitted answers `Unloading` and may still be found busy. A
+  mob that reads idle may be busy, or closed, when the caller next acts:
+  no wait and no notification come with the read. An observation costs
+  what an idle close costs, on the actor's loop: it is a read for an
+  occasion, not for a poll.
+
+- `gemini-4-neon` in the Core model catalog: a paid Gemini API model with a
+  shared 1,048,576-token context and a 65,536-token synchronous output cap.
+  Meerkat supports thinking levels `low`/`medium`/`high`. Google's `xhigh` is
+  not expressible by Meerkat's Gemini tag and is refused by strict
+  `reasoning_effort` validation; an unsupported turn reasoning preference is
+  instead not applied, preserving the existing level or provider default.
+  Long decode is not added.
+
+- `meerkat-core`: `CoreBoundaryStageOutput::attach_durable_delivery` and
+  `CoreBoundaryStageOutput::withdraw_durable_delivery`. The holder of a
+  parked durable boundary preparation attaches the deliveries of other
+  inputs that join the same boundary, or takes one back, before its one
+  commit publishes them in attach order.
+
+- `meerkat-core`: `PendingBoundaryAdmissions` and `PendingBoundaryAdmission`,
+  and the provided method `TurnStateHandle::pending_boundary_admissions`
+  (`None` by default). A runtime announces a durable steer it has
+  acknowledged before that steer's boundary preparation registers, and
+  the runner keeps its boundary open while an announcement stands.
+
+### Changed
+
+- `meerkat-mob-mcp`: a mob store file is served only under the id its
+  file name encodes. A store file whose name encodes one mob's id and
+  whose records hold another mob (a copy of a store under another name, a
+  backup put back under another name, a renamed file) was, since 0.5.2,
+  resumed and served under the records' id: a lookup of the file's own id
+  served the other mob from that file, and when the other mob was already
+  loaded the file was filed quarantined under the other mob's id. Such a
+  file is now quarantined under the id its name encodes
+  (`resume_refused`, the cause naming both ids) before anything of it is
+  resumed, held or torn down, and the mob its records name is served from
+  its own store. A file whose name encodes no id still takes the id its
+  records name, unless a store file named for that id lies beside it:
+  then it is quarantined under its file's stem, under both restore
+  policies and whichever file is met first. The sweep over the stores
+  that are not loaded lists nothing of another mob beside such a file.
+  Nor do the two reads that open one store of a mob that is not loaded:
+  `MobMcpState::unloaded_mob_creation` answers `None` for such a file and
+  keeps nothing of the other mob, and the read of whether the mob is
+  stopped, made before the first work for it, keeps nothing and leaves
+  the file to its load, which refuses it. Before, the first answered the
+  other mob's creation as that of the mob the file is named for, and the
+  second refused work for that mob as stopped whenever the other mob was.
+  The file's name grants nothing: a mob's id may be chosen by whoever
+  creates it, and the name is used only to refuse a store whose own
+  records disagree with it.
+  The name an earlier release gave a store (the escaped id with no
+  prefix) is the mob's own as before, and the declared default mob's
+  store is the default mob's whatever its file is called.
+
+- `meerkat-mob`, `meerkat-mob-mcp`: the answer of an existing call
+  changes. A create of a mob from a definition (`mob_create_definition`
+  and its variants, an agent's `mob_create`) under an id the mob set
+  already knows (a managed mob's, or a mob's that is not loaded or is
+  being unloaded) answers the new `MobError::MobAlreadyExists(MobId)`,
+  whose structured data is `{"kind": "mob_already_exists", "mob_id"}`
+  (`MobError::MOB_ALREADY_EXISTS_KIND`). It was `MobError::Internal`,
+  which a surface could tell only by reading its message, "internal
+  error: mob already exists: <id>". The new variant's message is "mob
+  already exists: <id>": the "internal error: " prefix is gone, so a
+  consumer that compared the whole message or its start must change, and
+  one that searched it for "mob already exists" need not. Its failure
+  class is the mob's rejection, no longer
+  `Internal`. A create from a mobpack under such an id keeps its own
+  answers: the mob, for the same pack, or its refusal (the pack's
+  identity does not match); one that arrives while a create under the id
+  is in flight waits for it.
+  An id whose create is still in flight is answered the same way: a second
+  create from a definition, which was answered `MobError::Internal`
+  ("internal error: mob already exists: <id>"), answers `MobAlreadyExists`
+  at once, with nothing of its mob built and the host's create admission not
+  asked for it; a second create from a mobpack, which was answered
+  `MobError::Internal` ("duplicate mobpack create raced ..."), waits for the
+  first and answers as above; and a host's handle under such an id is
+  refused `MobAlreadyExists`.
+  Under the id a host
+  declared for its default mob, every create and
+  `try_mob_insert_handle` answer the new variant (`mob_insert_handle`
+  logs the refusal and returns nothing; see the default mob under
+  Added).
+
+- `meerkat-mob-mcp`: a continuation committed for a member of a mob (a
+  council's outcome, a `fork_off` result, a host's own commit through the
+  continuation service) is answered `ContinuationSubmitError::Unavailable`
+  while the mob set may still host mobs it has not recorded: no verb took
+  its census of a persistent root yet, or a host that inserts handles has
+  not declared its mobs restored. It used to be answered "owner retired",
+  which drops the completion for good. The caller asks again; the set's
+  own deliveries after a restart take the census before they ask. A mob
+  the set knows, or one it destroyed, is answered as before. Only a mob
+  verb, or the host's `declare_mob_set_restored`, ends that state: a host
+  on which neither happens keeps such a commit owed (the caller keeps
+  seeing `Unavailable`).
+
+- `meerkat-mob-mcp`: on every host, with or without a default mob, the
+  council re-link after a restart never commits a council's outcome to its
+  convener's session as a plain session when that session's stored member
+  binding names a mob the host knows and does not serve. A mob that is
+  merely not loaded is loaded for the delivery and the outcome is the
+  member's (it used to be committed to the session and landed when the
+  session was next attached); for a held or quarantined mob the outcome
+  stays owed (`CouncilRelinkAction::AwaitingMob`) until the mob is served.
+  A stored binding that cannot be read fails the re-link, which is retried.
+
+- `meerkat-mob-mcp`: the mob set keeps one record per mob store
+  (`MobStoreRestoreLifecycleMachine`) and reads which mobs are managed, held
+  before activation, quarantined, dormant or destroyed from the records'
+  phases. The four maps that answered this before are gone, and a move of a
+  mob between those sets is one transition of its record. The facts about
+  the set as a whole, which no store's record can hold, are the state of a
+  machine of their own (`MobHostedSetLifecycleMachine`, one state per mob
+  set): how far the pass over the stores from before came, whether a
+  census of them is owed and complete, whether a host registered a handle
+  of its own, and whether every mob is known. None of them moves a mob
+  between sets.
+
+  The eager restore still restores every store when the set is first used,
+  each in the step that lists it, and the first verb answers once the pass
+  has been over every store. Five things differ from before:
+  - A state shared with `into_shared` runs each load as its own task: a
+    first verb that is cancelled no longer cancels the restore of the store
+    it was loading, and the next verb waits for that load.
+  - A restore that panics no longer panics the first verb of such a state.
+    The pass goes on, and that one store is left with its load unfinished:
+    until a lookup of its mob ends the unfinished load and re-attempts it,
+    the mob is listed in `MobInventory::dormant`, and a fork_off completion
+    whose job no loaded mob holds waits instead of being refused.
+  - A store file whose name does not decode to a mob id and that cannot be
+    read was skipped with an error log. It is now quarantined under its
+    file's stem (for example `mob--%ZZ`): `mob_inventory` and
+    `quarantined_mobs` list it under that id, a lookup of that id answers
+    `MobQuarantined`, and the file is kept as found. No store is skipped
+    silently.
+  - The WorkGraph flow host's reads of a flow's mob (its configuration and
+    external delivery steps, a delivery record, a run's status) answer the
+    typed hold or quarantine for a held or quarantined mob, where they
+    answered that the mob was not found, which the WorkGraph bridge
+    recorded as a lost run. Like every lookup of a mob by its id, each of
+    these reads now asks a store that is quarantined as `store_unavailable`
+    for one re-attempt of its restore; before, they touched nothing.
+  - A destroy holds its mob with an owner lease
+    (`MobHandle::acquire_owner`) while it runs, under both policies. A
+    host's own `close_if_idle` on a mob during its destroy answers `Busy`
+    with one foreground owner, and a stand-down's `close_admission` counts
+    that owner as busy.
+
+  A mob that is known and not served is not read as gone. A continuation
+  owed to one of its members, or to the plain session whose implicit
+  delegation mob it is, loads the mob instead of being stranded, and so does
+  a detached job's completion that is committed for a member: it is never
+  dropped as owed to an owner that is gone because the member's mob was
+  dormant or being unloaded. A fork_off completion whose job no served mob
+  holds waits while a mob is not served and is not refused as absent. A
+  WorkGraph flow that targets such a mob loads it, or answers why it cannot,
+  and its run is never recorded as lost. A lookup at a state that is
+  standing down is refused and quarantines nothing. A member lookup that
+  cannot read a session's stored member binding while a mob is not loaded
+  refuses (`ProvenanceUnavailable`) instead of answering from the loaded
+  mobs alone. A host handle inserted after the census under the id of a
+  dormant mob takes that mob's record, so no dormant record is left beside
+  it. One inserted before the first verb of the set keeps the id as well:
+  the census files no record for the root's store under it, the store is
+  not loaded beside the handle and is left as found, and the next process
+  lists it again. A handle inserted under the id of a mob the set itself
+  runs (a store it loaded, a mob it created), or of a store the set is
+  loading, holds before activation or keeps quarantined, is refused
+  (`try_mob_insert_handle`) with the answer a create under that id gets;
+  a handle replaces only the handle of a mob a host inserted before (the
+  store record machine, version 4, refuses the registration:
+  `RegisterManagedHostHandleSetRun`).
+  The first holder of an id keeps it, and no collision of ids destroys a
+  stored mob: a store whose resumed mob turns out to be a second mob of one
+  id is shut down again and kept as found.
+  A mob the set ran that has ended (it was shut down and its actor is
+  over) holds nothing any more: a host's handle under its id is admitted,
+  and the set serves the host's mob from then on (the store record
+  machine, version 7). A mob that is being destroyed keeps its id until
+  its destroy is recorded in the set, also in the moment after its actor
+  has ended: a host's handle under it is refused `MobAlreadyExists` until
+  then.
+  A create takes its mob's id before the mob is built: from its first
+  step, before the host's create admission is asked and before any storage
+  exists, until it ends. A second create under the id made meanwhile (a
+  host's, or a member's through its mob tools) is refused at once with
+  `MobAlreadyExists` and builds nothing; a host's handle under it is
+  refused the same way; a create from a mobpack waits for the create in
+  flight and then answers its mob, refuses a different pack, or takes the
+  id when that create ended without a mob. A create that is refused or
+  fails frees the id in the same step (the store record machine, version
+  5: its `Creating` phase).
+
+- Core catalog presentation identifies Neon as the Gemini default. Hydrogen
+  remains recommended/selectable and `gemini-3.1-pro-preview` remains supported.
+  Forge's local setup preset and separately pinned installer catalog are
+  unchanged; this does not establish Neon availability there.
+
+- `meerkat-runtime`: a durable steer that was admitted and was still waiting for its run's next boundary when its session was loaded again from the store now joins that run when the run resumes. Before, no request of the resumed run carried that steer or any durable steer admitted behind it while the run ran, and one follow-up turn delivered them after the run ended. Now the resumed run's next boundary that accepts durable deliveries carries the steer that waited and the durable steers admitted behind it, in admission order, each once, and no follow-up turn runs for them. A recall of the steer that waited leaves the steers behind it in that request. When that boundary refuses durable deliveries, or the run ends before a boundary, one follow-up turn delivers them in admission order. A steer whose row counts a stage attempt takes the follow-up turn. A steer whose join to the resumed run is still open when its session is loaded once more takes one follow-up turn after the run, exactly once. A join write the store refuses is not published and fences the runtime; a reload then delivers the steer once. With no run to resume nothing changes: the steer that waited starts the next run. A recycle, which the machine takes only while no run is current, now keeps the delivery class of a queued steer; the next run still takes that steer as its own input, once.
+
+### Fixed
+
+- `meerkat-runtime`: a durable steer recalled with `MeerkatMachine::recall_queued_input` while it waits for its model boundary no longer delays the durable steers behind it. Before, the recalled steer's preparation kept the boundary until the runner reached it, so that boundary delivered nothing and every later steer landed one model request later. Now the steers behind a recalled one join the request they would have joined, in admission order, whether the recall commits before or after the runner parks at the boundary: when the recalled steer held the boundary's claim, only its own delivery is withdrawn, and the steers behind it are joined and published at that boundary. The recalled steer is in no request and has no transcript row, and the recall's answers are unchanged.
+
+- `meerkat-mob-mcp`: a session's implicit delegation mob whose replacement
+  (for another model or provider route) could not finish its destroy's
+  storage cleanup, because something still held the mob's database, could
+  not be created again while the process ran: no mob was found under the id
+  any more, the create was refused until that cleanup was done ("retry that
+  destroy before reusing the id"), and nothing retried that destroy, so
+  every later delegation of the session failed. The next call that ensures
+  the session's implicit mob now continues the owed cleanup first: it
+  creates the mob once nothing is owed, and answers what is still
+  outstanding until then.
+
+- `meerkat-mob-mcp`: a mob that became managed after the mob set's own
+  restore did not get the fork_off re-link a restored mob gets: a mob whose
+  store left its quarantine through a re-attempt of its restore
+  (`mob_restore_retry`, or the re-attempt a lookup of the mob asks of a
+  `store_unavailable` quarantine; 0.9.9 through 0.9.15), and a child mob
+  that was held when its store was read and released once its owner was
+  resolved (0.9.0 through 0.9.15). The outcomes of the fork children an
+  earlier process had left that mob were not delivered to their forkers
+  until a later process restored the mob, or the host ran the re-link
+  itself (`relink_restored_fork_children`). The re-attempt and the release
+  now schedule that re-link, once per mob.
+
+- `meerkat-mob-mcp`: a create under the id of a mob store that came under
+  the persistent root after the state took its census (a copy, or a restore
+  by an operator, while the host runs) is answered that the id is taken
+  (`MobError::MobAlreadyExists`; a mobpack create loads the mob and compares
+  it with its pack) before the host's create hook is asked. The store is
+  listed then, as the census lists a store, and its mob is known from then
+  on; under the eager policy it is loaded at once. Before, such a create was
+  admitted and the host's create hook was asked, where a host releases what
+  it keeps under the id; the create then opened the store, which refused a
+  second creation, and the failed create had written to the store's files. A
+  store that holds no mob (an empty event log and no creation record that
+  names a mob: what a create leaves when it fails before it wrote a
+  creation) is not listed, and the next create under the id takes the file
+  over as before; the look opens the store once to read that. A store whose
+  log is empty while its creation record still names a mob is listed, and
+  its load quarantines it. The storage of a destroyed mob whose cleanup is
+  owed is not looked for and not opened: the create is refused as before. A
+  store placed between that look and the create's own open of its store is
+  still met as before.
+
+### Upgrade notes
+
+- `meerkat-mob`, `meerkat-mob-mcp`: a caller that matched the message of a
+  second create under an id ("internal error: mob already exists",
+  "duplicate mobpack create raced") reads `MobError::MobAlreadyExists`
+  (`{"kind": "mob_already_exists"}`) instead; one that retried a mobpack
+  create on the "raced" error need not: the second create waits for the
+  first and answers the mob's id.
+
+- `meerkat-mob-mcp`: a mob store file whose name names another mob than
+  its records is no longer served under the records' id: it is
+  quarantined, both ids named; remove the copy or give the file its mob's
+  name (see Changed).
+
+- For ordinary Gemini sessions, pin `--model gemini-4-argon` or
+  `[models] gemini = "gemini-4-argon"` to retain Argon, or set
+  `--reasoning-effort medium` to keep medium thinking on Neon. These session
+  overrides do not change the fallback web-search helper. Remove any custom
+  `[models.gemini-4-neon]` entry before upgrading because model IDs must be
+  unique. See the [upgrade guide](docs/guides/upgrading.mdx) for consumer-specific
+  behavior and rollback notes.
+
+- Steers: do not rely on a model decision between consecutive eligible
+  steers. Steers that wait together now reach the model in one request,
+  where 0.9.17 delivered one per model boundary. No setting keeps one
+  steer per model boundary. If distinct decisions
+  matter, match the earlier steer to a model decision before sending the
+  next one: its `boundary_append_applied` names the `input_id` and the
+  `run_id` of the turn that applied it, and that run's next successful
+  `turn_completed` says the model has answered a request that carried it
+  (matched by stream order: the event carries no run id and no success
+  flag).
+  The applied event alone is neither a response nor the durable
+  consumption of the input. A steer that takes the follow-up turn
+  publishes no `boundary_append_applied`: read its `last_run_id` with
+  `session/input_status` and take that run's first successful
+  `turn_completed`. When that `turn_completed` does not come (a failed
+  call, a discard, a terminal or a replay without it), do not wait without
+  a limit and do not resend on your own: reconcile with
+  `session/input_status`, `boundary_appends_discarded` and retained
+  history.
+  A steer admitted after a request's input is fixed waits for the next
+  boundary, even when its admission was acknowledged before the request
+  was composed or sent: a caller cannot tell the two instants apart, so
+  an admission acknowledged before the request left does not mean the
+  steer is in that request.
+  Each input keeps its own input id, and a successful retained in-turn
+  application has one `boundary_append_applied` (match a delivery by its
+  `input_id`); the changed contract is timing. See
+  [Durable steer](docs/reference/session-contracts.mdx#durable-steer).
+
+## [0.9.17] - 2026-11-18
+
+### Breaking
+
+- `rkat-rest`: a request whose `Host` is a name other than `localhost` (not an address literal) is refused with `403` and code `HOST_NOT_SERVED` until the name is listed in `[rest] served_hosts`: a reverse proxy that forwards its public host name, and a container or service name, have to be listed. A server that is not bound to loopback and lists no name says so in a warning when it starts. A browser page of another origin is refused with `403` and code `ORIGIN_NOT_ALLOWED` until its origin is listed in `[rest] allowed_origins`. An entry that is not one origin (`*`, `null`, a URL with a path, a bare host) or not one host name (a scheme, a port, a path, a wildcard) is refused when the configuration document is loaded or written. Both keys take effect at the server's next start and compose with the rest of the `[rest]` table between a realm and its parent. For a caller that sends no `Origin`, answers no longer carry `access-control-allow-origin: *`, and with nothing allowed an `OPTIONS` request without an origin is answered `405` where it was answered `200` with an empty body.
+
+- `rkat-rpc`: a connection whose first line reads as an HTTP request line is closed without an answer; before, that line and each header line got a parse error and the connection stayed open.
+
+- `meerkat-rest`: the public struct `AppState` gains the public fields `rest_allowed_origins` and `rest_served_hosts`. `meerkat-core`: the public struct `RestServerConfig` gains `allowed_origins` and `served_hosts`. Code that builds either struct field by field names them.
+
+- Schedules written by agents: a member's schedule into a member it is not wired to is refused (`policy_denied`, code `schedule_target_not_a_peer`). A schedule that creates a session, or that spawns or forks a helper, is refused (`policy_denied`, code `schedule_session_creation_not_allowed`) unless the writer runs on the host's default build with nothing narrowing its tools (for a helper: unless its build mounts the mob tools) or the host sets `agent_schedules_may_create_sessions = true` under `[tools]`; a resume of such a schedule is judged in the same way. A prompt, a profile or a flow that has an agent write such a schedule stops working until the host allows it. Agents can no longer create, change, pause or delete the schedules a Meta gateway keeps for itself, and no longer see them in their list.
+
+- `meerkat-core`: the public struct `ToolsConfig` gains the public field `agent_schedules_may_create_sessions: bool` (the `[tools]` key of that name). Code that builds `ToolsConfig` with a struct literal adds the field; `..Default::default()` fills it; a pattern that takes the struct apart naming every field without `..` adds the field or a `..`. A config document does not have to change: an absent key is off, and the key is written only when it is on.
+
+- File tools: `apply_patch`, `blob_save_file`, `blob_load_file` and `view_image` refuse, with an `invalid_arguments` tool error, a path inside a `.rkat` directory anywhere under the project root and a path inside the documents and stores a host declares for its realm; reads are refused there as writes are. A file the host declares is refused with its side files, on every host: a name that begins with the file's name followed by `-` or `.` (`config.toml.bak`, `sessions.sqlite3-wal`), and a lock name made from the file's name without its extension (`config.lock`, `tasks.build.lock`). `view_image` refuses a file whose bytes are not PNG, JPEG, GIF or WebP, whatever its name, and no longer accepts `.svg`; the media type of the image it returns follows the file's bytes, not its name (a PNG named `.jpg` is returned as `image/png`). A prompt or a tool flow that has an agent read or copy such a file, or write a file of one of those names in the realm directory of a server started without a context root (its own `tasks.db`, `memory/notes`, `config.toml.bak`), stops working.
+
+- Where a realm is looked for (`rkat`, and `rkat-rpc`, `rkat-rest` and `rkat-mcp` started with `--context-root`): a realm id that exists, with its manifest, under more than one state root on the path (the project root's `.rkat/realms`, a farther ancestor's, the user-global root) refuses the start, where one copy was used. `rkat` prints `Error: realm '<id>' exists under more than one candidate state root: ...` and exits with status 1; a server does not start: exit status 1 and the same text on stderr. The text names both directories and the ways on: `--state-root` for one of them, or `rkat storage migrate` with `--adopt-root` to keep one and archive the other (see Upgrade). An existing realm under a farther ancestor's root is now used: a server started with `--realm X --context-root C` takes X from an ancestor's root, a home-level root included, where it created X in the user-global root, and a new explicit id first used in a nested project is taken from an ancestor's root if it exists there. A `.rkat` entry on that path that cannot be examined refuses the start, naming the entry (`RootProbeFailed`), where it was passed over; this also refuses a process that may not examine a directory above its start directory, for which `--state-root` makes no walk. A farther ancestor's state root that the user may not read is skipped with one warning. `rkat storage doctor` without `--root` reads every ancestor's state root and the user-global root, and exits with status 1 where it finds a realm id under more than one; `storage migrate` and `storage prune` keep their default roots. `--state-root` is unchanged, as is a server started without `--context-root`. The text of `RuntimeBootstrapError::RealmSplitBrain` changed; its fields did not.
+
+- `meerkat-machine-kernels`: the generated input struct `generated::meerkat::inputs::ClassifyRecoveredInputDurability` gains the public field `pending_terminal_carrier: bool`, and the public enum `generated::meerkat::TransitionId` gains six variants, each added after every published variant: `TransitionId::ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierInitializing`, `TransitionId::ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierIdle`, `TransitionId::ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierAttached`, `TransitionId::ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierRunning`, `TransitionId::ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierRetired` and `TransitionId::ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierStopped`. `meerkat-runtime`: the variant `ClassifyRecoveredInputDurability` of the public generated input enum `meerkat_machine::dsl::MeerkatMachineInput` gains the same field, and so does its expansion in `meerkat-machine-schema`. Code that builds any of these with a struct literal adds the field; an exhaustive `match` on `TransitionId` adds the arms. No wire form and no stored form changes.
+
+- `rkat-mcp`: `meerkat_config` `set` and `patch` refuse a write that adds or changes a process launch or a provider route, or loosens what the realm composes (see Security): `-32602` with data `{"type":"confinement_administration_required"}`, nothing written. A client that used the tool to add or change a stdio MCP server, a command hook, a stdio or git skills repository, another shell program, a looser command policy or a provider route (an auth profile, a backend, a binding or the default binding, a Copilot account, a connector client, a self-hosted server, or a self-hosted model added or pointed at another server) makes that change in the realm document, with `rkat mcp add --scope realm` for MCP servers, with `rkat auth` for provider routes, or through `config/patch`, `config/set` or REST `/config`. A change of any field of such an entry is refused too, a self-hosted model's other fields excepted (to disable a command hook, to change a stdio server's timeout or a binding's default model), as are, in a realm whose parent states a `[shell]` section, a write of another shell key alone, and the three removals named under Security.
+
+- Rust API: exhaustive public enums gain variants; each is a source break for an exhaustive `match`. `meerkat-core`: `comms::GeneratedCommsTrustAuthoritySourceKind::MobMachineExternalPeerReciprocalTrustRemoval`. `meerkat-machine-schema`: `CommsTrustAuthoritySourceKind::MobMachineExternalPeerReciprocalTrustRemoval`, `MobMachineInput::AuthorizeExternalPeerReciprocalTrustRemoval` and `MobMachineEffect::ExternalPeerReciprocalTrustRemovalRequested`, with their variant ids `MobMachineInputVariant::AuthorizeExternalPeerReciprocalTrustRemoval` and `MobMachineEffectVariant::ExternalPeerReciprocalTrustRemovalRequested`. `meerkat-machine-kernels`, in `generated::mob`: `Input::AuthorizeExternalPeerReciprocalTrustRemoval`, `InputKind::AuthorizeExternalPeerReciprocalTrustRemoval`, `Effect::ExternalPeerReciprocalTrustRemovalRequested`, `EffectKind::ExternalPeerReciprocalTrustRemovalRequested`, `TransitionId::AuthorizeExternalPeerReciprocalTrustRemovalRunning` and `TransitionId::AuthorizeExternalPeerReciprocalTrustRemovalStopped`. `meerkat-mob`: `MobMachineCatalogInput` and its own `machines::mob_machine::MobMachineInput` and `MobMachineEffect` gain the same input and effect, and its own `MobMachineInputVariant` and `MobMachineEffectVariant` the same two ids, with one added generated module. In the generated machine enums (the kernel's five, the schema's four and `MobMachineCatalogInput`) each new variant stands after every published variant. No handle method, command, wire type, schema artifact, SDK type or stored form changes.
+
+- Behaviour-only, Rust embedders: `meerkat_mob::DelegationExecutionService::execute` (the one-call form, the call the `delegate` tool makes) now retires its helper when the call's future is dropped after its helper was spawned, while it wires the helper back, admits the work or waits on the helper (a timeout around it, a cancelled task): the helper's running work is stopped. On 0.9.16 the helper stayed a member and ran its task to the end with nobody to take the result (the call exists from 0.8.30; the releases between were not read). `start`, the split lifecycle, retires nothing on a drop. The retirement runs on a detached task and is not complete when the drop returns; nobody receives its result: a failed one is logged once as a warning and the helper stays a member until something retires it; on native targets, with no async runtime at the drop it is only logged and the helper stays; a call dropped before its helper's spawn has returned retires nothing, and a helper whose spawn then completes stays a member. (Shown by a test on the service call: the retirement at a drop, and on the 0.9.16 code that the helper stayed a member. Read from the source: that its running work is stopped, that on 0.9.16 it ran to the end, and the rest. Whether a cancelled turn drops the `delegate` tool's call was not read.)
+
+- Behaviour-only (not measured by the gate): `meerkat`, `meerkat-tools`:
+  `enable_shell` / `.shell(bool)` / `override_shell`, the config's
+  `tools.shell_enabled` and a mob profile's `tools.shell` keep their shape
+  and now also turn on `monitor_start`; and a shell job manager whose
+  dispatcher does not enable `monitor_start`, or whose session may not
+  start a monitor, no longer runs a recorded resumable monitor again, and
+  ends as `needs_attention` the ones that session's own tool started.
+  `JobManager::spawn_monitor_for_call` keeps its signature and records
+  the monitor as the host's: an embedder that used it as its own tool's
+  path starts monitors the session does not end. In `meerkat-core`,
+  `ToolExecutionPolicy::permits_call` and `permits`,
+  `ComposedToolFilter::allows` and the projection of
+  `PreparedToolSurface::of` keep their shape and now refuse or hide
+  `monitor_start` where `shell` is out. See Changed, Fixed and the
+  Upgrade notes.
+
+- Behaviour-only (not measured by the gate): a replayed `interaction_complete` event of a run whose structured output is JSON null now carries "structured_output" with the value null; before, the member was absent after the reread. It concerns a session that ran a directed input (one with an interaction id, such as a mob's placed turn or a flow step) under an output schema that admits null, where its events are read again from the durable event log: RPC `events/list_since` on that session, and (traced only as far as the other host's read of that log) the events of a mob member that runs on another host (`mob/stream_open`; `structuredOutput` in the TypeScript SDK). The live event carried the null on both releases. Code that tests the member's presence on the replayed event (`"structured_output" in event`, `!== undefined`) now takes the branch for a present member with the value null; code that tests the value is not affected. A `run_completed` event does not carry the member where the output comes by the extraction step: there the null is on `extraction_succeeded`, before and after, so a session started with `turn/start` on `rkat-rpc` shows no difference (shown by runs on the published 0.9.16 and on a build of this release's source). No declared type and no generated file changes; the Python SDK gives `None` either way. See Fixed, "A structured output that is JSON null". (That a reread keeps the member: shown by a test. Which events carry it in a running host, and the two doors: read from the source, not run.)
+
+- Schedules: a session that is no mob member and is not built as the host builds a session by default (a tool family switched on or off, a tool access policy, filter or grant gate, a replaced dispatcher, per-run hooks, a budget or a credential binding of its own), or whose tools are narrowed while it runs, is refused when it schedules a prompt or an event into another session by id, unless the host allows it by name. Scheduling into its own session is unchanged.
+
+- Rust API: `meerkat-core`: the public serialized enum `connection::ProviderBindingError` (re-exported as `meerkat_core::ProviderBindingError`) gains the variant `InlineSecretProfileOverride { binding, profile }`, serialized kind `inline_secret_profile_override`. The enum is not non-exhaustive: an exhaustive `match` adds the arm.
+
+- Auth bindings: a per-request choice among several inline keys kept as auth profiles for one backend is refused. An auth profile override (`auth_binding.profile`, the third part of `--auth-binding realm:binding:profile`) may not name an inline-secret profile other than the binding's own: the request is refused with the message `binding 'B' cannot take auth profile 'P' as an override: it holds an inline secret, which only a binding that names it as its own auth profile uses; give the secret a binding of its own on the backend it is for` (the Rust error's kind is `inline_secret_profile_override`; no door carries this kind); through a door it is wrapped as `binding 'REALM:B' is invalid: ` and that message: RPC `auth/status/get` answers invalid params (`-32602`), and the CLI prints it on stderr with a failing exit before anything is built; what `session/create`, `turn/start` and the REST session routes answer for such a request was not run. It names the binding and the profile and no value. The way forward (shown by a test): give each key a binding of its own on that backend and name the binding in the request (`auth_binding = { realm, binding }`, `--auth-binding realm:binding`); or keep the keys outside the document, which an override may still name (an environment variable: shown by a test; the managed store: read from the source). An override that names the binding's own inline profile still resolves (shown by a test).
+
+- `meerkat-core`: the public enum `ConfigWarning` gains the variant `ConfigWarning::InlineSecretBindingLeftOut`, which carries the binding and the auth profile it names, and the public enum `ProviderBindingError` gains the variant `ProviderBindingError::InlineSecretProfileOverride`. An exhaustive `match` on `ProviderBindingError` adds an arm; a cast of a `ConfigWarning` to an integer with `as` no longer compiles, because with a variant that carries data the enum's variants no longer have defined discriminants (the enum is non-exhaustive, so a match on it needs no new arm; the cast's failure, E0605, was shown by a build of two small crates outside the repository).
+
+- `meerkat_config` on `rkat-mcp`: a `set` or a `patch` that changes `[rest]`, `[comms]` or `[mob_host]`, or that changes the realm's parent so that another realm's tables come into force, is refused with `-32602` and the data type `confinement_administration_required`. A model-driven flow that wrote these tables through the tool stops working: set them in the configuration file or with `rkat config set` and `rkat config patch`.
+
+### Added
+
+- OpenAI `gpt-6.2-astra` (GPT-6.2 Astra) and `gpt-6.2-sol` (GPT-6.2 Sol), which OpenAI released on 2026-11-17, are cataloged as Supported OpenAI models: a 1,050,000-token context window with a separate 922,000-token input ceiling, 128,000 output tokens, text and image input, text output, and the reasoning effort levels `low`, `medium`, `high`, `xhigh` and `max`. A request that names `none` or `minimal` for one of them is refused before the provider is asked, as for every level a catalog row does not list; OpenAI refuses both levels for the two models. A request that names no level is answered by the provider at `medium`. Neither is a realtime model: OpenAI lists the Realtime endpoint as not supported for them, so they are not cataloged for live sessions. No default, alias or example changes: the OpenAI default stays `gpt-6-astra`. The rest of the two rows (web search, structured output, images in tool results, a system message after the first turn, a forced tool choice, the GPT-6 Responses prompt-cache defaults and a 600 s call timeout) is that of `gpt-6.1-sol`'s row. A configuration that already defines one of the two ids itself must drop that entry (see Upgrade notes). (The limits, the modalities and the endpoints are from OpenAI's model pages as read on 2026-11-17. Shown by calls to OpenAI's Responses API on that day: on both models the five levels were accepted and `none` and `minimal` refused with HTTP 400, a call without a level came back at `medium`, and an image input and a system message after an assistant turn were accepted. Shown by runs of both models through an `rkat-rpc` built from the source of this release's catalog change: a plain turn, a tool call, a structured output with a schema, an image input, an image in a tool result, each of the five levels sent as asked, `none` and `minimal` refused by Meerkat itself with `-32602` (`reasoning_effort_refused`, `unsupported_level`, naming the supported levels), and a second turn that followed a system prompt given with that turn. Not run: web search, a forced tool choice and the prompt-cache lifetimes.)
+
+- `meerkat-core` (Rust): `local_realms_candidates`, `RealmConfig::resolve_locator_among_roots` and its `_with` form, `RealmRootResolution` (non-exhaustive) and `StorageLayout::unreadable_realm_roots`, for a host that resolves a realm among several state roots.
+
+- `meerkat-mob-pack`: new module `content_warnings`, the rules behind the
+  `rkat mob pack` report. Its six public items are named under Changed.
+
+- Rust API of `meerkat-tools`: the trait
+  `builtin::shell::MonitorRerunAdmission`, its answer
+  `builtin::shell::MonitorRerunAnswer` (admitted, refused, or not known)
+  and `DurableShellJobRuntime::with_monitor_rerun_admission`, through
+  which the builder of a session's tools says whether the session may
+  start a monitor at the moment a recorded one would be run again. A
+  runtime without one runs every recorded resumable monitor again, as
+  before.
+- Rust API of `meerkat-core`: `tool_scope::tool_never_wider_than`, which
+  names the tool a tool is never offered or callable more widely than
+  (`shell` for `monitor_start`).
+- The job failure code `monitor_start_not_permitted`, the `reason` of a
+  `needs_attention` monitor job that was not run again. Failure codes are
+  open strings.
+- A monitor job records who started it. The session's own `monitor_start`
+  tool records the job's tool identity at version `v2`; the host's
+  `monitors/start` route records `v1`, as every earlier release did for
+  both. No wire type changes.
+
+- **A session whose committed run never settles is reported by name.** After
+  a run's terminal commit the runtime still records the completion of the
+  run's inputs and, for a directed run, publishes its terminals; until it
+  has, a session whose run completed starts nothing further, so input it is
+  handed is accepted and never run. When the work has stayed unsettled for
+  one minute:
+  - the host logs an error that names the session, the run and its inputs,
+    and repeats it every minute for as long as it lasts, also after the
+    session's runtime loop has ended;
+  - `runtime/health` (JSON-RPC) and `GET /runtime/health` (REST) publish a
+    new check, `session_run_settlement`: `degraded` while any registered
+    session is in that state, whether or not its runtime loop is alive. It
+    is an addition to the open `checks` map, beside the declared dimensions:
+    no schema or SDK change, and `meerkat::surface::RUNTIME_HEALTH_DIMENSIONS`
+    is unchanged. A session that is busy at the moment of a read is not a
+    failed read: the check then keeps its last complete reading;
+  - a mob names the member: reading a member's status logs an error with the
+    mob, the member, its session and the run;
+  - Rust hosts read the same through
+    `MeerkatMachine::unsettled_run_session_count()` and
+    `MeerkatMachine::unsettled_run(session_id)`, which returns the new
+    `meerkat_runtime::UnsettledRun`.
+
+  These are reports only: nothing is retried, ended or refused because of
+  them, and no member status value changes. Limits: the host's line covers
+  runs committed by the running process, while the check also counts a
+  completion a restart recovered and has not yet settled; the line that names
+  the member is written when the member's status is read, while the host's
+  own line, which names the session, needs no reader; and a session whose
+  state stays locked for good shows in the host's line, not in the check.
+- **The runtime's "runtime run finalization ended" log line carries the
+  session id** beside the run id, so the log says whose run settled.
+
+- Hosts get a judge for their agents' schedule writes: the public trait `ScheduleWriteJudge`, attached with `ScheduleService::attach_write_judge`, answers `ScheduleWriteVerdict` (`Accepted`, `OutOfReach`, `Unavailable`, `NotAMember`). A host's own judge answers `NotAMember` for a writer that is no member of a mob it holds; the schedule tools then hold that writer's schedule into another session to the host's statements or allowance. A judge that answers `Accepted` for such a writer has that write taken.
+
+### Changed
+
+- `meerkat-mob`: the error of a member left Broken by a resume that could not
+  certify the cleanup of its own attempt, and the log line of its parked
+  custody, now say what to do by cause. When the cause is a Recovery
+  corruption: leave the member as it is (a retire, respawn or rotation is
+  refused in that state and can leave the mob unable to start), send it
+  nothing, keep a copy of the state directory, and see Known limitations in
+  the release notes. For any other cause the repair stays retire or respawn.
+  Before, the message named retire or respawn as the repair of every cause.
+
+- `rkat`: `rkat mob pack` now reports on standard error how many files it
+  packed (`packed<TAB><n> files`) and warns about packed files that look
+  like secrets, repository metadata, local state or an earlier pack: one
+  `warning<TAB><path> is in the pack: <why>` line for each, then one `note`
+  line that points at `rkat mob inspect <pack>`. `rkat mob web build`
+  repeats the warnings for the pack it copies into the bundle, which serves
+  the whole pack to everyone who can load the page. The pack's contents and
+  digest are unchanged, and so are the standard output of both commands
+  (the digest alone for `mob pack`) and their exit status, also when
+  standard error cannot be written to; nothing is refused. The one thing a
+  script can notice is new lines on standard error. A warning names a path
+  and never prints a byte of a file. In the path, these characters are
+  printed as escapes: the control characters, the line and paragraph
+  separators (U+2028, U+2029), and the invisible characters U+00AD,
+  U+061C, U+180E, U+200B to U+200F, U+202A to U+202E, U+2060 to U+2064,
+  U+2066 to U+206F, U+FEFF, U+FFF9 to U+FFFB, U+E0001 and U+E0020 to
+  U+E007F; every other character is printed as it is. The files are
+  flagged by name, and for one form by content (a file whose text,
+  trimmed, is exactly 64 hex digits). What is flagged:
+  - a file that `--sign` would accept as a key: its text, with the white
+    space around it trimmed, is exactly 64 hex digits. It is flagged
+    whatever it is called, unless it lies under one of the directories
+    below, whose own line then stands for it. Any file that is only a
+    64-digit hex value is flagged, a key or not: this command's own digest
+    saved to a file, for example;
+  - env files: `.env`, `.env.<name>` and `<name>.env`. The three template
+    names `.env.example`, `.env.sample` and `.env.template` get the line of
+    a hidden file instead;
+  - key-like names: `id_rsa`, `id_dsa`, `id_ecdsa`, `id_ed25519`, `*.pem`,
+    `*.key`, `*.p12`, `*.pfx`, and a name that is `key` or ends in `-key`,
+    `_key` or `.key` before its extension (`key.hex`). A `.pub` file is not
+    flagged;
+  - `.npmrc`, `.netrc`, `.pypirc`, `.git-credentials`, `.htpasswd`;
+  - `*.mobpack` and `mobpack.bin`;
+  - the directories `.git/`, `.rkat/`, `.ssh/`, `.aws/` and `.gnupg/`, in
+    any case and at any depth, one line each with the number of files
+    under it, and a `.git` file;
+  - every other hidden file, and every other hidden directory (the
+    top-most one, one line with the number of files under it).
+
+  The list is a heuristic and misses much: `credentials.json`,
+  `terraform.tfstate`, `secrets.yaml`, `*.jks` and `*.ppk`, for example,
+  get no warning. No warning does not mean the pack is clean:
+  `rkat mob inspect <pack>` lists every file in it and is the check. New in
+  `meerkat-mob-pack` for the same rules, in `content_warnings`:
+  `pack_content_warnings`, `classify_packed_file`, `classify_packed_path`,
+  `has_signing_key_form`, `PackContentWarning` and `PackedPathConcern`.
+
+- `meerkat`, `meerkat-tools`, on every surface that switches shell
+  (`enable_shell` / `.shell(bool)` / `override_shell`, the config's
+  `tools.shell_enabled`, a mob profile's `tools.shell`, the CLI's
+  `--tools workspace` and `--tools full`): `shell` now turns on the whole
+  shell family. Every agent with shell whose session has durable job and
+  blob stores is offered `monitor_start` beside `shell`, `shell_jobs`,
+  `shell_job_status` and `shell_job_cancel`, with no configuration. Before,
+  the tool needed a policy enable in a custom dispatcher build, which no
+  stock surface offered. A session without durable job and blob stores is
+  not offered it, as its `shell` offers no `background`.
+
+  To keep the earlier tool list, deny the name. In a mob profile:
+
+  ```toml
+  [profiles.<name>.tools]
+  shell = true
+  deny = ["monitor_start"]
+  ```
+
+  Outside a mob, `session/create` takes a session tool filter,
+  `"tool_filter": {"Deny": ["monitor_start"]}`, which hides the tool and
+  refuses a call by name for the session; a turn's
+  `turn_tool_overlay.blocked_tools` (CLI `--block-tool monitor_start`, for a
+  run's first turn) does so for that turn; and a fork's or a mob spawn's
+  `tool_access_policy` deny list, or a Rust build's `tool_access_policy`,
+  denies it for the session. A grant-gated shell
+  family keeps `monitor_start` closed with its other tools until a grant,
+  which opens all five; a read-only profile lists it, as it lists `shell`,
+  and refuses every call. Under a grant gate on the name `shell` alone,
+  the grant of `shell` opens `monitor_start` too, and each
+  `monitor_start` call is admitted as a use of that grant: a call made
+  after the grant ended is refused with the gate's refusal for `shell`.
+
+  What a monitor may do that a background `shell` command may not:
+
+  - wake its own session: with `delivery` set to `event_steer` or
+    `event_queue`, each notification of the script is an input of its own
+    that starts a turn, with no outside input, and wakes a dormant mob
+    member. The default, `notification`, appends to the session's context
+    and starts no turn;
+  - choose its own rate: the notification rate and line size are arguments
+    of the call, within hard caps (at most 1000 notifications per window, a
+    window of 1 second to 24 hours, 1 MiB per line). No host setting bounds
+    the rate below the caps;
+  - run again after a host restart: a `replayable` monitor, and a
+    `checkpoint_resumable` one with a checkpoint, is run again at the
+    session's next shell job call, where a background `shell` command ends
+    as `worker_lost`. See Fixed for what stops that.
+
+  A monitor counts against the shell family's limit of concurrent processes.
+
+- `meerkat-tools`, `meerkat-contracts`, docs: the words "high-trust" are gone
+  from `monitor_start`'s description, from the `monitors/start` line of the
+  RPC method catalog (`artifacts/schemas/rpc-methods.json`) and from the
+  built-in tools reference, the tools concept and examples pages, the
+  durable jobs guide and the RPC reference: an agent with shell is already
+  trusted with a shell. The tool's name and the method's name are
+  unchanged. The Shell capability's description now names `monitor_start`.
+
+- `rkat mcp get` masks every env and header value in its text form, and a
+  server URL is shown without its userinfo and query in `rkat mcp get`, the
+  `rkat mcp list` table, the line `rkat mcp add` prints and the
+  project-server lines a run prints on stderr. The `--json` forms of `list`
+  and `get` are unchanged and print the values the server is given. Not
+  covered: a credential inside a stdio server's argument (the command line is
+  shown as before) and a token used as a URL path segment.
+
+- `meerkat-core` (behaviour, Rust hosts):
+  `meerkat_core::Agent::hot_swap_llm_identity` and
+  `meerkat_core::Agent::rotate_auth_lease_auth_binding` no longer release the
+  lease of the credential a session leaves, and so no longer cancel that
+  credential's sign-in flows in flight; a host that relied on this to
+  withdraw a credential calls the logout or the credential's clear instead.
+
+- `meerkat-comms`: a listener on a socket path no longer takes the path from
+  a listener that answers a dial or refuses it for permission. With
+  `[comms] mode = "uds"` a member's signed listener removed whatever file lay
+  at `address` and bound there. When another process's member already
+  listened on that path, that member could no longer be dialled and a peer
+  that dialled the address reached the new one, with no error in either
+  process. The listener now dials an existing socket file before it removes
+  it. When a listener answers the dial, the path is kept and the start is
+  refused: the error has the kind a taken TCP address gives
+  (`std::io::ErrorKind::AddrInUse`) and reads
+  `socket path <path> is held by a live listener`. When the dial is refused
+  for permission while a file lies at the path (for example the file is
+  another user's), the path is kept too and the error reads
+  `socket path <path> may not be dialled by this user and is not removed`;
+  with no file there the start goes on to the bind as before and reports
+  what the bind reports. The member's build then fails with
+  `Comms runtime failed: Failed to start comms listeners: Listener error: socket path <path> ...`;
+  a session create or resume answers it as
+  `agent error: Build error: Comms runtime failed: ...`, and a mob member
+  that is restored is recorded broken with that reason while Core's mob
+  start goes on (a Meerkat Meta gateway's start goes on too, with that
+  member's wake refused). A socket file that a listener which has ended left
+  at the path is removed and bound as before, so a restarted host starts as
+  before; the dial's other failures leave the path free as before. A
+  listener of the same process is replaced as before, as long as the path is
+  written the same way: the rule goes by the path as given, so the same file
+  reached under a second spelling (for example through a symlinked directory)
+  is now refused as held where it was replaced. The dial is bounded at
+  two seconds; a connection, a listener whose backlog is full and a dial
+  that does not end within the bound all count as held. The listener that
+  holds the path sees one connection that closes without a byte. The
+  crate's plain event listener on a socket path and
+  `meerkat_comms::transport::uds::UdsListener::bind` follow the same rule.
+  The TCP listeners are unchanged: a second bind of a taken fixed address
+  already failed.
+
+- Mobs: one create of a mob id at a time. While a create of a mob id is under way, another create of that id is refused at once, with nothing built, although the mob is not listed yet: a definition create with `mob already exists: <id>`, a mobpack create with the existing `duplicate mobpack create raced for mob id '<id>' ...` answer. This holds on every surface that creates mobs (the agent mob tools, `mob/create` on `rkat-rpc`, the MCP create, the CLI). The id is free again as soon as that create ends, with or without its mob. If a create never ends, its id stays taken until the host process is restarted; nothing about it is stored, so a restart frees it.
+
+### Fixed
+
+- `apply_patch`: the tool's description, which the model reads, said that absolute paths are rejected; the tool applies an absolute path that lies inside the project root (on Unix). The description now reads "Paths are relative to the project root; a path that leaves the root, absolute or via '..', is rejected." No behaviour changes.
+
+- `apply_patch`: an update hunk whose only unchanged line is an empty line applies only where the file has an empty line to match; where it has none, the hunk is refused and the file is left as it was. Such a hunk used to apply without matching any line of the file. Unchanged lines that end in an empty line, standing for the file's last newline, apply as before.
+
+- A realm that already exists under an ancestor project's root is no longer left behind when a nearer `.rkat` directory appears, for example after `rkat init` in a subdirectory: the existing realm is used where it lies.
+
+- Peer requests: a response to a peer request without a result no longer stops the requester. On a host whose realm is on disk, a session that had sent a peer request stopped running once it had handled a response that carried no result (the agent tool `send_response`, or a host's or SDK caller's `peer_response`, with status `accepted`, `completed` or `failed`): the SQLite runtime store refused to record that run as finished, the log had ERROR `failed to durably publish directed interaction terminal ... terminal completion finalization lost the exact durable CAS` and WARN `runtime-loop exit teardown did not complete; the registration is detached ...`, and from then on every input to the session was accepted and never ran, or on some doors was refused, while the session still read active; on `rkat-rpc`, `runtime/health` read degraded under `session_runtime_loop` and `mob/destroy` answered `mob destroy incomplete`. Now the store's exact compare of an input row takes the stored bytes first and keeps the typed re-encoding as a second reading for rows of an older stamp, which alone ends the stop; and a peer response whose result is JSON null is admitted with no payload, at the comms ingress and at `session/peer_response_terminal`. No stored form and no wire form changes. Two rendered lines change in the process that received the response: a final response without a result is no longer shown to the receiving agent with a line `Result: null`, and a comms notice without a payload no longer with `Payload: null`; the instruction texts agents are shown do not change. What this does not do: a session that an earlier release stopped stays stopped while its host runs. After a restart of the host a stop caused by a final response is over, as it already was on 0.9.16, and the work queued behind it is abandoned at that start and not run, except a message that a Meta gateway took with an idempotency key, which is run (see Upgrade notes); a stop caused by a progress response (`accepted`) is the subject of the recovery entry of this release. One narrow case stays: a pending completion whose stored row has the current version stamp and a null payload, read after a restart, is still refused (read from the source, not run). A run whose structured output is JSON null was a separate defect: see the item after this one. Affected: 0.9.5 through 0.9.16 (by the source at the release tags; shown by runs on builds of the 0.9.5, 0.9.11 and 0.9.15 tags and on the published 0.9.14, 0.9.15 and 0.9.16; a build of the 0.9.4 tag did not stop). (Shown by tests that fail on the 0.9.16 code, and by runs with a real model on builds of this release's source. On `rkat-rpc`: after a response with status `accepted` and no result, three of three, and with status `completed` and no result, three of three, the requester ran its next message, `runtime/health` read ok, `mob/destroy` completed and the log had neither line, where the published 0.9.16 stopped two of two each; a response with its typed result, one of one, as before. On a Meta gateway: after a progress response `accepted` followed by the final response with its result, three of three, and after a final response `completed` without a result, three of three, the requester ran its later message, nothing stayed queued and the log had neither line. The ingress change, a `failed` response and the other hosts: by tests or read from the source.)
+
+- A structured output that is JSON null no longer leaves a record that cannot be read. When a run's output schema admits null at its root and the model answered null, the run completed and answered, and the stored record of its input could not be read again (one record per such run). With the SQLite runtime store that alone did no harm in runs on 0.9.16: the session and its history read whole, and a start does not read a finished record at all (read from the source: it reads the inputs still open and those with a completion pending), so nothing is logged for it. But where the host process ended between such a run's commit and the finalization of its completion (typically 20 to 40 ms; 1 to 260 ms seen; over before the client has the answer), the session could not be registered at the next start (`failed to recover runtime driver during registration` with `pending terminal owner row read failed: Store read failed: terminal completion candidate digest mismatch`) and a new prompt was refused, through `rkat-rpc` with that same text; and on a realm kept in the host's own database through the host store interface any such finished run was enough: the session was refused at its next use (shown by a run on the runtime's test host). Now the read form of three fields keeps an explicit null as a present value: the run result's structured output and the structured output of the run-completed and interaction-complete events. Nothing is written differently. Records already stored read again as they are, with no repair and no rewrite, and a session whose host ended at that moment is recovered at the next start and its completion is finalized. One difference a reader of events can see (see Breaking): a replayed `interaction_complete` event of such a run (a session that ran a directed input, read again from its durable event log) now carries "structured_output" with the value null, as the live one did; before, the member was gone after the reread (the Python SDK gives `None` either way; the TypeScript SDK sees `null` where it saw no member; the declared type is optional and unknown in both). A `run_completed` event does not carry the member where the output comes by the extraction step, and `extraction_succeeded` held the null before and holds it now: a session started with `turn/start` on `rkat-rpc` shows no difference in its events. Schema files and generated SDK types are unchanged. Going back to 0.9.16 on a SQLite store this release has used: the same bytes are written; a finished record with a null is not read at a start there, as before, and one that this release finalized no longer refuses the session. Affected: 0.8.11 through 0.9.16 (the check is in the source at every release tag from 0.8.11, by a walk of all tags by content; 0.8.0 to 0.8.10 were not read; run on 0.9.16 only); a Meta gateway keeps its runtime state in the same store (read from the source; not run). This ends the Known limitation of that name added under 0.9.16 on 2026-11-17. (Shown by tests: the two records that 0.9.16 wrote are read and written back byte-equal, and the recovery at the driver on a record the test builds. Shown by runs on 0.9.16: the unreadable record; and the refused session, on the published `rkat-rpc` ten of ten hosts killed at that moment. Shown by a run on a build of the fix's own commit: a new process over a copy of the store that 0.9.16 left at such a host end registered the session, answered a new prompt and finalized the old record, which still holds its null, with no error or warning line; the database file that the refused start of 0.9.16 itself leaves is byte-equal to that one's, so a session 0.9.16 has already refused comes back the same way. Limits of that run: the host end was made by a test executor that held the acknowledgement, at the runtime's own machine and not through a host's session service, and one start was run. Shown by runs on an `rkat-rpc` built from this release's source: over the ten stores on which the published `rkat-rpc` 0.9.16 had refused the session, two starts each, every start registered the session and answered a new prompt, and the old record was finalized with its null, with no error or warning line. Shown by a run with a row that is not in the release's tree: on the runtime's test host behind the host store interface, a session with one finished run whose structured output was JSON null was refused at its next registration on the 0.9.16 code (`host store input state: terminal completion receipt digest mismatch`), and on the fix's commit it registered and ran a new prompt. Read from the source, not run: a host's real database behind that interface, roots that admit null other than an object-or-null root, and going back.)
+
+- `meerkat-runtime`: a session whose finished run was still unsettled when its runtime was registered again (a restart of the host, for one) now has that run finalized at its first drain when the run had consumed an input the runtime marks ephemeral: a peer's progress notice (a response that is not the final one) to a request the session had sent. The registration keeps that input's row, and the first drain records the run's completion with its outcome and takes the session checkpoint the run still owed. Before, the registration left the row out of the recovered session while the store went on naming it, and the session's first drain, a stop and an unregister were refused with `Recovery corruption: pending terminal owner <id> is absent from the live shell`; after a refused stop or unregister every later registration was refused too; a mob marked such a member `broken`. A batch in which one run had consumed such a notice together with a durable input was refused the same way and is finalized as well. An ephemeral input that had not run is still dropped at a restart. A store that already holds such a row is finalized at the next registration and first drain (shown by a row on a store the test builds, and by a run of a Meta gateway built from this release's source on a state kept from the published 0.9.16 whose member had stopped after a progress response: at the first start the member read active and healthy, a new message ran, the pending terminal owner row the state held was gone and the log had no `Recovery corruption` line; a second state, stopped after a final response without a result, came back the same way, but its pending row is a durable input's, which earlier releases kept too, so it does not show this change). Not shown: that a member a mob has already marked `broken`, or a session whose stop or unregister was already refused, comes back by this change. The refusal is in 0.8.11 through 0.9.16 (by the source at the release tags).
+
+- TypeScript SDK (`@rkat/sdk`): a call written to an `rkat-rpc` process that
+  is gone, before the Node program has returned to its event loop (shortly
+  after a kill, or after a stretch of synchronous work during which the
+  process ended), now rejects with `PROCESS_EXITED` and the process's
+  stderr, like any call the process died on. Before, the write's
+  `write EPIPE` error was raised outside the call and ended a program
+  without a handler for uncaught exceptions (`Unhandled 'error' event`, exit
+  code 1), although the call was inside a try/catch. This holds for every
+  request, for starting a streaming session or turn, and for subscribing to
+  a session's, a mob's or a mob member's events. The reply to a tool call
+  the process asked for, written in that window, is dropped without an
+  error raised; the call that was waiting on the process rejects with
+  `PROCESS_EXITED`. A process that keeps running after it closed its input,
+  or whose output can no longer be read, now fails pending calls, later requests and later event subscriptions
+  with `PROTOCOL_ERROR` about a second later (a later start of a streaming
+  session or turn throws `NOT_CONNECTED`) and is stopped the way
+  `close()` stops it; a failed read of its stderr only ends the stderr an
+  error message carries. Affected: every release of the TypeScript SDK
+  since 0.3.0.
+
+- `meerkat`: a session that is the target of a WorkGraph attention binding
+  and was built without the WorkGraph tools takes its turns. The binding's
+  turn overlay allows the WorkGraph tools of the binding's mode, and a turn
+  whose allow-list names a tool the session lacks is refused whole, so such
+  a session (a mob member whose profile has no WorkGraph tools, for one)
+  took no turn while a binding named it, and its status read healthy. The
+  session now takes the overlay as its own tools allow: with some of the
+  mode's tools the allow-list is narrowed to those it has; with none of
+  them it takes an ordinary turn with its own tools. Another overlay of
+  the same turn that narrowed the list keeps its restriction, with one
+  exception: an allow-list that holds every tool of the binding's mode
+  cannot be told from no other overlay, so a session with none of those
+  tools takes that turn with its own tools too. Present in every release
+  since 0.7.23 (by the source at the release tags from v0.7.23 through
+  v0.9.16; shown by a run on a Meta 0.9.15 gateway only).
+
+- `meerkat-auth-core` (`rkat mcp login`, and every host's MCP OAuth login): a
+  remote MCP server that publishes only OAuth authorization-server metadata
+  at its own origin can be logged in to. Such a server follows the 2025-03-26
+  MCP authorization revision: its `401` challenge names no
+  `resource_metadata`, it has no protected resource metadata (RFC 9728), and
+  `/.well-known/oauth-authorization-server` at its origin names its
+  endpoints. From 0.6.34 through 0.9.16 the login failed with `MCP OAuth
+  discovery failed for '<server>': no oauth-protected-resource metadata
+  found`. The server is now taken to be its own authorization server: the
+  metadata is read from the origin of the configured server URL (RFC 8414,
+  then OpenID Connect discovery) and the configured URL is the resource.
+  A server has no protected resource metadata when every location the
+  document is looked for says so: the two well-known URLs at the origin
+  root (with and without the server's path) by `404` or `410`, and the one
+  under the server's own endpoint path by `404`, `410`, `403`, `405` or a
+  `401` whose challenge names no resource metadata (the endpoint's own
+  guard answers there). Any other answer without
+  a document (a server error, a redirect, `401` at the origin root) still
+  fails the login, unless another of the candidate locations serves the
+  document.
+  Every existing check applies unchanged: the `issuer` must be that origin
+  (as written, or with one trailing slash), PKCE `S256`, a registration
+  endpoint, `https` or loopback endpoints, no redirects. A metadata document
+  is required (no default endpoint paths are assumed), a document served at
+  one of these locations (the earliest that serves one), or named by the
+  challenge the host passes on, is always the one followed (a defect of it
+  still fails the login), and a host-registered client is never discovered
+  this way. A document served only behind the endpoint's own guard is not
+  seen. `rkat mcp login` passes the endpoint's own challenge on; the RPC
+  and REST login starts pass none, so a document named only in that
+  challenge is not seen by them. A server with neither document is refused
+  with both named. A
+  server of this kind without an OpenID Connect UserInfo endpoint needs
+  `--oauth-account-selection unverified`, as before for any such
+  authorization server.
+
+- `meerkat-tools`, `meerkat`: a later deny now holds for a monitor's re-run
+  after a host restart. A recorded resumable monitor is run again only while
+  its session may still start one: `monitor_start` enabled for it, not
+  denied by name, not closed by its grant gate, and its profile not
+  read-only, as the session's current build resolves them, and not hidden
+  by the session's own tool filter or an inherited filter. Otherwise the
+  session never runs it again. At its next shell job call, a monitor its
+  own tool started ends as `needs_attention` with the failure code
+  `monitor_start_not_permitted`; a monitor the host's route started, and
+  one recorded before this release, is left as it is for the host's
+  route. Earlier releases ran such a monitor again whatever the session's
+  tools said. A session whose shell family was turned off has no shell job
+  call, so nothing of its own runs a recorded monitor again. Where what
+  the session may do cannot be read at that moment (its tool filters or
+  its grants are unreadable), nothing is decided: the monitor is neither
+  run again nor ended, and the session's next shell job call asks again.
+
+  What the re-run asks is the session's execution policy, its durable
+  tool filters and its grant gate. The re-run happens outside any run, so
+  a grant scoped to one run does not admit it. A turn's block list, a
+  governed application tool policy and a host's dispatch admission are not
+  asked.
+
+- `rkat`, `meerkat-mcp`, `meerkat-core`: a stdio MCP server that fails during
+  setup now shows why. Since 0.9.3 the host captures such a server's stderr
+  as a bounded, redacted tail and records the phase, the class of the failure
+  and the server's own exit status, but `rkat` showed none of it: its
+  operator read only the transport's text, such as
+  `connection closed: initialize response`.
+  - The `detail` of the server's `Failed` lifecycle notice (the
+    `tool_config_changed` event, and the CLI's `--wait-for-mcp` warning)
+    keeps the transport's text and adds, in fixed words, the phase (`launch`,
+    `initialize` or `tool discovery`) and what the transport established,
+    with the server's own exit status or signal where its close proved it.
+    For example: `...; stdio setup failed during initialize: the server
+    process ended, exit status 3`. A signal reads
+    `killed by signal 9 (SIGKILL)`.
+  - `rkat` also tells its operator, on its own stderr only and once per
+    failed server, that sentence and the last lines the server wrote to
+    stderr: at most 40 lines and 4 KiB of the retained tail, marked when
+    earlier output is not shown and when the end of the server's stderr was
+    not reached. It does so after the `--wait-for-mcp` wait, also when that
+    wait refuses the run, and otherwise when the run ends. A confined
+    server's last stderr lines are shown this way too; `rkat` showed them
+    nowhere before. A trusted-host server's stderr is still also written to
+    `rkat`'s stderr as it arrives.
+  - What the shown tail can hold: values of 8 bytes or more that the host
+    passed in the server's environment (the first 64, declared secrets
+    first) are removed from it exactly, and secret-shaped text is removed.
+    Launch arguments are not removed exactly, only where they are
+    secret-shaped: a secret belongs in `secret_env`, not in an argument.
+  - The stderr tail still never reaches the model, lifecycle notices, events
+    or errors, and the model's setup-failure notice is unchanged and carries
+    no class. Only the phase, the class and the exit status are added to the
+    notice's detail.
+  - Other hosts (`rkat-rpc`, `rkat-rest`, a governed realm's sessions) show
+    the phase and the exit status in that event's detail and do not print
+    the tail. A host built on the Rust API reads it with
+    `McpRouterAdapter::stdio_stderr_tail`, or with the new
+    `McpRouterAdapter::claim_stdio_failure_reports`, which returns each
+    retained failure once with its tail (sensitive: host and operator
+    only). `McpStdioSetupFailure`, `McpStdioSetupPhase`,
+    `McpStdioSetupFailureClass` and `McpStdioExit` implement `Display`.
+  - Not covered: a server that dies during a call, after a good setup.
+
+- `meerkat-session`: on a realm created with `--realm-backend jsonl`, and on
+  in-memory stores, the first turn after a run was cancelled at its boundary
+  is no longer lost. After `mob/cancel_all_work` ended a member's running
+  run, the first turn then started on that member's session (`turn/start`,
+  `mob/turn_start`) made its model call, and its result was not kept: the
+  request was answered an internal error (`-32603`, `turn abandoned: ...
+  WholeBlob committed authority differs from the live actor base ...`). A
+  `mob/member_send` to that member was accepted, made its model call and
+  ended without its result, with no error to its sender. The turn after
+  that ran. A session with no mob showed the same after a run of its own
+  was cancelled at the run's boundary. The first turn and the member send
+  now complete. The cause: the runtime alone made the cancelled run's last
+  save the session's committed document, and the live session's own record
+  of the committed document it saves from stayed at the earlier one,
+  because the conversation itself had not changed; the next run's first
+  save was then refused. A turn's entry now compares that record with the
+  store and brings the live session up to the committed document when they
+  differ. A realm on the default `sqlite` backend was not affected: it
+  reads the committed document's identity from the store at each save. This
+  ends the 0.9.15 Known limitation about the first turn after
+  `mob/cancel_all_work`. Affected: 0.9.5 through 0.9.16 by the presence of
+  the code that settles a cancelled run without telling the session layer
+  (first in 0.9.5); shown by runs on the published 0.9.14 with a `jsonl`
+  realm and by tests on the 0.9.15 and 0.9.16 trees; 0.9.5 through 0.9.13
+  were not run. Measured by tests of this change for `mob/cancel_all_work`
+  (the cancelled run started by a member send, on in-memory stores, and by
+  a client's own `turn/start`, on a `jsonl` realm with a `sqlite` realm as
+  the control), and for a session with no mob through the session runtime's
+  own boundary cancel, which no public JSON-RPC method sends;
+  `mob/force_cancel` and a member stop that cancels at the run's boundary
+  reach the same state by reading and were not run.
+
+- Cancellation on a native Rust host that supplies its own HostStore: interrupting a runtime write could leave later store calls for that session refused until a new process opened the same store. A cancelled run could then continue without a new prompt. The fix changes which task completes the write, not the batch passed to the host. In a candidate test with a custom store, the next prompt in the first process was refused before the fix; after reopen, the model double received one request before any new prompt, and the input ended consumed. With the fix, cancellation returned Ok, the input ended abandoned for cancellation, and the next prompt ran in the same process. After reopen the model double received no request before a new prompt. Neither cancellation case ran a tool. These results are from the test store, not a production database; the write form was found in the 0.9.5 through 0.9.16 sources, but the cancellation case was not run on those tags.
+
+- An environment variable that is not set fails only the `mcp.toml` server
+  that names it (affected: 0.3.0 to 0.9.16, where it failed every server).
+  Each server resolves alone, and that server is reported by name with the
+  field and the variable, never a value. `rkat mcp list` and `rkat mcp get`
+  show it with nothing expanded, marked unresolved (`--json`: the entry as
+  written, with an `unresolved` object holding `field` and `variable`);
+  `rkat mcp login` and the RPC and REST auth
+  methods work for the other servers; a run starts with that server reported
+  as a failed MCP server and a warning on stderr; a resumed `rkat-rpc`
+  session restores the other servers' attachments and reports only that
+  server's as unavailable. A login addressed to that server with `rkat mcp login`, and a run in a
+  governed realm, are refused with a message naming the server, the field
+  and the variable; a login over the RPC or REST auth methods is refused
+  with `MCP configuration could not be read`, and the names go to the
+  host's log only. One case still fails the whole set: an unresolved file
+  server whose name a realm server also uses. The loads of `meerkat-core` that return one list
+  (`McpConfig::load*`, `effective_servers_from_roots*`) keep their
+  whole-load error, whose field names the server; the per-server loads
+  (`McpConfig::resolve_*`, `UnresolvedMcpServer`) are additive.
+
+- `rkat`, `rkat-rpc`, `rkat-rest`, `rkat-mcp`: a `[confinement]` or `[governance]` table in a project's `.rkat/config.toml` that is not in effect is now reported. These hosts read the two sections from the config documents they compose and, for confinement, from the `--confinement` flags; a project file's table is not read (since 0.9.1, the first release with `[confinement]`), and until now nothing said so. `rkat` prints one `warning:` line per project file and section on stderr at the start of a command that builds an agent, naming the file, the table and where the section is read from: for confinement the user document `~/.rkat/config.toml` and the flags first (on Linux with the `--state-root` that a start confining every launch kind needs when its realm state lies inside a write grant), then the realm's own document. `rkat doctor` prints the same as a `warn config` line and its verdict is unchanged. `rkat-rpc`, `rkat-rest` and `rkat-mcp` log it as a warning at start when they have a `--context-root`. It is reported when the table is present, not empty and not what is in effect, or does not parse as its section; a project file that restates what is in effect is not mentioned. The table is still not read from the project file. The configuration pages say where the section goes and that these hosts read only the hook entries of a project's `.rkat/config.toml`.
+
+- `rkat`, and every host's first open of a new realm (`meerkat-store`): a command that takes a realm's manifest lock (`rkat realm create`, the first open of a new realm, `rkat realm govern`) now releases it before it returns; before, the lock file could outlive the command, and the next such command in that realm, typically `rkat realm govern` right after `rkat realm create`, failed with `timed out acquiring realm manifest lock` for up to 30 seconds, and the realm was not governed. Affected: 0.9.0, where `realm govern` first shipped, to 0.9.16; this closes 0.9.16's Known limitation on the realm's manifest lock. A process that is killed while it holds the lock still leaves the file; the next command that takes the lock removes it once it is more than 30 seconds old, as before. (The failure was seen in the field on 0.9.15; the release of the lock is shown by tests.)
+
+- `rkat`, and every host that looks for a realm under two or more state roots (`meerkat-store`): a first start of a realm that failed or was cancelled now removes its first-start markers before it returns; before, such a marker could stay and the next first start of that realm failed with `first-start reservation is contended` for up to 30 seconds. Affected: 0.8.4 to 0.9.16. A process that is killed during a first start still leaves its markers; they are taken over once they are more than 30 seconds old, as before. (Read from the source and shown by tests; not seen in the field.)
+
+- `rkat-rest`, `rkat-mcp` (`meerkat-store`): a server that held a lease on a realm now removes its lease record at an ordinary end; before, the record could go on reading as a live lease for up to 30 seconds after the server had ended, and for that long `rkat realm delete` refused the realm and `rkat realm prune` skipped it unless forced. Affected: 0.3.3, where realm leases first shipped, to 0.9.16. A server that is killed still leaves its record, which reads as a live lease until 30 seconds after its last heartbeat, as before. Not closed: a server that ends while a heartbeat write of its lease is under way can put the record back, live for 30 seconds more, or, after a refused write, leave an emptied record that keeps `rkat realm delete` refusing and `rkat realm prune` skipping the realm unless forced. (Read from the source and shown by tests on the lease guard; the servers themselves were not run, and the case that is not closed is read, not run.)
+
+- `meerkat-core`: one session's fallback or live model switch onto another
+  credential no longer takes the credential it leaves away from the host's
+  other sessions (by a live model switch since 0.6.0 at the
+  latest: the lines are in the source at 0.6.0 and not at 0.5.2, and were
+  not traced end to end below 0.7.0; by a fallback since 0.7.2: the call is
+  in the source at every release tag from 0.7.2 and not at 0.7.1): sessions
+  on that sign-in go on, new ones
+  can be started, and a session that runs on, or falls back to, the
+  credential another session left is no longer held. A sign-out, or the
+  removal of a credential, still withdraws it for every session.
+
+- `meerkat-core`: a fallback or live switch onto another credential no
+  longer ends with `failed to release previous auth lease ... credential
+  lifecycle owner is busy` (0.8.52 and later).
+
+- `meerkat-copilot`, `meerkat-openai`: a connection that the peer resets
+  after it was established (a reset, an aborted connection, a broken pipe,
+  or a stream cut off below HTTP) is now classed as a connection failure by
+  the GitHub Copilot token exchange and by the OpenAI and OpenAI-compatible
+  clients when they send a request. The turn's error reads
+  `llm_provider_error` with `provider_error_kind` `connection_reset` where
+  it read `unknown`, and a session with a model fallback can fall back on
+  it, as it can on a refused connection. Retries are unchanged. A peer that
+  closes the connection cleanly before it answers still reads `unknown`. A
+  host that matched on `unknown` for these errors sees `connection_reset`,
+  and the OpenAI clients' error no longer carries the transport's own text.
+  Affects the Copilot token exchange since 0.9.9, the OpenAI client since
+  0.3.4 and the OpenAI-compatible client since 0.5.2. This change was not
+  run against a live GitHub Copilot account.
+
+- `meerkat-mob`: a Stop, or a Shutdown that does not keep the member's run for
+  the next start, issued again after a refused Stop ends a run that started in
+  between, and lands. A Stop that fails (for one, a member's turn does not end
+  within the Stop's ten-minute guard) leaves the mob running with the Stop
+  owed, and input that was queued for a member can then start a run. Every
+  later Stop, and every later Shutdown that does not keep the member's run for
+  the next start, treated that member as already interrupted: it sent the
+  member no cancel, waited for the run, and failed with
+  `LifecycleOperationProgressStalled` naming the member (stage
+  `autonomous_member_stop_idle` or `runtime_run_settlement`), each time, until
+  the run ended by itself or was ended with `mob/stop_member_run` or
+  `mob/force_cancel`, the member was removed, or the host was restarted. Now
+  the Stop issued again holds each member and cancels the run the member has
+  then, at the run's next boundary; a Shutdown that does not keep the run ends
+  it at once. A Stop that leaves runs running waits for no turn: it was not
+  affected, and it still leaves that run running. Two things a caller can see
+  besides: the report of a Stop issued again after a failed one states, for
+  each member, what that Stop itself found and did (for example the run it
+  cancelled), no longer the outcome kept from the failed attempt; and that Stop
+  sends every autonomous member one more stop call. Unchanged: a Stop that
+  fails pauses nothing, so input queued for a member runs until the next Stop;
+  a turn that reaches no boundary still keeps a Stop waiting to its guard, and
+  `mob/stop_member_run` ends such a run at once. Affected: autonomous members,
+  in 0.9.16 by run; by reading, every release from 0.9.3, where a failed Stop
+  first released the members it held. Measured by tests of this change, of the
+  mob runtime with a stand-in for the session service and the model, for a
+  member the host runs itself: the Stop and the Shutdown issued again failed as
+  above before the change and land with it. Not measured, read only: a member
+  on another host, and a Stop that leaves runs running.
+
+- `meerkat-mob`: a member adopted from a roster spec is built with its
+  record's labels. On 0.9.15 and 0.9.16 a member taken into store custody
+  from a roster spec (`MobHandle::adopt_identity` with a roster source) was
+  refused every later build where its host composes the seat, because its
+  seat's labels differed from its record's. A start and a build now read the
+  labels of such a member from its record while the member's last seat row
+  is still the one the adoption found, and the adoption's commit sets its
+  roster entry from the record. Nothing is written for it and no stored form
+  changes; a member refused before the restart into this release is built at
+  its first build after it. An import that binds such a record in place
+  (`MobHandle::import_created_identities`) sets the roster entry from the
+  record at its commit too. Unchanged: a member adopted from a worker; a
+  seat that a label update of a created agent left behind its record (moved
+  by a respawn with the record's labels or by an update, as on 0.9.15); and
+  a label the host answers that the record does not carry is still refused,
+  naming that key. The record census still counts a healthy adopted member
+  as a stale seat until its next seat row.
+
+### Security
+
+- `rkat-rest`: a web page open in a browser on the same machine as a running server could read the server's answers and make requests that write. The server answered every request with a cross-origin allowance for any origin, on reads, on preflights and on writes, with its default loopback bind and with no setting or credential: a page of any origin could read the realm's configuration document and its sessions, and could send a configuration patch or create a session. Now the server compares a request's `Origin` with the realm's `[rest] allowed_origins` (an array of origins, empty by default, read when the server starts) before any route runs. An origin that is not listed, `null` included, is answered `403` with code `ORIGIN_NOT_ALLOWED` and no cross-origin header, on a preflight too; so is a request that a browser marks `Sec-Fetch-Site: cross-site` and that carries no `Origin`. A listed origin is served, and its answer allows that origin only. A caller that sends no `Origin` is served as before. Limits: the server still asks for no credential, so any local program that can open a socket to it is served; a request marked `same-site` without an origin is served (every GET route is a read, and the page cannot read the answer); a listed origin written with its default port never matches, and one written with a trailing dot matches only a page loaded under the name with that dot; the preflight answer carries no private-network allowance for a listed public origin. Affected: every release from 0.3.0 through 0.9.16 (by the source at the release tags). (Shown by rows and through the built binary on a loopback port; that the check covers every route and that no GET route writes: read from the source.) (Shown by a run on the published 0.9.15: a page of another local origin, in a headless Chromium, read `/config`, an inline auth source set in it included, and changed it with a `PATCH`, with no credential; the answers carried `access-control-allow-origin: *`. A page of a public site and another browser were not run; of the other routes, only a session create was run (it reached the handler and was refused only for the realm's missing provider credential, the refusal readable to the page).)
+
+- `rkat-rest`: a page whose own host name was made to resolve to the server's address could read the server's answers. The server answered a request addressed to any host name, so such a page was a same-origin caller of the server: its reads carry no `Origin`. It needed a browser on a machine that reaches the listener and a host name that the page's site controls; no setting and no credential. Now, whatever address it is bound to, the server answers a request only when its `Host` is `localhost`, an address literal or a name listed in `[rest] served_hosts` (an array of host names, empty by default, read when the server starts); any other name is answered `403` with code `HOST_NOT_SERVED` and the name in `details.host`, before any route runs. A request without a `Host` header is served. Affected: every release from 0.3.0 through 0.9.16 (by the source at the release tags; not run on a published binary). (Shown by rows; that a browser always sends a `Host`, and that a re-pointed name cannot appear as an address literal: from how HTTP and name resolution work, not run.)
+
+- `rkat-rpc --tcp`: a web page open in a browser on the same machine could run JSON-RPC requests on the listener, a configuration write included, without being able to read the answers. Bytes shaped as an HTTP request were read line by line: the request line and each header line got a parse error, and a JSON line in the request's body was run as a request. It needed `rkat-rpc` started with `--tcp`; no credential; the server's log showed nothing of it. Now a connection whose first line reads as an HTTP request line (a method, a target, an HTTP version) is closed on that line: nothing after it is read or run, nothing is written back, and the listener logs a warning with the peer's address (`... an HTTP request arrived on the RPC listener; the connection is closed and nothing of the request is dispatched`). The rule holds on every JSON-lines connection of the server, stdio included. Limits: only the first line is judged, so a listener behind a TCP proxy that writes a header line of its own first is judged on that line; a leading byte-order mark from a raw client is not covered. Affected: 0.5.2 through 0.9.16 (by the source at the release tags). (Shown by rows on a served connection and through the accept loop on a loopback port; that no JSON line can read as a request line: read from the source.) (Shown by runs on the published 0.9.15 with `--tcp` on a loopback port: hand-built bytes shaped as an HTTP POST got the result of the JSON line in their body, and a page in a headless Chromium wrote a configuration value with a `no-cors` POST whose answer it could not read; the server's log named neither request. One browser, a local page, one write.)
+
+- Schedules: an agent that holds the schedule tools could have the host carry out later, under the host's own authority, what the agent itself may not do. (a) A mob member could schedule content into a member it cannot message, and on a Meta gateway into a member that takes no outside sends. (b) Any agent's session could schedule a session that is created on demand; the host builds that session as it builds a session by default, not as the writer's was built (shown on a 0.9.15 gateway where another profile may use the shell: a member with the comms and schedule tools only got a fired session that was offered the shell). (c) A member with the schedule tools and without the mob tools could schedule a helper of a role it could not spawn. (d) On a gateway a member could create, pause, retime or delete the schedules the gateway keeps for itself (the memory steward's pass, the announcement source runners), or store one that the gateway then took for its own. It needed the schedule tools and nothing else. Now: (a) a member's create or update is judged as its own send and is refused with `policy_denied`, code `schedule_target_not_a_peer`, unless the target is the member itself or a member of its own mob that it is wired to; (b) a create, an update or a resume of a schedule that creates a session is refused with `policy_denied`, code `schedule_session_creation_not_allowed`, unless the host states that the writer's build is the host's default build and nothing narrows its tools, or the host allows it by name (`[tools] agent_schedules_may_create_sessions`, off by default); (c) the same code answers a schedule that spawns or forks a helper, unless the writer's build mounts the mob tools or the host allows it by the same key; (d) an agent's schedule tools refuse the steward's runnable and the two reserved labels on create and update, refuse every call by id on the gateway's own schedules and leave them out of their list, and at each start the gateway keeps its own steward and runner schedules and removes any other row that claims to be one. Nothing is stored for a refused write; a host's own calls are not judged; pause, delete and the reads stay open to the writer. Limits: a schedule stored before the upgrade keeps firing, because a stored schedule names no writer: list the schedules that create sessions or helpers and delete those that should not exist; a right the writer loses after the write is not judged again at the fire; a member that holds the mob tools can still schedule a helper of a role its own ceiling does not allow; a member whose build mounts the mob tools can still schedule a helper where those tools are withheld from it by an approval gate, a deny rule or a filter: the helper is created when the schedule fires and no approval is asked at that moment; withhold the schedule tools from such a member; on a host that registers runnables, every member that holds the schedule tools and is not private to a person can create a schedule that fires any of them, with parameters of its choosing, and the fire does not tell the handler who wrote the schedule: register only runnables that any such member may fire, and check their parameters in the handler; a default session on a self-hosted server that is not its realm's one default route is refused a session-creating schedule after a restart; a row stored before the upgrade that already carries this version's mark is kept as the gateway's own, resumed and retimed: the runner label at the value "2" with a live source's runnable and parameters, or the steward's label on the steward's runnable; the allowance is a key of the realm's configuration document, which each host on that realm reads once at its start, so whoever can write that document can turn it on from the next start of a host on that realm: a client of `config/set` or `config/patch` on `rkat-rpc`, of `PUT` or `PATCH /config` on `rkat-rest` and of the configuration tool `meerkat_config` on `rkat-mcp` (each of them can also start sessions itself), a session that has the shell on a host without OS confinement, and, through a parent realm's document, a session with the file tools on a server whose tools' root is the state root; and a child realm cannot be kept off under a parent realm that allows: the key is written into a document only when it is on, so a `false` stated in the child's document is dropped by any typed write of that document (a `config set` on any surface, whatever it changes), and the child then takes the parent's allowance without a word: allow in each realm that needs it, not in a parent whose children must stay off. Affected: (a) 0.5.2 through 0.9.16 for a member with the schedule switch and 0.6.6 through 0.9.16 for a default delegate, on a Meta gateway every Meta release from 0.7.28; (b) and (c) 0.5.2 through 0.9.16; (d) at least since Meta 0.9.9, through 0.9.16 (the Core ranges, and (d) from Meta 0.9.9, by the source at the release tags; Meta 0.7.28 by Meta's release commits: the 0.7.27 release tree does not hold this form, and 0.7.27 in another form and earlier Meta releases were not read; the schedules of (d) are in Meta's history from 0.9.0 and from 0.9.5, and whether the effect reached them before 0.9.9 was not read). (Shown by rows; (b) and (c) also end to end on the published 0.9.15 gateway; the Core hosts' form of (a) and the limits: read from the source.)
+
+- File tools on `rkat-rpc` and `rkat-mcp`, also as the Python and TypeScript SDKs start `rkat-rpc`: a session with the built-in file tools, on a server started without a context root (the default), had those tools rooted in the realm's own directory. There `apply_patch` and `blob_save_file` could change, replace or delete the realm's stores (sessions, runtime, jobs, work graph, memory, tasks, blobs, artifacts and mobs, the approval records and decisions, the shell tools' process custody records, the lease, hosting and delivery directories and the realm's lock files); at least since 0.9.12 only the realm's four documents and `.rkat` were refused there (an earlier form of that refusal was not read). On every host `blob_load_file` could copy any file under the tools' root (up to 25 MB) into the blob store, and `view_image` could return any file with an image name (up to 5 MB), also inside `.rkat` and inside a path the host had declared as its own; and `view_image` returned a file by its name and size alone, whatever its bytes were. It needed a model-driven session with the built-in tools; no shell. Now the four tools answer an `invalid_arguments` tool error and touch nothing where the path is in a `.rkat` directory anywhere under the project root, or in another place the host keeps its state and configuration in: the message of a write says `the file tools do not write there`, that of a read ends `the file tools do not read there`. The stock hosts declare their realm's documents and stores, its admission lock and its write-admission lock; a declared file covers its side files and the lock files made from its name. A refused read answers the same whatever stands at the path. `view_image` returns a file only when its bytes begin as PNG, JPEG, GIF or WebP, and no longer offers `.svg`. No wire type, schema, stored form, SDK type or setting changes. Limits: the rule binds a session without a shell: a session that has the shell reaches what the server's user reaches unless confinement is set; it is a list of names, and a Rust host that passes no list declares nothing; not covered: the short-lived `.<name>.tmp.<id>` files, `presentation/` as `rkat` writes it, a context root at the state root (the other realms' directories), and case-insensitive filesystems on Linux; an existing hard link in the project to a protected file is written and read through. Affected: tools rooted in the realm from 0.3.3; on by default on `rkat-rpc` from 0.4.6 (`apply_patch`), `view_image` from 0.4.12, the blob tools from 0.6.2, on `rkat-mcp` from 0.5.0; through 0.9.16 (by the source at the release tags). (Shown by rows in the tools crate and in the facade's suite, on a started `rkat-rpc` on SQLite and JSONL realms, and on `rkat-mcp` built in process.)
+
+- Confinement and where a realm is looked for: a process that an agent drives under confinement could make the user's next start run without that confinement. A command looked for its realm under one project-local root, `<P>/.rkat/realms` for the nearest directory P at or above the start directory that holds a `.rkat` entry, and under the user-global root; the realm's id does not depend on that entry. So when a `.rkat` entry appeared in a directory between the start directory and P, or in the start directory itself, the next command found the existing realm in neither place and used a fresh realm of the same id under the nearer root (a server: under the user-global root), without a word: the realm's own documents, with the confinement and the grants they state, were no longer the ones composed, a realm document placed under the nearer root was read as the realm's own, and where the entry was in the start directory itself, the project's MCP servers, hooks and skills under it were used without the confinement's refusal of sources a confined process can write. It needed a confinement requirement stated only in a realm document, a realm kept under the project-local root and not under the user-global one, a start from a directory below P without `--state-root` (for a user with `~/.rkat` the home directory is P for every directory below it that has no `.rkat` of its own), and a confined process that can create a `.rkat` there, as it can in the start directory on Linux. Now the resolution reads the state root of the project root and of every farther ancestor whose `.rkat` is a directory, then the user-global root, and uses the existing realm where it lies; a realm id found under more than one root refuses the start and prefers neither copy; and a `.rkat` entry that cannot be examined refuses the start, where it was passed over and a farther ancestor's root was used in its place. A farther ancestor's root is read and never written. Limits: a confined process can still stop the next start by placing a second copy of the realm: look at both copies before adopting one, as the refusal says; it can also stop it by taking away the user's own access to the start directory, or by placing a `.rkat` in a directory whose realm was never started, which a start confined by the user document or the flags then refuses; a realm is found by its manifest only, so a realm document written by hand for a realm that was never started is not found under a farther root; two first starts of one explicit id from two directories at the same moment can leave it under two roots, and the next start from the nested one is refused; a third root that holds the id is not named in the refusal; the servers are bound only when started with `--context-root`. Affected: the realm left behind, 0.8.4 through 0.9.16; the loss of confinement, 0.9.1 through 0.9.16 (by the source at the release tags; no published binary was run). (Shown by rows on the resolution and on starts of the `rkat`, `rkat-rpc`, `rkat-rest` and `rkat-mcp` binaries on Linux, with no confined process: what a confined process can create is read from the source; Windows and macOS were not run.)
+
+- `rkat mob run <pack file>`: the `--confinement` flags were not applied to it. An operator who started `rkat --confinement <mode> mob run <pack file>` (any `--confinement*` flag; a run of a pack file, not of an installed mob id) got a mob whose members' launches (the shell tool, command hooks, local MCP stdio servers) were governed by the realm documents' `[confinement]` table only: the flag's selection was not applied to that command. With no `[confinement]` document the launches ran as the trusted host, and no startup report or admission line said so. `mob deploy`, `run`, `resume`, `mob host` and every other command that starts a launch applied the flag. Now the pack run composes the flag's selection for every launch kind as `mob deploy` does, and a flagged pack run gets what every confined command gets: the startup report on stderr; the admission of the host's own inputs, which refuses the command before it starts when a confined process could change the realm state, the user configuration document or, where the host keeps it in files, its credential store; and a launch kind the platform cannot confine is refused at that launch, never run unconfined. Without a flag nothing changes. Limits: no requirement travels to a mob's members on other hosts: such a member is built by that host's own process and is confined as that host's own documents and flags say; for Meta, a search of its crates found no place that takes a `--confinement` flag or lowers a `[confinement]` selection at all (see the Known limitation "Confinement under a Meta gateway" under Meta 0.9.16). Affected: 0.9.1 through 0.9.16, every release that has the flags (by the source at the release tags; no published binary was run). (Shown by tests of the configuration the pack run composes, compared with the one `mob deploy` composes from the same flag; that a composed selection is then admitted and enforced at a launch is read from the source, the same code every other command uses: no confined pack member was started.)
+
+- `rkat-mcp`, the `meerkat_config` tool: a `set` or a `patch` could put a process launch, or a looser setting, into the realm's configuration. The tool has one caller, the server's MCP client, and cannot tell a hand from a model. Such a write could put into the realm's configuration, or bring into what the realm composes along its parent chain: an entry that launches a process (an MCP server with a stdio transport, a hook with a command runtime, a skills repository with a stdio or a git transport); another shell program or a looser shell command policy; a command hook hidden by an entry of its id, when the write takes that entry away; a provider route that changes where a host credential goes; a change of the server a self-hosted model names, or of the server a binding names. Now such a `set` or `patch` is refused before the candidate is validated and before anything is written: `-32602` with data `{"type":"confinement_administration_required"}`. Two comparisons are made and either refuses: the realm's own document (a launching entry or a route entry that the committed document does not hold as the same whole entry; the route entries are an auth profile, a backend, a binding, a default binding set or changed, a Copilot account, a connector client, a self-hosted server, and a self-hosted model added or pointed at another server) and what the realm composes along its parent chain. A committed chain that does not compose answers `-32603`, `failed to compose the realm's config chain`; a candidate that does not compose answers `-32602`, `Invalid config: the document does not compose along the realm's parent chain`. Not refused: an HTTP MCP server, an HTTP or in-process hook, a filesystem or HTTP skills repository, a restated entry, and a removal or a parent edge change that brings nothing of those kinds into force. Refused as well: a change of any field of a launching entry or of a route entry other than a self-hosted model (a command hook's `enabled`, a stdio server's timeout, a binding's default model), since such an entry counts as unchanged only as the same whole entry (a self-hosted model's other fields and `self_hosted.default_model` pass); in a realm whose parent states a `[shell]` section, a write of another shell key alone, unless it states the parent's program and policy with it; and the removal of an own entry that shadowed a parent's launching entry (a stdio server by its name; a stdio or git skills repository by its source id), of an entry that hid a command hook of its id, and of a self-hosted model through whose entry a binding that stays names its server. The operator's other ways are unchanged: the realm document itself, `rkat mcp add --scope realm` for MCP servers, `rkat auth` for provider routes, JSON-RPC `config/patch` and `config/set`, REST `/config`. Limits: the removal of a binding that names a server is not covered, and the same end is reached by an own realm section that stands in front of a parent's section of the same id with nothing in it; the check and the write are not made under one lock; the tool can still switch on the shell tool, the built-in tools and skills where the host switched them off (`tools.shell_enabled`, `tools.builtins_enabled`, `skills.enabled`). Affected: 0.3.0 through 0.9.16: the tool has had a writing `set` and `patch` at every release tag (its arms read at 0.3.0, 0.8.42, 0.9.1 and 0.9.2). Which kinds a release could write, by names in the source over the whole tree at every release tag: the shell program, realm MCP servers, skills repositories and hooks from 0.3.0; self-hosted servers and models from 0.5.2; a realm's provider routes at least since 0.6.0 (an earlier form of that kind is in the config at 0.3.0 and was not read). Whether a release's sessions then started what was written was not read, and nothing was run on a published binary. (Shown by tests, each kind red first; the range, the limits, the three examples of a changed field and the removal of a shadowing skills repository: read from the source.)
+
+- `delegate` under network comms: a helper built on its parent's key is no longer wired to it. On a host whose realm runs comms in tcp mode on port 0 or in uds mode, a session that called `delegate` ended up trusting its realm's own key: its trust held an entry under its own peer id for the helper, which stayed after the helper was retired and was shown in no peers listing; the helper's trust held the same kind of entry for its parent while the helper lived. It needed network comms, a session with a comms identity and one `delegate` call; no operator action. Under one fixed tcp port the helper is never built, and under the default in-process comms every session has a key of its own: nothing changes there. Now `delegate` does not wire such a helper: neither side's trust takes the other's descriptor, the helper's mob keeps no edge to the delegating session, and the tool's answer carries `wired: false`; the helper is built, runs its task, returns its result and is retired as before. A direct caller of the reciprocal add (the mob handle method) for a descriptor on the store's own key is refused. What a caller loses: such a helper could address its parent's peer id through the send tools, by id only; that call now answers `peer_not_found_or_not_trusted` (read from the source; not run). Limits: an edge that an earlier release stored for a helper that was live at a crash is added again at a resume, on the helper's own store; on Core hosts such a helper is retired only inside the delegation's own call chain and otherwise lives until its mob goes with the delegating session's archive or is retired by a caller (a Meta host's idle sweep retires it, by default after 300 idle seconds; where `implicit_delegate_idle_retire_secs` is unset it retires nothing, and a candidate launch does not start the sweep). Affected: 0.5.1 through 0.9.16 (by names in the source at all release tags: the delegate's wiring makes its second add at every tag from 0.5.1, the first with the `delegate` tool, under another name before 0.7.0; the lines were read at 0.9.16 only, and whether the two runtimes had one key and the store took the entry before 0.9.16 was not read; nothing was run on a published binary). (Shown by tests: that such a helper is no longer wired, the two comms modes where nothing changes, the present answer and the refusal. The entry under the session's own peer id and the helper's entry for its parent while it lived, on 0.9.16: by a run on a build of the 0.9.16 release commit's source (not the published binary), with rows that are not in the release's tree. Read from the source, not run: what a caller loses and both limits.)
+
+- `delegate`: the delegating agent's trust in a helper now ends with the helper. An agent whose `delegate` call answers `wired: true` (its session has a comms identity and the wiring succeeded) kept, on its own comms runtime, the trust row that the call's wiring had added for the helper. Nothing removed that row when the helper was retired: the agent went on listing the retired helper as a peer, one more entry for every helper ever wired, for the life of its comms runtime, and would still have admitted a message signed with the retired helper's key. The helper's key pair is a file of its own (`<session comms identity root>/<session id>/identity.key`, mode 0600), and the retirement left it on disk, readable by the host process's OS user, by an agent whose host enabled the shell tool without confinement, and by the file tools where the key root lies inside the tools' project root. To be heard as the retired helper needed the key file's bytes and a way to deliver into the delegating agent's inbox; for an in-process helper no such way was found by reading unless that session id were built again; no use was run or shown. Now, when a delegate helper ends, the delegating agent's row for it is removed and the helper is no longer in its peers listing: after `delegate` returns, when a `delegate` call is dropped while it waits on its helper (the call now retires its helper itself: see Breaking), and when the helper's mob is destroyed. The helper's session key pair (`identity.key`, `identity.pub`) is deleted once its session is archived: this is for a helper of the `delegate` tool's own mob; the delegation service used on another mob deletes nothing, and a session kept for a successor keeps its pair. The `delegate` answer is unchanged. Not under network comms (tcp, uds): there the key is the realm's and is kept. Limits: a wired helper respawned onto a fresh session keeps the earlier incarnation's row and key pair; a removal that is refused is not asked again, so that row stays past the retirement; after the mob's actor is rebuilt in a living process the rows of helpers wired before are not removed by that mob (the delegating agent's own runtime being rebuilt still ends them, and their key pairs are still deleted at their later retirement); a helper whose retirement fails keeps its key pair, and its row too if the failure comes ahead of the trust removal, until that retirement completes; key pairs of helpers that an earlier release retired stay on disk (see Upgrade). Affected: 0.5.1 through 0.9.16 for the row (by the source: the row's add is in every release tag from 0.5.1 to 0.9.16, 138 tags walked by content, its lines read at six of them; that nothing removed it: by a run at 0.9.16 and by lines at 0.9.15; the retirement code of 0.5.1 through 0.9.14 was not read tag by tag); the key pair left on disk was not ranged by tags. (Shown by tests that fail on the 0.9.16 code: the row, the listing, the helper of a dropped call and the key pair on disk. Read from the source: the admission of a signed message, the readers of the key file and the limits; of the limits, that the row of a refused removal stays past the retirement is also shown by a test (that the removal is not asked again: by lines only), and a retirement that fails ahead of the trust removal by a run.)
+
+- Schedules: a session that is no mob member and holds the schedule tools could schedule a prompt or an event into any other session of its host by that session's id. Now a create, every update and the resume of a schedule whose session target (`exact_session`, `resumable_session`) names a session other than the writer's own is refused with `policy_denied`, code `schedule_session_creation_not_allowed`, when the writer is no member of a mob its host holds, unless the host states that the writer's build is its default build and nothing narrows its tools, or the host sets `agent_schedules_may_create_sessions` under `[tools]`. A session's schedule into its own session is unchanged. That key now allows three things together: sessions created on demand, helpers, and schedules into another session. Limits: a schedule that a session outside a mob writes for a mob member is not judged by this change: on a gateway a plain resumable prompt into a member's session is written as that member's target and is accepted (the exact form and an event are refused); where a host's judge holds no mob at all, every writer is answered as no member, a member included; a schedule stored before the upgrade keeps firing; a resume by a writer the two statements do not cover is answered as temporarily unavailable while the judge cannot answer. Affected: 0.5.2 through 0.9.16 (by the source at the release tags; not run on a published binary). (Shown by rows.)
+
+- Configuration answers no longer show stored secret values. Every door that answers the configuration document returned its stored secret values in clear: the `meerkat_config` tool on `rkat-mcp` (to the model of a session that has the tool and to whoever reads that session), `GET /config` and the answers to `PUT` and `PATCH /config`, `config/get` and the results of `config/set` and `config/patch`, and `rkat config get`. It needed access to the door and nothing else. The values: an auth profile's inline secret; a credential command's environment; MCP servers' environment and header values; hooks' environment and header values; a skills repository's environment, token or header value. A refused patch, and a stored document that did not parse, were answered with the parser's own display, which quotes the document's line, with a stored value when one sits on it. Now the answers show `<redacted>` at those places on every door; the values are read from the document file. A write that sends `<redacted>` back keeps the value stored at the same place (lists by the entry's own key); where nothing is stored for it the write is refused and nothing is written (REST 400 `Invalid config: ...`; RPC and the tool `-32602`; the CLI a failing exit). A stored secret stays with its address: a marker is not resolved in an entry whose `url` the write changes, and a write that changes where a stored inline secret is sent is refused unless it states the secret, as is a patch that makes a profile an inline secret without stating it. A JSON-RPC server composed with no config runtime refuses a write that carries the marker (`-32602`). Errors about a configuration document give the place (line, column, key path) and what is wrong, never the stored document's line, and no stored value but for the limit below (an error about the caller's own `set` payload can still quote what the caller sent). Limits: argument lists, addresses and free option values are shown whole; a custom reader that words its own error still prints the value it refused (none sits at a secret place). NOT COVERED BY THIS CHANGE, read from the source and not run: the doors that list MCP server entries still show a realm server's environment and header values: `rkat mcp list --json` and `rkat mcp get NAME --json` whole; `rkat mcp get NAME` in its text form whole unless the value's name holds `key`, `secret`, `token` or `password`, and then with its first two and last two characters (`****` only for a value of four characters or fewer); and Meta's `meta/realm_mcp/servers` as stored: a server installed through `meta/realm_mcp/install` with a literal `env` or header value is listed with it, and by its module's documentation that door is served only to the SDK host on the gateway's own stdio. Affected: 0.3.0 through 0.9.16: these doors have returned the stored document whole since the earliest release tag. By kind of value: MCP servers' and hooks' values and a skills repository's token from 0.3.0 (its stdio environment from 0.4.0); an auth profile's inline secret and a credential command's values from 0.6.0. Through 0.5.2 the document also held a provider's `api_key`, a kind that no longer exists, and an answer carried it. A self-hosted server's `bearer_token`, 0.5.2 through 0.6.34, was never serialized into an answer. (By a walk of all release tags by content, the lines read at the first tag of each kind and at 0.9.16; no published binary was run.) (Shown by tests on the four doors and of the rules in Core.)
+
+- `rkat-mcp`'s configuration tool (`meerkat_config`, actions `set` and `patch`): a caller of the tool, which can be a model connected to the server, could change the served realm's own listener settings with no further right than calling the tool: every key of `[rest]` (the address the REST server binds), of `[comms]` (the comms listeners' mode and addresses and the peer authentication settings `auth` and `require_peer_auth`) and of `[mob_host]` (the host acceptor's and the live WebSocket's addresses and bounds). A change of the realm's own parent edge could do the same without naming a key, by putting another realm's table into force. `[rest]` and `[mob_host]` are read at the next start of the host that uses them, `[comms]` by the next session built in the same running server (read from the source; what each written key then changed in a running host was not run). Now the tool refuses such a write and writes nothing: JSON-RPC invalid params (`-32602`) with data `{"type": "confinement_administration_required"}` and a message that names the table. The rule is on the table's path, so a key this version does not know is refused too; a write that carries the three tables unchanged commits. The operator's doors still write these tables: the configuration file, `rkat config set` and `rkat config patch`, and the REST and JSON-RPC config methods. Limits: where the server serves the `global` realm, a change of the user document's realm sections can still change what another realm composes for these tables, if that realm has no document of its own and the table already stands in some realm's document: no new value can be written that way; a full replace rewrites the document from its typed form, so a key of `[rest]` or `[comms]` in the file that this version does not know is dropped. Affected: `[rest]` and `[comms]`, 0.3.0 through 0.9.16; `[mob_host]`, 0.8.0 through 0.9.16 (by the source at the release tags; not run on a published binary). (Shown by rows in the MCP server's crate.)
+
+- Comms: when two different sources of trust in one peer were removed from a member at the same moment, the peer could stay trusted by that member until that member's runtime was rebuilt, and it was then listed among that member's peers even where it had been kept out of the directory. The two removals now settle in order: the peer's trust is removed, and with it the listing. Read from the source: an agent's own tools do not bring two such removals together on a member that stays seated (its mob's unwire and retirement lanes, a mob's destroy, a retirement that is re-driven, placed and dormant members), and on a placed member with an external binding that carries the supervisor's key the two removals do not run at the same time during an operator's supervisor rotation. Not read: that a session has exactly one comms drain task, every arm of the retirement's stage order, and how a key rotation reaches a live placed member to its end. Affected: 0.7.0 through 0.9.16 (by the source at the release tags).
+
+### Upgrade notes
+
+- A configuration that defines `gpt-6.2-astra` or `gpt-6.2-sol` itself (a `[models."gpt-6.2-sol"]` entry, for example because you ran the model on 0.9.16 before the catalog listed it) must drop that entry when upgrading: the catalog now has both ids, and a second definition of a model id is refused with "model id '<id>' must be unique across built-in, custom, and self-hosted entries". The refusal comes when the configuration is loaded, not when the model is first used, so with such an entry nothing starts: `rkat-rpc` ends at its start with exit code 1, having served nothing, and its error line reads "rkat-rpc: invalid runtime config: Validation error: " and that message (an SDK sees only that the process closed); by the source every `rkat` command that loads the runtime configuration answers "Invalid runtime config: " and that message, and the REST server and a Meta gateway refuse to start. An entry in a mob definition is refused when one of the mob's members is built. Two ways to take the entry out were run. Before the upgrade, on 0.9.16: the RPC `config/patch` with `{"models": {"gpt-6.2-sol": null}}` removes it (from then until the upgrade 0.9.16 does not resolve the model). After a refused start: remove the `[models."gpt-6.2-sol"]` table from the realm's `config.toml` by hand (in the run it lay under `.local/share/meerkat/realms/<realm>/` in the home directory). After either, this release starts and the catalog row serves the model with its own limits and reasoning effort levels (see Added). (Shown by runs with `gpt-6.2-sol` on a realm that the published `rkat-rpc` 0.9.16 wrote, where a turn through the entry had answered, and an `rkat-rpc` built from the source of this release's catalog change: the refused start, both ways out and a turn on the model after each. Read from the source, not run: `rkat`, the REST server, a Meta gateway and a mob definition's entry.)
+
+- Before you upgrade, find realms that exist twice. The same realm id with a manifest under two state roots on one path is refused at the first start from the nested directory after the upgrade (see Breaking). Such a pair exists where a `.rkat` appeared in a directory after work there under a parent directory (the next command wrote a second realm of the same id under the nearer root); where the same `--realm` name was used from two nested project roots (the home directory counts as one for anyone with `~/.rkat`); after `rkat realm create` from a nested root, which on this release too creates the realm under its own state root without looking under the others; and for a server started with `--realm X --context-root C` where C has its own `.rkat` and X lies under an ancestor's root. To find them on 0.9.16: `rkat storage doctor --root <dir>/.rkat/realms`, with one `--root` for each directory on the path that has a `.rkat` and one for the user-global realms root (`$XDG_DATA_HOME/meerkat/realms`, else `~/.local/share/meerkat/realms`, on Linux; `~/Library/Application Support/meerkat/realms` on macOS; `%APPDATA%\meerkat\realms` on Windows); it reports each such id as `split-brain-realm` with both directories. On this release `rkat storage doctor` without a root reads them all. To go on with one copy, add `--state-root '<root>'` to the command. To keep one copy and archive the other: `rkat --realm <id> storage migrate --root '<A>' --root '<B>' --apply --adopt-root <root to keep>`: the adopted realm stays untouched where it lies and the other copy is renamed to `<root>/<id>.pre-<version>-<timestamp>.split-brain` and kept read-only until `rkat storage prune --apply` removes it, by default once it is 30 days old. Look at both copies first: a copy you did not create should not be adopted. The doctor may also list a realm directory under a project that a confined start left there before it was refused with the advice to pass `--state-root`: it holds no session and is safe to leave; it can be deleted, or archived with the adopt command (read from the source, not run). (The finding command by a row on the 0.9.16 code, the adopt command by rows on the 0.9.16 code and on this release.)
+
+- `rkat --confinement <mode> mob run <pack file>`: the flag is now applied (see Security), so a command that started before can be refused at its start by the admission every confined command has: `<kind> confinement lets a confined process change the realm state at '<path>'; start the host with --state-root <dir> outside every confinement write grant` (`<kind>` is `shell`, `command_hooks` or `mcp_stdio`). Only a confining mode can refuse (`workspace`; `trusted-host` cannot). The refusal comes after the pack is verified and the realm's persistence is opened and before the mob is created, so a refused first start may already have created the realm's own files under the state root. On Linux at a project root with the default project-local state root, `--confinement workspace mob run <pack file>` is refused as `--confinement workspace run` is: give `--state-root <dir>` outside the project and outside every `--confinement-write` path: the rule is outside every write grant. The state root is where the realm lives, with its configuration document and the pack run's durable mob, so the later commands on that mob (`rkat mob runs`, `status`, `logs`) need the same `--state-root`, and a realm document kept under the project is not the one read once the state root is elsewhere. A pack run without a flag is unchanged. (Read from the source; the refusal's text is shown by a test of the function a pack run shares with `run`; the refusal on a pack run is not shown by a run.)
+
+- Delegate helpers' key pairs from earlier releases (see Security): this release deletes a delegate helper's session key pair when it retires the helper; it does not list or remove the pairs of helpers that an earlier release retired. They lie under the session comms identity root, one directory per session id (`<root>/<session id>/identity.key` and `identity.pub`), where the root is `<user config root>/.rkat/session_comms_identity` when the host gives its agent factory a user config root, and otherwise `meerkat/session_comms_identity` under the platform's state directory (Linux and other Unix: `$XDG_STATE_HOME`, else `$HOME/.local/state`; macOS: `$HOME/Library/Application Support`; Windows: `%LOCALAPPDATA%`); a host that declares the members' root for its mob itself has them there. The pairs exist only under in-process comms, the default. A directory's name there is only a session id: every session built with in-process comms under that root has a directory of the same form (the delegating sessions themselves and plain sessions of every realm, not only mob members), and removing one of those makes that session's next build another peer. No tool tells them apart. (Read from the source; no state directory was opened.)
+
+- `monitor_start` is never offered or callable more widely than `shell`.
+  A deny list, a spawn's or a fork's tool access policy, a session's tool
+  filter, a turn's block list or a grant gate on the name `shell` that
+  closes `shell` closes `monitor_start` with it, at every build and after a
+  restart, and the grant that opens `shell` opens it, for as long as that
+  grant is in force: a `monitor_start` call is checked against it when it
+  is dispatched. A session whose
+  `shell` is closed by name is therefore not offered the monitor by the
+  upgrade, and, unless only a turn's block list closes it, its recorded
+  monitors are not run again. An allow list that names `monitor_start` and
+  not `shell` no longer admits the monitor. The rule goes by the tool's
+  name: a host's or an MCP server's tool exposed as `monitor_start` is
+  bound to `shell` in the same way, and where shell is on with durable
+  stores the built-in tool takes the name (the built-in is on only where
+  the build also has a realm id and a job delivery projector). (These
+  notes on `monitor_start`. Shown by tests: that a deny, an access policy,
+  a filter, a block list or a grant gate on `shell` closes it; what a live
+  session with shell is offered; which recorded monitors are run again; an
+  operator's monitor on a session that may not start one. Read from the
+  source: the guards that go by the tool's name; a tool exposed under the
+  name and the built-in taking it; and going back to an earlier release,
+  read at 0.9.15.)
+- A pre-tool hook or a host's dispatch admission that refuses or inspects
+  `shell` calls by the tool's name does not take a `monitor_start` call for
+  one, and nothing in Meerkat can teach it the name: add `monitor_start` to
+  such a guard, or deny the tool. A governed application tool policy admits
+  only the tools it names, so it refuses `monitor_start` until it names it.
+  A tool permission rule is such a guard: a rule that refuses `shell` by
+  name does not refuse a `monitor_start` call, and a rule that permits
+  `shell` by name does not permit it. A monitor's command does pass the
+  `[shell]` section's command rules when it is started. (Read from the
+  source: traced by lines for a governed application tool policy; for
+  Meta's gating rules and a governed realm's permissions by a search of
+  the source that found no binding of the two names; that a monitor's
+  command passes the `[shell]` rules at its start: by lines, not shown by
+  a test.)
+- A live session of an agent with shell is offered `monitor_start` from its
+  next build. Its stored session and its stored system prompt are not
+  rewritten; the tool list sent to the provider gains one definition.
+- A store that holds a recorded monitor: a session that may start a monitor
+  runs it again after a restart, as before. One that may not (a denied name,
+  a closed grant gate, a read-only profile, a tool filter that hides it) no
+  longer runs it again, and does not end it either: every monitor recorded
+  before this release is left for the host's route, as is every monitor an
+  operator starts. Only a monitor the session's own tool starts from this
+  release on is ended as `needs_attention`.
+- An operator's monitor on a session that may not start one: in earlier
+  releases the session's next shell job call resumed an operator's lost
+  resumable monitor. Now that call does not, and the monitor waits until
+  an operator calls `monitors/start` or `jobs/cancel` for that session:
+  the host's route recovers a session's jobs only when it is called.
+- Going back to an earlier release: it runs every recorded resumable
+  monitor again at the session's next shell job call, whatever the
+  session's tools say, so cancel the monitors a deny should hold before
+  going back. A host that offered `monitor_start` itself on the earlier
+  release meets one more thing there: a re-dispatch of the call that
+  started a monitor under this release answers a submission conflict
+  instead of joining its job.
+
+- Configuration and stored secrets (see Security and Breaking): a caller that read a secret out of a config answer no longer gets it; the value is in the document file, and `rkat config get` has no flag that shows it: to copy a document with its values, copy the file (a config answer written into another realm is refused at the first marker for which that realm stores nothing, and never brings the first realm's values; by the rule, not run). A write that changes where a stored inline secret is sent states the secret again in the same write, and a patch that makes a profile an inline secret states it too. A realm with a parent chain: a binding whose inline secret would go to a `[self_hosted.servers]` entry (or, with no declared server, a `[self_hosted]` section) that is not its own document's is left out of the composed realm. The realm loads, and a load warning names the binding and its auth profile and says what to state where: read the load warnings of each such realm after the upgrade (the CLI prints them on a command that loads the realm's configuration; the servers log each once per realm and process as a warning; no door returns them in an answer). A session that names a binding left out gets the binding of that id from an ancestor realm if one defines it, with that realm's credential and backend, and fails as an unknown binding otherwise; a request that names no binding uses another binding of the realm or of an ancestor, if there is one, so where the binding left out was the realm's default, the route of such a request changes. The text of a config parse error is now one line: "Parse error: line L, column C, in `key.path`: MESSAGE". (The composition and both request cases: shown by tests; no realm of a published release was upgraded in a run.)
+
+- `meerkat-comms`: a host that starts its successor process on the same
+  `[comms]` socket `address` while the old process still listens (a restart
+  with overlap) must stop the old process and wait for its exit before the
+  successor starts its members: the socket file the old process leaves is
+  then removed and bound as before, whereas a successor started during the
+  overlap, which took the path without an error before, now has its
+  member's build fail (a restored mob member is recorded broken) and stays
+  so until that successor is started again or the member is respawned (see
+  Changed). (Shown by tests on real sockets inside one process, at the
+  listener: its start is refused on a path a live listener holds, and a
+  socket file no listener holds is taken over. Two processes were not run;
+  and that the member's build then fails, that a restored mob member is
+  recorded broken, and how a refused successor comes back are read from the
+  source.)
+
+- A session that an earlier release stopped after a peer response without a result (see Fixed, "Peer requests: a response to a peer request without a result no longer stops the requester"): what was sent to it while it was stopped. At the first start on this release, as at any start on 0.9.15 and 0.9.16, an input that was queued behind the stop is ended as abandoned and is not run, however soon that start comes: send it again; new work runs (by the source a stop ends every queued input except a durable prompt that a graceful stop keeps for the next start, and has ended them at least since 0.5.2). The exception seen: a message that a Meta gateway took with an idempotency key (`meta/send` with `idempotency_key`) is run at that start, once, and sending it again under the same key makes no second input and answers the session and input ids (by the source a keyed send is admitted as a durable prompt, which a graceful stop keeps for the next start, and an unkeyed send to a member in the default mode is an event, which a stop ends; the stores of the runs show the two kinds so). A kept prompt has a time limit of fifteen minutes, counted from the stop that kept it. In these states the earlier release's stop of the stopped session had not finished (its stores show no stop mark and an unfinished unregister with that limit), so it is finished at the next start and the limit counts from that start: the keyed send ran sixteen minutes after the stop, and in another state three hours after it, for that reason (read from the source and from the stores before and after the start: after it the unregister is finished and the input's row carries no time limit). After a stop that did finish, a kept prompt is ended as `requeue_expired` at a start more than fifteen minutes later (read from the source; not run here). No log line and no event reports an abandoned input to a host; a program that embeds Meerkat and waits on the input in the same process is given its end (read from the source). Where the caller holds the input's id its status can be asked (`session/input_status`; `meta/send_status` on a Meta gateway) and reads `abandoned` without a reason; a `meta/send` without a key answers no input id. (Shown by runs on the published 0.9.15 and 0.9.16, on an earlier candidate build and on a gateway built from this release's source: abandoned at starts from under one second to six hours after the stop; the keyed send run at starts 7 seconds, 57 seconds and 16 minutes after it on the published 0.9.16 gateway and on the earlier candidate's, and 3 seconds and three hours after it on the gateway built from this release's source.)
+
+### Known limitations
+
+- `rkat mob pack` still packs every regular file under the mob directory,
+  hidden files included, except the key the pack is signed with and its own
+  output file. Env files and other secrets, key files the pack is not
+  signed with, `.git/`, and `.rkat/` with its stored conversations and
+  configuration all go into the pack when they are in the directory, and a
+  web bundle serves the pack whole. `rkat mob pack` now warns about a
+  short list of names and one content form (see Changed): key-like names,
+  a file that has the form of a signing key and `.mobpack` files among
+  them. The list misses much, and a warning removes nothing. Keep such
+  files out of the mob directory, and read `rkat mob inspect <pack>`
+  before a pack leaves your machine.
+
+- No host setting bounds a monitor's notification rate below the hard caps
+  (at most 1000 notifications per window, a window of 1 second to 24
+  hours, 1048576 bytes per line):
+  a monitor with event delivery starts turns of its own session at a rate
+  the model chooses. `deny` is the control.
+- The host's own monitor route is not bound by a member's deny: an
+  operator's `monitors/start` or job cancel for a session runs that
+  session's recorded resumable monitors again under the host's authority.
+- A monitor that an agent started before this release, which only a Rust
+  host's own tool policy could allow, is recorded as the host's monitors
+  are. After a later deny the session neither runs it again nor ends it:
+  it stays lost until the host's route recovers the session's jobs or
+  cancels it.
+- A deny does not stop a monitor that is already running; cancel its job.
+  `jobs/list` with the session's id lists its jobs (a monitor's
+  `runner.name` is `meerkat.monitor_script`) and `jobs/cancel` with the
+  job's id cancels one. Cancel before the restart that brings the deny:
+  after a restart, the host's cancel of a lost resumable monitor starts it
+  once more before it cancels it.
+
+- A `[shell]` command rule that was tightened after a monitor was started
+  does not stop that monitor's re-run after a restart: the recorded
+  command is started again with no new check of the rules, as in earlier
+  releases. A deny, a grant gate, a read-only profile or a tool filter
+  does stop the re-run. The first is read from the source; the second is
+  shown by tests of this release.
+
+- On Unix, cancelling a monitor or a background shell job signals and checks the process group that Meerkat manages. A child that remains in that group is within the scope of that check even after its parent exits. The check does not establish whether a child outside the group has stopped. This limit is read from the source; the detached-child case was not run.
+
+- The new report of an unsettled run (see Added, "A session whose committed run never settles is reported by name") can stand for a session that is working. The check `session_run_settlement` and the mob's line ("member's committed run is not settled; the member starts nothing further until it is") count a run whose completion has stayed unsettled for a minute, whatever its end; the host's line, which says the same of the session, is written only for a run whose output its loop committed. The loop that ended that run starts nothing further; but the machine admits a later run while an earlier run's completion is unsettled, so `degraded`, or the mob's line, can stand for a member that is working. Read from the source; not run; what a session does after that loop has left was not traced. The lines' wording is to be corrected in a later release.
+
+- MCP server, two resumes of one session at the same time, one of which rebuilds the session: the other, plain resume can be answered with an error that carries no kind where the MCP page (since 0.9.15) promises Ok or the typed `session_resume_required` (`-32003`): either `-32603` "Agent error: agent error: Internal error: Runtime not ready: destroyed" or `-32005` "request cancelled". A host that retries only on the typed refusal does not retry. And whichever of the three answers comes, the plain resume's prompt may have been taken all the same: its turn can start on the session's old runtime and make its provider call, and the prompt with the model's answer is then in the session's history once the rebuilding resume has answered. In 750 passes of a test that records it (on 0.9.16 and on a candidate build of 0.9.17, the process held to two CPUs) the turn was kept, once and with its answer, in 9 of the 22 passes answered `-32603`, in all 9 answered `-32005` and in 16 of 240 answered with the typed refusal; it was never kept twice, no session was left unusable, and the next resume answered Ok every time. So after any error on a resume that was sent beside another resume: wait until the other resume has answered, read the session's history, and send the prompt again only if it is not there. How often: the test for this case failed 11 of 50 runs on 0.9.16 held to two CPUs (7 with the first answer, 4 with the second), 1 of 20 runs of its whole suite on four CPUs, 0 of 50 alone and unpinned, and once in an ordinary CI round. On a candidate build of this release the same runs gave 1 of 50 held to two CPUs, 1 of 20 runs of the whole suite on four CPUs and 0 of 50 unpinned. In the test both resumes are sent while a first turn is still running and wait behind it; two resumes on an idle session were not run. The lines that retire the old runtime without holding the turn boundary are in every release since 0.8.0 and in this one (read at every release tag and at this release's candidate). Read from the source and not seen in a run: the recovery can also hold such a turn, and the rebuilding resume is then refused with a typed hold until it is resolved. Not traced: the same pattern at the RPC and REST doors. No fix is scheduled yet.
+
+- An input accepted for a session can be lost when the host is at its session limit (printed under 0.9.15 and, added 2026-11-17, under 0.9.16; this release holds no fix for it). What the limit counts is work in flight, not the members or sessions that exist: a session being created, a first turn that waits to start, and a turn that runs or has been admitted each hold one slot until that work ends; a member or a session that is built and idle holds none (read from the source). When every slot is held and an input is accepted for a session that is built and idle, the host tries three times to start it, each try fails with "Max sessions reached", and the input is abandoned. It stays abandoned when slots are free again; new work sent to the same session afterwards runs. (Shown by a test on the 0.9.16 product code for a prompt that the host itself hands to such a session. That a mob member's message to another member, a Meta operator's or host's send and a schedule's delivery are lost in the same way is read from the source; the member's message was shown by the runs named under 0.9.15.) Who is told: the sending member is not. A program that embeds Meerkat and holds the input's completion receives it as abandoned with the error `Max sessions reached`. The input's status (`meta/send_status` on a Meta gateway, `session/input_status` on a Core host, asked with the session and the input's id) reads `abandoned` after three attempts and does not give the cause (read from the source); the WARN line printed under 0.9.15 was not looked for in this test. Not every send is accepted and then lost: a request that first has to build the session, a routed RPC turn, a REST continue and the MCP server's accept are refused with an answer before anything is accepted (the first shown by a test, the others read from the source). The limit is 16 by default on Meta's `rpc_gateway` (`runtime_options.max_sessions`), 64 on the stock `meta_gateway`, which does not take the option (a Rust host of Meta's builder sets its own), and 100,000 on a Core host; a host reaches it only when more work than that is in flight at one moment. In one of the maintainers' own systems, which runs 22 long-lived members on the default 16, the logs of 45 days hold no such loss. Raising the limit is the avoidance. Not run: whether the same message, sent again once slots are free, runs. Affected: 0.8.23 through this release (0.9.16 by that test; the start and the earlier releases as printed under 0.9.15, not walked again; not run on this release). A fix is being designed.
+
+- Mobs: a second store file for the same mob in the mob root can become the file the mob runs on, and what the mob then writes is lost if that file is removed later. `rkat`, `rkat-mcp`, `rkat-rest` and `rkat-rpc` when its realm paths are resolved (so, inferred, the Python and TypeScript SDKs that start it) restore their mobs from `<the realm's root>/mobs`; Meta's mob runtime, when its storage is durable, from the `mobs` directory of its state directory; a Rust host that builds its mob state with a persistent storage root, from the `mobs` directory of that root (read from the source; `rkat-mob-mcp`, a state built without a root and the browser runtime do not). They take for a mob's store every regular file directly in that `mobs` directory whose name begins with `mob--` and whose extension is exactly `db`; nothing between is looked at, and the mob's id is read from the records in the file, not from its name. Taken: `mob--x-copy.db`, `mob--x (copy).db`, `mob--x.bak.db`. Not taken: `mob--x.db.bak`, `mob--x.bak`, `mob--x.db.orig`, `mob--x.DB`, `copy-of-mob--x.db` and any file in a subdirectory. Where two taken files hold the same mob id, the mob is served from whichever of the two the directory lists first, which can be the copy; the other is refused at its resume and kept as it was found. From then on what the mob writes into its own store (a member added, for one) goes into the file it is served from; if that file is removed later, whether it is the copy or the original, the next start serves the other one, stale, with no error, and those changes are gone. The members' session histories are not in that store and are not lost. The sign is two warning lines in the host's log at the first mob access after each start while both files are there, about a millisecond apart; neither names the file: `WARN meerkat_comms::inproc: refusing inproc registration that would unbind a live route under this name` with `peer_name=<id>/__mob_supervisor__`, then `WARN meerkat_mob_mcp: quarantining a persisted mob store: the rest of the restore goes on mob_id=<id> class=resume_refused`; the inventory's list of quarantined stores stays empty for it. To avoid it, keep a backup of a store file outside the mob root or under a name that is not taken: a copy kept as `mob--<id>.db.bak` in the mob root was left alone, byte-identical, with no warning (two runs of two starts each). Where the lines are in the log, find which of the two files the mob runs on before removing either: count the rows of `mob_events` in each (`sqlite3 -readonly <file> "select count(*) from mob_events;"`, with the host running or stopped; the read leaves the `.db` file byte-identical and puts a `-shm` file and an empty `-wal` file beside it). The file with more rows is the one the mob runs on (4 against 3 in the runs, in both orders); equal counts tell nothing (both files answer the same until the mob has written something), and a modification time alone is not a safe sign (a fresh copy is newer than the original until the original is written again). Then stop the host and take the other file out of the mob root: run in both orders, the next start served the remaining file with its members, ran turns and logged no warning. Affected as described: 0.9.9 through this release (shown by runs on a build of the 0.9.16 tag, 16 passes, on Linux ext4, none of them through one of the binaries named above; read at 0.9.9 and at this release's candidate; the releases between by a search of all tags by content). Earlier releases differ, read from the source and not run: in 0.8.24 through 0.9.3 (read at both) a refused second file fails the whole restore, every mob access answers the error and nothing is destroyed; in 0.9.4 through 0.9.8 the second file is kept aside and the restore goes on, with another warning (not traced further); at 0.8.23, the one earlier release that was read, the mob resumed second could be destroyed, and the first could be the copy; releases before it were not read: on releases before 0.8.24 leave no copy in the mob root. Read from the source, not run: that the restore of other mobs goes on beside a refused file (the runs had one mob), and that a taken file which holds no events is removed by the restore. Not run: a second process on the same root; other platforms. Not read: which RPC or CLI calls answer from the inventory. This release holds no fix for it (read from the source).
+
+- Reasoning effort and an agent's own model switch (0.9.15, 0.9.16 and this release): when an agent switches its session to another model with its built-in tool `brain_swap` while the session holds a reasoning effort level, the switch is carried out before the next turn without asking whether the new model takes that level. If it does not, the session is left on the new model with a level that model refuses, and the next turn and every later one is refused with invalid params until the level or the model is changed: JSON-RPC `-32602`, HTTP 400, CLI exit 2 with `INVALID_PARAMS`; the error's data has the kind `reasoning_effort_refused`, and its text reads, for a level the new model's source does not list, "reasoning effort '<level>' is not supported by <provider> model '<model>' on <route>; supported: <levels>". Nothing is sent to a provider, and the level is not lowered by itself. No JSON-RPC, REST or MCP request stages such a switch: only the agent's tool does (a Rust host's own `request_switch_turn` has the same effect). A session has the tool when its host can carry out the switch, more than one model is reachable, the tool is enabled (it is by default) and no client override is set; `rkat` builds its sessions so (which other surfaces' sessions have it, and Meta, were not traced). To get the session running again, clear the level or set one the new model takes with the next request, or name another model: `reasoning_effort` on `turn/start` and `mob/turn_start`, REST `POST /sessions/{id}/messages` and MCP `meerkat_resume` (a level sets it, `{"action":"clear"}` removes it); `rkat run --resume <SESSION> --no-reasoning-effort "<PROMPT>"` or `--reasoning-effort <LEVEL>`. (Read from the source at the 0.9.16 tag, where a test pins the behaviour, and the same lines stand at this release's candidate; 0.9.15 by a search of every 0.9 tag by content; not run. That a changed level or model ends the refusal is read from the source; the calls named for it are those of the documentation of that release and were not run for this case.) A fix is planned.
+
 ## [0.9.16] - 2026-11-16
 
 ### Breaking
@@ -224,6 +2060,28 @@ them.
   for each session, the symbolic link edge and that the other servers were not
   affected are by reading; macOS and Windows were not run.)
 
+- Added 2026-11-17. Windows: when several tasks or processes open the same new
+  realm for the first time at the same moment, none of them fails any more
+  with "IO error: Access is denied. (os error 5)" (a Known limitation of
+  0.9.15). A realm that has no manifest yet is opened under a lock file, and a
+  realm that may live under more than one state root is reserved for its first
+  start by a marker file in each; the holder gives either back by removing the
+  file, and Windows keeps a file name until its removal completes and refuses
+  a create or a read of the name in that moment. The other openers took that
+  refusal as an error. On Windows they now read it as held and wait inside the
+  existing five-second deadline; a file that really cannot be created there
+  ends in the existing lock timeout or contention error instead of "Access is
+  denied". Nothing changes on other platforms. Affected: 0.9.15; earlier
+  releases failed on Windows at every first use of a realm (see Fixed in
+  0.9.15). (By a run on a Windows runner, image windows-2025-vs2026
+  20261103.298.1, with this release's store code: the test that opens one new
+  realm from many tasks at once failed with this error on the 0.9.15 tag in 13
+  of 25 runs by itself and in 12 of 25 runs of the whole realm module, and
+  passed 25 of 25 on this release's code, where the whole realm module passed.
+  The test for one realm under two state roots did not fail on the 0.9.15 tag
+  in 25 runs, so the wait on the first-start marker is shown only by tests
+  that take the platform as a parameter and run on every host.)
+
 ### Security
 
 - The shell job tools answered for jobs of other sessions (0.8.8 through
@@ -328,6 +2186,31 @@ them.
   the retry by runs on the released 0.9.15 `rkat`; the cause and its two other
   faces by reading, in the same lines in every release from 0.9.0, where
   `realm govern` first shipped.)
+
+- Live channels (0.9.15 and 0.9.16; earlier releases not read; added
+  2026-11-17): wait for the channel to report `ready` before sending input.
+  Input sent before that is refused as not ready and is not held for later. A
+  turn commit that follows with nothing staged is an invalid request and ends
+  the channel; the client sees only the socket close, without the reason. Read
+  from the source of both releases; the close was seen in runs of a live
+  example whose first input went out before `ready`, on the published 0.9.15
+  and on a build of 0.9.16.
+
+- Added 2026-11-17, after the release. A `[confinement]` table in a project's `.rkat/config.toml` is not read, and `rkat` does not warn about it: an agent's shell is not confined by it. State confinement in the user document, `~/.rkat/config.toml`, as `[confinement.all]` with `mode = "workspace"`, so that it covers every launch kind; do not rely on a realm document as its only statement. The `--confinement` flags are for the one command that carries them. Whichever you use, check that command's stderr for the confinement lines: three, one for each launch kind, when a requirement applies, and none when none does; where none is printed, the command is not confined. On Linux a start that confines every launch kind while the realm state lies inside the directory the command is started in, which is the default with `rkat`, is refused and asks for `--state-root <dir>` outside the project. The section "Confinement for one project" of the CLI configuration page says what else changes under confinement. (That the project file is not read and that the user document and the flags are, by runs of the published 0.9.16 `rkat` on Linux x86_64 on a host without a confinement backend; reported by a user on 0.9.15 on macOS; macOS and 0.9.15 were not run by the maintainers.) A fix is planned.
+
+- Added 2026-11-17, after the release. TypeScript SDK (`@rkat/sdk`): when the `rkat-rpc` process the client started exits, or is killed, while the program is still using the client, a call that writes to it after it is gone and before Node has processed its exit ends the Node program with `Error: write EPIPE` reported as `Unhandled 'error' event`, exit code 1, instead of the call rejecting. That is the case when the process is gone (a few milliseconds after a kill) and the program has not returned to its event loop since, for example a synchronous stretch of 20 ms or more between the process's end and the next call. This holds for every request method, for starting a streaming session or turn, for subscribing to a session's, a mob's or a mob member's events, and for the reply to a tool call that the process asked the program to run. It is rare; a program that must not end this way installs a `process.on("uncaughtException", ...)` handler before `connect()` and keeps it while the client is connected: in the handler, ignore only this error (`error.code === "EPIPE"` and `error.syscall === "write"`); for any other error, print it and exit with a non-zero code; do not throw from the handler. The call then rejects with `PROCESS_EXITED` (18 of 18 starts on the published 0.9.16 on Linux with Node 22, with 20 or 50 ms of synchronous work between the kill and the call; without the handler the program ended in 17 of 18 such starts; not run on macOS or on Windows). Where the write was the reply to a tool call, the call that was waiting on the process rejects. While it is installed the handler also swallows a `write EPIPE` on the program's own output. This is so in every release of the TypeScript SDK since 0.3.0 (read from the source at the release tags). A fix is planned.
+
+- Added 2026-11-17, after the release. Peer requests: on a host whose realm is on disk, a session that has sent a peer request stops running when a response to that request arrives without a result. That is `rkat`, `rkat-rpc`, `rkat-rest` and `rkat-mcp` on any realm on disk, whatever the session format (a JSONL realm keeps the runtime's rows in SQLite too), and a Rust host on the disk composition or one that hands in the SQLite runtime store; the tell is a file `sessions.sqlite3` (SQLite realm) or `runtime.sqlite3` (JSONL realm) in the realm directory (read from the source). A response is what the agent tool `send_response` sends, or a host's or SDK caller's `peer_response` through the comms send; its `result` is optional (the documented `comms/send` call lists it as optional, and a call that leaves it out sends a response without a result: the Python and TypeScript SDKs' `send`, RPC, REST and the MCP tool `meerkat_comms_send`; read from the source, not run), and the instruction a responding agent is shown with each request gives `completed` without a result as its example. Messages (`send_message`, `reply_to_peer`) are not responses and are not affected, and the responses Meerkat itself sends always carry a result (read from the source). When the requesting session has handled such a response, the SQLite runtime store refuses, at every try, to record that run as finished; the session's loop logs `ERROR meerkat_runtime::runtime_loop: failed to durably publish directed interaction terminal ... terminal completion finalization lost the exact durable CAS` and `WARN meerkat_runtime::runtime_loop: runtime-loop exit teardown did not complete; the registration is detached until an explicit resume completes its unregister` (on this release that resume does not complete it; read from the source), and the session runs nothing further; an unregister of the session is refused. On `rkat-rpc`, `runtime/health` then answers `status` `degraded` with `session_runtime_loop` `degraded`, where both read `ok` before; the answer names no session (shown by two runs of the published 0.9.16). A response that carries a result does not stop the requester. If the host is then ended and started again, the session can be unable to run for good: after a stop caused by a progress response (`accepted`) its first drain, a stop and an unregister are refused with `Recovery corruption: pending terminal owner <id> is absent from the live shell`, and after a refused stop or unregister every later registration too; the same refusal follows any end of a host while a run that was started by, or consumed, a peer's progress response is unsettled. The session's committed history can still be read (`session/read`). Before any restart keep a copy of the realm directory together with the sessions' comms identity directory (with the default in-process comms), which is not inside it: `~/.rkat/session_comms_identity` for `rkat` and `rkat mob host`; for `rkat-rpc`, `rkat-rest` and `rkat-mcp` the per-user state directory (`$XDG_STATE_HOME/meerkat/session_comms_identity`, else `~/.local/state/meerkat/session_comms_identity`, on Linux; `~/Library/Application Support/meerkat/session_comms_identity` on macOS; `%LOCALAPPDATA%\meerkat\session_comms_identity` on Windows); or, for any of the four, `<root>/.rkat/session_comms_identity` where `--user-config-root` names a root; and, for `rkat mob host`, its host identity directory (`<state root>/host-identity` unless `--identity-dir` or `[mob_host].identity_dir` names another) (shown by runs of the published 0.9.16 `rkat` and `rkat-rpc` on Linux; the rest read from the source). For a mob on Meta, see the entry of the same date under Meta 0.9.16, which says what an operator sees, what was run and what not to do. Affected: the stop, 0.9.5 through 0.9.16 (by the source at the release tags, and shown by runs on builds of the 0.9.5, 0.9.11 and 0.9.15 tags; a build of the 0.9.4 tag did not stop, 3 of 3); the refusal after a restart, 0.8.11 through 0.9.16 (by the source at the release tags). A host on a memory realm does not get the stop, and neither does a Rust host whose realm is kept in its own database through the host store interface, which compares as the in-memory store does (read from the source; the in-memory store also by a run). A Rust host with a runtime store of its own implementation was not read: it gets the stop only if that store judges a stored record by decoding and re-encoding it, as the SQLite runtime store did. (Shown by runs of the published Meta `rpc_gateway` 0.9.16, 0.9.15 and 0.9.14, by two runs of a mob of two members on the published `rkat-rpc` 0.9.16, and by runs on a build of the release commit.) The fixes are in 0.9.17 (see Fixed under 0.9.17).
+
+- Added 2026-11-17, after the release. MCP server, two resumes of one session at the same time, one of which rebuilds the session: the other, plain resume can be answered with an error that carries no kind where the MCP page (since 0.9.15) promises Ok or the typed `session_resume_required` (`-32003`): either `-32603` "Agent error: agent error: Internal error: Runtime not ready: destroyed" or `-32005` "request cancelled". A host that retries only on the typed refusal does not retry. And whichever of the three answers comes, the plain resume's prompt may have been taken all the same: its turn can start on the session's old runtime and make its provider call, and the prompt with the model's answer is then in the session's history once the rebuilding resume has answered. In 750 passes of a test that records it (on 0.9.16 and on a candidate build of 0.9.17, the process held to two CPUs) the turn was kept, once and with its answer, in 9 of the 22 passes answered `-32603`, in all 9 answered `-32005` and in 16 of 240 answered with the typed refusal; it was never kept twice, no session was left unusable, and the next resume answered Ok every time. So after any error on a resume that was sent beside another resume: wait until the other resume has answered, read the session's history, and send the prompt again only if it is not there. How often: the test for this case failed 11 of 50 runs on 0.9.16 held to two CPUs (7 with the first answer, 4 with the second), 1 of 20 runs of its whole suite on four CPUs, 0 of 50 alone and unpinned, and once in an ordinary CI round. In the test both resumes are sent while a first turn is still running and wait behind it; two resumes on an idle session were not run. The lines that retire the old runtime without holding the turn boundary are in every release since 0.8.0 (read at every release tag). Read from the source and not seen in a run: the recovery can also hold such a turn, and the rebuilding resume is then refused with a typed hold until it is resolved. Not traced: the same pattern at the RPC and REST doors. No fix is scheduled yet.
+
+- Structured output that is JSON null (0.8.11 through 0.9.16 by the source: the check that refuses the record and the field's form are at every release tag from 0.8.11, by a search of all tags by content; 0.8.0 to 0.8.10 hold an earlier check and were not read; the way a null output reaches the check was read at 0.9.16 only; run on 0.9.16 only; added 2026-11-17): when a run's output schema admits null at its root and the model answers null, on a session whose runtime state is kept in SQLite (a Meta gateway keeps it so too: read from the source, not run on a gateway), the run completes and the record of its input can no longer be read from the store (one record per such run; nothing is logged for it: a start does not read a finished record, read from the source). In runs on the 0.9.16 release commit that did no harm by itself: the session and its history read whole, a resume in a new process ran one more turn with the earlier turns, an export, a compaction and an archive answered, and a second session of the realm was untouched; an operator has nothing to do while every read answers. The harmful case: if the host process ends between that run's commit and its finalization (typically 20 to 40 ms in the author's runs, 1 to 260 ms seen; about 19 ms on the published `rkat-rpc`, where it is over about 10 ms before the answer reaches the client, so a host that ends after its client has the answer is not in it), the session is refused at the next start, and at every later one by the state the store is left in: the log holds `failed to recover runtime driver during registration` with `pending terminal owner row read failed: Store read failed: terminal completion candidate digest mismatch`, and a new prompt is refused: through `rkat-rpc` with that same text, while `session/read` still answers (at the runtime's own door, in the author's test of the runtime crate alone, a prompt was answered `Runtime not ready: destroyed`). No way past it is known on the released code. (Shown on the published `rkat-rpc` 0.9.16 with a real model: ten of ten hosts killed the moment the store showed that run's commit were refused in this way at the next start, and again at the second and third starts that were tried, and none of ten killed when the answer had arrived. Also shown by a run of the runtime with a SQLite store and two processes, the first ended at that point by a test executor. The same end after a run with a non-null result starts and runs.) Until fixed: use an output schema whose root does not admit null (read from the source, not run: an answer is checked against the schema, and only an answer that passed is recorded as the structured output); a root with no `type` admits it. Not affected: the in-memory store (read from the source). On a realm kept in the host's own database through the host store interface it needs no such moment: any finished run with a null structured output leaves a record that the store's typed import refuses, and the session is refused at its next use (shown by a run on the runtime's test host behind that interface, with a row that is not in the release's tree: `host store input state: terminal completion receipt digest mismatch`; not run on a host's real database). Read from the source only: where the open of the store itself loads that session's state (a session with recovery work pending), the realm's store does not open. Not run: root forms that admit null other than an object-or-null root. Not traced: whether anything besides a start refuses a session that holds such a record (by the source two other readers of a finished record exist: a read by the input's id or its idempotency key when the same input is offered again, and the sweep that settles a predecessor, which refuses a session that holds a record it cannot decode; which operations run them was not read). A fix is written and is planned for 0.9.17.
+
+- Added 2026-11-17, after the release. An input accepted for a session can be lost when the host is at its session limit: the Known limitation printed under 0.9.15 holds for 0.9.16 too, and for more than it names. What the limit counts is work in flight, not the members or sessions that exist: a session being created, a first turn that waits to start, and a turn that runs or has been admitted each hold one slot until that work ends; a member or a session that is built and idle holds none (read from the source). When every slot is held and an input is accepted for a session that is built and idle, the host tries three times to start it, each try fails with "Max sessions reached", and the input is abandoned. It stays abandoned when slots are free again; new work sent to the same session afterwards runs. (Shown by a test on this release's product code for a prompt that the host itself hands to such a session. That a mob member's message to another member, a Meta operator's or host's send and a schedule's delivery are lost in the same way is read from the source; the member's message was shown by the runs named under 0.9.15.) Who is told: the sending member is not. A program that embeds Meerkat and holds the input's completion receives it as abandoned with the error `Max sessions reached`. The input's status (`meta/send_status` on a Meta gateway, `session/input_status` on a Core host, asked with the session and the input's id) reads `abandoned` after three attempts and does not give the cause (read from the source); the WARN line printed under 0.9.15 was not looked for in this test. Not every send is accepted and then lost: a request that first has to build the session, a routed RPC turn, a REST continue and the MCP server's accept are refused with an answer before anything is accepted (the first shown by a test, the others read from the source). The limit is 16 by default on Meta's `rpc_gateway` (`runtime_options.max_sessions`), 64 on the stock `meta_gateway`, which does not take the option (a Rust host of Meta's builder sets its own), and 100,000 on a Core host; a host reaches it only when more work than that is in flight at one moment. In one of the maintainers' own systems, which runs 22 long-lived members on the default 16, the logs of 45 days hold no such loss. Raising the limit is the avoidance. Not run: whether the same message, sent again once slots are free, runs. Affected: 0.8.23 through 0.9.16 (0.9.16 by this test; the start and the earlier releases as printed under 0.9.15, not walked again). A fix is being designed; it is not in 0.9.17.
+
+- Added 2026-11-17, after the release. Mobs: a second store file for the same mob in the mob root can become the file the mob runs on, and what the mob then writes is lost if that file is removed later. `rkat`, `rkat-mcp`, `rkat-rest` and `rkat-rpc` when its realm paths are resolved (so, inferred, the Python and TypeScript SDKs that start it) restore their mobs from `<the realm's root>/mobs`; Meta's mob runtime, when its storage is durable, from the `mobs` directory of its state directory; a Rust host that builds its mob state with a persistent storage root, from the `mobs` directory of that root (read from the source; `rkat-mob-mcp`, a state built without a root and the browser runtime do not). They take for a mob's store every regular file directly in that `mobs` directory whose name begins with `mob--` and whose extension is exactly `db`; nothing between is looked at, and the mob's id is read from the records in the file, not from its name. Taken: `mob--x-copy.db`, `mob--x (copy).db`, `mob--x.bak.db`. Not taken: `mob--x.db.bak`, `mob--x.bak`, `mob--x.db.orig`, `mob--x.DB`, `copy-of-mob--x.db` and any file in a subdirectory. Where two taken files hold the same mob id, the mob is served from whichever of the two the directory lists first, which can be the copy; the other is refused at its resume and kept as it was found. From then on what the mob writes into its own store (a member added, for one) goes into the file it is served from; if that file is removed later, whether it is the copy or the original, the next start serves the other one, stale, with no error, and those changes are gone. The members' session histories are not in that store and are not lost. The sign is two warning lines in the host's log at the first mob access after each start while both files are there, about a millisecond apart; neither names the file: `WARN meerkat_comms::inproc: refusing inproc registration that would unbind a live route under this name` with `peer_name=<id>/__mob_supervisor__`, then `WARN meerkat_mob_mcp: quarantining a persisted mob store: the rest of the restore goes on mob_id=<id> class=resume_refused`; the inventory's list of quarantined stores stays empty for it. To avoid it, keep a backup of a store file outside the mob root or under a name that is not taken: a copy kept as `mob--<id>.db.bak` in the mob root was left alone, byte-identical, with no warning (two runs of two starts each). Where the lines are in the log, find which of the two files the mob runs on before removing either: count the rows of `mob_events` in each (`sqlite3 -readonly <file> "select count(*) from mob_events;"`, with the host running or stopped; the read leaves the `.db` file byte-identical and puts a `-shm` file and an empty `-wal` file beside it). The file with more rows is the one the mob runs on (4 against 3 in the runs, in both orders); equal counts tell nothing (both files answer the same until the mob has written something), and a modification time alone is not a safe sign (a fresh copy is newer than the original until the original is written again). Then stop the host and take the other file out of the mob root: run in both orders, the next start served the remaining file with its members, ran turns and logged no warning. Affected as described: 0.9.9 through 0.9.16 (shown by runs on a build of the 0.9.16 tag, 16 passes, on Linux ext4, none of them through one of the binaries named above; read at 0.9.9; the releases between by a search of all tags by content). Earlier releases differ, read from the source and not run: in 0.8.24 through 0.9.3 (read at both) a refused second file fails the whole restore, every mob access answers the error and nothing is destroyed; in 0.9.4 through 0.9.8 the second file is kept aside and the restore goes on, with another warning (not traced further); at 0.8.23, the one earlier release that was read, the mob resumed second could be destroyed, and the first could be the copy; releases before it were not read: on releases before 0.8.24 leave no copy in the mob root. Read from the source, not run: that the restore of other mobs goes on beside a refused file (the runs had one mob), and that a taken file which holds no events is removed by the restore. Not run: a second process on the same root; other platforms. Not read: which RPC or CLI calls answer from the inventory. No fix is in 0.9.17 (read from the source).
+
+- Added 2026-11-17, after the release. Reasoning effort and an agent's own model switch (0.9.15 and 0.9.16, by a search of every 0.9 tag by content): when an agent switches its session to another model with its built-in tool `brain_swap` while the session holds a reasoning effort level, the switch is carried out before the next turn without asking whether the new model takes that level. If it does not, the session is left on the new model with a level that model refuses, and the next turn and every later one is refused with invalid params until the level or the model is changed: JSON-RPC `-32602`, HTTP 400, CLI exit 2 with `INVALID_PARAMS`; the error's data has the kind `reasoning_effort_refused`, and its text reads, for a level the new model's source does not list, "reasoning effort '<level>' is not supported by <provider> model '<model>' on <route>; supported: <levels>". Nothing is sent to a provider, and the level is not lowered by itself. No JSON-RPC, REST or MCP request stages such a switch: only the agent's tool does (a Rust host's own `request_switch_turn` has the same effect). A session has the tool when its host can carry out the switch, more than one model is reachable, the tool is enabled (it is by default) and no client override is set; `rkat` builds its sessions so (which other surfaces' sessions have it, and Meta, were not traced). To get the session running again, clear the level or set one the new model takes with the next request, or name another model: `reasoning_effort` on `turn/start` and `mob/turn_start`, REST `POST /sessions/{id}/messages` and MCP `meerkat_resume` (a level sets it, `{"action":"clear"}` removes it); `rkat run --resume <SESSION> --no-reasoning-effort "<PROMPT>"` or `--reasoning-effort <LEVEL>`. (Read from the source at the 0.9.16 tag, where a test pins the behaviour; not run. That a changed level or model ends the refusal is read from the source; the calls named for it are those of the documentation of that release and were not run for this case.) A fix is planned.
 
 ## [0.9.15] - 2026-11-15
 
@@ -4559,9 +6442,12 @@ them.
   sender's receipt gives neither, the WARN line gives the input's id. The
   limit is 16 sessions by default on Meta's rpc gateway
   (`runtime_options.max_sessions`) and 64, not settable, on Meta's Console
-  gateway; a Core host's default is 100,000. Keep it at or above the number
-  of agent sessions (members, helpers and scheduled runs included) that can
-  be awake on the host at once, not only those with a turn running. Affects
+  gateway; a Core host's default is 100,000. (Corrected 2026-11-17: the
+  limit counts work in flight, not members: a session being created, a
+  first turn waiting to start and a turn that runs or is admitted each hold
+  a slot, and an idle member holds none; see the item added under 0.9.16
+  on that date. Raise it if more work than the limit can be in flight at
+  one moment.) Affects
   0.8.23 through this release (by runs on Meta 0.9.14 and on a gateway built
   from this release's code; earlier releases read from the source).
 
@@ -4843,6 +6729,7 @@ them.
   source). A single start is not affected. Seen in a test on a Windows
   runner that creates one realm from 32 tasks at once. A fix is planned for
   the next release.
+  Added 2026-11-17: fixed in 0.9.16.
 
 - Added 2026-11-16, after the release. External events admitted without a
   wake (REST `POST /sessions/{id}/external-events`, JSON-RPC
@@ -4924,6 +6811,14 @@ them.
   failure, its exit code, the ungoverned realm and the retry by runs on the
   released 0.9.15 `rkat`; the cause and its two other faces by reading, in the
   same lines in every release from 0.9.0, where `realm govern` first shipped.)
+
+- Added 2026-11-17, after the release. A `[confinement]` table in a project's `.rkat/config.toml` is not read, and `rkat` does not warn about it: an agent's shell is not confined by it. State confinement in the user document, `~/.rkat/config.toml`, as `[confinement.all]` with `mode = "workspace"`, so that it covers every launch kind; do not rely on a realm document as its only statement. The `--confinement` flags are for the one command that carries them. Whichever you use, check that command's stderr for the confinement lines: three, one for each launch kind, when a requirement applies, and none when none does; where none is printed, the command is not confined. On Linux a start that confines every launch kind while the realm state lies inside the directory the command is started in, which is the default with `rkat`, is refused and asks for `--state-root <dir>` outside the project. The section "Confinement for one project" of the CLI configuration page says what else changes under confinement. (Reported by a user on this release on macOS; shown by the maintainers' runs on 0.9.16 on Linux x86_64; not run on 0.9.15.) A fix is planned.
+
+- Added 2026-11-17, after the release. Peer requests: on a host whose realm is on disk, a session that has sent a peer request stops running when a response to that request arrives without a result; after the next restart of the host the session can be unable to run for good. This release has it too (shown on a build of the 0.9.15 tag: stopped in 5 of 5 with `accepted` without a result and in 5 of 5 with `failed` without a result, not stopped in 5 of 5 with a result; and by runs of the published Meta `rpc_gateway` 0.9.15). The entry of the same date under 0.9.16 says which hosts are affected and what is seen; it applies to this release as written.
+
+- Added 2026-11-17, after the release. MCP server, two resumes of one session at the same time, one of which rebuilds the session: the other, plain resume can be answered with an error that carries no kind where the MCP page (since 0.9.15) promises Ok or the typed `session_resume_required` (`-32003`): either `-32603` "Agent error: agent error: Internal error: Runtime not ready: destroyed" or `-32005` "request cancelled". A host that retries only on the typed refusal does not retry. And whichever of the three answers comes, the plain resume's prompt may have been taken all the same: its turn can start on the session's old runtime and make its provider call, and the prompt with the model's answer is then in the session's history once the rebuilding resume has answered. In 750 passes of a test that records it (on 0.9.16 and on a candidate build of 0.9.17, the process held to two CPUs) the turn was kept, once and with its answer, in 9 of the 22 passes answered `-32603`, in all 9 answered `-32005` and in 16 of 240 answered with the typed refusal; it was never kept twice, no session was left unusable, and the next resume answered Ok every time. So after any error on a resume that was sent beside another resume: wait until the other resume has answered, read the session's history, and send the prompt again only if it is not there. How often: the test for this case failed 11 of 50 runs on 0.9.16 held to two CPUs (7 with the first answer, 4 with the second), 1 of 20 runs of its whole suite on four CPUs, 0 of 50 alone and unpinned, and once in an ordinary CI round. In the test both resumes are sent while a first turn is still running and wait behind it; two resumes on an idle session were not run. The lines that retire the old runtime without holding the turn boundary are in every release since 0.8.0 (read at every release tag). Read from the source and not seen in a run: the recovery can also hold such a turn, and the rebuilding resume is then refused with a typed hold until it is resolved. Not traced: the same pattern at the RPC and REST doors. No fix is scheduled yet.
+
+- Added 2026-11-17, after the release. Reasoning effort and an agent's own model switch (0.9.15 and 0.9.16, by a search of every 0.9 tag by content): when an agent switches its session to another model with its built-in tool `brain_swap` while the session holds a reasoning effort level, the switch is carried out before the next turn without asking whether the new model takes that level. If it does not, the session is left on the new model with a level that model refuses, and the next turn and every later one is refused with invalid params until the level or the model is changed: JSON-RPC `-32602`, HTTP 400, CLI exit 2 with `INVALID_PARAMS`; the error's data has the kind `reasoning_effort_refused`, and its text reads, for a level the new model's source does not list, "reasoning effort '<level>' is not supported by <provider> model '<model>' on <route>; supported: <levels>". Nothing is sent to a provider, and the level is not lowered by itself. No JSON-RPC, REST or MCP request stages such a switch: only the agent's tool does (a Rust host's own `request_switch_turn` has the same effect). A session has the tool when its host can carry out the switch, more than one model is reachable, the tool is enabled (it is by default) and no client override is set; `rkat` builds its sessions so (which other surfaces' sessions have it, and Meta, were not traced). To get the session running again, clear the level or set one the new model takes with the next request, or name another model: `reasoning_effort` on `turn/start` and `mob/turn_start`, REST `POST /sessions/{id}/messages` and MCP `meerkat_resume` (a level sets it, `{"action":"clear"}` removes it); `rkat run --resume <SESSION> --no-reasoning-effort "<PROMPT>"` or `--reasoning-effort <LEVEL>`. (Read from the source at the 0.9.16 tag, where a test pins the behaviour; not run. That a changed level or model ends the refusal is read from the source; the calls named for it are those of the documentation of that release and were not run for this case.) A fix is planned.
 
 ## [0.9.14] - 2026-11-11
 
@@ -21966,10 +23861,15 @@ them.
   per boundary, in arrival order: a steer admitted while an earlier one still
   waits joins the boundary after it, in the same run, instead of falling back
   to the follow-up turn; steers still waiting when the run ends take the
-  follow-up turn in arrival order. Before, every peer or text steer admitted
-  during one boundary reached the next model request; now one durable steer
+  follow-up turn in arrival order. Before, in our held-tool test, 0.9.3 put
+  the first steer in the next model request and the rest in a follow-up
+  turn; now one durable steer
   joins per boundary, and the later ones land at later boundaries of the run
-  or in the follow-up turn.
+  or in the follow-up turn. (Corrected on 2026-11-21, with the steer entry
+  under Unreleased: this entry said that
+  before, every peer or text steer admitted during one boundary reached the
+  next model request. Our held-tool test on 0.9.3 does not show that; other
+  releases were not measured.)
 - `meerkat-core`: `SystemNoticeBlock::Comms` and
   `AgentEvent::PeerContentIngested` gain the field
   `delivery_id: Option<InteractionId>`: the delivery id of an incoming peer
@@ -53049,7 +54949,9 @@ tag, so its comparison link uses v0.3.0 as the exact ancestry base.
 
 Initial development release.
 
-[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.9.16...HEAD
+[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.9.18...HEAD
+[0.9.18]: https://github.com/lukacf/meerkat/compare/v0.9.17...v0.9.18
+[0.9.17]: https://github.com/lukacf/meerkat/compare/v0.9.16...v0.9.17
 [0.9.16]: https://github.com/lukacf/meerkat/compare/v0.9.15...v0.9.16
 [0.9.15]: https://github.com/lukacf/meerkat/compare/v0.9.14...v0.9.15
 [0.9.14]: https://github.com/lukacf/meerkat/compare/v0.9.13...v0.9.14

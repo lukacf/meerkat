@@ -25,13 +25,16 @@ State root resolution is realm-id first (0.8.4):
 
 1. An explicit `--state-root` wins with no probing.
 2. Otherwise the realm is used where it already exists: under the project-local
-   `<project-root>/.rkat/realms` (the nearest ancestor containing `.rkat`) or
+   `<project-root>/.rkat/realms` (the nearest ancestor containing `.rkat`),
+   under a farther ancestor's `.rkat/realms` (so a nearer `.rkat` directory,
+   for example after `rkat init` in a subdirectory, does not leave it behind) or
    the user-global root (`<data dir>/meerkat/realms`: Linux
    `~/.local/share/meerkat/realms`, macOS
    `~/Library/Application Support/meerkat/realms`, Windows
    `%APPDATA%\meerkat\realms`).
-3. A realm under both is a typed split-brain refusal; fix it with
-   `rkat storage migrate --apply --adopt-root <PATH>`.
+3. A realm under more than one of them is a typed split-brain refusal naming
+   both realm directories; pass `--state-root <PATH>` to name the one to use, or
+   fix it with `rkat storage migrate --root <A> --root <B> --apply --adopt-root <PATH>`.
 4. A new realm goes to the surface default: project-local for the CLI,
    user-global for `rkat-rpc`, `rkat-rest` and `rkat-mcp` (servers probe the
    project-local root only when started with `--context-root`).
@@ -257,7 +260,8 @@ rkat storage prune [--apply] [--older-than-days 30] [--json] [--root PATH]...
 - Storage verbs run before realm resolution, take no leases, and reject
   `--isolated` and `--default-model`. Scope them with `--realm`, the global
   `--state-root` or repeatable `--root` (explicit roots replace the default
-  sweep of `<context-root>/.rkat/realms` plus the user-global root).
+  sweep of `<context-root>/.rkat/realms` plus the user-global root; `storage
+  doctor` by default also reads every ancestor's `.rkat/realms`).
 - `--bridge-pre-0-8-10` needs `--apply` and a `sqlite` realm, attempts every
   domain, commits those that authenticate and reports each refusal; read the
   per-domain report rather than the exit code alone.

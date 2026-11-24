@@ -246,7 +246,10 @@ impl<'de> Deserialize<'de> for MemberRef {
 // may also carry the internal `instruction_lineage_root` of a fork-derived
 // member (the first member of its fork family, for operator instructions);
 // a reader that predates it ignores it, and the member reads there as one
-// that is not fork-derived.
+// that is not fork-derived. A stored `MemberSpawned` may also carry the
+// internal `seat_lineage` record of who seated the member; a reader that
+// predates it ignores it, and reads the member's seat from the row's older
+// members.
 const CURRENT_STORED_MOB_EVENT_SCHEMA_VERSION: u32 = 9;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1305,6 +1308,16 @@ pub struct MemberSpawnedEvent {
     /// and journals written before it decode it as `None`.
     #[serde(skip, default)]
     pub(crate) instruction_lineage_root: Option<AgentIdentity>,
+    /// Who seated the member, as the runtime's seat step recorded it: the
+    /// seat's kind, the creating member's seat for a kind that has one, and
+    /// who recorded and sealed it. A runtime successor's row (a respawn, a
+    /// rotation) stores the record of the seat it follows unchanged. It is a
+    /// fact of the journal and allows nothing. Stored only by the internal
+    /// event codec; a reader that predates it ignores it, and a row written
+    /// before it decodes it as `None`, where the member's seat is read from
+    /// the row's older members.
+    #[serde(skip, default)]
+    pub(crate) seat_lineage: Option<crate::runtime::StoredSeatLineage>,
 }
 
 impl MemberSpawnedEvent {
@@ -1349,6 +1362,7 @@ impl MemberSpawnedEvent {
             approval_branch: None,
             dispatch_admission_lineage: false,
             instruction_lineage_root: None,
+            seat_lineage: None,
         }
     }
 
@@ -1385,6 +1399,19 @@ impl MemberSpawnedEvent {
     /// instructions, when the member is fork-derived.
     pub(crate) fn instruction_lineage_root(&self) -> Option<&AgentIdentity> {
         self.instruction_lineage_root.as_ref()
+    }
+
+    pub(crate) fn with_seat_lineage(
+        mut self,
+        seat_lineage: Option<crate::runtime::StoredSeatLineage>,
+    ) -> Self {
+        self.seat_lineage = seat_lineage;
+        self
+    }
+
+    /// The seat record this row stores for its member, when it stores one.
+    pub(crate) fn seat_lineage(&self) -> Option<&crate::runtime::StoredSeatLineage> {
+        self.seat_lineage.as_ref()
     }
 
     pub(crate) fn with_history_unavailable(
@@ -2220,6 +2247,15 @@ pub(crate) fn encode_stored_mob_event(event: &MobEvent) -> Result<Vec<u8>, serde
         );
     }
     if let Some(member_spawned) = event.kind.member_spawned()
+        && let Some(seat_lineage) = member_spawned.seat_lineage()
+        && let Some(kind) = value.get_mut("kind").and_then(Value::as_object_mut)
+    {
+        kind.insert(
+            "seat_lineage".to_string(),
+            serde_json::to_value(seat_lineage)?,
+        );
+    }
+    if let Some(member_spawned) = event.kind.member_spawned()
         && let Some(seat_build_inputs) = member_spawned.seat_build_inputs()
         && let Some(kind) = value.get_mut("kind").and_then(Value::as_object_mut)
     {
@@ -2555,6 +2591,19 @@ pub(crate) fn decode_stored_mob_event(bytes: &[u8]) -> Result<MobEvent, serde_js
         .map(serde_json::from_value::<Option<AgentIdentity>>)
         .transpose()?
         .flatten();
+    let spawned_seat_lineage = value
+        .get_mut("kind")
+        .and_then(Value::as_object_mut)
+        .and_then(|kind| {
+            if kind.get("type").and_then(Value::as_str) == Some("member_spawned") {
+                kind.remove("seat_lineage")
+            } else {
+                None
+            }
+        })
+        .map(serde_json::from_value::<Option<crate::runtime::StoredSeatLineage>>)
+        .transpose()?
+        .flatten();
     let spawned_seat_build_inputs = value
         .get_mut("kind")
         .and_then(Value::as_object_mut)
@@ -2862,6 +2911,11 @@ pub(crate) fn decode_stored_mob_event(bytes: &[u8]) -> Result<MobEvent, serde_js
         && let Some(member_spawned) = event.kind.member_spawned_mut()
     {
         member_spawned.instruction_lineage_root = Some(root);
+    }
+    if let Some(seat_lineage) = spawned_seat_lineage
+        && let Some(member_spawned) = event.kind.member_spawned_mut()
+    {
+        member_spawned.seat_lineage = Some(seat_lineage);
     }
     if let Some(seat_build_inputs) = spawned_seat_build_inputs
         && let Some(member_spawned) = event.kind.member_spawned_mut()
@@ -3646,6 +3700,104 @@ mod tests {
         fn root_of(kind: &MobEventKind) -> Option<AgentIdentity> {
             match kind {
                 MobEventKind::MemberSpawned(spawned) => spawned.instruction_lineage_root().cloned(),
+                other => panic!("unexpected kind {other:?}"),
+            }
+        }
+    }
+
+    /// The seat record of a member is stored by the event codec only: absent
+    /// from the public event and from a row that holds none, ignored by a
+    /// reader of the public form, decoded as none from a journal written
+    /// before it, and written back as stored when it holds members this
+    /// build does not know. The stored schema does not move.
+    #[test]
+    fn test_stored_seat_lineage_roundtrips_and_stays_internal() {
+        use crate::runtime::StoredSeatLineage;
+        let sid = SessionId::from_uuid(Uuid::nil());
+        let identity = AgentIdentity::from("seated");
+        let record: StoredSeatLineage = serde_json::from_value(serde_json::json!({
+            "recorded_by": "shell",
+            "kind": "unproven",
+        }))
+        .expect("a stored record");
+        let row = |seat: Option<StoredSeatLineage>| MobEvent {
+            cursor: 1,
+            timestamp: Utc::now(),
+            mob_id: MobId::from("test-mob"),
+            kind: MobEventKind::MemberSpawned(
+                MemberSpawnedEvent::new(
+                    identity.clone(),
+                    Generation::new(1),
+                    FenceToken::new(2),
+                    AgentRuntimeId::new(identity.clone(), Generation::new(1)),
+                    ProfileName::from("worker"),
+                )
+                .with_bridge_member_ref(Some(MemberRef::from_bridge_session_id(sid.clone())))
+                .with_seat_lineage(seat),
+            ),
+        };
+        let marker = "seat_lineage";
+        assert_eq!(CURRENT_STORED_MOB_EVENT_SCHEMA_VERSION, 9);
+        let spawned = row(Some(record.clone()));
+        let mut public = serde_json::to_value(&spawned).expect("public event payload");
+        assert!(
+            public["kind"].get(marker).is_none(),
+            "the public event never carries {marker}"
+        );
+        let encoded = encode_stored_mob_event(&spawned).expect("encode");
+        let mut stored: serde_json::Value = serde_json::from_slice(&encoded).expect("parse");
+        assert_eq!(
+            stored["event"]["kind"][marker],
+            serde_json::json!({ "recorded_by": "shell", "kind": "unproven" })
+        );
+        let decoded = decode_stored_mob_event(&encoded).expect("decode");
+        assert_eq!(
+            seat_of(&decoded.kind),
+            Some(record),
+            "{marker} survives the stored roundtrip"
+        );
+
+        // A reader of the public form ignores the member.
+        public["kind"][marker] = stored["event"]["kind"][marker].clone();
+        let read: MobEvent = serde_json::from_value(public).expect("the public form reads it");
+        assert_eq!(seat_of(&read.kind), None);
+
+        // Members a later release wrote are written back as stored.
+        stored["event"]["kind"][marker]["kind"] = "a_later_kind".into();
+        stored["event"]["kind"][marker]["a_later_member"] = serde_json::json!({ "kept": true });
+        let later = serde_json::to_vec(&stored).expect("encode a later row");
+        let decoded = decode_stored_mob_event(&later).expect("decode");
+        let again = encode_stored_mob_event(&decoded).expect("encode");
+        let again: serde_json::Value = serde_json::from_slice(&again).expect("parse");
+        assert_eq!(
+            again["event"]["kind"][marker], stored["event"]["kind"][marker],
+            "a later release's {marker} is written back unchanged"
+        );
+
+        let plain = encode_stored_mob_event(&row(None)).expect("encode");
+        let plain: serde_json::Value = serde_json::from_slice(&plain).expect("parse");
+        assert!(
+            plain["event"]["kind"].get(marker).is_none(),
+            "a row that holds no record stores no {marker}"
+        );
+
+        let removed = stored
+            .get_mut("event")
+            .and_then(|event| event.get_mut("kind"))
+            .and_then(serde_json::Value::as_object_mut)
+            .and_then(|kind| kind.remove(marker));
+        assert!(removed.is_some());
+        let legacy = serde_json::to_vec(&stored).expect("encode without the record");
+        let decoded = decode_stored_mob_event(&legacy).expect("decode");
+        assert_eq!(
+            seat_of(&decoded.kind),
+            None,
+            "a journal written before {marker} decodes it as none"
+        );
+
+        fn seat_of(kind: &MobEventKind) -> Option<StoredSeatLineage> {
+            match kind {
+                MobEventKind::MemberSpawned(spawned) => spawned.seat_lineage().cloned(),
                 other => panic!("unexpected kind {other:?}"),
             }
         }

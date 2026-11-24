@@ -4,7 +4,7 @@ description: "Start a Meta application runtime with a matching gateway and SDK, 
 icon: "rocket"
 ---
 
-*Mirrored from Meerkat Meta main at [de520227a811](https://github.com/lukacf/meerkat/commit/de520227a81178fce9ffea3abcafa4a7bddfbf27) on 2026-11-17; Meta version 0.9.16 at that commit.*
+*Mirrored from Meerkat Meta main at [6372543dee87](https://github.com/lukacf/meerkat/commit/6372543dee877e30cf411bacc1317110927dfebc) on 2026-11-24; Meta version 0.9.18 at that commit.*
 
 This guide starts with the Meta application runtime. If you only need to run an
 agent or a mob, [Core's quickstart](https://docs.rkat.ai/quickstart) is enough.
@@ -44,7 +44,7 @@ arm64 archives are published with the release, listed in `index.json` and
 
 ```toml
 [dependencies]
-meerkat-meta = "0.9.16"
+meerkat-meta = "0.9.18"
 ```
 
 ## Bootstrap a runtime
@@ -229,6 +229,21 @@ output = await triage.dispatch_text_and_wait(
 )
 
 await personal.send_and_wait("What's happening today?", timeout=60)
+```
+
+To make a dispatch safe to repeat, give it an `idempotency_key` and a
+`correlation_id` together. A repeat with the same pair to the same agent
+starts no second turn in that agent's session. One of the two without the
+other is refused and nothing is delivered: `invalid delivery identity
+(idempotency key without a correlation id (half-pair))`. Give the correlation
+id as a canonical UUID:
+
+```python
+await triage.dispatch_text(
+    "New event from connector", origin="connector",
+    idempotency_key="event-42",
+    correlation_id="0b5f6f0e-6a1c-4f0e-9d6e-2f4a8c1d7e42",
+)
 ```
 
 <Note>

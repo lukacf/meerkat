@@ -4711,3 +4711,303 @@ async fn the_council_tool_takes_no_convener_argument() {
     );
     fixture.teardown().await;
 }
+
+// ===========================================================================
+// Source scope as the stock build gives it: a paired admit and refusal
+// ===========================================================================
+
+/// Marker of the convener's own probe turn.
+const SCOPE_PAIR_PROBE: &str = "SCOPE-PAIR-PROBE convene";
+
+/// A host-created mob whose `convener` profile mounts the agent mob tools
+/// (`tools.mob`), beside a `witness` profile that does not.
+fn scope_pair_host_definition(mob_id: &meerkat_mob::MobId) -> meerkat_mob::MobDefinition {
+    let mut convener = support::participant_profile("synthetic convener");
+    convener.tools.mob = true;
+    let witness = support::participant_profile("synthetic witness");
+    let mut definition = meerkat_mob::MobDefinition::explicit(mob_id.clone());
+    definition.profiles.insert(
+        meerkat_mob::ProfileName::from("convener"),
+        meerkat_mob::ProfileBinding::Inline(Box::new(convener)),
+    );
+    definition.profiles.insert(
+        meerkat_mob::ProfileName::from("witness"),
+        meerkat_mob::ProfileBinding::Inline(Box::new(witness)),
+    );
+    definition
+}
+
+/// One `council` call over one participant of `mob_id`.
+fn scope_pair_council(council_id: &str, mob_id: &str, member_id: &str) -> Value {
+    json!({
+        "council_id": council_id,
+        "topic": "Should we ship the migration this week?",
+        "participants": [{ "mob_id": mob_id, "member_id": member_id, "role": "witness" }],
+        "max_rounds": 1,
+        "timeout_seconds": 120,
+    })
+}
+
+/// The same `council` call from the same member session, with nothing but
+/// the rights the stock build gives it, is admitted where the session holds
+/// manage scope over the participant's mob and refused where it does not.
+///
+/// The convener is a member of a mob the HOST created, of a profile with
+/// `tools.mob`. Its build gives it the create capability and spawn scope
+/// over the profiles of its own mob, and no manage scope. No test code
+/// grants it anything: its calls are made by its own model turn, through the
+/// agent mob tools the production composition mounts for it.
+///
+/// - Refusal: a council over a visible member of its own, host-created mob
+///   is answered `access_denied`, and nothing is seated: no council record,
+///   no temporary mob, no new member.
+/// - Admit: the convener creates a mob with its own `mob_create` (which
+///   gives it manage scope over that mob), spawns a member into it, and its
+///   council over that member is admitted, seats the participant and
+///   completes.
+/// - The refused call, repeated after the admit, is refused again: the scope
+///   over the created mob says nothing about the host's mob.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_council_is_admitted_over_a_mob_its_convener_created_and_refused_over_its_hosts_mob() {
+    let scope = uuid::Uuid::new_v4().simple().to_string()[..12].to_string();
+    let host_mob = format!("scope-pair-host-{scope}");
+    let created_mob = format!("scope-pair-created-{scope}");
+    let refused_id = format!("scope-pair-refused-{scope}");
+    let admitted_id = format!("scope-pair-admitted-{scope}");
+    let repeated_id = format!("scope-pair-repeated-{scope}");
+
+    // The convener's probe turn makes these calls in order, each after the
+    // result of the one before.
+    let calls: Vec<(&'static str, &'static str, Value)> = vec![
+        (
+            "refused",
+            "council",
+            scope_pair_council(&refused_id, &host_mob, "host-witness"),
+        ),
+        (
+            "create",
+            "mob_create",
+            json!({ "definition": {
+                "id": created_mob,
+                "profiles": { "witness": {
+                    "model": "claude-haiku-4-5-20251001",
+                    "tools": { "comms": true },
+                    "peer_description": "synthetic witness",
+                    "runtime_mode": "turn_driven"
+                } }
+            } }),
+        ),
+        (
+            "spawn",
+            "mob_spawn_member",
+            json!({
+                "mob_id": created_mob,
+                "profile": "witness",
+                "member_id": "created-witness",
+            }),
+        ),
+        (
+            "admitted",
+            "council",
+            scope_pair_council(&admitted_id, &created_mob, "created-witness"),
+        ),
+        (
+            "repeated",
+            "council",
+            scope_pair_council(&repeated_id, &host_mob, "host-witness"),
+        ),
+    ];
+    let seen: Arc<Mutex<Option<Vec<(bool, String)>>>> = Arc::default();
+    let sink = Arc::clone(&seen);
+    let script = move |request: &LlmRequest| {
+        if !last_user_text(request).contains(SCOPE_PAIR_PROBE) {
+            // A council participant's turns: the summary, then its position.
+            if user_text(request).contains("bounded plain-text summary") {
+                return ScriptedTurn::Text(COUNCIL_SUMMARY.to_string());
+            }
+            if let Some(role) = role_in_request(request) {
+                return ScriptedTurn::Text(format!("position from {role}"));
+            }
+            return ScriptedTurn::Text(FOLLOW_UP_REPLY.to_string());
+        }
+        let results: Vec<(bool, String)> = request
+            .messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::ToolResults { results, .. } => Some(results),
+                _ => None,
+            })
+            .flatten()
+            .map(|result| (result.is_error, result.text_content()))
+            .collect();
+        match calls.get(results.len()) {
+            Some((label, tool, args)) => ScriptedTurn::ToolCall {
+                id: format!("call-{label}"),
+                name: (*tool).to_string(),
+                args: args.clone(),
+            },
+            None => {
+                *sink.lock().unwrap() = Some(results);
+                ScriptedTurn::Text("probed".to_string())
+            }
+        }
+    };
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = support::agent_mob_tools_state(
+        temp.path(),
+        Arc::new(support::ScriptedCouncilClient::new(script)),
+        |state| state,
+    );
+    // The council's sealed result is the answer of the call itself.
+    state.set_detached_completion_delivery(DetachedCompletionDelivery::Unavailable);
+
+    let host_mob_id = meerkat_mob::MobId::from(host_mob.as_str());
+    state
+        .mob_create_definition(scope_pair_host_definition(&host_mob_id))
+        .await
+        .expect("the host creates its mob");
+    for (profile, member) in [("convener", "host-convener"), ("witness", "host-witness")] {
+        state
+            .mob_spawn(
+                &host_mob_id,
+                meerkat_mob::ProfileName::from(profile),
+                AgentIdentity::from(member),
+                Some(meerkat_mob::MobRuntimeMode::TurnDriven),
+                Some(meerkat_mob::MobBackendKind::Session),
+                None,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("the host seats {member}: {error}"));
+    }
+    let host = state.handle_for(&host_mob_id).await.expect("host mob");
+    let convener_session = host
+        .resolve_bridge_session_id(&AgentIdentity::from("host-convener"))
+        .await
+        .expect("the convener's session");
+
+    // What the stock build gave the convener, read before any call: spawn
+    // scope over its mob's profiles, and no manage scope over its mob.
+    assert!(
+        host.member_spawn_profile_scope_contains(&convener_session, "witness"),
+        "a `tools.mob` member holds spawn scope over its own mob's profiles"
+    );
+    assert!(
+        !host.member_manage_scope_contains(&convener_session),
+        "a `tools.mob` member holds no manage scope over the mob its host created"
+    );
+
+    let spec = BoundedResultSpec::new("scope-pair", 4096).expect("bounded result spec");
+    let work = host
+        .start_work_for_identity_bounded(
+            AgentIdentity::from("host-convener"),
+            WorkSpec::new(
+                ContentInput::Text(SCOPE_PAIR_PROBE.to_string()),
+                WorkOrigin::Internal,
+            ),
+            HandlingMode::Queue,
+            spec.clone(),
+        )
+        .await
+        .expect("the convener's turn starts");
+    tokio::time::timeout(Duration::from_mins(3), work.wait_bounded(spec))
+        .await
+        .expect("the convener's turn ends within the hang guard")
+        .expect("a refused call does not fail the turn");
+
+    let results = seen
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the convener's turn reached its last request");
+    assert_eq!(results.len(), 5, "one result per call: {results:#?}");
+    for (label, (is_error, text)) in ["refused", "create", "spawn", "admitted", "repeated"]
+        .iter()
+        .zip(&results)
+    {
+        eprintln!("SCOPE-PAIR ACTUAL {label}: is_error={is_error} {text}");
+    }
+    let council = state.temporary_council();
+    let council_id = |raw: &str| {
+        meerkat_mob::temporary_council::TemporaryCouncilId::new(raw).expect("council id")
+    };
+
+    // The refusal, before and after the admit, and what it left behind.
+    for (index, raw_id) in [(0, &refused_id), (4, &repeated_id)] {
+        let (is_error, text) = &results[index];
+        assert!(
+            *is_error && text.contains("access_denied"),
+            "a council over the host's mob is refused access_denied: {text}"
+        );
+        let id = council_id(raw_id);
+        assert!(
+            council
+                .load(&id)
+                .await
+                .expect("read the council store")
+                .is_none(),
+            "a refused council leaves no council record"
+        );
+        assert!(
+            state.handle_for(&id.temporary_mob_id()).await.is_err(),
+            "a refused council creates no temporary mob"
+        );
+    }
+    let mut host_members: Vec<String> = host
+        .list_members()
+        .await
+        .into_iter()
+        .map(|member| member.agent_identity.to_string())
+        .collect();
+    host_members.sort();
+    assert_eq!(
+        host_members,
+        ["host-convener", "host-witness"],
+        "a refused council forks no member of the host's mob"
+    );
+
+    // The convener's own create and spawn.
+    for (index, what) in [(1, "mob_create"), (2, "mob_spawn_member")] {
+        let (is_error, text) = &results[index];
+        assert!(!*is_error, "the convener's own {what} is admitted: {text}");
+    }
+
+    // The admit: seated and completed.
+    let (is_error, text) = &results[3];
+    assert!(
+        !*is_error,
+        "a council over the mob the convener created is admitted: {text}"
+    );
+    let admitted: Value = serde_json::from_str(text).expect("json council result");
+    assert_eq!(
+        admitted["result"]["exit_reason"]["reason"], "completed",
+        "{admitted}"
+    );
+    let participants = admitted["result"]["participants"]
+        .as_array()
+        .expect("participants");
+    assert_eq!(participants.len(), 1, "{admitted}");
+    assert_eq!(participants[0]["seated"], true, "{admitted}");
+    assert!(
+        admitted["result"].to_string().contains(COUNCIL_SUMMARY),
+        "{admitted}"
+    );
+    let record = council
+        .load(&council_id(&admitted_id))
+        .await
+        .expect("read the council store")
+        .expect("the admitted council has its record");
+    assert_eq!(
+        record
+            .convener
+            .as_ref()
+            .map(|convener| &convener.session_id),
+        Some(&convener_session),
+        "the record names the convener's own session"
+    );
+
+    let _ = state
+        .mob_destroy(&meerkat_mob::MobId::from(created_mob.as_str()))
+        .await;
+    let _ = state.mob_destroy(&host_mob_id).await;
+}

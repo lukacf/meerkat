@@ -702,6 +702,7 @@ async fn the_names_with_a_gating_record_are_the_origins_and_the_askers() {
             .evaluate_gating_action_with_origin(
                 serde_json::from_value(request).expect("gating request"),
                 origin.map(|identity| crate::runtime::GatingOrigin {
+                    mob_id: None,
                     identity: identity.to_string(),
                     conversation_id: None,
                     interaction_id: None,

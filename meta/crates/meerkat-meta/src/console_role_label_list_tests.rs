@@ -567,6 +567,8 @@ async fn a_deny_on_a_label_only_the_cache_holds_keeps_a_member_out_of_the_identi
     seat(&primary, "worker", "planner", BTreeMap::new()).await?;
     let team = mob_owned_by(&runtime, TEAM, session_of(&primary, "planner").await?).await?;
     seat(&team, "worker", MEMBER, BTreeMap::new()).await?;
+    // The console names the member by its mob and its name.
+    let named = format!("{TEAM}/{MEMBER}");
     let config = alice_drives_every_agent_and(vec![
         bob_drives_every_agent(),
         AccessRule {
@@ -582,7 +584,7 @@ async fn a_deny_on_a_label_only_the_cache_holds_keeps_a_member_out_of_the_identi
     prime_access_cache_from_runtime(&runtime, &access).await;
     if access
         .view_for_caller(Some(BOB), Some("person:bob"))
-        .can_view_agent(MEMBER)
+        .can_view_agent(&named)
     {
         wrong.push("the view admits the person the deny applies to".to_string());
     }
@@ -593,7 +595,7 @@ async fn a_deny_on_a_label_only_the_cache_holds_keeps_a_member_out_of_the_identi
         .into_iter()
         .zip(identity_list_doors(&app, &bob).await)
     {
-        if listed.contains(MEMBER) {
+        if listed.contains(named.as_str()) {
             wrong.push(format!("{door} names the member to the person"));
         }
     }
@@ -601,7 +603,7 @@ async fn a_deny_on_a_label_only_the_cache_holds_keeps_a_member_out_of_the_identi
         .into_iter()
         .zip(identity_list_doors(&app, &alice).await)
     {
-        if !listed.contains(MEMBER) {
+        if !listed.contains(named.as_str()) {
             wrong.push(format!(
                 "{door} does not name the member to a person no rule refuses: {listed:?}"
             ));
@@ -663,6 +665,7 @@ fn experience_of(
         false,
         false,
         &BTreeSet::new(),
+        None,
     );
     assert_eq!(response.status, 200, "experience: {:?}", response.body);
     response.body

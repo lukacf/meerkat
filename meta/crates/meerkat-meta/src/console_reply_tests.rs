@@ -651,6 +651,13 @@ impl PersistentMetadataStore for CountingMetadataStore {
             .await
     }
 
+    async fn release_mob_records(
+        &self,
+        mob_id: &str,
+    ) -> Result<crate::MobRecordsRelease, MetadataStoreError> {
+        self.inner.release_mob_records(mob_id).await
+    }
+
     async fn settle_detached_writes(&self) {
         self.inner.settle_detached_writes().await;
     }

@@ -77,11 +77,7 @@ wait_for_tux() {
   exit 1
 }
 
-send_prompt() {
-  local prompt="$1"
-  tmux send-keys -t "$session_name" -l "$prompt"
-  tmux send-keys -t "$session_name" Enter
-}
+source "$script_dir/tux-prompt-input.sh"
 
 start_tux_tmux() {
   local cmd
@@ -134,7 +130,7 @@ scheduled_file="/tmp/tux-live-scheduled-${run_id}.txt"
 nonce="target-b-to-a-live-suite-${run_id}"
 
 echo "Hive -> target-a request"
-send_prompt "LIVE SUITE ${run_id}: call peers, then send_request to target-a with handling_mode steer, intent \"execute_task\", params {\"instruction\":\"write ${hive_file} containing the exact words hive request ok ${run_id} plus hostname, then respond completed JSON\"}. Report the send status."
+send_prompt "LIVE SUITE ${run_id}: call peers, then send_message to target-a with handling_mode steer and this body: \"write ${hive_file} containing the exact words hive request ok ${run_id} plus hostname\". Report the send status."
 sleep "$hive_wait"
 verify_file_contains target-a "$hive_file" "hive request ok ${run_id}"
 

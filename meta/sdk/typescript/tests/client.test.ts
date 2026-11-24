@@ -70,7 +70,7 @@ describe("MetaAsyncClient.status()", () => {
       jsonrpc: "2.0",
       id: req.id,
       result: {
-        contract_version: "0.5.0",
+        contract_version: "0.6.0",
         running: true,
         loaded_modules: ["mod-a"],
       },
@@ -80,7 +80,7 @@ describe("MetaAsyncClient.status()", () => {
     assert.equal(calls[0].method, "meta/status");
     assert.equal(calls[0].id, "test-status");
     assert.deepEqual(calls[0].params, {});
-    assert.equal(result.contract_version, "0.5.0");
+    assert.equal(result.contract_version, "0.6.0");
     assert.equal(result.running, true);
     assert.deepEqual(result.loaded_modules, ["mod-a"]);
   });
@@ -93,7 +93,7 @@ describe("MetaAsyncClient.capabilities()", () => {
       jsonrpc: "2.0",
       id: req.id,
       result: {
-        contract_version: "0.5.0",
+        contract_version: "0.6.0",
         methods: ["meta/status", "meta/capabilities"],
         loaded_modules: ["mod-a", "mod-b"],
       },
@@ -102,7 +102,7 @@ describe("MetaAsyncClient.capabilities()", () => {
     const result = await client.capabilities("test-caps");
     assert.equal(calls[0].method, "meta/capabilities");
     assert.equal(calls[0].id, "test-caps");
-    assert.equal(result.contract_version, "0.5.0");
+    assert.equal(result.contract_version, "0.6.0");
     assert.deepEqual(result.methods, ["meta/status", "meta/capabilities"]);
     assert.deepEqual(result.loaded_modules, ["mod-a", "mod-b"]);
   });

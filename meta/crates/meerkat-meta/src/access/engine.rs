@@ -37,6 +37,49 @@ pub struct AccessResource<'a> {
     /// Agent labels. `None` means the attributes are unknown (label
     /// selectors cannot match); `Some` empty means known-empty.
     pub labels: Option<&'a BTreeMap<String, String>>,
+    /// The mob the agent is a member of, as a rule's `mobs` selector reads
+    /// it. The default mob's for a check that names none.
+    pub mob: AccessResourceMob<'a>,
+}
+
+/// The mob of the agent an access check targets.
+///
+/// Identities are names inside a mob: two mobs of one host may each have an
+/// agent of the same name. A rule selects an agent through its mob: an
+/// allow that lists no `mobs` selects the default mob's agents only, a deny
+/// that lists none the agents of every mob, and a rule that lists mobs the
+/// agents of those mobs.
+///
+/// A check made through an [`crate::access::AccessView`] reads the mob it
+/// names through the default mob the controller was told: a mob named by
+/// its id is the default mob exactly when it is that one, in either variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccessResourceMob<'a> {
+    /// The host's default mob (the mob its launch names), with its mob id
+    /// where it is known: a rule that lists mobs selects the default mob
+    /// by that id.
+    Default(Option<&'a str>),
+    /// Another mob of the host, by its mob id.
+    Other(&'a str),
+}
+
+impl Default for AccessResourceMob<'_> {
+    fn default() -> Self {
+        Self::Default(None)
+    }
+}
+
+impl<'a> AccessResourceMob<'a> {
+    pub(crate) fn is_default(&self) -> bool {
+        matches!(self, Self::Default(_))
+    }
+
+    pub(crate) fn id(&self) -> Option<&'a str> {
+        match self {
+            Self::Default(id) => *id,
+            Self::Other(id) => Some(id),
+        }
+    }
 }
 
 impl<'a> AccessResource<'a> {
@@ -49,6 +92,13 @@ impl<'a> AccessResource<'a> {
             identity: Some(identity),
             ..Self::default()
         }
+    }
+
+    /// This resource as an agent of `mob`.
+    #[must_use]
+    pub fn in_mob(mut self, mob: AccessResourceMob<'a>) -> Self {
+        self.mob = mob;
+        self
     }
 
     fn is_present(&self) -> bool {
@@ -198,14 +248,22 @@ fn resource_match(rule: &AccessRule, known: &KnownResource<'_>) -> SelectorMatch
         agents,
         roles,
         match_labels,
+        mobs,
     } = rule;
-    if agents.is_empty() && roles.is_empty() && match_labels.is_empty() {
-        return SelectorMatch::Matches;
-    }
     let KnownResource {
         resource,
         knowledge,
     } = known;
+    // An agent is judged by the rules that reach its own mob: an allow
+    // that names no mobs is the default mob's, whatever else it selects,
+    // and a deny that names none reaches every mob. The mob is half of
+    // an agent's key: it is known of every agent, whatever else is not.
+    if resource.is_present() && !rule.selects_mob(&resource.mob) {
+        return SelectorMatch::DoesNotMatch;
+    }
+    if agents.is_empty() && roles.is_empty() && match_labels.is_empty() && mobs.is_empty() {
+        return SelectorMatch::Matches;
+    }
     // A constrained rule can never match a check that has no resource.
     if !resource.is_present() {
         return SelectorMatch::DoesNotMatch;
@@ -421,6 +479,28 @@ pub(crate) fn principal_may_perform(
     })
 }
 
+/// Whether an allow rule that applies to the principal selects the mob
+/// `mob_id` as a mob other than the host's default mob: the rule lists that
+/// id in `mobs`, or lists `"*"`. An allow that lists no `mobs` is the
+/// default mob's and selects no other mob. The rule applies to the principal
+/// as it does for every other check (its subject, `"*"` for a signed-in
+/// caller, a group, or a rule that lists neither subjects nor groups).
+///
+/// The rule's actions and its agent, role and label selectors are not read,
+/// and neither is any deny rule: what the principal may do in the mob is
+/// judged per action and resource. It reads the configuration alone.
+pub(crate) fn allow_rule_selects_other_mob(
+    config: &AccessControlConfig,
+    principal: &AccessPrincipal,
+    mob_id: &str,
+) -> bool {
+    config.rules.iter().any(|rule| {
+        matches!(rule.effect, AccessEffect::Allow)
+            && subject_matches(rule, principal)
+            && rule.selects_mob(&AccessResourceMob::Other(mob_id))
+    })
+}
+
 /// Resolve the configured group memberships for a subject.
 pub(crate) fn groups_for_subject(config: &AccessControlConfig, subject: &str) -> BTreeSet<String> {
     config
@@ -445,6 +525,7 @@ pub(crate) fn deny_undecidable_by_identity<'c>(
     principal: &AccessPrincipal,
     action: &str,
     identity: &str,
+    mob: &AccessResourceMob<'_>,
 ) -> Option<&'c str> {
     if !config.enabled {
         return None;
@@ -464,6 +545,7 @@ pub(crate) fn deny_undecidable_by_identity<'c>(
                     .iter()
                     .any(|pattern| action_matches(pattern, action))
                 && subject_matches(rule, principal)
+                && rule.selects_mob(mob)
                 && selectors_need_attributes(rule, identity)
         })
         .map(|rule| rule.id.as_str())
@@ -484,6 +566,9 @@ fn selectors_need_attributes(rule: &AccessRule, identity: &str) -> bool {
         agents,
         roles,
         match_labels,
+        // The mob is part of the member's key, never an attribute: the
+        // caller names it with the identity.
+        mobs: _,
     } = rule;
     // Roles and labels are attributes, never part of an identity string.
     let role_selector = !roles.is_empty();
@@ -551,6 +636,7 @@ mod tests {
                 agent_id: Some(AGENT),
                 role: None,
                 labels: Some(&known),
+                mob: AccessResourceMob::default(),
             },
             knowledge: AttributeKnowledge::IDENTITY_AND_HELD_LABELS,
         }];
@@ -749,6 +835,7 @@ mod tests {
                     agent_id: Some("aide"),
                     role: None,
                     labels: Some(&own_labels),
+                    mob: AccessResourceMob::default(),
                 },
                 knowledge: role_alone,
             },
@@ -757,6 +844,7 @@ mod tests {
                 agent_id: Some("planner"),
                 role: Some("lead"),
                 labels: Some(&planner_labels),
+                mob: AccessResourceMob::default(),
             }),
         ];
         let view = |rules: Vec<AccessRule>| {
@@ -882,6 +970,7 @@ mod tests {
             agent_id: Some("apprentice"),
             role: Some("reader"),
             labels: Some(&none),
+            mob: AccessResourceMob::default(),
         });
         let ancestor = |knowledge| KnownResource {
             resource: AccessResource {
@@ -889,6 +978,7 @@ mod tests {
                 agent_id: None,
                 role: None,
                 labels: Some(&none),
+                mob: AccessResourceMob::default(),
             },
             knowledge,
         };
@@ -984,6 +1074,7 @@ mod tests {
         }]);
         let labels = BTreeMap::from([("side_chat_of".to_string(), "alpha".to_string())]);
         let resource = AccessResource {
+            mob: Default::default(),
             identity: Some("alpha-side"),
             agent_id: None,
             role: None,
@@ -1263,6 +1354,7 @@ mod tests {
             &principal("bob@example.test", &[]),
             "agent.view",
             identity,
+            &AccessResourceMob::default(),
         )
         .map(ToString::to_string)
     }
@@ -1338,6 +1430,7 @@ mod tests {
                 &principal("bob@example.test", &[]),
                 "agent.send",
                 "worker",
+                &AccessResourceMob::default(),
             ),
             None
         );
@@ -1348,6 +1441,7 @@ mod tests {
                 &principal("root@example.test", &[]),
                 "agent.view",
                 "worker",
+                &AccessResourceMob::default(),
             ),
             None
         );
@@ -1363,6 +1457,7 @@ mod tests {
                 &principal("bob@example.test", &[]),
                 "agent.view",
                 "worker",
+                &AccessResourceMob::default(),
             ),
             None
         );
@@ -1380,6 +1475,7 @@ mod tests {
                 &principal("bob@example.test", &[]),
                 "agent.view",
                 "worker",
+                &AccessResourceMob::default(),
             ),
             None
         );
@@ -1444,6 +1540,127 @@ mod tests {
             ],
             [true, true, false, false],
             "named callers are decided as before"
+        );
+    }
+
+    fn mob_agent(mob: AccessResourceMob<'_>) -> AccessResource<'_> {
+        AccessResource::for_identity("alice").in_mob(mob)
+    }
+
+    /// A rule that names no mobs is the default mob's: it grants and denies
+    /// nothing for an agent of the same name in another mob. A rule selects
+    /// another mob's agents only by listing that mob, or every mob.
+    #[test]
+    fn member_keyed_access_rule_selects_the_agents_of_its_own_mobs() {
+        let mut default_only = allow_rule("view-alice");
+        default_only.actions = vec!["agent.view".to_string()];
+        default_only.agents = vec!["alice".to_string()];
+        let mut second_only = allow_rule("send-alice-in-second");
+        second_only.actions = vec!["agent.send".to_string()];
+        second_only.agents = vec!["alice".to_string()];
+        second_only.mobs = vec!["second".to_string()];
+        let mut every_mob = allow_rule("reset-alice-everywhere");
+        every_mob.actions = vec!["agent.reset".to_string()];
+        every_mob.agents = vec!["alice".to_string()];
+        every_mob.mobs = vec!["*".to_string()];
+        let mut launch_by_id = allow_rule("retire-alice-in-launch");
+        launch_by_id.actions = vec!["agent.retire".to_string()];
+        launch_by_id.agents = vec!["alice".to_string()];
+        launch_by_id.mobs = vec!["launch".to_string()];
+        let config = config_with_rules(vec![default_only, second_only, every_mob, launch_by_id]);
+        let alice = principal("alice@example.com", &["ops"]);
+        let allowed = |action: &str, mob: AccessResourceMob<'_>| {
+            evaluate_access(&config, &alice, action, &mob_agent(mob)).is_allow()
+        };
+        let default_mob = AccessResourceMob::Default(Some("launch"));
+        let second = AccessResourceMob::Other("second");
+        let third = AccessResourceMob::Other("third");
+        assert_eq!(
+            [
+                allowed("agent.view", default_mob),
+                allowed("agent.view", AccessResourceMob::default()),
+                allowed("agent.view", second),
+            ],
+            [true, true, false],
+            "a rule without mobs is the default mob's alone"
+        );
+        assert_eq!(
+            [
+                allowed("agent.send", default_mob),
+                allowed("agent.send", second),
+                allowed("agent.send", third),
+            ],
+            [false, true, false],
+            "a rule that lists a mob selects that mob's agents alone"
+        );
+        assert_eq!(
+            [
+                allowed("agent.reset", default_mob),
+                allowed("agent.reset", second),
+                allowed("agent.reset", third),
+            ],
+            [true; 3],
+            "`*` lists every mob of the host"
+        );
+        assert_eq!(
+            [
+                allowed("agent.retire", default_mob),
+                allowed("agent.retire", second),
+            ],
+            [true, false],
+            "the default mob is listed by its id like any other"
+        );
+    }
+
+    /// An allow that lists no mobs is the default mob's: it grants nothing
+    /// in another mob, also when it has no selector at all. A deny that
+    /// lists none reaches the agent of the same name in every mob.
+    #[test]
+    fn member_keyed_access_an_allow_without_mobs_reaches_no_other_mob_and_a_deny_does() {
+        let mut view_everything = allow_rule("view-everything");
+        view_everything.actions = vec!["agent.view".to_string()];
+        view_everything.mobs = vec!["*".to_string()];
+        let mut deny_alice = allow_rule("deny-alice");
+        deny_alice.effect = AccessEffect::Deny;
+        deny_alice.actions = vec!["agent.view".to_string()];
+        deny_alice.agents = vec!["alice".to_string()];
+        let mut send_everything = allow_rule("send-everything");
+        send_everything.actions = vec!["agent.send".to_string()];
+        let config = config_with_rules(vec![view_everything, deny_alice, send_everything]);
+        let alice = principal("alice@example.com", &["ops"]);
+        let second = AccessResourceMob::Other("second");
+        assert!(
+            !evaluate_access(
+                &config,
+                &alice,
+                "agent.view",
+                &mob_agent(AccessResourceMob::default())
+            )
+            .is_allow(),
+            "the deny holds for the default mob's alice"
+        );
+        assert!(
+            !evaluate_access(&config, &alice, "agent.view", &mob_agent(second)).is_allow(),
+            "a deny that lists no mobs reaches the second mob's alice"
+        );
+        assert!(
+            evaluate_access(
+                &config,
+                &alice,
+                "agent.send",
+                &mob_agent(AccessResourceMob::default())
+            )
+            .is_allow()
+        );
+        assert!(
+            !evaluate_access(&config, &alice, "agent.send", &mob_agent(second)).is_allow(),
+            "a rule with no selector at all is still the default mob's"
+        );
+        // A check with no agent is the host's: an unconstrained rule
+        // matches it, and a rule that lists mobs does not.
+        assert!(evaluate_access(&config, &alice, "agent.send", &AccessResource::none()).is_allow());
+        assert!(
+            !evaluate_access(&config, &alice, "agent.view", &AccessResource::none()).is_allow()
         );
     }
 }

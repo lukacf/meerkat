@@ -47,6 +47,16 @@ const PARTICIPANTS: [&str; 2] = ["council-p0", "council-p1"];
 const NESTED_MEMBER: &str = "nested-worker";
 /// A member of an ordinary nested mob whose id has a council mob's form.
 const LOOKALIKE_MEMBER: &str = "lookalike-worker";
+/// The name a console gives `member` of the nested mob `mob`: its mob and
+/// name. Kept for the whole test, as the rows' name lists are.
+fn nested_name(mob: &str, member: &str) -> &'static str {
+    Box::leak(
+        crate::console_member_ref::nested_member_identity(mob, member)
+            .expect("a nested member has a console name")
+            .into_boxed_str(),
+    )
+}
+
 /// A member that takes no part in the council.
 const BYSTANDER: &str = "bystander";
 /// A member of an ordinary mob a host inserted under the mob id of a council
@@ -175,17 +185,58 @@ async fn turn_on(
     .expect("the turn's reply is recorded");
 }
 
+/// The session the seated member `member` of `primary` runs on.
+async fn session_of_the_seated(primary: &meerkat_mob::MobHandle, member: &str) -> SessionId {
+    primary
+        .resolve_bridge_session_id(&AgentIdentity::from(member))
+        .await
+        .expect("the creating member's session")
+}
+
+/// A creation record that names the member `creator` of `primary` as it
+/// is seated there: at its generation, on its session.
+async fn created_by_the_seated(
+    primary: &meerkat_mob::MobHandle,
+    creator: &str,
+) -> meerkat_mob::MobProvenance {
+    let seated = primary
+        .get_member(&AgentIdentity::from(creator))
+        .await
+        .expect("the roster reads")
+        .expect("the creating member is seated");
+    meerkat_mob::MobProvenance::OperatorMember {
+        parent_mob_id: primary.mob_id().clone(),
+        parent_incarnation: primary.incarnation(),
+        creator_identity: AgentIdentity::from(creator),
+        creator_generation: seated.generation,
+        owner_session: seated
+            .bridge_session_id()
+            .cloned()
+            .expect("the creating member has a session"),
+    }
+}
+
 /// An ordinary nested mob `mob_id` with one member, as an agent's
-/// `mob_create` leaves it: managed by the runtime's mob tools `state`.
+/// `mob_create` leaves it: created for `creator`, the session of a seated
+/// member, and managed by the runtime's mob tools `state`.
 async fn seat_nested_mob(
     state: &Arc<meerkat_mob_mcp::MobMcpState>,
+    creator: SessionId,
     mob_id: &str,
     member: &str,
 ) -> SessionId {
-    let mob_id = tokio::time::timeout(WAIT, state.mob_create_definition(definition(mob_id)))
-        .await
-        .expect("bounded nested mob create")
-        .expect("nested mob");
+    let mob_id = tokio::time::timeout(
+        WAIT,
+        Box::pin(state.mob_create_definition_with_owner_bridge_session(
+            definition(mob_id),
+            creator,
+            false,
+            false,
+        )),
+    )
+    .await
+    .expect("bounded nested mob create")
+    .expect("nested mob");
     seat_nested_member(state, &mob_id, member).await
 }
 
@@ -193,13 +244,17 @@ async fn seat_nested_mob(
 /// inserted into the runtime's mob tools `state`. This is how an ordinary
 /// mob comes to hold an id of the council form (`council--...`): no create
 /// makes one, since the form belongs to councils, and a mob stored under
-/// such an id by an earlier release is restored the same way.
+/// such an id by an earlier release is restored the same way. Its creation
+/// record is `creator`, which names a seated member
+/// ([`created_by_the_seated`]): a mob whose record says the host created
+/// it is a mob of its own, and no console lists it under another mob.
 async fn insert_nested_mob(
     state: &Arc<meerkat_mob_mcp::MobMcpState>,
+    creator: meerkat_mob::MobProvenance,
     mob_id: &str,
     member: &str,
 ) -> SessionId {
-    insert_nested_mob_with(state, mob_id, member, |builder| builder).await
+    insert_nested_mob_with(state, creator, mob_id, member, |builder| builder).await
 }
 
 /// [`insert_nested_mob`] whose host finishes its builder with `configure`:
@@ -207,6 +262,7 @@ async fn insert_nested_mob(
 /// has to bring along (a default model client, for one).
 async fn insert_nested_mob_with(
     state: &Arc<meerkat_mob_mcp::MobMcpState>,
+    creator: meerkat_mob::MobProvenance,
     mob_id: &str,
     member: &str,
     configure: impl FnOnce(meerkat_mob::MobBuilder) -> meerkat_mob::MobBuilder,
@@ -216,7 +272,8 @@ async fn insert_nested_mob_with(
         configure(
             meerkat_mob::MobBuilder::new(definition(mob_id), meerkat_mob::MobStorage::in_memory())
                 .with_session_service(state.session_service())
-                .allow_ephemeral_sessions(true),
+                .allow_ephemeral_sessions(true)
+                .with_provenance(creator),
         )
         .create(),
     )
@@ -363,6 +420,9 @@ struct Realm {
     nested_session: SessionId,
     lookalike_mob: String,
     lookalike_session: SessionId,
+    /// The console names of the two ordinary nested members.
+    nested_member: &'static str,
+    lookalike_member: &'static str,
 }
 
 impl Realm {
@@ -375,17 +435,34 @@ impl Realm {
         turn(&fixture, SOURCE, SOURCE_TURN).await;
         let state = mob_tools(&fixture);
         let nested_mob = unique("nested");
-        let nested_session = seat_nested_mob(&state, &nested_mob, NESTED_MEMBER).await;
+        // The ordinary nested mobs are made by a seated member that takes
+        // no part in the council.
+        let primary = fixture.runtime.handle();
+        let nested_session = seat_nested_mob(
+            &state,
+            session_of_the_seated(&primary, BYSTANDER).await,
+            &nested_mob,
+            NESTED_MEMBER,
+        )
+        .await;
         let lookalike_mob = format!(
             "{}{}",
             meerkat_mob::temporary_council::TEMPORARY_COUNCIL_MOB_ID_PREFIX,
             unique("lookalike")
         );
-        let lookalike_session = insert_nested_mob(&state, &lookalike_mob, LOOKALIKE_MEMBER).await;
+        let lookalike_session = insert_nested_mob(
+            &state,
+            created_by_the_seated(&primary, BYSTANDER).await,
+            &lookalike_mob,
+            LOOKALIKE_MEMBER,
+        )
+        .await;
         Self {
             fixture,
             gate,
             _release: release,
+            nested_member: nested_name(&nested_mob, NESTED_MEMBER),
+            lookalike_member: nested_name(&lookalike_mob, LOOKALIKE_MEMBER),
             nested_mob,
             nested_session,
             lookalike_mob,
@@ -396,7 +473,7 @@ impl Realm {
     fn names(&self) -> Vec<&'static str> {
         let mut names = vec!["convener", SOURCE, "bob", BYSTANDER];
         names.extend(PARTICIPANTS);
-        names.extend([NESTED_MEMBER, LOOKALIKE_MEMBER]);
+        names.extend([self.nested_member, self.lookalike_member]);
         names
     }
 }
@@ -779,6 +856,7 @@ fn stored_frame_at(
     let session = provenance.identity.session_id.clone();
     NewConsoleFrame {
         id: None,
+        mob_id: None,
         dedupe_key: key.to_string(),
         timestamp_ms,
         runtime_key: RUNTIME.to_string(),
@@ -864,7 +942,7 @@ async fn frames_stored_for_a_council_participant_are_not_served() {
         (
             "lookalike-live",
             captured(
-                LOOKALIKE_MEMBER,
+                realm.lookalike_member,
                 &realm.lookalike_session.to_string(),
                 "general",
                 &primary,
@@ -874,7 +952,7 @@ async fn frames_stored_for_a_council_participant_are_not_served() {
         (
             "nested-live",
             captured(
-                NESTED_MEMBER,
+                realm.nested_member,
                 &realm.nested_session.to_string(),
                 "general",
                 &primary,
@@ -884,7 +962,7 @@ async fn frames_stored_for_a_council_participant_are_not_served() {
         (
             "nested-gone",
             captured(
-                "gone-worker",
+                nested_name(&gone_mob, "gone-worker"),
                 "gone-worker-session",
                 "general",
                 &primary,
@@ -926,7 +1004,7 @@ async fn frames_stored_for_a_council_participant_are_not_served() {
     let _ = listed(&aggregator).await;
 
     let mut names = realm.names();
-    names.extend(["gone-worker", "council-helper"]);
+    names.extend([nested_name(&gone_mob, "gone-worker"), "council-helper"]);
     let ordinary = BTreeSet::from([
         "lookalike-live".to_string(),
         "nested-live".to_string(),
@@ -1001,7 +1079,7 @@ async fn frames_stored_for_a_council_participant_are_not_served_with_no_runtime_
         (
             "lookalike-live",
             captured(
-                LOOKALIKE_MEMBER,
+                realm.lookalike_member,
                 &realm.lookalike_session.to_string(),
                 "general",
                 &primary,
@@ -1011,7 +1089,7 @@ async fn frames_stored_for_a_council_participant_are_not_served_with_no_runtime_
         (
             "nested-live",
             captured(
-                NESTED_MEMBER,
+                realm.nested_member,
                 &realm.nested_session.to_string(),
                 "general",
                 &primary,
@@ -1021,7 +1099,7 @@ async fn frames_stored_for_a_council_participant_are_not_served_with_no_runtime_
         (
             "nested-gone",
             captured(
-                "gone-worker",
+                nested_name(&gone_mob, "gone-worker"),
                 "gone-worker-session",
                 "general",
                 &primary,
@@ -1057,7 +1135,7 @@ async fn frames_stored_for_a_council_participant_are_not_served_with_no_runtime_
     let _ = listed(&aggregator).await;
 
     let mut names = realm.names();
-    names.extend(["gone-worker", "primary-worker"]);
+    names.extend([nested_name(&gone_mob, "gone-worker"), "primary-worker"]);
     // While the runtime is registered the ordinary frames are served, so the
     // reads below are of frames a console does serve.
     assert_eq!(
@@ -1133,12 +1211,23 @@ async fn an_ordinary_mob_under_a_settled_councils_mob_id_is_listed_and_its_frame
 
     // The ordinary mob under the settled council's mob id, with one turn.
     let state = mob_tools(&realm.fixture);
-    let reuse_session = insert_nested_mob(&state, &council.mob, REUSE_MEMBER).await;
+    let reuse_session = insert_nested_mob(
+        &state,
+        created_by_the_seated(&realm.fixture.runtime.handle(), BYSTANDER).await,
+        &council.mob,
+        REUSE_MEMBER,
+    )
+    .await;
     let reused = state
         .handle_for(&meerkat_mob::MobId::from(council.mob.as_str()))
         .await
         .expect("the ordinary mob under the council's mob id");
     turn_on(&realm.fixture, &reused, REUSE_MEMBER, REUSE_TURN).await;
+    // The console's name of the ordinary mob's member: its mob and name.
+    let reuse_member = nested_name(&council.mob, REUSE_MEMBER);
+    // The console's names of the settled council's seats, as it captured
+    // them while the council ran: each seat's mob and name.
+    let seats = PARTICIPANTS.map(|seat| nested_name(&council.mob, seat));
     // A moment after the ordinary mob exists.
     let after_reuse = frame_time_now();
     assert!(during_council < after_reuse, "the council ended in between");
@@ -1153,7 +1242,7 @@ async fn an_ordinary_mob_under_a_settled_councils_mob_id_is_listed_and_its_frame
         (
             "settled-council-seat",
             captured(
-                PARTICIPANTS[0],
+                seats[0],
                 &fork_session,
                 "council_p0",
                 &primary,
@@ -1175,7 +1264,7 @@ async fn an_ordinary_mob_under_a_settled_councils_mob_id_is_listed_and_its_frame
         (
             "settled-council-seat-by-name",
             captured(
-                PARTICIPANTS[1],
+                seats[1],
                 "unrecorded-seat-session",
                 "council_p1",
                 &primary,
@@ -1197,7 +1286,7 @@ async fn an_ordinary_mob_under_a_settled_councils_mob_id_is_listed_and_its_frame
         (
             "ordinary-member",
             captured(
-                REUSE_MEMBER,
+                reuse_member,
                 &reuse_session.to_string(),
                 "general",
                 &primary,
@@ -1217,7 +1306,7 @@ async fn an_ordinary_mob_under_a_settled_councils_mob_id_is_listed_and_its_frame
 
     let mut wrong = Vec::new();
     let identities = listed(&aggregator).await;
-    if !identities.contains(REUSE_MEMBER) {
+    if !identities.contains(reuse_member) {
         wrong.push(format!(
             "identities does not list {REUSE_MEMBER} of the ordinary mob {}: {identities:?}",
             council.mob
@@ -1228,7 +1317,7 @@ async fn an_ordinary_mob_under_a_settled_councils_mob_id_is_listed_and_its_frame
         "the settled council's participants are not listed: {identities:?}"
     );
     if aggregator
-        .inspect_identity(REUSE_MEMBER)
+        .inspect_identity(reuse_member)
         .await
         .expect("inspect")
         .is_none()
@@ -1239,13 +1328,14 @@ async fn an_ordinary_mob_under_a_settled_councils_mob_id_is_listed_and_its_frame
     backfill(&aggregator).await;
 
     let mut names = realm.names();
-    names.extend([REUSE_MEMBER, "unrecorded-seat-name", "council-helper"]);
+    names.extend([reuse_member, "unrecorded-seat-name", "council-helper"]);
+    names.extend(seats);
     let ordinary = BTreeSet::from(["ordinary-member".to_string()]);
     let controller = controller(deny_source_by_identity());
     let administrator = served(&aggregator, &controller, Some(ROOT), &names).await;
     if !administrator
         .iter()
-        .any(|frame| frame.identity == REUSE_MEMBER && carries(frame, REUSE_TURN))
+        .any(|frame| frame.identity == reuse_member && carries(frame, REUSE_TURN))
     {
         wrong.push(format!(
             "the history of {REUSE_MEMBER} is not served to the administrator"
@@ -1302,10 +1392,17 @@ async fn a_settled_record_without_a_destroyed_receipt_keeps_its_mob_id() {
     let record = store.commit(&record).await.expect("rewrite the record");
     assert!(!record.is_unfinished(), "the record still reads settled");
 
-    insert_nested_mob(&state, &council.mob, REUSE_MEMBER).await;
+    insert_nested_mob(
+        &state,
+        created_by_the_seated(&realm.fixture.runtime.handle(), BYSTANDER).await,
+        &council.mob,
+        REUSE_MEMBER,
+    )
+    .await;
     let identities = listed(&aggregator).await;
     assert!(
-        !identities.contains(REUSE_MEMBER),
+        !identities.contains(nested_name(&council.mob, REUSE_MEMBER))
+            && !identities.contains(REUSE_MEMBER),
         "a mob under the id of a record with no destroyed receipt stays unlisted: {identities:?}"
     );
     realm.fixture.stop().await;
@@ -1357,7 +1454,13 @@ async fn a_mob_listed_before_its_council_settled_stays_the_councils() {
         "the mob listed before the council's destroy is the council's after its record settled"
     );
 
-    insert_nested_mob(&state, &council.mob, REUSE_MEMBER).await;
+    insert_nested_mob(
+        &state,
+        created_by_the_seated(&realm.fixture.runtime.handle(), BYSTANDER).await,
+        &council.mob,
+        REUSE_MEMBER,
+    )
+    .await;
     let ordinary = state
         .handle_for(&mob)
         .await
@@ -1482,7 +1585,7 @@ async fn stored_frames_keep_access_rules(deny: Option<AccessRule>) {
             "nested-member",
             SOURCE_TURN,
             captured(
-                NESTED_MEMBER,
+                realm.nested_member,
                 &realm.nested_session.to_string(),
                 "general",
                 &primary,
@@ -1597,9 +1700,13 @@ async fn the_source_other_nested_members_and_a_hiding_console_read_as_before() {
     turn(&realm.fixture, "bob", "META-BOB-EARLIER-TURN").await;
     let names = realm.names();
     let aggregator = console(&realm.fixture, Arc::new(AllowAllConsoleVisibilityPolicy));
+    // The stock console with the listing of nested mobs off: the console
+    // that hides every nested member.
     let hiding = console(
         &realm.fixture,
-        Arc::new(HideImplicitDelegateMembersConsoleVisibilityPolicy),
+        crate::console_aggregator::stock_console_visibility_policy(
+            crate::console_aggregator::NestedMobListing::Hidden,
+        ),
     );
     let council = Council::convene(&realm.fixture, &realm.gate).await;
     backfill(&aggregator).await;
@@ -1611,8 +1718,8 @@ async fn the_source_other_nested_members_and_a_hiding_console_read_as_before() {
         SOURCE,
         "bob",
         BYSTANDER,
-        NESTED_MEMBER,
-        LOOKALIKE_MEMBER,
+        realm.nested_member,
+        realm.lookalike_member,
     ] {
         assert!(
             including.contains(member),
@@ -1636,6 +1743,7 @@ async fn the_source_other_nested_members_and_a_hiding_console_read_as_before() {
     for nested in PARTICIPANTS
         .into_iter()
         .chain([NESTED_MEMBER, LOOKALIKE_MEMBER])
+        .chain([realm.nested_member, realm.lookalike_member])
     {
         assert!(
             hiding
@@ -1684,14 +1792,16 @@ async fn the_source_other_nested_members_and_a_hiding_console_read_as_before() {
         served(&aggregator, &by_identity, Some(CALLER), &names)
             .await
             .iter()
-            .any(|frame| frame.identity == NESTED_MEMBER && carries(frame, "META-NESTED-TURN")),
+            .any(
+                |frame| frame.identity == realm.nested_member && carries(frame, "META-NESTED-TURN")
+            ),
         "an including console serves a nested member's history"
     );
     assert!(
         !served(&hiding, &by_identity, Some(ROOT), &names)
             .await
             .iter()
-            .any(|frame| frame.identity == NESTED_MEMBER),
+            .any(|frame| frame.identity == realm.nested_member),
         "a console that hides nested members serves none of their frames"
     );
 
@@ -1886,6 +1996,7 @@ async fn the_council_reads_wake_no_dormant_member() {
         .resolve_bridge_session_id(&sleeper)
         .await
         .expect("member session");
+    let created_by_the_sleeper = created_by_the_seated(&handle, BYSTANDER).await;
     handle
         .member(&sleeper)
         .await
@@ -1912,13 +2023,20 @@ async fn the_council_reads_wake_no_dormant_member() {
         meerkat_mob::temporary_council::TEMPORARY_COUNCIL_MOB_ID_PREFIX,
         unique("lookalike")
     );
-    insert_nested_mob_with(&state, &lookalike_mob, LOOKALIKE_MEMBER, |builder| {
-        builder.with_default_llm_client(Arc::new(CompletionClient {
-            gate: Arc::clone(&gate),
-            log: Arc::clone(&log),
-        }))
-    })
+    insert_nested_mob_with(
+        &state,
+        created_by_the_sleeper,
+        &lookalike_mob,
+        LOOKALIKE_MEMBER,
+        |builder| {
+            builder.with_default_llm_client(Arc::new(CompletionClient {
+                gate: Arc::clone(&gate),
+                log: Arc::clone(&log),
+            }))
+        },
+    )
     .await;
+    let lookalike_member = nested_name(&lookalike_mob, LOOKALIKE_MEMBER);
 
     let aggregator = MetaConsoleAggregator::in_memory();
     seed_participant_frames(
@@ -1947,7 +2065,7 @@ async fn the_council_reads_wake_no_dormant_member() {
         "the released member is not materialized: {before:?}"
     );
     let mut names = PARTICIPANTS.to_vec();
-    names.push(LOOKALIKE_MEMBER);
+    names.push(lookalike_member);
     council_reads(&aggregator, &names).await;
 
     assert!(
@@ -1965,7 +2083,7 @@ async fn the_council_reads_wake_no_dormant_member() {
         "the reads materialized no member"
     );
     assert!(
-        listed(&aggregator).await.contains(LOOKALIKE_MEMBER),
+        listed(&aggregator).await.contains(lookalike_member),
         "the nested mob that merely has a council mob's id form is listed"
     );
 }

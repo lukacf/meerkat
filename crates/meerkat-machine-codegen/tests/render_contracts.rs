@@ -1259,6 +1259,65 @@ fn meerkat_recovered_pending_carrier_arms_follow_every_published_variant() {
     );
 }
 
+/// MeerkatMachine's denial of a switch onto a target that refuses the
+/// reasoning effort level the session holds is declared beside its
+/// sibling arms in the catalog and emitted on the late tail: its six arms
+/// directly follow
+/// `ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierStopped`,
+/// the last variant 0.9.17 published, which keeps index 2884, so no
+/// published `TransitionId` discriminant moves. Both switch inputs are
+/// declared before the appended-input section, so rendering does not refuse
+/// an arm of theirs that the late tail leaves out: this row does.
+#[test]
+fn meerkat_reasoning_effort_refusal_arms_follow_every_published_variant() {
+    let rendered = render_machine_kernel_module(&meerkat_machine());
+    let variants = transition_id_variants(&rendered);
+    let index = |name: &str| {
+        variants
+            .iter()
+            .position(|variant| variant == name)
+            .expect("the named variant is a rendered TransitionId variant")
+    };
+    // The last TransitionId variant 0.9.17 published.
+    let published_last =
+        index("ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierStopped");
+    assert_eq!(published_last, 2884);
+    let arms = [
+        "RequestFiniteSwitchTurnReasoningEffortRefusedIdle",
+        "RequestFiniteSwitchTurnReasoningEffortRefusedAttached",
+        "RequestFiniteSwitchTurnReasoningEffortRefusedRunning",
+        "RequestUntilChangedSwitchTurnReasoningEffortRefusedIdle",
+        "RequestUntilChangedSwitchTurnReasoningEffortRefusedAttached",
+        "RequestUntilChangedSwitchTurnReasoningEffortRefusedRunning",
+    ]
+    .map(str::to_owned);
+    assert_eq!(
+        variants[published_last + 1..published_last + 1 + arms.len()].to_vec(),
+        arms.to_vec(),
+        "the refusal's arms directly follow the last variant 0.9.17 published"
+    );
+}
+
+/// The evidence a switch request carries about its target and the reasoning
+/// effort level the session holds has exactly these five values, in this
+/// order: `Refused` denies, the other four admit. The switch arms name the
+/// refusing one, so a value added later would be admitted by them: adding
+/// one changes this row, and is a decision about the arms.
+#[test]
+fn meerkat_target_reasoning_effort_verdict_has_exactly_its_five_values() {
+    let rendered = render_machine_kernel_module(&meerkat_machine());
+    assert_eq!(
+        enum_variant_names(&rendered, "TargetReasoningEffortVerdict"),
+        [
+            "NoHeldEffort",
+            "HeldEffortAccepted",
+            "LegacyUnverified",
+            "Refused",
+            "LevelsUnreadable"
+        ]
+    );
+}
+
 /// MobMachine's stale respawn abandonment arm (0.9.11) is declared beside
 /// its siblings in the catalog and emitted on the late tail, after every
 /// variant 0.9.10 published and after the arms 0.9.11 appended before it:

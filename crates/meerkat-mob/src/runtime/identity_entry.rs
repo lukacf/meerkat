@@ -1892,6 +1892,17 @@ impl IdentityLife {
     pub fn token(&self) -> String {
         format!("{}.{}", self.resets, self.ends)
     }
+
+    /// The marker a token names; `None` for a text [`Self::token`] does not
+    /// write.
+    pub(crate) fn from_token(token: &str) -> Option<Self> {
+        let (resets, ends) = token.split_once('.')?;
+        let marker = Self {
+            resets: resets.parse().ok()?,
+            ends: ends.parse().ok()?,
+        };
+        (marker.token() == token).then_some(marker)
+    }
 }
 
 /// What the row of `rotate_member`'s fresh life of an identity no member

@@ -31,6 +31,8 @@ pub mod console_auth_config;
 pub mod console_config;
 pub mod console_contracts;
 pub mod console_governed_ingress;
+pub(crate) mod console_member_ref;
+pub(crate) mod console_mob_listing;
 // Person-addressed delivery has no caller in this crate yet: outside tests
 // the delivery chain is unused. The console's requester reply route, its
 // first caller, removes this allow.
@@ -70,6 +72,7 @@ pub mod mcp_apps_sandbox;
 pub mod member_comms_id;
 #[cfg(test)]
 mod member_identity_guard_tests;
+pub mod member_key;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod member_mcp_custody;
 pub(crate) mod member_socket_place;
@@ -79,8 +82,10 @@ pub mod memory;
 pub mod memory_wiring;
 pub(crate) mod mob_activation_retry;
 pub mod mob_announcements;
+pub(crate) mod mob_announcements_release;
 pub mod mob_composition_manifest;
 pub mod mob_handle_runtime;
+pub(crate) mod mob_memory_release;
 pub(crate) mod mob_schedules_release;
 pub mod mobpack;
 pub mod mocks;
@@ -135,8 +140,8 @@ pub mod workgraph_wiring;
 pub use access::{
     ACCESS_ACTIONS, AccessApprover, AccessApproverPerson, AccessConfigError, AccessControlConfig,
     AccessController, AccessDecision, AccessEffect, AccessGroup, AccessIngressSubject,
-    AccessPrincipal, AccessPublicationAlreadyJoined, AccessResource, AccessRule, AccessView,
-    AgentResourceAttributes, evaluate_access, validate_access_config,
+    AccessPrincipal, AccessPublicationAlreadyJoined, AccessResource, AccessResourceMob, AccessRule,
+    AccessView, AgentResourceAttributes, evaluate_access, validate_access_config,
 };
 pub use actor_loop_health::{
     ActorLoopHealth, ActorLoopHealthKind, ActorLoopHealthReport, ActorLoopHealthState,
@@ -181,9 +186,10 @@ pub use console_aggregator::{
     ConsoleTimelineQueryResult, ConsoleTimelineWindowPage, ConsoleTimelineWindowQuery,
     ConsoleTurnOrigin, ConsoleVisibility, ConsoleVisibilityPolicy,
     HideImplicitDelegateMembersConsoleVisibilityPolicy, InMemoryConsoleLogStore,
-    MetaConsoleAggregator, NewConsoleFrame, ReplaySubscriptionEffect, ReplaySubscriptionState,
-    ReplaySubscriptionTransition, SendEffect, SendState, SendTransition, SourceIngestionEffect,
-    SourceIngestionState, SourceIngestionTransition, SqliteConsoleLogStore,
+    MetaConsoleAggregator, NestedMobListing, NewConsoleFrame, ReplaySubscriptionEffect,
+    ReplaySubscriptionState, ReplaySubscriptionTransition, SendEffect, SendState, SendTransition,
+    SourceIngestionEffect, SourceIngestionState, SourceIngestionTransition, SqliteConsoleLogStore,
+    stock_console_visibility_policy,
 };
 pub use console_audit::ConsoleAuditLimits;
 pub use console_config::{
@@ -259,6 +265,7 @@ pub use live_contracts::{
 pub use meerkat_mob::{MemberTurnEventSender, MemberTurnHandle, MemberTurnOptions};
 pub use meerkat_mob_mcp::ChildToolBundleAvailability;
 pub use member_comms_id::RuntimePlaneIdentityGuard;
+pub use member_key::DefaultMob;
 #[cfg(not(target_arch = "wasm32"))]
 pub use member_mcp_custody::{
     MEMBER_MCP_SETTLEMENT_BUDGET, MemberMcpCredentialOutcome, MemberMcpCustody,
@@ -310,8 +317,8 @@ pub use runtime::{
     AuthenticatedConsoleHuman, BaselineRuntimeError, BigQueryAccessToken,
     BigQueryAccessTokenSource, BigQueryGcConfig, BigQuerySessionStoreAdapter,
     BigQuerySessionStoreError, CONSOLE_HUMAN_TRUST_DOMAIN_PREFIX, ConfigResolutionError,
-    ConsoleAgentLiveSnapshot, ConsoleHumanNotCurrent, ConsoleLiveSnapshot,
-    ConsoleModelCapabilities, ConsoleRestJsonRequest, ConsoleRestJsonResponse,
+    ConsoleAgentLiveSnapshot, ConsoleHumanNotCurrent, ConsoleLiveSnapshot, ConsoleMob,
+    ConsoleMobState, ConsoleModelCapabilities, ConsoleRestJsonRequest, ConsoleRestJsonResponse,
     CurrentConsoleHumanEvidence, DecisionRuntimeError, GatingAuditEntry, GatingAuditPage,
     GatingDecideError, GatingDecideRequest, GatingDecider, GatingDecision, GatingDecisionResult,
     GatingEscalationRoutes, GatingEvaluateRequest, GatingEvaluateResult, GatingIdUnavailable,
@@ -325,7 +332,7 @@ pub use runtime::{
     LocalJsonMemoryStoreError, McpBoundaryError, MemberIdleRetireOverrideRecord, MemoryAssertion,
     MemoryBackendConfig, MemoryConflictSignal, MemoryIndexError, MemoryIndexRequest,
     MemoryIndexResult, MemoryQueryRequest, MemoryQueryResult, MemoryStoreInfo, MetaRuntimeError,
-    MetaRuntimeHandle, MetadataScope, MetadataStoreError, ModuleCleanupFailure,
+    MetaRuntimeHandle, MetadataScope, MetadataStoreError, MobRecordsRelease, ModuleCleanupFailure,
     ModuleCleanupObservation, ModuleCleanupOperation, ModuleCleanupPhase,
     ModuleCleanupProcessObservation, ModuleCleanupReapedProcess, ModuleHealthState,
     ModuleHealthTransition, ModuleRouteError, ModuleRouteRequest, ModuleRouteResponse,

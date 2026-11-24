@@ -306,6 +306,15 @@ describe("MetaBuilder chainable methods", () => {
     assert.equal(builder._config.consoleReadOnly, true);
   });
 
+  it("consoleListNestedMobs() sets consoleListNestedMobs and returns this", () => {
+    const builder = Meta.builder();
+    const result = builder.consoleListNestedMobs(false);
+    assert.equal(result, builder);
+    assert.equal(builder._config.consoleListNestedMobs, false);
+    builder.consoleListNestedMobs(true);
+    assert.equal(builder._config.consoleListNestedMobs, true);
+  });
+
   it("consoleFetchTimeoutMs() sets consoleFetchTimeoutMs and returns this", () => {
     const builder = Meta.builder();
     const result = builder.consoleFetchTimeoutMs(120_000);
@@ -505,6 +514,7 @@ describe("MetaBuilder default config", () => {
     assert.equal(cfg.allowRemote, null);
     assert.equal(cfg.consoleRequireAppAuth, null);
     assert.equal(cfg.consoleReadOnly, null);
+    assert.equal(cfg.consoleListNestedMobs, null);
     assert.equal(cfg.consoleFetchTimeoutMs, null);
     assert.equal(cfg.demoLlm, false);
     assert.equal(cfg.memberCommsAddress, null);

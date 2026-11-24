@@ -165,9 +165,10 @@ schedule = true
         .mob_runtime()
         .agent_mob_mcp_state()
         .expect("the launch installs the agent mob tools");
-    attached
-        .mob_target_registry
-        .adopt_mob_runtime(runtime.mob_runtime());
+    attached.mob_target_registry.adopt_mob_runtime(
+        runtime.mob_runtime(),
+        &crate::member_key::DefaultMob::new(handle.mob_id().clone()),
+    );
     let anna = handle
         .resolve_bridge_session_id_observation(&AgentIdentity::from("anna"))
         .await

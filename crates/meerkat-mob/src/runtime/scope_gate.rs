@@ -224,7 +224,8 @@ impl MobCommand {
             | Self::GetIdentityIntent { .. }
             | Self::GetIdentityConvergenceStatus { .. }
             | Self::MemberMachineProjection { .. }
-            | Self::QueryPhase { .. } => Some(ControlScope::List),
+            | Self::QueryPhase { .. }
+            | Self::ObserveIdle { .. } => Some(ControlScope::List),
             #[cfg(feature = "runtime-adapter")]
             Self::DrainRunsSnapshot { .. } => Some(ControlScope::List),
 
@@ -577,6 +578,7 @@ impl MobCommand {
             | Self::GetIdentityConvergenceStatus { .. }
             | Self::MemberMachineProjection { .. }
             | Self::QueryPhase { .. }
+            | Self::ObserveIdle { .. }
             | Self::GrantScopes { .. }
             | Self::RevokeScopes { .. }
             | Self::Grants { .. }
@@ -949,6 +951,9 @@ impl MobCommand {
                 let _ = reply_tx.send(Err(error));
             }
             Self::MemberMachineProjection { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            Self::ObserveIdle { reply_tx } => {
                 let _ = reply_tx.send(Err(error));
             }
             Self::QueryPhase { reply_tx } => {

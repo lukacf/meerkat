@@ -853,7 +853,8 @@ class PersistentTransport:
             watch._fail(failure)
 
     def _handle_callback(self, msg: dict, *, process=_CURRENT_TRANSPORT) -> None:
-        """Dispatch callback in a separate thread so the reader loop is not blocked."""
+        """Hand a callback to the event loop in the order it arrived; wait
+        for its result and answer it on a thread of its own."""
         if process is _CURRENT_TRANSPORT:
             process = self._process
         with self._pending_lock:
@@ -892,17 +893,62 @@ class PersistentTransport:
                         "failed to send callback error response for id=%s", callback_id
                     )
             return
-        # Dispatch in a daemon thread to avoid blocking the reader loop
+        # Handed on here, on the reader thread, so callbacks start on the
+        # loop in the order they arrived, as the TypeScript transport starts
+        # them (a customize build of a destroyed mob that arrived first must
+        # not be handled after a build of the mob created under its id).
+        # Handing on only queues the coroutine; the reader never waits for a
+        # handler, so a handler can still send requests whose answers this
+        # thread reads, and callbacks still run concurrently.
+        scheduled = self._hand_on_callback(
+            msg, process=process, handler=handler, loop=loop
+        )
+        # The wait for the result and the answer run on a daemon thread.
         t = threading.Thread(
             target=self._dispatch_callback, args=(msg,), daemon=True,
-            kwargs={"process": process, "handler": handler, "loop": loop},
+            kwargs={
+                "process": process,
+                "handler": handler,
+                "loop": loop,
+                "scheduled": scheduled,
+            },
             name="meta-callback",
         )
         t.start()
 
+    def _hand_on_callback(
+        self, msg: dict, *, process: Any, handler: Callable, loop: Any
+    ) -> Any:
+        """Queue the callback's handler on the loop without waiting for it.
+
+        Returns the future of its result, or the error that prevented the
+        hand-off (answered by ``_dispatch_callback``).
+        """
+        if loop is None or not loop.is_running():
+            return RuntimeError(
+                "PersistentTransport: no running event loop for callback dispatch"
+            )
+        method = msg.get("method", "")
+        params = msg.get("params", {})
+
+        async def invoke_current_handler():
+            # Scheduling on the captured loop can outlive the child.
+            # Check again before any host handler body starts.
+            if process is not self._process:
+                return None
+            return await handler(method, params)
+
+        invocation = invoke_current_handler()
+        try:
+            return asyncio.run_coroutine_threadsafe(invocation, loop)
+        except Exception as exc:  # noqa: BLE001 - answered as the callback's error
+            invocation.close()
+            return exc
+
     def _dispatch_callback(
         self, msg: dict, *, process=_CURRENT_TRANSPORT,
         handler=_CURRENT_TRANSPORT, loop=_CURRENT_TRANSPORT,
+        scheduled=_CURRENT_TRANSPORT,
     ) -> None:
         if process is _CURRENT_TRANSPORT:
             process = self._process
@@ -912,45 +958,36 @@ class PersistentTransport:
             loop = self._loop
         if process is not self._process:
             return
+        if scheduled is _CURRENT_TRANSPORT:
+            scheduled = self._hand_on_callback(
+                msg, process=process, handler=handler, loop=loop
+            )
         method = msg.get("method", "")
-        params = msg.get("params", {})
         callback_id = msg.get("id")  # None for notifications
         try:
-            if loop is not None and loop.is_running():
-                async def invoke_current_handler():
-                    # Scheduling on the captured loop can outlive the child.
-                    # Check again before any host handler body starts.
-                    if process is not self._process:
-                        return None
-                    return await handler(method, params)
-
-                future = asyncio.run_coroutine_threadsafe(
-                    invoke_current_handler(), loop
+            if isinstance(scheduled, BaseException):
+                raise scheduled
+            future = scheduled
+            try:
+                result = future.result(
+                    timeout=_PROVIDER_CALLBACK_COMPLETION_SECONDS
                 )
-                try:
-                    result = future.result(
-                        timeout=_PROVIDER_CALLBACK_COMPLETION_SECONDS
-                    )
-                except FutureTimeoutError as exc:
-                    # `Future.result()` also propagates a TimeoutError raised
-                    # by the provider itself. A completed future therefore
-                    # represents the provider's own failure, not exhaustion
-                    # of the host wait, and must retain its original error.
-                    if future.done():
-                        raise
-                    # The ordinary request timeout is intentionally unrelated
-                    # to provider execution. If the dedicated host deadline is
-                    # exhausted, cancel the event-loop coroutine before Rust's
-                    # 130-second wire deadline so a timed-out provider cannot
-                    # continue toward a late authority commit unnoticed.
-                    future.cancel()
-                    raise TimeoutError(
-                        "provider callback exceeded its 125s host completion deadline"
-                    ) from exc
-            else:
-                raise RuntimeError(
-                    "PersistentTransport: no running event loop for callback dispatch"
-                )
+            except FutureTimeoutError as exc:
+                # `Future.result()` also propagates a TimeoutError raised
+                # by the provider itself. A completed future therefore
+                # represents the provider's own failure, not exhaustion
+                # of the host wait, and must retain its original error.
+                if future.done():
+                    raise
+                # The ordinary request timeout is intentionally unrelated
+                # to provider execution. If the dedicated host deadline is
+                # exhausted, cancel the event-loop coroutine before Rust's
+                # 130-second wire deadline so a timed-out provider cannot
+                # continue toward a late authority commit unnoticed.
+                future.cancel()
+                raise TimeoutError(
+                    "provider callback exceeded its 125s host completion deadline"
+                ) from exc
             # Notifications (no id) are fire-and-forget — no response sent
             if callback_id is None:
                 return

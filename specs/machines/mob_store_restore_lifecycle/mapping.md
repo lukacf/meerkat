@@ -8,82 +8,659 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `MobStoreRestoreLifecycleMachine`
 
 ### Code Anchors
-- `mob_store_restore_lifecycle` (machine `MobStoreRestoreLifecycleMachine`): `crates/meerkat-mob/src/machines/mob_store_restore_lifecycle.rs` — MobStoreRestoreLifecycleMachine owns one quarantined persisted mob store: its class, the single re-attempt in flight, and whether a re-attempt released the store or left it quarantined under the class it met
+- `mob_store_restore_lifecycle` (machine `MobStoreRestoreLifecycleMachine`): `crates/meerkat-mob/src/machines/mob_store_restore_lifecycle.rs` — MobStoreRestoreLifecycleMachine owns one mob store's stay in a host's set: whether its mob is dormant, loading, managed, unloading, held, quarantined, retrying or gone, the single load, re-attempt or unload in flight, the class a quarantine holds, whether an idle mob's store can be unloaded and loaded again, whether the mob's handle may be handed out, and for the store a host's launch declares: that it is its launch's, whether its mob still waits for the launch's first serve, and whether it holds no mob, and a create's hold of its mob's id from before anything of the mob is built until the create is resolved
 
 ### Scenarios
-- `mob_store_quarantine_classification` — mob_store_restore_lifecycle_machine.rs::a_pass_classifies_a_store_once quarantines an unclassified store under its class and refuses a second classification in every later phase
-- `mob_store_single_flight_retry` — mob_store_restore_lifecycle_machine.rs::one_re_attempt_is_in_flight_at_a_time admits one re-attempt of a quarantined store, refuses a second request while it runs without waiting, and refuses a request for an unclassified or released store
+- `mob_store_census` — mob_store_restore_lifecycle_machine.rs::a_census_lists_a_dormant_store_and_finds_a_quarantined_one_afresh lists a dormant store, finds a quarantined one afresh with no class and no attempt, and refuses to list a store the set loads, manages, unloads, holds or re-attempts, or one that is gone
+- `mob_store_registration` — mob_store_restore_lifecycle_machine.rs::a_mob_built_outside_a_load_joins_the_set_as_managed registers a host's handle as managed on a record that stands for nothing yet and on one a census listed, lets it replace the handle of a mob a host inserted, refuses it over a mob the set itself runs while that mob runs and admits it once that mob has ended, registers nothing while an unload is admitted, and refuses every other phase
+- `mob_store_single_flight_load` — mob_store_restore_lifecycle_machine.rs::one_load_is_in_flight_at_a_time admits one load of a dormant store, refuses a second request while it runs, answers a request that meets an admitted unload with the refusal its caller waits on, and refuses a request in every phase that has nothing to load
+- `mob_store_load_outcomes` — mob_store_restore_lifecycle_machine.rs::a_load_resolves_into_the_phase_its_outcome_names resolves a load into managed, held or gone, quarantines a failed one under the class it met without counting an attempt, and refuses an outcome with no load in flight
+- `mob_store_single_flight_retry` — mob_store_restore_lifecycle_machine.rs::one_re_attempt_is_in_flight_at_a_time admits one re-attempt of a quarantined store, refuses a second request while it runs without waiting, and refuses a request for a store that is not quarantined
 - `mob_store_retry_eligibility` — mob_store_restore_lifecycle_machine.rs::an_on_demand_re_attempt_is_admitted_only_for_a_store_that_could_not_serve admits an on-demand re-attempt only for a store quarantined as store_unavailable, refuses it unchanged for store_unreadable and resume_refused, and admits an explicit re-attempt for every class
-- `mob_store_retry_outcomes` — mob_store_restore_lifecycle_machine.rs::a_re_attempt_releases_the_store_or_keeps_it_quarantined releases the store on a managed, held or settled outcome, keeps it quarantined under the class a failed attempt met, counts every ended attempt, and refuses an outcome with no attempt in flight
+- `mob_store_retry_outcomes` — mob_store_restore_lifecycle_machine.rs::a_re_attempt_releases_the_store_or_keeps_it_quarantined releases the store into managed, held or gone with no class left, keeps it quarantined under the class a failed attempt met, counts every ended attempt, and refuses an outcome with no attempt in flight
+- `mob_store_unload_admission` — mob_store_restore_lifecycle_machine.rs::an_unload_is_admitted_only_for_a_store_the_set_can_load_again admits the idle question for a managed persisted store before the actor is asked and stops handing the mob out, never admits it for a volatile store or a host's own handle, admits one unload at a time, and refuses every phase that is not managed
+- `mob_store_unload_outcomes` — mob_store_restore_lifecycle_machine.rs::an_admitted_unload_resolves_as_the_actor_answered returns the store to dormant when the actor closed idle, so it loads again, returns the mob to managed and hands it out again when the actor was busy, and refuses an answer with no unload admitted
+- `mob_store_handed_out` — mob_store_restore_lifecycle_machine.rs::a_mob_is_handed_out_only_while_its_record_is_managed hands a mob out in the managed phase alone, whichever way the record got there, and stops at an admitted unload and at a destroy
+- `mob_store_held_release` — mob_store_restore_lifecycle_machine.rs::a_held_mob_leaves_its_hold_in_one_step releases a held mob into managed or gone in one step, keeps it held when the release did not resolve the hold, and refuses every phase that is not held
+- `mob_store_destroy` — mob_store_restore_lifecycle_machine.rs::a_destroyed_mob_is_gone_for_good records a destroyed managed mob as gone, answers a destroy that meets an admitted unload with the refusal its caller waits on, and refuses a destroy in every other phase
+- `mob_store_declared_launch` — mob_store_restore_lifecycle_machine.rs::a_declared_store_waits_for_its_launch_and_stays_its_launchs declares a store once, refuses a lookup's load and an on-demand re-attempt until the wait for the launch ends, never admits a pass's load, ends the wait once in whatever phase the serve left the record, refuses every create, handle and destroy but the launch's own, and keeps the record of a declared store that holds no mob as dormant and vacant where a store under the root is gone
+- `mob_store_create_takes_the_id` — mob_store_restore_lifecycle_machine.rs::a_create_takes_its_mobs_id_before_the_mob_is_built admits a create on the record the set files for it and on the declared record that holds no mob for the launch's create alone, refuses a create under a record that stands for a store or a mob the set knows and under one whose create is in flight, resolves a created mob into managed under the origin its create gives it, and frees the id of a create that ended without a mob
+- `mob_store_create_only_on_a_record_that_stands_for_nothing` — mob_store_restore_lifecycle_machine.rs::a_record_that_stands_for_a_store_refuses_a_create admits a create on the record filed for it, which has admitted nothing before, and refuses it, changing nothing, on a record a census listed, on one whose mob was loaded and unloaded again, and on one whose mob the set created and unloaded
+- `mob_store_create_in_flight` — mob_store_restore_lifecycle_machine.rs::nothing_else_moves_a_record_whose_create_is_in_flight refuses a census, a registration (a host's handle included), a declaration, a load, a re-attempt, an unload, a release and a destroy of a record whose create is in flight, each unchanged, and ends the wait for the launch once while the launch's create runs
+- `mob_store_stop_of_a_mob_that_is_not_loaded` — mob_store_restore_lifecycle_machine.rs::a_mob_that_is_not_loaded_keeps_its_stop_and_no_demand_loads_a_stopped_one keeps what the mob answered about its stop when its actor closed at an unload, takes a read of the stored stop only while dormant and unread, refuses a demand's load of a stopped mob and of one whose stop is unread while a lookup, a pass and the launch load it, and clears the stop in every step that leaves dormant and loading
 
 ### Transitions
-- `QuarantineUnclassified`
+- `CensusDormant`
   - anchors: `mob_store_restore_lifecycle`
-  - scenarios: `mob_store_quarantine_classification`
-- `QuarantineQuarantined`
+  - scenarios: `mob_store_census`, `mob_store_create_only_on_a_record_that_stands_for_nothing`
+- `CensusQuarantined`
   - anchors: `mob_store_restore_lifecycle`
-  - scenarios: `mob_store_quarantine_classification`
-- `QuarantineRetrying`
+  - scenarios: `mob_store_census`
+- `CensusLoading`
   - anchors: `mob_store_restore_lifecycle`
-  - scenarios: `mob_store_quarantine_classification`
-- `QuarantineReleased`
+  - scenarios: `mob_store_census`
+- `CensusManaged`
   - anchors: `mob_store_restore_lifecycle`
-  - scenarios: `mob_store_quarantine_classification`
-- `RequestRetryUnclassified`
+  - scenarios: `mob_store_census`
+- `CensusHeld`
   - anchors: `mob_store_restore_lifecycle`
-  - scenarios: `mob_store_single_flight_retry`
+  - scenarios: `mob_store_census`
+- `CensusRetrying`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_census`
+- `CensusUnloading`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_census`
+- `CensusGone`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_census`
+- `CensusCreating`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_create_in_flight`
+- `RegisterDormant`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_registration`, `mob_store_handed_out`
+- `RegisterDormantLaunchOwned`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_declared_launch`
+- `RegisterManagedHostHandle`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_registration`
+- `RegisterManagedHostHandleSetRun`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_registration`
+- `RegisterManagedHostHandleOverEnded`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_registration`
+- `RegisterManagedLaunchOwned`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_declared_launch`
+- `RegisterLoading`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_registration`
+- `RegisterHeld`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_registration`
+- `RegisterQuarantined`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_registration`
+- `RegisterRetrying`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_registration`
+- `RegisterUnloading`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_registration`
+- `RegisterGone`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_registration`
+- `RegisterCreating`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_create_in_flight`
+- `DeclareDormant`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_declared_launch`
+- `DeclareDormantDeclared`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_declared_launch`
+- `DeclareLoading`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_declared_launch`
+- `DeclareManaged`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_declared_launch`
+- `DeclareUnloading`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_declared_launch`
+- `DeclareHeld`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_declared_launch`
+- `DeclareQuarantined`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_declared_launch`
+- `DeclareRetrying`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_declared_launch`
+- `DeclareGone`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_declared_launch`
+- `DeclareCreating`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_create_in_flight`
+- `EndLaunchWaitDormant`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_declared_launch`
+- `EndLaunchWaitDormantNotAwaited`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_declared_launch`
+- `EndLaunchWaitLoading`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_declared_launch`
+- `EndLaunchWaitLoadingNotAwaited`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_declared_launch`
+- `EndLaunchWaitManaged`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_declared_launch`
+- `EndLaunchWaitManagedNotAwaited`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_declared_launch`
+- `EndLaunchWaitUnloading`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_declared_launch`
+- `EndLaunchWaitHeld`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_declared_launch`
+- `EndLaunchWaitHeldNotAwaited`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_declared_launch`
+- `EndLaunchWaitQuarantined`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_declared_launch`
+- `EndLaunchWaitQuarantinedNotAwaited`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_declared_launch`
+- `EndLaunchWaitRetrying`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_declared_launch`
+- `EndLaunchWaitRetryingNotAwaited`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_declared_launch`
+- `EndLaunchWaitGone`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_declared_launch`
+- `EndLaunchWaitCreating`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_create_in_flight`
+- `EndLaunchWaitCreatingNotAwaited`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_create_in_flight`
+- `RequestLoadDormant`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_single_flight_load`
+- `RequestLoadDormantAwaitsLaunch`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_declared_launch`
+- `RequestLoadDormantVacant`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_declared_launch`
+- `RequestLoadDormantLaunchOwned`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_declared_launch`
+- `RequestLoadDormantDemand`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_stop_of_a_mob_that_is_not_loaded`
+- `RequestLoadDormantStopped`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_stop_of_a_mob_that_is_not_loaded`
+- `RequestLoadDormantStopUnread`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_stop_of_a_mob_that_is_not_loaded`
+- `RequestLoadLoading`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_single_flight_load`
+- `RequestLoadManaged`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_single_flight_load`
+- `RequestLoadHeld`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_single_flight_load`
+- `RequestLoadQuarantined`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_single_flight_load`
+- `RequestLoadRetrying`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_single_flight_load`
+- `RequestLoadUnloading`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_single_flight_load`
+- `RequestLoadGone`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_single_flight_load`
+- `RequestLoadCreating`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_create_in_flight`
+- `ResolveLoadManaged`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_load_outcomes`, `mob_store_handed_out`
+- `ResolveLoadHeld`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_load_outcomes`
+- `ResolveLoadSettled`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_load_outcomes`
+- `ResolveLoadSettledDeclared`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_declared_launch`
+- `ResolveLoadFailed`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_load_outcomes`
+- `ResolveLoadDormant`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_load_outcomes`
+- `ResolveLoadWhileManaged`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_load_outcomes`
+- `ResolveLoadWhileHeld`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_load_outcomes`
+- `ResolveLoadQuarantined`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_load_outcomes`
+- `ResolveLoadRetrying`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_load_outcomes`
+- `ResolveLoadUnloading`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_load_outcomes`
+- `ResolveLoadGone`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_load_outcomes`
+- `ResolveLoadCreating`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_create_in_flight`
 - `RequestRetryQuarantined`
   - anchors: `mob_store_restore_lifecycle`
   - scenarios: `mob_store_single_flight_retry`, `mob_store_retry_eligibility`
 - `RequestRetryQuarantinedNotRetryable`
   - anchors: `mob_store_restore_lifecycle`
   - scenarios: `mob_store_retry_eligibility`
+- `RequestRetryQuarantinedAwaitsLaunch`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_declared_launch`
 - `RequestRetryRetrying`
   - anchors: `mob_store_restore_lifecycle`
   - scenarios: `mob_store_single_flight_retry`
-- `RequestRetryReleased`
+- `RequestRetryDormant`
   - anchors: `mob_store_restore_lifecycle`
   - scenarios: `mob_store_single_flight_retry`
+- `RequestRetryLoading`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_single_flight_retry`
+- `RequestRetryManaged`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_single_flight_retry`
+- `RequestRetryHeld`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_single_flight_retry`
+- `RequestRetryUnloading`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_single_flight_retry`
+- `RequestRetryGone`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_single_flight_retry`
+- `RequestRetryCreating`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_create_in_flight`
 - `ResolveRetryFailed`
   - anchors: `mob_store_restore_lifecycle`
   - scenarios: `mob_store_retry_outcomes`
-- `ResolveRetryRestored`
+- `ResolveRetryManaged`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_retry_outcomes`, `mob_store_handed_out`
+- `ResolveRetryHeld`
   - anchors: `mob_store_restore_lifecycle`
   - scenarios: `mob_store_retry_outcomes`
-- `ResolveRetryUnclassified`
+- `ResolveRetrySettled`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_retry_outcomes`
+- `ResolveRetrySettledDeclared`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_declared_launch`
+- `ResolveRetryDormant`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_retry_outcomes`
+- `ResolveRetryLoading`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_retry_outcomes`
+- `ResolveRetryWhileManaged`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_retry_outcomes`
+- `ResolveRetryWhileHeld`
   - anchors: `mob_store_restore_lifecycle`
   - scenarios: `mob_store_retry_outcomes`
 - `ResolveRetryQuarantined`
   - anchors: `mob_store_restore_lifecycle`
   - scenarios: `mob_store_retry_outcomes`
-- `ResolveRetryReleased`
+- `ResolveRetryUnloading`
   - anchors: `mob_store_restore_lifecycle`
   - scenarios: `mob_store_retry_outcomes`
+- `ResolveRetryGone`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_retry_outcomes`
+- `ResolveRetryCreating`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_create_in_flight`
+- `RequestUnloadManaged`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_unload_admission`, `mob_store_handed_out`
+- `RequestUnloadManagedNotReloadable`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_unload_admission`
+- `RequestUnloadUnloading`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_unload_admission`
+- `RequestUnloadDormant`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_unload_admission`
+- `RequestUnloadLoading`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_unload_admission`
+- `RequestUnloadHeld`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_unload_admission`
+- `RequestUnloadQuarantined`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_unload_admission`
+- `RequestUnloadRetrying`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_unload_admission`
+- `RequestUnloadGone`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_unload_admission`
+- `RequestUnloadCreating`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_create_in_flight`
+- `ResolveUnloadClosed`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_unload_outcomes`
+- `ResolveUnloadBusy`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_unload_outcomes`, `mob_store_handed_out`
+- `ResolveUnloadDormant`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_unload_outcomes`
+- `ResolveUnloadLoading`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_unload_outcomes`
+- `ResolveUnloadWhileManaged`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_unload_outcomes`
+- `ResolveUnloadHeld`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_unload_outcomes`
+- `ResolveUnloadQuarantined`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_unload_outcomes`
+- `ResolveUnloadRetrying`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_unload_outcomes`
+- `ResolveUnloadGone`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_unload_outcomes`
+- `ResolveUnloadCreating`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_create_in_flight`
+- `ReleaseHeldManaged`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_handed_out`, `mob_store_held_release`
+- `ReleaseHeldSettled`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_held_release`
+- `ReleaseHeldSettledDeclared`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_declared_launch`
+- `ReleaseHeldKept`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_held_release`
+- `ReleaseHeldDormant`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_held_release`
+- `ReleaseHeldLoading`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_held_release`
+- `ReleaseHeldWhileManaged`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_held_release`
+- `ReleaseHeldQuarantined`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_held_release`
+- `ReleaseHeldRetrying`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_held_release`
+- `ReleaseHeldUnloading`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_held_release`
+- `ReleaseHeldGone`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_held_release`
+- `ReleaseHeldCreating`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_create_in_flight`
+- `DestroyManaged`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_handed_out`, `mob_store_destroy`
+- `DestroyManagedLaunchOwned`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_declared_launch`
+- `DestroyDormant`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_destroy`
+- `DestroyLoading`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_destroy`
+- `DestroyHeld`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_destroy`
+- `DestroyQuarantined`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_destroy`
+- `DestroyRetrying`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_destroy`
+- `DestroyUnloading`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_destroy`
+- `DestroyGone`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_destroy`
+- `DestroyCreating`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_create_in_flight`
+- `RequestCreateDormant`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_create_takes_the_id`, `mob_store_create_only_on_a_record_that_stands_for_nothing`
+- `RequestCreateDormantKnown`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_create_only_on_a_record_that_stands_for_nothing`
+- `RequestCreateDormantNotDeclared`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_create_takes_the_id`
+- `RequestCreateDormantLaunch`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_create_takes_the_id`
+- `RequestCreateDormantLaunchHoldsAMob`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_create_takes_the_id`
+- `RequestCreateDormantLaunchOwned`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_create_takes_the_id`
+- `RequestCreateLoading`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_create_takes_the_id`
+- `RequestCreateManaged`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_create_takes_the_id`
+- `RequestCreateUnloading`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_create_takes_the_id`
+- `RequestCreateHeld`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_create_takes_the_id`
+- `RequestCreateQuarantined`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_create_takes_the_id`
+- `RequestCreateRetrying`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_create_takes_the_id`
+- `RequestCreateGone`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_create_takes_the_id`
+- `RequestCreateCreating`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_create_takes_the_id`
+- `ResolveCreateCreated`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_create_takes_the_id`
+- `ResolveCreateCreatedInMemory`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_create_takes_the_id`
+- `ResolveCreateCreatedDeclared`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_create_takes_the_id`
+- `ResolveCreateFailed`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_create_takes_the_id`
+- `ResolveCreateFailedDeclared`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_create_takes_the_id`
+- `ResolveCreateDormant`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_create_takes_the_id`
+- `ResolveCreateLoading`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_create_takes_the_id`
+- `ResolveCreateManaged`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_create_takes_the_id`
+- `ResolveCreateUnloading`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_create_takes_the_id`
+- `ResolveCreateHeld`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_create_takes_the_id`
+- `ResolveCreateQuarantined`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_create_takes_the_id`
+- `ResolveCreateRetrying`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_create_takes_the_id`
+- `ResolveCreateGone`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_create_takes_the_id`
+- `ReadStopDormantStopped`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_stop_of_a_mob_that_is_not_loaded`
+- `ReadStopDormantNotStopped`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_stop_of_a_mob_that_is_not_loaded`
+- `ReadStopDormantKnown`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_stop_of_a_mob_that_is_not_loaded`
+- `ReadStopLoading`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_stop_of_a_mob_that_is_not_loaded`
+- `ReadStopManaged`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_stop_of_a_mob_that_is_not_loaded`
+- `ReadStopUnloading`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_stop_of_a_mob_that_is_not_loaded`
+- `ReadStopHeld`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_stop_of_a_mob_that_is_not_loaded`
+- `ReadStopQuarantined`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_stop_of_a_mob_that_is_not_loaded`
+- `ReadStopRetrying`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_stop_of_a_mob_that_is_not_loaded`
+- `ReadStopGone`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_stop_of_a_mob_that_is_not_loaded`
+- `ReadStopCreating`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_stop_of_a_mob_that_is_not_loaded`
 
 ### Effects
+- `StoreListed`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_census`, `mob_store_create_only_on_a_record_that_stands_for_nothing`
+- `StoreRegistered`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_registration`, `mob_store_handed_out`, `mob_store_create_takes_the_id`
+- `LaunchDeclared`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_declared_launch`
+- `LaunchWaitEnded`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_declared_launch`, `mob_store_create_in_flight`
+- `LoadAdmitted`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_single_flight_load`, `mob_store_stop_of_a_mob_that_is_not_loaded`
+- `StoreLoaded`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_load_outcomes`, `mob_store_handed_out`
 - `StoreQuarantined`
   - anchors: `mob_store_restore_lifecycle`
-  - scenarios: `mob_store_quarantine_classification`
+  - scenarios: `mob_store_load_outcomes`
 - `RetryAdmitted`
   - anchors: `mob_store_restore_lifecycle`
   - scenarios: `mob_store_single_flight_retry`, `mob_store_retry_eligibility`
 - `StoreReleased`
   - anchors: `mob_store_restore_lifecycle`
-  - scenarios: `mob_store_retry_outcomes`
+  - scenarios: `mob_store_retry_outcomes`, `mob_store_handed_out`
 - `StoreStillQuarantined`
   - anchors: `mob_store_restore_lifecycle`
   - scenarios: `mob_store_retry_outcomes`
+- `UnloadAdmitted`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_unload_admission`, `mob_store_handed_out`
+- `StoreUnloaded`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_unload_outcomes`, `mob_store_stop_of_a_mob_that_is_not_loaded`
+- `UnloadDeclined`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_unload_outcomes`, `mob_store_handed_out`
+- `HoldReleased`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_handed_out`, `mob_store_held_release`
+- `StoreGone`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_handed_out`, `mob_store_destroy`
+- `CreateAdmitted`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_create_takes_the_id`, `mob_store_create_only_on_a_record_that_stands_for_nothing`
+- `CreateReleased`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_create_takes_the_id`
+- `StopRead`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_stop_of_a_mob_that_is_not_loaded`
 - `RequestRefused`
   - anchors: `mob_store_restore_lifecycle`
-  - scenarios: `mob_store_quarantine_classification`, `mob_store_single_flight_retry`, `mob_store_retry_eligibility`, `mob_store_retry_outcomes`
+  - scenarios: `mob_store_census`, `mob_store_registration`, `mob_store_single_flight_load`, `mob_store_load_outcomes`, `mob_store_single_flight_retry`, `mob_store_retry_eligibility`, `mob_store_retry_outcomes`, `mob_store_unload_admission`, `mob_store_unload_outcomes`, `mob_store_held_release`, `mob_store_destroy`, `mob_store_declared_launch`, `mob_store_create_takes_the_id`, `mob_store_create_only_on_a_record_that_stands_for_nothing`, `mob_store_create_in_flight`, `mob_store_stop_of_a_mob_that_is_not_loaded`
 
 ### Invariants
-- `unclassified_record_has_no_attempts`
+- `only_a_quarantine_holds_a_class`
   - anchors: `mob_store_restore_lifecycle`
-  - scenarios: `mob_store_quarantine_classification`
-- `released_record_was_attempted`
+  - scenarios: `mob_store_load_outcomes`, `mob_store_retry_outcomes`
+- `only_a_persisted_store_waits_unloaded`
   - anchors: `mob_store_restore_lifecycle`
-  - scenarios: `mob_store_retry_outcomes`
+  - scenarios: `mob_store_registration`, `mob_store_unload_admission`, `mob_store_declared_launch`, `mob_store_create_takes_the_id`
+- `only_a_declared_store_awaits_its_launch`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_declared_launch`
+- `a_store_that_is_gone_awaits_no_launch`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_declared_launch`
+- `a_store_whose_unload_is_admitted_awaits_no_launch`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_declared_launch`
+- `a_declared_store_is_never_gone`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_declared_launch`, `mob_store_create_takes_the_id`
+- `only_a_declared_store_that_is_not_loaded_is_vacant`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_declared_launch`, `mob_store_create_takes_the_id`
+- `only_a_store_that_is_not_loaded_knows_its_mobs_stop`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_stop_of_a_mob_that_is_not_loaded`
+- `a_mob_is_handed_out_exactly_while_managed`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_unload_admission`, `mob_store_unload_outcomes`, `mob_store_handed_out`, `mob_store_create_takes_the_id`
+- `a_record_that_stands_for_nothing_is_as_it_was_filed`
+  - anchors: `mob_store_restore_lifecycle`
+  - scenarios: `mob_store_create_only_on_a_record_that_stands_for_nothing`
 
 
 <!-- GENERATED_COVERAGE_END -->

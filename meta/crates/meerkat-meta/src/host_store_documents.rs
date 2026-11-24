@@ -45,8 +45,9 @@ use crate::mob_handle_runtime::DelegateIdleRetireOverride;
 use crate::runtime::{
     IdentityRotationIntent, IdentityToolRecord, LifecycleEffectFailure, LifecycleEffectIntent,
     LifecycleEffectKind, LifecycleIntentKey, LifecycleIntentSlot, LifecycleProjectionCursor,
-    MemberIdleRetireOverrideRecord, MetadataStoreError, PersistentMetadataStore, RecordRetention,
-    decode_identity_record, encode_identity_record, lifecycle_effect_failure_order,
+    MemberIdleRetireOverrideRecord, MetadataStoreError, MobRecordsRelease, PersistentMetadataStore,
+    RecordRetention, decode_identity_record, encode_identity_record,
+    lifecycle_effect_failure_order,
 };
 
 /// Meta's record family on a host store realm: one record scope per
@@ -1068,6 +1069,54 @@ impl PersistentMetadataStore for SpiMetadataStore {
             )
             .await
             .map_err(io_error)
+    }
+
+    /// Every document of a mob carries the mob's id in its key (alone, or
+    /// behind its length), so the mob's documents are found by key and
+    /// removed one by one. The mob's cursor writes run on a task of their
+    /// own: the cursor that waits is dropped and the write in flight lands
+    /// first, so no cursor comes back after its document went.
+    async fn release_mob_records(
+        &self,
+        mob_id: &str,
+    ) -> Result<MobRecordsRelease, MetadataStoreError> {
+        if mob_id.is_empty() {
+            return Ok(MobRecordsRelease::Released { records: 0 });
+        }
+        loop {
+            let writing = match lock(&self.cursors).get_mut(mob_id) {
+                Some(slot) => {
+                    slot.pending = None;
+                    slot.writing
+                }
+                None => false,
+            };
+            if !writing {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        }
+        lock(&self.cursors).remove(mob_id);
+        let mut keys = vec![cursor_key(mob_id), lifecycle_cursor_key(mob_id)];
+        for prefix in [
+            idle_key(mob_id, ""),
+            identity_tools_key(mob_id, ""),
+            identity_rotation_key(mob_id, ""),
+            lifecycle_effect_prefix(mob_id),
+            lifecycle_failure_prefix(mob_id),
+            lifecycle_harvest_failure_prefix(mob_id),
+        ] {
+            keys.extend(self.documents.keys_with_prefix(&prefix));
+        }
+        let mut records = 0;
+        for key in keys {
+            // A key the realm lists may name a document removed since.
+            if self.documents.read(&key).await.map_err(io_error)?.is_some() {
+                self.documents.write(&key, None).await.map_err(io_error)?;
+                records += 1;
+            }
+        }
+        Ok(MobRecordsRelease::Released { records })
     }
 
     /// Documents of the host store realm: as durable as the realm.

@@ -20,6 +20,8 @@ import React from "react";
 import {
   agentDisplayTitle,
   canonicalTopologyEdge,
+  memberReferenceKeys,
+  nestedMobIdsOfMembers,
   topologyEdgeKey,
   topologyOperationIsPending,
   type ResponsePhase,
@@ -355,11 +357,26 @@ export function buildGraph(
     if (!draft.authority) continue;
     (draft.external ? externalAuthorities : homeAuthorities).add(draft.authority);
   }
+  // A reference that starts with a listed nested mob ("alpha/reviewer", or
+  // the peer name "alpha/role/reviewer") names that mob's member or no node:
+  // never the node of a member of the same name in another mob.
+  const nestedMobs = nestedMobIdsOfMembers([
+    ...agents,
+    ...nodes.map((node) => ({ identity: nodeIdentity(node), mob_id: node.mob_id })),
+  ]);
   const labelKeys = new Map<string, string>();
   const resolved = new Map<string, string | null>();
   const resolveUncached = (raw: string): string | null => {
     const direct = exact.get(raw) || folded.get(raw.toLowerCase());
     if (direct) return direct;
+    const lookup = memberReferenceKeys(raw, nestedMobs);
+    if (lookup.nested) {
+      for (const key of lookup.keys) {
+        const found = exact.get(key);
+        if (found) return found;
+      }
+      return null;
+    }
     const endpoint = parseEndpointKey(raw);
     if (endpoint) {
       if (externalAuthorities.has(endpoint.authority)) {
@@ -419,6 +436,7 @@ export function buildGraph(
         identity,
         member_id: registry?.member_id,
         agent_id: registry?.agent_id,
+        mob_id: node?.mob_id || registry?.mob_id,
         labels,
         role,
         group,

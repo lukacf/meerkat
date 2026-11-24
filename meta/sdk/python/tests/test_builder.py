@@ -363,6 +363,23 @@ class TestBuilderChain:
 
         assert params["runtime_options"]["console_read_only"] is True
 
+    def test_console_list_nested_mobs_false_sets_runtime_option(self):
+        b = Meta.builder().console_list_nested_mobs(False)
+        params = MetaRuntime(b._config)._build_init_params()
+
+        assert params["runtime_options"]["console_list_nested_mobs"] is False
+
+    def test_console_list_nested_mobs_true_sets_runtime_option(self):
+        b = Meta.builder().console_list_nested_mobs(True)
+        params = MetaRuntime(b._config)._build_init_params()
+
+        assert params["runtime_options"]["console_list_nested_mobs"] is True
+
+    def test_console_list_nested_mobs_defaults_to_omitted(self):
+        params = MetaRuntime(Meta.builder()._config)._build_init_params()
+
+        assert "console_list_nested_mobs" not in params["runtime_options"]
+
     def test_console_auth_defaults_to_omitted(self):
         params = MetaRuntime(Meta.builder()._config)._build_init_params()
 
@@ -840,6 +857,20 @@ class TestBuilderChain:
         b = Meta.builder().agent_memory(operatorScope="off")
         params = MetaRuntime(b._config)._build_init_params()
         assert params["runtime_options"]["agent_memory"] == {"operator_scope": "off"}
+
+    def test_agent_memory_own_memory_only_profiles_serializes_to_gateway_wire_key(self):
+        b = Meta.builder().agent_memory(own_memory_only_profiles=["guest", "visitor"])
+        params = MetaRuntime(b._config)._build_init_params()
+        assert params["runtime_options"]["agent_memory"] == {
+            "own_memory_only_profiles": ["guest", "visitor"],
+        }
+
+    def test_agent_memory_own_memory_only_profiles_accepts_camel_case(self):
+        b = Meta.builder().agent_memory(ownMemoryOnlyProfiles=("guest",))
+        params = MetaRuntime(b._config)._build_init_params()
+        assert params["runtime_options"]["agent_memory"] == {
+            "own_memory_only_profiles": ["guest"],
+        }
 
     def test_agent_memory_hygienist_keeps_only_disabled_compatibility(self):
         b = Meta.builder().agent_memory(

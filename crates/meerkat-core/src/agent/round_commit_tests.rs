@@ -158,6 +158,9 @@ struct RecordingTools {
     /// Close this checkpointer's self-fence window once the first call
     /// starts.
     fence_on_first_dispatch: Mutex<Option<Arc<RecordingCheckpointer>>>,
+    /// Hold the first call (it signals `entered`) until the row releases
+    /// it, so the row can act while the round's tools run.
+    release_first_call: Mutex<Option<Arc<Notify>>>,
 }
 
 impl RecordingTools {
@@ -169,7 +172,15 @@ impl RecordingTools {
             entered: Notify::new(),
             boundary_cancel: Mutex::new(None),
             fence_on_first_dispatch: Mutex::new(None),
+            release_first_call: Mutex::new(None),
         })
+    }
+
+    /// Hold the first call until the returned signal is notified.
+    fn hold_first_call(&self) -> Arc<Notify> {
+        let release = Arc::new(Notify::new());
+        *self.release_first_call.lock().unwrap() = Some(Arc::clone(&release));
+        release
     }
 
     fn cancel_at_next_boundary(&self, sender: meerkat_core::CancelAfterBoundarySender) {
@@ -225,6 +236,11 @@ impl AgentToolDispatcher for RecordingTools {
                     run_id.clone(),
                 ))
                 .expect("the agent holds the receiver");
+        }
+        let held = self.release_first_call.lock().unwrap().take();
+        if let Some(release) = held {
+            self.entered.notify_one();
+            release.notified().await;
         }
         if self.hang_on == Some(call.name) {
             self.entered.notify_one();
@@ -1860,6 +1876,138 @@ async fn the_cursor_binds_the_runs_start_inputs() {
         assert_eq!(
             cursor_of(first).expect("first commit").bound_input_ids,
             staged
+        );
+    }
+}
+
+/// One input's durable boundary delivery: a single notice row.
+fn joined_delivery(
+    detail: &str,
+) -> (
+    meerkat_core::lifecycle::InputId,
+    meerkat_core::lifecycle::DurableTurnBoundaryAppends,
+) {
+    let input_id = meerkat_core::lifecycle::InputId::new();
+    let appends = meerkat_core::lifecycle::DurableTurnBoundaryAppends::try_new(
+        input_id.clone(),
+        vec![meerkat_core::lifecycle::ConversationAppend {
+            runtime_source: None,
+            role: meerkat_core::lifecycle::ConversationAppendRole::SystemNotice,
+            content: meerkat_core::lifecycle::CoreRenderable::SystemNotice {
+                kind: meerkat_core::types::SystemNoticeKind::Generic,
+                body: Some(detail.to_string()),
+                blocks: Vec::new(),
+            },
+            identity: None,
+        }],
+        None,
+    )
+    .expect("an eligible durable notice");
+    (input_id, appends)
+}
+
+/// The cursor also lists every input a boundary joined to the run. Two
+/// durable deliveries are published at the run's post-tool boundary, one
+/// claim carrying both. The round commits made before that boundary list the
+/// start inputs only; the next round commit, and every later one, lists the
+/// start inputs and then the two joined inputs, in the order the runner
+/// applied them. A resumable run's cursor is what recovery reads to keep an
+/// input bound to the run, so a joined input missing from it would be
+/// delivered again after a restart.
+#[tokio::test]
+async fn the_cursor_binds_the_inputs_a_boundary_joined_after_the_start_inputs() {
+    let staged = vec![
+        meerkat_core::lifecycle::InputId::new(),
+        meerkat_core::lifecycle::InputId::new(),
+    ];
+    let client = ScriptedClient::new(vec![
+        Step::Tools(vec![("call-1", "probe", "{}")]),
+        Step::Tools(vec![("call-2", "probe", "{}")]),
+        Step::Answer("done"),
+    ]);
+    let tools = RecordingTools::new(RecordingTools::probes(), None);
+    let release = tools.hold_first_call();
+    let checkpointer = RecordingCheckpointer::new();
+    let mut agent = build_agent(
+        fresh_session(),
+        &client,
+        &tools,
+        Some(Arc::clone(&checkpointer)),
+        true,
+        None,
+    )
+    .await;
+    agent.set_run_start_input_ids(staged.clone());
+    let state = agent.transient_turn_context_state();
+    let run = tokio::spawn(async move { agent.run("start".into()).await });
+
+    // The first round's tool runs: its post-tool boundary is open.
+    tokio::time::timeout(std::time::Duration::from_secs(5), tools.entered.notified())
+        .await
+        .expect("the first round's tool starts");
+    let run_id = state.active_run_for_test().expect("the run owns the actor");
+    let (first_id, first) = joined_delivery("joined first");
+    let (second_id, second) = joined_delivery("joined second");
+    let prepare_state = state.clone();
+    let prepare = tokio::spawn(async move {
+        prepare_state
+            .prepare_active_turn_boundary(
+                &run_id,
+                meerkat_core::lifecycle::TurnBoundaryDelivery::DurableAppends(first),
+            )
+            .await
+    });
+    for _ in 0..2_000 {
+        if state.has_registered_durable_for_test() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(state.has_registered_durable_for_test());
+    release.notify_one();
+
+    // The runner is parked at the post-tool boundary: one claim publishes
+    // both deliveries.
+    let mut stage = tokio::time::timeout(std::time::Duration::from_secs(5), prepare)
+        .await
+        .expect("the runner parks at the post-tool boundary")
+        .expect("prepare task")
+        .expect("durable preparation")
+        .into_stage_output(None);
+    stage
+        .attach_durable_delivery(second)
+        .expect("attach the second input's delivery");
+    stage.commit().expect("publish the claim");
+    tokio::time::timeout(std::time::Duration::from_secs(5), run)
+        .await
+        .expect("the run finishes")
+        .expect("run task")
+        .expect("the run completes");
+
+    let cursors = checkpointer
+        .commits()
+        .iter()
+        .filter_map(|(session, _)| cursor_of(session))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        cursors.len(),
+        4,
+        "two rounds, two commits each; the end-of-run save has no cursor"
+    );
+    for (index, cursor) in cursors[..2].iter().enumerate() {
+        assert_eq!(
+            cursor.bound_input_ids, staged,
+            "commit {index} is made before the boundary: the start inputs only"
+        );
+    }
+    let mut bound = staged.clone();
+    bound.extend([first_id, second_id]);
+    for (index, cursor) in cursors[2..].iter().enumerate() {
+        assert_eq!(
+            cursor.bound_input_ids,
+            bound,
+            "commit {} after the boundary lists the start inputs, then the two joined inputs in apply order",
+            index + 2
         );
     }
 }

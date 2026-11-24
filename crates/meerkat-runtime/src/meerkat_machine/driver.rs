@@ -845,6 +845,12 @@ impl IngressView<'_> {
         self.driver.durable_steer_order()
     }
 
+    /// The steer lane's first input that the machine holds a durable
+    /// live-boundary delivery for and that has no live-boundary work running.
+    pub(crate) fn durable_steer_waiting_without_work(&self) -> Option<InputId> {
+        self.driver.durable_steer_waiting_without_work()
+    }
+
     /// Whether `input_id` may join the current run `run_id` at a live
     /// boundary: inputs of different requesters never share a run, and the
     /// Steer lane is first in, first out across requesters (see

@@ -318,7 +318,7 @@ describe("live execution identity v1", () => {
 
   it("treats absent experimental capability as unsupported", () => {
     const oldGateway = parseCapabilitiesResult({
-      contract_version: "0.5.0",
+      contract_version: "0.6.0",
       methods: [],
       loaded_modules: [],
     });

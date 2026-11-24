@@ -474,6 +474,23 @@ pub trait KeyedInjectReceiver: Send + Sync {
         delivery_key: &'a str,
         with_input: bool,
     ) -> KeyedInjectFuture<'a, Result<KeyedInjectStatusAnswer, KeyedInjectRefusal>>;
+
+    /// This plane's receiver for `mob_id`, a mob the serving host has
+    /// beside its default mob: the receiver that reaches that mob's own
+    /// continuation owner, under this plane's window and clock.
+    ///
+    /// The control listener asks it for a keyed inject request whose signed
+    /// audience names such a mob, after its grant policy admitted the
+    /// request for that mob. `None`, which is the default, says that this
+    /// receiver serves the host's default mob alone: the request is then
+    /// answered `not_served`, never delivered to the default mob.
+    fn for_mob<'a>(
+        &'a self,
+        mob_id: &'a meerkat_mob::MobId,
+    ) -> KeyedInjectFuture<'a, Option<Arc<dyn KeyedInjectReceiver>>> {
+        let _ = mob_id;
+        Box::pin(async { None })
+    }
 }
 
 /// What a gateway's keyed inject plane serves. A gateway binds its control

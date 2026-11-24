@@ -17,6 +17,21 @@
 //!   (reopen sees the last durably written watermark; concurrent cross-handle
 //!   visibility is NOT contractual), windowed-query pagination under
 //!   concurrent append.
+//! - [`chapters::console_log_mobs`] - `ConsoleLogStore` on a host that
+//!   creates a mob beside its default mob: `remove_frames_of_mob` (one mob's
+//!   frames go, every other frame keeps its cursor, the default mob's are
+//!   never removed) and the read of one mob's frames as `reads_one_mob`
+//!   states it; and the window of `unsettled_send_frames`, which is the
+//!   default mob's own frames (another mob's frames are never counted in
+//!   it and never move the default mob's send out of it); and the six
+//!   operations on a send that name its mob (`update_frame_status_of_mob`,
+//!   `transition_send_frame_of_mob`, `take_send_frame_hold_of_mob`,
+//!   `frame_by_dedupe_key_of_mob`, `send_frame_by_interaction_of_mob`,
+//!   `unsettled_send_frames_of_mob`), each reaching the send of the mob it
+//!   names and no other. A store that keeps the trait's default
+//!   `remove_frames_of_mob` fails it, as such a host refuses every create
+//!   of a second mob over that store; so does a store that reads one mob's
+//!   frames and keeps the defaults of the six, which refuse another mob.
 //! - [`chapters::binary_blobs`] / [`chapters::legacy_blob_layout`] —
 //!   `BinaryBlobStore`: content-address round-trips, `is_persistent()`
 //!   honesty, typed dangling-reference `NotFound`, and the legacy

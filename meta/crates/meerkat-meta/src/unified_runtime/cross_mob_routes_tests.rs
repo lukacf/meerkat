@@ -1042,3 +1042,147 @@ async fn a_part_that_was_replaced_or_closed_takes_no_link() {
     assert!(locked(&later.state).links.is_empty());
     assert!(!registry.has_wake_route_in_namespace(&pair.ns_b, &pair.alice));
 }
+
+/// A runtime of one mob with no members, built by the builder.
+async fn runtime_of_one_mob(tag: &str) -> UnifiedRuntime {
+    let definition = meerkat_mob::MobDefinition::from_toml(&format!(
+        "[mob]\nid = \"link-part-{tag}-{}\"\n\n[profiles.worker]\nmodel = \"gpt-5.5\"\n",
+        uuid::Uuid::new_v4().simple()
+    ))
+    .expect("mob definition");
+    UnifiedRuntime::builder()
+        .definition(definition)
+        .default_llm_client(Arc::new(meerkat_client::TestClient::default()))
+        .build()
+        .await
+        .expect("runtime builds")
+}
+
+/// Two mobs of one process each hold their own part of the link table: the
+/// start-time read of each gives the table a part under that mob's
+/// namespace, held by that mob's entry, and a mob that closes its links
+/// takes its own part out of the table and leaves the other mob's.
+#[tokio::test]
+async fn each_mob_holds_its_own_part_of_the_link_table() {
+    let a = runtime_of_one_mob("a").await;
+    let b = runtime_of_one_mob("b").await;
+    a.restore_cross_mob_wake_routes().await;
+    b.restore_cross_mob_wake_routes().await;
+    let namespace = |runtime: &UnifiedRuntime| {
+        mob_inproc_namespace_for_id(&runtime.mob_id()).expect("the mob's namespace")
+    };
+    let (ns_a, ns_b) = (namespace(&a), namespace(&b));
+    let part_a = routes_of(&ns_a).expect("mob A holds a part");
+    let part_b = routes_of(&ns_b).expect("mob B holds a part");
+    assert!(!Arc::ptr_eq(&part_a, &part_b), "each mob has its own part");
+    let held_by = |runtime: &UnifiedRuntime| runtime.default_mob().cross_mob_routes.get().cloned();
+    assert!(
+        held_by(&a).is_some_and(|held| Arc::ptr_eq(&held, &part_a)),
+        "mob A's entry holds mob A's part"
+    );
+    assert!(
+        held_by(&b).is_some_and(|held| Arc::ptr_eq(&held, &part_b)),
+        "mob B's entry holds mob B's part"
+    );
+
+    b.close_cross_mob_links();
+    assert!(routes_of(&ns_b).is_none(), "mob B's part left the table");
+    assert!(
+        routes_of(&ns_a).is_some_and(|current| Arc::ptr_eq(&current, &part_a)),
+        "mob A's part is still the table's"
+    );
+    a.shutdown().await;
+    b.shutdown().await;
+}
+
+/// What the stop of the resolved mob `mob` does with the mob's links.
+fn close_links_as_a_stop(mob: &super::super::MobEntryRef<'_>) {
+    mob.entry().close_cross_mob_links();
+}
+
+/// What the end of the shutdown of the resolved mob `mob` does with the
+/// mob's links.
+fn clear_links_as_the_end_of_a_shutdown(mob: &super::super::MobEntryRef<'_>) {
+    mob.entry().clear_cross_mob_wake_routes();
+}
+
+/// Two entries in one runtime, each with its part of the link table, the
+/// second mob's holding a link to a member of the default mob with that
+/// member's inbox route: closing the links of a resolved mob takes that
+/// mob's own part out of the table, with its wake routes, and leaves the
+/// default mob's part; clearing them takes the inbox routes of that mob's
+/// own links. The runtime's own methods close the default mob's part.
+#[tokio::test]
+async fn a_resolved_mob_closes_and_clears_its_own_part_of_the_link_table() {
+    let host = runtime_of_one_mob("entry-host").await;
+    let second = runtime_of_one_mob("entry-second").await;
+    host.restore_cross_mob_wake_routes().await;
+    second.restore_cross_mob_wake_routes().await;
+    let namespace = |runtime: &UnifiedRuntime| {
+        mob_inproc_namespace_for_id(&runtime.mob_id()).expect("the mob's namespace")
+    };
+    let (ns_host, ns_second) = (namespace(&host), namespace(&second));
+    let part_host = routes_of(&ns_host).expect("the default mob holds a part");
+    let part_second = routes_of(&ns_second).expect("the second mob holds a part");
+    let registry = InprocRegistry::global();
+
+    // The second mob's row of desk names front of the default mob, and the
+    // second mob's namespace routes front's name to an inbox.
+    let front = Keypair::generate().public_key();
+    let front_name = comms_name(&host.mob_id(), "front");
+    let desk_name = comms_name(&second.mob_id(), "desk");
+    part_second.set_member_links("desk", vec![link("desk", &desk_name, &front_name, front)]);
+    assert!(registry.has_wake_route_in_namespace(&ns_second, &front));
+    let (_front_inbox, front_sender) = Inbox::new_transport_only();
+    assert!(
+        !registry
+            .register_with_meta_in_namespace(
+                &ns_second,
+                front_name.clone(),
+                front,
+                front_sender,
+                PeerMeta::default(),
+            )
+            .is_rejected()
+    );
+    let route_to_front = || registry.get_name_by_pubkey_in_namespace(&ns_second, &front);
+
+    let mob = super::super::MobEntryRef::second_entry_for_tests(&host, &second);
+    close_links_as_a_stop(&mob);
+    assert!(
+        routes_of(&ns_second).is_none(),
+        "the resolved mob's own part left the table"
+    );
+    assert!(
+        !registry.has_wake_route_in_namespace(&ns_second, &front),
+        "with its wake routes"
+    );
+    assert!(
+        routes_of(&ns_host).is_some_and(|current| Arc::ptr_eq(&current, &part_host)),
+        "the default mob's part is still the table's"
+    );
+    assert_eq!(
+        route_to_front().as_deref(),
+        Some(front_name.as_str()),
+        "a close leaves the inbox routes of the part's links"
+    );
+
+    clear_links_as_the_end_of_a_shutdown(&mob);
+    assert_eq!(
+        route_to_front().as_deref(),
+        None,
+        "the clear takes the inbox routes of the resolved mob's own links"
+    );
+    assert!(
+        routes_of(&ns_host).is_some_and(|current| Arc::ptr_eq(&current, &part_host)),
+        "the default mob's part is still the table's"
+    );
+
+    host.close_cross_mob_links();
+    assert!(
+        routes_of(&ns_host).is_none(),
+        "the runtime's own method closes the default mob's part"
+    );
+    host.shutdown().await;
+    second.shutdown().await;
+}

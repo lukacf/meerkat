@@ -1805,8 +1805,11 @@ pub async fn adopt_schedule_mob_targets(
     let mob_state = runtime.mob_runtime().agent_mob_mcp_state();
     // The registry also adopts who the runtime's members are private to:
     // the agent schedule tools judge private targets and hide private
-    // members' schedules with it.
-    mob_target_registry.adopt_mob_runtime(runtime.mob_runtime());
+    // members' schedules with it. The host states its default mob here: the
+    // runtime's own wrapper is its launch mob's.
+    let launch = runtime.mob_runtime();
+    let default_mob = crate::member_key::DefaultMob::new(launch.handle().mob_id().clone());
+    mob_target_registry.adopt_mob_runtime(launch, &default_mob);
     if ScheduleFiringRole::of_runtime(runtime) == ScheduleFiringRole::QuiescedCandidate {
         return mob_state;
     }
@@ -1817,7 +1820,10 @@ pub async fn adopt_schedule_mob_targets(
         .mob_runtime()
         .private_owners()
         .follow_member_ends(Arc::new(
-            crate::schedule_wiring::EndedPrivateMemberSchedules::new(schedule_service.clone()),
+            crate::schedule_wiring::EndedPrivateMemberSchedules::new(
+                schedule_service.clone(),
+                default_mob,
+            ),
         ))
         .await;
     // Only the launch that speaks for its composition hands its runtime the
@@ -1935,13 +1941,17 @@ pub async fn spawn_gateway_schedule_host<B: SessionAgentBuilder + 'static>(
         runnable_host,
         runtime.console_schedule_doors(),
     );
-    let schedule_host = crate::schedule_wiring::spawn_schedule_host_with_identity_runtime(
+    // A fire for a member of another mob this host serves is delivered
+    // through that mob's own internal lane: the host resolves the mob at
+    // the fire, with the resolver its request doors use.
+    let schedule_host = crate::schedule_wiring::spawn_schedule_host_over_host_mobs(
         session_service,
         runtime_adapter,
         schedule_service,
         mob_state,
         runtime.mob_handle(),
         runtime.identity_runtime_ref().cloned(),
+        Some(runtime.mob_resolver()),
         Some(runnable_host),
         workgraph_service,
         owner_id,

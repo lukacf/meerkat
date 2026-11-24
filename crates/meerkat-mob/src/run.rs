@@ -4748,6 +4748,50 @@ pub fn mob_machine_create_mob_admission(
     })
 }
 
+/// Resolve the per-mob operator admission verdict for a mob that has no
+/// live handle to ask.
+///
+/// The tool surface extracts a single raw observation (whether the operator
+/// holds manage scope over the mob) and feeds it here. MobMachine, not the
+/// tool surface, decides the Allow/Deny verdict, and the surface mirrors it.
+/// The verdict is a pure classification across all phases, so a mob that is
+/// not loaded gets the verdict its own machine would give once loaded
+/// (`MobHandle::resolve_current_mob_admission`), from a stateless MobMachine
+/// classification. Fails closed if the machine emits no verdict.
+pub fn mob_machine_current_mob_admission(
+    can_manage_mob: bool,
+) -> Result<crate::runtime::CurrentMobAdmission, MobError> {
+    let effects = classify_mob_machine_stateless(
+        mob_dsl::MobMachineInput::ResolveCurrentMobAdmission { can_manage_mob },
+        "ResolveCurrentMobAdmission",
+    )?;
+    let mut admission = None;
+    for effect in effects {
+        match effect {
+            mob_dsl::MobMachineEffect::CurrentMobAdmissionResolved { admission: kind } => {
+                admission = Some(match kind {
+                    mob_dsl::MobCurrentMobAdmissionKind::Allowed => {
+                        crate::runtime::CurrentMobAdmission::Allowed
+                    }
+                    mob_dsl::MobCurrentMobAdmissionKind::Denied => {
+                        crate::runtime::CurrentMobAdmission::Denied
+                    }
+                });
+            }
+            other => {
+                return Err(MobError::Internal(format!(
+                    "MobMachine current-mob admission classifier emitted unexpected effect: {other:?}"
+                )));
+            }
+        }
+    }
+    admission.ok_or_else(|| {
+        MobError::Internal(
+            "MobMachine accepted current-mob admission observation but emitted no verdict".into(),
+        )
+    })
+}
+
 /// Resolve the operator profile-mutation admission verdict.
 ///
 /// The tool surface extracts a single raw observation — whether the operator

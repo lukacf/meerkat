@@ -158,6 +158,20 @@ describe("MetaBuilder.agentMemory()", () => {
     assert.deepEqual(boolBuilder._config.agentMemoryConfig, { steward: true });
   });
 
+  it("passes the steward write limit through as write_scopes", () => {
+    const builder = Meta.builder();
+    builder.agentMemory({ steward: { writeScopes: "identity" } });
+    assert.deepEqual(builder._config.agentMemoryConfig, {
+      steward: { write_scopes: "identity" },
+    });
+
+    const unset = Meta.builder();
+    unset.agentMemory({ steward: { enabled: true } });
+    assert.deepEqual(unset._config.agentMemoryConfig, {
+      steward: { enabled: true },
+    });
+  });
+
   it("serializes operatorScope to the gateway wire key", () => {
     const builder = Meta.builder();
     builder.agentMemory({ store: "sqlite", operatorScope: "provisional" });

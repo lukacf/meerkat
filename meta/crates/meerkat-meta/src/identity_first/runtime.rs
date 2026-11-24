@@ -69,9 +69,11 @@ mod identity_family;
 pub(crate) use identity_family::UNSEATED_RECORD_MAX_AGE;
 mod instruction_append;
 mod lifecycle_projection;
+mod memory_purge;
 mod records;
 #[cfg(test)]
 mod roster_pass_tests;
+mod scoped_memory;
 #[cfg(test)]
 mod seat_tests;
 mod tool_grant_seat;

@@ -33,8 +33,10 @@ pub const ACTION_OPERATOR_MEMORY_READ: &str = "operator.memory.read";
 /// reads the caller's own operator scope only; reading anyone else's needs
 /// this action on top. Admins hold it, as they hold every action.
 pub const ACTION_OPERATOR_MEMORY_READ_ANY: &str = "operator.memory.read_any";
-/// Administrative memory operations on an identity's store (imports,
-/// re-keying, floor overrides). Reserved: no console RPC maps to it yet.
+/// Administrative memory operations: the purge of a retired record's
+/// content (`meta/agent_memory/purge`), on the identity for an identity's
+/// record and unscoped for a record of a shared scope. Imports, re-keying
+/// and floor overrides map to no console RPC yet.
 pub const ACTION_AGENT_MEMORY_ADMIN: &str = "agent.memory.admin";
 /// Read mob-scoped memory records in the console Memory panel.
 pub const ACTION_MOB_MEMORY_READ: &str = "mob.memory.read";
@@ -44,6 +46,9 @@ pub const ACTION_MOB_MEMORY_PROPOSE: &str = "mob.memory.propose";
 /// commit RPC — steward promotions ride the gating flow (`gating.decide`),
 /// not this action, so nothing maps to it yet.
 pub const ACTION_MOB_MEMORY_COMMIT: &str = "mob.memory.commit";
+/// Retire a mob-scoped memory record (`meta/agent_memory/forget_in_scope`).
+/// It names no agent: a rule grants it for the console as a whole.
+pub const ACTION_MOB_MEMORY_DELETE: &str = "mob.memory.delete";
 /// Read the quarantine queue and its verdict surfaces (§10.3).
 pub const ACTION_MEMORY_QUARANTINE_REVIEW: &str = "memory.quarantine.review";
 /// Create new members: ensure/spawn/fork helpers, run flows.
@@ -198,6 +203,7 @@ pub const ACCESS_ACTIONS: &[&str] = &[
     ACTION_MOB_MEMORY_READ,
     ACTION_MOB_MEMORY_PROPOSE,
     ACTION_MOB_MEMORY_COMMIT,
+    ACTION_MOB_MEMORY_DELETE,
     ACTION_MEMORY_QUARANTINE_REVIEW,
     ACTION_AGENT_SPAWN,
     ACTION_AGENT_RESPAWN,

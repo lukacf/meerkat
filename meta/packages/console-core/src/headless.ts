@@ -187,6 +187,8 @@ export const CONSOLE_COMMAND_NAMES = {
   listMemoryDreamRuns: "listMemoryDreamRuns",
   listMemoryAuditVerdicts: "listMemoryAuditVerdicts",
   decideMemoryQuarantine: "decideMemoryQuarantine",
+  forgetMemoryInScope: "forgetMemoryInScope",
+  purgeMemoryRecord: "purgeMemoryRecord",
   workgraphSnapshot: "workgraphSnapshot",
   workgraphGet: "workgraphGet",
   workgraphEvents: "workgraphEvents",
@@ -451,6 +453,14 @@ const CONSOLE_COMMAND_SPECS: Record<ConsoleCommandName, ConsoleCommandSpec> = {
   },
   [CONSOLE_COMMAND_NAMES.decideMemoryQuarantine]: {
     method: CONSOLE_RPC_METHODS.memoryQuarantineDecide,
+    targetKinds: new Set<MetaWorkbenchTarget["kind"]>(["meta/memory"]),
+  },
+  [CONSOLE_COMMAND_NAMES.forgetMemoryInScope]: {
+    method: CONSOLE_RPC_METHODS.agentMemoryForgetInScope,
+    targetKinds: new Set<MetaWorkbenchTarget["kind"]>(["meta/memory"]),
+  },
+  [CONSOLE_COMMAND_NAMES.purgeMemoryRecord]: {
+    method: CONSOLE_RPC_METHODS.agentMemoryPurge,
     targetKinds: new Set<MetaWorkbenchTarget["kind"]>(["meta/memory"]),
   },
   [CONSOLE_COMMAND_NAMES.workgraphSnapshot]: {

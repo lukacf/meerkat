@@ -247,6 +247,8 @@ The bundled console uses a small set of stable protocol surfaces:
 
 The console contract version is `0.6.0` in `console/src/lib/contract.ts` and `docs/rct/console-rest-sse-contract-v0.6.0.json`. The runtime JSON-RPC contract is separately versioned by `META_CONTRACT_VERSION`.
 
+Contract `0.6.0` also lists `meta/agent_memory/forget_in_scope` and `meta/agent_memory/purge`: a client detects them through the methods the gateway advertises in `meta/capabilities`, does not infer them from the version `0.6.0`, and does not probe by trying a destructive call.
+
 On a gateway that hosts more than one mob, a mob that is not loaded reads
 "Asleep". A mob that is asleep stays asleep while the Console shows it: the
 Console asks nothing of it until someone opens it, writes to one of its

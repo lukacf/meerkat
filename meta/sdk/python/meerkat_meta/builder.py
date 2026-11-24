@@ -876,6 +876,8 @@ class MetaBuilder:
                         "minSignals",
                         "max_output_tokens",
                         "maxOutputTokens",
+                        "write_scopes",
+                        "writeScopes",
                     }
                 )
                 if unknown:
@@ -910,6 +912,13 @@ class MetaBuilder:
                     steward_wire["min_signals"] = steward["min_signals"]
                 elif "minSignals" in steward:
                     steward_wire["min_signals"] = steward["minSignals"]
+                # Where the steward may write: "all" (the default),
+                # "identity" or "own_identity". The gateway validates the
+                # value; a gateway older than the key refuses it.
+                if "write_scopes" in steward:
+                    steward_wire["write_scopes"] = steward["write_scopes"]
+                elif "writeScopes" in steward:
+                    steward_wire["write_scopes"] = steward["writeScopes"]
                 wire["steward"] = steward_wire
             else:
                 wire["steward"] = steward

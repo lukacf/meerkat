@@ -567,6 +567,61 @@ pub struct StewardConfig {
     /// [`DistillerConfig`]: crate::memory::distiller::DistillerConfig
     /// [`HygienistConfig`]: crate::memory::hygienist::HygienistConfig
     pub max_output_tokens: Option<u32>,
+    /// Where the steward may write (`agent_memory.steward.write_scopes`).
+    /// The default, [`StewardWriteScopes::All`], is the behaviour before the
+    /// key existed.
+    pub write_scopes: StewardWriteScopes,
+}
+
+/// The steward's write limit (`agent_memory.steward.write_scopes`): a
+/// closed set, ordered from loose to strict. Shell law, applied to every op
+/// a dream would commit; an op it stops is a recorded skip or a hold, never
+/// silent.
+///
+/// It is not a privacy boundary between identities: one dream's prompt
+/// still holds the records of every identity the dream covers, and
+/// [`Self::OwnIdentity`] checks only the lineage the model declares.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum StewardWriteScopes {
+    /// No limit.
+    #[default]
+    All,
+    /// The steward changes nothing in a mob or realm scope: no create,
+    /// promotion, supersede, tombstone, retier or rank there. Identity
+    /// scopes are written as without a limit. A person's operator scope has
+    /// its own switch (`operator_scope`) and is not affected.
+    Identity,
+    /// As [`Self::Identity`], and a create or supersede in an identity's
+    /// scope must name its source records (`derived_from`, or the prior it
+    /// supersedes), all of them in that same scope.
+    OwnIdentity,
+}
+
+impl StewardWriteScopes {
+    /// The configuration value.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Identity => "identity",
+            Self::OwnIdentity => "own_identity",
+        }
+    }
+
+    /// Parse a configuration value; `None` for anything outside the set.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "all" => Some(Self::All),
+            "identity" => Some(Self::Identity),
+            "own_identity" => Some(Self::OwnIdentity),
+            _ => None,
+        }
+    }
+
+    /// Whether the limit keeps the steward out of `scope` altogether.
+    pub fn excludes(self, scope: &MemoryScope) -> bool {
+        !matches!(self, Self::All)
+            && matches!(scope, MemoryScope::Mob { .. } | MemoryScope::Realm { .. })
+    }
 }
 
 impl Default for StewardConfig {
@@ -579,6 +634,7 @@ impl Default for StewardConfig {
             runs_per_day: DEFAULT_RUNS_PER_DAY,
             min_signals: DEFAULT_MIN_SIGNALS,
             max_output_tokens: None,
+            write_scopes: StewardWriteScopes::All,
         }
     }
 }
@@ -1860,8 +1916,22 @@ impl StewardEngine {
             .map(|meta| meta.id.clone())
             .chain(signals.quarantine.iter().map(|record| record.id.clone()))
             .collect();
-        let (ops, created_ids) =
-            self.map_consolidate_ops(reply.ops, &known_ids, &signals.operator_ids, run_id, run);
+        let record_scopes = self
+            .consolidate_record_scopes(&reply.ops, &known_ids, run)
+            .await;
+        let law = ConsolidateWriteLaw {
+            partition: Some(partition),
+            write_scopes: self.config.write_scopes,
+            record_scopes: &record_scopes,
+        };
+        let (ops, created_ids) = self.map_consolidate_ops(
+            reply.ops,
+            &known_ids,
+            &signals.operator_ids,
+            &law,
+            run_id,
+            run,
+        );
         let committed = self
             .commit_group(ops, StagedBatchKind::FreshWrite, run_id, "consolidate", run)
             .await;
@@ -1982,6 +2052,8 @@ impl StewardEngine {
             .take(MAX_WORKING_SET)
             .map(|id| created_ids.get(id).cloned().unwrap_or_else(|| id.clone()))
             .collect();
+        // A rank is a write too: the limit keeps it out of an excluded scope.
+        let mut excluded_ranks: HashSet<String> = HashSet::new();
         let live: HashSet<String> = match self
             .store
             .records_by_ids(&self.realm, &rank_candidates)
@@ -1995,6 +2067,13 @@ impl StewardEngine {
                     record.status != RecordStatus::Tombstoned
                         && !record.scope.kept_apart_by_its_key()
                 })
+                .filter(|record| {
+                    let excluded = self.config.write_scopes.excludes(&record.scope);
+                    if excluded {
+                        excluded_ranks.insert(record.id.clone());
+                    }
+                    !excluded
+                })
                 .map(|record| record.id)
                 .collect(),
             Err(err) => {
@@ -2005,6 +2084,13 @@ impl StewardEngine {
         };
         let mut rank_ops = Vec::new();
         for id in rank_candidates {
+            if excluded_ranks.contains(&id) {
+                run.skips.push(format!(
+                    "rank for '{id}' dropped: steward write_scopes is '{}'",
+                    self.config.write_scopes.as_str()
+                ));
+                continue;
+            }
             if !live.contains(&id) {
                 run.skips
                     .push(format!("rank for '{id}' dropped: not a live record"));
@@ -2865,6 +2951,7 @@ impl StewardEngine {
         raw_ops: Vec<RawStewardOp>,
         known_ids: &HashSet<String>,
         operator_ids: &HashSet<String>,
+        law: &ConsolidateWriteLaw<'_>,
         run_id: &str,
         run: &mut DreamRun,
     ) -> (Vec<StagedOp>, HashMap<String, String>) {
@@ -2876,12 +2963,33 @@ impl StewardEngine {
             run_id,
             run,
             self.operator_routing,
+            law,
         )
     }
 }
 
+/// Where a consolidate op may write: a create lands only in a scope the
+/// dream covers, and the steward's write limit
+/// ([`StewardWriteScopes`]) applies to every op.
+struct ConsolidateWriteLaw<'a> {
+    /// The dream's slice of the realm. `None` covers every scope (the eval
+    /// harness, which maps a reply outside any dream).
+    partition: Option<&'a DreamPartition>,
+    write_scopes: StewardWriteScopes,
+    /// The scope of each existing record the ops name. Read from the store
+    /// only when a limit is set; an id it does not hold has no known scope.
+    record_scopes: &'a HashMap<String, MemoryScope>,
+}
+
+/// What a dream run's skips record for a create whose scope the mapper
+/// cannot use: a scope it cannot build, and a scope the dream does not
+/// cover. One wording for both, with no kind and no key; the reason is in
+/// the log.
+const UNUSABLE_SCOPE_SKIP: &str = "create op with missing/unknown scope, dropped";
+
 /// Shell-side sanitation of a consolidate op list (free so the eval
 /// harness exercises the exact production mapping).
+#[allow(clippy::too_many_arguments)]
 fn map_consolidate_ops_impl<S: std::hash::BuildHasher, O: std::hash::BuildHasher>(
     realm: &str,
     raw_ops: Vec<RawStewardOp>,
@@ -2890,6 +2998,7 @@ fn map_consolidate_ops_impl<S: std::hash::BuildHasher, O: std::hash::BuildHasher
     run_id: &str,
     run: &mut DreamRun,
     allow_operator: bool,
+    law: &ConsolidateWriteLaw<'_>,
 ) -> (Vec<StagedOp>, HashMap<String, String>) {
     // First pass: collect declared create ids for namespacing.
     let mut created_ids: HashMap<String, String> = HashMap::new();
@@ -2915,10 +3024,38 @@ fn map_consolidate_ops_impl<S: std::hash::BuildHasher, O: std::hash::BuildHasher
             .cloned()
             .unwrap_or_else(|| id.to_string())
     };
-    let known = |id: &str| known_ids.contains(id) || created_ids.contains_key(id);
+    let limited = law.write_scopes != StewardWriteScopes::All;
+    // The scope each op that declares an id writes, for the ops after it,
+    // and the declared ids whose op was dropped: a later op that names one
+    // is dropped on its own, where it would fail the whole group at
+    // validation.
+    let mut declared_scopes: HashMap<String, MemoryScope> = HashMap::new();
+    let mut dropped: HashSet<String> = HashSet::new();
+    let mut declaring: Option<(String, usize)> = None;
 
     let mut ops = Vec::new();
     for raw in raw_ops {
+        if let Some((id, len)) = declaring.take()
+            && ops.len() == len
+        {
+            dropped.insert(id);
+        }
+        if (raw.op == "create" || raw.op == "supersede")
+            && let Some(id) = raw.id.as_deref()
+        {
+            declaring = Some((id.to_string(), ops.len()));
+        }
+        let known = |id: &str| {
+            known_ids.contains(id) || (created_ids.contains_key(id) && !dropped.contains(id))
+        };
+        // The scope of a record an op names: the scope an earlier op of
+        // this group writes, or an existing record's as the store read it.
+        let scope_of = |id: &str| -> Option<MemoryScope> {
+            declared_scopes
+                .get(id)
+                .or_else(|| law.record_scopes.get(id))
+                .cloned()
+        };
         let drop_op = |reason: String, run: &mut DreamRun| {
             tracing::warn!(run_id, reason, "agent memory steward: op dropped");
             run.skips.push(reason);
@@ -3037,12 +3174,54 @@ fn map_consolidate_ops_impl<S: std::hash::BuildHasher, O: std::hash::BuildHasher
                         .as_ref()
                         .and_then(|scope| scope_for_realm(realm, &scope.kind, &scope.key))
                     else {
+                        drop_op(UNUSABLE_SCOPE_SKIP.to_string(), run);
+                        continue;
+                    };
+                    // A create into a scope the dream does not cover is
+                    // dropped. The run's skips record it as a create whose
+                    // scope cannot be used; the reason goes to the log only,
+                    // and never the key the model wrote.
+                    if let Some(partition) = law.partition
+                        && !partition.covers(&scope)
+                    {
+                        tracing::warn!(
+                            run_id,
+                            scope_kind = scope.kind_str(),
+                            "agent memory steward: create op dropped: the dream does not cover \
+                             its scope"
+                        );
+                        run.skips.push(UNUSABLE_SCOPE_SKIP.to_string());
+                        continue;
+                    }
+                    if law.write_scopes.excludes(&scope) {
                         drop_op(
-                            "create op with missing/unknown scope, dropped".to_string(),
+                            format!(
+                                "create op targets {} scope, dropped: steward write_scopes is \
+                                 '{}'",
+                                scope.kind_str(),
+                                law.write_scopes.as_str()
+                            ),
                             run,
                         );
                         continue;
-                    };
+                    }
+                    if law.write_scopes == StewardWriteScopes::OwnIdentity
+                        && let Some(reason) =
+                            own_identity_refusal(&scope, &raw.derived_from, scope_of, true)
+                    {
+                        drop_op(
+                            format!(
+                                "create op into {} '{}' dropped: {reason}",
+                                scope.kind_str(),
+                                scope.key()
+                            ),
+                            run,
+                        );
+                        continue;
+                    }
+                    if let Some(id) = raw.id.as_deref() {
+                        declared_scopes.insert(id.to_string(), scope.clone());
+                    }
                     ops.push(StagedOp::Create {
                         id: raw.id.as_deref().map(resolve),
                         scope,
@@ -3064,6 +3243,31 @@ fn map_consolidate_ops_impl<S: std::hash::BuildHasher, O: std::hash::BuildHasher
                             run,
                         );
                         continue;
+                    }
+                    // A supersede writes its prior's scope.
+                    let prior_scope = scope_of(prior);
+                    if limited {
+                        let refusal = excluded_target(law.write_scopes, prior_scope.as_ref())
+                            .or_else(|| {
+                                let scope = prior_scope.as_ref()?;
+                                (law.write_scopes == StewardWriteScopes::OwnIdentity)
+                                    .then(|| {
+                                        own_identity_refusal(
+                                            scope,
+                                            &raw.derived_from,
+                                            scope_of,
+                                            false,
+                                        )
+                                    })
+                                    .flatten()
+                            });
+                        if let Some(reason) = refusal {
+                            drop_op(format!("supersede op on '{prior}' dropped: {reason}"), run);
+                            continue;
+                        }
+                    }
+                    if let (Some(id), Some(scope)) = (raw.id.as_deref(), prior_scope) {
+                        declared_scopes.insert(id.to_string(), scope);
                     }
                     ops.push(StagedOp::Supersede {
                         id: raw.id.as_deref().map(resolve),
@@ -3094,6 +3298,12 @@ fn map_consolidate_ops_impl<S: std::hash::BuildHasher, O: std::hash::BuildHasher
                     drop_op(format!("tombstone op for unknown '{id}', dropped"), run);
                     continue;
                 }
+                if limited
+                    && let Some(reason) = excluded_target(law.write_scopes, scope_of(id).as_ref())
+                {
+                    drop_op(format!("tombstone op on '{id}' dropped: {reason}"), run);
+                    continue;
+                }
                 ops.push(StagedOp::Tombstone {
                     id: resolve(id),
                     rationale: raw.rationale.clone(),
@@ -3116,6 +3326,12 @@ fn map_consolidate_ops_impl<S: std::hash::BuildHasher, O: std::hash::BuildHasher
                 }
                 if !known(id) {
                     drop_op(format!("retier op for unknown '{id}', dropped"), run);
+                    continue;
+                }
+                if limited
+                    && let Some(reason) = excluded_target(law.write_scopes, scope_of(id).as_ref())
+                {
+                    drop_op(format!("retier op on '{id}' dropped: {reason}"), run);
                     continue;
                 }
                 let Some(trust) = raw.trust.as_deref().and_then(TrustTier::parse) else {
@@ -3149,7 +3365,168 @@ fn map_consolidate_ops_impl<S: std::hash::BuildHasher, O: std::hash::BuildHasher
     (ops, created_ids)
 }
 
+/// Why the write limit stops an op on an existing record whose scope is
+/// `scope`; `None` when it does not. A record whose scope is not known
+/// (`scope` is `None`) is not written under a limit.
+fn excluded_target(
+    write_scopes: StewardWriteScopes,
+    scope: Option<&MemoryScope>,
+) -> Option<String> {
+    match scope {
+        None => Some(format!(
+            "steward write_scopes is '{}' and the record's scope is not known",
+            write_scopes.as_str()
+        )),
+        Some(scope) if write_scopes.excludes(scope) => Some(format!(
+            "the record is in {} scope and steward write_scopes is '{}'",
+            scope.kind_str(),
+            write_scopes.as_str()
+        )),
+        Some(_) => None,
+    }
+}
+
+/// `write_scopes = "own_identity"`: every source a write names must be a
+/// record of the scope it writes (`target`), and a create must name at
+/// least one. `None` when the write passes. The sources are the lineage the
+/// model declares; text taken from a record it does not declare is not seen
+/// here.
+fn own_identity_refusal(
+    target: &MemoryScope,
+    sources: &[String],
+    scope_of: impl Fn(&str) -> Option<MemoryScope>,
+    sources_required: bool,
+) -> Option<String> {
+    if sources_required && sources.is_empty() {
+        return Some(
+            "steward write_scopes is 'own_identity' and the op names no source record".to_string(),
+        );
+    }
+    sources
+        .iter()
+        .find(|source| scope_of(source.as_str()).as_ref() != Some(target))
+        .map(|source| {
+            format!(
+                "steward write_scopes is 'own_identity' and its source '{source}' is not a \
+                 record of that scope"
+            )
+        })
+}
+
 impl StewardEngine {
+    /// The scope of each existing record the consolidate ops name, for the
+    /// write limit. Empty without a limit: nothing is read then. A failed
+    /// read leaves the scopes unknown, and the mapper drops an op on a
+    /// record whose scope it does not know.
+    async fn consolidate_record_scopes(
+        &self,
+        raw_ops: &[RawStewardOp],
+        known_ids: &HashSet<String>,
+        run: &mut DreamRun,
+    ) -> HashMap<String, MemoryScope> {
+        if self.config.write_scopes == StewardWriteScopes::All {
+            return HashMap::new();
+        }
+        let ids: Vec<String> = raw_ops
+            .iter()
+            .flat_map(|raw| {
+                raw.id
+                    .iter()
+                    .chain(raw.prior.iter())
+                    .chain(raw.derived_from.iter())
+            })
+            .filter(|id| known_ids.contains(id.as_str()))
+            .cloned()
+            .collect::<BTreeSet<String>>()
+            .into_iter()
+            .collect();
+        if ids.is_empty() {
+            return HashMap::new();
+        }
+        match self.store.records_by_ids(&self.realm, &ids).await {
+            Ok(records) => records
+                .into_iter()
+                .map(|record| (record.id, record.scope))
+                .collect(),
+            Err(err) => {
+                run.skips.push(format!(
+                    "write_scopes: the scopes of the records the ops name could not be read \
+                     ({err}); ops on existing records are dropped"
+                ));
+                HashMap::new()
+            }
+        }
+    }
+
+    /// The backstop behind every door of the write limit: the first op of
+    /// `ops` that would write a scope the limit excludes, described; `None`
+    /// when the group may commit, and at once when there is no limit. The
+    /// doors drop or hold such an op before it gets here, so a hit refuses
+    /// the whole group: a group is one unit. An existing record's scope is
+    /// read from the store; a failed read, or a record the store does not
+    /// hold, refuses the group too.
+    async fn excluded_scope_op(&self, ops: &[StagedOp]) -> Option<String> {
+        let write_scopes = self.config.write_scopes;
+        if write_scopes == StewardWriteScopes::All {
+            return None;
+        }
+        let ids: Vec<String> = ops
+            .iter()
+            .filter_map(|op| match op {
+                StagedOp::Create { .. } => None,
+                StagedOp::Supersede { prior, .. } => Some(prior.clone()),
+                StagedOp::Tombstone { id, .. }
+                | StagedOp::Retier { id, .. }
+                | StagedOp::SetRank { id, .. } => Some(id.clone()),
+            })
+            .collect();
+        let mut scopes: HashMap<String, MemoryScope> = if ids.is_empty() {
+            HashMap::new()
+        } else {
+            match self.store.records_by_ids(&self.realm, &ids).await {
+                Ok(records) => records
+                    .into_iter()
+                    .map(|record| (record.id, record.scope))
+                    .collect(),
+                Err(err) => {
+                    return Some(format!(
+                        "steward write_scopes is '{}' and the scopes of its records could not \
+                         be read ({err})",
+                        write_scopes.as_str()
+                    ));
+                }
+            }
+        };
+        for op in ops {
+            let (target, scope) = match op {
+                StagedOp::Create { id, scope, .. } => {
+                    if let Some(id) = id {
+                        scopes.insert(id.clone(), scope.clone());
+                    }
+                    (None, Some(scope.clone()))
+                }
+                StagedOp::Supersede { id, prior, .. } => {
+                    let scope = scopes.get(prior).cloned();
+                    if let (Some(id), Some(scope)) = (id, scope.as_ref()) {
+                        scopes.insert(id.clone(), scope.clone());
+                    }
+                    (Some(prior.as_str()), scope)
+                }
+                StagedOp::Tombstone { id, .. }
+                | StagedOp::Retier { id, .. }
+                | StagedOp::SetRank { id, .. } => (Some(id.as_str()), scopes.get(id).cloned()),
+            };
+            if let Some(reason) = excluded_target(write_scopes, scope.as_ref()) {
+                let kind = op.kind_str();
+                return Some(match target {
+                    Some(id) => format!("{kind} op on '{id}': {reason}"),
+                    None => format!("{kind} op: {reason}"),
+                });
+            }
+        }
+        None
+    }
+
     /// Stage → validate → commit one atomic op group. Validation failures
     /// drop the whole group loudly (the group is a semantic unit; §8.4
     /// crash semantics guarantee nothing partial lands). Returns committed
@@ -3168,6 +3545,16 @@ impl StewardEngine {
         run: &mut DreamRun,
     ) -> usize {
         if ops.is_empty() {
+            return 0;
+        }
+        if let Some(reason) = self.excluded_scope_op(&ops).await {
+            tracing::warn!(
+                run_id,
+                group,
+                reason,
+                "agent memory steward: group refused by the write limit"
+            );
+            run.skips.push(format!("group '{group}' refused: {reason}"));
             return 0;
         }
         let batch = StagedMutationBatch {
@@ -3318,6 +3705,29 @@ impl StewardEngine {
                 continue;
             }
             match verdict.verdict.as_str() {
+                // The write limit (shell law): a proposal into a scope the
+                // limit excludes is neither committed nor staged for an
+                // operator's approval. It is held, so a later dream judges
+                // it again once the setting allows it. Never silent.
+                "accept" | "promote_pending_gate"
+                    if self.config.write_scopes.excludes(&proposal.scope) =>
+                {
+                    run.skips.push(format!(
+                        "proposal '{}' held: it targets {} scope and steward write_scopes is \
+                         '{}'",
+                        proposal.proposal_id,
+                        proposal.scope.kind_str(),
+                        self.config.write_scopes.as_str()
+                    ));
+                    if self
+                        .store
+                        .set_proposal_status(&self.realm, &proposal.proposal_id, "held")
+                        .await
+                        .is_ok()
+                    {
+                        run.verdicts.proposals_held += 1;
+                    }
+                }
                 // §10.1 deterministic law (shell, not LLM judgment): a
                 // proposal that carried taint at propose time can never be
                 // committed by a plain steward accept — the accept
@@ -3564,6 +3974,23 @@ impl StewardEngine {
             // No verdict event here: a judgment is not an applied outcome.
             // A release or tombstone is reported by the store once its review
             // commits, a promotion by its gate, and a hold changes nothing.
+            //
+            // The write limit: a quarantined record of an excluded scope is
+            // neither released nor tombstoned by the dream (both change that
+            // scope in place); an operator reviews it.
+            if self.config.write_scopes.excludes(&record.scope)
+                && matches!(verdict.verdict.as_str(), "release" | "tombstone")
+            {
+                run.skips.push(format!(
+                    "quarantine {} of '{}' skipped: the record is in {} scope and steward \
+                     write_scopes is '{}'",
+                    verdict.verdict,
+                    record.id,
+                    record.scope.kind_str(),
+                    self.config.write_scopes.as_str()
+                ));
+                continue;
+            }
             match verdict.verdict.as_str() {
                 // Release and tombstone run the store's review transaction,
                 // the one an operator's decision runs (memory/review.rs):
@@ -3778,6 +4205,17 @@ impl StewardEngine {
             ));
             return false;
         };
+        // The write limit: no promotion into an excluded scope is staged
+        // for an operator to approve.
+        if self.config.write_scopes.excludes(&scope) {
+            run.skips.push(format!(
+                "gated promotion of '{source_id}' not staged: it targets {} scope and steward \
+                 write_scopes is '{}'",
+                scope.kind_str(),
+                self.config.write_scopes.as_str()
+            ));
+            return false;
+        }
         let title = record.title.clone();
         let mut ops = vec![StagedOp::Create {
             id: None,
@@ -3905,6 +4343,25 @@ impl StewardEngine {
                 realm: self.realm.clone(),
                 token: promotion.stage_token.clone(),
             };
+            // The write limit wins over an approval: a promotion staged
+            // while the steward had no limit is not committed into a scope
+            // the limit now excludes. Its batch is discarded and it is
+            // settled as expired.
+            if self.config.write_scopes != StewardWriteScopes::All
+                && matches!(promotion.scope_kind.as_str(), "mob" | "realm")
+            {
+                tracing::warn!(
+                    pending_id = %notice.pending_id,
+                    record_id = %promotion.record_id,
+                    scope_kind = %promotion.scope_kind,
+                    write_scopes = self.config.write_scopes.as_str(),
+                    "agent memory steward: approved promotion not committed: the steward's \
+                     write_scopes excludes its target scope; marking expired"
+                );
+                let _ = self.store.discard_stage(token).await;
+                self.settle_promotion(&notice.pending_id, "expired").await;
+                return;
+            }
             match self.store.commit(token).await {
                 Ok(receipt) => {
                     self.settle_promotion(&notice.pending_id, "committed").await;
@@ -4253,6 +4710,18 @@ impl StewardEngine {
                             "harvest promote of quarantined '{}' downgraded to keep \
                              (quarantine promotion is gated)",
                             record.id
+                        ));
+                        continue;
+                    }
+                    // The write limit: nothing is promoted into mob scope.
+                    // The verdict becomes a keep, so the source is not
+                    // tombstoned either.
+                    if self.config.write_scopes != StewardWriteScopes::All {
+                        run.skips.push(format!(
+                            "harvest promote of '{}' downgraded to keep: steward write_scopes \
+                             is '{}'",
+                            record.id,
+                            self.config.write_scopes.as_str()
                         ));
                         continue;
                     }
@@ -4684,7 +5153,10 @@ fn now_ms() -> u64 {
 pub mod eval {
     use std::collections::{HashMap, HashSet};
 
-    use super::{ConsolidateReply, DreamRun, map_consolidate_ops_impl, parse_object};
+    use super::{
+        ConsolidateReply, ConsolidateWriteLaw, DreamRun, StewardWriteScopes,
+        map_consolidate_ops_impl, parse_object,
+    };
     use crate::memory::records::{MemoryAuthor, MemoryScope, RecordStatus, TrustTier};
     use crate::memory::staged::{
         DEFAULT_TOMBSTONE_RECREATE_WINDOW_MS, StagedBatchKind, StagedBatchView,
@@ -4722,6 +5194,12 @@ pub mod eval {
             run_id,
             &mut run,
             allow_operator,
+            // A reply mapped outside a dream: no partition, no write limit.
+            &ConsolidateWriteLaw {
+                partition: None,
+                write_scopes: StewardWriteScopes::All,
+                record_scopes: &HashMap::new(),
+            },
         );
         Ok(EvalConsolidateOutcome {
             ops,
@@ -4856,6 +5334,8 @@ mod tests {
     use futures::stream;
     use meerkat_client::types::LlmStream;
     use std::sync::Mutex as StdMutex;
+
+    mod removal_binding;
 
     const REALM: &str = "team";
 
@@ -5449,6 +5929,24 @@ mod tests {
         pending_ids: Vec<&str>,
         gate: Arc<dyn LlmWriteGate>,
     ) -> Fixture {
+        build_fixture_with_config(
+            llm,
+            pending_ids,
+            gate,
+            StewardConfig {
+                enabled: true,
+                min_signals: 1,
+                ..StewardConfig::default()
+            },
+        )
+    }
+
+    fn build_fixture_with_config(
+        llm: ScriptedLlm,
+        pending_ids: Vec<&str>,
+        gate: Arc<dyn LlmWriteGate>,
+        config: StewardConfig,
+    ) -> Fixture {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = SqliteAgentMemoryStore::open(dir.path()).expect("store");
         store.set_llm_write_gate(gate);
@@ -5461,11 +5959,6 @@ mod tests {
         let gating = Arc::new(ScriptedGatingBridge::new(pending_ids));
         let conflicts = Arc::new(CapturingConflictBridge::default());
         let transcripts = Arc::new(ScriptedTranscripts::new());
-        let config = StewardConfig {
-            enabled: true,
-            min_signals: 1,
-            ..StewardConfig::default()
-        };
         let engine = StewardEngine::new(
             StewardProfile::embedded_default(),
             config,
@@ -9163,6 +9656,11 @@ mod tests {
                 "run-1",
                 &mut run,
                 routing,
+                &ConsolidateWriteLaw {
+                    partition: None,
+                    write_scopes: StewardWriteScopes::All,
+                    record_scopes: &HashMap::new(),
+                },
             );
             assert!(
                 ops.is_empty(),
@@ -10697,6 +11195,842 @@ mod tests {
             failure_row.detail
         );
         assert!(failure_row.completed_at_ms > 0);
+    }
+
+    // -- the steward's write limit (`write_scopes`) -------------------------------
+
+    mod write_limit_doors;
+
+    fn limited_config(write_scopes: StewardWriteScopes) -> StewardConfig {
+        StewardConfig {
+            enabled: true,
+            min_signals: 1,
+            write_scopes,
+            ..StewardConfig::default()
+        }
+    }
+
+    fn build_fixture_limited(
+        replies: Vec<String>,
+        pending_ids: Vec<&str>,
+        write_scopes: StewardWriteScopes,
+    ) -> Fixture {
+        build_fixture_with_config(
+            ScriptedLlm::new(replies),
+            pending_ids,
+            Arc::new(TaintedSessionGate),
+            limited_config(write_scopes),
+        )
+    }
+
+    /// A second engine over a fixture's store and model, as a restart with
+    /// another configuration or roster is.
+    fn engine_over(
+        fixture: &Fixture,
+        config: StewardConfig,
+        mobs: Arc<dyn MobPurposeSource>,
+    ) -> Arc<StewardEngine> {
+        Arc::new(
+            StewardEngine::new(
+                StewardProfile::embedded_default(),
+                config,
+                Arc::new(ScriptedHandle {
+                    client: fixture.llm.clone(),
+                }),
+                fixture.store.clone(),
+                fixture.transcripts.clone(),
+                REALM,
+            )
+            .with_mob_context(mobs),
+        )
+    }
+
+    fn consolidate_with(
+        ops: serde_json::Value,
+        proposal_verdicts: serde_json::Value,
+        quarantine_verdicts: serde_json::Value,
+        working_set: serde_json::Value,
+    ) -> String {
+        json_reply(serde_json::json!({
+            "ops": ops,
+            "proposal_verdicts": proposal_verdicts,
+            "quarantine_verdicts": quarantine_verdicts,
+            "open_loop_escalations": [], "contradictions": [],
+            "working_set": working_set
+        }))
+    }
+
+    fn script_consolidate(fixture: &Fixture, reply: String) {
+        let mut replies = fixture.llm.replies.lock().unwrap();
+        let slot = replies
+            .iter_mut()
+            .find(|reply| reply.as_str() == "PLACEHOLDER-CONSOLIDATE")
+            .expect("consolidate slot");
+        *slot = reply;
+    }
+
+    async fn completed_dream(engine: &Arc<StewardEngine>) -> DreamRun {
+        engine.note_session_completed();
+        let outcome = engine.dream_now().await;
+        let DreamOutcome::Completed(run) = outcome else {
+            panic!("dream must complete: {outcome:?}");
+        };
+        run
+    }
+
+    async fn titles_in(fixture: &Fixture, scope: &MemoryScope) -> Vec<String> {
+        fixture
+            .store
+            .manifest(std::slice::from_ref(scope), ManifestTier::Full)
+            .await
+            .expect("manifest")
+            .into_iter()
+            .map(|meta| meta.title)
+            .collect()
+    }
+
+    async fn record_of(fixture: &Fixture, id: &str) -> MemoryRecord {
+        fixture
+            .store
+            .records_by_ids(REALM, &[id.to_string()])
+            .await
+            .expect("read")
+            .remove(0)
+    }
+
+    fn limit_skips(run: &DreamRun) -> usize {
+        run.skips
+            .iter()
+            .filter(|skip| skip.contains("write_scopes"))
+            .count()
+    }
+
+    /// One dream through three doors into mob scope: a consolidate create
+    /// (beside a create in an identity's scope), the plain accept of a mob
+    /// proposal, and a harvest promotion (beside a harvest tombstone).
+    async fn mob_doors_dream(write_scopes: StewardWriteScopes) -> (Fixture, DreamRun) {
+        let fixture = build_fixture_limited(
+            vec![
+                empty_gather(),
+                "PLACEHOLDER-CONSOLIDATE".to_string(),
+                json_reply(serde_json::json!([
+                    {"record_id": "mem-r1", "verdict": "promote", "rationale": "durable"},
+                    {"record_id": "mem-r2", "verdict": "tombstone", "rationale": "stale"}
+                ])),
+            ],
+            vec![],
+            write_scopes,
+        );
+        seed_active(
+            &fixture.store,
+            "mem-r1",
+            &identity_scope("identity:retiree"),
+            "Shared deploy gotcha",
+            "the whole mob needs this",
+        )
+        .await;
+        seed_active(
+            &fixture.store,
+            "mem-r2",
+            &identity_scope("identity:retiree"),
+            "My scratch note",
+            "member-local trivia",
+        )
+        .await;
+        let proposal_id = fixture
+            .store
+            .propose(
+                &mob_scope(),
+                new_record("Refund gotcha", "use finance_approve first"),
+                MemoryAuthor::Agent {
+                    identity: "identity:worker".to_string(),
+                },
+            )
+            .await
+            .expect("propose");
+        fixture
+            .engine
+            .note_identity_retired("identity:retiree", Some("sess-r"), "retire")
+            .await;
+        script_consolidate(
+            &fixture,
+            consolidate_with(
+                serde_json::json!([
+                    {"op": "create", "kind": "fact",
+                     "scope": {"kind": "mob", "key": "mob:main"},
+                     "title": "Shared insight", "body": "everyone should know this"},
+                    {"op": "create", "kind": "fact",
+                     "scope": {"kind": "identity", "key": "identity:worker"},
+                     "title": "Worker-only insight", "body": "the worker should know this"}
+                ]),
+                serde_json::json!([
+                    {"proposal_id": proposal_id, "verdict": "accept", "rationale": "useful"}
+                ]),
+                serde_json::json!([]),
+                serde_json::json!([]),
+            ),
+        );
+        let run = completed_dream(&fixture.engine).await;
+        (fixture, run)
+    }
+
+    /// Without a limit the three doors commit into mob scope, as before the
+    /// key existed.
+    #[tokio::test]
+    async fn write_scopes_all_commits_into_mob_scope_as_before() {
+        let (fixture, run) = mob_doors_dream(StewardWriteScopes::All).await;
+        let mut titles = mob_titles(&fixture).await;
+        titles.sort();
+        assert_eq!(
+            titles,
+            vec!["Refund gotcha", "Shared deploy gotcha", "Shared insight"],
+            "{:?}",
+            run.skips
+        );
+        assert_eq!(limit_skips(&run), 0, "{:?}", run.skips);
+        assert_eq!(
+            record_of(&fixture, "mem-r1").await.status,
+            RecordStatus::Tombstoned
+        );
+    }
+
+    #[tokio::test]
+    async fn write_scopes_identity_drops_a_consolidate_create_into_mob_scope() {
+        let (fixture, run) = mob_doors_dream(StewardWriteScopes::Identity).await;
+        assert!(
+            !mob_titles(&fixture)
+                .await
+                .contains(&"Shared insight".to_string()),
+            "{:?}",
+            run.skips
+        );
+        // One dropped op is not a dropped group: the identity create lands.
+        assert!(
+            titles_in(&fixture, &identity_scope("identity:worker"))
+                .await
+                .contains(&"Worker-only insight".to_string()),
+            "{:?}",
+            run.skips
+        );
+        assert!(
+            run.skips
+                .iter()
+                .any(|skip| skip.contains("create op") && skip.contains("write_scopes")),
+            "{:?}",
+            run.skips
+        );
+    }
+
+    #[tokio::test]
+    async fn write_scopes_identity_holds_the_accept_of_a_mob_proposal() {
+        let (fixture, run) = mob_doors_dream(StewardWriteScopes::Identity).await;
+        assert!(
+            !mob_titles(&fixture)
+                .await
+                .contains(&"Refund gotcha".to_string()),
+            "{:?}",
+            run.skips
+        );
+        assert_eq!(run.verdicts.proposals_accepted, 0, "{:?}", run.skips);
+        assert_eq!(run.verdicts.proposals_held, 1, "{:?}", run.skips);
+        let proposals = fixture
+            .store
+            .pending_proposals(REALM, 8)
+            .await
+            .expect("proposals");
+        assert_eq!(proposals.len(), 1, "the proposal waits for a later dream");
+        assert_eq!(proposals[0].status, "held");
+        assert!(
+            run.skips
+                .iter()
+                .any(|skip| skip.contains("proposal") && skip.contains("write_scopes")),
+            "{:?}",
+            run.skips
+        );
+    }
+
+    #[tokio::test]
+    async fn write_scopes_identity_keeps_a_harvest_promote_and_its_source() {
+        let (fixture, run) = mob_doors_dream(StewardWriteScopes::Identity).await;
+        assert!(mob_titles(&fixture).await.is_empty(), "{:?}", run.skips);
+        // The promotion became a keep: its source is not tombstoned.
+        assert_eq!(
+            record_of(&fixture, "mem-r1").await.status,
+            RecordStatus::Active,
+            "{:?}",
+            run.skips
+        );
+        // The interview's other verdict still applies, and the interview ends.
+        assert_eq!(
+            record_of(&fixture, "mem-r2").await.status,
+            RecordStatus::Tombstoned
+        );
+        assert_eq!(run.verdicts.harvests_completed, 1);
+        assert!(
+            fixture
+                .store
+                .pending_harvests(REALM, 8)
+                .await
+                .expect("harvests")
+                .is_empty()
+        );
+        assert!(
+            run.skips
+                .iter()
+                .any(|skip| skip.contains("harvest promote") && skip.contains("write_scopes")),
+            "{:?}",
+            run.skips
+        );
+    }
+
+    /// In-place changes of a mob record put new text into, or take text out
+    /// of, a scope the limit keeps the steward out of: each is dropped, and
+    /// so is its rank.
+    #[tokio::test]
+    async fn write_scopes_identity_drops_supersede_tombstone_and_retier_of_a_mob_record() {
+        let fixture = build_fixture_limited(
+            vec![
+                empty_gather(),
+                consolidate_with(
+                    serde_json::json!([
+                        {"op": "supersede", "id": "s1", "prior": "mem-m1", "kind": "fact",
+                         "title": "Reworded shared note", "body": "new text for everyone"},
+                        {"op": "tombstone", "id": "mem-m2", "rationale": "stale"},
+                        {"op": "retier", "id": "mem-m3", "trust": "untrusted",
+                         "rationale": "doubtful"},
+                        {"op": "tombstone", "id": "mem-w1", "rationale": "stale"}
+                    ]),
+                    serde_json::json!([]),
+                    serde_json::json!([]),
+                    serde_json::json!(["mem-m1", "mem-w2"]),
+                ),
+            ],
+            vec![],
+            StewardWriteScopes::Identity,
+        );
+        for (id, title) in [
+            ("mem-m1", "Shared note one"),
+            ("mem-m2", "Shared note two"),
+            ("mem-m3", "Shared note three"),
+        ] {
+            seed_active(&fixture.store, id, &mob_scope(), title, "shared body").await;
+        }
+        for (id, title) in [("mem-w1", "Worker note one"), ("mem-w2", "Worker note two")] {
+            seed_active(
+                &fixture.store,
+                id,
+                &identity_scope("identity:worker"),
+                title,
+                "worker body",
+            )
+            .await;
+        }
+        let run = completed_dream(&fixture.engine).await;
+
+        let m1 = record_of(&fixture, "mem-m1").await;
+        assert_eq!(m1.status, RecordStatus::Active, "{:?}", run.skips);
+        assert_eq!(m1.working_set_rank, None, "{:?}", run.skips);
+        assert_eq!(
+            record_of(&fixture, "mem-m2").await.status,
+            RecordStatus::Active,
+            "{:?}",
+            run.skips
+        );
+        assert_eq!(
+            record_of(&fixture, "mem-m3").await.trust,
+            TrustTier::AgentObserved,
+            "{:?}",
+            run.skips
+        );
+        let mut titles = mob_titles(&fixture).await;
+        titles.sort();
+        assert_eq!(
+            titles,
+            vec!["Shared note one", "Shared note three", "Shared note two"]
+        );
+        // The ops on the identity's records apply.
+        assert_eq!(
+            record_of(&fixture, "mem-w1").await.status,
+            RecordStatus::Tombstoned,
+            "{:?}",
+            run.skips
+        );
+        assert_eq!(
+            record_of(&fixture, "mem-w2").await.working_set_rank,
+            Some(1)
+        );
+        assert_eq!(run.ops_committed, 2, "{:?}", run.skips);
+        assert_eq!(limit_skips(&run), 4, "{:?}", run.skips);
+    }
+
+    /// No promotion is staged for an operator to approve: not for a
+    /// quarantined record, not for a proposal, not for the accept of a
+    /// proposal that was tainted when it was made.
+    #[tokio::test]
+    async fn write_scopes_identity_stages_no_promotion_gate() {
+        let fixture = build_fixture_limited(
+            vec![empty_gather(), "PLACEHOLDER-CONSOLIDATE".to_string()],
+            vec!["gate-1", "gate-2", "gate-3"],
+            StewardWriteScopes::Identity,
+        );
+        let quarantined = seed_quarantined(
+            &fixture.store,
+            "identity:worker",
+            "Quarantined fact",
+            "body of the quarantined fact",
+        )
+        .await;
+        let agent = MemoryAuthor::Agent {
+            identity: "identity:worker".to_string(),
+        };
+        let clean = fixture
+            .store
+            .propose(
+                &mob_scope(),
+                new_record("Clean proposal", "a clean body"),
+                agent.clone(),
+            )
+            .await
+            .expect("propose");
+        let mut tainted_record = new_record("Tainted proposal", "a tainted body");
+        tainted_record.evidence = vec![EvidenceRef {
+            session_id: "tainted-sess".to_string(),
+            generation: 0,
+            revision: None,
+            range: None,
+        }];
+        let tainted = fixture
+            .store
+            .propose(&mob_scope(), tainted_record, agent)
+            .await
+            .expect("propose");
+        script_consolidate(
+            &fixture,
+            consolidate_with(
+                serde_json::json!([]),
+                serde_json::json!([
+                    {"proposal_id": clean, "verdict": "promote_pending_gate",
+                     "rationale": "worth sharing"},
+                    {"proposal_id": tainted, "verdict": "accept", "rationale": "worth sharing"}
+                ]),
+                serde_json::json!([
+                    {"record_id": quarantined, "verdict": "promote_pending_gate",
+                     "rationale": "worth sharing", "target_mob": "mob:main"}
+                ]),
+                serde_json::json!([]),
+            ),
+        );
+        let run = completed_dream(&fixture.engine).await;
+
+        assert_eq!(
+            fixture.gating.calls.lock().unwrap().len(),
+            0,
+            "{:?}",
+            run.skips
+        );
+        assert!(
+            fixture
+                .store
+                .pending_promotions(REALM)
+                .await
+                .expect("promotions")
+                .is_empty()
+        );
+        assert!(mob_titles(&fixture).await.is_empty());
+        assert_eq!(run.verdicts.quarantine_gated, 0);
+        assert_eq!(run.verdicts.proposals_gated, 0);
+        assert!(matches!(
+            record_of(&fixture, &quarantined).await.status,
+            RecordStatus::Quarantined { .. }
+        ));
+        let proposals = fixture
+            .store
+            .pending_proposals(REALM, 8)
+            .await
+            .expect("proposals");
+        assert_eq!(proposals.len(), 2);
+        assert!(
+            proposals.iter().all(|proposal| proposal.status == "held"),
+            "{proposals:?}"
+        );
+        assert_eq!(limit_skips(&run), 3, "{:?}", run.skips);
+    }
+
+    /// A promotion staged while the steward had no limit is not committed
+    /// by an approval that arrives once it has one: the limit wins.
+    #[tokio::test]
+    async fn write_scopes_identity_expires_a_promotion_staged_before_the_limit() {
+        let fixture = build_fixture(
+            vec![empty_gather(), "PLACEHOLDER-CONSOLIDATE".to_string()],
+            vec!["gate-1"],
+        );
+        let quarantined = seed_quarantined(
+            &fixture.store,
+            "identity:worker",
+            "Quarantined fact",
+            "body of the quarantined fact",
+        )
+        .await;
+        script_consolidate(
+            &fixture,
+            consolidate_with(
+                serde_json::json!([]),
+                serde_json::json!([]),
+                serde_json::json!([
+                    {"record_id": quarantined, "verdict": "promote_pending_gate",
+                     "rationale": "worth sharing", "target_mob": "mob:main"}
+                ]),
+                serde_json::json!([]),
+            ),
+        );
+        let run = completed_dream(&fixture.engine).await;
+        assert_eq!(run.verdicts.quarantine_gated, 1, "{:?}", run.skips);
+
+        let limited = engine_over(
+            &fixture,
+            limited_config(StewardWriteScopes::Identity),
+            Arc::new(SingleMobSource),
+        );
+        limited
+            .resolve_gating_notice(GatingResolutionNotice {
+                pending_id: "gate-1".to_string(),
+                action_id: "gate-action-000001".to_string(),
+                approved: true,
+                next_pending_id: None,
+                cause: "approval_decided".to_string(),
+            })
+            .await;
+
+        assert!(mob_titles(&fixture).await.is_empty());
+        assert!(matches!(
+            record_of(&fixture, &quarantined).await.status,
+            RecordStatus::Quarantined { .. }
+        ));
+        assert!(
+            fixture
+                .store
+                .pending_promotions(REALM)
+                .await
+                .expect("promotions")
+                .is_empty(),
+            "the promotion is settled, not left pending"
+        );
+        // Settled as expired, which is what an operator reads of it.
+        let status: String = rusqlite::Connection::open(fixture.store.path_for_realm(REALM))
+            .expect("open")
+            .query_row(
+                "SELECT status FROM pending_promotions WHERE pending_id = 'gate-1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("the promotion's row is kept");
+        assert_eq!(status, "expired");
+    }
+
+    /// The backstop behind every door: a group that still holds an op for a
+    /// scope the limit excludes commits nothing.
+    #[tokio::test]
+    async fn write_scopes_identity_commit_group_refuses_an_excluded_scope_op() {
+        let fixture = build_fixture_limited(Vec::new(), Vec::new(), StewardWriteScopes::Identity);
+        seed_active(
+            &fixture.store,
+            "mem-m1",
+            &mob_scope(),
+            "Shared note one",
+            "shared body",
+        )
+        .await;
+        let mut run = DreamRun::default();
+        let created = fixture
+            .engine
+            .commit_group(
+                vec![
+                    StagedOp::Create {
+                        id: None,
+                        scope: identity_scope("identity:worker"),
+                        record: new_record("Worker note", "worker body"),
+                        trust: TrustTier::AgentObserved,
+                        derived_from: Vec::new(),
+                        rationale: None,
+                        created_at_ms: None,
+                        updated_at_ms: None,
+                    },
+                    StagedOp::Create {
+                        id: None,
+                        scope: mob_scope(),
+                        record: new_record("Shared note", "shared body two"),
+                        trust: TrustTier::AgentObserved,
+                        derived_from: Vec::new(),
+                        rationale: None,
+                        created_at_ms: None,
+                        updated_at_ms: None,
+                    },
+                ],
+                StagedBatchKind::FreshWrite,
+                "run-probe",
+                "probe-create",
+                &mut run,
+            )
+            .await;
+        let tombstoned = fixture
+            .engine
+            .commit_group(
+                vec![StagedOp::Tombstone {
+                    id: "mem-m1".to_string(),
+                    rationale: None,
+                }],
+                StagedBatchKind::FreshWrite,
+                "run-probe",
+                "probe-tombstone",
+                &mut run,
+            )
+            .await;
+
+        assert_eq!((created, tombstoned), (0, 0), "{:?}", run.skips);
+        assert_eq!(mob_titles(&fixture).await, vec!["Shared note one"]);
+        assert!(
+            titles_in(&fixture, &identity_scope("identity:worker"))
+                .await
+                .is_empty(),
+            "the group is one unit: nothing of it commits"
+        );
+        assert_eq!(limit_skips(&run), 2, "{:?}", run.skips);
+    }
+
+    /// One dream under `own_identity`: two creates and a supersede that
+    /// leave the scope of their sources, or name none, beside a merge and a
+    /// supersede that stay inside one identity.
+    async fn own_identity_dream() -> (Fixture, DreamRun) {
+        let fixture = build_fixture_limited(
+            vec![
+                empty_gather(),
+                consolidate_with(
+                    serde_json::json!([
+                        {"op": "create", "id": "c1", "kind": "fact",
+                         "scope": {"kind": "identity", "key": "identity:other"},
+                         "title": "Copied to the other", "body": "what the worker knows",
+                         "derived_from": ["mem-a"]},
+                        {"op": "create", "id": "c2", "kind": "fact",
+                         "scope": {"kind": "identity", "key": "identity:worker"},
+                         "title": "Unsourced note", "body": "text with no declared source"},
+                        {"op": "create", "id": "c3", "kind": "fact",
+                         "scope": {"kind": "identity", "key": "identity:worker"},
+                         "title": "Merged worker fact", "body": "a and b in one",
+                         "derived_from": ["mem-a", "mem-b"]},
+                        {"op": "supersede", "id": "s1", "prior": "mem-o", "kind": "fact",
+                         "title": "Other fact, widened", "body": "now with the worker's text",
+                         "derived_from": ["mem-a"]},
+                        {"op": "supersede", "id": "s2", "prior": "mem-b", "kind": "fact",
+                         "title": "Worker fact B, reworded", "body": "b in better words"}
+                    ]),
+                    serde_json::json!([]),
+                    serde_json::json!([]),
+                    serde_json::json!([]),
+                ),
+            ],
+            vec![],
+            StewardWriteScopes::OwnIdentity,
+        );
+        for (id, identity, title) in [
+            ("mem-a", "identity:worker", "Worker fact A"),
+            ("mem-b", "identity:worker", "Worker fact B"),
+            ("mem-o", "identity:other", "Other fact"),
+        ] {
+            seed_active(
+                &fixture.store,
+                id,
+                &identity_scope(identity),
+                title,
+                &format!("body of {title}"),
+            )
+            .await;
+        }
+        let run = completed_dream(&fixture.engine).await;
+        (fixture, run)
+    }
+
+    #[tokio::test]
+    async fn own_identity_drops_a_create_into_another_identitys_scope() {
+        let (fixture, run) = own_identity_dream().await;
+        assert_eq!(
+            titles_in(&fixture, &identity_scope("identity:other")).await,
+            vec!["Other fact"],
+            "neither the create nor the supersede with a source of another identity lands: {:?}",
+            run.skips
+        );
+    }
+
+    #[tokio::test]
+    async fn own_identity_drops_a_create_without_sources() {
+        let (fixture, run) = own_identity_dream().await;
+        assert!(
+            !titles_in(&fixture, &identity_scope("identity:worker"))
+                .await
+                .contains(&"Unsourced note".to_string()),
+            "{:?}",
+            run.skips
+        );
+        assert_eq!(limit_skips(&run), 3, "{:?}", run.skips);
+    }
+
+    #[tokio::test]
+    async fn own_identity_keeps_a_merge_inside_one_identity() {
+        let (fixture, run) = own_identity_dream().await;
+        let mut titles = titles_in(&fixture, &identity_scope("identity:worker")).await;
+        titles.sort();
+        assert_eq!(
+            titles,
+            vec![
+                "Merged worker fact",
+                "Worker fact A",
+                "Worker fact B, reworded"
+            ],
+            "{:?}",
+            run.skips
+        );
+        assert_eq!(run.ops_committed, 2, "{:?}", run.skips);
+    }
+
+    /// With no setting at all: a create into a scope the dream does not
+    /// cover is dropped, and the run's skips record it in the words of a
+    /// create whose scope cannot be used: no key, no kind, no reason.
+    #[tokio::test]
+    async fn dream_drops_a_create_into_a_scope_it_does_not_cover() {
+        let fixture = build_fixture(
+            vec![
+                empty_gather(),
+                consolidate_with(
+                    serde_json::json!([
+                        {"op": "create", "kind": "fact",
+                         "scope": {"kind": "identity", "key": "identity:alice-side"},
+                         "title": "Note for the side chat", "body": "from the shared records"},
+                        {"op": "create", "kind": "fact",
+                         "scope": {"kind": "identity", "key": "identity:worker"},
+                         "title": "Worker note", "body": "for the shared member"}
+                    ]),
+                    serde_json::json!([]),
+                    serde_json::json!([]),
+                    serde_json::json!([]),
+                ),
+            ],
+            vec![],
+        );
+        let engine = engine_over(
+            &fixture,
+            limited_config(StewardWriteScopes::All),
+            Arc::new(PrivateRosterSource),
+        );
+        let run = completed_dream(&engine).await;
+
+        assert!(
+            titles_in(&fixture, &identity_scope("identity:alice-side"))
+                .await
+                .is_empty(),
+            "{:?}",
+            run.skips
+        );
+        assert_eq!(
+            titles_in(&fixture, &identity_scope("identity:worker")).await,
+            vec!["Worker note"],
+            "{:?}",
+            run.skips
+        );
+        assert_eq!(
+            run.skips
+                .iter()
+                .filter(|skip| skip.as_str() == UNUSABLE_SCOPE_SKIP)
+                .count(),
+            1,
+            "{:?}",
+            run.skips
+        );
+        assert!(
+            !run.skips
+                .iter()
+                .any(|skip| skip.contains("alice-side") || skip.contains("does not cover")),
+            "no skip names a key or the cover: {:?}",
+            run.skips
+        );
+    }
+
+    /// With no setting at all: a per-mob dream's create lands in its own
+    /// mob's scope or one of its members', nowhere else.
+    #[tokio::test]
+    async fn per_mob_dream_drops_a_create_outside_its_partition() {
+        let fixture = build_fixture(Vec::new(), Vec::new());
+        let engine = engine_over(
+            &fixture,
+            StewardConfig {
+                per_mob: true,
+                ..limited_config(StewardWriteScopes::All)
+            },
+            Arc::new(TwoMobSource),
+        );
+        let partitions = engine.dream_partitions();
+        assert_eq!(partitions.len(), 3, "alpha + beta + remainder");
+        let create = |kind: &str, key: &str| {
+            serde_json::json!({
+                "op": "create", "kind": "fact",
+                "scope": {"kind": kind, "key": key},
+                "title": format!("Note in {kind} {key}"), "body": "a body"
+            })
+        };
+        let raw_ops: Vec<RawStewardOp> = serde_json::from_value(serde_json::json!([
+            create("identity", "b1"),
+            create("mob", "beta"),
+            create("identity", "a1"),
+            create("mob", "alpha"),
+        ]))
+        .expect("raw ops");
+        let mut run = DreamRun::default();
+        let (ops, _) = map_consolidate_ops_impl(
+            REALM,
+            raw_ops,
+            &HashSet::<String>::new(),
+            &HashSet::<String>::new(),
+            "run-1",
+            &mut run,
+            false,
+            &ConsolidateWriteLaw {
+                partition: Some(&partitions[0]),
+                write_scopes: StewardWriteScopes::All,
+                record_scopes: &HashMap::new(),
+            },
+        );
+        let targets: Vec<(String, String)> = ops
+            .iter()
+            .filter_map(|op| match op {
+                StagedOp::Create { scope, .. } => {
+                    Some((scope.kind_str().to_string(), scope.key().to_string()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            targets,
+            vec![
+                ("identity".to_string(), "a1".to_string()),
+                ("mob".to_string(), "alpha".to_string())
+            ],
+            "{:?}",
+            run.skips
+        );
+        assert_eq!(
+            run.skips
+                .iter()
+                .filter(|skip| skip.as_str() == UNUSABLE_SCOPE_SKIP)
+                .count(),
+            2,
+            "{:?}",
+            run.skips
+        );
+        assert!(
+            !run.skips
+                .iter()
+                .any(|skip| skip.contains("does not cover") || skip.contains("b1")),
+            "{:?}",
+            run.skips
+        );
     }
 
     /// No dream covers an identity scope kept under an owner

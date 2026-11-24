@@ -864,6 +864,8 @@ const newest = await handle.recallAgentMemory("scout", {
 });
 ```
 
+A record of a shared scope is retired with `handle.forgetAgentMemoryInScope({ kind: "mob", key: mobId }, memoryId, { realm })` (or `{ kind: "realm" }`), and the content of a retired record is blanked for good with `handle.purgeAgentMemory({ kind: "identity", key: identity }, memoryId, { realm })`, which answers `{ memoryId, purged, purgedIds }`. The memory steward's write limit is `agentMemory({ steward: { writeScopes: "all" | "identity" | "own_identity" } })`. See [Removing and purging records](/concepts/memory#removing-and-purging-records) and [Where the memory steward writes](/concepts/memory#where-the-memory-steward-writes).
+
 ## Type definitions
 
 The SDK exports camelCase result types. Its wire parsers translate snake_case

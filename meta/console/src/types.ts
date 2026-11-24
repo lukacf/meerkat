@@ -618,6 +618,23 @@ export interface MemoryFullRecord extends Omit<MemoryPanelRecord, "body_bytes"> 
   body: string;
   /// Detail-only: the content hash a quarantine decision binds to.
   content_hash?: string;
+  /// Detail-only: the record's content was purged (a retired record with no
+  /// text left).
+  purged?: boolean;
+}
+
+/// The answer to meta/agent_memory/forget_in_scope.
+export interface MemoryForgetInScopeResult {
+  memory_id: string;
+  deleted: boolean;
+}
+
+/// The answer to meta/agent_memory/purge: every record whose content was
+/// blanked (the record and the earlier versions it replaced).
+export interface MemoryPurgeResult {
+  memory_id: string;
+  purged: boolean;
+  purged_ids: string[];
 }
 
 export interface MemoryInjectionEntry {

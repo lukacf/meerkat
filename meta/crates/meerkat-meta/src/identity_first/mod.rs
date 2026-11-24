@@ -30,9 +30,10 @@ pub use adapters::{
 pub use agent_memory::{
     AgentMemoryConfig, AgentMemoryCustomizer, AgentMemoryError, AgentMemoryForgetResult,
     AgentMemoryLlmWrites, AgentMemoryOperatorScope, AgentMemoryPerTurnInjection,
-    AgentMemoryProvider, AgentMemoryRecallFailurePolicy, AgentMemoryRecallRequest,
-    AgentMemoryRecord, AgentMemoryRuntimeInjector, AgentMemorySelection, AuthoredWriteReceipt,
-    MEMORY_TOOL_NAME, NewAgentMemory,
+    AgentMemoryProvider, AgentMemoryPurgeError, AgentMemoryPurgeResult,
+    AgentMemoryRecallFailurePolicy, AgentMemoryRecallRequest, AgentMemoryRecord,
+    AgentMemoryRuntimeInjector, AgentMemorySelection, AuthoredWriteReceipt, MEMORY_TOOL_NAME,
+    NewAgentMemory,
 };
 pub use bridge::{
     ActorCallObservation, ActorCommandTimeout, BoundGovernedInput, BridgeAdmissionError,

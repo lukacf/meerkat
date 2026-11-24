@@ -58,12 +58,17 @@ use crate::unified_runtime::default_mob_methods_tests::{
 const HANDLER_FILES: &[(&str, &str)] = &[
     ("rpc.rs", include_str!("../rpc.rs")),
     ("rpc/console_ingress.rs", include_str!("console_ingress.rs")),
+    ("rpc/forget_methods.rs", include_str!("forget_methods.rs")),
     ("rpc/gating_methods.rs", include_str!("gating_methods.rs")),
     (
         "rpc/identity_methods.rs",
         include_str!("identity_methods.rs"),
     ),
     ("rpc/memory_methods.rs", include_str!("memory_methods.rs")),
+    (
+        "rpc/memory_scope_methods.rs",
+        include_str!("memory_scope_methods.rs"),
+    ),
     ("rpc/mob_addressing.rs", include_str!("mob_addressing.rs")),
     ("rpc/mob_hosting.rs", include_str!("mob_hosting.rs")),
     ("rpc/mob_methods.rs", include_str!("mob_methods.rs")),
@@ -72,6 +77,7 @@ const HANDLER_FILES: &[(&str, &str)] = &[
         include_str!("operator_methods.rs"),
     ),
     ("rpc/params.rs", include_str!("params.rs")),
+    ("rpc/purge_methods.rs", include_str!("purge_methods.rs")),
     (
         "rpc/question_set_methods.rs",
         include_str!("question_set_methods.rs"),

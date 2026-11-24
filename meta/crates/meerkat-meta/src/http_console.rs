@@ -3,10 +3,13 @@
 pub(crate) mod audit;
 mod every_mob;
 mod mcp_apps;
+mod memory_forget;
+mod memory_purge;
 mod mobs_selector;
 mod question_sets;
 mod row_key;
 pub(crate) mod schedules;
+mod scoped_memory;
 mod shared_panels;
 mod timeline_of_mobs;
 pub use mcp_apps::ConsoleToolApplicationIngress;
@@ -9252,9 +9255,11 @@ fn is_console_mutating_rpc_method(method: &str) -> bool {
             | "meta/schedule/pause"
             | "meta/schedule/resume"
             | "meta/schedule/delete"
+            | "meta/agent_memory/purge"
             | "meta/agent_memory/remember"
             | "meta/agent_memory/update"
             | "meta/agent_memory/forget"
+            | "meta/agent_memory/forget_in_scope"
             | "meta/memory/quarantine/decide"
             | "meta/gating/decide"
             | "meta/mob_labels/set"
@@ -10223,10 +10228,18 @@ fn console_rpc_access_requirements(
             (ACTION_AGENT_VIEW, identity.clone()),
             (ACTION_AGENT_SEND, identity),
         ]),
+        // The purge of a retired record's content: `agent.memory.admin`,
+        // on the identity the request names or unscoped for a shared scope.
+        "meta/agent_memory/purge" => Some(memory_purge::purge_requirements(identity, params)),
         "meta/agent_memory/remember" => one(ACTION_AGENT_MEMORY_WRITE, identity),
         // Update is a supersede — a write within the record's lineage.
         "meta/agent_memory/update" => one(ACTION_AGENT_MEMORY_WRITE, identity),
         "meta/agent_memory/forget" => one(ACTION_AGENT_MEMORY_DELETE, identity),
+        // The removal of a record of a shared scope: `mob.memory.delete` for
+        // the mob's scope, the unscoped delete grant for the realm's.
+        "meta/agent_memory/forget_in_scope" => {
+            Some(scoped_memory::forget_in_scope_requirements(params))
+        }
         // §10.3 migration: memory reads moved from bare `agent.view` to the
         // per-scope read action, and the console keeps `agent.view` as a
         // prerequisite — both are required. Pre-migration configs are
@@ -10628,6 +10641,7 @@ pub(crate) fn console_method_member_fields(method: &str) -> Option<&'static [Con
         | "meta/schedule/pause"
         | "meta/schedule/resume"
         | "meta/schedule/delete"
+        | "meta/agent_memory/purge"
         | "meta/agent_memory/update"
         | "meta/agent_memory/forget"
         | "meta/agent_memory/recall"
@@ -10719,7 +10733,9 @@ pub(crate) fn console_method_member_fields(method: &str) -> Option<&'static [Con
         | "meta/memory/panel/overview"
         | "meta/memory/panel/proposals"
         | "meta/memory/panel/injections"
-        | "meta/memory/panel/harvests" => NO_MEMBER,
+        | "meta/memory/panel/harvests"
+        // A removal from a shared scope names a scope, never a member.
+        | "meta/agent_memory/forget_in_scope" => NO_MEMBER,
         method if method.starts_with("meta/access/") => NO_MEMBER,
         method if method.starts_with("meta/mob_announcements/") => NO_MEMBER,
         method if method.starts_with("meta/workgraph/") => NO_MEMBER,
@@ -11313,8 +11329,9 @@ fn hidden_recorded_member_refusal(method: &str, spelling: &str) -> JsonRpcError 
 /// [`console_method_member_fields`]; a method it does not list is read for
 /// the four subject spellings). A member hidden from the caller
 /// ([`AccessView::hides_agent`], which judges every spelling of a member as
-/// the member it names), and, for a read of an identity's memory scope and
-/// for a read or a change of a member's console schedules
+/// the member it names), and, for a read of an identity's memory scope, for
+/// the purge of a record there ([`memory_purge::names_an_identity_scope`])
+/// and for a read or a change of a member's console schedules
 /// ([`schedules::acts_on_member_schedules`]), a member the console withholds
 /// from the caller because it does not know it
 /// ([`AccessView::withholds_unknown_member`]), is answered as a member that
@@ -11356,7 +11373,9 @@ fn console_rpc_resolve_members_with(
             method,
             "meta/agent_memory/recall" | "meta/agent_memory/manifest" | "meta/memory/panel/records"
         );
-    let withholds_unknown = reads_memory_scope || schedules::acts_on_member_schedules(method);
+    let withholds_unknown = reads_memory_scope
+        || schedules::acts_on_member_schedules(method)
+        || memory_purge::names_an_identity_scope(method);
     let mut nonce: Option<String> = None;
     let mut refused: Option<String> = None;
     let fields = console_method_member_fields_or_subject(method);
@@ -12355,6 +12374,11 @@ fn memory_panel_record_json(
 ) -> Value {
     let mut value = serde_json::to_value(record).unwrap_or(Value::Null);
     if let Some(object) = value.as_object_mut() {
+        // A record whose content was purged says so: its empty text is a
+        // purge's doing, not a missing body.
+        if crate::memory::sqlite_store::purge::is_purged(record) {
+            object.insert("purged".to_string(), json!(true));
+        }
         if include_body {
             object.insert(
                 "content_hash".to_string(),
@@ -18832,8 +18856,18 @@ async fn handle_console_runtime_rpc_with_visibility(
                     if can_mutate && identity_runtime.agent_memory_supports_forget().await {
                         methods.push("meta/agent_memory/forget");
                     }
+                    if can_mutate
+                        && identity_runtime
+                            .agent_memory_supports_forget_in_scope()
+                            .await
+                    {
+                        methods.push("meta/agent_memory/forget_in_scope");
+                    }
                     if can_mutate && identity_runtime.agent_memory_supports_update().await {
                         methods.push("meta/agent_memory/update");
+                    }
+                    if can_mutate && identity_runtime.agent_memory_supports_purge().await {
+                        methods.push("meta/agent_memory/purge");
                     }
                     if identity_runtime.agent_memory_supports_manifest().await {
                         methods.push("meta/agent_memory/manifest");
@@ -19031,6 +19065,12 @@ async fn handle_console_runtime_rpc_with_visibility(
                         None => true,
                     },
                 );
+                // The purge is irreversible: it is offered only to a caller
+                // who holds its grant somewhere.
+                methods.retain(|method| {
+                    *method != crate::rpc::purge_methods::PURGE_METHOD
+                        || memory_purge::offered_to(view)
+                });
             }
             // Coarse capability flags, intersected with the caller's grants so
             // they agree with the per-agent affordances in `/console/experience`.
@@ -19220,6 +19260,17 @@ async fn handle_console_runtime_rpc_with_visibility(
             .unwrap_or(Value::Null)
         })
         .await,
+        "meta/agent_memory/purge" => meerkat_runtime::stack_relief::box_in_own_frame(move || async move {
+            memory_purge::handle_console_purge(
+                identity_runtime.as_ref(),
+                MemoryPanelCaller::own(access_view),
+                authenticated_principal,
+                &request.params,
+                response_id,
+            )
+            .await
+        })
+        .await,
         "meta/agent_memory/remember" => meerkat_runtime::stack_relief::box_in_own_frame(move || async move {
             let Some(identity_runtime) = &identity_runtime else {
                 return response_value(
@@ -19260,42 +19311,24 @@ async fn handle_console_runtime_rpc_with_visibility(
         })
         .await,
         "meta/agent_memory/forget" => meerkat_runtime::stack_relief::box_in_own_frame(move || async move {
-            let Some(identity_runtime) = &identity_runtime else {
-                return response_value(
-                    response_id,
-                    None,
-                    Some(JsonRpcError {
-                        code: -32601,
-                        message: "agent memory is not configured".to_string(),
-                        data: None,
-                    }),
-                );
-            };
-            match parse_agent_memory_forget_params(&request.params) {
-                Ok(forget_request) => match identity_runtime
-                    .forget_agent_memory_by(
-                        &forget_request.realm,
-                        &forget_request.identity,
-                        &forget_request.memory_id,
-                        console_memory_author(authenticated_principal),
-                    )
-                    .await
-                {
-                    Ok(result) => response_value(
-                        response_id,
-                        Some(serde_json::to_value(result).unwrap_or(Value::Null)),
-                        None,
-                    ),
-                    Err(err) => response_value(
-                        response_id,
-                        None,
-                        Some(crate::rpc::agent_memory_rpc_error("forget", err)),
-                    ),
-                },
-                Err(err) => {
-                    invalid_params(response_id, format!("Invalid params: {}", err.message()))
-                }
-            }
+            memory_forget::handle_console_forget(
+                identity_runtime.as_ref(),
+                MemoryPanelCaller::own(access_view),
+                authenticated_principal,
+                &request.params,
+                response_id,
+            )
+            .await
+        })
+        .await,
+        "meta/agent_memory/forget_in_scope" => meerkat_runtime::stack_relief::box_in_own_frame(move || async move {
+            scoped_memory::handle_console_forget_in_scope(
+                identity_runtime.as_ref(),
+                authenticated_principal,
+                &request.params,
+                response_id,
+            )
+            .await
         })
         .await,
         "meta/agent_memory/recall" => meerkat_runtime::stack_relief::box_in_own_frame(move || async move {
@@ -27527,7 +27560,14 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
+    mod forget_access;
+    mod memory_access;
+    mod memory_fixture;
+    mod memory_guard_store;
+    mod memory_router;
+    mod purge;
     mod refusal_form;
+    mod set_aside_reach;
 
     /// §10.3 fail-closed panel guard. Operator-scope rows are cross-mob
     /// personal facts, so they need their OWN grant: folding the operator
@@ -28153,6 +28193,9 @@ mod tests {
             ))
         }
     }
+
+    mod scoped_memory;
+    mod scoped_memory_access;
 
     pub(super) async fn build_empty_console_test_runtime(
         mob_id: &str,

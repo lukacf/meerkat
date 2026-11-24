@@ -2125,3 +2125,44 @@ test("records refine by text over titles, descriptions and tags, by kind and by 
   assert.equal(v2.trustLevel("untrusted"), 1);
   assert.equal(v2.trustLevel("operator"), 5);
 });
+
+test("Remove is offered only for an active record of a shared scope", () => {
+  const { canRemoveSharedRecord, memoryScopeParam } = __memoryTest;
+  const mob = quarantinedDetail({
+    scope: { scope: "mob", realm: "default", mob: "reading" },
+    status: { status: "active" },
+  });
+  assert.equal(canRemoveSharedRecord(mob), true);
+  assert.deepEqual(memoryScopeParam(mob), { kind: "mob", key: "reading" });
+  const realm = quarantinedDetail({ scope: { scope: "realm", realm: "default" }, status: { status: "active" } });
+  assert.equal(canRemoveSharedRecord(realm), true);
+  assert.deepEqual(memoryScopeParam(realm), { kind: "realm" });
+  assert.equal(
+    canRemoveSharedRecord(quarantinedDetail({ status: { status: "active" } })),
+    false,
+    "an identity's own record is forgotten, not removed here",
+  );
+  assert.equal(
+    canRemoveSharedRecord({ ...mob, status: { status: "tombstoned" } }),
+    false,
+    "a retired record is not removed again",
+  );
+});
+
+test("Purge content is offered only for a retired record that still has text", () => {
+  const { canPurgeRecord, isPurgedRecord, memoryScopeParam } = __memoryTest;
+  const retired = quarantinedDetail({ status: { status: "tombstoned" } });
+  assert.equal(canPurgeRecord(retired), true);
+  assert.deepEqual(memoryScopeParam(retired), { kind: "identity", key: "lead:main" });
+  assert.equal(canPurgeRecord(quarantinedDetail({ status: { status: "active" } })), false, "forget first");
+  assert.equal(canPurgeRecord({ ...retired, purged: true }), false, "nothing is left to purge");
+  assert.equal(isPurgedRecord({ ...retired, title: "", body: "" }), true, "judged by its empty text");
+  assert.equal(
+    canPurgeRecord({
+      ...retired,
+      scope: { scope: "operator", realm: "default", operator: "console-caller:v1:aa" },
+    }),
+    false,
+    "a person's operator memory is not reached by this call",
+  );
+});

@@ -555,7 +555,7 @@ pub(crate) fn parse_agent_memory_recall_params(
     })
 }
 
-fn parse_agent_memory_identity(
+pub(super) fn parse_agent_memory_identity(
     object: &serde_json::Map<String, Value>,
 ) -> Result<AgentIdentity, MemoryParamsError> {
     object
@@ -569,7 +569,7 @@ fn parse_agent_memory_identity(
         })
 }
 
-fn parse_agent_memory_realm(
+pub(super) fn parse_agent_memory_realm(
     object: &serde_json::Map<String, Value>,
 ) -> Result<String, MemoryParamsError> {
     match object.get("realm") {

@@ -1410,6 +1410,43 @@ class AgentMemoryForgetResult:
 
 
 @dataclass(frozen=True)
+class AgentMemoryPurgeResult:
+    """Result of purging the content of a tombstoned memory record.
+
+    ``purged`` is false when nothing was purged: the id is unknown, is a
+    record of another scope, or was purged before. ``purged_ids`` names
+    every record whose content was blanked: the record and the earlier
+    versions it replaced.
+    """
+    memory_id: str
+    purged: bool
+    purged_ids: tuple[str, ...]
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> AgentMemoryPurgeResult:
+        if not isinstance(data, dict):
+            raise ValueError("agent_memory_purge_result must be an object")
+        memory_id = _require_non_empty_string(
+            data, "memory_id", "agent_memory_purge_result"
+        )
+        purged = data.get("purged")
+        if not isinstance(purged, bool):
+            raise ValueError("agent_memory_purge_result.purged must be a boolean")
+        purged_ids = data.get("purged_ids", [])
+        if not isinstance(purged_ids, list) or not all(
+            isinstance(item, str) for item in purged_ids
+        ):
+            raise ValueError(
+                "agent_memory_purge_result.purged_ids must be an array of strings"
+            )
+        return cls(
+            memory_id=memory_id,
+            purged=purged,
+            purged_ids=tuple(purged_ids),
+        )
+
+
+@dataclass(frozen=True)
 class AgentMemoryUpdateResult:
     """Result of meta/agent_memory/update: the superseding record's id."""
     memory_id: str

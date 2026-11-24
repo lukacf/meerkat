@@ -51,7 +51,8 @@ const WIRE_METHODS: ReadonlySet<string> = new Set(
   `
   live/webrtc/answer
   meta/agent_definitions/list
-  meta/agent_memory/forget meta/agent_memory/manifest meta/agent_memory/recall
+  meta/agent_memory/forget meta/agent_memory/forget_in_scope
+  meta/agent_memory/manifest meta/agent_memory/purge meta/agent_memory/recall
   meta/agent_memory/remember meta/agent_memory/update
   meta/attach_existing_session
   meta/blob/get meta/blob/upload
@@ -651,7 +652,7 @@ describe("the handle of a launch's own mob names no mob on the wire", () => {
         .filter((method) => !MULTIPART_ALWAYS.has(method))
         .sort(),
     );
-    assert.equal(WIRE_METHODS.size, 161);
+    assert.equal(WIRE_METHODS.size, 163);
     assert.equal(IDENTITY_FIRST_WIRE_METHODS.size, 30);
     for (const method of IDENTITY_FIRST_WIRE_METHODS) assert.equal(WIRE_METHODS.has(method), false);
   });
@@ -1839,7 +1840,7 @@ describe("stop, resume, redefine and destroy a mob of the host", () => {
 // of them takes a `mobId` of its own. The same agent name under two handles
 // is two agents, each with its own memory.
 
-// The five memory calls: what each is given here, its wire method, and the
+// The seven memory calls: what each is given here, its wire method, and the
 // params that leave besides the mob.
 const MEMORY_CALLS: Readonly<Record<string, readonly [unknown[], string, Record<string, unknown>]>> = {
   rememberAgentMemory: [
@@ -1860,6 +1861,16 @@ const MEMORY_CALLS: Readonly<Record<string, readonly [unknown[], string, Record<
   forgetAgentMemory: [
     ["scribe", "m-1"],
     "meta/agent_memory/forget",
+    { identity: "scribe", memory_id: "m-1" },
+  ],
+  forgetAgentMemoryInScope: [
+    [{ kind: "mob", key: "shared" }, "m-1"],
+    "meta/agent_memory/forget_in_scope",
+    { scope: { kind: "mob", key: "shared" }, memory_id: "m-1" },
+  ],
+  purgeAgentMemory: [
+    [{ kind: "identity", key: "scribe" }, "m-1"],
+    "meta/agent_memory/purge",
     { identity: "scribe", memory_id: "m-1" },
   ],
   manifestAgentMemory: [
@@ -1886,9 +1897,9 @@ const NO_IDENTITY_CONTEXT = {
 };
 
 describe("an agent's memory and the long-term agents, mob by mob", () => {
-  it("the memory calls are the handle's five", () => {
+  it("the memory calls are the handle's seven", () => {
     assert.deepEqual(
-      NAMES.filter((name) => name.endsWith("AgentMemory")),
+      NAMES.filter((name) => name.includes("AgentMemory")),
       Object.keys(MEMORY_CALLS).sort(),
     );
   });

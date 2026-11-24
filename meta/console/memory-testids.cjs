@@ -198,6 +198,21 @@ module.exports = {
   QUARANTINE_ERROR: "memory-quarantine-error",
   QUARANTINE_OUTCOME: "memory-quarantine-outcome",
 
+  // ── Removal and purge (Biography of a shared or a retired record) ──
+  // RECORD_REMOVE renders on an active record of a shared scope (the mob's
+  // or the realm's) when meta/agent_memory/forget_in_scope is advertised to
+  // the caller on a mutable console; RECORD_PURGE on a retired (tombstoned)
+  // record that still has text when meta/agent_memory/purge is. Each action
+  // is two steps: recordAction(kind, "start") opens the confirmation,
+  // recordAction(kind, "confirm") sends the request and
+  // recordAction(kind, "cancel") closes it; a refusal or denial renders
+  // recordAction(kind, "error") in place. RECORD_PURGED marks a record whose
+  // content was purged.
+  RECORD_REMOVE: "memory-record-remove",
+  RECORD_PURGE: "memory-record-purge",
+  recordAction: (kind, step) => `memory-record-${kind}-${step}`,
+  RECORD_PURGED: "memory-record-purged",
+
   // ── Live memory-event strip (bottom of the Pipeline tab) ──
   LIVE_STRIP: "memory-live-strip",
   liveRow: (frameId) => `memory-live-row:${frameId}`,

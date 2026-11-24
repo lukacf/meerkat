@@ -362,7 +362,7 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # runner's coverage parsing stays pinned to that form.
 # empty_resume_residency_audit.sh requires its four witnesses violated, and
 # with --mutants each seeded defect's invariant or property violated.
-# switch_turn_withdrawal_audit.sh requires its five witnesses violated, and
+# switch_turn_withdrawal_audit.sh requires its seven witnesses violated, and
 # with --mutants each seeded defect's property or invariant violated.
 # durable_tail_classification_audit.sh requires its Ready witness violated,
 # and with --mutants each seeded defect's target invariant violated.
@@ -825,6 +825,10 @@ printf '%s\n' \
   'echo "Error: Action property AuditCompleteSettlesTheRequest is violated."' \
   'echo "Error: Action property NotAuditWitnessFiniteConflictRefused is violated."' \
   'echo "Error: Invariant AuditNoDenialUnderThePendingSwitch is violated."' \
+  'echo "Error: Action property AuditStagedOnlyOnAdmittingEvidence is violated."' \
+  'echo "Error: Action property AuditEffortDenialOnlyOnARefusal is violated."' \
+  'echo "Error: Action property NotAuditWitnessEffortRefusedWhilePending is violated."' \
+  'echo "Error: Action property NotAuditWitnessUnreadableLevelsStaged is violated."' \
   'echo "Error: Action property NotAuditWitnessBuildPreparationRetryRecorded is violated."' \
   'echo "Error: Action property NotAuditWitnessBuildPreparationRetryRefusedWake is violated."' \
   'echo "Error: Action property NotAuditWitnessBuildPreparationRetryResolved is violated."' \

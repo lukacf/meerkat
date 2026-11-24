@@ -931,6 +931,9 @@ struct RunSeat {
     /// wait too long to name a moment.
     wait_ends: Option<meerkat_core::time_compat::Instant>,
     seated: std::sync::Mutex<Option<SeatedHelper>>,
+    /// The slot the run set its helper's tool bound in, kept to lift the
+    /// bound when the run is over.
+    tool_bound: std::sync::Mutex<Option<Arc<meerkat_core::ToolCallOuterBoundSlot>>>,
 }
 
 impl RunSeat {
@@ -942,6 +945,30 @@ impl RunSeat {
             caller,
             wait_ends,
             seated: std::sync::Mutex::new(None),
+            tool_bound: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// Keep the slot in which the run bound its helper's tool calls.
+    fn keep_tool_bound(&self, slot: Arc<meerkat_core::ToolCallOuterBoundSlot>) {
+        *self
+            .tool_bound
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(slot);
+    }
+
+    /// Lift the bound the run put on its helper's tool calls: the run is
+    /// over. A helper that outlives its run (its retirement failed) waits
+    /// for nobody any more, and a bound that has ended would cut every tool
+    /// call of a turn it is given later.
+    fn lift_tool_bound(&self) {
+        if let Some(slot) = self
+            .tool_bound
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            slot.clear();
         }
     }
 
@@ -1032,6 +1059,8 @@ impl Drop for EndHelperOfLostRun {
             let retire = service
                 .retire_seated(&cleanup, &identity, &seat, &seated)
                 .await;
+            // The lost run is over too.
+            seat.lift_tool_bound();
             let ended = DelegationHelperEnded::of(cancel, retire);
             tracing::warn!(
                 mob_id = %service.handle.mob_id(),
@@ -1781,6 +1810,8 @@ impl DelegationExecutionService {
         );
         self.settle_run(request, bounds.max_run, &seat, answer_tx)
             .await;
+        // The run is over: a helper it could not retire waits for nobody.
+        seat.lift_tool_bound();
         lost.disarm();
         drop(owner);
     }
@@ -1977,7 +2008,7 @@ impl DelegationExecutionService {
             .flatten()
             .map(|scope| scope.session_id().clone());
         if let (Some(session_id), Some(wait_ends)) = (session_id.as_ref(), seat.wait_ends) {
-            self.bound_helper_tool_calls(identity, session_id, wait_ends)
+            self.bound_helper_tool_calls(seat, identity, session_id, wait_ends)
                 .await;
         }
         seat.note(|seated| {
@@ -2000,9 +2031,11 @@ impl DelegationExecutionService {
     /// runs under it. A helper whose session this host's runtime does not
     /// hold (one placed on another host), or a mob that runs without the
     /// runtime adapter, gets no bound: its tools run under their own
-    /// deadlines alone, as before.
+    /// deadlines alone, as before. The run lifts the bound when it is over
+    /// ([`RunSeat::lift_tool_bound`]).
     async fn bound_helper_tool_calls(
         &self,
+        seat: &RunSeat,
         identity: &AgentIdentity,
         session_id: &meerkat_core::SessionId,
         wait_ends: meerkat_core::time_compat::Instant,
@@ -2015,10 +2048,13 @@ impl DelegationExecutionService {
         #[cfg(not(feature = "runtime-adapter"))]
         let slot: Option<Arc<meerkat_core::ToolCallOuterBoundSlot>> = None;
         match slot {
-            Some(slot) => slot.set(meerkat_core::ToolCallOuterBound::new(
-                wait_ends,
-                Self::HELPER_REPORT_RESERVE,
-            )),
+            Some(slot) => {
+                slot.set(meerkat_core::ToolCallOuterBound::new(
+                    wait_ends,
+                    Self::HELPER_REPORT_RESERVE,
+                ));
+                seat.keep_tool_bound(slot);
+            }
             None => tracing::debug!(
                 mob_id = %self.handle.mob_id(),
                 member = %identity,
@@ -2430,6 +2466,26 @@ async fn notify_peer_added(
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod helper_end_tests {
     use super::*;
+
+    /// A run that is over lifts the bound it put on its helper's tool
+    /// calls: a helper that outlives its run is not cut by a wait that has
+    /// ended. Lifting twice, or with nothing bound, does nothing.
+    #[test]
+    fn a_run_that_is_over_lifts_the_bound_on_its_helpers_tool_calls() {
+        let seat = RunSeat::new(None, None);
+        seat.lift_tool_bound();
+        let slot = Arc::new(meerkat_core::ToolCallOuterBoundSlot::default());
+        slot.set(meerkat_core::ToolCallOuterBound::new(
+            meerkat_core::time_compat::Instant::now(),
+            DelegationExecutionService::HELPER_REPORT_RESERVE,
+        ));
+        seat.keep_tool_bound(Arc::clone(&slot));
+        assert!(slot.get().is_some(), "the helper's tool calls are bounded");
+        seat.lift_tool_bound();
+        assert_eq!(slot.get(), None, "the bound is lifted with the run");
+        seat.lift_tool_bound();
+        assert_eq!(slot.get(), None);
+    }
     use crate::MobState;
 
     fn member() -> AgentIdentity {

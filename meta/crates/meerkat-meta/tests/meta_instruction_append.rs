@@ -4767,28 +4767,48 @@ fn one_function_owns_the_instruction_records() {
 }
 
 // ---------------------------------------------------------------------------
-// What a start reads from a host store
+// What a start loads of its agents' sessions from a host store
 // ---------------------------------------------------------------------------
 
-/// The session documents a gateway start loads from the realm's store, on a
-/// realm kept in a host store.
+/// The session bodies a gateway start loads from the realm's store, and the
+/// per-scope reads it makes of its agents' sessions, on a realm kept in a
+/// host store.
 ///
 /// Three counts are kept apart:
 ///
-/// - The REAL STORE READ COUNT is what this module's rows assert: the calls
-///   a start makes on the host's storage interface
-///   (`meerkat_core::host_store::HostStore`) that name a session's scope,
-///   recorded by a wrapper of that interface over Core's reference in-memory
-///   host store, from the realm's open to the end of the build. On such a
-///   realm the first read of a session's runtime in a process loads the
-///   scope's body from the host (`read_rows` on the session's scope), and
-///   the build sections a start compares are read from that body.
+/// - The REAL STORE READ COUNT is what this module's rows assert: the
+///   per-scope calls a start makes on the host's storage interface
+///   (`meerkat_core::host_store::HostStore`) that name a session's scope
+///   (`load_head` and `read_rows`), recorded by a wrapper of that interface
+///   over Core's reference in-memory host store, from the realm's open to
+///   the end of the build. On such a realm the first read of a session's
+///   runtime in a process loads the scope's body from the host (`read_rows`
+///   on the session's scope), and the build sections a start compares are
+///   read from that body.
 /// - The PROXY POLL COUNT is the unit row
 ///   `a_text_with_no_section_makes_no_build_state_read_and_one_with_a_section_makes_one`
 ///   beside the comparison: it counts polls of a stand-in future handed to
 ///   the decision, and reaches no store.
 /// - A host's own AGGREGATE on its own realm (its agents, its store, its
 ///   time to ready) is not reproduced here.
+///
+/// What the count leaves out, and its resolution:
+///
+/// - The listing of heads is not counted. A realm lists the heads of every
+///   scope when it opens (`list_heads`, by kind, in pages), the session
+///   scopes among them, whatever the agents' instructions are: that is how
+///   it learns which scopes exist. The listing names no scope, and its
+///   calls follow the pages of the listing, not what a start compares. So
+///   the rows say that a start loads no session body and makes no per-scope
+///   read of such a session, not that it reads nothing of it.
+/// - A load of a scope's body is counted as a `read_rows` call from the
+///   lowest row index a start read of that scope: a load reads the rows
+///   from the first row of the scope's window on. A second load within one
+///   start that began at a later row would not be counted as a load. The
+///   calls themselves still are, and for an agent with no section the rows
+///   require that there is no call at all.
+/// - Chunks a session's body may spill to are not attributed to an agent:
+///   only calls that name the session's own scope are.
 ///
 /// A realm kept under a state directory (the rig of the rows above, whose
 /// runtime store is a local database) is not covered: a start makes the
@@ -4891,6 +4911,8 @@ mod host_store_start_reads {
             self.store.load_head(scope).await
         }
 
+        /// Forwarded and not recorded: a listing names no scope (see the
+        /// module).
         async fn list_heads(
             &self,
             kind: ScopeKind,
@@ -5016,7 +5038,7 @@ mod host_store_start_reads {
         }
     }
 
-    /// What one start read of one session scope.
+    /// The per-scope reads one start made of one session scope.
     #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
     struct ScopeReads {
         /// `load_head` calls that named the scope.
@@ -5025,7 +5047,8 @@ mod host_store_start_reads {
         row_calls: usize,
         /// Loads of the scope's body: a load reads the scope's rows from
         /// their first row on, in as many `read_rows` calls as the rows
-        /// take, so each load makes one call from that first row.
+        /// take, so each load makes one call from that first row. Counted
+        /// as the calls from the lowest row index read (see the module).
         loads: usize,
     }
 
@@ -5053,14 +5076,15 @@ mod host_store_start_reads {
             }
         }
 
+        /// No per-scope read at all: no head load, no row read.
         fn none(self) -> bool {
             self == Self::default()
         }
     }
 
-    /// The real store read count of one second start: what the start read
-    /// of each configured agent's session scope, and of every scope of the
-    /// session kind.
+    /// The real store read count of one second start: the per-scope reads
+    /// the start made of each configured agent's session scope, and the
+    /// body loads over every scope of the session kind.
     #[derive(Debug)]
     struct StartReads {
         /// By agent: the agents whose current text has no section.
@@ -5116,9 +5140,9 @@ mod host_store_start_reads {
     /// section and [`WITH_A_SECTION`] whose text has one, give every agent
     /// one run (so each has a conversation, and the mob holds no instruction
     /// record of any), stop it, and start it again as a new process on the
-    /// same realm with the same configuration. Answers what that second
-    /// start, from the realm's open to the end of its build, read of the
-    /// agents' session scopes.
+    /// same realm with the same configuration. Answers which per-scope
+    /// reads that second start, from the realm's open to the end of its
+    /// build, made of the agents' session scopes.
     ///
     /// With `a_run_to_resume` the mob has one agent more, [`RUNNING`], whose
     /// text has no section: the first lifetime stops while a run of it
@@ -5172,10 +5196,17 @@ mod host_store_start_reads {
             // stop keeps the run for the next start.
             send_only(&rig, RUNNING, &format!("{HOLD} until the next start")).await;
             assert!(rig.asked(HOLD).await, "the run is in flight at the stop");
-            rig.shutdown().await;
-        } else {
-            rig.shutdown_for_reopen().await;
         }
+        // The reopen follows a teardown that settled, with or without a run
+        // in flight: the helper fails the row unless the shutdown's report
+        // says the mob stopped and every member was unregistered, so
+        // nothing of the first lifetime still runs a member (the held model
+        // call included) or writes the realm when the next process opens
+        // it. On a realm kept in a host store that report is the condition
+        // a reopen in this process waits for: the realm's custody is its
+        // fence, which lapses below on the store's own clock, and the cache
+        // directory holds no custody file.
+        rig.shutdown_for_reopen().await;
         drop(provider);
         // The stopped process's lease is still recorded on the store's
         // clock: the next process opens once it lapsed.
@@ -5233,15 +5264,17 @@ mod host_store_start_reads {
         }
     }
 
-    /// A start loads from the realm's store the session of no configured
-    /// agent whose text has no section, and loads the session of each agent
-    /// whose text has a section once: so what a start loads does not grow
-    /// with the configured agents that have no instructions. Measured on a
-    /// realm kept in a host store, where a session is one scope the store
-    /// serves, for a mob of 6 such agents and for one of 12, each beside 2
-    /// agents with a section. Every agent has a conversation and the mob
-    /// holds no instruction record, which is the state in which a start
-    /// compares an agent with the sections its session was built with.
+    /// A start loads the session body of no configured agent whose text has
+    /// no section and makes no per-scope read of its session, and loads the
+    /// session body of each agent whose text has a section once: so the
+    /// session bodies a start loads do not grow with the configured agents
+    /// that have no instructions. (The realm's listing of heads at its open
+    /// is not counted: see the module.) Measured on a realm kept in a host
+    /// store, where a session is one scope the store serves, for a mob of 6
+    /// such agents and for one of 12, each beside 2 agents with a section.
+    /// Every agent has a conversation and the mob holds no instruction
+    /// record, which is the state in which a start compares an agent with
+    /// the sections its session was built with.
     ///
     /// Not shown here: a realm kept under a state directory (the same
     /// comparison over another store), and how long a start takes.
@@ -5255,37 +5288,38 @@ mod host_store_start_reads {
             for (name, reads) in &start.with_no_section {
                 assert!(
                     reads.none(),
-                    "a start reads nothing of the session of {name}, whose text has no \
-                     section: {reads:?} ({measured})"
+                    "a start loads no session body of {name}, whose text has no section, and \
+                     makes no per-scope read of its session: {reads:?} ({measured})"
                 );
             }
             for (name, reads) in &start.with_a_section {
                 assert_eq!(
                     reads.loads, 1,
-                    "a start loads the session of {name}, whose text has a section, once: \
-                     {reads:?} ({measured})"
+                    "a start loads the session body of {name}, whose text has a section, \
+                     once: {reads:?} ({measured})"
                 );
             }
         }
         assert_eq!(
             (few.agent_loads(), many.agent_loads()),
             (WITH_A_SECTION, WITH_A_SECTION),
-            "the sessions a start loads are those of the agents with a section, however \
-             many agents have none ({measured})"
+            "the session bodies a start loads are those of the agents with a section, \
+             however many agents have none ({measured})"
         );
         assert_eq!(
             few.session_kind_loads, many.session_kind_loads,
-            "the session scopes a start loads do not grow with the agents that have no \
+            "the session bodies a start loads do not grow with the agents that have no \
              section ({measured})"
         );
     }
 
-    /// A start that resumes an agent's run loads that agent's session once,
-    /// whatever its text: the run needs it. Beside it the start still loads
-    /// no session of an agent with no section and no run to resume, and the
-    /// session of each agent with a section once. So the sessions a start
-    /// loads are at most those of the agents with a run to resume and those
-    /// of the agents with a section.
+    /// A start that resumes an agent's run loads that agent's session body
+    /// once, whatever its text: the run needs it. Beside it the start still
+    /// loads no session body of an agent with no section and no run to
+    /// resume and makes no per-scope read of its session, and loads the
+    /// session body of each agent with a section once. So the session
+    /// bodies a start loads are at most those of the agents with a run to
+    /// resume and those of the agents with a section.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_start_loads_the_session_of_an_agent_whose_run_it_resumes_once() {
         let start = second_start_reads(FEW_WITH_NO_SECTION, true).await;
@@ -5294,28 +5328,29 @@ mod host_store_start_reads {
         for (name, reads) in &start.with_no_section {
             assert!(
                 reads.none(),
-                "a start reads nothing of the session of {name}, whose text has no section \
-                 and which has no run to resume: {reads:?} ({measured})"
+                "a start loads no session body of {name}, whose text has no section and \
+                 which has no run to resume, and makes no per-scope read of its session: \
+                 {reads:?} ({measured})"
             );
         }
         for (name, reads) in &start.with_a_section {
             assert_eq!(
                 reads.loads, 1,
-                "a start loads the session of {name}, whose text has a section, once: \
+                "a start loads the session body of {name}, whose text has a section, once: \
                  {reads:?} ({measured})"
             );
         }
         let resumed = start.resumed.expect("the row has an agent with a run");
         assert_eq!(
             resumed.loads, 1,
-            "a start loads the session of {RUNNING}, whose run it resumes, once: \
+            "a start loads the session body of {RUNNING}, whose run it resumes, once: \
              {resumed:?} ({measured})"
         );
         assert_eq!(
             start.agent_loads(),
             WITH_A_SECTION + 1,
-            "the sessions a start loads are those of the agents with a section and of the \
-             agent whose run it resumes ({measured})"
+            "the session bodies a start loads are those of the agents with a section and \
+             of the agent whose run it resumes ({measured})"
         );
     }
 }

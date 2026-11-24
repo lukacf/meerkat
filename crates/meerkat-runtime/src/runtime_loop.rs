@@ -7757,12 +7757,19 @@ async fn admit_resumed_run(
             )
             .await
         }
-        crate::resumed_run_admission::ResumedRunAdmissionVerdict::Undecided { detail } => {
+        crate::resumed_run_admission::ResumedRunAdmissionVerdict::Undecided { cause, detail } => {
             // Neither resumed nor settled: the run stays marked, its inputs
             // bound and none ended, and the machine holds it until a later
             // answer. The next wake of the loop, or the session's next
-            // registration, asks again; nothing asks on a timer.
-            match driver.lock().await.hold_resumed_run_for_admission(&run_id) {
+            // registration, asks again; nothing asks on a timer. The driver
+            // notes the round, once the machine has accepted the hold, for a
+            // host that reads the held run.
+            let held = driver.lock().await.hold_resumed_run_for_admission(
+                &run_id,
+                cause,
+                crate::resumed_run_admission::bounded_undecided_reason(&detail),
+            );
+            match held {
                 Ok(()) => {
                     tracing::warn!(
                         session_id = %authority_binding.session_id,

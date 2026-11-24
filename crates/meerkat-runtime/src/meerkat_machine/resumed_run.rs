@@ -223,6 +223,118 @@ impl MeerkatMachine {
         driver.lock().await.resumed_run_admission_held()
     }
 
+    /// The run `session_id`'s current registration marked resumable and has
+    /// neither resumed nor settled, with where it stands with its admission;
+    /// `None` when the registration marks no run, or the session has no
+    /// registration in this process.
+    ///
+    /// A host polls this to see a run that waits. It is answered from the
+    /// session's state in memory, from the moment the registration marks
+    /// the run: whether or not an executor is attached, and whether or not
+    /// the session's runtime loop makes passes. The read asks nothing of the
+    /// admission, makes no store call, applies no machine input and wakes
+    /// nothing, so it never moves
+    /// [`ResumedRunAdmissionUndecided::rounds`](crate::ResumedRunAdmissionUndecided::rounds).
+    /// It does not wait for the session either: a session whose state stays
+    /// held past
+    /// [`PENDING_RESUMED_RUN_READ_BOUND`](crate::PENDING_RESUMED_RUN_READ_BOUND)
+    /// (a store commit in flight holds it), or whose registration needs a
+    /// reload, answers
+    /// [`PendingResumedRunRead::NotReadableNow`](crate::PendingResumedRunRead::NotReadableNow).
+    ///
+    /// The machine decides the answer: the run it marks, whether it holds
+    /// that run for its admission
+    /// ([`ResumedRunAdmissionState::Held`](crate::ResumedRunAdmissionState::Held),
+    /// otherwise
+    /// [`ResumedRunAdmissionState::MarkedNotHeld`](crate::ResumedRunAdmissionState::MarkedNotHeld)),
+    /// and whether its stop was asked
+    /// ([`PendingResumedRun::stop_requested`](crate::PendingResumedRun::stop_requested)).
+    /// The rounds, their cause and their reason are what this registration
+    /// noted of the held run: diagnostics, absent when it noted none.
+    ///
+    /// The answer is `None` once the run resumes or its settlement commits
+    /// (its admission answered, or it was stopped, settled as retained,
+    /// reset or destroyed). A stop that is recorded and not yet settled is
+    /// still answered, with `stop_requested`. `None` alone does not say
+    /// which: read the terminal receipt of the run's input
+    /// ([`Self::input_terminal_receipt`]). A new registration starts over:
+    /// its rounds and its times begin again.
+    pub async fn pending_resumed_run(
+        &self,
+        session_id: &meerkat_core::types::SessionId,
+    ) -> Option<crate::resumed_run_admission::PendingResumedRunRead> {
+        let (driver, reload_required) = {
+            let sessions = self.sessions.read().await;
+            let entry = sessions.get(session_id)?;
+            (
+                Arc::clone(&entry.driver),
+                entry.require_durability_ready().is_err(),
+            )
+        };
+        Self::read_pending_resumed_run(session_id, &driver, reload_required).await
+    }
+
+    /// [`Self::pending_resumed_run`] for every session registered in this
+    /// process: one answer for each session that marks a run or cannot be
+    /// read now, in session id order. A session that cannot be read costs
+    /// the read at most
+    /// [`PENDING_RESUMED_RUN_READ_BOUND`](crate::PENDING_RESUMED_RUN_READ_BOUND).
+    pub async fn pending_resumed_runs(
+        &self,
+    ) -> Vec<crate::resumed_run_admission::PendingResumedRunRead> {
+        let mut registered: Vec<_> = {
+            let sessions = self.sessions.read().await;
+            sessions
+                .iter()
+                .map(|(session_id, entry)| {
+                    (
+                        session_id.clone(),
+                        Arc::clone(&entry.driver),
+                        entry.require_durability_ready().is_err(),
+                    )
+                })
+                .collect()
+        };
+        registered.sort_by_key(|(session_id, _, _)| session_id.to_string());
+        let mut reads = Vec::new();
+        for (session_id, driver, reload_required) in &registered {
+            if let Some(read) =
+                Self::read_pending_resumed_run(session_id, driver, *reload_required).await
+            {
+                reads.push(read);
+            }
+        }
+        reads
+    }
+
+    /// One session's marked run. The session's state is waited for at most
+    /// the read bound, and a registration that needs a reload is not read:
+    /// its in-memory state is not what the next registration will hold.
+    async fn read_pending_resumed_run(
+        session_id: &meerkat_core::types::SessionId,
+        driver: &super::SharedDriver,
+        reload_required: bool,
+    ) -> Option<crate::resumed_run_admission::PendingResumedRunRead> {
+        use crate::resumed_run_admission::{PENDING_RESUMED_RUN_READ_BOUND, PendingResumedRunRead};
+
+        let not_readable = || {
+            Some(PendingResumedRunRead::NotReadableNow {
+                session_id: session_id.clone(),
+            })
+        };
+        if reload_required {
+            return not_readable();
+        }
+        let Ok(driver) =
+            crate::tokio::time::timeout(PENDING_RESUMED_RUN_READ_BOUND, driver.lock()).await
+        else {
+            return not_readable();
+        };
+        driver
+            .pending_resumed_run(session_id)
+            .map(PendingResumedRunRead::Pending)
+    }
+
     /// Settle the run `session_id`'s registration retained, without resuming
     /// it and without a model request: the run a restart left open (a crash,
     /// a power cut, or a graceful stop that kept the run), which the
@@ -783,14 +895,48 @@ impl super::driver::DriverEntry {
         self.shell_driver().resumed_run_admission_held()
     }
 
-    /// Hold the run `run_id` marked resumable for its admission (see
+    /// Hold the run `run_id` marked resumable after one more undecided round
+    /// of its admission, and note the round once the machine has accepted
+    /// the hold (see
     /// [`crate::driver::ephemeral::EphemeralRuntimeDriver::hold_resumed_run_for_admission`]).
     pub(crate) fn hold_resumed_run_for_admission(
         &mut self,
         run_id: &meerkat_core::lifecycle::RunId,
+        cause: crate::resumed_run_admission::ResumedRunAdmissionUndecidedCause,
+        reason: String,
     ) -> Result<(), crate::RuntimeDriverError> {
         self.shell_driver_mut()
-            .hold_resumed_run_for_admission(run_id)
+            .hold_resumed_run_for_admission(run_id, cause, reason)
+    }
+
+    /// The run this registration marked resumable and has neither resumed
+    /// nor settled, as it stands now: the machine's mark, the machine's
+    /// hold and the machine's stop intent, with how long the registration
+    /// has marked the run and, for a run the machine holds, what the
+    /// registration noted of its undecided rounds. `None` when no run is
+    /// marked. Reads only: no machine input, no store call.
+    pub(crate) fn pending_resumed_run(
+        &self,
+        session_id: &meerkat_core::types::SessionId,
+    ) -> Option<crate::resumed_run_admission::PendingResumedRun> {
+        let now = meerkat_core::time_compat::Instant::now();
+        let mark = self.resumable_run_id();
+        let hold = self.resumed_run_admission_held();
+        let driver = self.shell_driver();
+        let admission = crate::resumed_run_admission::resumed_run_admission_state(
+            mark.as_ref(),
+            hold.as_ref(),
+            driver.resumed_run_admission_note(),
+            now,
+        )?;
+        let run_id = mark?;
+        Some(crate::resumed_run_admission::PendingResumedRun {
+            session_id: session_id.clone(),
+            marked_for: driver.resumable_mark_elapsed(&run_id, now),
+            stop_requested: self.resumable_run_stop_requested(),
+            run_id,
+            admission,
+        })
     }
 
     /// Release the admission hold of the run `run_id` (see

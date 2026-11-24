@@ -102,7 +102,10 @@ pub enum ResumedRunAdmissionDecision {
     /// at the session's next registration, never on a timer. An admission
     /// that cannot decide never lets the run resume, and never ends it.
     Unavailable {
-        /// Why, for the runtime's log.
+        /// Why: for the runtime's log, and for a host that reads the held
+        /// run ([`ResumedRunAdmissionUndecided::reason`], cut at
+        /// [`RESUMED_RUN_ADMISSION_REASON_MAX_BYTES`]). Write nothing here
+        /// that a reader of either must not see.
         detail: String,
     },
 }
@@ -129,6 +132,213 @@ pub trait ResumedRunAdmission: Send + Sync {
     ) -> ResumedRunAdmissionDecision;
 }
 
+/// The most bytes of an undecided round's reason text the runtime keeps
+/// ([`ResumedRunAdmissionUndecided::reason`]). A longer text is cut at a
+/// character boundary.
+pub const RESUMED_RUN_ADMISSION_REASON_MAX_BYTES: usize = 512;
+
+/// The longest a read of a session's marked run
+/// ([`crate::MeerkatMachine::pending_resumed_run`]) waits for that session's
+/// state before it answers [`PendingResumedRunRead::NotReadableNow`].
+pub const PENDING_RESUMED_RUN_READ_BOUND: Duration = Duration::from_millis(100);
+
+/// What [`crate::MeerkatMachine::pending_resumed_run`] answers for a session
+/// whose registration marks a run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PendingResumedRunRead {
+    /// The run the registration marked resumable and has neither resumed nor
+    /// settled.
+    Pending(PendingResumedRun),
+    /// The session's state cannot be read now: something held it for longer
+    /// than [`PENDING_RESUMED_RUN_READ_BOUND`] (a store commit in flight, for
+    /// example), or the session's registration needs a reload, whose
+    /// in-memory state is not answered. Ask again. Whether the session marks
+    /// a run is not known from this answer.
+    NotReadableNow {
+        /// The session that could not be read.
+        session_id: SessionId,
+    },
+}
+
+/// A run its session's registration marked resumable and has neither resumed
+/// nor settled.
+///
+/// The machine says which run is marked, whether it is held for its
+/// admission and whether its stop was asked. Reading it asks nothing of the
+/// admission or the store and changes nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct PendingResumedRun {
+    /// The session the run belongs to.
+    pub session_id: SessionId,
+    /// The marked run, under its original id.
+    pub run_id: RunId,
+    /// How long this registration has marked the run, by this process's
+    /// monotonic clock. It starts when the registration marks the run and
+    /// starts over at every registration. It is an observation of when: no
+    /// decision reads it.
+    pub marked_for: Duration,
+    /// A stop of the run is recorded and its settlement has not committed:
+    /// the run never resumes, and it is answered until the runtime loop has
+    /// settled it, which waits for the session's store to take writes. A
+    /// process that ends first loses the recorded stop: the next
+    /// registration marks the run again.
+    pub stop_requested: bool,
+    /// Where the run stands with its admission in this registration.
+    pub admission: ResumedRunAdmissionState,
+}
+
+/// Where a run marked resumable stands with its admission, in the
+/// registration that marks it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ResumedRunAdmissionState {
+    /// The run is marked and the machine does not hold it for its admission:
+    /// it was not asked about yet (no executor is attached, the session's
+    /// runtime loop has not reached it, or it waits for something else
+    /// first: its controller, its destination, a host's hold of the
+    /// session's run starts), its first round is under way, or its
+    /// admission let it continue and it is about to resume. A registration
+    /// without an admission reads so until its run resumes.
+    MarkedNotHeld,
+    /// The machine holds the run for its admission: a round ended undecided,
+    /// and the run is neither resumed nor ended.
+    Held(ResumedRunAdmissionHeld),
+}
+
+/// A run the machine holds for its admission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ResumedRunAdmissionHeld {
+    /// What this registration noted of the run's undecided rounds. `None`
+    /// when it noted none of this run: the machine's hold is what says the
+    /// run is held, and the rounds are diagnostics beside it.
+    pub undecided: Option<ResumedRunAdmissionUndecided>,
+}
+
+/// The undecided rounds of a held run that this registration noted. A new
+/// registration starts over.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ResumedRunAdmissionUndecided {
+    /// The rounds this registration asked about the run that ended
+    /// undecided. Only a round the runtime asks moves it (a wake of the
+    /// session's loop asks one); a read never does.
+    pub rounds: u64,
+    /// How long ago the first of those rounds ended, by this process's
+    /// monotonic clock.
+    pub undecided_for: Duration,
+    /// How the last of those rounds ended.
+    pub cause: ResumedRunAdmissionUndecidedCause,
+    /// The last round's reason: the detail of the admission's `Unavailable`
+    /// answer, or that it did not answer in time. Diagnostic text for a
+    /// person: it is the admission's own wording, it may change between
+    /// releases, and it is cut at
+    /// [`RESUMED_RUN_ADMISSION_REASON_MAX_BYTES`]. Decide from
+    /// [`Self::cause`], never by matching this text.
+    pub reason: String,
+}
+
+/// How an undecided round of a resumed-run admission ended: what its last
+/// attempt did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum ResumedRunAdmissionUndecidedCause {
+    /// The admission did not answer within
+    /// [`RESUMED_RUN_ADMISSION_ATTEMPT_TIMEOUT`].
+    TimedOut,
+    /// The admission answered [`ResumedRunAdmissionDecision::Unavailable`].
+    AnsweredUnavailable,
+}
+
+/// `reason`, cut to [`RESUMED_RUN_ADMISSION_REASON_MAX_BYTES`] at a character
+/// boundary.
+pub(crate) fn bounded_undecided_reason(reason: &str) -> String {
+    if reason.len() <= RESUMED_RUN_ADMISSION_REASON_MAX_BYTES {
+        return reason.to_string();
+    }
+    let mut end = RESUMED_RUN_ADMISSION_REASON_MAX_BYTES;
+    while !reason.is_char_boundary(end) {
+        end -= 1;
+    }
+    reason[..end].to_string()
+}
+
+/// What one registration noted of the undecided rounds it asked about one
+/// run: diagnostics beside the machine's hold. It names its run, so it is
+/// never shown for another; the machine alone says whether a run is held.
+#[derive(Debug, Clone)]
+pub(crate) struct UndecidedRoundsNote {
+    run_id: RunId,
+    rounds: u64,
+    first_undecided_at: meerkat_core::time_compat::Instant,
+    cause: ResumedRunAdmissionUndecidedCause,
+    reason: String,
+}
+
+impl UndecidedRoundsNote {
+    /// One more round asked about `run_id` ended undecided at `now`, by
+    /// `cause` and with `reason`. A note of the same run counts on and keeps
+    /// the time of its first round; a note of another run, or none, starts
+    /// over. The caller notes only a round whose hold the machine accepted.
+    pub(crate) fn note_round(
+        note: &mut Option<Self>,
+        run_id: &RunId,
+        cause: ResumedRunAdmissionUndecidedCause,
+        reason: String,
+        now: meerkat_core::time_compat::Instant,
+    ) {
+        match note.as_mut() {
+            Some(noted) if &noted.run_id == run_id => {
+                noted.rounds = noted.rounds.saturating_add(1);
+                noted.cause = cause;
+                noted.reason = reason;
+            }
+            _ => {
+                *note = Some(Self {
+                    run_id: run_id.clone(),
+                    rounds: 1,
+                    first_undecided_at: now,
+                    cause,
+                    reason,
+                });
+            }
+        }
+    }
+
+    fn observed(&self, now: meerkat_core::time_compat::Instant) -> ResumedRunAdmissionUndecided {
+        ResumedRunAdmissionUndecided {
+            rounds: self.rounds,
+            undecided_for: now.saturating_duration_since(self.first_undecided_at),
+            cause: self.cause,
+            reason: self.reason.clone(),
+        }
+    }
+}
+
+/// Where the run a registration marks stands with its admission, from the
+/// machine's mark, the machine's hold and the registration's note, read
+/// together: `None` with no mark; marked and not held unless the machine's
+/// hold names the marked run; held then, with the note's rounds only when
+/// the note names that same run.
+pub(crate) fn resumed_run_admission_state(
+    mark: Option<&RunId>,
+    hold: Option<&RunId>,
+    note: Option<&UndecidedRoundsNote>,
+    now: meerkat_core::time_compat::Instant,
+) -> Option<ResumedRunAdmissionState> {
+    let marked = mark?;
+    if hold != Some(marked) {
+        return Some(ResumedRunAdmissionState::MarkedNotHeld);
+    }
+    Some(ResumedRunAdmissionState::Held(ResumedRunAdmissionHeld {
+        undecided: note
+            .filter(|noted| &noted.run_id == marked)
+            .map(|noted| noted.observed(now)),
+    }))
+}
+
 /// The runtime's final verdict for one resume after it asked the admission.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ResumedRunAdmissionVerdict {
@@ -138,8 +348,10 @@ pub(crate) enum ResumedRunAdmissionVerdict {
         detail: String,
     },
     /// Every attempt went unanswered: leave the run marked, held, and ask
-    /// again later. `detail` is the last reason the admission gave.
+    /// again later. `cause` is how the last attempt ended and `detail` the
+    /// last reason the admission gave.
     Undecided {
+        cause: ResumedRunAdmissionUndecidedCause,
         detail: String,
     },
 }
@@ -157,6 +369,7 @@ pub(crate) async fn ask_resumed_run_admission(
         return ResumedRunAdmissionVerdict::Continue;
     };
     let mut last_detail = String::new();
+    let mut last_cause = ResumedRunAdmissionUndecidedCause::AnsweredUnavailable;
     for attempt in 1..=RESUMED_RUN_ADMISSION_ATTEMPTS {
         let answer = crate::tokio::time::timeout(
             RESUMED_RUN_ADMISSION_ATTEMPT_TIMEOUT,
@@ -174,11 +387,13 @@ pub(crate) async fn ask_resumed_run_admission(
             }
             Ok(ResumedRunAdmissionDecision::Unavailable { detail }) => {
                 last_detail = detail;
+                last_cause = ResumedRunAdmissionUndecidedCause::AnsweredUnavailable;
             }
             Err(_elapsed) => {
                 last_detail = format!(
                     "the admission did not answer within {RESUMED_RUN_ADMISSION_ATTEMPT_TIMEOUT:?}"
                 );
+                last_cause = ResumedRunAdmissionUndecidedCause::TimedOut;
             }
         }
         tracing::warn!(
@@ -193,6 +408,7 @@ pub(crate) async fn ask_resumed_run_admission(
         }
     }
     ResumedRunAdmissionVerdict::Undecided {
+        cause: last_cause,
         detail: last_detail,
     }
 }
@@ -353,7 +569,7 @@ mod tests {
         let admission: Arc<dyn ResumedRunAdmission> = scripted.clone();
         let verdict = ask_resumed_run_admission(Some(&admission), &request()).await;
         assert!(
-            matches!(&verdict, ResumedRunAdmissionVerdict::Undecided { detail } if detail == "third"),
+            matches!(&verdict, ResumedRunAdmissionVerdict::Undecided { cause: ResumedRunAdmissionUndecidedCause::AnsweredUnavailable, detail } if detail == "third"),
             "{verdict:?}"
         );
         assert_eq!(scripted.calls(), RESUMED_RUN_ADMISSION_ATTEMPTS);
@@ -365,7 +581,7 @@ mod tests {
         let started = crate::tokio::time::Instant::now();
         let verdict = ask_resumed_run_admission(Some(&admission), &request()).await;
         assert!(
-            matches!(&verdict, ResumedRunAdmissionVerdict::Undecided { detail } if detail.contains("did not answer")),
+            matches!(&verdict, ResumedRunAdmissionVerdict::Undecided { cause: ResumedRunAdmissionUndecidedCause::TimedOut, detail } if detail.contains("did not answer")),
             "{verdict:?}"
         );
         let bound = RESUMED_RUN_ADMISSION_ATTEMPT_TIMEOUT * RESUMED_RUN_ADMISSION_ATTEMPTS
@@ -384,5 +600,166 @@ mod tests {
         let other: Arc<dyn ResumedRunAdmission> = Arc::new(NeverAnswers);
         assert!(slot.bind(other).is_err());
         assert!(Arc::ptr_eq(&slot.current().expect("bound"), &first));
+    }
+
+    fn a_note_of(
+        run_id: &RunId,
+        rounds: u64,
+        at: meerkat_core::time_compat::Instant,
+    ) -> UndecidedRoundsNote {
+        let mut note = None;
+        for round in 1..=rounds {
+            UndecidedRoundsNote::note_round(
+                &mut note,
+                run_id,
+                ResumedRunAdmissionUndecidedCause::AnsweredUnavailable,
+                format!("round {round}"),
+                at,
+            );
+        }
+        note.expect("a noted round")
+    }
+
+    /// The answer over the machine's mark, the machine's hold and the
+    /// registration's note, every combination: no mark answers nothing,
+    /// whatever else is there; a mark the hold does not name is marked and
+    /// not held, whatever the note says; a mark the hold names is held, and
+    /// only a note of that same run gives it rounds.
+    #[test]
+    fn the_admission_state_is_decided_by_the_machines_mark_and_hold_and_the_note_only_adds_rounds()
+    {
+        let run = RunId::new();
+        let other = RunId::new();
+        let noted_at = meerkat_core::time_compat::Instant::now();
+        let now = noted_at + Duration::from_secs(90);
+        let own = a_note_of(&run, 2, noted_at);
+        let foreign = a_note_of(&other, 5, noted_at);
+        let rounds_of = |state: Option<ResumedRunAdmissionState>| match state {
+            Some(ResumedRunAdmissionState::Held(held)) => {
+                Some(held.undecided.map(|undecided| undecided.rounds))
+            }
+            _ => None,
+        };
+
+        // No mark: nothing, for each hold and each note.
+        for hold in [None, Some(&run), Some(&other)] {
+            for note in [None, Some(&own), Some(&foreign)] {
+                assert_eq!(
+                    resumed_run_admission_state(None, hold, note, now),
+                    None,
+                    "no mark answers nothing (hold {hold:?})"
+                );
+            }
+        }
+        // A mark the machine does not hold: marked, not held, whatever the
+        // note says, also under a hold that names another run.
+        for hold in [None, Some(&other)] {
+            for note in [None, Some(&own), Some(&foreign)] {
+                assert_eq!(
+                    resumed_run_admission_state(Some(&run), hold, note, now),
+                    Some(ResumedRunAdmissionState::MarkedNotHeld),
+                    "a note never makes a run held (hold {hold:?})"
+                );
+            }
+        }
+        // A mark the machine holds: held. No note, or another run's note:
+        // held with no rounds. Its own note: its rounds.
+        assert_eq!(
+            rounds_of(resumed_run_admission_state(
+                Some(&run),
+                Some(&run),
+                None,
+                now
+            )),
+            Some(None),
+            "held with no note is held, its rounds absent"
+        );
+        assert_eq!(
+            rounds_of(resumed_run_admission_state(
+                Some(&run),
+                Some(&run),
+                Some(&foreign),
+                now
+            )),
+            Some(None),
+            "another run's note is never shown for the held run"
+        );
+        let Some(ResumedRunAdmissionState::Held(held)) =
+            resumed_run_admission_state(Some(&run), Some(&run), Some(&own), now)
+        else {
+            panic!("the held run reads held");
+        };
+        let undecided = held.undecided.expect("its own note gives its rounds");
+        assert_eq!(undecided.rounds, 2);
+        assert_eq!(undecided.reason, "round 2", "the last round's reason");
+        assert_eq!(
+            undecided.cause,
+            ResumedRunAdmissionUndecidedCause::AnsweredUnavailable
+        );
+        assert_eq!(
+            undecided.undecided_for,
+            Duration::from_secs(90),
+            "since the first of its rounds"
+        );
+    }
+
+    /// A note of another run starts over: its count, its time and its
+    /// reason are the new run's own.
+    #[test]
+    fn a_note_starts_over_for_another_run() {
+        let first = RunId::new();
+        let second = RunId::new();
+        let start = meerkat_core::time_compat::Instant::now();
+        let mut note = Some(a_note_of(&first, 3, start));
+        let later = start + Duration::from_secs(40);
+        UndecidedRoundsNote::note_round(
+            &mut note,
+            &second,
+            ResumedRunAdmissionUndecidedCause::TimedOut,
+            "the second run's round".to_string(),
+            later,
+        );
+        let now = later + Duration::from_secs(5);
+        assert_eq!(
+            resumed_run_admission_state(Some(&first), Some(&first), note.as_ref(), now),
+            Some(ResumedRunAdmissionState::Held(ResumedRunAdmissionHeld {
+                undecided: None
+            })),
+            "the first run's rounds are gone with its note"
+        );
+        let Some(ResumedRunAdmissionState::Held(held)) =
+            resumed_run_admission_state(Some(&second), Some(&second), note.as_ref(), now)
+        else {
+            panic!("the second run reads held");
+        };
+        let undecided = held.undecided.expect("the second run's own note");
+        assert_eq!(
+            (
+                undecided.rounds,
+                undecided.cause,
+                undecided.reason.as_str(),
+                undecided.undecided_for
+            ),
+            (
+                1,
+                ResumedRunAdmissionUndecidedCause::TimedOut,
+                "the second run's round",
+                Duration::from_secs(5)
+            )
+        );
+    }
+
+    #[test]
+    fn a_reason_is_cut_at_the_bound_on_a_character_boundary() {
+        let short = "the store did not answer";
+        assert_eq!(bounded_undecided_reason(short), short);
+        let exact = "x".repeat(RESUMED_RUN_ADMISSION_REASON_MAX_BYTES);
+        assert_eq!(bounded_undecided_reason(&exact), exact);
+        // Two-byte characters with one byte of offset: the bound falls
+        // inside a character, and the cut steps back to its start.
+        let wide = "x".to_string() + &"\u{e9}".repeat(RESUMED_RUN_ADMISSION_REASON_MAX_BYTES);
+        let cut = bounded_undecided_reason(&wide);
+        assert_eq!(cut.len(), RESUMED_RUN_ADMISSION_REASON_MAX_BYTES - 1);
+        assert!(wide.starts_with(&cut));
     }
 }

@@ -7188,6 +7188,8 @@ pub(crate) fn machine_suspend_run_for_stop(
         projection.current_run_id,
         projection.pre_run_phase,
     );
+    // The suspension marked the run resumable: it waits from now.
+    driver.shell_driver_mut().restamp_resumable_mark(run_id);
     Ok(true)
 }
 

@@ -3446,6 +3446,21 @@ frame's own `mob_id` follows with the surfaces that address a mob.
   application that mounts the Console package builds it from the source of its
   gateway's release.
 
+- Added 2026-11-24, after the release. A persistent `meta_gateway`
+  (`persistent_sessions: true`) using the built-in default mob definition
+  (no `config/mob.toml` or `<workspace>/definition.json`) derives a different
+  mob ID after the upgrade. On its existing state it exits with code 1. The
+  `meta/init` error is `-32603`, `failed to bootstrap local runtime`, with a
+  null response ID. Only the gateway log says why:
+  `the supplied mob definition diverges from the canonical definition in this storage, in: id`.
+  Before upgrading, or after the first refused start, copy the `definition`
+  object from `<state directory>/event_log.sqlite3.composition.json` into a
+  new `<workspace>/definition.json`, then start the gateway. This was shown
+  with state from the published 0.9.15 gateway and a 0.9.16 release candidate.
+  The same refusal on upgrades since Meta 0.9.9 and the fact that it does not
+  affect the SDK-started `rpc_gateway` are read from the source. See the
+  [Meta 0.9.16 upgrade guide](https://docs.rkat.ai/guides/upgrading#meta-0-9-16).
+
 ### Added
 
 - Python SDK: `Meta.builder().max_sessions(n)` sets the gateway's session

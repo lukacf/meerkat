@@ -1140,6 +1140,12 @@ source, not run).
 Meta 0.9.15 pins Core `=0.9.15`. The full list is in `meta/CHANGELOG.md`
 under `## [0.9.15]`.
 
+- If a Meta 0.9.9 through 0.9.14 gateway respawned an agent or rebuilt it
+  during `meta/compact_member`, upgrading to 0.9.15 does not restore the
+  agent's ability to list or manage mobs it created before that rebuild.
+  See "Agents that created mobs and were seated again on 0.9.15" under
+  [Rolling back to 0.9.14](#rolling-back-to-0-9-14).
+
 - Identity policy: an enabled policy that names an approval outcome or a
   preparation mode this release does not carry out is refused at init. That
   is the approval outcome `notify` or `review`, in a rule or as the default,
@@ -6161,3 +6167,20 @@ variants listed under `### Breaking` in the CHANGELOG. The most common are:
    media-health and playback-hint notifications.
 8. Leave any SQLite session that 0.8.50 reported as `Corrupted` in place.
    0.8.51 loads it.
+
+## Upgrading to 0.8.31
+
+**Persistent mob store filenames (historical note added 2026-11-24).** A host
+restoring mobs from its `mobs` directory can skip a 0.8.30 store after the
+upgrade. 0.8.30 named each file `<escaped-mob-id>.db`; 0.8.31 adds the
+`mob--` prefix and scans only regular `.db` files whose names begin with
+that prefix. For a mob named `team`, the scan skips the old `team.db` without
+opening it. Not seeing that mob after restore does not mean its data was
+deleted.
+
+0.9.18 still filters by filename. If the old mob ID itself began with
+`mob--`, its old filename already passes that filter: for the mob
+`mob--team`, 0.8.30 wrote `mob--team.db`. In this case 0.9.18 can decode
+the whole filename stem and compare it with the ID in the store. This is not a general
+migration of older stores. These rules were read from the tagged source;
+an upgrade with an actual 0.8.30 store was not tested.

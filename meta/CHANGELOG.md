@@ -49,6 +49,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   section. Affected: Meta 0.9.15 and later up to this change (the comparison
   does not exist before 0.9.15).
 
+- The WorkGraph resume gate says why it could not read, where it used to
+  leave Meerkat's admission attempt to time out in silence. For a durable
+  member's interrupted run that carries no attention projection, the gate
+  pages through every open work item of the mob's WorkGraph namespace, and
+  each page is one full list of the store. Over a store whose list takes
+  longer than one admission attempt
+  (`RESUMED_RUN_ADMISSION_ATTEMPT_TIMEOUT`, 8 seconds), Meerkat dropped the
+  gate in the middle of its scan: the gate logged nothing, and the only
+  detail was that the admission did not answer in time. The gate now ends
+  its own scan a little before the attempt ends (after seven eighths of it)
+  and answers unavailable with a reason that names the open work item list
+  by realm and namespace, the pages it had read and the time it waited. An
+  operator sees that reason in the gate's own warning
+  (`durable resume gate: the gate cannot decide`) and as the detail of
+  Meerkat's `resumed run admission is unavailable` warning. A scan that is
+  ended draws no verdict from the pages it read and writes nothing. Nothing
+  else changes: while the list stays that slow the run is held as before,
+  and a list that answers in time decides as before.
+
+- The WorkGraph resume gate's unavailable reasons are the gate's own
+  sentences. A WorkGraph read that failed used to put the store's whole
+  error text into the reason, and a run's attention projection that does
+  not decode put the decoder's text there; a store may print a path or an
+  id in its error. The reason of a failed read now names the error's kind
+  (`store error`, `backing store unavailable`, `unsupported backend` and so
+  on) with the realm and the namespace, and the reason of a projection
+  that does not decode is one fixed sentence. The store's and the
+  decoder's own text is in the gate's log, in the warnings
+  `durable resume gate: a WorkGraph read failed` and
+  `durable resume gate: the run's WorkGraph attention projection does not
+  decode`. A reader that matched the old reason text for either case finds
+  it there. The realm and the namespace are the only text in an unavailable
+  reason that the gate does not write itself; they come last in it, and a
+  control character in either is replaced by `?`. The verdicts are
+  unchanged.
+
 ## [0.9.18] - 2026-11-22
 
 Records that name a member carry the member's mob, so that one host can keep

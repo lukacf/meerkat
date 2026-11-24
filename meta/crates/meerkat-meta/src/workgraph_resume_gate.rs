@@ -497,17 +497,18 @@ impl WorkGraphResumeGate {
     /// its last page: unavailable, with what was slow. The reason is read by
     /// an operator: it names the list by the realm and namespace the gate
     /// reads, the number of pages read and the time waited, and nothing of
-    /// any item.
+    /// any item. The names come last: where a long reason is cut for
+    /// display, what was slow, the counts and the times are kept.
     fn claim_scan_cut(&self, pages_read: usize, waited: Duration) -> ResumeCheck {
         ResumeCheck::Unavailable(format!(
-            "the WorkGraph open work item list of realm '{}' namespace '{}' was too slow for \
-             the resume gate's claim scan: {pages_read} page(s) of up to {CLAIM_SCAN_PAGE} items \
-             read in {} ms, scan budget {} ms; the scan was ended, no verdict was drawn from the \
-             pages read and nothing was written",
-            self.service.default_realm_id(),
-            self.service.default_namespace(),
+            "the WorkGraph open work item list was too slow for the resume gate's claim scan: \
+             {pages_read} page(s) of up to {CLAIM_SCAN_PAGE} items read in {} ms, scan budget \
+             {} ms; the scan was ended, no verdict was drawn from the pages read and nothing \
+             was written; realm '{}' namespace '{}'",
             waited.as_millis(),
             CLAIM_SCAN_BUDGET.as_millis(),
+            self.service.default_realm_id(),
+            self.service.default_namespace(),
         ))
     }
 
@@ -1821,6 +1822,55 @@ mod tests {
             waited >= CLAIM_SCAN_BUDGET,
             "the scan had its whole budget: waited {waited:?} of {CLAIM_SCAN_BUDGET:?}"
         );
+    }
+
+    /// The first `bytes` bytes of `text`, cut back to a character boundary:
+    /// how a reason that is too long is shortened where it is reported.
+    fn cut_at(text: &str, bytes: usize) -> &str {
+        let mut end = bytes.min(text.len());
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        &text[..end]
+    }
+
+    /// Meerkat reports a reason cut at 512 bytes. The scan's reason holds
+    /// what was slow, the counts and the times before the realm and the
+    /// namespace, so a very long realm id costs it its tail only, and with
+    /// the largest numbers there are.
+    #[test]
+    fn a_cut_scans_reason_keeps_its_facts_ahead_of_a_very_long_realm_id() {
+        let realm = format!("mob.{}", "r".repeat(4096));
+        let store: Arc<dyn WorkGraphStore> = Arc::new(MemoryWorkGraphStore::new());
+        let gate = WorkGraphResumeGate::new(WorkGraphService::with_scope(
+            store,
+            realm.clone(),
+            WorkNamespace::default(),
+        ));
+
+        let check = gate.claim_scan_cut(usize::MAX, Duration::MAX);
+        let ResumeCheck::Unavailable(reason) = &check else {
+            panic!("a cut scan answers unavailable: {check:?}");
+        };
+        assert!(
+            reason.contains(&realm),
+            "the gate itself names the realm whole: {} bytes",
+            reason.len()
+        );
+        let kept = cut_at(reason, 512);
+        for part in [
+            "open work item list was too slow".to_string(),
+            format!("{} page(s)", usize::MAX),
+            format!("read in {} ms", Duration::MAX.as_millis()),
+            format!("scan budget {} ms", CLAIM_SCAN_BUDGET.as_millis()),
+            "no verdict was drawn from the pages read and nothing was written".to_string(),
+            "realm '".to_string(),
+        ] {
+            assert!(
+                kept.contains(&part),
+                "the cut reason holds \"{part}\": {kept}"
+            );
+        }
     }
 
     #[tokio::test]

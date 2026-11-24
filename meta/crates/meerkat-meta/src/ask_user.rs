@@ -160,6 +160,10 @@ impl std::fmt::Debug for AskUserSurface {
             .debug_struct("AskUserSurface")
             .field("decisions", &self.decisions)
             .field("a_person_decides", &self.console.takes_a_persons_decision())
+            .field(
+                "console_refuses_every_caller",
+                &self.console.refuses_every_caller(),
+            )
             .field("mob_id", &self.mob_id)
             .finish_non_exhaustive()
     }

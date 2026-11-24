@@ -1025,6 +1025,12 @@ fn minimal_decision_state() -> RuntimeDecisionState {
     RuntimeDecisionState::local_console(ConsolePolicy::default(), None)
 }
 
+/// What the gateway warns at start when its console refuses every caller
+/// (`ConsoleAuthPosture::ClosedToEveryCaller`).
+const CONSOLE_CLOSED_TO_EVERY_CALLER_WARNING: &str = "console requires app auth but trusts no signing key: every console request will be \
+     refused with 401. Pass runtime_options.auth_config to trust an issuer, or set \
+     runtime_options.console_require_app_auth = false for an explicitly open local console";
+
 /// The HTTP listener exposure gate, run before any bootstrap work. The
 /// decision state it consults is the one the console will serve with:
 /// `auth_config` when the host passed one, else the keyless fallback, so
@@ -5805,6 +5811,35 @@ ingress_subjects = [{ ingress = "chat", subject = "U123" }]
             ConsoleAuthPosture::of(&decisions),
             ConsoleAuthPosture::ClosedToEveryCaller
         );
+    }
+
+    /// The start warning of a console that refuses every caller names what
+    /// that means for the questions a member asks: no person can answer
+    /// them in the console, and the program that embeds the gateway still
+    /// can. It never says that nobody can answer.
+    #[test]
+    fn the_closed_console_warning_names_what_it_means_for_questions() {
+        let warning = CONSOLE_CLOSED_TO_EVERY_CALLER_WARNING;
+        assert!(
+            warning.starts_with(
+                "console requires app auth but trusts no signing key: every console request \
+                 will be refused with 401."
+            ),
+            "{warning}"
+        );
+        assert!(warning.contains("`ask_user`"), "{warning}");
+        assert!(warning.contains("no person can answer"), "{warning}");
+        assert!(
+            warning.contains("program that embeds this gateway can still answer"),
+            "{warning}"
+        );
+        let lowered = warning.to_lowercase();
+        for never in ["nobody can answer", "no one can answer"] {
+            assert!(
+                !lowered.contains(never),
+                "the warning says `{never}`: {warning}"
+            );
+        }
     }
 
     #[test]
@@ -21788,11 +21823,7 @@ external_addressable = true
     if crate::gateway_composition::ConsoleAuthPosture::of(&decision_state)
         == crate::gateway_composition::ConsoleAuthPosture::ClosedToEveryCaller
     {
-        tracing::warn!(
-            "console requires app auth but trusts no signing key: every console request will be \
-             refused with 401. Pass runtime_options.auth_config to trust an issuer, or set \
-             runtime_options.console_require_app_auth = false for an explicitly open local console"
-        );
+        tracing::warn!("{CONSOLE_CLOSED_TO_EVERY_CALLER_WARNING}");
     }
     if crate::gateway_composition::ConsoleAuthPosture::of(&decision_state)
         == crate::gateway_composition::ConsoleAuthPosture::Open

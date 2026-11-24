@@ -45,6 +45,10 @@ impl ConsoleScheduleDoor for APersonDecides {
         true
     }
 
+    fn refuses_every_caller(&self) -> bool {
+        false
+    }
+
     async fn send(&self, _send: &ConsoleScheduledSend, _delivery_key: &str) -> Result<(), String> {
         Ok(())
     }

@@ -1,12 +1,47 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { ConsoleFrame } from "../types";
-import { activeRunIdFromFrames, describeRunStopReceipt, parseRunStopResult } from "./run-stop";
+import type { ConsoleAgent, ConsoleFrame } from "../types";
+import { activeRunIdFromFrames, describeRunStopReceipt, parseRunStopResult, runStopOffered } from "./run-stop";
 
 function frame(id: string, event: string, extra: Partial<ConsoleFrame> = {}): ConsoleFrame {
   return { id, event, data: {}, ...extra };
 }
+
+function agent(memberId: string, affordances: ConsoleAgent["affordances"]): ConsoleAgent {
+  return { agent_id: memberId, member_id: memberId, identity: memberId, label: memberId, kind: "mob_agent", affordances };
+}
+
+test("Stop is offered for a named run of an agent the viewer may retire, unless its row says the gateway stops no run of it", () => {
+  const retirable = agent("alpha", { can_retire: true });
+  const running = { readOnly: false, activeRunId: "r-1" };
+  assert.equal(runStopOffered({ ...running, agent: retirable }), true, "a gateway that does not say leaves Stop offered");
+  assert.equal(runStopOffered({ ...running, agent: agent("alpha", { can_retire: true, can_stop_run: true }) }), true);
+  assert.equal(
+    runStopOffered({ ...running, agent: agent("research-team/archivist", { can_retire: true, can_stop_run: false }) }),
+    false,
+    "a run of a member of a nested mob is stopped by no gateway route",
+  );
+  assert.equal(runStopOffered({ ...running, agent: agent("alpha", { can_retire: false }) }), false);
+  assert.equal(runStopOffered({ ...running, readOnly: true, agent: retirable }), false);
+  assert.equal(runStopOffered({ readOnly: false, activeRunId: null, agent: retirable }), false);
+  assert.equal(runStopOffered({ ...running, agent: null }), false);
+});
+
+test("Stop follows the row's own word on stopping, and the retirement only where the row says nothing of stopping", () => {
+  const running = { readOnly: false, activeRunId: "r-1" };
+  assert.equal(
+    runStopOffered({ ...running, agent: agent("support/reviewer", { can_retire: false, can_stop_run: true }) }),
+    true,
+    "a member of a hosted mob the gateway stops runs of and does not retire",
+  );
+  assert.equal(runStopOffered({ ...running, agent: agent("support/reviewer", { can_stop_run: true }) }), true);
+  assert.equal(runStopOffered({ ...running, agent: agent("alpha", { can_retire: true, can_stop_run: false }) }), false);
+  assert.equal(runStopOffered({ ...running, agent: agent("alpha", { can_retire: true }) }), true, "a launch mob's member as before");
+  assert.equal(runStopOffered({ ...running, agent: agent("alpha", {}) }), false, "a row that says neither");
+  assert.equal(runStopOffered({ ...running, readOnly: true, agent: agent("support/reviewer", { can_stop_run: true }) }), false);
+  assert.equal(runStopOffered({ readOnly: false, activeRunId: null, agent: agent("support/reviewer", { can_stop_run: true }) }), false);
+});
 
 test("the active run is the latest run_started no terminal has closed", () => {
   assert.equal(activeRunIdFromFrames([]), null);

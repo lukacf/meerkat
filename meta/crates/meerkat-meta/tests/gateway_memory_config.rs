@@ -545,7 +545,7 @@ fn gateway_static_scheduling_methods_are_not_found() {
     let state_dir = tempfile::tempdir().expect("state dir");
     let mut gateway = GatewayProcess::start();
     let init = gateway.init_with_runtime_options(&state_dir, json!({}));
-    assert_eq!(init["result"]["contract_version"], json!("0.5.0"), "{init}");
+    assert_eq!(init["result"]["contract_version"], json!("0.6.0"), "{init}");
 
     for method in ["meta/scheduling/evaluate", "meta/scheduling/dispatch"] {
         let response = gateway.rpc(json!({
@@ -566,7 +566,7 @@ fn gateway_schedule_tools_lists_the_durable_schedule_tool_definitions() {
     let state_dir = tempfile::tempdir().expect("state dir");
     let mut gateway = GatewayProcess::start();
     let init = gateway.init_with_runtime_options(&state_dir, json!({}));
-    assert_eq!(init["result"]["contract_version"], json!("0.5.0"), "{init}");
+    assert_eq!(init["result"]["contract_version"], json!("0.6.0"), "{init}");
 
     let listed = gateway.rpc(json!({
         "jsonrpc": "2.0",

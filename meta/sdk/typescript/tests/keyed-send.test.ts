@@ -38,7 +38,7 @@ async function makeRuntime(keyed: boolean, steer = false) {
     switch (method) {
       case "meta/capabilities":
         return {
-          contract_version: "0.5.0",
+          contract_version: "0.6.0",
           methods: keyed
             ? ["meta/send", "meta/status_identity", "meta/send_status"]
             : ["meta/send", "meta/status_identity"],

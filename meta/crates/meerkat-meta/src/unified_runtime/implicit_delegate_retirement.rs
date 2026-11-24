@@ -21,12 +21,15 @@ use super::UnifiedRuntime;
 
 impl UnifiedRuntime {
     pub(crate) async fn configure_implicit_delegate_retirement(&self, options: &RuntimeOptions) {
-        let Some(state) = self.mob_runtime.agent_mob_mcp_state() else {
+        let Some(state) = self.default_mob().mob_runtime.agent_mob_mcp_state() else {
             return;
         };
         let sweep_interval =
             Duration::from_millis(options.implicit_delegate_idle_sweep_interval_ms.max(1_000));
-        let overrides = self.mob_runtime.implicit_delegate_retirement_overrides();
+        let overrides = self
+            .default_mob()
+            .mob_runtime
+            .implicit_delegate_retirement_overrides();
         // Re-arm the sweep for members restored across a restart: their
         // opt-ins live in the durable metadata store, not in the roster.
         if let Some(overrides) = overrides.as_ref() {
@@ -39,21 +42,21 @@ impl UnifiedRuntime {
         }
         // A candidate launch retires no member: the delegates it finds idle
         // are the authoritative launch's, whose sweep retires them.
-        if !self.mob_runtime.speaks_for_composition() {
+        if !self.default_mob().mob_runtime.speaks_for_composition() {
             tracing::info!(
                 "candidate launch: the implicit delegate idle-retire sweep is not started"
             );
             return;
         }
         let task = tokio::spawn(run_implicit_delegate_retirement(
-            self.mob_runtime.clone(),
+            self.default_mob().mob_runtime.clone(),
             state,
             overrides,
             options
                 .implicit_delegate_idle_retire_secs
                 .map(Duration::from_secs),
             sweep_interval,
-            Arc::clone(&self.implicit_delegate_identity_runtime),
+            Arc::clone(self.default_mob().identity_plane.slot()),
         ));
         *self.implicit_delegate_retirement_task.lock().await = Some(task);
     }
@@ -145,7 +148,11 @@ async fn run_implicit_delegate_retirement(
         };
         let mob_handles = Box::pin(state.mob_handles_snapshot()).await.ok();
         let rosters_observed = mob_handles.is_some();
+        // The mobs whose rosters this pass could read: the ones the set
+        // handed out.
+        let mut handed_out = BTreeSet::new();
         for (mob_id, handle) in mob_handles.unwrap_or_default() {
+            handed_out.insert(mob_id.to_string());
             let is_primary_mob = mob_id.as_str() == primary_mob_id;
             let is_implicit_mob = Box::pin(state.is_implicit_mob(&mob_id)).await;
             if !is_primary_mob && !is_implicit_mob {
@@ -436,7 +443,20 @@ async fn run_implicit_delegate_retirement(
         }
         idle_since.retain(|key, _| seen.contains(key));
         if rosters_observed && let Some(overrides) = per_delegate_overrides.as_ref() {
+            // A member this pass did not find is gone only when its mob's
+            // roster was read. A mob the set still knows and did not hand
+            // out (it is not loaded, held or quarantined, or its idle
+            // question is open) was not read: nothing is known of its
+            // members, and their opt-ins stand until the mob is read again.
+            // When the set cannot say which mobs it knows, nothing is
+            // released by this pass.
+            let Some(not_read) = mobs_known_and_not_read(&state, &handed_out).await else {
+                continue;
+            };
             for ((mob_id, member_id), bound) in implicit_opt_ins_at_start {
+                if not_read.contains(&mob_id) {
+                    continue;
+                }
                 // A member being respawned can be missing from the roster for
                 // a moment; its respawn carries the opt-in, so it is skipped.
                 if !seen.contains(&(mob_id.clone(), member_id.clone()))
@@ -447,6 +467,29 @@ async fn run_implicit_delegate_retirement(
             }
         }
     }
+}
+
+/// The mobs `state` knows whose rosters a pass that was handed `handed_out`
+/// did not read: a mob that is not loaded, a held or quarantined one, and a
+/// mob whose handle the set withheld while its idle question was open.
+/// `None` when the set's inventory cannot be read.
+async fn mobs_known_and_not_read(
+    state: &MobMcpState,
+    handed_out: &BTreeSet<String>,
+) -> Option<BTreeSet<String>> {
+    let inventory = Box::pin(state.mob_inventory()).await.ok()?;
+    Some(
+        inventory
+            .managed
+            .iter()
+            .map(|(mob_id, _)| mob_id)
+            .chain(inventory.held.iter().map(|(mob_id, _)| mob_id))
+            .chain(inventory.quarantined.iter().map(|row| &row.mob_id))
+            .chain(inventory.dormant.iter())
+            .map(ToString::to_string)
+            .filter(|mob_id| !handed_out.contains(mob_id))
+            .collect(),
+    )
 }
 
 /// Await how an idle retirement that outlived `retire`'s wait settles, and
@@ -1535,6 +1578,20 @@ comms = true
             ) -> Result<usize, MetadataStoreError> {
                 Ok(0)
             }
+            async fn release_mob_records(
+                &self,
+                mob_id: &str,
+            ) -> Result<crate::runtime::MobRecordsRelease, MetadataStoreError> {
+                let mut written = self
+                    .written
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let before = written.len();
+                written.retain(|record| record.mob_id != mob_id);
+                Ok(crate::runtime::MobRecordsRelease::Released {
+                    records: u64::try_from(before - written.len()).unwrap_or(u64::MAX),
+                })
+            }
         }
 
         let early = SessionId::new();
@@ -1780,6 +1837,7 @@ comms = true
         let first_handle = first.mob_handle();
         let first_session = seat(&first_handle, "helper").await;
         let overrides = first
+            .default_mob()
             .mob_runtime
             .implicit_delegate_retirement_overrides()
             .expect("overrides");
@@ -1847,6 +1905,7 @@ comms = true
         );
         assert_eq!(
             second
+                .default_mob()
                 .mob_runtime
                 .implicit_delegate_retirement_overrides()
                 .expect("overrides")
@@ -1874,6 +1933,7 @@ comms = true
             boot_sweeping_runtime(MOB_ID, &temp.path().join("state"), &metadata_path, 1_000).await;
         let handle = runtime.mob_handle();
         let overrides = runtime
+            .default_mob()
             .mob_runtime
             .implicit_delegate_retirement_overrides()
             .expect("overrides");
@@ -1961,6 +2021,7 @@ comms = true
         assert!(!runtime.speaks_for_composition());
         let handle = runtime.mob_handle();
         let overrides = runtime
+            .default_mob()
             .mob_runtime
             .implicit_delegate_retirement_overrides()
             .expect("overrides");
@@ -2052,6 +2113,7 @@ comms = true
             .await
             .expect("member session");
         let service = runtime
+            .default_mob()
             .mob_runtime
             .session_service()
             .cloned()
@@ -2119,6 +2181,7 @@ comms = true
             seated_identity(&mut runtime, MOB_ID).await;
 
         let overrides = runtime
+            .default_mob()
             .mob_runtime
             .implicit_delegate_retirement_overrides()
             .expect("overrides");
@@ -2173,6 +2236,7 @@ comms = true
         let (identity_runtime, identity, roster_member, before) =
             seated_identity(&mut runtime, MOB_ID).await;
         let overrides = runtime
+            .default_mob()
             .mob_runtime
             .implicit_delegate_retirement_overrides()
             .expect("overrides");
@@ -2396,6 +2460,7 @@ comms = true
         .await;
         let handle = runtime.mob_handle();
         let overrides = runtime
+            .default_mob()
             .mob_runtime
             .implicit_delegate_retirement_overrides()
             .expect("overrides");
@@ -2457,6 +2522,7 @@ comms = true
         .await;
         let handle = runtime.mob_handle();
         let overrides = runtime
+            .default_mob()
             .mob_runtime
             .implicit_delegate_retirement_overrides()
             .expect("overrides");
@@ -2634,10 +2700,12 @@ comms = true
         let runtime =
             boot_sweeping_runtime(MOB_ID, &temp.path().join("state"), &metadata_path, 1_000).await;
         let state = runtime
+            .default_mob()
             .mob_runtime
             .agent_mob_mcp_state()
             .expect("agent mob state");
         let overrides = runtime
+            .default_mob()
             .mob_runtime
             .implicit_delegate_retirement_overrides()
             .expect("overrides");
@@ -2754,6 +2822,7 @@ comms = true
         .expect("bootstrap persistent runtime");
         let handle = runtime.mob_handle();
         let overrides = runtime
+            .default_mob()
             .mob_runtime
             .implicit_delegate_retirement_overrides()
             .expect("overrides");
@@ -2815,6 +2884,7 @@ comms = true
             boot_sweeping_runtime(MOB_ID, &temp.path().join("state"), &metadata_path, 1_000).await;
         let handle = runtime.mob_handle();
         let overrides = runtime
+            .default_mob()
             .mob_runtime
             .implicit_delegate_retirement_overrides()
             .expect("overrides");
@@ -2883,6 +2953,7 @@ comms = true
         .await;
         let handle = runtime.mob_handle();
         let overrides = runtime
+            .default_mob()
             .mob_runtime
             .implicit_delegate_retirement_overrides()
             .expect("overrides");
@@ -2954,6 +3025,104 @@ comms = true
         runtime.shutdown().await;
     }
 
+    /// An implicit delegation mob the mob set unloaded was not read by the
+    /// sweep: nothing is known of its members while it is not loaded, so
+    /// their opt-ins stand, pass after pass, and the member is still opted
+    /// in once its mob is loaded again.
+    #[tokio::test]
+    async fn the_opt_ins_of_a_mob_that_is_not_loaded_are_not_released() {
+        use super::super::mob_entries::lazy_start_tests::StoredHost;
+
+        const MOB_ID: &str = "implicit-mob-not-loaded";
+        let stored = StoredHost::of(sweeping_definition(MOB_ID));
+        let metadata_path = stored.state_dir().join("metadata.sqlite3");
+        let runtime = bootstrap_sweeping(stored.spec(), MOB_ID, &metadata_path, 100).await;
+        let state = runtime
+            .default_mob()
+            .mob_runtime
+            .agent_mob_mcp_state()
+            .expect("agent mob state");
+        let overrides = runtime
+            .default_mob()
+            .mob_runtime
+            .implicit_delegate_retirement_overrides()
+            .expect("overrides");
+        let owner = seat(&runtime.mob_handle(), "owner").await.to_string();
+        let (implicit, _) = state
+            .ensure_implicit_mob_for_model(&owner, "gpt-5.5", None)
+            .await
+            .expect("implicit mob");
+        state
+            .mob_spawn(
+                &implicit,
+                meerkat_mob::ProfileName::from("delegate"),
+                AgentIdentity::from("helper"),
+                Some(meerkat_mob::MobRuntimeMode::TurnDriven),
+                None,
+                None,
+            )
+            .await
+            .expect("seat helper");
+        overrides
+            .set(
+                implicit.as_str(),
+                "helper",
+                DelegateIdleRetireOverride::Seconds(3600),
+            )
+            .await;
+        assert_eq!(persisted_members(&metadata_path).await, vec!["helper"]);
+
+        let unloaded = state.unload_idle_mobs_for_tests().await;
+        let inventory = state
+            .mob_inventory()
+            .await
+            .expect("the mob set's inventory");
+        assert!(
+            inventory.dormant.contains(&implicit),
+            "the mob set unloads the idle implicit mob: it unloaded {unloaded:?}, and knows as \
+             not loaded {:?}",
+            inventory.dormant
+        );
+
+        // Several passes of the sweep over a mob it cannot read.
+        tokio::time::sleep(Duration::from_millis(1_500)).await;
+        assert_eq!(
+            persisted_members(&metadata_path).await,
+            vec!["helper"],
+            "the opt-in of a member of a mob that is not loaded stands"
+        );
+        assert!(
+            state
+                .mob_inventory()
+                .await
+                .expect("the mob set's inventory")
+                .dormant
+                .contains(&implicit),
+            "and the sweep loaded nothing for it"
+        );
+
+        let handle = state
+            .handle_for(&implicit)
+            .await
+            .expect("the implicit mob loads again");
+        assert!(
+            handle
+                .get_member(&AgentIdentity::from("helper"))
+                .await
+                .expect("the roster of the mob loaded again")
+                .is_some(),
+            "the member is on its mob's roster again"
+        );
+        assert!(
+            overrides
+                .get_bound(implicit.as_str(), "helper")
+                .await
+                .is_some(),
+            "and it is still opted in"
+        );
+        runtime.shutdown().await;
+    }
+
     /// The implicit-mob release skips a member whose Meta respawn is in
     /// flight: it can be missing from the roster for a moment, and its
     /// respawn carries the opt-in.
@@ -2965,10 +3134,12 @@ comms = true
         let runtime =
             boot_sweeping_runtime(MOB_ID, &temp.path().join("state"), &metadata_path, 1_000).await;
         let state = runtime
+            .default_mob()
             .mob_runtime
             .agent_mob_mcp_state()
             .expect("agent mob state");
         let overrides = runtime
+            .default_mob()
             .mob_runtime
             .implicit_delegate_retirement_overrides()
             .expect("overrides");
@@ -3101,6 +3272,7 @@ comms = true
             boot_sweeping_runtime(MOB_ID, &temp.path().join("state"), &metadata_path, 1_000).await;
         let handle = runtime.mob_handle();
         let overrides = runtime
+            .default_mob()
             .mob_runtime
             .implicit_delegate_retirement_overrides()
             .expect("overrides");
@@ -3168,6 +3340,7 @@ comms = true
             boot_sweeping_runtime(MOB_ID, &temp.path().join("state"), &metadata_path, 1_000).await;
         let handle = runtime.mob_handle();
         let overrides = runtime
+            .default_mob()
             .mob_runtime
             .implicit_delegate_retirement_overrides()
             .expect("overrides");
@@ -3370,6 +3543,7 @@ comms = true
         let runtime = boot_gated_persistent_runtime(MOB_ID, temp.path(), gate).await;
         let handle = runtime.mob_handle();
         let overrides = runtime
+            .default_mob()
             .mob_runtime
             .implicit_delegate_retirement_overrides()
             .expect("overrides");
@@ -3461,6 +3635,7 @@ comms = true
         let runtime = boot_gated_persistent_runtime(MOB_ID, temp.path(), gate).await;
         let handle = runtime.mob_handle();
         let overrides = runtime
+            .default_mob()
             .mob_runtime
             .implicit_delegate_retirement_overrides()
             .expect("overrides");
@@ -3769,6 +3944,7 @@ comms = true
         await_member_run_open(&handle, &AgentIdentity::from("worker")).await;
         assert_eq!(
             first
+                .default_mob()
                 .mob_runtime
                 .session_owes_durable_input(&worker_session)
                 .await,
@@ -3778,6 +3954,7 @@ comms = true
         open_gate.send(true).expect("open the gate");
         tokio::time::timeout(Duration::from_secs(30), async {
             while first
+                .default_mob()
                 .mob_runtime
                 .session_owes_durable_input(&worker_session)
                 .await
@@ -3790,6 +3967,7 @@ comms = true
         .expect("the worker's input stayed open after its turn ended");
         seat(&handle, "bystander").await;
         first
+            .default_mob()
             .mob_runtime
             .implicit_delegate_retirement_overrides()
             .expect("overrides")
@@ -3809,6 +3987,7 @@ comms = true
         .await;
         let handle = second.mob_handle();
         let service = second
+            .default_mob()
             .mob_runtime
             .agent_mob_mcp_state()
             .expect("agent mob tool state")
@@ -3882,6 +4061,7 @@ comms = true
         let worker_session = seat(&handle, "worker").await;
         tokio::time::timeout(Duration::from_secs(30), async {
             while first
+                .default_mob()
                 .mob_runtime
                 .session_owes_durable_input(&worker_session)
                 .await
@@ -3893,6 +4073,7 @@ comms = true
         .await
         .expect("the worker's kickoff input stayed open");
         first
+            .default_mob()
             .mob_runtime
             .implicit_delegate_retirement_overrides()
             .expect("overrides")
@@ -3928,6 +4109,7 @@ comms = true
             "the restored worker keeps its session"
         );
         let service = second
+            .default_mob()
             .mob_runtime
             .agent_mob_mcp_state()
             .expect("agent mob tool state")
@@ -4362,6 +4544,7 @@ comms = true
         .await;
         let handle = runtime.mob_handle();
         let overrides = runtime
+            .default_mob()
             .mob_runtime
             .implicit_delegate_retirement_overrides()
             .expect("overrides");
@@ -4434,6 +4617,7 @@ comms = true
         .await;
         let handle = runtime.mob_handle();
         let overrides = runtime
+            .default_mob()
             .mob_runtime
             .implicit_delegate_retirement_overrides()
             .expect("overrides");
@@ -4547,6 +4731,7 @@ comms = true
         .await;
         let handle = runtime.mob_handle();
         let overrides = runtime
+            .default_mob()
             .mob_runtime
             .implicit_delegate_retirement_overrides()
             .expect("overrides");
@@ -4599,6 +4784,7 @@ comms = true
         .await;
         let handle = runtime.mob_handle();
         let overrides = runtime
+            .default_mob()
             .mob_runtime
             .implicit_delegate_retirement_overrides()
             .expect("overrides");
@@ -4648,6 +4834,7 @@ comms = true
         .await;
         let handle = runtime.mob_handle();
         let overrides = runtime
+            .default_mob()
             .mob_runtime
             .implicit_delegate_retirement_overrides()
             .expect("overrides");
@@ -4723,6 +4910,7 @@ comms = true
         let runtime = boot_gated_persistent_runtime(MOB_ID, temp.path(), gate).await;
         let handle = runtime.mob_handle();
         let overrides = runtime
+            .default_mob()
             .mob_runtime
             .implicit_delegate_retirement_overrides()
             .expect("overrides");

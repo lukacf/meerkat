@@ -73,4 +73,41 @@ function assertScopeCancellation(value) {
   }
 }
 
-module.exports = { assertScopeCancellation };
+// The stock console starts its one subscription again while it initializes,
+// and each start cancels the history read of the one before. On a gateway
+// whose capabilities list mob addressing the last start follows the
+// experience read for every mob that the console makes once it has that
+// answer. Returns the live held reads of the last start: none while the
+// console has not got that far, every live held read on a gateway that
+// hosts one mob. A held read that a newer unscoped read of the scope
+// followed is of a start the console replaces. While reads are held no
+// stream follows, so the newest held read can still be the storage-scope
+// start's, which the capability's start then replaces: the two send the
+// same read. `held` and `observations` are the scope proxy's records.
+function unscopedRecentRead(item) {
+  if (item.path !== "/console/rpc" || item.method !== "POST") return false;
+  try {
+    const { method, params } = JSON.parse(item.request);
+    return method === "meta/console/query_timeline" && params?.mode === "recent" && params.limit === 200
+      && params.identity === undefined && params.before === undefined && params.after === undefined;
+  } catch { return false; }
+}
+function heldReadsOfLastStart({ observations, held, scope }) {
+  const live = held.filter(item => item.scope === scope && !Number.isFinite(item.abortedAt));
+  const answer = observations.filter(item => {
+    if (item.scope !== scope || item.path !== "/console/rpc" || item.status !== 200 || !Number.isFinite(item.endedAt)) return false;
+    try { return JSON.parse(item.request).method === "meta/capabilities"; } catch { return false; }
+  }).sort((left, right) => left.endedAt - right.endedAt)[0];
+  if (!answer) return [];
+  let features;
+  try { features = JSON.parse(answer.response).result?.feature_capabilities; } catch { return []; }
+  if (!Array.isArray(features) || !features.includes("mob_addressing")) return live;
+  const everyMobRead = observations.filter(item => item.scope === scope && item.method === "GET"
+    && item.path === "/console/experience?mobs=*" && item.startedAt >= answer.endedAt && Number.isFinite(item.endedAt))
+    .sort((left, right) => left.endedAt - right.endedAt)[0];
+  if (!everyMobRead) return [];
+  const reads = observations.filter(item => item.scope === scope && unscopedRecentRead(item));
+  return live.filter(item => item.startedAt >= everyMobRead.endedAt && !reads.some(read => read.startedAt > item.startedAt));
+}
+
+module.exports = { assertScopeCancellation, heldReadsOfLastStart };

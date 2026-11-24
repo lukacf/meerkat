@@ -1357,6 +1357,82 @@ async fn a_reopen_keeps_every_replay_only_event_field() {
     );
 }
 
+/// A seat row's seat record survives the storage whole: the append, a write
+/// that is no append, the image a checkpoint writes from the loaded log, and
+/// a reopen. Members of the record this build does not know are kept as
+/// stored.
+#[tokio::test]
+async fn a_seat_record_survives_a_checkpoint_a_later_write_and_a_reopen() {
+    use crate::event::MemberSpawnedEvent;
+    use crate::ids::{AgentIdentity, AgentRuntimeId, Generation, ProfileName};
+    use meerkat_core::types::SessionId;
+
+    let host = Arc::new(MemoryHost::default());
+    let process = start(&host, "mob").await;
+    let identity = AgentIdentity::from("worker");
+    let record: crate::runtime::StoredSeatLineage = serde_json::from_value(serde_json::json!({
+        "recorded_by": "shell",
+        "kind": "a_later_kind",
+        "a_later_member": { "kept": [1, 2] },
+    }))
+    .expect("a stored record");
+    let spawned = MemberSpawnedEvent::new(
+        identity.clone(),
+        Generation::INITIAL,
+        crate::ids::FenceToken::new(1),
+        AgentRuntimeId::initial(identity),
+        ProfileName::from("worker"),
+    )
+    .with_bridge_member_ref(Some(MemberRef::from_bridge_session_id(SessionId::new())))
+    .with_seat_lineage(Some(record.clone()));
+    let storage = process.stores.storage();
+    storage
+        .events
+        .append(event(MobEventKind::MemberSpawned(spawned), None))
+        .await
+        .expect("append the seat row");
+    // A write that is no append.
+    storage
+        .specs
+        .put_spec(&MobId::from("mob"), &MobDefinition::explicit("mob"), None)
+        .await
+        .expect("put the spec");
+    drop(storage);
+
+    let holds_the_record = |image: &BTreeMap<String, Vec<u8>>| {
+        image
+            .values()
+            .filter(|bytes| {
+                bytes
+                    .windows(b"a_later_member".len())
+                    .any(|window| window == b"a_later_member")
+            })
+            .count()
+    };
+    assert_eq!(
+        holds_the_record(&full_export(&process.stores).await),
+        1,
+        "the image a checkpoint writes holds the record as stored"
+    );
+    let reopened = restart_and_compare(&host, "mob", process).await;
+    assert_eq!(holds_the_record(&full_export(&reopened.stores).await), 1);
+    let replayed = reopened
+        .stores
+        .storage()
+        .events
+        .replay_all()
+        .await
+        .expect("replay the events");
+    let stored: Vec<_> = replayed
+        .iter()
+        .filter_map(|event| match &event.kind {
+            MobEventKind::MemberSpawned(spawned) => Some(spawned.seat_lineage().cloned()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(stored, vec![Some(record)]);
+}
+
 /// An event entry a pre-release build of this storage wrote in the public
 /// event form, without the stored codec's schema version, is refused with an
 /// error that names that form and asks for the mob to be recreated: it lacks

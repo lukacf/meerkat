@@ -118,6 +118,18 @@ impl From<crate::meerkat_machine::dsl::LiveBoundaryDelivery> for LiveBoundaryDel
     }
 }
 
+/// The stored class goes back to the machine as recovery read it: the
+/// machine decides whether a recovered input keeps it.
+impl From<LiveBoundaryDeliveryClass> for crate::meerkat_machine::dsl::LiveBoundaryDelivery {
+    fn from(class: LiveBoundaryDeliveryClass) -> Self {
+        match class {
+            LiveBoundaryDeliveryClass::FollowUpOnly => Self::FollowUpOnly,
+            LiveBoundaryDeliveryClass::RequestOnly => Self::RequestOnly,
+            LiveBoundaryDeliveryClass::DurableAppend => Self::DurableAppend,
+        }
+    }
+}
+
 /// Admitted conversation projection for one input.
 ///
 /// The raw input payload is still retained for durability/replay, but the

@@ -413,7 +413,7 @@ impl RemoteMemberDelivery {
         self.read(batch, true)
             .await
             .map(|answer| answer.input)
-            .map_err(|error| NativeUnavailable(error.to_string()))
+            .map_err(|error| NativeUnavailable::new(error.to_string()))
     }
 }
 
@@ -421,25 +421,161 @@ impl RemoteMemberDelivery {
 /// continuation owner, as the continuation the peer's batch is, keyed under
 /// the scope of the caller the grant admitted.
 pub struct KeyedInjectServer {
-    native: Arc<MobNativeDelivery>,
+    seam: Seam,
     window_ms: u64,
     clock: Clock,
     /// When this receiver was built: no request issued earlier is served.
     started_at_ms: u64,
 }
 
-impl KeyedInjectServer {
-    pub(crate) fn new(native: Arc<MobNativeDelivery>, window_ms: u64) -> Self {
-        Self::with_clock(native, window_ms, Arc::new(system_clock))
-    }
+/// Where a server's delivery seam comes from.
+enum Seam {
+    /// One seam for the server's life: a server a test builds over a seam
+    /// of its own.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "built by tests over a seam of their own; a gateway's plane reads its mobs"
+        )
+    )]
+    Fixed(Arc<MobNativeDelivery>),
+    /// A mob of a host: the seam is built over the mob's identity runtime
+    /// as it is attached when a request arrives. The host's parts are one
+    /// value, shared by the plane's receivers for all its mobs.
+    OfAHostsMob {
+        hosted: Arc<HostedDeliveries>,
+        mob_id: meerkat_mob::MobId,
+    },
+}
 
+/// What a host's keyed inject plane needs to deliver to a mob the host
+/// serves: the resolver of the host's mobs, and the host's own parts of a
+/// delivery seam. It holds no mob and no list of mobs.
+pub(crate) struct HostedDeliveries {
+    pub(crate) mobs: crate::unified_runtime::MobResolver,
+    pub(crate) host: super::HostDeliveryParts,
+}
+
+impl KeyedInjectServer {
+    #[cfg(test)]
     pub(crate) fn with_clock(native: Arc<MobNativeDelivery>, window_ms: u64, clock: Clock) -> Self {
         let started_at_ms = clock();
         Self {
-            native,
+            seam: Seam::Fixed(native),
             window_ms,
             clock,
             started_at_ms,
+        }
+    }
+
+    /// The plane of a host. It answers for the host's default mob,
+    /// `default_mob`, and gives a receiver for each other mob the host
+    /// serves ([`KeyedInjectReceiver::for_mob`]).
+    ///
+    /// What is the host's is fixed here, once: the window, the clock, the
+    /// start, and the host's parts of a delivery seam. What is a mob's, its
+    /// identity runtime, is read when a request arrives, for the default
+    /// mob like any other: a mob without one answers `not_served`, and a
+    /// mob that gets one later is served from then on.
+    pub(crate) fn of_the_host(
+        hosted: HostedDeliveries,
+        default_mob: meerkat_mob::MobId,
+        window_ms: u64,
+    ) -> Self {
+        let clock: Clock = Arc::new(system_clock);
+        let started_at_ms = clock();
+        Self {
+            seam: Seam::OfAHostsMob {
+                hosted: Arc::new(hosted),
+                mob_id: default_mob,
+            },
+            window_ms,
+            clock,
+            started_at_ms,
+        }
+    }
+
+    /// The delivery seam of this server's mob, for one request.
+    ///
+    /// A mob of a host is read as it is now. The listener resolved it for
+    /// this request, so a mob the set does not hold loaded at this moment
+    /// was closed in between: nothing is loaded here, and the caller is
+    /// told to ask again. A mob without an identity runtime has no durable
+    /// identities to deliver to and answers `not_served`.
+    ///
+    /// A mob's record of the members it keeps apart owes the read of the
+    /// mob from the moment the host is about to build it, and a request
+    /// can be the one that made the host load it. While that read is owed,
+    /// and then while a first read of the record is on its first attempt,
+    /// the seam waits, at most the control channel's own bound in all
+    /// ([`crate::runtime::cross_mob_control::MEMBERS_APART_READ_WAIT`]),
+    /// and marks nothing for anyone else who waits. This is the one wait
+    /// of a keyed request, for the default mob and for every other: the
+    /// handler of a keyed verb is built without one. After the wait the
+    /// keyed verbs answer by what the record and the registered row say:
+    /// an identity of a mob that is still not read is answered as a read
+    /// that cannot be made now.
+    ///
+    /// The mob is read after the wait, not before it: a mob that was
+    /// closed while the request waited is not loaded now, and the caller
+    /// is told to ask again.
+    async fn native(&self) -> Result<Arc<MobNativeDelivery>, KeyedInjectRefusal> {
+        match &self.seam {
+            Seam::Fixed(native) => Ok(Arc::clone(native)),
+            Seam::OfAHostsMob { hosted, mob_id } => {
+                let not_loaded = || {
+                    KeyedInjectRefusal::new(
+                        KeyedInjectRefusalCode::Unavailable,
+                        format!(
+                            "the mob '{mob_id}' is not loaded on this gateway now; ask again later"
+                        ),
+                    )
+                };
+                // The record of the mob the seam is built for; nothing of
+                // the mob is held while the request waits.
+                let members_apart = hosted
+                    .mobs
+                    .resolve_if_loaded(mob_id)
+                    .ok_or_else(not_loaded)?
+                    .mob_runtime()
+                    .private_owners()
+                    .clone();
+                members_apart
+                    .read_of_the_mob_awaited(
+                        mob_id.as_str(),
+                        crate::runtime::cross_mob_control::MEMBERS_APART_READ_WAIT,
+                    )
+                    .await;
+                let mob = hosted
+                    .mobs
+                    .resolve_if_loaded(mob_id)
+                    .ok_or_else(not_loaded)?;
+                let identities = mob.identity_runtime_ref().ok_or_else(|| {
+                    KeyedInjectRefusal::not_served(NotServedCause::NotIdentityFirst)
+                })?;
+                let seam_mob = MobId::new(mob_id.to_string()).map_err(|error| {
+                    KeyedInjectRefusal::new(
+                        KeyedInjectRefusalCode::NativeUnavailable,
+                        format!("this gateway's mob id '{mob_id}': {error}"),
+                    )
+                })?;
+                // The seam asks the record of the mob it is built for whether
+                // an identity is kept apart from other callers, beside the
+                // identity's registered row: the default mob's seam is
+                // built here too.
+                let members_apart = mob.mob_runtime().private_owners().clone();
+                Ok(Arc::new(
+                    MobNativeDelivery::new(
+                        seam_mob,
+                        identities,
+                        Arc::clone(&hosted.host.mob_tools),
+                        Arc::clone(&hosted.host.machine),
+                        Arc::clone(&hosted.host.sessions),
+                    )
+                    .with_members_apart(members_apart),
+                ))
+            }
         }
     }
 }
@@ -537,8 +673,11 @@ impl KeyedInjectServer {
     /// deadline that drops this future between them leaves nothing behind.
     /// The preparation runs under the identity runtime's own task: the
     /// deadline drops only the wait for it.
-    async fn ready(&self, identity: &MemberIdentity) -> Result<(), KeyedInjectRefusal> {
-        match self.native.governs_work_authority() {
+    async fn ready(
+        native: &MobNativeDelivery,
+        identity: &MemberIdentity,
+    ) -> Result<(), KeyedInjectRefusal> {
+        match native.governs_work_authority() {
             Ok(false) => {}
             Ok(true) => {
                 return Err(KeyedInjectRefusal::new(
@@ -552,15 +691,14 @@ impl KeyedInjectServer {
         // An identity kept apart from other callers is, for a peer gateway,
         // an identity that is not registered here: the same answer, and
         // nothing of it is prepared.
-        let service = if self
-            .native
+        let service = if native
             .kept_apart(identity)
             .await
             .map_err(native_unavailable)?
         {
             IdentityService::Unknown
         } else {
-            self.native
+            native
                 .identity_service(identity)
                 .await
                 .map_err(native_unavailable)?
@@ -580,7 +718,7 @@ impl KeyedInjectServer {
                 ));
             }
         }
-        self.native
+        native
             .prepare_identity(identity)
             .await
             .map_err(|error| match error {
@@ -618,6 +756,10 @@ impl KeyedInjectReceiver for KeyedInjectServer {
         deadline_ms: u64,
     ) -> KeyedInjectFuture<'a, Result<NativeReceipt, KeyedInjectRefusal>> {
         Box::pin(async move {
+            // The mob's seam first: a mob without durable identities
+            // answers `not_served` before anything of the delivery itself
+            // is checked.
+            let native = self.native().await?;
             let identity = validate_delivery(&delivery)?;
             let continuation = continuation_delivery(
                 &scope.native_key(delivery.delivery_key),
@@ -632,9 +774,8 @@ impl KeyedInjectReceiver for KeyedInjectServer {
             // deadline, and the deadline is checked once more just before the
             // commit: a delivery committed after it could land behind later
             // ones its caller already moved on to.
-            within_deadline(deadline_ms, &self.clock, self.ready(&identity)).await?;
-            match self
-                .native
+            within_deadline(deadline_ms, &self.clock, Self::ready(&native, &identity)).await?;
+            match native
                 .submit_delivery(&identity, continuation, self.now_ms())
                 .await
             {
@@ -676,13 +817,13 @@ impl KeyedInjectReceiver for KeyedInjectServer {
         with_input: bool,
     ) -> KeyedInjectFuture<'a, Result<KeyedInjectStatusAnswer, KeyedInjectRefusal>> {
         Box::pin(async move {
+            let native = self.native().await?;
             let identity = hosted_identity(member)?;
             BatchId::new(delivery_key).map_err(invalid)?;
             // An identity kept apart from other callers reads, for a peer
             // gateway, as a name no identity has: no commit, whatever its
             // continuation owner holds.
-            if self
-                .native
+            if native
                 .kept_apart(&identity)
                 .await
                 .map_err(native_unavailable)?
@@ -692,8 +833,7 @@ impl KeyedInjectReceiver for KeyedInjectServer {
                     input: None,
                 });
             }
-            let status = self
-                .native
+            let status = native
                 .status_of(&identity, &scope.native_key(delivery_key))
                 .await
                 .map_err(|error| match error {
@@ -714,14 +854,47 @@ impl KeyedInjectReceiver for KeyedInjectServer {
                         ..
                     },
                     true,
-                ) => self
-                    .native
+                ) => native
                     .input_state(session_id, input_id)
                     .await
                     .unwrap_or_else(|error| Some(serde_json::json!({ "unavailable": error.0 }))),
                 _ => None,
             };
             Ok(KeyedInjectStatusAnswer { status, input })
+        })
+    }
+
+    /// A host's plane's receiver for another mob of the host: this plane's
+    /// window, clock and start, and a delivery seam built over that mob's
+    /// own id and identity runtime when a request arrives. A delivery to a
+    /// member name two mobs have is thereby a continuation of the member of
+    /// the mob it was signed for, under that mob's own owner key.
+    ///
+    /// The control listener asks after it resolved the mob, and nothing of
+    /// the mob is read here: the receiver reads the mob per request, loads
+    /// nothing and waits behind no load. A mob without an identity runtime
+    /// has a receiver too, which answers `not_served` after the plane's own
+    /// checks of the request, as the default mob's does. A server over one
+    /// fixed seam serves that seam's mob alone and has no receiver for
+    /// another.
+    fn for_mob<'a>(
+        &'a self,
+        mob_id: &'a meerkat_mob::MobId,
+    ) -> KeyedInjectFuture<'a, Option<Arc<dyn KeyedInjectReceiver>>> {
+        Box::pin(async move {
+            // A server over one fixed seam serves that seam's mob alone.
+            let Seam::OfAHostsMob { hosted, .. } = &self.seam else {
+                return None;
+            };
+            Some(Arc::new(Self {
+                seam: Seam::OfAHostsMob {
+                    hosted: Arc::clone(hosted),
+                    mob_id: mob_id.clone(),
+                },
+                window_ms: self.window_ms,
+                clock: Arc::clone(&self.clock),
+                started_at_ms: self.started_at_ms,
+            }) as Arc<dyn KeyedInjectReceiver>)
         })
     }
 }

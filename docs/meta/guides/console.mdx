@@ -4,7 +4,7 @@ description: "Embedded Meta console with configurable branding, grouped roster, 
 icon: "desktop"
 ---
 
-*Mirrored from Meerkat Meta main at [dca30fbb4416](https://github.com/lukacf/meerkat/commit/dca30fbb4416907692283c67dcf9db1b0480bdf5) on 2026-11-22; Meta version 0.9.17 at that commit.*
+*Mirrored from Meerkat Meta main at [f853345e4f7a](https://github.com/lukacf/meerkat/commit/f853345e4f7a157b561d8c68e8d51908c031508c) on 2026-11-24; Meta version 0.9.18 at that commit.*
 
 Meta ships a web-based operator console through its HTTP composition. The
 console/admin `meta_gateway` serves it directly. A persistent, SDK-driven
@@ -247,7 +247,19 @@ The bundled console uses a small set of stable protocol surfaces:
 
 `/console/modules` returns IDs from `RuntimeDecisionState.modules`. It is a configuration inventory, not confirmation of successful startup, current liveness, or health.
 
-The console contract version is `0.5.0` in `console/src/lib/contract.ts` and `docs/rct/console-rest-sse-contract-v0.5.0.json`. The runtime JSON-RPC contract is separately versioned by `META_CONTRACT_VERSION`.
+The console contract version is `0.6.0` in `console/src/lib/contract.ts` and `docs/rct/console-rest-sse-contract-v0.6.0.json`. The runtime JSON-RPC contract is separately versioned by `META_CONTRACT_VERSION`.
+
+On a gateway that hosts more than one mob, a mob that is not loaded reads
+"Asleep". A mob that is asleep stays asleep while the Console shows it: the
+Console asks nothing of it until someone opens it, writes to one of its
+agents, or presses Refresh in an agent's details. Voice works with the
+agents of the mob the gateway was launched with. For an agent of another
+hosted mob the Console shows the voice control as unavailable and says so;
+it sends no voice request for that agent. Interactive views (MCP Apps)
+have the same limit: they work with the agents of the mob the gateway was
+launched with, and for an agent of another hosted mob the Console says so
+and sends no such request.
+
 
 Gateway custody also differs. `rpc_gateway` installs a SQLite console timeline
 store only when its init request configures `persistent_state`; long-lived
@@ -339,7 +351,11 @@ Two controls under the search box set how the roster lists agents:
 - **Group**: *Category* lists agents under their categories and subgroups (the
   `[agent_list]` grouping above); *None* lists every agent in one list. Either
   way, Pinned stays on top and an agent spawned by another, or a side chat,
-  stays nested under it.
+  stays nested under it. A console that lists several mobs also offers *Mob*
+  (see [Mobs](#mobs)). The roster picks its starting grouping once, when the
+  console opens: *Mob* when several mobs are listed then, *Category*
+  otherwise. A mob that appears or goes away later does not re-group the
+  roster or move its scroll position.
 - **Sort**: *Manual* keeps your own order; *Name* sorts by display name, with
   numbers in order (`Agent 2` before `Agent 10`); *Last activity* lists the
   most recently active agents first and agents with no known activity last.
@@ -355,7 +371,7 @@ categories in their order; the first move keeps that order for every agent,
 and a move changes only where the moved agent stands, in either view. A new
 agent appears at the end of its place, and a renamed agent keeps its place,
 since the order is kept by identity. Agents do not move while you sort by name or last activity, or while
-a search or an activity filter is on. Categories and subgroups reorder the same
+a search, an activity filter or a mob choice is on. Categories and subgroups reorder the same
 way: drag a header, or focus it and press <kbd>Alt</kbd>+<kbd>↑</kbd> or
 <kbd>Alt</kbd>+<kbd>↓</kbd>.
 
@@ -376,6 +392,78 @@ collapse an earlier console kept for every user of the runtime, carry over
 once.
 
 Non-addressable agents (e.g., Gate, Health Monitor) appear dimmed and cannot be messaged.
+
+#### Mobs
+
+After 0.9.17 the console lists the mobs nested under its gateway's own mob
+(through 0.9.17 the stock console hid every member of every other mob): the mobs its
+agents create (with `mob_create` or the `delegate` tool), nested under the mob
+of the member that created them at any depth. A mob the host created is a
+mob of its own, served by its own id beside the gateway's own mob: it is
+not listed there as a group and none of its members is. Its members are
+reached by a request that names it in `mob_id`, and a read over every mob
+(`mobs=*`) lists it to a caller who may address it. A mob's place comes from its creation record, so it stays
+under its creator's mob after that member was reset or left, while the
+gateway runs: a mob of a member whose session was archived is removed with
+its store at the gateway's next start. A mob created
+for a session that is no member's is not listed, and neither are its members:
+a temporary council's mob is such a mob. A member of a nested mob has its own
+row, chat, transcript, send, schedules and retire, and a dormant member is
+listed like a live one: listing wakes no member and loads no mob. The gateway
+respawns, resets and forks into a side chat the members of its own mob only,
+and stops a run of a member of its own mob or, by a request that names the
+mob, of a mob the host created. So the row of a member of a nested mob says
+so (`can_respawn`, `can_reset`, `can_stop_run` and `can_fork_side_chat` are
+`false`) and the console offers none of the four on it. The row of a member
+of a mob the host created reads `can_stop_run` as the row of a member of
+the gateway's own mob does, and `can_retire`, `can_respawn`, `can_reset`
+and `can_fork_side_chat` `false`.
+
+- **Roster.** With **Group** set to *Mob*, the roster is a tree of mobs that
+  follows the nesting. Each mob's header shows its name, how many of its
+  agents are listed and a status mark, and says "Stopped" or "Status
+  unknown" for a mob that is not running; click it to collapse the mob with
+  the mobs nested under it. A mob and its agents step in with the nesting,
+  up to three levels; the tooltip names the mob's state, the member that
+  created it, the mob it is nested in and its id. The **...** beside the
+  header (shown on hover or keyboard focus) offers **Show only this mob**,
+  **Show all mobs** and **Copy mob ID**, which copies on any origin and
+  confirms beside the mob.
+- **The mob choice.** A chosen mob narrows the roster and the topology to
+  that mob and the mobs nested under it, and the roster's count reads "N of
+  M agents". Choose from a mob's **...**, from the **Mob** select in the
+  roster's view options (under any grouping), or from the topology's **More
+  actions** menu, which offers **All mobs** and each mob. A search under a
+  choice looks in the chosen mobs: when nothing matches there the roster
+  says so, counts the matches in the other mobs and offers **Search all
+  mobs**; **Clear filters** clears the choice too. The choice is kept per
+  user. It applies while several mobs are listed, and it is dropped once the
+  console no longer lists the chosen mob.
+- **Names.** A mob definition names no title, so the console names each mob
+  for people and keeps the id in the tooltip and the copy action. A readable
+  id reads in words (`research-team` reads "Research team"). A mob a member
+  created reads as that member's: "Planner's research team", "Planner's
+  team" for a generated id, "Planner's helpers" for the mob the `delegate`
+  tool runs its helpers in. A generated id whose creator you may not see
+  reads "Team", with a number when several are listed ("Team 1", "Team 2").
+  Mobs left with one name are told apart in muted text beside it: the mob
+  each is nested in, or "1 of 2".
+- **Members.** A member of the console's own mob has its bare name as its
+  identity. A member of a mob nested under it has the identity `<mob
+  id>/<member name>` (`research-team/reviewer`), so two members with one
+  name in two mobs are two agents, each with its own row, chat, pins and
+  place in the manual order. A member of a mob the host created is keyed by
+  that mob's id and the name that mob knows it by: two parts for a member
+  of that mob, three (`<mob id>/<nested mob id>/<member name>`) for a
+  member of a mob nested under it. The console shows the member's display name, or its member
+  name in words ("Reviewer"), on every surface; the identity is in tooltips,
+  technical details and copy actions.
+
+The helpers the `delegate` tool runs stay hidden on the stock console, and so
+does their mob. A mob appears only through members you may see: a mob whose
+members are all hidden from you is not listed, a mob with no member is listed
+to no one, and a mob's creator is named only when you may see that member. A
+mob listed under a mob you cannot see appears under the nearest mob you can.
 
 An identity-first agent whose identity binding moved (after a reset or a
 delete), and that the console could not collect again within 2 s, has state
@@ -469,7 +557,10 @@ decision's approver id in the approver map, to the person who asked and,
 while access control is enforced, to a caller granted `decisions.admin`;
 while access control is enforced each of them also needs `decisions.view`;
 other callers see nothing of it, and a Console that signs nobody in shows
-none.
+none. A held change of an agent of a mob beside the launch mob is shown
+only to a caller who may address that mob; to a caller who addresses it by
+an access rule only while the mob the change is held for stands under that
+mob's id.
 
 In 0.9.15 and 0.9.16 the Console shows such a decision and does not decide
 it. The card has no Approve or Reject for anyone, and the Console's own RPC
@@ -1389,12 +1480,16 @@ interface ConsoleAgent {
   profile?: string;
   state?: string;
   group?: string;         // sidebar grouping
+  mob_id?: string;        // the mob the agent is a member of
   addressable?: boolean;
   affordances?: {
     can_send_message?: boolean;
     can_manage_schedules?: boolean; // under enforced access: agent.send and schedule.manage
     can_retire?: boolean;
     can_respawn?: boolean;
+    can_reset?: boolean;            // meta/reset; under enforced access: agent.reset
+    can_stop_run?: boolean;         // meta/stop_member_run; under enforced access: agent.retire
+    can_fork_side_chat?: boolean;   // meta/fork_member
     can_change_identity?: boolean; // from 0.9.15: edit and archive this agent at run time (agent.identity.manage)
     can_remove_identity?: boolean; // from 0.9.15: remove this agent for good (agent.identity.remove)
     runtime_mode?: string;
@@ -1402,6 +1497,14 @@ interface ConsoleAgent {
   labels?: Record<string, string>;
 }
 ```
+
+`can_respawn`, `can_reset`, `can_stop_run` and `can_fork_side_chat` are `false`
+on the row of a member of a nested mob: those four methods act on the members
+of the gateway's own mob. The stock console offers Reset, Stop and Fork to
+side chat by the last three and reads a row without them as before.
+`can_fork_side_chat` says only whether the gateway forks the agent into a side
+chat: unlike `can_reset` and `can_stop_run`, the caller's grants do not narrow
+it.
 
 From 0.9.15, `identity_changes` of the same read says what the console offers for the
 team's [long-term agents](#long-term-agents): `available` (the host changes
@@ -1765,8 +1868,8 @@ The browser keeps each signed-in user's console data apart. Queued messages
 (in local storage) and unsent drafts (in each tab's session storage) are kept
 under the user's storage scope, the `storage_scope` of `/console/experience`;
 a host that passes `storageNamespace` gets it combined with that scope. The
-display settings, the sidebar's and the activity rail's collapse and the agent
-list's arrangement are kept per user too, and each tab saves the panel layout
+display settings, the sidebar's and the activity rail's collapse, the agent
+list's arrangement and the mob choice are kept per user too, and each tab saves the panel layout
 only when it changes it, so a tab left open does not undo what another tab
 arranged.
 

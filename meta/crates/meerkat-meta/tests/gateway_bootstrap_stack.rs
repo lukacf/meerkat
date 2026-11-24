@@ -5,10 +5,15 @@
 //! explicit stack and its runtime workers at the same size, and must settle
 //! init `ready` and exit cleanly rather than overflow.
 //!
+//! The bound is this row's, for such an embedder. It is not the gateway
+//! binaries' stack: they run their workers at 16 MiB.
+//!
 //! An optimized build bootstraps on the ordinary 2 MiB. An unoptimized build
-//! keeps one stack slot per temporary in each poll frame; with the runtime
-//! construction futures heap-placed it needs a little over 2 MiB, against more
-//! than 4 MiB before, so it is held to 3 MiB here.
+//! keeps one stack slot per temporary in each poll frame, and room for a
+//! callee's whole future at every call it awaits; it needs more than 2 MiB
+//! and is held to 3 MiB here. The deepest point of a start is the identity
+//! roster's bootstrap, awaited from `run_persistent_inner`: the control below
+//! says what was measured there.
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 use std::io::{BufRead, BufReader, Write};
 use std::sync::{Arc, mpsc};
@@ -128,16 +133,23 @@ fn the_gateway_bootstraps_an_identity_runtime_on_bounded_stacks() {
     bootstraps_ready_on(TEST, STACK);
 }
 
-/// The unoptimized 2 MiB control. Measured on the heap-placed tree, the
-/// overflowing worker stack is about 2.09 MB: `run_persistent_inner`'s own
-/// poll frame (about 793 KB of locals and temporaries; its future is 35 KB),
-/// the native mob-mcp restore chain (`restore_from_persistent_storage` about
-/// 529 KB, `reobserve_held_child_mobs` about 320 KB,
-/// `scavenge_orphaned_bridge_session_scoped_mobs_inner` about 183 KB) and the
-/// remaining bootstrap chain (about 200 KB). Heap placement cannot shrink
-/// those frames; an unoptimized embedder sets an explicit worker stack.
+/// The unoptimized 2 MiB control. Measured on an unoptimized build at the
+/// identity roster's bootstrap, the deepest point of a start: the worker
+/// stack was about 3.14 MB deep, past this file's 3 MiB by less than 32 KB.
+/// `run_persistent_inner`'s own poll frame was about 2.05 MB of it: about
+/// 0.73 MB for the bootstrap spec, which every call of its builder chain
+/// returns by value into a slot of its own, and about 0.39 MB for the future
+/// of an init's abort at a shutdown request, kept whole at each of its seven
+/// call sites. The roster bootstrap above that frame was about 1.08 MB
+/// (`apply_open_declared_roster` about 246 KB,
+/// `bootstrap_installed_identity_first_context_inner` about 223 KB, the rest
+/// in frames of 15 to 60 KB). The abort's future is on the heap since, which
+/// takes its slots out of that frame: measured again, the frame is about
+/// 1.71 MB (0.34 MB less) and a start settles on about 2.85 MB of worker
+/// stack. The spec's slots and the other callees' futures stay in it; an
+/// unoptimized embedder sets an explicit worker stack.
 #[test]
-#[ignore = "an unoptimized build needs a little over 2 MiB; see the doc comment"]
+#[ignore = "an unoptimized build needs more than 2 MiB; see the doc comment"]
 fn the_unoptimized_gateway_bootstraps_on_two_mib_stacks() {
     serve_if_host_process();
     bootstraps_ready_on(TWO_MIB_CONTROL, 2 << 20);

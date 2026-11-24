@@ -14,7 +14,7 @@ const frames = [
 ];
 frames.forEach((frame, index) => { frame.cursor = `console:${index + 1}`; });
 const experience = {
-  contract_version: "0.5.0", runtime_id: "extension-preview", storage_scope: "extension-preview-subject",
+  contract_version: "0.6.0", runtime_id: "extension-preview", storage_scope: "extension-preview-subject",
   console_config: { title: "Extension example", panel_modules: ["/extensions/example.js"],
     layout: { initial_agent: agent }, environment: { label: "fixture" }, rail: { visible: false } },
   console_policy: { read_only: true },

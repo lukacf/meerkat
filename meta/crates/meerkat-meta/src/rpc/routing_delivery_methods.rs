@@ -127,6 +127,12 @@ impl RoutingDeliveryParamsError {
             RoutingDeliveryParamsError::Delivery(DeliverySendError::ForgedResolution) => {
                 "resolution does not match the trusted route for route_id".to_string()
             }
+            // The stdio dispatch of a host answers this refusal itself, with
+            // the ids of both mobs; this is its text on a door that names
+            // no mob.
+            RoutingDeliveryParamsError::Delivery(
+                error @ DeliverySendError::ResolutionOfAnotherMob { .. },
+            ) => error.to_string(),
             RoutingDeliveryParamsError::Delivery(DeliverySendError::InvalidRecipient) => {
                 "resolution.recipient must be a non-empty string".to_string()
             }
@@ -151,6 +157,13 @@ impl RoutingDeliveryParamsError {
             }
             RoutingDeliveryParamsError::RouteMutation(RuntimeRouteMutationError::EmptyRouteKey) => {
                 "route_key must be a non-empty string".to_string()
+            }
+            // Not reachable from a request: a route's mob is the mob the
+            // request names, which the addressing seam judged, and an empty
+            // id is refused there. A Rust host that passes a route its own
+            // blank mob meets this.
+            RoutingDeliveryParamsError::RouteMutation(RuntimeRouteMutationError::EmptyMobId) => {
+                "mob_id must name a mob when provided".to_string()
             }
             RoutingDeliveryParamsError::RouteMutation(
                 RuntimeRouteMutationError::EmptyRecipient,
@@ -238,6 +251,7 @@ pub(super) fn parse_routing_resolve_params(
     };
 
     Ok(RoutingResolveRequest {
+        mob_id: None,
         recipient: recipient.to_string(),
         channel,
         retry_max,
@@ -340,6 +354,7 @@ pub(super) fn parse_routing_route_add_params(
 
     Ok(RuntimeRoute {
         route_key,
+        mob_id: None,
         recipient,
         channel,
         sink,
@@ -396,7 +411,10 @@ pub(super) fn parse_delivery_send_params(
         }
     };
 
+    // The mob is the request's own (its top-level `mob_id`), which the
+    // dispatch judged: it sets it, and the params are never read for it.
     Ok(DeliverySendRequest {
+        mob_id: None,
         resolution,
         payload,
         idempotency_key,
@@ -408,6 +426,7 @@ pub(super) fn parse_delivery_history_params(
 ) -> Result<DeliveryHistoryRequest, RoutingDeliveryParamsError> {
     if params.is_null() {
         return Ok(DeliveryHistoryRequest {
+            mob_id: None,
             recipient: None,
             sink: None,
             limit: 20,
@@ -448,9 +467,49 @@ pub(super) fn parse_delivery_history_params(
         }
     };
 
+    // As for a send: the dispatch sets the mob.
     Ok(DeliveryHistoryRequest {
+        mob_id: None,
         recipient,
         sink,
         limit,
     })
+}
+
+/// The stdio dispatch's refusal of a send whose resolution was made for
+/// another mob of the host: `-32602`,
+/// `data.kind = "resolution_of_another_mob"`, with the mob the resolution
+/// was made for and the mob the send is for. The send reached neither the
+/// delivery module nor the delivery history.
+///
+/// `resolution_mob_id` is the mob the resolution names and `request_mob_id`
+/// the mob the send is for, each none for the default mob, which is
+/// `launch_mob`. The words say what each side names; the data names both
+/// mobs by id.
+pub(super) fn resolution_of_another_mob_refusal(
+    resolution_mob_id: Option<&str>,
+    request_mob_id: Option<&str>,
+    launch_mob: &str,
+) -> JsonRpcError {
+    let resolution_names = resolution_mob_id.map_or_else(
+        || "names no mob".to_string(),
+        |mob_id| format!("names mob '{mob_id}'"),
+    );
+    let send_is_for = request_mob_id.map_or_else(
+        || format!("the default mob '{launch_mob}'"),
+        |mob_id| format!("mob '{mob_id}'"),
+    );
+    JsonRpcError {
+        code: -32602,
+        message: format!(
+            "Invalid params: the resolution {resolution_names}, and this send is for \
+             {send_is_for}; a send takes a resolution made for its own mob, and a resolution of \
+             the default mob names no mob"
+        ),
+        data: Some(serde_json::json!({
+            "kind": "resolution_of_another_mob",
+            "resolution_mob_id": resolution_mob_id.unwrap_or(launch_mob),
+            "request_mob_id": request_mob_id.unwrap_or(launch_mob),
+        })),
+    }
 }

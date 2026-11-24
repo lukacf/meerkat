@@ -459,18 +459,55 @@ impl SessionServiceRuntimeExt for MeerkatMachine {
         // persistence sequence in the same stable service boundary as direct
         // reconfigure; the nested host methods deliberately acquire recovery
         // only while the machine mutation gate is held.
-        let _turn_finalization_guard = if matches!(
+        let until_changed = matches!(
             &request.intent.duration,
             meerkat_core::image_generation::SwitchTurnDuration::UntilChanged
-        ) {
-            Some(
-                self.llm_reconfigure_host()?
-                    .acquire_turn_finalization_boundary(session_id)
-                    .await?,
-            )
+        );
+        let host = if until_changed {
+            Some(self.llm_reconfigure_host()?)
         } else {
-            None
+            self.llm_reconfigure_host
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
         };
+        // A recorded denial is the request's answer, read before any wait
+        // for the host: a retry of a denied request waits for no turn and
+        // looks at no target.
+        if let Some(denied) = self
+            .recorded_switch_turn_result(session_id, request.request_id)
+            .await
+            .map_err(Self::driver_error_from_control_plane_error)?
+        {
+            return Ok(denied);
+        }
+        // The target is judged against the identity generated state holds
+        // for the session, and the request is decided only while the session
+        // still holds it. A session whose identity generated state does not
+        // hold yet gives that check nothing to compare: only then a finite
+        // request takes the turn-finalization boundary too, and the identity
+        // is read from the host under it. A request whose wait for the
+        // boundary is dropped has staged nothing.
+        let identity_unknown = host.is_some()
+            && self
+                .current_session_llm_identity(session_id)
+                .await
+                .map_err(Self::driver_error_from_control_plane_error)?
+                .is_none();
+        let _turn_finalization_guard = match host.as_ref() {
+            Some(host) if until_changed || identity_unknown => {
+                Some(host.acquire_turn_finalization_boundary(session_id).await?)
+            }
+            _ => None,
+        };
+        if identity_unknown && let Some(host) = host.as_ref() {
+            let _mutation_guard = self
+                .lock_current_durability_ready_session_mutation_gate(session_id)
+                .await?;
+            let hydrated = host.hydrate_session_llm_state(session_id).await?;
+            self.cache_hydrated_session_llm_state(session_id, &hydrated)
+                .await?;
+        }
         let result = self
             .execute_meerkat_machine_command(
                 None,

@@ -59674,7 +59674,7 @@ mod tests {
                 .take_boundary_for_test(&run_id, true)
                 .await
                 .map_err(|error| AgentError::InternalError(error.to_string()))?;
-            if taken.applied_durable.is_none() {
+            if taken.applied_durable.is_empty() {
                 return Err(AgentError::InternalError(
                     "the probe boundary carried no durable delivery".to_string(),
                 ));

@@ -2,6 +2,7 @@ import React from "react";
 import type { IdentityInspectViewState } from "@console-core";
 import type { ConsoleAgent } from "../types";
 import { agentDisplayTitle } from "../lib/agents";
+import { memberReferenceKeys, nestedMobIdsOfMembers } from "../../../packages/console-core/src/member-ref";
 import { agentHealth, isAgentWorking, type AgentHealth } from "../lib/agent-status";
 import { useActivityLedger, type LedgerRunSpan } from "../lib/activity-ledger";
 import {
@@ -147,11 +148,21 @@ function peerKey(peer: unknown): string {
   return "";
 }
 
+/**
+ * The roster's agent a peer key names: by the key itself, else by its last
+ * path segment ("team/role/member"). A key that starts with a listed nested
+ * mob names that mob's member only, never a member of the same name in
+ * another mob.
+ */
 function findAgent(agents: readonly ConsoleAgent[] | undefined, key: string): ConsoleAgent | undefined {
-  const bare = key.split("/").pop() || key;
-  return agents?.find((agent) =>
-    agent.identity === key || agent.member_id === key || agent.agent_id === key
-    || agent.identity === bare || agent.member_id === bare);
+  if (!agents) return undefined;
+  const exact = agents.find((agent) => agent.identity === key || agent.member_id === key || agent.agent_id === key);
+  if (exact) return exact;
+  for (const candidate of memberReferenceKeys(key, nestedMobIdsOfMembers(agents)).keys) {
+    const found = agents.find((agent) => agent.identity === candidate || agent.member_id === candidate);
+    if (found) return found;
+  }
+  return undefined;
 }
 
 /** A finished, failed or open run in words: "Finished in 4.2s · 3 tool calls". */
@@ -200,6 +211,8 @@ export function AgentDetailsPanel({
   now,
   identityChanges,
   rosterListingSuperseded,
+  asleepTeam,
+  teamUnavailable = false,
   children,
 }: {
   identity: string;
@@ -228,6 +241,16 @@ export function AgentDetailsPanel({
    * too (`roster_listing_superseded` of `meta/identity/get`). The note at
    * the status says it, as it does when the details answer says so. */
   rosterListingSuperseded?: boolean;
+  /**
+   * Set when the agent's mob is listed as not loaded and nothing was read
+   * for the agent: the mob's name for people (or null when the console has
+   * none). The pane then says the team is asleep and offers to read, which
+   * wakes it, in place of a loading state that would never end.
+   */
+  asleepTeam?: string | null;
+  /** With `asleepTeam`: the team is unavailable, not asleep. The pane says
+   * that, and offers no way to wake it. */
+  teamUnavailable?: boolean;
   /** The record and schedules sections, when offered. */
   children?: React.ReactNode;
 }): React.JSX.Element {
@@ -248,7 +271,8 @@ export function AgentDetailsPanel({
   // Named the way the sidebar names the agent.
   const name = agent
     ? agentDisplayTitle({ ...agent, label: agent.label || view?.display_name || "" })
-    : view?.display_name || agentDisplayName(identity, directory) || identity;
+    : (view?.display_name && view.display_name !== identity ? view.display_name : "")
+      || agentDisplayName(identity, directory) || identity;
   const role = view?.role || agent?.role;
   // The gateway's inspect payload carries no progress; the roster row does.
   const progress = view?.progress ?? agent?.progress;
@@ -412,7 +436,24 @@ export function AgentDetailsPanel({
         </GlanceStrip>
       ) : null}
       <PanelBody className="agent-details__body">
-        {view === undefined ? (
+        {view === undefined && asleepTeam !== undefined ? (
+          teamUnavailable ? (
+            <EmptyState
+              kind="unavailable"
+              title={`${asleepTeam || "This agent's team"} is unavailable`}
+              body="Nothing was read for this agent: its team cannot be opened right now."
+              testId={`inspect-asleep:${identity}`}
+            />
+          ) : (
+            <EmptyState
+              kind="unavailable"
+              title={`${asleepTeam || "This agent's team"} is asleep`}
+              body="Nothing was read for this agent, so its team stays asleep. Reading its details wakes the team."
+              action={onRefresh ? <Button size="sm" onClick={onRefresh}>Wake and read details</Button> : undefined}
+              testId={`inspect-asleep:${identity}`}
+            />
+          )
+        ) : view === undefined ? (
           <LoadingState label="Loading agent details" rows={4} />
         ) : view === null ? (
           <EmptyState

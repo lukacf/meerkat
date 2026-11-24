@@ -244,6 +244,13 @@ impl std::fmt::Debug for AskUserSlot {
 }
 
 impl AskUserSlot {
+    /// Test builds only: whether `other` is this very slot (a clone of it),
+    /// so that filling one fills the other.
+    #[cfg(test)]
+    pub(crate) fn is_the_slot_of(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.surface, &other.surface)
+    }
+
     /// Fill the slot; it replaces the surface before. A runtime that
     /// follows the ends of its private members
     /// ([`Self::follow_private_member_ends`]) then withdraws, in the
@@ -327,6 +334,22 @@ impl AskUserSlot {
         })
     }
 
+    /// The host the `ask_user` tool of a member build asks through: of the
+    /// mob and the member the build's own binding names, whatever mob the
+    /// slot's surface was built for. A host serves any number of mobs with
+    /// one surface, so a member of a mob the surface cannot route an answer
+    /// back to is answered that no person can be asked.
+    pub(crate) fn member_host(
+        &self,
+        binding: &meerkat_core::MobMemberBinding,
+    ) -> MemberAskUserHost {
+        MemberAskUserHost::new(
+            self.clone(),
+            binding.mob_id.clone(),
+            crate::member_comms_id::logical_memory_identity(&binding.member),
+        )
+    }
+
     /// Put the `ask_user` tool, with a host for that member, into the host
     /// tools of a member build (`SessionBuildOptions::host_tools`), beside a
     /// dispatcher a host layer already put there. Core's factory composes
@@ -379,11 +402,7 @@ impl AskUserSlot {
             );
             return;
         }
-        let host = MemberAskUserHost::new(
-            self.clone(),
-            binding.mob_id.clone(),
-            crate::member_comms_id::logical_memory_identity(&binding.member),
-        );
+        let host = self.member_host(binding);
         let tool: Arc<dyn meerkat_core::AgentToolDispatcher> =
             Arc::new(AskUserDispatcher::new(Arc::new(host)));
         build.host_tools = Some(match build.host_tools.take() {

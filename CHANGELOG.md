@@ -37,6 +37,292 @@ them.
 
 ### Breaking
 
+- Behaviour-only (not measured by the gate): `brain_swap` still reports `staged` or `already_staged`, not the outcome. Previously the switch could take effect with an incompatible level and the next input would be refused. Now, before the next input, a target route that refuses the held level, alone or in combination with the session's other reasoning settings, is denied with `CapabilityPolicy`. The session keeps its model and level and runs the input there. The agent gets no later turn notice of the denial; the routing record and a host log warning identify it.
+- Rust API: both `MeerkatMachineInput::RequestFiniteSwitchTurn` and `MeerkatMachineInput::RequestUntilChangedSwitchTurn` gain `target_reasoning_effort` and `inspected_current_identity`. This applies to the inputs in `meerkat_machine_schema::catalog::dsl::meerkat_machine` and `meerkat_runtime::meerkat_machine::dsl`. In `meerkat-machine-kernels`, both `generated::meerkat::inputs::RequestFiniteSwitchTurn` and `generated::meerkat::inputs::RequestUntilChangedSwitchTurn` likewise gain `target_reasoning_effort: Option<TargetReasoningEffortVerdict>` and `inspected_current_identity: Option<SessionLlmIdentity>`.
+- Rust API: `meerkat-machine-kernels` adds six variants to `generated::meerkat::TransitionId`:
+  - `RequestFiniteSwitchTurnReasoningEffortRefusedIdle`
+  - `RequestFiniteSwitchTurnReasoningEffortRefusedAttached`
+  - `RequestFiniteSwitchTurnReasoningEffortRefusedRunning`
+  - `RequestUntilChangedSwitchTurnReasoningEffortRefusedIdle`
+  - `RequestUntilChangedSwitchTurnReasoningEffortRefusedAttached`
+  - `RequestUntilChangedSwitchTurnReasoningEffortRefusedRunning`
+
+### Changed
+
+- For a staged model switch, the compatibility check now covers the session's existing reasoning level when the target model's supported levels are available at decision time.
+
+### Upgrade notes
+
+- After a denial, do not resend the input: it ran on the retained model. Changing or clearing the level does not revive the denied switch. To use the target, choose a supported level or explicitly clear the held level, then request the switch again.
+
+- Rust callers must supply both fields when constructing either switch-request input, update named patterns that omit `..`, and handle the six new variants in exhaustive `TransitionId` matches. An empty verdict field does not deliver a compatibility decision. A custom `SessionLlmReconfigureHost` that wants target identity inspection must implement `inspect_target_session_llm_identity`; otherwise the host remains responsible for its judge's acceptance.
+
+### Known limitations
+
+- On the stock host, a target whose client cannot be built is held. For a buildable target, **no source for supported levels** means the switch is denied. **An existing source that is temporarily unreadable** is different: the switch can take effect without a compatibility verdict. Requests on the target are then refused as retryable until the levels can be read. If the target does not support the held level, requests remain refused until the level or model changes.
+
+## [0.9.18] - 2026-11-23
+
+### Breaking
+
+- `meerkat-machine-schema` (and its re-export
+  `meerkat_mob::machines::mob_store_restore_lifecycle`):
+  `MobStoreRestoreLifecycleMachine` is version 2 and owns one mob store's
+  whole stay in a host's mob set, where version 1 owned only a quarantined
+  store. Its public types change with it:
+  - `MobStoreRestoreLifecyclePhase`: `Unclassified` is renamed `Dormant`,
+    `Released` is removed, and `Loading`, `Managed`, `Unloading`, `Held` and
+    `Gone` are added. A store a re-attempt released is now `Managed`, `Held` or
+    `Gone`. `Quarantined` and `Retrying` keep their meaning and move to later
+    positions.
+  - `MobStoreRestoreLifecycleInput` and
+    `MobStoreRestoreLifecycleInputVariant`: `Quarantine` is removed (a store is
+    quarantined by a failed `ResolveLoad`), and `Census`, `Register`,
+    `RequestLoad`, `ResolveLoad`, `RequestUnload`, `ResolveUnload`,
+    `ReleaseHeld` and `Destroy` are added. `RequestRetry` and `ResolveRetry` are
+    unchanged and move to later positions.
+  - `MobStoreRestoreLifecycleEffect` and
+    `MobStoreRestoreLifecycleEffectVariant`: `StoreListed`, `StoreRegistered`,
+    `LoadAdmitted`, `StoreLoaded`, `UnloadAdmitted`, `StoreUnloaded`,
+    `UnloadDeclined`, `HoldReleased` and `StoreGone` are added.
+    `StoreQuarantined`, `RetryAdmitted`, `StoreReleased`,
+    `StoreStillQuarantined` and `RequestRefused` are unchanged and move to later
+    positions.
+  - `MobStoreRestoreRefusal`: `AlreadyClassified` is removed, so `NotRetrying`
+    and `NotRetryable` move one position up, and `LoadInFlight`, `NotDormant`,
+    `NotLoading`, `NotManaged`, `NotHeld`, `HoldKept`, `NotReloadable`,
+    `UnloadInFlight`, `NotUnloading`, `AlreadyHosted` and `Gone` are added.
+  - `MobStoreRestoreLifecycleMachineState` gains the fields `origin:
+    MobStoreOrigin` (a new enum: `Persisted`, `Volatile`, `HostHandle`) and
+    `served: bool` (true only while the record is `Managed`: the mob is handed
+    out only then).
+  - `MobStoreUnloadOutcome` is a new enum (`Closed`, `Busy`): the answer of a
+    mob's actor to an admitted idle unload, carried by `ResolveUnload`.
+  - The invariants `unclassified_record_has_no_attempts` and
+    `released_record_was_attempted` are replaced by
+    `only_a_quarantine_holds_a_class`, `only_a_persisted_store_waits_unloaded`
+    and `a_mob_is_handed_out_exactly_while_managed` (`served` is true in
+    `Managed` and in no other phase).
+
+  The idle unload of a mob is two steps of its record, in the shape of a
+  load: `RequestUnload` is admitted only in `Managed` and only for a store
+  the set can load again (`origin` is `Persisted`; otherwise it is refused
+  `NotReloadable`) and moves the record to `Unloading`; `ResolveUnload`
+  carries the actor's answer (`Closed` returns the record to `Dormant`,
+  `Busy` to `Managed`). In `Unloading` a `Register`, a `RequestLoad` and a
+  `Destroy` are refused `UnloadInFlight`.
+
+  The record is volatile and never persisted, so no stored state changes.
+  Code that matches these enums exhaustively adds the new variants; code
+  that compares or casts their variants reads the new order.
+
+- `meerkat-machine-kernels`: the generated kernel of that machine
+  (`generated::mob_store_restore_lifecycle`) changes the same way. `Phase`,
+  `Input`, `InputKind`, `Effect` and `EffectKind` gain and lose the variants
+  named above (`Quarantined`, `Retrying`, `RequestRetry`, `ResolveRetry`,
+  `StoreQuarantined`, `RetryAdmitted`, `StoreReleased`, `StoreStillQuarantined`
+  and `RequestRefused` stay and change position, as `NotRetrying` and
+  `NotRetryable` do in `MobStoreRestoreRefusal`), `State` gains the fields
+  `origin` and `served`, and `MobStoreOrigin` and `MobStoreUnloadOutcome` are
+  new. `TransitionId` loses `QuarantineUnclassified`, `QuarantineQuarantined`,
+  `QuarantineRetrying`, `QuarantineReleased`, `RequestRetryUnclassified`,
+  `RequestRetryReleased`, `ResolveRetryRestored`, `ResolveRetryUnclassified`,
+  `ResolveRetryReleased` and now holds one variant per transition of version 2:
+  `CensusDormant`, `CensusGone`, `CensusHeld`, `CensusLoading`, `CensusManaged`,
+  `CensusQuarantined`, `CensusRetrying`, `CensusUnloading`, `DestroyDormant`,
+  `DestroyGone`, `DestroyHeld`, `DestroyLoading`, `DestroyManaged`,
+  `DestroyQuarantined`, `DestroyRetrying`, `DestroyUnloading`,
+  `RegisterDormant`, `RegisterGone`, `RegisterHeld`, `RegisterLoading`,
+  `RegisterManagedHostHandle`, `RegisterManagedRefused`, `RegisterQuarantined`,
+  `RegisterRetrying`, `RegisterUnloading`, `ReleaseHeldDormant`,
+  `ReleaseHeldGone`, `ReleaseHeldKept`, `ReleaseHeldLoading`,
+  `ReleaseHeldManaged`, `ReleaseHeldQuarantined`, `ReleaseHeldRetrying`,
+  `ReleaseHeldSettled`, `ReleaseHeldUnloading`, `ReleaseHeldWhileManaged`,
+  `RequestLoadDormant`, `RequestLoadGone`, `RequestLoadHeld`,
+  `RequestLoadLoading`, `RequestLoadManaged`, `RequestLoadQuarantined`,
+  `RequestLoadRetrying`, `RequestLoadUnloading`, `RequestRetryDormant`,
+  `RequestRetryGone`, `RequestRetryHeld`, `RequestRetryLoading`,
+  `RequestRetryManaged`, `RequestRetryQuarantined`,
+  `RequestRetryQuarantinedNotRetryable`, `RequestRetryRetrying`,
+  `RequestRetryUnloading`, `RequestUnloadDormant`, `RequestUnloadGone`,
+  `RequestUnloadHeld`, `RequestUnloadLoading`, `RequestUnloadManaged`,
+  `RequestUnloadManagedNotReloadable`, `RequestUnloadQuarantined`,
+  `RequestUnloadRetrying`, `RequestUnloadUnloading`, `ResolveLoadDormant`,
+  `ResolveLoadFailed`, `ResolveLoadGone`, `ResolveLoadHeld`,
+  `ResolveLoadManaged`, `ResolveLoadQuarantined`, `ResolveLoadRetrying`,
+  `ResolveLoadSettled`, `ResolveLoadUnloading`, `ResolveLoadWhileHeld`,
+  `ResolveLoadWhileManaged`, `ResolveRetryDormant`, `ResolveRetryFailed`,
+  `ResolveRetryGone`, `ResolveRetryHeld`, `ResolveRetryLoading`,
+  `ResolveRetryManaged`, `ResolveRetryQuarantined`, `ResolveRetrySettled`,
+  `ResolveRetryUnloading`, `ResolveRetryWhileHeld`, `ResolveRetryWhileManaged`,
+  `ResolveUnloadBusy`, `ResolveUnloadClosed`, `ResolveUnloadDormant`,
+  `ResolveUnloadGone`, `ResolveUnloadHeld`, `ResolveUnloadLoading`,
+  `ResolveUnloadQuarantined`, `ResolveUnloadRetrying`,
+  `ResolveUnloadWhileManaged`.
+
+- `meerkat-machine-schema` (and its re-export
+  `meerkat_mob::machines::mob_store_restore_lifecycle`),
+  `meerkat-machine-kernels`: the same machine is version 3 in this release,
+  not 2: the record of the store a host's launch declares (the host's
+  default mob, see Added) owns that the store is its launch's and whether
+  its mob still waits for the launch's first serve. On top of the changes
+  above:
+  - `MobStoreOrigin` gains `Declared` (after `HostHandle`).
+  - `MobStoreLoadTrigger` is a new enum (`Lookup`, `Pass`, `Launch`): what
+    asks for a load.
+  - `MobStoreRestoreLifecycleInput` and
+    `MobStoreRestoreLifecycleInputVariant` (the kernel's `Input` and
+    `InputKind`): `Declare { vacant: bool }` and `EndLaunchWait` are added
+    after `Register`, and `RequestLoad` is no longer a unit variant: it is
+    `RequestLoad { trigger: MobStoreLoadTrigger }`.
+  - `MobStoreRestoreLifecycleEffect` and
+    `MobStoreRestoreLifecycleEffectVariant` (the kernel's `Effect` and
+    `EffectKind`): `LaunchDeclared` and `LaunchWaitEnded` are added after
+    `StoreRegistered`.
+  - `MobStoreRestoreRefusal` gains `AwaitsLaunch`, `LaunchOwned`,
+    `NotAwaitingLaunch` and `NotDeclared`, after `Gone`. A `Register` that
+    names `Declared` is admitted only for a record `Declare` made the
+    declared one; for any other it is refused `NotDeclared`.
+  - `MobStoreRestoreLifecycleMachineState` (the kernel's `State`) gains the
+    fields `awaits_launch: bool` and `vacant: bool`.
+  - The invariants `only_a_declared_store_awaits_its_launch`,
+    `a_store_that_is_gone_awaits_no_launch`,
+    `a_store_whose_unload_is_admitted_awaits_no_launch`,
+    `a_declared_store_is_never_gone` and
+    `only_a_declared_store_that_is_not_loaded_is_vacant` are added, and
+    `only_a_persisted_store_waits_unloaded` now lets a declared store wait
+    as well.
+  - The kernel's `TransitionId` gains `DeclareDormant`,
+    `DeclareDormantDeclared`, `DeclareLoading`, `DeclareManaged`,
+    `DeclareUnloading`, `DeclareHeld`, `DeclareQuarantined`,
+    `DeclareRetrying`, `DeclareGone`, `EndLaunchWaitDormant`,
+    `EndLaunchWaitDormantNotAwaited`, `EndLaunchWaitLoading`,
+    `EndLaunchWaitLoadingNotAwaited`, `EndLaunchWaitManaged`,
+    `EndLaunchWaitManagedNotAwaited`, `EndLaunchWaitUnloading`,
+    `EndLaunchWaitHeld`,
+    `EndLaunchWaitHeldNotAwaited`, `EndLaunchWaitQuarantined`,
+    `EndLaunchWaitQuarantinedNotAwaited`, `EndLaunchWaitRetrying`,
+    `EndLaunchWaitRetryingNotAwaited`, `EndLaunchWaitGone`,
+    `RegisterDormantLaunchOwned`, `RegisterDormantNotDeclared`,
+    `RegisterManagedLaunchOwned`,
+    `RequestLoadDormantAwaitsLaunch`, `RequestLoadDormantVacant`,
+    `RequestLoadDormantLaunchOwned`, `RequestRetryQuarantinedAwaitsLaunch`,
+    `ResolveLoadSettledDeclared`, `ResolveRetrySettledDeclared`,
+    `ReleaseHeldSettledDeclared` and `DestroyManagedLaunchOwned`.
+
+  For a store that is not declared nothing changes but the shape of
+  `RequestLoad` (its trigger decides nothing there). A declared store's
+  record refuses a lookup's load and an on-demand re-attempt with
+  `AwaitsLaunch` until `EndLaunchWait`, refuses a pass's load, every
+  `Register` but one that names `Declared`, a host's handle and a `Destroy`
+  with `LaunchOwned`, refuses `RequestUnload` with `NotReloadable`, and
+  stays `Dormant` with `vacant` set where a load, a re-attempt or a
+  released hold of any other store ends `Gone`. The record is in process
+  only, as before: nothing stored names the new origin or fields.
+
+- `meerkat-machine-schema` (and its re-export
+  `meerkat_mob::machines::mob_store_restore_lifecycle`),
+  `meerkat-machine-kernels`: the same machine is version 4 in this release,
+  not 3: a mob the set itself runs keeps its id against a host's handle. On
+  top of the changes above, the kernel's `TransitionId` gains
+  `RegisterManagedHostHandleSetRun`. A `Register` that names `HostHandle`
+  is admitted over a managed record only when that record's own origin is
+  `HostHandle` (a host inserts its mob again); over the record of a store
+  the set loaded, or of a mob it created, it is refused `AlreadyHosted` and
+  the record does not change, where it was admitted before and the mob's
+  handle was replaced. The record is in process only: nothing stored names
+  the version.
+
+- `meerkat-machine-schema` (and its re-export
+  `meerkat_mob::machines::mob_store_restore_lifecycle`),
+  `meerkat-machine-kernels`: the same machine is version 5 in this release:
+  a create takes its mob's id before the mob is built. On top of the
+  changes above, `MobStoreRestoreLifecyclePhase` gains `Creating`, the
+  input enum `RequestCreate { launch }` and `ResolveCreate { outcome,
+  in_memory }`, the effect enum `CreateAdmitted` and `CreateReleased`,
+  `MobStoreRestoreRefusal` `CreateInFlight` and `NotCreating`, and the
+  kernel's `TransitionId` one arm of every input for the new phase and the
+  arms of the two new inputs; `MobStoreCreateOutcome` (`Created`, `Failed`)
+  is new. An exhaustive match over one of these enums must name the new
+  variants. The record is in process only: nothing stored names the
+  version or the phase.
+
+- `meerkat-machine-schema` (and its re-export
+  `meerkat_mob::machines::mob_store_restore_lifecycle`),
+  `meerkat-machine-kernels`: the same machine is version 6 in this release:
+  the stop of a mob that is not loaded is state of its store's record. On
+  top of the changes above, the state gains the field `stop`
+  (`MobStoreStop`: `Unread`, `NotStopped`, `Stopped`, a new enum),
+  `ResolveUnload` gains the field `stop` (what the mob answered about its
+  stop when its actor closed), the input enum gains `ReadStop { stopped }`
+  (the set's read of a dormant store, taken only while the record does not
+  know the answer), the effect enum `StopRead { stopped }`,
+  `MobStoreLoadTrigger` gains `Demand` (what originates work for the mob:
+  its load is refused for a stopped mob), `MobStoreRestoreRefusal` gains
+  `Stopped`, `StopUnread` and `StopKnown`, and the kernel's `TransitionId`
+  the arms of the new input and of a demand's load. A construction of
+  `ResolveUnload` must name `stop`, and an exhaustive match over one of
+  these enums the new variants. The record is in process only: nothing
+  stored names the version or the field.
+
+- `meerkat-machine-schema` (and its re-export
+  `meerkat_mob::machines::mob_store_restore_lifecycle`),
+  `meerkat-machine-kernels`: the same machine is version 7 in this release:
+  two more facts are the record's own. The state gains the field `known`
+  (the record stands for a store or a mob the set knows; false only for a
+  record filed for a create that has admitted nothing yet): a create is
+  admitted only by such a record, and a record a census listed, or whose
+  mob was loaded, registered or created and is not loaded now, refuses it
+  `AlreadyHosted`. The input `Register` is a host's handle only: it loses
+  the field `origin` and gains `holder_ended` (the mob the record manages
+  has ended without a destroy: its actor is over and its last phase is
+  not `Destroyed`). A host's handle over a mob the set itself
+  runs is refused while that mob runs and admitted once it has ended, and
+  a registration always gives the record the origin of a host's handle (a
+  create joins through `RequestCreate` and `ResolveCreate`). The kernel's
+  `TransitionId` gains `RequestCreateDormantKnown` and
+  `RegisterManagedHostHandleOverEnded` and loses
+  `RegisterDormantNotDeclared` and `RegisterManagedRefused`. A
+  construction of `Register` names `holder_ended` and no `origin`, and an
+  exhaustive match over `TransitionId` the changed arms. The record is in
+  process only: nothing stored names the version or the fields.
+
+  The arms the kernel's `TransitionId` gained with versions 5 and 6, by
+  name. With version 5: one arm of each input the machine already had, for
+  the new phase `Creating` (two of `EndLaunchWait`), `CensusCreating`,
+  `RegisterCreating`, `DeclareCreating`, `EndLaunchWaitCreating`,
+  `EndLaunchWaitCreatingNotAwaited`, `RequestLoadCreating`,
+  `ResolveLoadCreating`, `RequestRetryCreating`, `ResolveRetryCreating`,
+  `RequestUnloadCreating`, `ResolveUnloadCreating`, `ReleaseHeldCreating`
+  and `DestroyCreating`; for `RequestCreate`, `RequestCreateDormant`,
+  `RequestCreateDormantNotDeclared`, `RequestCreateDormantLaunch`,
+  `RequestCreateDormantLaunchHoldsAMob`, `RequestCreateDormantLaunchOwned`,
+  `RequestCreateLoading`, `RequestCreateManaged`, `RequestCreateUnloading`,
+  `RequestCreateHeld`, `RequestCreateQuarantined`, `RequestCreateRetrying`,
+  `RequestCreateGone` and `RequestCreateCreating`; for `ResolveCreate`,
+  `ResolveCreateCreated`, `ResolveCreateCreatedInMemory`,
+  `ResolveCreateCreatedDeclared`, `ResolveCreateFailed`,
+  `ResolveCreateFailedDeclared`, `ResolveCreateDormant`,
+  `ResolveCreateLoading`, `ResolveCreateManaged`, `ResolveCreateUnloading`,
+  `ResolveCreateHeld`, `ResolveCreateQuarantined`, `ResolveCreateRetrying`
+  and `ResolveCreateGone`. With version 6: for a load a demand asks,
+  `RequestLoadDormantDemand`, `RequestLoadDormantStopped` and
+  `RequestLoadDormantStopUnread`; for `ReadStop`, `ReadStopDormantStopped`,
+  `ReadStopDormantNotStopped`, `ReadStopDormantKnown`, `ReadStopLoading`,
+  `ReadStopManaged`, `ReadStopUnloading`, `ReadStopHeld`,
+  `ReadStopQuarantined`, `ReadStopRetrying`, `ReadStopGone` and
+  `ReadStopCreating`.
+
+- Behaviour-only (not measured by the gate): `meerkat-mob`:
+  `MobHandle::close_if_idle` keeps its signature, and a call whose caller
+  stopped waiting before the mob's actor reached the request (its future
+  was dropped, for one at a timeout) no longer closes the mob: the actor
+  skips a request nobody waits for, so a caller that read the missing
+  answer as "not closed" is not contradicted later. A caller that waits is
+  answered as before, and an actor that was already deciding the request
+  when its caller left still decides it. A caller that wants the mob
+  closed waits for the answer.
+
 - **Behavior:** Core's Gemini catalog default changes from `gemini-4-argon`
   to `gemini-4-neon`. A Gemini session without an explicit model or applicable
   configured/binding default now uses Neon. With thinking unset, Meerkat sends
@@ -49,7 +335,488 @@ them.
   precedence. The global and image defaults are unchanged. No wire/schema
   break is introduced.
 
+- `meerkat-machine-kernels`: the generated input struct `generated::meerkat::inputs::RecoverInputLifecycle` gains the public field `live_boundary_delivery: Option<LiveBoundaryDelivery>`. `meerkat-runtime`: the variant `RecoverInputLifecycle` of the public generated input enum `meerkat_machine::dsl::MeerkatMachineInput` gains the same field, and so does its expansion in `meerkat-machine-schema`. Code that builds any of these with a struct literal adds the field; `None` keeps the earlier behaviour. No variant is added and no enum order moves. No wire form and no stored form changes.
+
+- **Behavior:** (behaviour-only, not measured by the gate) steers into a
+  running turn, a change of timing with no type, wire or schema change: the
+  eligible prefix of the durable content steers that wait in the steer lane
+  now joins a boundary where a durable steer has registered its claim, in
+  admission order, so the next model request is the first to carry them.
+  An acknowledged admission is not inclusion in a request: the cutoff
+  decides that. In 0.9.17 one durable steer joined per model
+  boundary, and a steer admitted while an earlier one waited joined the
+  boundary after it (read from the source at tag `v0.9.17`:
+  `DurableSteerOrder`, `crates/meerkat-runtime/src/driver/ephemeral.rs` lines
+  306-320, and the Durable steer section of
+  `docs/reference/session-contracts.mdx` there). Where a claim is
+  registered, the cutoff of a request is the publication of that claim: one
+  step under the session mutation gate, after the eligible prefix of the
+  waiting steers is joined to the run and before the runner writes the rows
+  and composes the request. Admission and recall take the same gate: a steer
+  admitted before the cutoff, also one admitted after the runner parked at
+  the boundary, joins that request when it is in the eligible prefix, and a
+  steer admitted after it waits for the next eligible boundary or the
+  follow-up turn. At a boundary
+  with no durable steer (none registered, or a park on request-only
+  context alone) the input is fixed at the one check in which the runner
+  finds every delivery it is parked on resolved, no durable steer
+  registered and no acknowledged steer still on its way: an eligible steer
+  whose admission was acknowledged before that check is in the request,
+  unless it is recalled or its preparation fails first. Once a
+  durable steer has entered the boundary, the cutoff is its publication
+  under the session mutation gate, as at any boundary. A successful in-turn
+  application that the run retains is exactly once per input, as before:
+  its join, its delivery witness, its transcript rows and its
+  `boundary_append_applied`; steers that join one boundary have adjacent
+  rows and publish their events in admission order. The applied event is
+  neither the model's response nor the durable consumption of the input,
+  and the round commit is separate evidence (retained history). The joins
+  stop at the first durable steer that cannot
+  join the run (another requester's, one the run's bound of 256 contributors
+  refuses, one whose rows cannot be written in-turn, one whose join could
+  not be made durable): it keeps its place and no steer behind it overtakes
+  it. Unchanged: no model request in flight is cancelled, steers still
+  waiting when the run ends take the follow-up turn in arrival order, and an
+  input that only a fresh turn applies never joins a running turn. In our
+  held-tool test, 0.9.3 put the first steer in the next request and the
+  rest in a follow-up turn; 0.9.4 and the tested revision of `main`
+  delivered one per request; this change delivers the eligible waiting
+  prefix together. Other releases were not measured. See
+  [Durable steer](docs/reference/session-contracts.mdx#durable-steer) and
+  Upgrade notes.
+
 ### Added
+
+- `meerkat-mob`: `MobStorage::read_stored_events(path, after_cursor, limit)`
+  reads one page of a mob store's journal from the store file with no
+  running mob: the structural events after a cursor, in cursor order, and
+  the journal's latest cursor, read in one read transaction
+  (`MobEventsPage`). It is the page a running mob's events view answers,
+  unfiltered. The page names the mob the journal belongs to
+  (`MobEventsPage::mob_id`: the mob the journal's first event names, read
+  in the same transaction), whatever the page holds; a journal that holds
+  no event names none. The file is opened read-only: a missing store is
+  refused and never created, a store an earlier release wrote is read as
+  it is and not migrated, and no fence, lease or write lock is taken, so
+  a store a mob runs on can be read beside its writer. The refusals are
+  typed (`MobStoredEventsReadError`: `StoreMissing`, `ForeignSchema`,
+  `Read`).
+
+- `meerkat-mob-mcp`: `MobMcpState::mob_events_without_load(mob_id,
+  after_cursor, limit)` reads one page of a hosted mob's journal and the
+  journal's latest cursor without loading the mob. `mob_events` and
+  `mob_latest_event_cursor` answer through the mob's handle, and a lookup
+  of a mob that is known and not loaded loads it; this read takes the
+  set's census first, as a listing does, and then loads no mob for the id
+  it is asked and changes nothing of the set. A managed mob answers
+  through its own handle. A mob that is known and not served by a loaded
+  handle (not loaded, its load or its idle unload in flight, or a child
+  mob held before activation) is read from its store's file with
+  `MobStorage::read_stored_events`, read-only. A quarantined store answers
+  its quarantine and is not read, and no restore is re-attempted; a mob no
+  set holds is `MobNotFound`, as is a store whose journal names another
+  mob or holds no event, for every page. A store this build cannot read
+  answers `StorageError` carrying the read's own refusal and is not
+  quarantined by the read. The page is not filtered: a caller that wants
+  a mob's spawns keeps those; it names its mob (`MobEventsPage::mob_id`).
+  It needs the console owner (`SubscribeEvents`), for a managed mob as
+  well: a mob that is not loaded has no running machine that could
+  resolve a per-mob grant.
+
+- `meerkat-mob`: `MobStorage::read_stored_creator(path, mob_id)` reads who
+  created a stored mob (`MobProvenance`) from the creation record in its
+  store file, with no running mob. It answers nothing when the record
+  proves nothing about the mob asked: the store holds no creation record,
+  the record is finalized, or the record names another mob. The file is
+  opened read-only, as
+  `MobStorage::read_stored_events` opens it: never created, never
+  migrated, no fence, lease or write lock. The refusals are typed
+  (`MobStoredCreationReadError`: `StoreMissing`, `ForeignSchema`, `Read`).
+  `MobStorage::read_creation_provenance(path)` is the same read without
+  the mob's id, for a caller that walks store files. It answers a
+  `StoredMobCreation`: who created the store's mob (`Recorded`), a store
+  that holds no mob (`NoMob`: no creation record, or a finalized one), or
+  a store that predates creation records (`PredatesCreationRecords`: an
+  earlier release wrote it and no later one has opened it for writing
+  since, so who created its mob is recorded nowhere).
+  `read_stored_creator` answers nothing for both of the last two.
+  On a host that loads its mobs on demand
+  (`MobRestorePolicy::OnDemand`), the schedule write's judge reads a mob
+  that is not loaded through it: the member that created another mob with
+  its own create may write a schedule that has the host act in that mob
+  (a helper to spawn there, one of its flows) while the mob is not loaded
+  or its load or idle unload is in flight, and that mob is neither loaded
+  nor restored for the question. (For a creator recorded as a member of
+  another mob, the rule still looks that recorded parent mob up with the
+  ordinary lookup, which loads it when it is not loaded.) A mob held
+  before activation, a quarantined mob and a destroyed mob stay out of
+  reach. A mob created before mob creation records existed has no
+  recorded creator, and a load does not add one (it records the creator
+  as not known): its creator's schedule write that acts in it is out of
+  reach whether the mob is loaded or not.
+
+- `meerkat-mob`: `MobActorTaskWatch::has_ended` says, without waiting,
+  whether a mob's actor task is over (its future returned, or the task was
+  lost).
+
+- `meerkat-machine-schema`, `meerkat-machine-kernels`, `meerkat-mob`: a new
+  canonical machine, `MobHostedSetLifecycleMachine`
+  (`meerkat_mob::machines::mob_hosted_set_lifecycle`), owns the facts about
+  a host's mob set as a whole, which no store's record can hold: how far
+  the pass over the stores the host has from before came (`Unrestored`,
+  `Attempted`, `Restored`; the first pass is named once), whether a census
+  of such stores is owed (a persistent mob root, or a declared default mob
+  with a store file), whether the census is complete (a pass finished, or
+  the host declared its own restore done), whether a host registered a
+  handle of its own, and whether every mob of the host is known. The mob
+  set (`meerkat-mob-mcp`) held these as plain fields beside its records;
+  it now applies the machine's inputs and reads its answers, and no
+  behaviour changes. One state per mob set, in process only: nothing is
+  stored. `MobMcpState::declare_mob_set_restored` keeps its signature.
+
+- `meerkat-mob-mcp`: `MobMcpState::persistent_mob_store_path(&mob_id)` names
+  the file a mob set with a persistent root keeps one mob's store in
+  (`None` for a set without a root, which keeps its mobs in memory). It
+  opens nothing. A host that keeps a file of its own for one mob names it
+  after this file, beside it, instead of spelling the store's name again.
+
+- `meerkat-mob-mcp`: a mob set can restore its persisted mobs on demand.
+  `MobMcpState::with_mob_restore_policy(MobRestorePolicy::OnDemand)` makes the
+  restore a census: the store files of the root are listed, each mob is
+  known and dormant, and no store is opened. A lookup of a dormant mob loads
+  that mob alone, and lookups that arrive together share the one load. At
+  start exactly the mobs whose members hold recovery work or pending
+  deliveries are loaded (one obligation scan of the runtime store; a member
+  session names its mob through its stored member binding, read without the
+  session's body; a scan that cannot tell loads every mob). What the eager
+  restore does for every store runs afterwards as a sweep over the dormant
+  stores, one at a time: a child mob whose owner was archived while the
+  process was down is torn down, an empty store is swept, an unreadable one
+  is quarantined. A store that cannot be read is so quarantined when it is
+  first read, by a request that names its mob or by that sweep, never by
+  the census. The scavenge of child mobs whose owner session was archived
+  runs the same sweep, so a dormant child of an owner archived while the
+  process runs is torn down too.
+
+  Every ten minutes each mob that has been loaded at least that long is put
+  to its store's record for an idle unload. The record admits it only for a
+  store the set can load again (a mob with in-memory storage, or one whose
+  handle the host inserted itself, is never unloaded). The mob's own actor
+  is then asked whether it is idle (`close_if_idle`), within 30 seconds: an
+  idle mob is shut down and is dormant again once its actor has ended, and
+  loads again at its next lookup; a mob with work in flight or a held owner
+  lease (`MobHandle::acquire_owner`) stays loaded, and so does one whose
+  actor gave no answer in time. From the step that admits the unload until
+  the actor's answer the mob is not handed out: a lookup of it, a destroy,
+  a WorkGraph flow, a completion owed to one of its members and a handle a
+  host inserts under its id wait for the answer. A member lookup does not
+  wait: it reads the mob's roster from its actor, which still runs. The
+  mob is not hidden in that time: `mob_list` and `MobInventory::managed`
+  list it until its actor closed, and no observer of the mob set
+  (`mob_set_changes`) is woken by the question. A destroy holds its mob
+  with an owner lease while it runs, so the mob's actor declines an unload
+  under it.
+
+  The default, `MobRestorePolicy::Eager`, restores every store when the set
+  is first used, and every Core surface keeps it. Meta's gateways select
+  `OnDemand` for the mobs they host (see the Meta changelog); a Rust host
+  that selects it should read "Limits in this release" in
+  the mobs guide first (which reads see served mobs only, a handle taken
+  just before the idle question, an actor that does not end, the fixed ten
+  minute period, no lease for an open event stream).
+
+- `meerkat-core`, `meerkat-mob-mcp`: a mob set that restores on demand can
+  answer the wake of a member's session whose mob is not loaded. A road that
+  holds only a session's id (a turn, comms sent as the member, a scheduled
+  session target, a session-addressed delivery, a cold attach) asks the
+  session-owner wake registry for the session's owner before it goes on. A
+  mob publishes its members' sessions there only while its actor runs, so
+  for a mob that is not loaded the road found no owner and went on as for a
+  session no mob holds.
+  `SessionOwnerWakeRegistry::publish_owner_of_unnamed_sessions` adds an
+  owner that `wake` asks when no entry names the session, or the entry's
+  owner answers that it no longer owns it
+  (`retract_owner_of_unnamed_sessions` removes it; `wake_published` asks the
+  entries alone). `owned` never asks such an owner, so a read or a cancel
+  loads nothing.
+  `MobMcpState::answer_wakes_of_unserved_member_sessions` is the host's
+  statement that its set is such an owner. The set reads the session's
+  stored member binding, loads the mob it names as work loads it, and the
+  loaded mob answers the wake. A stopped mob is not loaded for a wake, which
+  is refused in the retryable form (`SessionError::Busy`); so are a binding
+  that cannot be read while a mob may not be loaded, a held child mob, and a
+  wake that arrives while the census is taken. A wake re-attempts no
+  quarantined store (the one re-attempt a lookup by id makes on demand
+  stays with that lookup): over a store that is only unavailable it
+  answers busy, and over any other quarantined store, or a mob the state
+  destroyed, it is refused for good. A session with no binding, one whose
+  binding names a mob the set does not know, and a session of the host's
+  default mob are not the set's to answer. A set whose host does not state
+  it answers no wake, as before; Meta's launches state it over a declared
+  store, unless the launch is a candidate (see the Meta changelog).
+
+- `meerkat-mob-mcp`: `MobMcpState::unloaded_mob_member(mob_id)` reads what
+  the store of one mob that is known and not loaded holds of the mob's
+  members, without loading the mob: the incarnation the mob was created at
+  and the mob's member binding history (`UnloadedMobMember`), which holds
+  the binding of a member that sits on the roster, of one that left it and
+  of one whose name a later member holds. No roster row is read: a member
+  is found by the binding of its session and generation, never by the name
+  a row sits under. It opens that one store once, judged as a restore
+  judges it; no actor is built, no member is restored, the mob stays not
+  loaded and nothing is kept of the read, so each call opens the store and
+  replays its journal. It answers `None` for a mob that has an actor (ask
+  its handle), a mob whose idle unload is admitted and not answered yet, a
+  quarantined store, a store whose load is in flight and the declared
+  default store. It needs the console owner (`List`).
+
+- `meerkat-mob-mcp`: `MobInventory` gains `dormant`, the ids of the mobs that
+  are known and not loaded: no actor runs for them. A mob whose idle unload
+  is admitted stays in `managed` until its actor closed and ended. `dormant`
+  is empty under the eager policy, except for a store whose restore
+  panicked (below). A create under the id of a dormant mob is refused from
+  the set's records, without opening that mob's store.
+  `MobInventory::dormant_creation` names who created the dormant mobs (the
+  `MobProvenance` their creation recorded, by mob id), as far as the set
+  has read it without loading them: the sweep over the dormant mobs reads
+  it in the one open it makes of each store, and a mob the set created or
+  loaded keeps it once it is unloaded. A dormant mob that is absent there
+  has not been read (the sweep has not reached its store, the state runs
+  no sweep, or its creation record cannot be read); no listing opens a
+  store for it.
+  `MobMcpState::unloaded_mob_creation(mob_id)` answers it for one mob that
+  has no actor, without loading the mob: from the store's record when the
+  record keeps it, and otherwise, for a dormant mob, by opening that one
+  store once and keeping the answer in the record (a listing names it from
+  then on). The store of a quarantined mob is never opened for it: it
+  answers what the record kept before the store failed, or `None`. A mob
+  whose idle unload is admitted and not answered yet is answered from its
+  record too, without opening its store and without waiting for the
+  unload. A host that judges a request by who created the mob it names
+  does not have to wait for the sweep after a start.
+  `MobInventory::dormant_incarnation` names the dormant mobs' own
+  incarnations (the `MobIncarnationId` their creation recorded, by mob id),
+  read in the same opens and kept the same way, so that a read that needs
+  the incarnation of a mob that is not loaded loads nothing. A dormant mob
+  that is absent there has not been read, or its store holds no creation
+  record: nothing is guessed for it. The read of who created one mob keeps
+  the incarnation from the same open.
+  `MobInventory::dormant_stopped` names the dormant mobs that are stopped
+  (each is also in `dormant`). A mob an operator stopped stays stopped
+  while it is not loaded: the idle unload hands the store's record the
+  mob's own word, and after a restart the set reads it where it opens the
+  store anyway (the sweep, the read of who created one mob) or at the
+  first call below. A stopped mob whose store was not read yet is in
+  `dormant` only; no listing opens a store.
+  `MobMcpState::handle_for_work(mob_id)` is `handle_for` for the calls a
+  stopped mob refuses as work: a send to a member and a run of a flow,
+  each with or without an external delivery identity (`mob_member_send`,
+  `mob_member_send_with_external_identity`, `mob_run_flow_with_stream`,
+  `mob_run_flow_with_external_identity`). For a mob that is not loaded and
+  stopped it answers the loaded stopped mob's refusal
+  (`MobError::InvalidTransition` from `Stopped` to `Running`) and loads
+  nothing. Every other call loads a stopped mob, which answers it itself
+  and stays stopped: a read, an operator's verb, a keyed send, a turn
+  start, an ingress interaction, submitted work, the begin of an external
+  delivery and an agent's mob tools. The refusal is given without a load
+  where the mob set's console principal is the owner; for any other
+  principal the mob is loaded and answers for itself. A schedule that
+  fires for a member of a stopped mob that is not loaded therefore loads
+  the mob: its delivery begins as for a loaded stopped mob, the send is
+  refused, the occurrence ends with its delivery failed, and the mob is
+  unloaded again when it is idle.
+  The agent tool `mob_list` names the caller's own mobs that are not
+  loaded: a mob its session created with `mob_create` is listed with the
+  status `Dormant`, or `Stopped` when it was stopped before it was
+  unloaded, from what the set's records keep, with no load and no open of
+  a store. The list judges such a mob as it judges a loaded one: the
+  creation record proves the session's own create, and the verdict is the
+  mob machine's (`meerkat_mob::mob_machine_current_mob_admission`, new: a
+  stateless reading of the machine's per-mob admission). A mob the host
+  made for the session stays out, as it does while loaded. A mob the
+  caller holds a manage grant over (its delegation mob among them) is
+  listed the same way while it is not loaded: the grant is bound to the
+  mob's incarnation, which the set's record keeps for a mob it created or
+  loaded, so a grant over an earlier mob of the id lists nothing. A mob
+  whose record the set has not read yet is listed once it is loaded.
+
+- `meerkat-mob`: `MobStorage::recorded_phase` reads the lifecycle phase a
+  store's event log records for its mob, without building the mob and
+  without appending an event: the phase a resume would start the mob in
+  (`Stopped` after a completed stop, `Running` after the resume that ends
+  it, and `Running` for a mob whose actor only shut down), or `None` for a
+  store whose log holds no mob.
+
+- `meerkat-runtime`: `LogicalRuntimeId::session_id` is public: the session a
+  session runtime id names, `None` for a member delivery address.
+
+- `meerkat-mob-mcp`: a Rust host can hand the mob set its composition of the
+  mobs it creates itself, and its default mob.
+  `MobMcpState::with_host_mob_composition` installs a `HostMobComposition`:
+  the set asks it for every build of a mob whose creation records
+  `MobProvenance::Host`, and of the default mob, at the create and at each
+  load of the mob's store (`HostMobBuild` with `HostMobBuild::new` and
+  `HostMobBuild::mob_id`, `HostMobBuildStage`). Such a build starts clean:
+  `compose` gets a builder with nothing of the set's state-wide
+  configuration on it and gives it everything the mob needs;
+  `resume_expectation` can bind a load to a stored definition. The realm's
+  skill sources are not copied into such a mob's definition, so it defines
+  every skill its profiles name: a create whose inline profile, or whose
+  realm profile, names a skill the definition does not define is refused.
+  Two stated limits of that check: the default mob's own create is not
+  checked (it keeps the realm profiles of its own store, which the set
+  does not read), and a realm profile the realm's store does not hold is
+  left to the member's build, as before.
+  A refused
+  create leaves no mob behind (the store file of a further host mob is
+  removed again), and a refused load quarantines the store. A mob created
+  for an owner session is never given to the composition, and a child mob
+  keeps the child application tool policy. The restore passes do not wait
+  for a host mob's build: it runs on as the state's own task, is the one
+  load of its store, and holds the state's admission until it ends.
+  `MobMcpState::with_default_mob(DefaultMobDeclaration)` (it answers a
+  `Result`: a host composition has one default mob, and a second
+  declaration, or one made after the set was shared, is refused with
+  `MobError::WiringError` before anything is recorded) declares the mob a launch
+  names and the file of its store (`DefaultMobDeclaration::persistent`, any path, also
+  one under the set's root; `DefaultMobDeclaration::in_memory`; `default_mob_id`). A
+  declared file exists from the declaration on: the host's
+  forked-participant table is opened in it and is the one such table of the
+  host, used by temporary councils, every mob the set builds and the
+  default mob, ahead of the root's table and of
+  `with_forked_participant_store`. A persistent root configured after the
+  declaration (`try_with_persistent_storage_root`,
+  `with_persistent_storage_root`) opens no forked-participant table of its
+  own while the declared file's table is open, so it leaves no
+  `mobs/realm_forked_participants.db` that nothing reads (the root's
+  default temporary council store still lives in that file); a root
+  configured before the declaration has opened its table already. A table
+  that cannot be opened at the
+  declaration is tried again before the set's first pass; failing that, the
+  set runs with its own table and the default mob is not served in that
+  process, so a host never has two such tables. The set then creates or
+  loads the default mob itself: `serve_default_mob` takes the definition or a
+  `DefaultMobServe` (`DefaultMobServe::new`), which can also declare an
+  update of the stored definition (`declaring_update`, compare-and-swapped
+  on the revision the launch read, applied before the load), and answers
+  `DefaultMobServed` (with `declared_update`, the revision it committed). A
+  failed serve answers `DefaultMobServeError`: the failure (`error`) and
+  the revision of a declared update the serve committed before it failed,
+  which stays committed. `default_mob_stored_definition` reads what the
+  store holds before anything is built, through the open the serve then
+  loads with; a failed read answers its error and quarantines nothing.
+  Until the launch's first serve has ended, however it ends, every lookup,
+  delivery or completion that names the default mob waits, and no pass of
+  the set loads it: `MobInventory::dormant` names it under either restore
+  policy meanwhile. A stand-down releases the waiters with its own error.
+  The serve never changes the mob's phase (a stopped mob is served
+  stopped), re-attempts a quarantined default store once (with its declared
+  update applied first), and its create does not ask the create hook; a
+  create the composition refuses leaves the declared file with no mob in
+  it. The set quarantines the default store like any store, under the
+  default mob's id with the file kept as found, and never removes a file
+  with no mob in it at that place. The id is the launch's: every other
+  create under it and a handle a host inserts under it are refused at
+  once (`MobError::MobAlreadyExists`; `try_mob_insert_handle` answers it,
+  `mob_insert_handle` logs it), and
+  so is a destroy through the set (the agent tool included;
+  `MobError::WiringError`), and another store of the root that names it is
+  quarantined as a conflict. The default mob keeps the realm profiles of
+  its own store, and the idle unload never asks it. A council's outcome
+  owed to a member of a mob that is not served is never committed to that
+  member's session as a plain session: the re-link loads an ordinary
+  dormant mob for the delivery, and answers the new
+  `CouncilRelinkAction::AwaitingMob` (the outcome stays owed until that mob
+  is served) for the default mob that awaits its launch's serve and for a
+  held or quarantined mob. On a host that declares a default mob, the
+  outcome of a convener with no stored member binding, a plain session
+  included, stays owed while the default mob is not served (it awaits its
+  serve, or its store is quarantined), and so for as long as its store stays
+  quarantined. The recovery sweep logs what a pass leaves owed, one line
+  per mob with the number of outcomes and the state that holds them. That
+  the declared store is its launch's, and whether its mob still waits for
+  the launch's first serve, are facts of that store's record (see the
+  machine's version 3 under Breaking): the record is filed at the
+  declaration, for a default mob in memory as well, so a lookup of such a
+  mob waits for its launch's serve too. A state that sets neither behaves
+  as before (but see the two `meerkat-mob-mcp` entries under Changed
+  below: the continuation commit and the council re-link). No Core surface
+  sets a composition or a default mob; Meta's two gateways declare the mob
+  their launch names as the default mob of the mob set. See "Host mobs and
+  the default mob" in the mobs guide.
+- `meerkat-mob`, `meerkat-mob-mcp`: a member's seat row records who seated
+  the member, and `MobHandle::member_seat(identity)` reads it (`MemberSeat`:
+  its `MemberSeatKind`, the creating member's `RecordedSeat` for a kind
+  that has one, who recorded and sealed it). The kinds are the host's own
+  seat, the host's seat for a calling member or session, a calling member
+  or session, the mob's definition, a copy of another member, a schedule's
+  seat, and not shown; a seat row written before this release reads by its
+  older members, or as not recorded. The record is composed from what the
+  runtime observed, never from a name, a label or an argument of a call,
+  and it is a fact only: nothing reads it to allow or refuse, and a
+  member's creation record and the public events are unchanged. A host
+  says a seat is its own with `SpawnMemberSpec::attest_host_seat()`
+  (`SpawnMemberSpec::host_root` says it too); Core drops the attestation
+  wherever the spawn is sent for an agent or under an operation owner. A
+  helper a host's own call spawns through `MobHandle::spawn_helper` or
+  `fork_helper` is not attested and records not shown; the schedule host's
+  helpers go through `MobHandle::spawn_scheduled_helper` and
+  `fork_scheduled_helper` and record a schedule's seat. A door that seats
+  a member for a caller attaches the caller's seat as a mob's own handle
+  seals it (`MobHandle::seal_seat_creator`, `MemberSeatCreator`,
+  `SeatSealer`, `SpawnMemberSpec::with_seat_creator`,
+  `DelegationMemberOptions::seat_creator`). `MobHandle::seat_now(&RecordedSeat)`
+  answers whether a recorded seat still stands (`SeatNow`),
+  `MobHandle::member_lineage_step` where a member's lineage goes next
+  (`MemberLineageStep`), and `MobMcpState::lineage_of` and `mob_lineage`
+  (module `lineage`) follow it across the hosted mobs for the owner's
+  console, loading no mob. A link to another member is followed only by
+  its proof (`MemberLinkProof`), never by a name: the recorded seat with
+  `seat_now`, and a copy's source by the creation the copy records with
+  `MobHandle::creation_now`. An identity an agent asked for under the
+  host's rule alone reads closed. The record is one internal member of
+  the stored seat row: the stored schema does not move and an earlier
+  release ignores it.
+
+- `meerkat-mob`, `meerkat-mob-mcp`: one observation of whether a hosted
+  mob is idle, which decides nothing.
+  `MobHandle::observe_idle()` answers a `MobIdleObservation`: `busy`, the
+  `MobBusy` an idle close is decided on, and `admission_closed`, why the
+  mob's admission is closed when it is; `is_idle()` holds when nothing is
+  in flight and admission is open. The actor reads it on its serialized
+  admission path with the computation the close uses, and closes nothing,
+  takes no owner and waits for nothing.
+  `MobMcpState::mob_idle_observation(mob_id)` answers a `HostedMobIdle`
+  from one read of the hosted set, without loading the mob: `Observed`
+  with its actor's observation for a mob that is served, and `Unloading`,
+  `Held`, `Quarantined`, `Dormant`, `Loading`, `Changed`, `SetIncomplete`
+  or `Absent` otherwise, none of which means idle. It needs the console
+  owner (`List`), opens no store, takes no lease and starts no census: an
+  id no record names answers `SetIncomplete` until the set is complete,
+  and `Absent` only then. `Absent` is also the answer for an id whose
+  create is in flight, for a mob the set destroyed and for a declared
+  store that holds no mob yet. The observation of a served mob is given
+  only when the actor that answered still serves the mob; when its record
+  changed meanwhile, the record's answer by then is given. While the
+  actor answers, the read holds the set's admission, as the reads of the
+  set that open a store or wait do (a stand-down of the set waits for
+  it), and a clone of the set's handle of the mob, which it drops at the
+  answer.
+  Its limits. It covers the mob's own admission: a schedule that is due,
+  a delivery another owner holds for one of its members and the mobs its
+  members created are outside it. The counts are diagnostic. The native
+  work of the members' sessions (accepted inputs that are queued, held or
+  running, an open live channel) is read only when the actor's own counts
+  are idle, for the members with a bridge session in this process, and
+  reads as none in a build without the runtime adapter. The step between
+  the actor's delivery of a peer message and the member's accepted input
+  is not traced for it. A mob that is not loaded has no actor to ask and
+  answers `Dormant`: whether its store owes work is not read. A mob whose
+  unload is admitted answers `Unloading` and may still be found busy. A
+  mob that reads idle may be busy, or closed, when the caller next acts:
+  no wait and no notification come with the read. An observation costs
+  what an idle close costs, on the actor's loop: it is a read for an
+  occasion, not for a poll.
 
 - `gemini-4-neon` in the Core model catalog: a paid Gemini API model with a
   shared 1,048,576-token context and a 65,536-token synchronous output cap.
@@ -59,14 +826,257 @@ them.
   instead not applied, preserving the existing level or provider default.
   Long decode is not added.
 
+- `meerkat-core`: `CoreBoundaryStageOutput::attach_durable_delivery` and
+  `CoreBoundaryStageOutput::withdraw_durable_delivery`. The holder of a
+  parked durable boundary preparation attaches the deliveries of other
+  inputs that join the same boundary, or takes one back, before its one
+  commit publishes them in attach order.
+
+- `meerkat-core`: `PendingBoundaryAdmissions` and `PendingBoundaryAdmission`,
+  and the provided method `TurnStateHandle::pending_boundary_admissions`
+  (`None` by default). A runtime announces a durable steer it has
+  acknowledged before that steer's boundary preparation registers, and
+  the runner keeps its boundary open while an announcement stands.
+
 ### Changed
+
+- `meerkat-mob-mcp`: a mob store file is served only under the id its
+  file name encodes. A store file whose name encodes one mob's id and
+  whose records hold another mob (a copy of a store under another name, a
+  backup put back under another name, a renamed file) was, since 0.5.2,
+  resumed and served under the records' id: a lookup of the file's own id
+  served the other mob from that file, and when the other mob was already
+  loaded the file was filed quarantined under the other mob's id. Such a
+  file is now quarantined under the id its name encodes
+  (`resume_refused`, the cause naming both ids) before anything of it is
+  resumed, held or torn down, and the mob its records name is served from
+  its own store. A file whose name encodes no id still takes the id its
+  records name, unless a store file named for that id lies beside it:
+  then it is quarantined under its file's stem, under both restore
+  policies and whichever file is met first. The sweep over the stores
+  that are not loaded lists nothing of another mob beside such a file.
+  Nor do the two reads that open one store of a mob that is not loaded:
+  `MobMcpState::unloaded_mob_creation` answers `None` for such a file and
+  keeps nothing of the other mob, and the read of whether the mob is
+  stopped, made before the first work for it, keeps nothing and leaves
+  the file to its load, which refuses it. Before, the first answered the
+  other mob's creation as that of the mob the file is named for, and the
+  second refused work for that mob as stopped whenever the other mob was.
+  The file's name grants nothing: a mob's id may be chosen by whoever
+  creates it, and the name is used only to refuse a store whose own
+  records disagree with it.
+  The name an earlier release gave a store (the escaped id with no
+  prefix) is the mob's own as before, and the declared default mob's
+  store is the default mob's whatever its file is called.
+
+- `meerkat-mob`, `meerkat-mob-mcp`: the answer of an existing call
+  changes. A create of a mob from a definition (`mob_create_definition`
+  and its variants, an agent's `mob_create`) under an id the mob set
+  already knows (a managed mob's, or a mob's that is not loaded or is
+  being unloaded) answers the new `MobError::MobAlreadyExists(MobId)`,
+  whose structured data is `{"kind": "mob_already_exists", "mob_id"}`
+  (`MobError::MOB_ALREADY_EXISTS_KIND`). It was `MobError::Internal`,
+  which a surface could tell only by reading its message, "internal
+  error: mob already exists: <id>". The new variant's message is "mob
+  already exists: <id>": the "internal error: " prefix is gone, so a
+  consumer that compared the whole message or its start must change, and
+  one that searched it for "mob already exists" need not. Its failure
+  class is the mob's rejection, no longer
+  `Internal`. A create from a mobpack under such an id keeps its own
+  answers: the mob, for the same pack, or its refusal (the pack's
+  identity does not match); one that arrives while a create under the id
+  is in flight waits for it.
+  An id whose create is still in flight is answered the same way: a second
+  create from a definition, which was answered `MobError::Internal`
+  ("internal error: mob already exists: <id>"), answers `MobAlreadyExists`
+  at once, with nothing of its mob built and the host's create admission not
+  asked for it; a second create from a mobpack, which was answered
+  `MobError::Internal` ("duplicate mobpack create raced ..."), waits for the
+  first and answers as above; and a host's handle under such an id is
+  refused `MobAlreadyExists`.
+  Under the id a host
+  declared for its default mob, every create and
+  `try_mob_insert_handle` answer the new variant (`mob_insert_handle`
+  logs the refusal and returns nothing; see the default mob under
+  Added).
+
+- `meerkat-mob-mcp`: a continuation committed for a member of a mob (a
+  council's outcome, a `fork_off` result, a host's own commit through the
+  continuation service) is answered `ContinuationSubmitError::Unavailable`
+  while the mob set may still host mobs it has not recorded: no verb took
+  its census of a persistent root yet, or a host that inserts handles has
+  not declared its mobs restored. It used to be answered "owner retired",
+  which drops the completion for good. The caller asks again; the set's
+  own deliveries after a restart take the census before they ask. A mob
+  the set knows, or one it destroyed, is answered as before. Only a mob
+  verb, or the host's `declare_mob_set_restored`, ends that state: a host
+  on which neither happens keeps such a commit owed (the caller keeps
+  seeing `Unavailable`).
+
+- `meerkat-mob-mcp`: on every host, with or without a default mob, the
+  council re-link after a restart never commits a council's outcome to its
+  convener's session as a plain session when that session's stored member
+  binding names a mob the host knows and does not serve. A mob that is
+  merely not loaded is loaded for the delivery and the outcome is the
+  member's (it used to be committed to the session and landed when the
+  session was next attached); for a held or quarantined mob the outcome
+  stays owed (`CouncilRelinkAction::AwaitingMob`) until the mob is served.
+  A stored binding that cannot be read fails the re-link, which is retried.
+
+- `meerkat-mob-mcp`: the mob set keeps one record per mob store
+  (`MobStoreRestoreLifecycleMachine`) and reads which mobs are managed, held
+  before activation, quarantined, dormant or destroyed from the records'
+  phases. The four maps that answered this before are gone, and a move of a
+  mob between those sets is one transition of its record. The facts about
+  the set as a whole, which no store's record can hold, are the state of a
+  machine of their own (`MobHostedSetLifecycleMachine`, one state per mob
+  set): how far the pass over the stores from before came, whether a
+  census of them is owed and complete, whether a host registered a handle
+  of its own, and whether every mob is known. None of them moves a mob
+  between sets.
+
+  The eager restore still restores every store when the set is first used,
+  each in the step that lists it, and the first verb answers once the pass
+  has been over every store. Five things differ from before:
+  - A state shared with `into_shared` runs each load as its own task: a
+    first verb that is cancelled no longer cancels the restore of the store
+    it was loading, and the next verb waits for that load.
+  - A restore that panics no longer panics the first verb of such a state.
+    The pass goes on, and that one store is left with its load unfinished:
+    until a lookup of its mob ends the unfinished load and re-attempts it,
+    the mob is listed in `MobInventory::dormant`, and a fork_off completion
+    whose job no loaded mob holds waits instead of being refused.
+  - A store file whose name does not decode to a mob id and that cannot be
+    read was skipped with an error log. It is now quarantined under its
+    file's stem (for example `mob--%ZZ`): `mob_inventory` and
+    `quarantined_mobs` list it under that id, a lookup of that id answers
+    `MobQuarantined`, and the file is kept as found. No store is skipped
+    silently.
+  - The WorkGraph flow host's reads of a flow's mob (its configuration and
+    external delivery steps, a delivery record, a run's status) answer the
+    typed hold or quarantine for a held or quarantined mob, where they
+    answered that the mob was not found, which the WorkGraph bridge
+    recorded as a lost run. Like every lookup of a mob by its id, each of
+    these reads now asks a store that is quarantined as `store_unavailable`
+    for one re-attempt of its restore; before, they touched nothing.
+  - A destroy holds its mob with an owner lease
+    (`MobHandle::acquire_owner`) while it runs, under both policies. A
+    host's own `close_if_idle` on a mob during its destroy answers `Busy`
+    with one foreground owner, and a stand-down's `close_admission` counts
+    that owner as busy.
+
+  A mob that is known and not served is not read as gone. A continuation
+  owed to one of its members, or to the plain session whose implicit
+  delegation mob it is, loads the mob instead of being stranded, and so does
+  a detached job's completion that is committed for a member: it is never
+  dropped as owed to an owner that is gone because the member's mob was
+  dormant or being unloaded. A fork_off completion whose job no served mob
+  holds waits while a mob is not served and is not refused as absent. A
+  WorkGraph flow that targets such a mob loads it, or answers why it cannot,
+  and its run is never recorded as lost. A lookup at a state that is
+  standing down is refused and quarantines nothing. A member lookup that
+  cannot read a session's stored member binding while a mob is not loaded
+  refuses (`ProvenanceUnavailable`) instead of answering from the loaded
+  mobs alone. A host handle inserted after the census under the id of a
+  dormant mob takes that mob's record, so no dormant record is left beside
+  it. One inserted before the first verb of the set keeps the id as well:
+  the census files no record for the root's store under it, the store is
+  not loaded beside the handle and is left as found, and the next process
+  lists it again. A handle inserted under the id of a mob the set itself
+  runs (a store it loaded, a mob it created), or of a store the set is
+  loading, holds before activation or keeps quarantined, is refused
+  (`try_mob_insert_handle`) with the answer a create under that id gets;
+  a handle replaces only the handle of a mob a host inserted before (the
+  store record machine, version 4, refuses the registration:
+  `RegisterManagedHostHandleSetRun`).
+  The first holder of an id keeps it, and no collision of ids destroys a
+  stored mob: a store whose resumed mob turns out to be a second mob of one
+  id is shut down again and kept as found.
+  A mob the set ran that has ended (it was shut down and its actor is
+  over) holds nothing any more: a host's handle under its id is admitted,
+  and the set serves the host's mob from then on (the store record
+  machine, version 7). A mob that is being destroyed keeps its id until
+  its destroy is recorded in the set, also in the moment after its actor
+  has ended: a host's handle under it is refused `MobAlreadyExists` until
+  then.
+  A create takes its mob's id before the mob is built: from its first
+  step, before the host's create admission is asked and before any storage
+  exists, until it ends. A second create under the id made meanwhile (a
+  host's, or a member's through its mob tools) is refused at once with
+  `MobAlreadyExists` and builds nothing; a host's handle under it is
+  refused the same way; a create from a mobpack waits for the create in
+  flight and then answers its mob, refuses a different pack, or takes the
+  id when that create ended without a mob. A create that is refused or
+  fails frees the id in the same step (the store record machine, version
+  5: its `Creating` phase).
 
 - Core catalog presentation identifies Neon as the Gemini default. Hydrogen
   remains recommended/selectable and `gemini-3.1-pro-preview` remains supported.
   Forge's local setup preset and separately pinned installer catalog are
   unchanged; this does not establish Neon availability there.
 
+- `meerkat-runtime`: a durable steer that was admitted and was still waiting for its run's next boundary when its session was loaded again from the store now joins that run when the run resumes. Before, no request of the resumed run carried that steer or any durable steer admitted behind it while the run ran, and one follow-up turn delivered them after the run ended. Now the resumed run's next boundary that accepts durable deliveries carries the steer that waited and the durable steers admitted behind it, in admission order, each once, and no follow-up turn runs for them. A recall of the steer that waited leaves the steers behind it in that request. When that boundary refuses durable deliveries, or the run ends before a boundary, one follow-up turn delivers them in admission order. A steer whose row counts a stage attempt takes the follow-up turn. A steer whose join to the resumed run is still open when its session is loaded once more takes one follow-up turn after the run, exactly once. A join write the store refuses is not published and fences the runtime; a reload then delivers the steer once. With no run to resume nothing changes: the steer that waited starts the next run. A recycle, which the machine takes only while no run is current, now keeps the delivery class of a queued steer; the next run still takes that steer as its own input, once.
+
+### Fixed
+
+- `meerkat-runtime`: a durable steer recalled with `MeerkatMachine::recall_queued_input` while it waits for its model boundary no longer delays the durable steers behind it. Before, the recalled steer's preparation kept the boundary until the runner reached it, so that boundary delivered nothing and every later steer landed one model request later. Now the steers behind a recalled one join the request they would have joined, in admission order, whether the recall commits before or after the runner parks at the boundary: when the recalled steer held the boundary's claim, only its own delivery is withdrawn, and the steers behind it are joined and published at that boundary. The recalled steer is in no request and has no transcript row, and the recall's answers are unchanged.
+
+- `meerkat-mob-mcp`: a session's implicit delegation mob whose replacement
+  (for another model or provider route) could not finish its destroy's
+  storage cleanup, because something still held the mob's database, could
+  not be created again while the process ran: no mob was found under the id
+  any more, the create was refused until that cleanup was done ("retry that
+  destroy before reusing the id"), and nothing retried that destroy, so
+  every later delegation of the session failed. The next call that ensures
+  the session's implicit mob now continues the owed cleanup first: it
+  creates the mob once nothing is owed, and answers what is still
+  outstanding until then.
+
+- `meerkat-mob-mcp`: a mob that became managed after the mob set's own
+  restore did not get the fork_off re-link a restored mob gets: a mob whose
+  store left its quarantine through a re-attempt of its restore
+  (`mob_restore_retry`, or the re-attempt a lookup of the mob asks of a
+  `store_unavailable` quarantine; 0.9.9 through 0.9.15), and a child mob
+  that was held when its store was read and released once its owner was
+  resolved (0.9.0 through 0.9.15). The outcomes of the fork children an
+  earlier process had left that mob were not delivered to their forkers
+  until a later process restored the mob, or the host ran the re-link
+  itself (`relink_restored_fork_children`). The re-attempt and the release
+  now schedule that re-link, once per mob.
+
+- `meerkat-mob-mcp`: a create under the id of a mob store that came under
+  the persistent root after the state took its census (a copy, or a restore
+  by an operator, while the host runs) is answered that the id is taken
+  (`MobError::MobAlreadyExists`; a mobpack create loads the mob and compares
+  it with its pack) before the host's create hook is asked. The store is
+  listed then, as the census lists a store, and its mob is known from then
+  on; under the eager policy it is loaded at once. Before, such a create was
+  admitted and the host's create hook was asked, where a host releases what
+  it keeps under the id; the create then opened the store, which refused a
+  second creation, and the failed create had written to the store's files. A
+  store that holds no mob (an empty event log and no creation record that
+  names a mob: what a create leaves when it fails before it wrote a
+  creation) is not listed, and the next create under the id takes the file
+  over as before; the look opens the store once to read that. A store whose
+  log is empty while its creation record still names a mob is listed, and
+  its load quarantines it. The storage of a destroyed mob whose cleanup is
+  owed is not looked for and not opened: the create is refused as before. A
+  store placed between that look and the create's own open of its store is
+  still met as before.
+
 ### Upgrade notes
+
+- `meerkat-mob`, `meerkat-mob-mcp`: a caller that matched the message of a
+  second create under an id ("internal error: mob already exists",
+  "duplicate mobpack create raced") reads `MobError::MobAlreadyExists`
+  (`{"kind": "mob_already_exists"}`) instead; one that retried a mobpack
+  create on the "raced" error need not: the second create waits for the
+  first and answers the mob's id.
+
+- `meerkat-mob-mcp`: a mob store file whose name names another mob than
+  its records is no longer served under the records' id: it is
+  quarantined, both ids named; remove the copy or give the file its mob's
+  name (see Changed).
 
 - For ordinary Gemini sessions, pin `--model gemini-4-argon` or
   `[models] gemini = "gemini-4-argon"` to retain Argon, or set
@@ -75,6 +1085,35 @@ them.
   `[models.gemini-4-neon]` entry before upgrading because model IDs must be
   unique. See the [upgrade guide](docs/guides/upgrading.mdx) for consumer-specific
   behavior and rollback notes.
+
+- Steers: do not rely on a model decision between consecutive eligible
+  steers. Steers that wait together now reach the model in one request,
+  where 0.9.17 delivered one per model boundary. No setting keeps one
+  steer per model boundary. If distinct decisions
+  matter, match the earlier steer to a model decision before sending the
+  next one: its `boundary_append_applied` names the `input_id` and the
+  `run_id` of the turn that applied it, and that run's next successful
+  `turn_completed` says the model has answered a request that carried it
+  (matched by stream order: the event carries no run id and no success
+  flag).
+  The applied event alone is neither a response nor the durable
+  consumption of the input. A steer that takes the follow-up turn
+  publishes no `boundary_append_applied`: read its `last_run_id` with
+  `session/input_status` and take that run's first successful
+  `turn_completed`. When that `turn_completed` does not come (a failed
+  call, a discard, a terminal or a replay without it), do not wait without
+  a limit and do not resend on your own: reconcile with
+  `session/input_status`, `boundary_appends_discarded` and retained
+  history.
+  A steer admitted after a request's input is fixed waits for the next
+  boundary, even when its admission was acknowledged before the request
+  was composed or sent: a caller cannot tell the two instants apart, so
+  an admission acknowledged before the request left does not mean the
+  steer is in that request.
+  Each input keeps its own input id, and a successful retained in-turn
+  application has one `boundary_append_applied` (match a delivery by its
+  `input_id`); the changed contract is timing. See
+  [Durable steer](docs/reference/session-contracts.mdx#durable-steer).
 
 ## [0.9.17] - 2026-11-18
 
@@ -22816,10 +23855,15 @@ them.
   per boundary, in arrival order: a steer admitted while an earlier one still
   waits joins the boundary after it, in the same run, instead of falling back
   to the follow-up turn; steers still waiting when the run ends take the
-  follow-up turn in arrival order. Before, every peer or text steer admitted
-  during one boundary reached the next model request; now one durable steer
+  follow-up turn in arrival order. Before, in our held-tool test, 0.9.3 put
+  the first steer in the next model request and the rest in a follow-up
+  turn; now one durable steer
   joins per boundary, and the later ones land at later boundaries of the run
-  or in the follow-up turn.
+  or in the follow-up turn. (Corrected on 2026-11-21, with the steer entry
+  under Unreleased: this entry said that
+  before, every peer or text steer admitted during one boundary reached the
+  next model request. Our held-tool test on 0.9.3 does not show that; other
+  releases were not measured.)
 - `meerkat-core`: `SystemNoticeBlock::Comms` and
   `AgentEvent::PeerContentIngested` gain the field
   `delivery_id: Option<InteractionId>`: the delivery id of an incoming peer
@@ -53899,7 +54943,8 @@ tag, so its comparison link uses v0.3.0 as the exact ancestry base.
 
 Initial development release.
 
-[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.9.17...HEAD
+[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.9.18...HEAD
+[0.9.18]: https://github.com/lukacf/meerkat/compare/v0.9.17...v0.9.18
 [0.9.17]: https://github.com/lukacf/meerkat/compare/v0.9.16...v0.9.17
 [0.9.16]: https://github.com/lukacf/meerkat/compare/v0.9.15...v0.9.16
 [0.9.15]: https://github.com/lukacf/meerkat/compare/v0.9.14...v0.9.15

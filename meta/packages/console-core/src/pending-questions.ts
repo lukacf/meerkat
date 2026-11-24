@@ -22,8 +22,9 @@ export interface Question {
  * (`meta/gating/questions`). */
 export interface QuestionSet {
   pendingId: string;
-  /** The asking agent. */
-  origin: { identity: string };
+  /** The asking agent, and the mob the entry carries beside its name (the
+   * pair of a frame) when it carries one. */
+  origin: { identity: string; mobId?: string };
   title?: string;
   questions: readonly Question[];
   createdAtMs?: number;
@@ -252,6 +253,7 @@ function normalizeQuestion(value: unknown): { question: Question; cut: boolean }
 export function normalizeQuestionSet(value: unknown): QuestionSet | null {
   const raw = record(value);
   const pendingId = text(raw?.pending_id), identity = text(record(raw?.origin)?.identity), subjectDigest = text(raw?.subject_digest);
+  const mobId = text(record(raw?.origin)?.mob_id);
   if (!raw || !pendingId || !identity || !subjectDigest || !Array.isArray(raw.questions) || raw.questions.length === 0) return null;
   const questions: Question[] = [];
   const title = words(raw.title, QUESTION_SET_READ_LIMITS.title);
@@ -266,7 +268,7 @@ export function normalizeQuestionSet(value: unknown): QuestionSet | null {
   const createdAtMs = millis(raw.created_at_ms), deadlineAtMs = millis(raw.deadline_at_ms);
   const omittedQuestions = raw.questions.length - questions.length;
   return {
-    pendingId, origin: { identity }, ...(title ? { title: title.text } : {}), questions,
+    pendingId, origin: { identity, ...(mobId ? { mobId } : {}) }, ...(title ? { title: title.text } : {}), questions,
     ...(createdAtMs !== undefined ? { createdAtMs } : {}), ...(deadlineAtMs !== undefined ? { deadlineAtMs } : {}),
     subjectDigest,
     ...(omittedQuestions > 0 ? { omittedQuestions } : {}), ...(cut ? { shortened: true as const } : {}),

@@ -172,6 +172,17 @@ impl MobScopeResolver for StaticMobBinding {
     }
 }
 
+/// Whether a build's memory index lists the shared scopes beside the
+/// identity's own: the scope of each mob the identity is bound to and the
+/// realm's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SharedIndex {
+    /// The identity's own scope, each bound mob's and the realm's.
+    Listed,
+    /// The identity's own scope alone: the store is asked for no other.
+    Withheld,
+}
+
 /// Render-order weight of a scope inside a shared budget. Private working
 /// knowledge dominates; shared scopes get smaller, non-zero slices.
 fn scope_weight(scope: &MemoryScope) -> usize {
@@ -680,6 +691,19 @@ impl RecallCoordinator {
         query_text: Option<String>,
         query_terms: Vec<String>,
     ) -> Result<Option<String>, AgentMemoryError> {
+        self.assemble_build_injection_with(identity, query_text, query_terms, SharedIndex::Listed)
+            .await
+    }
+
+    /// [`Self::assemble_build_injection`], with the shared sections of the
+    /// index as `shared` says.
+    pub(crate) async fn assemble_build_injection_with(
+        &self,
+        identity: &AgentIdentity,
+        query_text: Option<String>,
+        query_terms: Vec<String>,
+        shared: SharedIndex,
+    ) -> Result<Option<String>, AgentMemoryError> {
         // The §8.3 selector stage retired unactivated, so the build-time
         // body set is the lexical recall path here too; the composed index
         // below is unchanged and still carries the manifest.
@@ -699,7 +723,7 @@ impl RecallCoordinator {
             .await?,
         );
         let index_section = if self.provider.supports_manifest() {
-            self.render_scope_index(identity).await?
+            self.render_scope_index(identity, shared).await?
         } else {
             None
         };
@@ -735,11 +759,21 @@ impl RecallCoordinator {
     /// Composed metadata index over the identity's readable scope set, with
     /// per-scope sub-budgets inside BUILD_INDEX_BUDGET_BYTES. The index is
     /// metadata only — an index, never a dump.
+    /// A build whose shared index is withheld ([`SharedIndex::Withheld`])
+    /// composes the identity's own scope alone: the store is asked for no
+    /// other scope, and the own rows have the whole index budget.
     async fn render_scope_index(
         &self,
         identity: &AgentIdentity,
+        shared: SharedIndex,
     ) -> Result<Option<String>, AgentMemoryError> {
-        let scopes = self.scope_set(identity);
+        let scopes = match shared {
+            SharedIndex::Listed => self.scope_set(identity),
+            SharedIndex::Withheld => vec![MemoryScope::Identity {
+                realm: self.config.realm.clone(),
+                identity: identity.as_str().to_string(),
+            }],
+        };
         let budgets = compose_scope_budgets(&scopes, BUILD_INDEX_BUDGET_BYTES);
         let mut sections = Vec::new();
         for ScopeBudget {
@@ -1705,6 +1739,159 @@ mod tests {
             coordinator.scope_set(&id),
             compose_identity_scope_set("team", &id)
         );
+        Ok(())
+    }
+
+    // ---- the shared sections of a build's index ----
+
+    /// A coordinator whose identity is bound to mob alpha.
+    fn alpha_coordinator(provider: Arc<FakeProvider>) -> RecallCoordinator {
+        RecallCoordinator::new(
+            provider,
+            AgentMemoryConfig {
+                realm: "team".to_string(),
+                ..AgentMemoryConfig::default()
+            },
+        )
+        .with_mob_resolver(Some(Arc::new(FixedMobs(&["mob:alpha"]))))
+    }
+
+    /// One record in the identity's own scope, one in mob alpha's and one in
+    /// the realm's.
+    fn alpha_provider() -> Arc<FakeProvider> {
+        Arc::new(
+            FakeProvider::with_manifest(
+                vec![],
+                vec![meta("mem-own", "Own note", "", 0)],
+                vec![meta("mem-realm", "Realm notice", "", 0)],
+            )
+            .mob_manifest(vec![meta("mem-alpha-shared", "Alpha rota", "", 0)]),
+        )
+    }
+
+    /// A build whose shared index is withheld lists the identity's own rows
+    /// and neither mob alpha's nor the realm's.
+    #[tokio::test]
+    async fn a_build_with_the_shared_index_withheld_lists_own_rows_alone()
+    -> Result<(), Box<dyn Error>> {
+        let id = identity()?;
+        let text = alpha_coordinator(alpha_provider())
+            .assemble_build_injection_with(&id, None, Vec::new(), SharedIndex::Withheld)
+            .await?
+            .ok_or("the identity's own rows make a section")?;
+        assert!(text.contains("Identity records:"), "{text}");
+        assert!(text.contains("mem-own"), "{text}");
+        for withheld in [
+            "Mob records:",
+            "mem-alpha-shared",
+            "Realm records:",
+            "mem-realm",
+        ] {
+            assert!(!text.contains(withheld), "{withheld}: {text}");
+        }
+        Ok(())
+    }
+
+    /// With the shared index withheld the identity's own rows have the whole
+    /// index limit: rows that the shared sections' shares crowd out of a
+    /// listed build are present in a withheld one.
+    #[tokio::test]
+    async fn a_withheld_build_gives_own_rows_the_whole_index_limit() -> Result<(), Box<dyn Error>> {
+        let id = identity()?;
+        // Rows of about 450 bytes each: the identity's share of the index
+        // beside a mob and a realm section holds fewer of them than the
+        // whole limit does.
+        let description = "d".repeat(400);
+        let own: Vec<RecordMeta> = (0..14)
+            .map(|n| meta(&format!("mem-own-{n:02}"), "Own note", &description, 0))
+            .collect();
+        let provider = || {
+            Arc::new(
+                FakeProvider::with_manifest(
+                    vec![],
+                    own.clone(),
+                    vec![meta("mem-realm", "Realm notice", "", 0)],
+                )
+                .mob_manifest(vec![meta("mem-alpha-shared", "Alpha rota", "", 0)]),
+            )
+        };
+        let listed = alpha_coordinator(provider())
+            .assemble_build_injection_with(&id, None, Vec::new(), SharedIndex::Listed)
+            .await?
+            .ok_or("a listed build has an index")?;
+        let withheld = alpha_coordinator(provider())
+            .assemble_build_injection_with(&id, None, Vec::new(), SharedIndex::Withheld)
+            .await?
+            .ok_or("a withheld build has an index")?;
+        let count = |text: &str| text.matches("mem-own-").count();
+        assert!(
+            count(&withheld) > count(&listed),
+            "own rows listed: withheld {} against listed {}",
+            count(&withheld),
+            count(&listed)
+        );
+        Ok(())
+    }
+
+    /// `Listed` is the build as it always was: the same text as
+    /// `assemble_build_injection` (one coordinator builds both, so the
+    /// envelope nonce is the same).
+    #[tokio::test]
+    async fn a_listed_build_is_the_build_as_before() -> Result<(), Box<dyn Error>> {
+        let id = identity()?;
+        let coordinator = alpha_coordinator(alpha_provider());
+        let before = coordinator
+            .assemble_build_injection(&id, None, Vec::new())
+            .await?;
+        let listed = coordinator
+            .assemble_build_injection_with(&id, None, Vec::new(), SharedIndex::Listed)
+            .await?;
+        assert_eq!(before, listed);
+        let text = before.ok_or("the build has an index")?;
+        for row in ["mem-own", "mem-alpha-shared", "mem-realm"] {
+            assert!(text.contains(row), "{row}: {text}");
+        }
+        Ok(())
+    }
+
+    /// Turn delivery holds no shared record whatever the build's index
+    /// lists: it recalls the identity's own scope.
+    #[tokio::test]
+    async fn turn_delivery_holds_no_shared_record() -> Result<(), Box<dyn Error>> {
+        let id = identity()?;
+        let provider = Arc::new(
+            FakeProvider::with_manifest(
+                vec![record("mem-own-body", "Own note", "own body")],
+                vec![],
+                vec![meta("mem-realm", "Realm notice", "", 0)],
+            )
+            .mob_manifest(vec![meta("mem-alpha-shared", "Alpha rota", "", 0)]),
+        );
+        let injected = alpha_coordinator(provider)
+            .inject_for_turn_classified(
+                &id,
+                Some("session-1"),
+                &meerkat_core::ContentInput::Text("own note".to_string()),
+            )
+            .await?;
+        let bodies = match injected {
+            TurnInjection::Injected(bodies) => bodies,
+            TurnInjection::Skipped(skip) => {
+                return Err(
+                    format!("expected an injection, got the skip {}", skip.as_str()).into(),
+                );
+            }
+        };
+        let text = bodies.text_content();
+        assert!(text.contains("own body"), "{text}");
+        for shared in [
+            "mem-alpha-shared",
+            "Alpha rota",
+            "mem-realm",
+            "Mob records:",
+        ] {
+            assert!(!text.contains(shared), "{shared}: {text}");
+        }
         Ok(())
     }
 

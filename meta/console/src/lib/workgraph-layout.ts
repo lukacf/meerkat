@@ -4,7 +4,8 @@ import type {
   WorkGraphWireEvent,
   WorkGraphWireItem,
 } from "../types";
-import { agentDisplayName, agentInitial, type AgentDirectory } from "../../../packages/console-components/src/panel-kit/agents";
+import { agentDisplayName, agentInitial, type AgentDirectory, type AgentDirectoryEntry } from "../../../packages/console-components/src/panel-kit/agents";
+import { nestedMemberIdentity, referenceLastSegment } from "../../../packages/console-core/src/member-ref";
 import {
   formatClockTime,
   formatShortDate,
@@ -66,9 +67,29 @@ export interface WorkGraphOwnerView {
 /// its mob ("mob/customer-ops/agent/dispatch"), which the roster knows by
 /// its last segment ("dispatch").
 export function workGraphOwnerMember(id: string): string {
-  const trimmed = id.trim();
-  const slash = trimmed.lastIndexOf("/");
-  return slash >= 0 && slash < trimmed.length - 1 ? trimmed.slice(slash + 1) : trimmed;
+  return referenceLastSegment(id.trim());
+}
+
+/// The mob a lowered owner key names ("mob/customer-ops/agent/dispatch"
+/// reads "customer-ops"); empty for a key of another shape.
+export function workGraphOwnerMob(id: string): string {
+  const match = /^mob\/([^/]+)\/[^/]+\/.+$/.exec(id.trim());
+  return match ? match[1]! : "";
+}
+
+/// The roster's entry for the member a lowered owner key names: the member
+/// of the key's mob. For a mob other than the console's own that the
+/// directory holds members of, that is the member `<mob>/<member>`, never a
+/// member of the same name in another mob.
+function workGraphOwnerMemberEntry(id: string, directory?: AgentDirectory): AgentDirectoryEntry | undefined {
+  const member = workGraphOwnerMember(id);
+  if (member === id.trim()) return undefined;
+  const mob = workGraphOwnerMob(id);
+  if (mob && directory?.nestedMobIds?.has(mob)) {
+    const identity = nestedMemberIdentity(mob, member);
+    return identity ? directory.lookup(identity) : undefined;
+  }
+  return directory?.lookup(member);
 }
 
 /// The owner for display, in the same owner-then-claim order: the roster
@@ -88,7 +109,7 @@ export function workGraphItemOwner(
     const known = key
       ? directory?.lookup(key)
         ?? (kind === "session" ? directory?.lookup(id) : undefined)
-        ?? (member !== id ? directory?.lookup(member) : undefined)
+        ?? workGraphOwnerMemberEntry(id, directory)
       : undefined;
     const name = known?.label.trim()
       || owner.display_name?.trim()
@@ -1237,7 +1258,7 @@ export function workGraphBindingTarget(
   const member = workGraphOwnerMember(id);
   return {
     name: directory?.lookup(key)?.label.trim()
-      || (member !== id ? directory?.lookup(member)?.label.trim() : undefined)
+      || workGraphOwnerMemberEntry(id, directory)?.label.trim()
       || agentDisplayName(member),
     key,
   };

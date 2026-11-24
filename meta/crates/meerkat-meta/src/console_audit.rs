@@ -20,6 +20,12 @@
 //! ([`ConsoleAuditSet`]): the console's changes, and MCP app tool calls, so
 //! however many tool calls an app makes, no change row gives way to them.
 //!
+//! The log is the host's: one log for all its mobs. A row that names a
+//! member names it by its mob and its identity: the `mob_id` among the
+//! change's params (none for a member of the default mob, as every row
+//! written before rows named a mob) beside the member field, and a row
+//! keeps that mob at least as long as it keeps the member ([`Hold::Mob`]).
+//!
 //! The log lives in the realm's metadata store
 //! ([`crate::runtime::PersistentMetadataStore`]) as pages of rows, one realm
 //! document per page, and lasts as long as the store keeps its realm
@@ -103,7 +109,7 @@ const TARGET_NAMED: &[&str] = &[
 /// session a member attaches or resumes), `source_member_id` and
 /// `from_member_id` (a fork's source), `local_member_id`,
 /// `remote_member_id`, `remote_mob_id` and `remote_peer_id` (cross-mob
-/// wiring), `mob_id`, `schedule_id`, `memory_id`, `pending_id` and
+/// wiring), `schedule_id`, `memory_id`, `pending_id` and
 /// `approver_id` (a gating decision), `operation_id` (a topology
 /// operation), `binding_id` (a WorkGraph binding), `subscription_id`,
 /// `source_id` and `batch_id` (announcements), `blob_id` and `decision_id`
@@ -120,7 +126,6 @@ const TARGET_IDS: &[&str] = &[
     "remote_member_id",
     "remote_mob_id",
     "remote_peer_id",
-    "mob_id",
     "schedule_id",
     "memory_id",
     "pending_id",
@@ -161,11 +166,24 @@ enum Hold {
     /// The member a change targets (the fields the console's access check
     /// judges) or the access rule it edits.
     Target,
+    /// The mob of the change (`mob_id`). With a member field it is half of
+    /// the member's key, so it holds longest: a row never names a member
+    /// and leaves out its mob, which would read as the member of that name
+    /// in the default mob.
+    Mob,
 }
+
+/// The target field that names the mob of a change, and so of the member
+/// the change targets.
+pub(crate) const TARGET_MOB_FIELD: &str = "mob_id";
 
 /// How firmly a target holds its field `key`.
 fn target_hold(key: &str) -> Hold {
-    if key == "rule_id" || crate::http_console::CONSOLE_RPC_MEMBER_TARGET_FIELDS.contains(&key) {
+    if key == TARGET_MOB_FIELD {
+        Hold::Mob
+    } else if key == "rule_id"
+        || crate::http_console::CONSOLE_RPC_MEMBER_TARGET_FIELDS.contains(&key)
+    {
         Hold::Target
     } else if TARGET_NAMED.contains(&key) || TARGET_IDS.contains(&key) {
         Hold::Named
@@ -185,15 +203,17 @@ fn receipt_hold(key: &str) -> Hold {
 
 /// When a field gives way to a row's bound, the lowest first: the caller's
 /// other `id` fields, then the caller's named fields, then the owner's
-/// receipt (its other `id` fields before its named ones), and the member a
-/// change targets and the access rule it edits last.
+/// receipt (its other `id` fields before its named ones), then the member a
+/// change targets and the access rule it edits, and the mob of the change
+/// last.
 fn give_way_order(in_receipt: bool, hold: Hold) -> u8 {
     match (in_receipt, hold) {
         (false, Hold::Other) => 0,
         (false, Hold::Named) => 1,
         (true, Hold::Other) => 2,
-        (true, Hold::Named | Hold::Target) => 3,
+        (true, Hold::Named | Hold::Target | Hold::Mob) => 3,
         (false, Hold::Target) => 4,
+        (false, Hold::Mob) => 5,
     }
 }
 
@@ -1034,6 +1054,80 @@ mod tests {
 
     const DAY_MS: u64 = 24 * 60 * 60 * 1000;
 
+    /// A row names a member by its mob and its identity. However many
+    /// identifiers a change carries, a row that keeps the member keeps the
+    /// member's mob: it never reads as the member of that name in the
+    /// default mob.
+    #[test]
+    fn member_keyed_audit_row_keeps_the_mob_of_the_member_it_names() {
+        let wide = "x".repeat(MAX_VALUE_BYTES);
+        let mut params = serde_json::Map::new();
+        for key in TARGET_NAMED.iter().chain(TARGET_IDS) {
+            params.insert((*key).to_string(), json!(wide));
+        }
+        params.insert("identity".to_string(), json!("alice"));
+        params.insert(TARGET_MOB_FIELD.to_string(), json!("second"));
+        let target = audit_target(&Value::Object(params));
+        assert_eq!(target.fields[TARGET_MOB_FIELD], json!("second"));
+        let row = ConsoleAuditEntry::answered(
+            entry("meta/retire").actor,
+            "meta/retire".to_string(),
+            target,
+            &json!({ "result": {} }),
+        );
+        assert!(row.truncated, "the row gave fields up to fit its bound");
+        assert_eq!(row.target.get("identity"), Some(&json!("alice")));
+        assert_eq!(
+            row.target.get(TARGET_MOB_FIELD),
+            Some(&json!("second")),
+            "the member's mob holds as long as the member: {:?}",
+            row.target.keys().collect::<Vec<_>>()
+        );
+        // The mob gives way last of all: after the member itself.
+        assert!(
+            give_way_order(false, target_hold(TARGET_MOB_FIELD))
+                > give_way_order(false, target_hold("identity"))
+        );
+    }
+
+    /// A row written before rows named a mob has none: its member is the
+    /// default mob's, and it is read back exactly as it was stored.
+    #[tokio::test]
+    async fn member_keyed_audit_row_stored_without_a_mob_is_the_default_mobs() {
+        let store: Arc<dyn PersistentMetadataStore> = Arc::new(InMemoryMetadataStore::new());
+        let stored = json!({
+            "v": 1,
+            "rows": [{
+                "seq": 1,
+                "at_ms": 5,
+                "actor": { "kind": "anonymous" },
+                "method": "meta/retire",
+                "target": { "identity": "alice" },
+                "outcome": "committed",
+            }],
+        });
+        store
+            .set_realm_document(&page_key(0), Some(&stored.to_string()))
+            .await
+            .expect("stored page");
+        let log =
+            ConsoleAuditLog::over(Arc::clone(&store), ConsoleAuditLimits::default()).expect("log");
+        let page = log.page(None, 10).await.expect("read");
+        assert_eq!(page.records.len(), 1);
+        let target = &page.records[0].fields["target"];
+        assert_eq!(target["identity"], json!("alice"));
+        let default_mob = crate::member_key::DefaultMob::new(meerkat_mob::MobId::from("launch"));
+        assert_eq!(
+            default_mob.resolve(target.get(TARGET_MOB_FIELD).and_then(Value::as_str)),
+            meerkat_mob::MobId::from("launch")
+        );
+        assert_eq!(
+            serde_json::to_value(&page.records[0]).expect("row"),
+            stored["rows"][0],
+            "the stored row is answered as it was written"
+        );
+    }
+
     fn entry(method: &str) -> ConsoleAuditEntry {
         ConsoleAuditEntry::answered(
             ConsoleAuditActor {
@@ -1708,6 +1802,14 @@ pub(crate) mod test_support {
                 .filter(|key| key.starts_with(prefix))
                 .cloned()
                 .collect())
+        }
+        /// This store has no release of a mob's records, and says so: the
+        /// rows of a host whose store cannot release use it.
+        async fn release_mob_records(
+            &self,
+            _mob_id: &str,
+        ) -> Result<crate::runtime::MobRecordsRelease, MetadataStoreError> {
+            Ok(crate::runtime::MobRecordsRelease::NotReleased)
         }
     }
 }

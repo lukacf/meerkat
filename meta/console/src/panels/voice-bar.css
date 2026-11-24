@@ -35,6 +35,16 @@
   background: var(--_cc-viz-live-soft);
 }
 .composer__voice:disabled { opacity: 0.45; cursor: default; }
+/* Voice cannot be started with this agent: shown, dimmed, and it says why (label, tooltip, on press). */
+.composer__voice--unavailable,
+.composer__voice--unavailable:hover:not(:disabled) {
+  opacity: 0.45;
+  cursor: help;
+  color: var(--_cc-foreground-muted);
+  border-color: var(--_cc-border-soft);
+  background: transparent;
+}
+.composer__voice--unavailable:active:not(:disabled) { transform: none; }
 /* Readiness is still being checked: visible and usable, visibly not yet confirmed. */
 .composer__voice--checking { animation: composer-voice-checking 1.4s ease-in-out infinite; }
 @keyframes composer-voice-checking { 0%, 100% { opacity: 0.55; } 50% { opacity: 0.85; } }

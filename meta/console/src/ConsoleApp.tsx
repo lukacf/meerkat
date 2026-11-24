@@ -2,8 +2,35 @@ import { ConsoleMcpAppsProvider, type ConsoleMcpAppsHost } from "@console-compon
 import { createNativeMcpAppsHost } from "./mcp-apps/native-host";
 import { useConsolePanels, createConsolePanelService, bindConsolePanelService } from "./lib/custom-panels";
 import { ConsolePanelsProvider, ConsoleCustomPanel } from "@console-components";
-import { SIDEBAR_AGENT_PINS_STORAGE_PREFIX, consoleCustomPanelTarget, type ConsolePanelDefinition, type ConsolePanelContext, type ConsolePanelService } from "@console-core";
+import {
+  MOB_VIEW_STORAGE_PREFIX,
+  SIDEBAR_AGENT_PINS_STORAGE_PREFIX,
+  consoleCustomPanelTarget,
+  consoleMobTree,
+  memberNameInMob,
+  mobCreatorNamer,
+  mobFullName,
+  nestedMobIds,
+  readConsoleMobView,
+  resolveConsoleMobChoice,
+  topologyInMobs,
+  writeConsoleMobView,
+  type MemberDoor,
+  AUTOMATIC,
+  ConsoleMobNotLoadedError,
+  hostListAgentWords,
+  hostListAgentWordsOf,
+  hostListNameAmbiguous,
+  memberMobId,
+  type ConsoleRequestBy,
+  type ConsolePanelDefinition,
+  type ConsolePanelContext,
+  type ConsolePanelService,
+} from "@console-core";
+import { agentDirectoryBehindDoor } from "./lib/door-agent-directory";
+import { approvalsWithPlacedAgents, attentionWithPlacedAgents, auditWithPlacedAgents, questionSetsWithPlacedAgents } from "./lib/host-list-agents";
 import { withConsoleSendStorageLock } from "./lib/send-storage-lock";
+import { workGraphOwnerMember, workGraphOwnerMob } from "./lib/workgraph-layout";
 import {
   framesAfterIdleWatermark,
   consoleFrameKey,
@@ -29,8 +56,8 @@ import {
   ConsoleTransportStatus,
   useConsoleDockController,
 } from "@console-components";
-import type { ConversationBlobReader, MarkdownUrlPolicy, WorkGraphCardActions } from "@console-components";
-import { AgentDirectoryProvider, EmptyState, LoadingState, PanelDensityDefaultProvider, PanelHeader, PanelShell, SelectField, createAgentDirectory } from "@console-components";
+import type { AgentDirectory, ConversationBlobReader, MarkdownUrlPolicy, WorkGraphCardActions } from "@console-components";
+import { AgentDirectoryProvider, EmptyState, LoadingState, PanelDensityDefaultProvider, PanelHeader, PanelShell, SelectField, agentDisplayName, createAgentDirectory } from "@console-components";
 import { forgetOwnSends, rememberOwnCallerScope, rememberOwnSend } from "./lib/turn-origin";
 import type {
   ConsoleDockState,
@@ -96,6 +123,7 @@ import {
   type TimelineDerivation,
 } from "./lib/adapters";
 import { accessSaveFailure, errorMessage, jsonRpcErrorCode } from "./lib/errors";
+import { workPanelReassignRefusal } from "./lib/work-panel-door";
 import { createSingleFlight } from "./lib/single-flight";
 import { sanitizeConversationEntries } from "./lib/conversation-visibility";
 import {
@@ -143,11 +171,12 @@ import {
   type ConsoleTopologyRelationsState,
 } from "./lib/topology-relations";
 import { findPaneResizeRoot } from "./lib/pane-resize";
-import { activeRunIdFromFrames, describeRunStopReceipt, parseRunStopResult } from "./lib/run-stop";
+import { activeRunIdFromFrames, describeRunStopReceipt, parseRunStopResult, runStopOffered } from "./lib/run-stop";
 import {
   findSideChatAgent,
   inactiveInstructionNotice,
   parseSideChatForkResult,
+  resetOffered,
   restartOffered,
   sideChatAlias,
   sideChatForkBlockedReason,
@@ -160,6 +189,7 @@ import {
   NO_CONSOLE_SCHEDULES,
   consoleScheduleEditing,
   consoleScheduleOffer,
+  scheduleErrorOfAnotherTeam,
   type ConsoleScheduleCommand,
   type ConsoleScheduleOffer,
 } from "./lib/schedules";
@@ -269,7 +299,7 @@ import {
 import { SignalsRail } from "./panels/SignalsRail";
 import { feedHistoryToLedger, historyFramesOf } from "./panels/activity/history-frames";
 import { railPresetsFromActivityFeed } from "./panels/activity/signals-model";
-import { ChatPane, type StagedAttachment } from "./panels/ChatPane";
+import { ChatPane, imagesLimitedReason, interactiveViewsLimitedReason, type ChatTeamNotLoaded, type StagedAttachment } from "./panels/ChatPane";
 import { MetaDock } from "./panels/MetaDock";
 import { PendingStack, type PendingCheckView, type PendingDeliveredNotice, type PendingItem } from "./panels/PendingStack";
 import { beginConsoleSendAttempt, classifyConsoleSendFailure, consoleCheckDelivered, consoleCheckNotFound, createConsoleSendAttempt, describeConsoleCheckFailure, finishConsoleSendAttempt, reconcileConsoleSendReceipt, recoverConsoleSendAttempt, type ConsoleFrozenSendEnvelope, type ConsoleSendAttempt, type ConsoleSendFailure } from "../../packages/console-core/src/send-attempt";
@@ -286,9 +316,10 @@ import { useQuestionSets } from "./lib/use-question-sets";
 import { consoleBundleIsStale, consoleBundleNotice, runningConsoleBundle, servedConsoleBundle } from "./lib/console-bundle";
 import { editConsoleContextQuote } from "../../packages/console-core/src/context-edit";
 import type { ConsoleQuoteSelection } from "../../packages/console-components/src/conversation/context-selection";
-import { consoleSendStorageKey, loadConsoleSendAttempts, saveConsoleSendAttempts, readLegacyConsoleQueue, readPredecessorConsoleQueue, consoleLegacyQueueImported, consoleComposerTabId, loadConsoleComposerDraft, saveConsoleComposerDraft, legacyConsoleQueueKey, purgeConsoleSendScope, removeOlderConsoleQueues } from "./lib/send-attempt-storage";
+import { consoleSendStorageKey, loadConsoleSendAttempts, saveConsoleSendAttempts, readLegacyConsoleQueue, readPredecessorConsoleQueue, consoleLegacyQueueImported, consoleComposerTabId, loadConsoleComposerDraft, saveConsoleComposerDraft, legacyConsoleQueueKey, purgeConsoleMobKeys, purgeConsoleSendScope, removeOlderConsoleQueues } from "./lib/send-attempt-storage";
+import { memberKeyPrefixes, memberOfMob, mobIncarnationsStorageKey, readSeenMobs, updateSeenMobs, writeSeenMobs, type SeenMobs } from "./lib/mob-incarnations";
 
-import { VoiceBar } from "./panels/VoiceBar";
+import { VoiceBar, voiceLimitedToLaunchMobReason } from "./panels/VoiceBar";
 import { useVoiceController } from "./lib/use-voice-controller";
 import {
   useVoiceReadiness,
@@ -557,9 +588,16 @@ function agentWorkItems(
   agent: ConsoleAgent | undefined,
 ): AgentWorkItem[] {
   const keys = new Set([identity, agent?.identity, agent?.member_id].filter((key): key is string => Boolean(key)));
+  // A lowered key names its member under its mob: the member of that mob,
+  // by its member name (a nested member's identity carries its mob).
+  const memberNames = new Set(Array.from(keys, (key) => memberNameInMob(key, agent?.mob_id)));
   const names = (key: { id?: string } | undefined) => {
     const id = key?.id?.trim();
-    return Boolean(id) && (keys.has(id!) || keys.has(id!.split("/").filter(Boolean).pop() || ""));
+    if (!id) return false;
+    if (keys.has(id)) return true;
+    const mob = workGraphOwnerMob(id);
+    if (mob && agent?.mob_id && mob !== agent.mob_id) return false;
+    return memberNames.has(workGraphOwnerMember(id));
   };
   const open = new Set(["open", "ready", "in_progress", "blocked"]);
   return (items || [])
@@ -596,6 +634,8 @@ const DOCK_LAYOUT_STORAGE_PREFIX = "meta-console-dock-state";
 /** The sidebar's and the activity rail's collapse (per-user preferences). */
 const SIDEBAR_COLLAPSED_PREFERENCE = "meta-console-sidebar-collapsed";
 const RAIL_COLLAPSED_PREFERENCE = "meta-console-rail-collapsed";
+/** How many times the console asks for the gateway's capabilities again, with its roster reads, after a read that failed. */
+const CAPABILITIES_READ_RETRIES = 3;
 // A fork's side chat is listed once the console's read model has walked it;
 // the refreshes right after the fork may predate that walk.
 const SIDE_CHAT_LIST_ATTEMPTS = 6;
@@ -1037,6 +1077,10 @@ function ConsoleAppAuthority(props: ConsoleAppProps): React.JSX.Element {
     carriedAttachmentsRef.current = null;
     retireInstance();
     const namespace = storageScopeRef.current;
+    // The record of the mobs this user saw (their ids and tokens) goes too.
+    if (namespace) {
+      try { browserLocalStorage()?.removeItem(mobIncarnationsStorageKey(namespace)); } catch { /* storage refused: nothing to remove */ }
+    }
     return namespace ? purgeConsoleSendScope(browserLocalStorage(), browserComposerStorage(), namespace) : Promise.resolve();
   }, [retireInstance]);
   const restart = React.useCallback((callerChanged: boolean) => {
@@ -1253,8 +1297,12 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           ? input => change(expectedCallerScope => source.executeCommand!({ ...input, expectedCallerScope }))
           : undefined,
         upload: source.upload ? input => change(expectedCallerScope => source.upload!({ ...input, expectedCallerScope })) : undefined,
+        openMob: source.openMob ? mobId => call(() => source.openMob!(mobId)) : undefined,
         readBlob: source.readBlob ? input => call(() => source.readBlob!(input)) : undefined,
         blobUrl: source.blobUrl ? id => { current(); return source.blobUrl!(id); } : undefined,
+        // What the connection knows of the gateway's mobs, for the request
+        // paths that do not go through this transport.
+        mobAddressing: source.mobAddressing,
         subscribeTimeline(input, onFrame, options) {
           const generation = lifetimeRef.current.generation;
           current(generation);
@@ -1291,7 +1339,18 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     () => instanceCaller.forChange().then(callerScope => callerScope ?? undefined),
     [instanceCaller],
   );
-  const { voice, state: voiceState } = useVoiceController(baseUrl, callerForRequest, reportCallerFailure);
+  // The door of a member, for the request paths beside the transport
+  // (voice, MCP Apps, a custom panel's service): they name a member the way
+  // the transport does.
+  const memberDoorForRequest = React.useCallback(
+    (identity: string): MemberDoor => consoleTransport.mobAddressing?.door(identity) ?? { mobId: null, identity },
+    [consoleTransport],
+  );
+  const memberHeldBackForRequest = React.useCallback(
+    (identity: string): boolean => consoleTransport.mobAddressing?.heldBack(identity) === true,
+    [consoleTransport],
+  );
+  const { voice, state: voiceState } = useVoiceController(baseUrl, callerForRequest, reportCallerFailure, memberDoorForRequest);
   // Who this console instance acts as (`meta/console/whoami`), read once:
   // `undefined` until the read answers, `null` when the connection has no
   // whoami or the read failed (the next experience load reads it again). The
@@ -1503,6 +1562,131 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     () => sidebarStorageKey(SIDEBAR_AGENT_PINS_STORAGE_PREFIX, sidebarPreferenceScope),
     [sidebarPreferenceScope],
   );
+  // The mobs the console lists, as a tree, and the person's mob choice: one
+  // mob with the mobs nested under it, or all mobs (null). The roster and
+  // the topology show the choice; it is kept per user, beside the roster
+  // view. A chosen mob the console no longer lists reads as all mobs, and
+  // is dropped from storage once a loaded mob list does not hold it.
+  const consoleMobs = experience?.topology?.live_snapshot?.mobs;
+  const primaryMobId = topologyTeamKey(experience);
+  // Whether this connection's capabilities were read at least once (an
+  // answer, or a failure): until then the console does not know whether the
+  // roster it holds lists every mob the caller may address.
+  const [capabilitiesKnown, setCapabilitiesKnown] = React.useState(() => consoleTransport.mobAddressing?.known === true);
+  // Whether a capability read was answered: only an answer says what the
+  // gateway hosts. A console that went on without one (below) knows how to
+  // go on, and still not whose agent a bare name is.
+  const [capabilitiesAnswered, setCapabilitiesAnswered] = React.useState(() => consoleTransport.mobAddressing?.answered === true);
+  // The console's own first read of the capabilities failed: its next read
+  // of the roster asks again, until a read answers.
+  // The roster the page shows, where it listed every mob when the page took
+  // it: the document the connection had read its list of mobs from at that
+  // moment, on this connection. It is noted when the page adopts a roster
+  // and not judged again at every render: the connection takes a newer
+  // document as soon as its read answers, the page only once the read of
+  // the modules beside it has answered too, and what the console knows of
+  // the roster it SHOWS does not change in between.
+  const [wholeRoster, setWholeRoster] = React.useState<{ transport: unknown; document: ConsoleExperience } | null>(null);
+  const capabilitiesFailedRef = React.useRef(false);
+  // How many times the console asked again after a failed read. It asks a
+  // few times, then no more: a gateway whose capabilities never answer is
+  // held to host one mob, as one that has no such method.
+  const capabilitiesRetriesRef = React.useRef(0);
+  React.useEffect(() => {
+    const addressing = consoleTransport.mobAddressing;
+    setCapabilitiesKnown(addressing?.known === true);
+    setCapabilitiesAnswered(addressing?.answered === true);
+    capabilitiesFailedRef.current = false;
+    capabilitiesRetriesRef.current = 0;
+    return addressing?.onKnown(() => {
+      setCapabilitiesKnown(true);
+      setCapabilitiesAnswered(addressing.answered);
+    });
+  }, [consoleTransport]);
+  // Whether the roster this render holds lists every mob the caller may
+  // address. A stock connection reads its first roster before it knows
+  // whether the gateway hosts mobs behind doors of their own; that roster
+  // lists the launch mob alone. A connection that names no mob, and a
+  // gateway that hosts one mob, hold a whole roster as soon as they know so.
+  // What the console decides from its list of mobs (the grouping it starts
+  // with, a kept mob choice, the member of a restored pane) waits for it.
+  const rosterIsWhole = ((): boolean => {
+    const addressing = consoleTransport.mobAddressing;
+    if (!addressing) return true;
+    // A failed read says nothing of what the gateway hosts: only an answer
+    // does. The roster is the one of every mob when the document shown was,
+    // as the page took it, the one the connection had read its mobs from
+    // (a gateway leaves an empty list of mobs out of that document).
+    if (!capabilitiesKnown || !addressing.known) return false;
+    return !addressing.enabled
+      || (wholeRoster !== null && wholeRoster.transport === consoleTransport && wholeRoster.document === experience);
+  })();
+  // What an earlier page load saw of the mobs behind a hosted mob's door:
+  // a mob nested under a hosted mob is listed only while that mob is loaded,
+  // so on a page loaded while it sleeps only the browser's record says
+  // whose door served the nested mob. Read before any pane is restored.
+  React.useEffect(() => {
+    const addressing = consoleTransport.mobAddressing;
+    if (!addressing || !persistentSendScope) return;
+    const kept = readSeenMobs(browserLocalStorage(), mobIncarnationsStorageKey(persistentSendScope));
+    addressing.rememberBehind(Object.entries(kept).map(([mobId, seen]) => [mobId, seen.door] as const));
+  }, [consoleTransport, persistentSendScope]);
+  // Each mob is named for people: by the member that created it when the
+  // roster lists that member, by its id's words, never by its id. Mobs whose
+  // name says nothing of its own keep one ordinal each while the console is
+  // open ("Team 1", "Team 2").
+  const mobOrdinalsRef = React.useRef<Map<string, number> | null>(null);
+  if (!mobOrdinalsRef.current) mobOrdinalsRef.current = new Map();
+  const mobOrdinals = mobOrdinalsRef.current;
+  const mobTree = React.useMemo(
+    () => consoleMobTree(consoleMobs, primaryMobId, {
+      creatorName: mobCreatorNamer(agents, nestedMobIds(consoleMobs, primaryMobId)),
+      ordinals: mobOrdinals,
+    }),
+    [agents, consoleMobs, mobOrdinals, primaryMobId],
+  );
+  const mobTreeRef = React.useRef(mobTree);
+  mobTreeRef.current = mobTree;
+  // The launch mob by its name for people, for a sentence that names it.
+  const launchMobNode = mobTree.find((mob) => mob.mobId === primaryMobId);
+  const launchMobName = launchMobNode ? mobFullName(launchMobNode) : null;
+  const mobViewStorageKey = React.useMemo(
+    () => sidebarStorageKey(MOB_VIEW_STORAGE_PREFIX, sidebarPreferenceScope),
+    [sidebarPreferenceScope],
+  );
+  // The choice is held with the key it was read under: the key changes
+  // once the experience names the person, and a choice read under the
+  // earlier key says nothing about the new one.
+  const [storedMob, setStoredMob] = React.useState<{ key: string; mobId: string | null }>(
+    () => ({ key: mobViewStorageKey, mobId: readConsoleMobView(browserLocalStorage(), mobViewStorageKey) }),
+  );
+  React.useEffect(() => {
+    const read = () => setStoredMob({ key: mobViewStorageKey, mobId: readConsoleMobView(browserLocalStorage(), mobViewStorageKey) });
+    read();
+    if (typeof window === "undefined") return undefined;
+    // Another tab of this console chose a mob.
+    const onStorage = (event: StorageEvent) => {
+      if (event.key === mobViewStorageKey) read();
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, [mobViewStorageKey]);
+  const chooseMob = React.useCallback((mobId: string | null) => {
+    writeConsoleMobView(browserLocalStorage(), mobViewStorageKey, mobId);
+    setStoredMob({ key: mobViewStorageKey, mobId });
+  }, [mobViewStorageKey]);
+  const storedMobChoice = storedMob.key === mobViewStorageKey ? storedMob.mobId : null;
+  const mobListLoaded = experience?.topology?.live_snapshot != null && rosterIsWhole;
+  const mobChoice = React.useMemo(
+    () => resolveConsoleMobChoice(mobTree, storedMobChoice, mobListLoaded),
+    [mobListLoaded, mobTree, storedMobChoice],
+  );
+  const dropStoredMobChoice = mobChoice.drop;
+  React.useEffect(() => {
+    if (dropStoredMobChoice) chooseMob(null);
+  }, [chooseMob, dropStoredMobChoice]);
+  const chosenMobIds = mobChoice.mobIds;
+  const chosenMobId = mobChoice.mobId;
   // The roster's section and subgroup order and collapse: per user too,
   // within the agent-list configuration they were arranged for. What an
   // earlier console kept for every user of the runtime is read once.
@@ -1735,18 +1919,31 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     identity: string,
     command: ConsoleScheduleCommand,
     params: Record<string, unknown>,
+    by?: ConsoleRequestBy,
   ): Promise<unknown> {
-    return executeHeadlessCommand(
-      CONSOLE_COMMAND_NAMES[command],
-      identityWorkbenchTarget(identity, "inspect"),
-      { ...params, identity },
-    );
+    try {
+      return await executeHeadlessCommand(
+        CONSOLE_COMMAND_NAMES[command],
+        identityWorkbenchTarget(identity, "inspect"),
+        { ...params, identity },
+        by,
+      );
+    } catch (error) {
+      // For an agent of a team beside the console's own, a refusal reads
+      // with that in mind: "no schedule would be sent" is said of that team.
+      if (!memberDoorForRequest(identity).mobId) throw error;
+      const doorMob = memberDoorForRequest(identity).mobId;
+      const team = mobTreeRef.current.find((mob) => mob.mobId === doorMob);
+      throw scheduleErrorOfAnotherTeam(error, team ? mobFullName(team) : null);
+    }
   }
 
-  async function inspectIdentityViaHeadless(identity: string): Promise<unknown> {
+  async function inspectIdentityViaHeadless(identity: string, by?: ConsoleRequestBy): Promise<unknown> {
     return executeHeadlessCommand(
       CONSOLE_COMMAND_NAMES.inspectIdentity,
       identityWorkbenchTarget(identity, "inspect"),
+      undefined,
+      by,
     );
   }
 
@@ -1812,15 +2009,39 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     </div>;
   }
 
+  /**
+   * `by` says who asks. A command the console makes on its own (a pane's
+   * read when it opens or after a frame, a timer, a retry) is `AUTOMATIC`:
+   * for a member whose mob is listed as not loaded it is not made at all
+   * (`ConsoleMobNotLoadedError`, nothing sent), so the mob stays not loaded
+   * until a person asks. A person's act (a button, a menu entry, a row's
+   * click) passes nothing, is sent by the member's door, and wakes the mob.
+   */
   async function executeHeadlessCommand(
     command: typeof CONSOLE_COMMAND_NAMES[keyof typeof CONSOLE_COMMAND_NAMES],
     target: ConsoleWorkbenchTarget,
     params?: Record<string, unknown>,
+    by?: ConsoleRequestBy,
   ): Promise<unknown> {
+    const automatic = by?.automatic === true;
+    if (automatic) {
+      const ofTarget = (target as { identity?: unknown }).identity;
+      const named = typeof params?.identity === "string" ? params.identity
+        : (target.kind === "meta/identity-chat" || target.kind === "meta/identity-inspect") && typeof ofTarget === "string" ? ofTarget
+          // A command sent for a row names that row.
+          : by?.about ?? null;
+      // Held back here, before the command's capability is even read.
+      if (named && consoleTransport.mobAddressing?.heldBack(named) === true) throw new ConsoleMobNotLoadedError(named);
+    }
     return (await consoleController.commands.execute({
       command,
       target,
       params: scopedPanelParams(target.kind, panelRuntimeKey, params),
+      ...(automatic ? { automatic: true } : {}),
+      // The row the person acted on decides the door.
+      ...(by?.about ? { about: by.about } : {}),
+      // A command on a value of the launch mob's door that names no row.
+      ...(by?.launchDoor ? { launchDoor: true } : {}),
     })).result;
   }
 
@@ -2265,9 +2486,54 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     return changed;
   }
 
+  // Whether a member's mob is listed as not loaded (asleep, or unavailable).
+  // A read the console makes on its own is not made for such a member: only
+  // a person's act names a mob that is not loaded, so it stays not loaded
+  // until someone asks for it.
+  const identityHeldBack = (identity: string): boolean => consoleTransport.mobAddressing?.heldBack(identity) === true;
+  /**
+   * The team of a member that is held back: its name, whether it is asleep
+   * (a person can wake it) or unavailable (nobody can, from here), and the
+   * way to wake it. Null for a member whose mob is loaded.
+   */
+  const teamNotLoadedOf = (identity: string): ChatTeamNotLoaded | null => {
+    if (!identityHeldBack(identity)) return null;
+    const addressing = consoleTransport.mobAddressing;
+    const doorMob = addressing?.door(identity).mobId ?? null;
+    // The mob that is not loaded: the door's own, or, behind the launch
+    // mob's door, the member's own mob.
+    const ownMob = doorMob ?? (addressing ? memberMobId(identity, addressing.table) : null);
+    const node = ownMob ? mobTree.find((mob) => mob.mobId === ownMob) : undefined;
+    // Asleep or unavailable is read from the list that says the mob is not
+    // loaded (the connection's newest), where that list holds the mob: the
+    // roster the page shows can be an older one, and the two would differ.
+    const listed = ownMob ? addressing?.listedMobs?.find((mob) => (mob.mob_id ?? "").trim() === ownMob) : undefined;
+    const listedState = typeof listed?.state === "string" ? listed.state.trim() : "";
+    const asleep = (listedState || node?.state) === "dormant";
+    return {
+      name: heldBackTeamName(identity),
+      unavailable: !asleep,
+      waking: doorMob ? wakingMobIds.has(doorMob) : false,
+      ...(asleep && doorMob && consoleTransport.openMob ? { onWake: () => openMob(doorMob) } : {}),
+    };
+  };
+  /** The name for people of the mob whose door serves a member, for a sentence about a member that is held back. */
+  const heldBackTeamName = (identity: string): string | null => {
+    const door = consoleTransport.mobAddressing?.door(identity).mobId;
+    const node = door ? mobTree.find((mob) => mob.mobId === door) : undefined;
+    return node ? mobFullName(node) : null;
+  };
+
   async function queryIdentityTimelinePage(
     identity: string,
-    target: { mode: "recent" | "since"; after?: string; before?: string; limit?: number },
+    target: {
+      mode: "recent" | "since";
+      after?: string;
+      before?: string;
+      limit?: number;
+      /** A read the console makes on its own: the transport holds it back for a mob that is not loaded. */
+      automatic?: boolean;
+    },
   ): Promise<{ page: ConsoleTimelinePage; metadataChanged: boolean }> {
     const pageFact = await consoleController.timeline.query(
       {
@@ -2276,6 +2542,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         after: target.after,
         before: target.before,
         limit: target.limit ?? 200,
+        ...(target.automatic ? { automatic: true } : {}),
       },
     );
     const page = pageFact.value;
@@ -2285,10 +2552,11 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
 
   function refreshIdentityTimelineNow(
     identity: string,
-    options: { clearPhase?: boolean } = {},
+    options: { clearPhase?: boolean; automatic?: boolean } = {},
   ): Promise<void> {
     const normalized = identity.trim();
     if (!normalized) return Promise.resolve();
+    if (options.automatic && identityHeldBack(normalized)) return Promise.resolve();
     const inFlight = timelineFetchInFlightRef.current[normalized];
     if (inFlight) {
       return inFlight.then(() => {
@@ -2306,6 +2574,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       const { page } = await queryIdentityTimelinePage(normalized, {
         mode: "recent",
         limit: 200,
+        automatic: options.automatic,
       });
       reconcileServerLog(normalized, page.frames, page.available);
       if (options.clearPhase) recomputePhaseForIdentity(normalized);
@@ -2323,9 +2592,13 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     return request;
   }
 
-  async function loadOlderIdentityTimeline(identity: string): Promise<void> {
+  /** `by`: the chat asks on its own when its top comes into view (a scroll
+   * the console cannot tell from a person's); "Load older history" is a
+   * person's act. */
+  async function loadOlderIdentityTimeline(identity: string, by?: ConsoleRequestBy): Promise<void> {
     const normalized = identity.trim();
     if (!normalized) return;
+    if (by?.automatic && identityHeldBack(normalized)) return;
     const log = getOrCreateLog(normalized);
     if (log.olderHistoryLoading || log.olderHistoryExhausted) return;
     log.olderHistoryLoading = true;
@@ -2335,6 +2608,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         mode: "recent",
         before: log.oldestTimelineCursor,
         limit: 200,
+        automatic: by?.automatic,
       });
       reconcileServerLog(normalized, page.frames, page.available);
       // Older frames just folded in may be the first page to contain a
@@ -2352,12 +2626,16 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   // Today's backfill (spec B4): one agent's recent history, up to 1000
   // frames, into its identity log and from there the activity ledger. Today
   // asks for the most active agents, four at a time.
-  const loadDayHistoryRef = React.useRef<(identity: string) => Promise<void>>(() => Promise.resolve());
+  const loadDayHistoryRef = React.useRef<(identity: string) => Promise<boolean>>(() => Promise.resolve(false));
   loadDayHistoryRef.current = async (identity: string) => {
     const normalized = identity.trim();
-    if (!normalized) return;
-    const { page, metadataChanged } = await queryIdentityTimelinePage(normalized, { mode: "recent", limit: 1000 });
+    // No read is made on the console's own for an agent whose mob is listed
+    // as not loaded. The answer says so: the agent is not counted as loaded
+    // and is asked again when the roster next changes.
+    if (!normalized || identityHeldBack(normalized)) return false;
+    const { page, metadataChanged } = await queryIdentityTimelinePage(normalized, { mode: "recent", limit: 1000, automatic: true });
     if (reconcileServerLog(normalized, page.frames, page.available) || metadataChanged) forceRender();
+    return true;
   };
   const loadDayHistory = React.useCallback((identity: string) => loadDayHistoryRef.current(identity), []);
 
@@ -2520,6 +2798,10 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   const [contextDrafts, setContextDrafts] = React.useState<Record<string, ConsoleContextRecord[]>>({});
   const [submittedFrames, setSubmittedFrames] = React.useState<Record<string, string>>({});
   const loadedComposerDraftsRef = React.useRef<Record<string, { text: string; contexts: ConsoleContextRecord[] }>>({});
+  // The chats closed because their mob was forgotten (created again under
+  // its id, or gone from the list): a draft such a pane writes as it closes
+  // is not kept.
+  const forgottenPanelKeysRef = React.useRef(new Set<string>());
   function storedComposerDraft(identity: string, panelKey: string) {
     const namespace = persistentSendScopeRef.current;
     const key = `${sendScopeRef.current}:${composerIdFor(panelKey)}`;
@@ -2540,6 +2822,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     // namespace/composer still owns this write even after outbound work stops,
     // unless its user signed out: then nothing of theirs is kept.
     if (callerHandlersRef.current.signingOut()) return true;
+    if (forgottenPanelKeysRef.current.has(panelKey)) return true;
     const namespace = persistentSendScopeRef.current;
     try {
       validateConsoleContexts(contexts);
@@ -2750,6 +3033,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   const initialTargetOpened = React.useRef(false);
   const dockLayoutHydrated = React.useRef(false);
   const dockLayoutRestored = React.useRef(false);
+  // The saved panes whose member the first roster did not list, by pane.
+  const restoredPanelsAwaitingRosterRef = React.useRef(new Map<string, MetaDockTarget>());
   const dockLayoutRestoring = React.useRef(false);
   /** The layout this tab last restored or stored, under its key. */
   const dockLayoutWritten = React.useRef<{ key: string; layout: string } | null>(null);
@@ -2791,6 +3076,10 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         if (!target || (target.kind !== "agent-chat" && target.kind !== "identity-inspect")) return panel;
         const identity = target.identity || target.memberId;
         const agent = agents.find(agent => [agent.identity, agent.member_id, agent.agent_id].includes(identity));
+        // The first roster of a stock connection may list the launch mob
+        // alone: a pane whose member it does not list is remembered, and
+        // gets its member back if the roster of every mob lists it.
+        if (!agent) restoredPanelsAwaitingRosterRef.current.set(panel.id, target);
         return { ...panel, target: agent ? (target.kind === "agent-chat" ? buildDockTarget(agent) : buildInspectTarget(agent)) : null };
       });
       dockLayoutRestored.current = true;
@@ -3096,6 +3385,22 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       // While this instance knows no caller (its read failed), the load reads
       // it again first; the answer binds the instance once the experience
       // read after it keeps the instance's scope.
+      // The console's own read of the capabilities failed: ask again with
+      // this read of the roster, so the console learns what the gateway
+      // hosts without waiting for a person's command.
+      if (capabilitiesFailedRef.current && consoleTransport.mobAddressing?.known === false) {
+        capabilitiesFailedRef.current = false;
+        if (capabilitiesRetriesRef.current < CAPABILITIES_READ_RETRIES) {
+          capabilitiesRetriesRef.current += 1;
+          void consoleTransport.capabilities().catch(() => { capabilitiesFailedRef.current = true; });
+        } else {
+          // No answer after a few tries: the console stops asking with its
+          // roster reads and goes on as with a gateway that names no such
+          // capability. A later answer (a person's command reads the
+          // capabilities too) is still taken.
+          consoleTransport.mobAddressing?.noteUnanswered();
+        }
+      }
       const callerAgain = instanceCaller.readAgain();
       const answeredAgain = callerAgain ? await callerAgain.then(whoami => ({ whoami }), () => undefined) : undefined;
       // Each identity log's version when the status was requested: a frame
@@ -3125,6 +3430,12 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         : [];
       const nextAgents = normalizeAgents(experienceJson, loadedModules);
       setExperience(experienceJson);
+      // Whether this roster lists every mob is decided here, as the page
+      // takes it, for as long as the page shows it.
+      const addressing = consoleTransport.mobAddressing;
+      setWholeRoster(addressing?.enabled && addressing.listedSource === experienceJson
+        ? { transport: consoleTransport, document: experienceJson }
+        : null);
       setAgents((current) => internAgents(current, nextAgents));
       settleIdleIdentitiesRef.current(nextAgents, logVersionsAtRequest);
       setActiveActivityPresetId(
@@ -3168,6 +3479,202 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     }, 15_000);
     return () => window.clearInterval(timer);
   }, [loadExperience]);
+
+  // The console reads its lists before it has seen the gateway's
+  // capabilities. When an answer first says the gateway hosts mobs behind
+  // doors of their own (or stops saying so), the lists are read again and
+  // the stream is opened again, so both cover every mob the caller may
+  // address without waiting for the periodic refresh. A read under way was
+  // asked the old way: the new one follows it.
+  const [mobAddressingEpoch, setMobAddressingEpoch] = React.useState(0);
+  // A pane the browser restored whose member the first roster did not list
+  // gets its member back once the whole roster is held: its row, or, for a
+  // member of a mob listed as not loaded, the pane as it was saved (its
+  // chat stays, and writing in it wakes the mob). A pane the person has
+  // used meanwhile is left alone. On a gateway that hosts one mob nothing
+  // is given back: such a member is not listed.
+  React.useEffect(() => {
+    const awaiting = restoredPanelsAwaitingRosterRef.current;
+    if (awaiting.size === 0 || !rosterIsWhole) return;
+    const addressing = consoleTransport.mobAddressing;
+    const remembered = new Map(awaiting);
+    awaiting.clear();
+    if (!addressing?.enabled) return;
+    // Each remembered pane's member now: its row, the saved pane for a
+    // member of a mob that is not loaded, or nobody.
+    const members = new Map<string, MetaDockTarget>();
+    for (const [panelId, saved] of remembered) {
+      if (saved.kind !== "agent-chat" && saved.kind !== "identity-inspect") continue;
+      const identity = saved.identity || saved.memberId;
+      const agent = agents.find((candidate) => [candidate.identity, candidate.member_id, candidate.agent_id].includes(identity));
+      if (agent) members.set(panelId, saved.kind === "agent-chat" ? buildDockTarget(agent) : buildInspectTarget(agent));
+      else if (addressing.heldBack(identity)) members.set(panelId, saved);
+    }
+    if (members.size === 0) return;
+    // Applied to the dock as it is when this runs: the restore of the saved
+    // layout may be queued in the same commit.
+    dockRef.current.setState((current) => {
+      let changed = false;
+      const panels = current.panels.map((panel) => {
+        const target = members.get(panel.id);
+        if (!target || panel.target) return panel;
+        changed = true;
+        return { ...panel, target };
+      });
+      return changed ? { ...current, panels } : current;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agents, consoleTransport, rosterIsWhole]);
+  React.useEffect(() => {
+    const addressing = consoleTransport.mobAddressing;
+    if (!addressing) return undefined;
+    let active = true;
+    const stop = addressing.onChange(() => {
+      // The lists first, then the stream: the stream's first page is read
+      // once the console holds the roster of every mob, so that page's
+      // frames of other mobs find their members' rows. (Opened before the
+      // roster, the page's frames of mobs not yet listed would be dropped,
+      // and nothing reads that page again.)
+      void Promise.resolve(experienceLoadInFlightRef.current)
+        .catch(() => undefined)
+        .then(() => (active ? loadExperience() : undefined))
+        .catch(() => {})
+        .then(() => { if (active) setMobAddressingEpoch((epoch) => epoch + 1); });
+    });
+    return () => {
+      active = false;
+      stop();
+    };
+  }, [consoleTransport, loadExperience]);
+
+  // The doors of the listed mobs that have one of their own, and which of
+  // them are not loaded, as one value that changes only when one of them
+  // does: what the console waits on before it reads for a member of a mob
+  // that was not loaded. On a gateway that hosts one mob it never changes.
+  const mobDoorsKey = React.useMemo(() => {
+    const table = consoleTransport.mobAddressing?.table;
+    if (!table) return "";
+    return [...table.doors]
+      .filter(([mob, door]) => door !== null || table.notLoaded.has(mob))
+      .map(([mob, door]) => `${mob}>${door ?? ""}${table.notLoaded.has(mob) ? "!" : ""}`)
+      .join("|");
+    // The table is the connection's: it changes with the lists it was read from.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [consoleTransport, experience, mobAddressingEpoch]);
+
+  // A person opened a mob that is asleep: one ordinary request names it (it
+  // wakes for it), then the lists are read again, after any read under way.
+  // Until its rows arrive the roster says it is waking.
+  const [wakingMobIds, setWakingMobIds] = React.useState<ReadonlySet<string>>(() => new Set());
+  const openingMobIdsRef = React.useRef(new Set<string>());
+  const openMob = React.useCallback((mobId: string) => {
+    const open = consoleTransport.openMob;
+    // One opening of a mob at a time: more clicks while it is under way send nothing.
+    if (!open || openingMobIdsRef.current.has(mobId)) return;
+    const opening = openingMobIdsRef.current;
+    opening.add(mobId);
+    setWakingMobIds((current) => new Set(current).add(mobId));
+    void open(mobId)
+      .then(
+        // Opened. The read of the lists after it is the console's own: when
+        // it fails the mob is open all the same, and the next read shows it.
+        () => Promise.resolve(experienceLoadInFlightRef.current).catch(() => undefined)
+          .then(() => loadExperience())
+          .then(() => undefined, () => undefined),
+        (error) => {
+          if ((error as { name?: unknown } | null)?.name !== "AbortError") {
+            // The mob by its name for people: a gateway's refusal may quote the id.
+            const node = mobTreeRef.current.find((mob) => mob.mobId === mobId);
+            const team = node ? mobFullName(node) : "that team";
+            // A refusal is the gateway's answer, and is said as one: the
+            // same request is answered the same way again. Any other
+            // failure may pass.
+            setActionError(jsonRpcErrorCode(error) !== null
+              ? `The gateway refused to open ${team}. It was not opened.`
+              : `Could not open ${team}. Try again in a moment.`);
+          }
+        },
+      )
+      .finally(() => {
+        opening.delete(mobId);
+        setWakingMobIds((current) => {
+          const next = new Set(current);
+          next.delete(mobId);
+          return next;
+        });
+      });
+  }, [consoleTransport, loadExperience]);
+
+  // A mob created again under the id of a destroyed one is another mob, and
+  // a mob that left the list is gone: the console forgets it before it
+  // shows anything under that id. What the browser kept for its members
+  // (queued messages, drafts) is removed once, by the first tab that sees
+  // the change; every tab drops what it holds itself: the open chats and
+  // details of those members, their transcripts, their queued messages and
+  // this tab's drafts. Nothing is sent. A mob that is only asleep is still
+  // listed, and nothing of it is forgotten (see lib/mob-incarnations).
+  const seenMobsRef = React.useRef<{ scope: string | null; seen: SeenMobs } | null>(null);
+  React.useEffect(() => {
+    const addressing = consoleTransport.mobAddressing;
+    const listed = addressing?.enabled ? addressing.listedMobs : null;
+    if (!addressing || !listed) return;
+    const namespace = persistentSendScope;
+    const local = browserLocalStorage();
+    const key = namespace ? mobIncarnationsStorageKey(namespace) : null;
+    const kept = key ? readSeenMobs(local, key) : {};
+    const stored = updateSeenMobs(kept, listed, addressing.table);
+    if (namespace && key) {
+      for (const mobId of stored.forget) void purgeConsoleMobKeys(local, browserComposerStorage(), namespace, mobId, kept[mobId]?.door);
+      if (stored.changed) writeSeenMobs(local, key, stored.seen);
+    }
+    const before = seenMobsRef.current?.scope === namespace ? seenMobsRef.current.seen : kept;
+    const here = updateSeenMobs(before, listed, addressing.table);
+    seenMobsRef.current = { scope: namespace, seen: here.seen };
+    if (here.forget.length === 0) return;
+    // The door a forgotten mob had: its members' keys start with it (contract v0.6.0, row_key).
+    const doorOf = (mobId: string) => before[mobId]?.door ?? here.seen[mobId]?.door ?? null;
+    const forgotten = (identity: string | null | undefined) => here.forget.some((mobId) => memberOfMob(identity, mobId, doorOf(mobId)));
+    const closedPanelKeys: string[] = [];
+    for (const panel of [...dockRef.current.viewState.panels]) {
+      const target = panel.target as MetaDockTarget | null;
+      if (!target || (target.kind !== "agent-chat" && target.kind !== "identity-inspect")) continue;
+      if (!forgotten(target.identity || target.memberId)) continue;
+      // A closing pane writes its draft once more: not for a forgotten mob.
+      const panelKey = buildPanelConversationKey(panel.id, target);
+      closedPanelKeys.push(panelKey);
+      forgottenPanelKeysRef.current.add(panelKey);
+      dockRef.current.closePanel(panel.id);
+    }
+    for (const held of [identityLogRef.current, pendingStackRef.current, timelineFetchInFlightRef.current]) {
+      for (const identity of Object.keys(held)) {
+        if (forgotten(identity)) delete (held as Record<string, unknown>)[identity];
+      }
+    }
+    // A pane's draft is kept in memory under a key that ends with its chat's member.
+    const ofForgottenChat = (draftKey: string) => here.forget.some((mobId) => memberKeyPrefixes(mobId, doorOf(mobId)).some((prefix) => draftKey.includes(`:agent-chat:${prefix}`)));
+    for (const draftKey of Object.keys(loadedComposerDraftsRef.current)) {
+      if (ofForgottenChat(draftKey)) delete loadedComposerDraftsRef.current[draftKey];
+    }
+    setDraftByKey((current) => {
+      const doomed = Object.keys(current).filter(ofForgottenChat);
+      if (doomed.length === 0) return current;
+      const next = { ...current };
+      for (const draftKey of doomed) delete next[draftKey];
+      return next;
+    });
+    forceRender();
+    // Once the closed panes are gone, this tab's drafts of the forgotten
+    // mobs are removed (again, for one a closing pane wrote), and a new
+    // chat in the same place may keep its own.
+    const timer = window.setTimeout(() => {
+      if (namespace) {
+        for (const mobId of here.forget) void purgeConsoleMobKeys(null, browserComposerStorage(), namespace, mobId, doorOf(mobId));
+      }
+      for (const panelKey of closedPanelKeys) forgottenPanelKeysRef.current.delete(panelKey);
+    }, 0);
+    return () => window.clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [consoleTransport, experience, persistentSendScope]);
 
   // The configured appearance applies through useConsoleDisplay, and the
   // configured sidebar and rail collapse through their preferences: a
@@ -3219,6 +3726,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       })
       .catch(() => {
         if (!active) return;
+        capabilitiesFailedRef.current = true;
         setSideChatsOffered(false);
         setScheduleOffer(NO_CONSOLE_SCHEDULES);
         setAgentRecordOffered(false);
@@ -3236,8 +3744,14 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   const identityChanges = useIdentityChanges({
     flags: identityChangeFlags(consoleReadOnly ? null : experience),
     readable: agentListOffered,
-    run: (command: IdentityCommand, params) =>
-      executeHeadlessCommand(CONSOLE_COMMAND_NAMES[command], requireWorkbenchTarget(buildControlTarget("roster")), params),
+    // A command of an agent's change is sent for the agent the person acted on.
+    run: (command: IdentityCommand, params, about, by) =>
+      executeHeadlessCommand(
+        CONSOLE_COMMAND_NAMES[command],
+        requireWorkbenchTarget(buildControlTarget("roster")),
+        params,
+        about ? { about, ...(by?.automatic ? { automatic: true } : {}) } : undefined,
+      ),
     onChanged: () => {
       void loadExperience().catch(() => {});
     },
@@ -3260,10 +3774,13 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     });
     let record: ReturnType<typeof parseAgentRecord>;
     try {
+      // The Details pane's own read of the agent's record, when it opens
+      // and when the records change: the console's own.
       record = parseAgentRecord(await executeHeadlessCommand(
         CONSOLE_COMMAND_NAMES.getAgentRecord,
         identityWorkbenchTarget(name, "inspect"),
         { name },
+        AUTOMATIC,
       ));
     } catch (error) {
       noteSuperseded(false);
@@ -3376,11 +3893,44 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     };
   }, [approvalScope, Boolean(experience), hasMobControlSurface, consoleReadOnly, approvalsDecidable, signInToDecide, consoleController]);
   // Scope changes hide the previous principal's snapshot before effects run.
-  const activeApprovals = approvalSnapshot?.owner === consoleController && approvalSnapshot.snapshot.scopeKey === approvalScope
+  const listedApprovals = approvalSnapshot?.owner === consoleController && approvalSnapshot.snapshot.scopeKey === approvalScope
     ? approvalSnapshot.snapshot : undefined;
+  // The host's lists name an agent by its bare name and no mob. A name that
+  // could be an agent of more than one mob is handed on in words that are
+  // no agent's key: the entry is placed in no chat, shown under no agent's
+  // name, and opens no agent. It is still listed, counted and decided.
+  const placeHostListAgent = React.useCallback((name: string, mobId?: string): string => {
+    const addressing = consoleTransport.mobAddressing;
+    if (!addressing) return name;
+    // Until a capability read answers (also after the console went on
+    // without one) nothing has said what the gateway hosts: any name could
+    // be an agent of a mob the console has never heard of.
+    if (!capabilitiesAnswered) return hostListAgentWords(name);
+    if (!addressing.enabled) return name;
+    // Until the console holds the roster of every mob it knows no mob but
+    // the launch mob: any name could be another mob's agent.
+    if (!rosterIsWhole) return hostListAgentWords(name);
+    // An entry that carries its mob beside the name names one agent: its
+    // key, by the rule of a frame. A mob the console does not list names
+    // nobody here.
+    if (mobId) return addressing.rowKey({ mob_id: mobId, identity: name }) ?? hostListAgentWords(name);
+    // An entry that carries no mob: an agent only where the name can be one.
+    const rowKeys = agents.map((agent) => agent.identity || agent.member_id || agent.agent_id || "");
+    return hostListNameAmbiguous(name, addressing.table, rowKeys) ? hostListAgentWords(name) : name;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [consoleTransport, agents, mobDoorsKey, rosterIsWhole, capabilitiesAnswered]);
+  const activeApprovals = React.useMemo(
+    () => (listedApprovals ? approvalsWithPlacedAgents(listedApprovals, placeHostListAgent) : listedApprovals),
+    [listedApprovals, placeHostListAgent],
+  );
+  // The records of the gating audit name an agent the same way.
+  const placedGatingAudit = React.useMemo(
+    () => auditWithPlacedAgents(gatingData.audit, placeHostListAgent) as typeof gatingData.audit,
+    [gatingData.audit, placeHostListAgent],
+  );
   // The question sets agents asked (`meta/gating/questions`), read and
   // answered like the approvals: for this scope, as the signed-in person.
-  const questionSets = useQuestionSets({
+  const listedQuestionSets = useQuestionSets({
     scopeKey: approvalScope, owner: consoleController,
     enabled: Boolean(experience) && hasMobControlSurface && approvalsDecidable !== undefined,
     readOnly: consoleReadOnly || !approvalsDecidable,
@@ -3393,6 +3943,10 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       command: CONSOLE_COMMAND_NAMES.decideGating, target: controlWorkbenchTarget("gating"), signal, params: { ...params },
     })).result,
   });
+  const questionSets = React.useMemo(
+    () => (listedQuestionSets ? questionSetsWithPlacedAgents(listedQuestionSets, placeHostListAgent) : listedQuestionSets),
+    [listedQuestionSets, placeHostListAgent],
+  );
   // Host-provided attention items ("Needs you"): read from the configured
   // same-origin sources every 30 s while the page is visible. Each source
   // fails alone; approvals never depend on them.
@@ -3431,7 +3985,11 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   // made it, so a scope change hides the previous person's items before
   // effects run, and a read that started before the change is never shown.
   const [consoleAttentionState, setConsoleAttentionState] = React.useState<{ scope: string; snapshot: ConsoleAttentionSnapshot }>();
-  const consoleAttention = consoleAttentionState?.scope === approvalScope ? consoleAttentionState.snapshot : undefined;
+  const listedAttention = consoleAttentionState?.scope === approvalScope ? consoleAttentionState.snapshot : undefined;
+  const consoleAttention = React.useMemo(
+    () => (listedAttention ? attentionWithPlacedAgents(listedAttention, placeHostListAgent) : listedAttention),
+    [listedAttention, placeHostListAgent],
+  );
   const consoleAttentionPollingRef = React.useRef<ConsoleAttentionPolling | null>(null);
   React.useEffect(() => {
     setConsoleAttentionState(undefined);
@@ -3488,6 +4046,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       : null,
     voiceState.target?.identity ?? null,
     hasVoiceHost && !consoleReadOnly && voice !== null,
+    memberDoorForRequest,
   );
   React.useEffect(() => {
     const target = voiceState.target;
@@ -3598,6 +4157,16 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       )
     )
       return;
+    // A stock connection reads its first roster before it knows whether the
+    // gateway hosts mobs behind doors of their own, and that roster lists
+    // the launch mob alone. A chat the browser restored is not replaced on
+    // such a roster: the console waits until it holds a roster read for
+    // every mob the caller may address.
+    if (!rosterIsWhole) return;
+    // A member of a mob that went to sleep has no row, and its mob is still
+    // listed: its open chat stays, with what the browser holds, and writing
+    // in it wakes the mob. A member whose mob left the list is gone.
+    if (identityHeldBack(identity)) return;
     const fallback =
       agents.find(
         (agent) => agent.addressable || agent.affordances?.can_send_message,
@@ -3608,7 +4177,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       dock.openTarget(buildControlTarget("roster"), "replace_focused");
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [agents, dock.focusedTarget]);
+  }, [agents, dock.focusedTarget, rosterIsWhole]);
 
   // =========================================================================
   // REFRESH PANEL DATA (inspect, routing, gating)
@@ -4347,8 +4916,10 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     );
     // Each kind refreshes independently, so one slow surface (topology on a
     // loaded server) neither delays the others nor stacks up behind itself.
-    const refreshes: Promise<void>[] = inspects.map((t) => panelRefreshFlight(`inspect:${t.identity}`, async () => {
-      const r = await inspectIdentityViaHeadless(t.identity);
+    // The console's own refresh of an open Details pane: not made for an
+    // agent whose mob is listed as not loaded (the pane says so instead).
+    const refreshes: Promise<void>[] = inspects.filter((t) => !identityHeldBack(t.identity)).map((t) => panelRefreshFlight(`inspect:${t.identity}`, async () => {
+      const r = await inspectIdentityViaHeadless(t.identity, AUTOMATIC);
       const result = normalizeConsoleInspectResult(r);
       setInspectByIdentity((c) => ({ ...c, [t.identity]: result }));
     }));
@@ -4425,7 +4996,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           return;
         }
         try {
-          await refreshIdentityTimelineNow(identity, { clearPhase: true });
+          await refreshIdentityTimelineNow(identity, { clearPhase: true, automatic: true });
         } catch {
           /* silent — will retry on next terminal event */
         }
@@ -4450,18 +5021,25 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   // introduces cards (loadOlderIdentityTimeline) can still trigger the fetch.
   const workGraphHydrationGateRef = React.useRef(createWorkGraphHydrationGate());
   async function hydrateWorkGraphCardsForIdentity(identity: string): Promise<void> {
+    // The console's own read: not made while the chat's member's mob is
+    // listed as not loaded, and then not counted as made. It is made when
+    // the list says otherwise (`mobDoorsKey` runs the effect again).
+    if (consoleTransport.mobAddressing?.heldBack(identity) === true) return;
     const shouldFetch = workGraphHydrationGateRef.current.shouldFetch(identity, {
       workgraphAvailable: experience?.workgraph?.available === true,
       hasCards: framesContainWorkGraphCards(getSortedFrames(identity)),
     });
     if (!shouldFetch) return;
     try {
+      // The cards are the chat's member's: the snapshot is read through that
+      // member's door, never from another mob's work graph.
       const snapshot = await executeHeadlessCommand(
         CONSOLE_COMMAND_NAMES.workgraphSnapshot,
         controlWorkbenchTarget("workgraph"),
         experience?.panel_runtimes ? {
           runtime_key: experience.panel_runtimes.find(runtime => identity.startsWith(`${runtime.namespace}/`))?.key || "",
         } : undefined,
+        { automatic: true, about: identity },
       );
       appendFrame(
         identity,
@@ -4495,12 +5073,15 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         void hydrateWorkGraphCardsForIdentity(identity);
         continue;
       }
-      void refreshIdentityTimelineNow(identity)
+      // A pane the browser restored is not a person's act: its first read
+      // waits while its member's mob is listed as not loaded, and is made
+      // once the list says otherwise (`mobDoorsKey`).
+      void refreshIdentityTimelineNow(identity, { automatic: true })
         .then(() => hydrateWorkGraphCardsForIdentity(identity))
         .catch(() => {});
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [baseUrl, dock.viewState.panels, forceRender, experience?.workgraph?.available]);
+  }, [baseUrl, dock.viewState.panels, forceRender, experience?.workgraph?.available, mobDoorsKey]);
 
   /// Repair one docked identity's log after the stream reported a replay
   /// gap: a `since` query from the newest known cursor, falling back to a
@@ -4519,6 +5100,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     async (identity: string): Promise<boolean> => {
       const log = getOrCreateLog(identity);
       if (log.hasServerLog === false) return false;
+      if (identityHeldBack(identity)) return false;
       if (identityRefreshInFlightRef.current.has(identity)) return false;
       identityRefreshInFlightRef.current.add(identity);
       let changed = false;
@@ -4532,6 +5114,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           mode: sinceCursor ? "since" : "recent",
           after: sinceCursor,
           limit: sinceCursor ? 1000 : 200,
+          automatic: true,
         });
         if (reconcileServerLog(identity, page.frames, page.available) || metadataChanged) {
           changed = true;
@@ -4547,6 +5130,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
             const { page, metadataChanged } = await queryIdentityTimelinePage(identity, {
               mode: "recent",
               limit: 200,
+              automatic: true,
             });
             if (reconcileServerLog(identity, page.frames, page.available) || metadataChanged) {
               changed = true;
@@ -4576,6 +5160,13 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   scheduleHistoryRefreshRef.current = scheduleHistoryRefresh;
   const scheduleExperienceRefreshRef = React.useRef(scheduleExperienceRefresh);
   scheduleExperienceRefreshRef.current = scheduleExperienceRefresh;
+  // A frame named a mob that is in none of the console's lists (a mob
+  // created a moment ago): the frame is not shown, and the lists are read
+  // again so that the mob and its members are.
+  React.useEffect(
+    () => consoleTransport.mobAddressing?.onUnlistedMob?.(() => scheduleExperienceRefreshRef.current()),
+    [consoleTransport],
+  );
   // Memory panels anchor on durable SQLite state; live memory.* frames are
   // freshness signals only. Debounced so dream-commit bursts coalesce into
   // one re-read, and gated on a memory panel actually being docked.
@@ -4626,16 +5217,47 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     timelineScope.ledger.getPeersVersion,
     timelineScope.ledger.getPeersVersion,
   );
+  // Where the gateway hosts mobs behind doors of their own (or may: the
+  // roster of every mob is not held yet), a name can belong to more than
+  // one team: a linked name is then offered only for an agent the directory
+  // holds. On a gateway with one mob every name is offered a link, as
+  // before, and the console's own opening finds its agent.
+  const namesCanBeOfSeveralTeams = ((): boolean => {
+    const addressing = consoleTransport.mobAddressing;
+    if (!addressing) return false;
+    // Nothing has said what the gateway hosts: it may host such mobs.
+    if (!capabilitiesAnswered) return true;
+    if (!addressing.enabled) return false;
+    return !rosterIsWhole || [...addressing.table.doors].some(([mob, door]) => door === mob);
+  })();
   const agentDirectory = React.useMemo(() => {
     const peerIds = timelineScope.ledger.peerIds();
-    return createAgentDirectory(agents.map((agent) => {
+    const directory = createAgentDirectory(agents.map((agent) => {
       const entry = agentDirectoryEntry(agent);
       const ids = peerIds.get(agent.identity || agent.member_id || agent.agent_id) ?? [];
       return ids.length ? { ...entry, aliases: [...entry.aliases, ...ids] } : entry;
     }));
+    // The words the console hands on in place of a name whose team it was
+    // not told are written as they are and open nothing, on every gateway.
+    return { ...directory, plainWords: hostListAgentWordsOf, ...(namesCanBeOfSeveralTeams ? { opensKnownOnly: true } : {}) };
     // Read again whenever the ledger learns a peer id.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [agents, timelineScope, ledgerPeersVersion]);
+  }, [agents, timelineScope, ledgerPeersVersion, namesCanBeOfSeveralTeams]);
+  // The directory as the pane of an agent behind one door reads it: the
+  // whole directory for the launch mob's door, and for another mob's door
+  // one in which a bare name is that door's agent (kept per door, so a pane
+  // gets the same object until the roster or the doors change).
+  const doorDirectories = React.useMemo(() => new Map<string, AgentDirectory>(), [agentDirectory, mobDoorsKey]);
+  const agentDirectoryOfDoor = (doorMobId: string | null): AgentDirectory => {
+    const table = consoleTransport.mobAddressing?.table;
+    if (!doorMobId || !table) return agentDirectory;
+    let scoped = doorDirectories.get(doorMobId);
+    if (!scoped) {
+      scoped = agentDirectoryBehindDoor(agentDirectory, doorMobId, table);
+      doorDirectories.set(doorMobId, scoped);
+    }
+    return scoped;
+  };
 
   React.useEffect(() => {
     const scope = timelineScope;
@@ -4775,7 +5397,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       unsubscribe?.();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [consoleController, consoleTransport, sidebarStorageNamespace, transportRetry]);
+  }, [consoleController, consoleTransport, sidebarStorageNamespace, transportRetry, mobAddressingEpoch]);
 
   // Timer cleanup on unmount
   React.useEffect(() => {
@@ -5175,7 +5797,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     const agent = agentsRef.current.find((candidate) => [candidate.identity, candidate.member_id, candidate.agent_id].includes(destination))
       ?? agentsRef.current.find((candidate) => [candidate.identity, candidate.member_id, candidate.agent_id].includes(identity));
     const host = experience?.console_config?.brand?.label?.trim();
-    return { agent: agent ? agentDisplayTitle(agent) : destination, host: host || undefined };
+    return { agent: agent ? agentDisplayTitle(agent) : agentDisplayName(destination, agentDirectory) || destination, host: host || undefined };
   }
   function setPendingCheck(identity: string, id: string, view: PendingCheckView | null) {
     setPendingChecks((current) => {
@@ -5309,6 +5931,10 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
 
   function maybeDrainHead(identity: string) {
     if (consoleReadOnlyRef.current || isIdentityBusy(identity)) return;
+    // The queue's own sending is the console's act, not the person's: a
+    // message for an agent whose team is not loaded waits (the queue says
+    // so) until the team is open.
+    if (identityHeldBack(identity)) return;
     const ownerPhase = agentsRef.current.find((agent) => [agent.identity, agent.member_id, agent.agent_id].includes(identity))?.response_phase;
     if (ownerPhase) return;
     const head = getPendingStack(identity)[0];
@@ -5622,7 +6248,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     return () => panelLifetime.abort.abort();
   }, [panelLifetime]);
   const panelHostService = React.useMemo<ConsolePanelService>(() => {
-    const service = panelService ?? createConsolePanelService(baseUrl);
+    const service = panelService ?? createConsolePanelService(baseUrl, memberDoorForRequest);
     return (request, scope, signal) => bindConsolePanelService(service, panelLifetime.abort.signal)(request, scope, signal);
   }, [panelService, baseUrl, panelLifetime]);
   const openCustomPanel = React.useCallback<ConsolePanelContext["openPanel"]>((id, options) => {
@@ -5652,12 +6278,13 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       return createNativeMcpAppsHost({ baseUrl, sandboxProxyUrl, authority: sendScope,
         runtimeId: experience?.runtime_id, readOnly: consoleReadOnly,
         requestTimeoutMs: consoleFetchTimeoutMsRef.current,
-        callerScope: callerForRequest, reportFailure: reportCallerFailure });
+        callerScope: callerForRequest, reportFailure: reportCallerFailure, memberDoor: memberDoorForRequest,
+        memberHeldBack: memberHeldBackForRequest });
     } catch {
       // A missing or invalid isolated sandbox retains the ordinary transcript.
       return undefined;
     }
-  }, [mcpAppsHost, baseUrl, experience?.console_config?.mcp_apps_sandbox_url, experience?.runtime_id, sendScope, consoleReadOnly, callerForRequest, reportCallerFailure]);
+  }, [mcpAppsHost, baseUrl, experience?.console_config?.mcp_apps_sandbox_url, experience?.runtime_id, sendScope, consoleReadOnly, callerForRequest, reportCallerFailure, memberDoorForRequest, memberHeldBackForRequest]);
 
   // =========================================================================
   // WORKGRAPH OPERATOR ACTIONS (inline card + panel)
@@ -5703,7 +6330,21 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         forceRender();
       };
       try {
-        const result = await executeHeadlessCommand(command, controlWorkbenchTarget("workgraph"), params);
+        // An action of a card is its chat's member's: it goes through that
+        // member's door (or is refused there), never to another mob's work
+        // graph, which can hold an item of the same id. The docked panel
+        // names no card and acts on the graph it shows, the launch mob's
+        // door's: its command is that door's, and is not sent when it names
+        // an agent behind another door. The mark is the docked panel's own
+        // statement of its door; the page's refusal of such an assignee and
+        // the transport's rule for a work graph command that names no row
+        // hold as well.
+        const result = await executeHeadlessCommand(
+          command,
+          controlWorkbenchTarget("workgraph"),
+          params,
+          cardIdentity ? { about: cardIdentity } : { launchDoor: true },
+        );
         setActionError("");
         echoResultToCard(result);
       } catch (err) {
@@ -5738,10 +6379,12 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     const refresh = workGraphConflictRefreshRequest(params);
     if (!refresh) return;
     try {
+      // Read from the work graph the card's action went to: its member's door.
       const fresh = await executeHeadlessCommand(
         refresh.command,
         controlWorkbenchTarget("workgraph"),
         refresh.params,
+        { about: cardIdentity },
       );
       appendFrame(
         cardIdentity,
@@ -5856,8 +6499,23 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
                 expected_revision: expectedRevision,
               }, cardIdentity),
           ),
-        onAttentionReassign: ({ bindingId, revision, identity }: { bindingId: string; revision?: number; identity: string }) =>
-          dispatch(
+        onAttentionReassign: ({ bindingId, revision, identity }: { bindingId: string; revision?: number; identity: string }) => {
+          // The docked panel shows the work of the launch mob's door: a
+          // work item is reassigned within that team, and an agent of
+          // another team is refused here, before any request.
+          if (!cardIdentity) {
+            const launch = mobTreeRef.current.find((mob) => mob.mobId === consoleTransport.mobAddressing?.table.launchMobId);
+            const refusal = workPanelReassignRefusal(
+              identity,
+              (rowKey) => consoleTransport.mobAddressing?.door(rowKey) ?? { mobId: null },
+              launch ? mobFullName(launch) : "this console's first team",
+            );
+            if (refusal) {
+              setActionError(refusal);
+              return undefined;
+            }
+          }
+          return dispatch(
             revision,
             { binding_id: bindingId },
             (expectedRevision) =>
@@ -5866,7 +6524,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
                 expected_revision: expectedRevision,
                 target: { kind: "identity", identity },
               }, cardIdentity),
-          ),
+          );
+        },
       };
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -6183,6 +6842,9 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     const panelKey = buildPanelConversationKey(panel.id, target);
     const identity = target.identity || target.memberId;
     const agent = agents.find((c) => c.member_id === target.memberId) || null;
+    // The agent's name for people: never its identity, which the header's
+    // tooltip carries.
+    const agentLabel = target.title || (agent ? agentDisplayTitle(agent) : agentDisplayName(identity, agentDirectory) || identity);
 
     // Single adapter pass over the canonical sorted log. No more
     // server/live split, no cross-store dedup, no duplicate grouping.
@@ -6243,8 +6905,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     // Offered only while the timeline names the in-flight run, and with the
     // same authority as force-cancel (the gateway authorizes it as retire).
     const activeRunId = activeRunIdFor(identity, identityLog.version, sortedFrames);
-    const canStopRun =
-      !consoleReadOnly && agent?.affordances?.can_retire === true && activeRunId !== null;
+    const canStopRun = runStopOffered({ readOnly: consoleReadOnly, agent, activeRunId });
 
     const stackItems = getPendingStack(identity);
     let hasLegacyQueue = false;
@@ -6284,6 +6945,20 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         });
     const canCloseSideChat =
       sideChatOf !== null && !consoleReadOnly && agent?.affordances?.can_retire === true;
+    // A known limit of this release: voice works with the agents of the
+    // launch mob. Where the console offers voice and would offer it to this
+    // agent, an agent behind another mob's door gets its voice control
+    // shown as unavailable, with the reason, and nothing is asked.
+    const voiceLimitReason =
+      hasVoiceHost && voice !== null && !consoleReadOnly
+        && agent?.affordances?.can_send_message === true
+        && memberDoorForRequest(identity).mobId !== null
+        ? voiceLimitedToLaunchMobReason(agentLabel, launchMobName)
+        : null;
+    // The agent's team is listed as not loaded: its interactive views are
+    // not loaded (nothing is asked for them), and each view's place says so,
+    // with the way to wake a team that is asleep.
+    const teamNotLoaded = teamNotLoadedOf(identity);
     // The queue's slot: an older queue to import, the queue, then where it is
     // kept (a caption under the queue) and any storage failure.
     const stackSlot = <>
@@ -6302,10 +6977,20 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           >Import and send</button>
         </div>
       )}
+      {stackItems.length > 0 && identityHeldBack(identity) ? (
+        // A message waiting in the queue is not sent on the console's own to
+        // a mob that is not loaded: it waits, and says why, until a person
+        // opens the mob (or writes: a send wakes it).
+        <p className="queue-waiting" role="status" data-testid={`pending-waiting:${identity}`}>
+          {teamNotLoaded?.unavailable
+            ? <>Waiting: {heldBackTeamName(identity) || "this agent's team"} is unavailable. Queued messages are sent when the team is available again.</>
+            : <>Waiting: {heldBackTeamName(identity) || "this agent's team"} is asleep. Queued messages are sent when the team is open.</>}
+        </p>
+      ) : null}
       {stackItems.length > 0 || (deliveredNotices[identity]?.length ?? 0) > 0 ? (
         <PendingStack
           items={stackItems}
-          agentLabel={target.title || (agent ? agentDisplayTitle(agent) : identity)}
+          agentLabel={agentLabel}
           hostLabel={experience?.console_config?.brand?.label?.trim() || undefined}
           resendUncertain={resendUncertain}
           checks={pendingChecks[identity]}
@@ -6345,7 +7030,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           // The renderer ID names a stable message assembled from potentially many
           // frames. Without canonical frame provenance, no frame-relative range is claimed.
           sourceIdentity: identity, messageId: quote.messageId,
-          quote: quote.text, label: target.title || (agent ? agentDisplayTitle(agent) : identity) });
+          quote: quote.text, label: agentLabel });
         const next = [...quotedContexts, context];
         validateConsoleContexts(next);
         setContextDrafts((current) => ({ ...current, [draftKey]: next }));
@@ -6363,13 +7048,13 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         approvalSnapshot={activeApprovals}
         onApprovalDecision={onGatingDecision}
         peerLabels={peerLabels}
-        agentLabel={target.title || (agent ? agentDisplayTitle(agent) : identity)}
+        agentLabel={agentLabel}
         identity={identity}
         key={`${sendScope}:${panel.id}:${identity}`}
         viewportKey={{ authority: sendScope, identity, conversation: identity, pane: panel.id }}
         submittedRowId={submittedRowId}
         onQuoteSelection={addQuote}
-        contextSlot={<QuoteContextChips records={quotedContexts} destinationLabel={target.title || (agent ? agentDisplayTitle(agent) : identity)} onEdit={(id, quote) => {
+        contextSlot={<QuoteContextChips records={quotedContexts} destinationLabel={agentLabel} onEdit={(id, quote) => {
           if (sendScope !== sendScopeRef.current || !lifetimeRef.current.active) throw new Error("This draft is no longer active.");
           const latest = storedComposerDraft(identity, panelKey);
           const next = editConsoleContextQuote(latest.contexts, id, quote);
@@ -6434,7 +7119,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
             : undefined
         }
         forkSideChatDisabledReason={canForkSideChat ? forkSideChatBlocked : null}
-        sideChatOfLabel={sideChatOf ? (sideChatSourceAgent ? agentDisplayTitle(sideChatSourceAgent) : sideChatOf) : null}
+        sideChatOfLabel={sideChatOf ? (sideChatSourceAgent ? agentDisplayTitle(sideChatSourceAgent) : agentDisplayName(sideChatOf, agentDirectory) || sideChatOf) : null}
         onCloseSideChat={
           canCloseSideChat
             ? () => void onCloseSideChat(panel.id, identity)
@@ -6447,7 +7132,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         sendLabel={configuredActionLabels.send}
         hasOlderHistory={identityHasOlderHistory(identityLog)}
         loadingOlderHistory={identityLog.olderHistoryLoading === true}
-        onLoadOlder={() => void loadOlderIdentityTimeline(identity)}
+        onLoadOlder={(by) => void loadOlderIdentityTimeline(identity, by)}
         stackSlot={stackSlot}
         voiceSlot={dock.viewState.focusedPanelId === panel.id ? voiceBar : null}
         onVoiceToggle={
@@ -6456,7 +7141,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
                 if (voiceState.target?.identity === identity && voiceState.phase !== "idle" && voiceState.phase !== "error") {
                   void voice.close();
                 } else {
-                  void voice.start({ identity, label: target.title || (agent ? agentDisplayTitle(agent) : identity) });
+                  void voice.start({ identity, label: agentLabel });
                 }
               }
             : undefined
@@ -6464,6 +7149,11 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         voiceActive={voiceState.target?.identity === identity && voiceState.phase !== "idle" && voiceState.phase !== "error"}
         voiceDisabled={voiceState.phase === "closing"}
         voiceChecking={voiceReadinessPending(voiceReadiness[identity])}
+        voiceUnavailableReason={voiceLimitReason}
+        teamNotLoaded={teamNotLoaded}
+        appsUnavailableReason={memberDoorForRequest(identity).mobId !== null ? interactiveViewsLimitedReason(agentLabel, launchMobName) : null}
+        imagesUnavailableReason={memberDoorForRequest(identity).mobId !== null ? imagesLimitedReason(agentLabel, launchMobName) : null}
+        onVoiceUnavailable={voiceLimitReason ? () => setActionError(voiceLimitReason) : undefined}
         liveSpeech={
           voiceState.target?.identity === identity && voiceState.phase === "active"
             ? voiceState.liveSpeech
@@ -6507,7 +7197,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       !consoleReadOnly &&
       configuredActionVisibility.reset &&
       experience?.runtime_capabilities?.can_retire_members === true &&
-      restartOffered(agent);
+      resetOffered(agent);
     return (
       <AgentDetailsPanel
         // One panel per agent: a pane that is shown another agent's
@@ -6527,7 +7217,13 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
             : undefined
         }
         openChatLabel={configuredActionLabels.chat}
-        onRefresh={() => void refreshInspectIdentity(target.identity).catch(() => {})}
+        onRefresh={() => {
+          // Reading the details of an agent whose team was asleep wakes the
+          // team: the lists are read again after it, so the roster and this
+          // pane show the team as it now is.
+          const woke = identityHeldBack(target.identity);
+          void refreshInspectIdentity(target.identity).then(() => { if (woke) scheduleExperienceRefresh(); }).catch(() => {});
+        }}
         actions={{
           respawn: canRespawn ? { label: configuredActionLabels.respawn, onClick: () => void onLifecycleAction(target.identity, "meta/respawn") } : undefined,
           reset: canReset ? { label: configuredActionLabels.reset, onClick: () => void onLifecycleAction(target.identity, "meta/reset") } : undefined,
@@ -6537,29 +7233,38 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           ? { api: identityChanges, controls: agentIdentityControls(identityChanges.flags, agent?.affordances) }
           : null}
         rosterListingSuperseded={agentRecordOffered && rosterListingSuperseded[target.identity] === true}
+        asleepTeam={identityHeldBack(target.identity) ? heldBackTeamName(target.identity) : undefined}
+        teamUnavailable={teamNotLoadedOf(target.identity)?.unavailable === true}
       >
-        {agentRecordOffered ? (
-          <AgentRecordFacts
-            key={`record:${target.identity}`}
-            load={loadAgentRecord}
-            name={target.identity}
-            refreshToken={identityChanges?.revision ?? 0}
-          />
-        ) : null}
-        {scheduleOffer.list ? (
-          <SchedulesSection
-            key={target.identity}
-            identity={target.identity}
-            editing={consoleScheduleEditing({
-              offer: scheduleOffer,
-              readOnly: consoleReadOnly,
-              accessEnforcing,
-              agent,
-            })}
-            refreshToken={inspect}
-            run={(command, params) => runScheduleCommand(target.identity, command, params)}
-          />
-        ) : null}
+        {/* The record and the schedules are answers of the agent's own
+            door, which names agents as it knows them: for an agent behind
+            another mob's door those names are read as that door's agents. */}
+        <AgentDirectoryProvider directory={agentDirectoryOfDoor(memberDoorForRequest(target.identity).mobId)}>
+          {agentRecordOffered && !identityHeldBack(target.identity) ? (
+            <AgentRecordFacts
+              key={`record:${target.identity}`}
+              load={loadAgentRecord}
+              name={target.identity}
+              refreshToken={identityChanges?.revision ?? 0}
+            />
+          ) : null}
+          {scheduleOffer.list ? (
+            <SchedulesSection
+              key={target.identity}
+              identity={target.identity}
+              editing={consoleScheduleEditing({
+                offer: scheduleOffer,
+                readOnly: consoleReadOnly,
+                accessEnforcing,
+                agent,
+              })}
+              refreshToken={inspect}
+              run={(command, params, by) => runScheduleCommand(target.identity, command, params, by)}
+              teamUnavailable={teamNotLoadedOf(target.identity)?.unavailable === true}
+              teamNotLoaded={identityHeldBack(target.identity)}
+            />
+          ) : null}
+        </AgentDirectoryProvider>
       </AgentDetailsPanel>
     );
   }
@@ -6704,7 +7409,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           auditError={gatingAuditError}
           auditLimit={GATING_AUDIT_LIMIT}
           auditRetention={gatingData.retention}
-          audit={gatingData.audit}
+          audit={placedGatingAudit}
           onDecide={(pid, decision) => void onGatingDecision(pid, decision)}
           readOnly={consoleReadOnly}
           hostAttention={hostAttention}
@@ -6725,11 +7430,26 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       // experience names (topology.live_snapshot.mob_id) in words, with the
       // id as its tooltip: never the console's or the sidebar's title, which
       // name the console, nor the runtime id. "Team" when none is named.
+      // With several mobs the map shows the chosen mob with the mobs nested
+      // under it, or all of them, and its menu offers the choice.
       const teamKey = topologyTeamKey(experience);
+      const chosenMob = chosenMobId ? mobTree.find((mob) => mob.mobId === chosenMobId) : undefined;
+      const shown = topologyInMobs({
+        nodes: normalizedTopology?.nodes || experience?.topology?.live_snapshot?.nodes || [],
+        agents,
+        mobIds: chosenMobIds,
+        primaryMobId: teamKey,
+        listedMobIds: new Set(mobTree.map((mob) => mob.mobId)),
+      });
+      const shownTeamName = chosenMob
+        ? mobFullName(chosenMob)
+        : mobTree.length > 1
+          ? "All mobs"
+          : teamKey ? teamName(teamKey) : undefined;
       return (
         <TopologyPanel
-          nodes={normalizedTopology?.nodes || experience?.topology?.live_snapshot?.nodes || []}
-          agents={agents}
+          nodes={shown.nodes}
+          agents={shown.agents}
           activity={liveFrames}
           activitySource={timelineScope.ledger}
           links={normalizedTopology?.links ?? null}
@@ -6771,8 +7491,13 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
               .finally(() => setTopologyRefreshing(false));
           }}
           canWireMembers={experience?.runtime_capabilities?.can_wire_members === true}
-          teamName={teamKey ? teamName(teamKey) : undefined}
-          teamKey={teamKey}
+          teamName={shownTeamName}
+          teamKey={chosenMob?.mobId ?? teamKey}
+          mobChoice={mobTree.length > 1 ? {
+            mobs: mobTree.map((mob) => ({ mobId: mob.mobId, name: mob.name, detail: mob.detail, depth: mob.depth })),
+            selected: chosenMobId,
+            onSelect: chooseMob,
+          } : undefined}
         />
       );
     }
@@ -6786,6 +7511,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           agents={agents}
           approvals={activeApprovals?.requests}
           loadHistory={loadDayHistory}
+          loadedMobs={mobDoorsKey}
         />
       );
     if (target.kind === "roster")
@@ -6827,7 +7553,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           auditError={gatingAuditError}
           auditLimit={GATING_AUDIT_LIMIT}
           auditRetention={gatingData.retention}
-          audit={gatingData.audit}
+          audit={placedGatingAudit}
           onDecide={(pid, decision) => void onGatingDecision(pid, decision)}
           readOnly={consoleReadOnly}
           hostAttention={hostAttention}
@@ -6851,6 +7577,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           agentDirectory={agentDirectory}
           agents={agents}
           loadHistory={loadDayHistory}
+          loadedMobs={mobDoorsKey}
         />
       );
     if (target.kind === "access")
@@ -7001,6 +7728,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           readOnly={consoleReadOnly}
           accessEnforcing={accessEnforcing}
           run={runScheduleCommand}
+          // The names inside an agent's schedules are that agent's door's.
+          directoryFor={(identity) => agentDirectoryOfDoor(memberDoorForRequest(identity).mobId)}
           // Lists older than 15 s are read again at most once a minute while
           // the console renders (the panel's Refresh reads them at once).
           refreshToken={Math.floor(Date.now() / 60_000)}
@@ -7102,6 +7831,14 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           onOpenApproval={openApproval}
           hostAttentionCount={hostAttention?.items.length || 0}
           attentionReplyCount={consoleAttention?.items.length || 0}
+          mobs={consoleMobs}
+          primaryMobId={primaryMobId}
+          selectedMobId={chosenMobId}
+          onSelectMob={chooseMob}
+          onOpenMob={consoleTransport.openMob ? openMob : undefined}
+          wakingMobIds={wakingMobIds}
+          mobsLoaded={experience !== null && rosterIsWhole}
+          mobOrdinals={mobOrdinals}
           questionSetCount={questionSets?.snapshot.sets.length || 0}
           questionSetStatus={questionSets?.snapshot.status}
           density={display.settings.density}

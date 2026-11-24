@@ -42,6 +42,10 @@ const SOURCES: &[(&str, &str)] = &[
         include_str!("../src/unified_runtime/mod.rs"),
     ),
     (
+        "src/unified_runtime/mob_entry.rs",
+        include_str!("../src/unified_runtime/mob_entry.rs"),
+    ),
+    (
         "src/unified_runtime/builder.rs",
         include_str!("../src/unified_runtime/builder.rs"),
     ),

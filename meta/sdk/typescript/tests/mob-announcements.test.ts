@@ -189,6 +189,7 @@ function newRuntime(): InstanceType<typeof MetaRuntime> {
     consoleConfigPath: null,
     consoleRequireAppAuth: null,
     consoleReadOnly: null,
+    consoleListNestedMobs: null,
     consoleFetchTimeoutMs: null,
     gatingConfigPath: null,
     routingConfigPath: null,
@@ -625,7 +626,7 @@ describe("mob announcement exports", () => {
 describe("mob announcement capability seam", () => {
   it("detects sources and reads the announcements object", () => {
     const data = {
-      contract_version: "0.5.0",
+      contract_version: "0.6.0",
       methods: ["meta/mob_announcements/announce"],
       loaded_modules: [],
       feature_capabilities: ["mob_announcements.sources.v1"],
@@ -1116,7 +1117,7 @@ describe("MobHandle member, escalation and status reads", () => {
 
   it("status reads the mob announcement counts", () => {
     const data = {
-      contract_version: "0.5.0",
+      contract_version: "0.6.0",
       running: true,
       loaded_modules: [],
       mob_announcements: {
@@ -1350,7 +1351,7 @@ describe("MobHandle handling reads and awaiting handling", () => {
       handling: { pending: 2, handled: 9, handled_unverified: 1, unhandled: 3 },
       escalations: { open: 1, last_event_cursor: 4 },
     };
-    const data = { contract_version: "0.5.0", running: true, loaded_modules: [], mob_announcements: announcements };
+    const data = { contract_version: "0.6.0", running: true, loaded_modules: [], mob_announcements: announcements };
     const counts = (api.parseStatusResult(data) as any).mobAnnouncements;
     assert.equal(counts.members.unhandled_held, 5);
     assert.deepEqual(counts.handling, { pending: 2, handled: 9, handled_unverified: 1, unhandled: 3 });

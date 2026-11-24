@@ -2034,7 +2034,7 @@ async def test_live_open_typed_serializes_v1_and_returns_handle():
 
     handle, calls = make_mock_mob_handle({
         "meta/capabilities": {
-            "contract_version": "0.5.0",
+            "contract_version": "0.6.0",
             "methods": ["meta/live/open"],
             "loaded_modules": [],
             "feature_capabilities": [
@@ -2093,7 +2093,7 @@ async def test_live_open_typed_refuses_execution_identity_before_old_gateway_ope
 
     handle, calls = make_mock_mob_handle({
         "meta/capabilities": {
-            "contract_version": "0.5.0",
+            "contract_version": "0.6.0",
             "methods": ["meta/live/open"],
             "loaded_modules": [],
         }
@@ -2149,7 +2149,7 @@ async def test_strict_live_open_refuses_missing_server_target_identity():
 
     handle, _calls = make_mock_mob_handle({
         "meta/capabilities": {
-            "contract_version": "0.5.0",
+            "contract_version": "0.6.0",
             "methods": ["meta/live/open"],
             "loaded_modules": [],
             "feature_capabilities": ["live.execution_identity.v1"],
@@ -2209,7 +2209,7 @@ async def test_live_connect_orders_owner_readiness_answer_and_activation():
 
     handle, calls = make_mock_mob_handle({
         "meta/capabilities": {
-            "contract_version": "0.5.0",
+            "contract_version": "0.6.0",
             "methods": [],
             "loaded_modules": [],
             "feature_capabilities": [
@@ -2328,7 +2328,7 @@ async def test_live_connect_aborts_and_closes_pending_channel_when_owner_is_revo
 
     handle, calls = make_mock_mob_handle({
         "meta/capabilities": {
-            "contract_version": "0.5.0",
+            "contract_version": "0.6.0",
             "methods": [],
             "loaded_modules": [],
             "feature_capabilities": [

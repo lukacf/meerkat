@@ -37,6 +37,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   else changes: while the list stays that slow the run is held as before,
   and a list that answers in time decides as before.
 
+- The WorkGraph resume gate's unavailable reasons are the gate's own
+  sentences. A WorkGraph read that failed used to put the store's whole
+  error text into the reason, and a run's attention projection that does
+  not decode put the decoder's text there; a store may print a path or an
+  id in its error. The reason of a failed read now names the error's kind
+  (`store error`, `backing store unavailable`, `unsupported backend` and so
+  on) with the realm and the namespace, and the reason of a projection
+  that does not decode is one fixed sentence. The store's and the
+  decoder's own text is in the gate's log, in the warnings
+  `durable resume gate: a WorkGraph read failed` and
+  `durable resume gate: the run's WorkGraph attention projection does not
+  decode`. A reader that matched the old reason text for either case finds
+  it there. The verdicts are unchanged.
+
 ### Upgrade notes
 
 - Type checkers can now report mistakes that a `str` annotation

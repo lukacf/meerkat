@@ -1042,7 +1042,7 @@ describe("ConversationQuestionSets", () => {
     expect(dismissed.queryByTestId(`question-set:${PENDING_ID}`)).toBeNull();
   });
 
-  it("keeps an answered set as a folded receipt that opens to its questions and the answers given", () => {
+  it("keeps an answered set as one row that shows its questions and the answers given", () => {
     // The conversation names the sets it places after a turn.
     const view = inConversation(
       answered(),
@@ -1051,12 +1051,13 @@ describe("ConversationQuestionSets", () => {
     expect(view.queryByTestId(`question-set:${PENDING_ID}`)).toBeNull();
     const receipt = view.getByTestId(`question-set-receipt:${PENDING_ID}`) as HTMLDetailsElement;
     expect(receipt.tagName).toBe("DETAILS");
-    expect(receipt.open).toBe(false);
+    // Shown open: the questions and the answers are read without a click.
+    expect(receipt.open).toBe(true);
     const line = receipt.querySelector("summary")?.textContent ?? "";
     expect(line).toContain("Answered");
     expect(line).toContain("Release plan");
-    // Opened, it reads as the questions with the answers given: the one
-    // answered, and the other as not answered.
+    // It reads as the questions with the answers given: the one answered,
+    // and the other as not answered.
     expect(receipt.textContent).toContain("Which region goes first?");
     expect(receipt.textContent).toContain("Europe");
     expect(receipt.textContent).toContain("When should it start?");
@@ -1070,6 +1071,41 @@ describe("ConversationQuestionSets", () => {
     // A turn the conversation places nothing after shows none.
     const other = inConversation(answered(), <ConversationApprovals approvalIdentity={IDENTITY} interactionIds={[]} questionReceiptIds={[]} />);
     expect(other.queryByTestId(`question-set-receipt:${PENDING_ID}`)).toBeNull();
+  });
+
+  it("reads the answered row as each question with its answer, to a reader and to assistive technology, with nothing to act on", () => {
+    const view = inConversation(
+      answered(),
+      <ConversationApprovals approvalIdentity={IDENTITY} interactionIds={[]} questionReceiptIds={[PENDING_ID]} />,
+    );
+    const receipt = view.getByTestId(`question-set-receipt:${PENDING_ID}`) as HTMLDetailsElement;
+    // A native disclosure: its line comes first, takes the keyboard's
+    // focus as any summary does, and says what the row is.
+    const line = receipt.firstElementChild as HTMLElement;
+    expect(line.tagName).toBe("SUMMARY");
+    expect(line.getAttribute("tabindex")).toBeNull();
+    expect(line.getAttribute("role")).toBeNull();
+    expect([...line.children].map((part) => part.textContent)).toEqual(["Answered", "Release plan", "2 questions"]);
+    // On arrival the questions and the answers are in the row, open.
+    expect(receipt.open).toBe(true);
+    // A description list: each question is a term and its answer the
+    // definition that follows it, which is how a screen reader says them.
+    const list = receipt.querySelector("dl") as HTMLElement;
+    expect([...list.children].map((part) => `${part.tagName}:${part.textContent}`)).toEqual([
+      "DT:Which region goes first?", "DD:Europe",
+      "DT:When should it start?", "DD:Not answered",
+    ]);
+    expect(within(receipt).getAllByRole("term").map((term) => term.textContent)).toEqual(["Which region goes first?", "When should it start?"]);
+    expect(within(receipt).getAllByRole("definition").map((answer) => answer.textContent)).toEqual(["Europe", "Not answered"]);
+    // Nothing in the row is kept from assistive technology.
+    expect(receipt.querySelector("[aria-hidden='true'], [hidden], [inert]")).toBeNull();
+    // Read-only: no field, no button, no link, nothing to edit.
+    expect(receipt.querySelector("input, textarea, select, button, a[href], [contenteditable], [role='button'], [role='radio'], [role='textbox']")).toBeNull();
+    // The line folds the row and opens it again; folded, the row is still there.
+    fireEvent.click(line);
+    expect(receipt.open).toBe(false);
+    fireEvent.click(line);
+    expect(receipt.open).toBe(true);
   });
 
   // Sets that still need the person stay in the active area whatever

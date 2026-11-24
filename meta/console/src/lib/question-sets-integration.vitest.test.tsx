@@ -328,9 +328,9 @@ describe("an answered question set in the agent's chat", () => {
     const second = await laterTurn(gatewayOf);
     await waitFor(() => expect(receipts().length).toBe(1));
     const receipt = receipts()[0];
-    // Folded: one line. Its questions and the answers given are inside it.
+    // One row, shown open: its line, the question and the answer given.
     expect(receipt.tagName).toBe("DETAILS");
-    expect((receipt as HTMLDetailsElement).open).toBe(false);
+    expect((receipt as HTMLDetailsElement).open).toBe(true);
     expect(receipt.querySelector("summary")?.textContent).toContain("Answered");
     expect(receipt.querySelector("summary")?.textContent).toContain("Release plan");
     expect(receipt.textContent).toContain("Which region goes first?");
@@ -342,6 +342,53 @@ describe("an answered question set in the agent's chat", () => {
     // Nothing of it can be sent again.
     expect(within(receipt).queryByRole("radio") === null).toBe(true);
     expect(within(receipt).queryByRole("button", { name: "Send answers" }) === null).toBe(true);
+  });
+
+  it("shows an answered set once, as a read-only row of the question and the answer where it was answered, and never below the turns that follow", async () => {
+    const gatewayOf = chatGateway();
+    render(<ConsoleApp baseUrl="" transport={gatewayOf.fake} />);
+    // While it is open the set can be answered, below the newest turn.
+    const card = await answerInChat();
+    expect(within(card).getByRole("button", { name: "Send answers" }) !== null).toBe(true);
+    expect(receipts().length).toBe(0);
+    sendAnswers(card);
+    await waitFor(() => expect(gatewayOf.decided.length).toBe(1));
+    await waitFor(() => expect(receipts().length).toBe(1));
+    const transcript = () => screen.getByLabelText("Conversation transcript");
+    const count = (words: string) => (transcript().textContent ?? "").split(words).length - 1;
+    const row = () => {
+      const receipt = receipts()[0] as HTMLDetailsElement;
+      return {
+        open: receipt.open,
+        asked: [...receipt.querySelectorAll("dt")].map((term) => term.textContent),
+        answered: [...receipt.querySelectorAll("dd")].map((answer) => answer.textContent),
+        controls: receipt.querySelectorAll("input, textarea, select, button, a[href], [contenteditable]").length,
+      };
+    };
+    const answeredRow = { open: true, asked: ["Which region goes first?"], answered: ["Europe"], controls: 0 };
+    expect(row()).toEqual(answeredRow);
+    // Two later turns: still one row, where it was, and the question is
+    // nowhere else in the chat; nothing of the set stands below them.
+    await laterTurn(gatewayOf);
+    await act(async () => { gatewayOf.add("turn-3", gatewayOf.clock() + 120_000, "And after Europe?", "The United States follow."); });
+    const last = await screen.findByTestId(`chat-turn:${identity}:2`);
+    await act(async () => { await new Promise((resolve) => window.setTimeout(resolve, 30)); });
+    expect(cards().length).toBe(0);
+    expect(receipts().length).toBe(1);
+    expect(row()).toEqual(answeredRow);
+    expect(count("Which region goes first?")).toBe(1);
+    expect(screen.queryByRole("button", { name: "Send answers" }) === null).toBe(true);
+    expect(screen.queryByRole("radio", { name: "Europe" }) === null).toBe(true);
+    const receipt = receipts()[0];
+    const first = await chat();
+    const second = await screen.findByTestId(`chat-turn:${identity}:1`);
+    expect(first.compareDocumentPosition(receipt) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(receipt.compareDocumentPosition(second) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(receipt.compareDocumentPosition(last) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // Below the newest turn: no question set, open or answered.
+    const below = [...transcript().querySelectorAll("[data-testid^='question-set']")]
+      .filter((element) => Boolean(last.compareDocumentPosition(element) & Node.DOCUMENT_POSITION_FOLLOWING) && !last.contains(element));
+    expect(below.map((element) => element.getAttribute("data-testid"))).toEqual([]);
   });
 
   it("keeps the receipt above the turn its answers start, which begins when the gateway decides", async () => {

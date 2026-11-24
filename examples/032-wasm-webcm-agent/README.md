@@ -47,8 +47,11 @@ a `dist/` built that way, rotate those keys; see the
 [known issue on the 0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/v0.9.14).
 
 Use `./examples.sh --clean` to force a fresh download/rebuild.
-The download cache is reused only when both WebCM files are nonempty; failed
-downloads remain unpromoted and a subsequent launch retries the pair.
+WebCM downloads use Node 22+ and a [pinned upstream revision](https://github.com/edubart/webcm/commit/8afdc285bc278ef1798d0604f83491d14e83c8cf).
+The helper checks both file lengths and Git blob IDs before installing or
+reusing the files; it never falls back to the latest build. A partial or
+corrupt cache stops startup: use `./examples.sh --clean` to replace it.
+These checks identify the committed files, not how they were built.
 
 ## Architecture
 

@@ -9,7 +9,15 @@
 # only for an approver who is still current, the executed fact settles it at
 # any time, and a release at or after the deadline records the expiry.
 #
-# usage: durable_decision_audit.sh <max-steps> [--mutants] [extra tlc args...]
+# usage: durable_decision_audit.sh <max-steps> [--mutants]
+#                                  [--part space|witnesses|mutants]
+#                                  [extra tlc args...]
+#
+# --part space runs only the whole-space run, --part witnesses only the
+# witness runs and --part mutants only the seeded defects; with no --part it
+# runs the space, the witnesses and, with --mutants, the defects, in that
+# order. No part reads another's output, and the canonical lane runs the
+# three parts in three shards.
 #
 # Derives the TLC config from the generated ci.cfg next to this script (every
 # generated constant and invariant, unchanged), then adds the audit's step
@@ -127,14 +135,48 @@
 # as TLC INCOMPLETE.
 set -euo pipefail
 
-usage="usage: durable_decision_audit.sh <max-steps> [--mutants] [extra tlc args...]"
+usage="usage: durable_decision_audit.sh <max-steps> [--mutants] [--part space|witnesses|mutants] [extra tlc args...]"
 max_steps="${1:?${usage}}"
 shift
 run_mutants=false
-if [[ "${1:-}" == "--mutants" ]]; then
-  run_mutants=true
-  shift
-fi
+part="all"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --mutants)
+      run_mutants=true
+      shift
+      ;;
+    --part)
+      part="${2:-}"
+      if [[ "${part}" != "space" && "${part}" != "witnesses" && "${part}" != "mutants" ]]; then
+        echo "error: --part needs space, witnesses or mutants, got '${part}'" >&2
+        exit 2
+      fi
+      shift 2
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+# A part runs alone, whatever else the command line names.
+run_space=true
+run_witnesses=true
+case "${part}" in
+  space)
+    run_witnesses=false
+    run_mutants=false
+    ;;
+  witnesses)
+    run_space=false
+    run_mutants=false
+    ;;
+  mutants)
+    run_space=false
+    run_witnesses=false
+    run_mutants=true
+    ;;
+esac
 if ! [[ "${max_steps}" =~ ^[0-9]+$ ]] || (( max_steps < 6 )); then
   echo "error: max-steps must be an integer >= 6 (the retried execution and the delivered notice need 6 machine steps)" >&2
   exit 2
@@ -338,74 +380,78 @@ run_tlc() {
   return "${status}"
 }
 
-safety_cfg="${work_dir}/safety.cfg"
-write_cfg "${safety_cfg}" "" ""
-safety_status=0
-run_tlc safety "${safety_cfg}" -coverage 1 "$@" || safety_status=$?
-safety_log="${work_dir}/safety.log"
-cat "${safety_log}"
-if [[ "${safety_status}" != "0" ]] \
-  || ! grep -q "Model checking completed. No error has been found." "${safety_log}"; then
-  echo "error: durable decision audit failed (tlc exit ${safety_status}, bound ${max_steps})" >&2
-  exit 1
-fi
-
-distinct="$(sed -nE 's/^[0-9]+ states generated, ([0-9]+) distinct states found, 0 states left on queue\.$/\1/p' \
-  "${safety_log}" | tail -1)"
-if [[ -z "${distinct}" ]]; then
-  echo "error: the safety run reported no final distinct-state count" >&2
-  exit 1
-fi
-if (( max_steps >= default_steps && distinct < min_distinct_states )); then
-  echo "error: safety run: ${distinct} distinct states, below the floor ${min_distinct_states} (90% of ${safety_states})" >&2
-  exit 1
-fi
-echo "safety distinct states: ${distinct} (floor ${min_distinct_states} at bound >= ${default_steps})"
-
-# TLC prints a coverage block every minute and one at the end; read the
-# last. An action's line is
-# `<Action line L, col C to line L, col C of module durable_decision_audit>: D:T`,
-# with D the new distinct states it found and T the successor states it
-# generated; an action that fires only into known states has D = 0, so T
-# counts.
-coverage="${work_dir}/safety-coverage.txt"
-awk '/^The coverage statistics at / { block = ""; next } { block = block $0 "\n" } END { printf "%s", block }' \
-  "${safety_log}" > "${coverage}"
-for action in "${covered_actions[@]}"; do
-  generated="$(awk -v head="<${action} line " '
-    index($0, head) == 1 && $0 ~ / of module durable_decision_audit>: [0-9]+:[0-9]+$/ {
-      split($NF, counts, ":"); total += counts[2]; found = 1
-    }
-    END { if (found) print total }' "${coverage}")"
-  if [[ -z "${generated}" || "${generated}" == "0" ]]; then
-    echo "error: safety run: ${action} never fired (coverage '${generated:-absent}')" >&2
+if [[ "${run_space}" == "true" ]]; then
+  safety_cfg="${work_dir}/safety.cfg"
+  write_cfg "${safety_cfg}" "" ""
+  safety_status=0
+  run_tlc safety "${safety_cfg}" -coverage 1 "$@" || safety_status=$?
+  safety_log="${work_dir}/safety.log"
+  cat "${safety_log}"
+  if [[ "${safety_status}" != "0" ]] \
+    || ! grep -q "Model checking completed. No error has been found." "${safety_log}"; then
+    echo "error: durable decision audit failed (tlc exit ${safety_status}, bound ${max_steps})" >&2
     exit 1
   fi
-  echo "covered ${action}: ${generated} successor states"
-done
 
-for witness in HumanApprovalExecutedAndNoticed RetriedAfterRelease ExecutionRefused \
-  EscalatedThenHumanApproved StaleDigestThenApproved DecideAtDeadlineExpires \
-  WithdrawnThenDecideRefused SelfApprovalThenAnotherApproves CommitThenRecordReplayed \
-  HoldReplayedAndConflicting PermitAcrossDeadlineExecuted ReleaseAfterDeadlineExpires \
-  AuthorizeAtDeadlineRefused DecidedBeforePresentationRefused ApprovedAtThePresentation \
-  ApproverRevokedEndsRefused RevokedPermitSettledExecuted CleanupSettledAfterExecution \
-  CleanupSettledAfterExpiry ReplySettledThenAnotherRefused LinkedPresentationThenApproved \
-  UncountedCarriedThenApproved; do
-  cfg="${work_dir}/witness-${witness}.cfg"
-  write_cfg "${cfg}" "" "
-  NotAuditWitness${witness}"
-  status=0
-  run_tlc "witness-${witness}" "${cfg}" "$@" || status=$?
-  log="${work_dir}/witness-${witness}.log"
-  if ! grep -q "Error: Invariant NotAuditWitness${witness} is violated" "${log}"; then
-    cat "${log}"
-    echo "error: witness ${witness} is not reachable at bound ${max_steps} (tlc exit ${status})" >&2
+  distinct="$(sed -nE 's/^[0-9]+ states generated, ([0-9]+) distinct states found, 0 states left on queue\.$/\1/p' \
+    "${safety_log}" | tail -1)"
+  if [[ -z "${distinct}" ]]; then
+    echo "error: the safety run reported no final distinct-state count" >&2
     exit 1
   fi
-  depth="$(grep -cE '^State [0-9]+:' "${log}" || true)"
-  echo "witness ${witness} reached in ${depth} states"
-done
+  if (( max_steps >= default_steps && distinct < min_distinct_states )); then
+    echo "error: safety run: ${distinct} distinct states, below the floor ${min_distinct_states} (90% of ${safety_states})" >&2
+    exit 1
+  fi
+  echo "safety distinct states: ${distinct} (floor ${min_distinct_states} at bound >= ${default_steps})"
+
+  # TLC prints a coverage block every minute and one at the end; read the
+  # last. An action's line is
+  # `<Action line L, col C to line L, col C of module durable_decision_audit>: D:T`,
+  # with D the new distinct states it found and T the successor states it
+  # generated; an action that fires only into known states has D = 0, so T
+  # counts.
+  coverage="${work_dir}/safety-coverage.txt"
+  awk '/^The coverage statistics at / { block = ""; next } { block = block $0 "\n" } END { printf "%s", block }' \
+    "${safety_log}" > "${coverage}"
+  for action in "${covered_actions[@]}"; do
+    generated="$(awk -v head="<${action} line " '
+      index($0, head) == 1 && $0 ~ / of module durable_decision_audit>: [0-9]+:[0-9]+$/ {
+        split($NF, counts, ":"); total += counts[2]; found = 1
+      }
+      END { if (found) print total }' "${coverage}")"
+    if [[ -z "${generated}" || "${generated}" == "0" ]]; then
+      echo "error: safety run: ${action} never fired (coverage '${generated:-absent}')" >&2
+      exit 1
+    fi
+    echo "covered ${action}: ${generated} successor states"
+  done
+fi
+
+if [[ "${run_witnesses}" == "true" ]]; then
+  for witness in HumanApprovalExecutedAndNoticed RetriedAfterRelease ExecutionRefused \
+    EscalatedThenHumanApproved StaleDigestThenApproved DecideAtDeadlineExpires \
+    WithdrawnThenDecideRefused SelfApprovalThenAnotherApproves CommitThenRecordReplayed \
+    HoldReplayedAndConflicting PermitAcrossDeadlineExecuted ReleaseAfterDeadlineExpires \
+    AuthorizeAtDeadlineRefused DecidedBeforePresentationRefused ApprovedAtThePresentation \
+    ApproverRevokedEndsRefused RevokedPermitSettledExecuted CleanupSettledAfterExecution \
+    CleanupSettledAfterExpiry ReplySettledThenAnotherRefused LinkedPresentationThenApproved \
+    UncountedCarriedThenApproved; do
+    cfg="${work_dir}/witness-${witness}.cfg"
+    write_cfg "${cfg}" "" "
+    NotAuditWitness${witness}"
+    status=0
+    run_tlc "witness-${witness}" "${cfg}" "$@" || status=$?
+    log="${work_dir}/witness-${witness}.log"
+    if ! grep -q "Error: Invariant NotAuditWitness${witness} is violated" "${log}"; then
+      cat "${log}"
+      echo "error: witness ${witness} is not reachable at bound ${max_steps} (tlc exit ${status})" >&2
+      exit 1
+    fi
+    depth="$(grep -cE '^State [0-9]+:' "${log}" || true)"
+    echo "witness ${witness} reached in ${depth} states"
+  done
+fi
 
 if [[ "${run_mutants}" == "true" ]]; then
   # usage: mutate <name> <expected invariant> <edits file>
@@ -711,4 +757,8 @@ EOF
   frame_update SettleReplyRefusedNotExecutedApproved reply_digest 'Some(digest)' > "${edits}"
   mutate reply_before_execution AuditReplySettledOnce "${edits}"
 fi
-echo "durable decision audit passed at model_step_count <= ${max_steps}"
+if [[ "${part}" == "all" ]]; then
+  echo "durable decision audit passed at model_step_count <= ${max_steps}"
+else
+  echo "durable decision audit ${part} part passed at model_step_count <= ${max_steps}"
+fi

@@ -6,12 +6,14 @@
 //! Keep runtime and store mechanics out of this file: the machine's semantics
 //! have exactly one home.
 //!
-//! Ownership: a quarantined persisted mob store is mob domain authority (the
-//! restore of a realm's persisted mobs). Mob owns it. The mob-set state in
-//! `meerkat-mob-mcp` runs the restores the machine admits and holds one
-//! record per quarantined store in memory, but does not own the domain.
+//! Ownership: one mob store's stay in a host's mob set (dormant, loading,
+//! managed, unloading, held, quarantined, retrying, gone) is mob domain
+//! authority. Mob owns it. The mob-set state in `meerkat-mob-mcp` holds one
+//! record per store in memory, runs the loads, re-attempts and unloads the
+//! machine admits, and reads its sets from the records, but does not own the
+//! domain.
 //!
-//! The machine is record-scoped and volatile: one machine state per
-//! quarantined store, never persisted.
+//! The machine is record-scoped and volatile: one machine state per store,
+//! never persisted.
 
 pub use meerkat_machine_schema::catalog::dsl::mob_store_restore_lifecycle::*;

@@ -475,7 +475,7 @@ async def test_a_subscription_method_on_an_older_meta_keeps_the_plain_error():
 
 def test_capabilities_detect_sources_and_read_the_announcements_object():
     from meerkat_meta import CapabilitiesResult, supports_announcement_sources
-    data = {"contract_version": "0.5.0", "methods": ["meta/mob_announcements/announce"],
+    data = {"contract_version": "0.6.0", "methods": ["meta/mob_announcements/announce"],
             "loaded_modules": [], "feature_capabilities": ["mob_announcements.sources.v1"],
             "mob_announcements": {"sources": "v1",
                                   "local_delivery": {"kind": "refused", "cause": "governed_runtime"},
@@ -922,7 +922,7 @@ async def test_a_source_health_reads_its_escalations_and_monitoring():
 
 def test_status_reads_the_mob_announcement_counts():
     from meerkat_meta import StatusResult
-    data = {"contract_version": "0.5.0", "running": True, "loaded_modules": [],
+    data = {"contract_version": "0.6.0", "running": True, "loaded_modules": [],
             "mob_announcements": {"sources": {"active": 2, "paused": 1, "failing": 1, "stale": 0},
                                   "members": {"suspended": 1, "unhandled_held": 0},
                                   "escalations": {"open": 3, "last_event_cursor": 12}}}
@@ -1119,7 +1119,7 @@ def test_status_reads_the_handling_counts():
                      "members": {"suspended": 0, "unhandled_held": 5},
                      "handling": {"pending": 2, "handled": 9, "handled_unverified": 1, "unhandled": 3},
                      "escalations": {"open": 1, "last_event_cursor": 4}}
-    data = {"contract_version": "0.5.0", "running": True, "loaded_modules": [], "mob_announcements": announcements}
+    data = {"contract_version": "0.6.0", "running": True, "loaded_modules": [], "mob_announcements": announcements}
     counts = StatusResult.from_dict(data).mob_announcements
     assert counts.members["unhandled_held"] == 5
     assert counts.handling == {"pending": 2, "handled": 9, "handled_unverified": 1, "unhandled": 3}

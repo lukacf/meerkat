@@ -656,7 +656,7 @@ test("createHttpConsoleTransport uses stock console routes and typed RPC methods
       body: typeof init?.body === "string" ? init.body : undefined,
     });
     if (requestUrl.endsWith(CONSOLE_REST_PATHS.experience)) {
-      return new Response(JSON.stringify({ contract_version: "0.5.0" }), { status: 200 });
+      return new Response(JSON.stringify({ contract_version: "0.6.0" }), { status: 200 });
     }
     if (requestUrl.endsWith(CONSOLE_REST_PATHS.modules)) {
       return new Response(JSON.stringify({ modules: ["mob"] }), { status: 200 });
@@ -710,7 +710,7 @@ test("createHttpConsoleTransport uses stock console routes and typed RPC methods
   try {
     Date.now = () => Number.parseInt("http", 36);
     const transport = createHttpConsoleTransport({ baseUrl: "http://console.test" });
-    assert.equal((await transport.loadExperience()).contract_version, "0.5.0");
+    assert.equal((await transport.loadExperience()).contract_version, "0.6.0");
     assert.deepEqual(await transport.loadModules?.(), { modules: ["mob"] });
     assert.deepEqual(await transport.capabilities(), {
       methods: [CONSOLE_RPC_METHODS.send, CONSOLE_RPC_METHODS.inspectIdentity],

@@ -3,7 +3,7 @@ set -euo pipefail
 
 pack_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 examples_dir="$(cd "${pack_dir}/.." && pwd)"
-repo_root="$(cd "${examples_dir}/.." && pwd)"
+repo_root="$(cd "${examples_dir}/../.." && pwd)"
 
 # Meerkat 0.7's machine-authority code allocates huge debug-build stack
 # frames. The mdm_mob_target binary sizes its own threads; this export is

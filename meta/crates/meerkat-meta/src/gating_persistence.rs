@@ -162,4 +162,11 @@ impl GatingStatePersistence {
     pub(crate) fn stop(&self) {
         self.stop.notify_one();
     }
+
+    /// Test seam: no write of the state goes on while the returned guard
+    /// lives; a write that is asked for meanwhile waits for it.
+    #[cfg(test)]
+    pub(crate) async fn hold_writes_for_test(&self) -> tokio::sync::MutexGuard<'_, Option<String>> {
+        self.written.lock().await
+    }
 }

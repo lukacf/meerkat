@@ -4324,6 +4324,140 @@ async fn a_wake_whose_build_fails_with_structured_data_keeps_it_on_the_restore_f
     }
 }
 
+/// The build refusal of a member whose reasoning effort level its route does
+/// not take, as a session service answers it.
+fn level_build_refusal() -> SessionError {
+    let refusal: meerkat_core::ReasoningEffortRefusal = serde_json::from_value(serde_json::json!({
+        "requested": "max", "provider": "anthropic", "model": "test-anthropic-default",
+        "route": {"backend": "anthropic_api", "api": "messages"},
+        "reason": "unsupported_level",
+        "supported": ["low", "medium", "high"], "facts": "catalog",
+    }))
+    .expect("a level refusal");
+    SessionError::Agent(meerkat_core::error::AgentError::ReasoningEffortRefused(
+        Box::new(refusal),
+    ))
+}
+
+/// A Dormant member whose build is refused for its reasoning effort level,
+/// woken through the session-owner wake registry: the path a session-keyed
+/// surface takes (an MCP `meerkat_resume` or `meerkat_comms_send`, a REST or
+/// JSON-RPC request on the member's session). The wake answers an internal
+/// agent error whose text ends with the refusal's sentence; on the wire
+/// that is the agent error's code with no data. The typed refusal data the
+/// mob keeps on its own restore failure (the member-keyed wake) is not
+/// handed to the session-keyed caller. A pin of what is, observed before it
+/// was asserted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_session_keyed_wake_whose_build_is_refused_for_its_level_answers() {
+    use meerkat_core::error::AgentError;
+    use meerkat_core::session_owner_wake::SessionOwnerWakeRegistry;
+
+    const REFUSAL_SENTENCE: &str = "session error: agent error: reasoning effort 'max' is not \
+        supported by anthropic model 'test-anthropic-default' on anthropic_api/messages; \
+        supported: low, medium, high";
+
+    let mob = DormantMemberMob::new("wake-level-refusal-session-keyed").await;
+    mob.service
+        .set_create_session_failure_error(&mob.session, level_build_refusal)
+        .await;
+    let registry = SessionOwnerWakeRegistry::global();
+    println!("OBSERVED owned: {}", registry.owned(&mob.session));
+    assert!(
+        registry.owned(&mob.session),
+        "the running mob routes its Dormant member's session"
+    );
+
+    // The build's refusal by itself carries its typed data on the wire.
+    let own = meerkat_contracts::WireError::from(level_build_refusal());
+    println!(
+        "OBSERVED the build refusal's own wire form: {}",
+        wire_lines(level_build_refusal())
+    );
+    assert_eq!(
+        (
+            own.code.jsonrpc_code(),
+            own.details
+                .as_ref()
+                .and_then(|data| data["kind"].as_str().map(str::to_string)),
+        ),
+        (-32013, Some("reasoning_effort_refused".to_string())),
+        "(code, data kind) of the refusal itself"
+    );
+
+    // Woken by its session, the member's failed build is answered as an
+    // internal agent error: a text that ends with the refusal's sentence,
+    // and no data. The first wake and a later one answer alike.
+    let opening = format!(
+        "the member owning session {} could not be woken: ",
+        mob.session
+    );
+    for wake in ["first", "second"] {
+        let answer = tokio::time::timeout(LAZY_STEP, registry.wake(&mob.session))
+            .await
+            .expect("the session-keyed wake answers");
+        println!("OBSERVED session-keyed wake ({wake}): {answer:?}");
+        let Some(Err(SessionError::Agent(AgentError::InternalError(text)))) = answer else {
+            panic!("{wake}: the session-keyed wake fails as an internal agent error");
+        };
+        assert!(
+            text.starts_with(&opening) && text.ends_with(REFUSAL_SENTENCE),
+            "{wake}: {text}"
+        );
+        let wire = meerkat_contracts::WireError::from(SessionError::Agent(
+            AgentError::InternalError(text),
+        ));
+        println!(
+            "OBSERVED session-keyed wake ({wake}) on the wire: code={} message={:?} data={}",
+            wire.code.jsonrpc_code(),
+            wire.message,
+            wire.details
+                .as_ref()
+                .map_or_else(|| "none".to_string(), ToString::to_string)
+        );
+        assert_eq!(
+            (wire.code.jsonrpc_code(), wire.details),
+            (-32013, None),
+            "{wake}: (code, data): the typed refusal is not handed on: {}",
+            wire.message
+        );
+    }
+
+    // Woken by its identity, the same member's failure keeps the data.
+    let member_keyed =
+        tokio::time::timeout(LAZY_STEP, mob.handle.ensure_member_live(&mob.identity))
+            .await
+            .expect("the member-keyed wake answers");
+    println!("OBSERVED member-keyed wake: {member_keyed:?}");
+    let Err(error) = member_keyed else {
+        panic!("the member-keyed wake fails");
+    };
+    assert!(
+        matches!(error, MobError::MemberRestoreFailed { .. }),
+        "{error:?}"
+    );
+    let kept = restore_failure_cause_data(&error);
+    println!("OBSERVED member-keyed wake's kept data: {kept:?}");
+    assert_eq!(
+        kept.as_ref().and_then(|data| data["kind"].as_str()),
+        Some("reasoning_effort_refused"),
+        "the member-keyed restore failure keeps the refusal's data: {kept:?}"
+    );
+}
+
+/// The wire form of a session error, as the MCP server makes a tool error
+/// of a failed owner wake (`WireError::from`): JSON-RPC code, message, data.
+fn wire_lines(error: SessionError) -> String {
+    let wire = meerkat_contracts::WireError::from(error);
+    format!(
+        "code={} message={:?} data={}",
+        wire.code.jsonrpc_code(),
+        wire.message,
+        wire.details
+            .map_or_else(|| "none".to_string(), |data| data.to_string())
+    )
+}
+
 /// A Dormant member whose wake fails because its build fails without
 /// structured data (the only form a restore failure had before it kept its
 /// cause's data): the restore failure carries none. A pin, on both sides of

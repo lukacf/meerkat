@@ -147,6 +147,30 @@ pub(crate) async fn next_until_stream_shutdown<T, F: Future<Output = Option<T>>>
     until_stream_shutdown(shutdown, next).await.flatten()
 }
 
+/// The mob machine's own word that the mob of a stream is going away: the
+/// admission state of the mob's actor, `None` while admission is open and
+/// then, for good, the reason it closed (a destroy, a stand-down, an
+/// unload). A stream of a mob other than the launch mob follows it.
+type StreamMobGone = tokio::sync::watch::Receiver<Option<meerkat_mob::MobAdmissionCloseReason>>;
+
+/// `next`, or `None` once the actor of the stream's mob closed its
+/// admission: the stream ends with its mob. `gone` is `None` for a stream
+/// of the launch mob and of a router built over one mob, which end as they
+/// always did. `next` must be cancellation-safe: the end drops it.
+async fn next_until_mob_gone<T, F: Future<Output = Option<T>>>(
+    gone: Option<&mut StreamMobGone>,
+    next: F,
+) -> Option<T> {
+    let Some(gone) = gone else {
+        return next.await;
+    };
+    tokio::select! {
+        biased;
+        _ = gone.wait_for(Option::is_some) => None,
+        item = next => item,
+    }
+}
+
 /// Whether the stream's caller is still authenticated. A stream checks it
 /// after the last await of a frame's processing, before it decides the
 /// frame. A caller no token identified always is.
@@ -332,6 +356,53 @@ fn workgraph_stream_allowed(view: &AccessView) -> bool {
     !view.enforced() || view.allows(ACTION_WORKGRAPH_VIEW)
 }
 
+/// Whether the caller of a stream of the mob `other` (none: the launch
+/// mob, which a route serves to every caller it lets in) may still address
+/// that mob, by `view` as it is now. The mob a stream's request names is
+/// judged with its caller when the stream opens ([`stream_mob_of_request`]);
+/// a stream that stays open asks this again after each refresh of its
+/// caller's view, beside its own grant, and ends when the answer is no: a
+/// rule that listed the mob was withdrawn, the caller is no administrator
+/// any more, or access came to be enforced. The client's reconnect is then
+/// answered for the mob as for an id no mob has.
+fn stream_mob_still_addressed(view: &AccessView, other: Option<&meerkat_mob::MobId>) -> bool {
+    other.is_none_or(|mob_id| view.may_address_other_mob(mob_id))
+}
+
+/// [`stream_mob_still_addressed`] at a stream's opening, asked on the live
+/// view the stream decides under. That view is built from the rules
+/// committed when the stream opens, which may be later ones than the
+/// request's view held when the mob was judged with the caller
+/// ([`stream_mob_of_request`]): the resolve that loads a mob lies between.
+/// A caller who may not address the mob by the live view is answered as
+/// for an id no mob has, ahead of the stream's own grant, as at that
+/// judgement.
+fn stream_mob_addressed_at_its_opening(
+    live: Option<&LiveAccessView>,
+    other: Option<&meerkat_mob::MobId>,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    match (live, other) {
+        (Some(live), Some(mob_id)) => stream_mob_addressed_by(live.view(), mob_id),
+        _ => Ok(()),
+    }
+}
+
+/// Whether the caller whose view is `view` may address the mob `mob_id`, a
+/// mob other than the launch mob, for a stream of it: a caller who may not
+/// is answered as for an id no mob has.
+fn stream_mob_addressed_by(
+    view: &AccessView,
+    mob_id: &meerkat_mob::MobId,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    if stream_mob_still_addressed(view, Some(mob_id)) {
+        Ok(())
+    } else {
+        Err(mob_refusal_over_http(
+            crate::rpc::mob_addressing::mob_not_served(mob_id.as_str()),
+        ))
+    }
+}
+
 pub fn agent_event_sse(interaction_id: &str, seq: u64, event: &AgentEvent) -> Event {
     let event_name = agent_event_name(event);
     let payload = serde_json::to_string(&console_agent_event_payload(event))
@@ -353,6 +424,182 @@ fn agent_event_name(event: &AgentEvent) -> String {
                 .map(ToString::to_string)
         })
         .unwrap_or_else(|| "agent_event".to_string())
+}
+
+/// The mob an event stream request names in its `mob_id` query parameter
+/// (`crate::rpc::mob_addressing`), for a route whose router was built over
+/// ONE mob's handles: a router a host builds by hand from the public router
+/// functions, which take that mob's own closures and handles. A request
+/// without the parameter names no mob and reads that mob's stream.
+///
+/// Such a route can read no other mob, so it serves the mob it was built
+/// over only, to every caller: the id is judged with the route's caller as
+/// one who addresses that mob alone
+/// ([`crate::rpc::mob_addressing::LaunchMobOnly`]), right after the route
+/// knows its caller and before its own rules, and a request that names any
+/// other id is refused before a stream opens and before anything is asked
+/// about that id, an administrator's included. The refusal is the one
+/// answer a door that has callers gives: HTTP 404 with the id the request
+/// named and no other mob. The routers a [`crate::UnifiedRuntime`] builds
+/// read the mob the request names instead ([`stream_mob_of_request`]).
+///
+/// A route whose router carries no resolver knows only the mob it was
+/// built over (`own_mob`): it serves it by its id and by no id, refuses
+/// every other id, and says so once in the log; a route that knows no mob
+/// by its id refuses every id.
+async fn refuse_stream_of_another_mob(
+    uri: &Uri,
+    resolver: Option<&crate::unified_runtime::MobResolver>,
+    own_mob: Option<&meerkat_mob::MobId>,
+    caller: SseCaller,
+) -> Result<SseCaller, (StatusCode, Json<Value>)> {
+    crate::rpc::mob_addressing::judge_served_mob(
+        &mob_named_in_query(uri),
+        resolver,
+        own_mob,
+        crate::rpc::mob_addressing::LaunchMobOnly(caller),
+        "event stream",
+    )
+    .await
+    .map(|(_, crate::rpc::mob_addressing::LaunchMobOnly(caller))| caller)
+    .map_err(mob_refusal_over_http)
+}
+
+/// The mob a stream of a router the runtime built is read from: the mob
+/// its request names, resolved.
+pub(crate) struct StreamMob {
+    /// The resolved mob: everything the stream reads is this mob's.
+    resolved: crate::unified_runtime::ResolvedMob,
+    /// The mob's id when it is not the launch mob: what the stream records
+    /// and reads of an agent is keyed by it. A stream of the launch mob
+    /// records and reads as a host of one mob does.
+    other: Option<meerkat_mob::MobId>,
+    /// The stream's owner lease on a mob other than the launch mob, held
+    /// until the stream ends: the mob counts an open stream among its
+    /// owners, so it is not closed as an idle mob while one is open. The
+    /// launch mob is never unloaded and gets none.
+    owner: Option<meerkat_mob::MobHandle>,
+}
+
+impl StreamMob {
+    /// The mob's runtime wrapper.
+    fn mob_runtime(&self) -> &MobRuntime {
+        self.resolved.mob_runtime()
+    }
+
+    /// The mob's id when it is not the launch mob.
+    fn other_mob(&self) -> Option<&meerkat_mob::MobId> {
+        self.other.as_ref()
+    }
+
+    /// The stream's owner lease, to keep for the stream's life.
+    fn take_owner(&mut self) -> Option<meerkat_mob::MobHandle> {
+        self.owner.take()
+    }
+}
+
+/// Resolve the mob a stream request on a router the runtime built names
+/// in its `mob_id` query parameter, with the route's caller in hand. A
+/// request without the parameter, or with the launch mob's id, is for the
+/// launch mob and the caller is handed back as it came. Any other id is
+/// judged with the caller first ([`crate::rpc::mob_addressing::judge_named_mob`]):
+/// a caller who may not address it is refused before anything is asked
+/// about that mob, with the answer of an id no mob has; a caller who may
+/// is handed back seeing that mob, the mob is resolved (which loads a mob
+/// that is not loaded) and the stream takes an owner lease on it.
+///
+/// Every refusal is the one answer a door that has callers gives: HTTP 404
+/// with the id the request named and no other mob, also for a mob whose
+/// admission closed between its resolve and the lease (a mob that is being
+/// unloaded or destroyed).
+async fn stream_mob_of_request(
+    uri: &Uri,
+    resolver: &crate::unified_runtime::MobResolver,
+    caller: SseCaller,
+) -> Result<(StreamMob, SseCaller), (StatusCode, Json<Value>)> {
+    use crate::rpc::mob_addressing::{
+        AddressedMob, judge_named_mob, launch_mob_of, mob_not_served, mob_refusal_for_a_caller,
+    };
+
+    let named = mob_named_in_query(uri);
+    let launch_mob = launch_mob_of(resolver).await;
+    let (addressed, caller) =
+        judge_named_mob(&named, launch_mob.as_ref(), caller).map_err(mob_refusal_over_http)?;
+    let refused = |error: &crate::unified_runtime::MobResolveError| {
+        mob_refusal_over_http(mob_refusal_for_a_caller(error))
+    };
+    match addressed {
+        AddressedMob::Launch => {
+            let resolved = resolver
+                .resolve(None)
+                .await
+                .map_err(|error| refused(&error))?;
+            Ok((
+                StreamMob {
+                    resolved,
+                    other: None,
+                    owner: None,
+                },
+                caller,
+            ))
+        }
+        AddressedMob::Other(mob_id) => {
+            let resolved = resolver
+                .resolve(Some(&mob_id))
+                .await
+                .map_err(|error| refused(&error))?;
+            let owner = resolved
+                .mob_handle()
+                .acquire_owner()
+                .map_err(|_| mob_refusal_over_http(mob_not_served(mob_id.as_str())))?;
+            Ok((
+                StreamMob {
+                    resolved,
+                    other: Some(mob_id),
+                    owner: Some(owner),
+                },
+                caller,
+            ))
+        }
+    }
+}
+
+/// The answer of a stream route of a router the runtime built when its
+/// request carries no mob resolver. The runtime layers its resolver over
+/// every router it builds, so no request reaches this.
+fn stream_route_without_resolver() -> (StatusCode, Json<Value>) {
+    http_error(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "the event stream route has no mob resolver",
+    )
+}
+
+/// The mob a request names in its `mob_id` query parameter
+/// (`crate::rpc::mob_addressing`); a request without the parameter names no
+/// mob.
+pub(crate) fn mob_named_in_query(uri: &Uri) -> crate::rpc::mob_addressing::NamedMob {
+    let mob_id = uri.query().and_then(|query| {
+        form_urlencoded::parse(query.as_bytes())
+            .find(|(name, _)| name == "mob_id")
+            .map(|(_, value)| value.into_owned())
+    });
+    crate::rpc::mob_addressing::NamedMob::from_query(mob_id)
+}
+
+/// The answer of an HTTP route for a mob id it does not serve to its
+/// caller, from the refusal a door that has callers gives: 404 with the id
+/// the request named and no other mob.
+pub(crate) fn mob_refusal_over_http(
+    refusal: crate::rpc::JsonRpcError,
+) -> (StatusCode, Json<Value>) {
+    let data = refusal.data.unwrap_or(Value::Null);
+    (
+        StatusCode::NOT_FOUND,
+        Json(json!({
+            "error": crate::rpc::mob_addressing::FOREIGN_MOB_TARGET_KIND,
+            "requested_mob_id": data.get("requested_mob_id").cloned().unwrap_or(Value::Null),
+        })),
+    )
 }
 
 fn http_error(status: StatusCode, message: &str) -> (StatusCode, Json<Value>) {
@@ -411,6 +658,7 @@ fn project_sse_payload(
     payload: Value,
 ) -> Option<Value> {
     let mut projected = NewConsoleFrame {
+        mob_id: None,
         id: None,
         dedupe_key: format!("sse:{identity}:{kind}:{timestamp_ms}"),
         timestamp_ms,
@@ -438,6 +686,7 @@ fn project_sse_payload(
         projected.status = ConsoleFrameStatus::Redacted;
     }
     let frame = ConsoleFrame {
+        mob_id: projected.mob_id.clone(),
         id: projected.dedupe_key.clone(),
         cursor: ConsoleCursor::from(projected.dedupe_key.as_str()),
         dedupe_key: projected.dedupe_key.clone(),
@@ -533,22 +782,53 @@ fn agent_sse_resume_cursor(headers: &HeaderMap) -> meerkat_core::comms::SessionE
         )
 }
 
+/// The per-agent subscription of a router the runtime built: the stream of
+/// the agent of the given name in the resolved mob.
+pub(crate) type AgentEventSubscribeInMobFn = Arc<
+    dyn Fn(
+            crate::unified_runtime::ResolvedMob,
+            String,
+            meerkat_core::comms::SessionEventCursor,
+        ) -> AgentEventReplaySubscribeFuture
+        + Send
+        + Sync,
+>;
+
+/// What the per-agent stream route reads its streams from.
+#[derive(Clone)]
+enum AgentStreamSource {
+    /// One mob's own closures and handles: a router a host built by hand.
+    /// It serves that mob only.
+    Own(Box<AgentStreamOwn>),
+    /// The mob a request names, resolved by the host's resolver: a router
+    /// the runtime built. The attributes are primed from the resolved
+    /// mob's runtime and identity runtime.
+    Resolved(AgentEventSubscribeInMobFn),
+}
+
+/// What a per-agent stream router built over one mob holds of that mob.
+#[derive(Clone)]
+struct AgentStreamOwn {
+    subscribe_fn: AgentEventReplaySubscribeFn,
+    /// Live mob runtime used to prime the access attribute cache at
+    /// connection time (roster plus spawn-registered console metadata),
+    /// so label/role/lineage rules resolve without a prior
+    /// `/console/experience` call. `None` keeps the route behaviour
+    /// unchanged.
+    prime_runtime: Option<MobRuntime>,
+    /// Identity authority whose current runtime aliases the access
+    /// rules need to judge an alias as the member it names.
+    prime_identity_runtime: Option<Arc<crate::identity_first::IdentityRuntime>>,
+}
+
 #[derive(Clone)]
 struct AgentSseState {
-    subscribe_fn: AgentEventReplaySubscribeFn,
+    source: AgentStreamSource,
     decisions: Option<RuntimeDecisionState>,
     /// The Console's session fence record the route's token checks read.
     session_fences: ConsoleSessionFences,
     access: Option<AccessController>,
     visibility_policy: Arc<dyn ConsoleVisibilityPolicy>,
-    /// Live mob runtime used to prime the access attribute cache at
-    /// connection time (roster plus spawn-registered console metadata), so
-    /// label/role/lineage rules resolve without a prior
-    /// `/console/experience` call. `None` keeps the route behaviour unchanged.
-    prime_runtime: Option<MobRuntime>,
-    /// Identity authority whose current runtime aliases the access rules
-    /// need to judge an alias as the member it names.
-    prime_identity_runtime: Option<Arc<crate::identity_first::IdentityRuntime>>,
 }
 
 /// Applies no session fence; use the routers a [`crate::UnifiedRuntime`] builds,
@@ -589,31 +869,56 @@ pub(crate) fn agent_events_sse_router_with_access_and_priming(
     visibility_policy: Arc<dyn ConsoleVisibilityPolicy>,
     session_fences: ConsoleSessionFences,
 ) -> Router {
-    Router::new()
-        .route("/agents/{agent_id}/events", get(agent_events_sse_handler))
-        .with_state(AgentSseState {
+    agent_events_router(AgentSseState {
+        source: AgentStreamSource::Own(Box::new(AgentStreamOwn {
             subscribe_fn,
-            decisions,
-            session_fences,
-            access,
-            visibility_policy,
             prime_runtime,
             prime_identity_runtime,
-        })
+        })),
+        decisions,
+        session_fences,
+        access,
+        visibility_policy,
+    })
+}
+
+/// The per-agent stream router of a [`crate::UnifiedRuntime`]: it serves
+/// the mob a request names with `mob_id`, resolved by the resolver the
+/// runtime layers over its routers, and the launch mob for a request that
+/// names none. `subscribe_in` opens the stream of an agent of the resolved
+/// mob.
+pub(crate) fn agent_events_sse_router_of_resolved_mobs(
+    subscribe_in: AgentEventSubscribeInMobFn,
+    decisions: Option<RuntimeDecisionState>,
+    access: Option<AccessController>,
+    visibility_policy: Arc<dyn ConsoleVisibilityPolicy>,
+    session_fences: ConsoleSessionFences,
+) -> Router {
+    agent_events_router(AgentSseState {
+        source: AgentStreamSource::Resolved(subscribe_in),
+        decisions,
+        session_fences,
+        access,
+        visibility_policy,
+    })
+}
+
+/// The one mount of the per-agent stream route.
+fn agent_events_router(state: AgentSseState) -> Router {
+    Router::new()
+        .route("/agents/{agent_id}/events", get(agent_events_sse_handler))
+        .with_state(state)
 }
 
 async fn agent_events_sse_handler(
     State(state): State<AgentSseState>,
     shutdown: Option<axum::Extension<StreamShutdown>>,
+    resolver: Option<axum::Extension<crate::unified_runtime::MobResolver>>,
     headers: HeaderMap,
     uri: Uri,
     Path(agent_id): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<Value>)> {
-    let SseCaller {
-        audience,
-        mut authentication,
-        ..
-    } = sse_access_context(
+    let caller = sse_access_context(
         state.decisions.as_ref(),
         &state.session_fences,
         state.access.as_ref(),
@@ -621,6 +926,70 @@ async fn agent_events_sse_handler(
         &uri,
     )
     .map_err(|()| sse_unauthorized("agent events stream requires a valid auth token"))?;
+    let resolver = resolver.as_ref().map(|axum::Extension(resolver)| resolver);
+    // What the stream reads, and the mob it reads it of: the router's own
+    // mob, or the mob the request names. `owner` is the stream's lease on a
+    // mob other than the launch mob, kept until the stream ends.
+    let (subscribe_fn, prime_runtime, prime_identity_runtime, other_mob, owner, caller) =
+        match state.source {
+            AgentStreamSource::Own(own) => {
+                let AgentStreamOwn {
+                    subscribe_fn,
+                    prime_runtime,
+                    prime_identity_runtime,
+                } = *own;
+                let caller = refuse_stream_of_another_mob(
+                    &uri,
+                    resolver,
+                    prime_runtime.as_ref().map(MobRuntime::mob_id),
+                    caller,
+                )
+                .await?;
+                (
+                    subscribe_fn,
+                    prime_runtime,
+                    prime_identity_runtime,
+                    None,
+                    None,
+                    caller,
+                )
+            }
+            AgentStreamSource::Resolved(subscribe_in) => {
+                let resolver = resolver.ok_or_else(stream_route_without_resolver)?;
+                let (mut mob, caller) = stream_mob_of_request(&uri, resolver, caller).await?;
+                let owner = mob.take_owner();
+                let other_mob = mob.other_mob().cloned();
+                let prime_runtime = Some(mob.mob_runtime().clone());
+                let prime_identity_runtime = mob.resolved.identity_runtime_ref();
+                let resolved = mob.resolved;
+                let subscribe_fn: AgentEventReplaySubscribeFn =
+                    Arc::new(move |agent_id, cursor| {
+                        subscribe_in(resolved.clone(), agent_id, cursor)
+                    });
+                (
+                    subscribe_fn,
+                    prime_runtime,
+                    prime_identity_runtime,
+                    other_mob,
+                    owner,
+                    caller,
+                )
+            }
+        };
+    let SseCaller {
+        audience,
+        mut authentication,
+        ..
+    } = caller;
+    // The mob's address by the rules committed now, ahead of the name the
+    // request gives: what the route answers about a name in the mob (a
+    // member the console does not show, a runtime alias no live member
+    // holds) it answers to a caller who may address the mob. The mob was
+    // judged with the request's view; the resolve that loads a mob lies
+    // between, and a rule may have been withdrawn in it.
+    if let Some(mob_id) = other_mob.as_ref() {
+        stream_mob_addressed_by(&audience.refreshed(), mob_id)?;
+    }
     let agent_id = agent_id.trim().to_string();
     if agent_id.is_empty() {
         return Err(http_error(
@@ -633,7 +1002,7 @@ async fn agent_events_sse_handler(
     {
         return Err(http_error(StatusCode::BAD_REQUEST, &message));
     }
-    let policy_identity = if let Some(runtime) = state.prime_runtime.as_ref() {
+    let policy_identity = if let Some(runtime) = prime_runtime.as_ref() {
         match crate::http_console::sse_agent_stream_identity_visibility(
             &runtime.handle(),
             state.visibility_policy.as_ref(),
@@ -658,24 +1027,44 @@ async fn agent_events_sse_handler(
     // The stream's audience controller: the access controller when one is
     // wired, else the stream's own, primed either way.
     let audience_access = audience.controller();
-    prime_sse_access_cache(state.prime_runtime.as_ref(), Some(&audience_access)).await;
-    if let Some(identity_runtime) = state.prime_identity_runtime.as_ref() {
-        crate::http_console::prime_current_runtime_aliases(identity_runtime, &audience_access)
-            .await;
+    prime_sse_access_cache(
+        prime_runtime.as_ref(),
+        Some(&audience_access),
+        other_mob.as_ref(),
+    )
+    .await;
+    if let Some(identity_runtime) = prime_identity_runtime.as_ref() {
+        crate::http_console::prime_current_runtime_aliases_of(
+            identity_runtime,
+            &audience_access,
+            other_mob.as_ref(),
+        )
+        .await;
     }
     // The stream decides under the policy committed before each event, not
     // the one the request read; the gate below reads the same view.
     let mut live_view = Some(LiveAccessView::new(audience));
+    // The mob's address by the live view, ahead of the stream's own grant.
+    stream_mob_addressed_at_its_opening(live_view.as_ref(), other_mob.as_ref())?;
     // The attributes were read just above; the stream reads them again
     // before it decides an item once that read is as old as a kept
     // record's bound.
     let mut prime_age = StreamPrimeAge::primed(std::time::Instant::now());
-    // An agent private to another person is answered as a member the
-    // console does not hold.
-    if live_view
-        .as_ref()
-        .is_some_and(|live| agent_stream_hidden(live.view(), &agent_id, &policy_identity))
+    // An agent private to another person is answered as a name no member
+    // holds, by what this view answers such a name: a refusal where the
+    // access rules refuse a name they know nothing of (a deny the name
+    // cannot rule out, or no allow that reaches it), a member the console
+    // does not hold otherwise. A runtime alias that names no member is
+    // answered so above, whatever the rules say.
+    if let Some(live) = live_view.as_ref()
+        && agent_stream_hidden(live.view(), &agent_id, &policy_identity)
     {
+        let absent = crate::http_console::ConsoleAbsentNames::fresh().absent_spelling(&agent_id);
+        if !crate::member_comms_id::is_reserved_generated_alias(&agent_id)
+            && !agent_stream_allowed(live.view(), &absent, &absent)
+        {
+            return Err(sse_access_denied(ACTION_AGENT_VIEW));
+        }
         return Err(http_error(StatusCode::NOT_FOUND, "member_not_found"));
     }
     // The access rules judge the member the request resolved to as well
@@ -687,28 +1076,36 @@ async fn agent_events_sse_handler(
     {
         return Err(sse_access_denied(ACTION_AGENT_VIEW));
     }
-    let reprime_runtime = state.prime_runtime.clone();
-    let reprime_identity_runtime = state.prime_identity_runtime.clone();
+    let reprime_runtime = prime_runtime;
+    let reprime_identity_runtime = prime_identity_runtime;
     let reprime_access = Some(audience_access);
+    let reprime_mob = other_mob;
 
     let AgentEventReplay {
         epoch,
         attached_epoch,
         stream: event_stream,
-    } = (state.subscribe_fn)(agent_id.clone(), agent_sse_resume_cursor(&headers))
+    } = subscribe_fn(agent_id.clone(), agent_sse_resume_cursor(&headers))
         .await
         .map_err(map_runtime_error)?;
     let visibility_policy = state.visibility_policy;
     let mut shutdown = shutdown.map(|axum::Extension(shutdown)| shutdown);
 
     let stream = stream! {
+        // The stream's owner lease on its mob, given back when the stream
+        // ends; the stream ends when that mob's actor closes its admission.
+        let owner = owner;
+        let mut mob_gone = owner.as_ref().map(meerkat_mob::MobHandle::admission_closed);
         let mut seq = 0_u64;
         tokio::pin!(event_stream);
         loop {
             let (policy_changed, envelope) = match wake_or_policy_change(
                 live_view.as_mut(),
                 authentication.as_mut(),
-                next_until_stream_shutdown(shutdown.as_mut(), event_stream.next()),
+                next_until_mob_gone(
+                    mob_gone.as_mut(),
+                    next_until_stream_shutdown(shutdown.as_mut(), event_stream.next()),
+                ),
             )
             .await
             {
@@ -724,14 +1121,19 @@ async fn agent_events_sse_handler(
                     policy_changed || prime_age.due(std::time::Instant::now());
                 while live.refresh() || changed {
                     changed = false;
-                    prime_sse_access_cache(reprime_runtime.as_ref(), reprime_access.as_ref())
+                    prime_sse_access_cache(
+                        reprime_runtime.as_ref(),
+                        reprime_access.as_ref(),
+                        reprime_mob.as_ref(),
+                    )
                         .await;
                     if let (Some(identity_runtime), Some(controller)) =
                         (reprime_identity_runtime.as_ref(), reprime_access.as_ref())
                     {
-                        crate::http_console::prime_current_runtime_aliases(
+                        crate::http_console::prime_current_runtime_aliases_of(
                             identity_runtime,
                             controller,
+                            reprime_mob.as_ref(),
                         )
                         .await;
                     }
@@ -804,16 +1206,34 @@ pub type MobEventSubscribeFuture =
 
 pub type MobEventSubscribeFn = Arc<dyn Fn() -> MobEventSubscribeFuture + Send + Sync>;
 
+/// What the mob-wide stream route reads its stream from.
+#[derive(Clone)]
+enum MobStreamSource {
+    /// One mob's own closure: a router a host built by hand. It serves
+    /// that mob only.
+    Own(Box<MobStreamOwn>),
+    /// The mob a request names, resolved by the host's resolver: a router
+    /// the runtime built. The stream is the resolved mob's merged agent
+    /// events, primed from that mob's runtime.
+    Resolved,
+}
+
+/// What a mob-wide stream router built over one mob holds of that mob.
+#[derive(Clone)]
+struct MobStreamOwn {
+    subscribe_fn: MobEventSubscribeFn,
+    /// See [`AgentStreamOwn::prime_runtime`].
+    prime_runtime: Option<MobRuntime>,
+}
+
 #[derive(Clone)]
 struct MobSseState {
-    subscribe_fn: MobEventSubscribeFn,
+    source: MobStreamSource,
     decisions: Option<RuntimeDecisionState>,
     /// See [`AgentSseState::session_fences`].
     session_fences: ConsoleSessionFences,
     access: Option<AccessController>,
     visibility_policy: Arc<dyn ConsoleVisibilityPolicy>,
-    /// See [`AgentSseState::prime_runtime`].
-    prime_runtime: Option<MobRuntime>,
 }
 
 /// Applies no session fence; use the routers a [`crate::UnifiedRuntime`] builds,
@@ -852,16 +1272,42 @@ pub(crate) fn mob_events_sse_router_with_access_and_priming(
     visibility_policy: Arc<dyn ConsoleVisibilityPolicy>,
     session_fences: ConsoleSessionFences,
 ) -> Router {
+    mob_events_router(MobSseState {
+        source: MobStreamSource::Own(Box::new(MobStreamOwn {
+            subscribe_fn,
+            prime_runtime,
+        })),
+        decisions,
+        session_fences,
+        access,
+        visibility_policy,
+    })
+}
+
+/// The mob-wide stream router of a [`crate::UnifiedRuntime`]: it serves the
+/// merged agent events of the mob a request names with `mob_id`, resolved
+/// by the resolver the runtime layers over its routers, and the launch
+/// mob's for a request that names none.
+pub(crate) fn mob_events_sse_router_of_resolved_mobs(
+    decisions: Option<RuntimeDecisionState>,
+    access: Option<AccessController>,
+    visibility_policy: Arc<dyn ConsoleVisibilityPolicy>,
+    session_fences: ConsoleSessionFences,
+) -> Router {
+    mob_events_router(MobSseState {
+        source: MobStreamSource::Resolved,
+        decisions,
+        session_fences,
+        access,
+        visibility_policy,
+    })
+}
+
+/// The one mount of the mob-wide stream route.
+fn mob_events_router(state: MobSseState) -> Router {
     Router::new()
         .route("/mob/events", get(mob_events_sse_handler))
-        .with_state(MobSseState {
-            subscribe_fn,
-            decisions,
-            session_fences,
-            access,
-            visibility_policy,
-            prime_runtime,
-        })
+        .with_state(state)
 }
 
 /// When a stream last read the roster and the agents' records into the
@@ -903,13 +1349,17 @@ impl StreamPrimeAge {
 /// label/role/lineage rules resolve without depending on a prior
 /// `/console/experience` call. `access` is the stream's audience controller
 /// ([`SseCaller::audience`]), primed whether or not access is enforced: the
-/// private-owner rule reads it too.
+/// private-owner rule reads it too. `mob` is the mob of the stream's
+/// request when it is not the launch mob: the attributes are recorded as
+/// that mob's agents'; a stream of the launch mob passes none and records
+/// as a host of one mob does.
 async fn prime_sse_access_cache(
     prime_runtime: Option<&MobRuntime>,
     access: Option<&AccessController>,
+    mob: Option<&meerkat_mob::MobId>,
 ) {
     if let (Some(runtime), Some(controller)) = (prime_runtime, access) {
-        crate::http_console::prime_access_cache_from_runtime(runtime, controller).await;
+        crate::http_console::prime_access_cache_from_runtime_of(runtime, controller, mob).await;
     }
 }
 
@@ -1114,14 +1564,17 @@ impl ProjectedStructuralEvent {
 /// Read the live roster into the shared attribute cache for the structural
 /// stream: through the runtime when there is one, else through the handle.
 /// `access` is the stream's audience controller, primed whether or not
-/// access is enforced.
+/// access is enforced. `mob` is the mob of the stream's request when it is
+/// not the launch mob ([`prime_sse_access_cache`]); the roster read through
+/// a handle alone is of a router built over one mob, which names none.
 async fn prime_structural_access_cache(
     runtime: Option<&MobRuntime>,
     handle: &MobHandle,
     access: Option<&AccessController>,
+    mob: Option<&meerkat_mob::MobId>,
 ) {
     if runtime.is_some() {
-        prime_sse_access_cache(runtime, access).await;
+        prime_sse_access_cache(runtime, access, mob).await;
     } else if let Some(controller) = access {
         crate::http_console::prime_access_cache_from_handle(handle, controller).await;
     }
@@ -1130,14 +1583,11 @@ async fn prime_structural_access_cache(
 async fn mob_events_sse_handler(
     State(state): State<MobSseState>,
     shutdown: Option<axum::Extension<StreamShutdown>>,
+    resolver: Option<axum::Extension<crate::unified_runtime::MobResolver>>,
     headers: HeaderMap,
     uri: Uri,
 ) -> Result<impl IntoResponse, (StatusCode, Json<Value>)> {
-    let SseCaller {
-        audience,
-        mut authentication,
-        ..
-    } = sse_access_context(
+    let caller = sse_access_context(
         state.decisions.as_ref(),
         &state.session_fences,
         state.access.as_ref(),
@@ -1145,13 +1595,58 @@ async fn mob_events_sse_handler(
         &uri,
     )
     .map_err(|()| sse_unauthorized("mob events stream requires a valid auth token"))?;
+    let resolver = resolver.as_ref().map(|axum::Extension(resolver)| resolver);
+    // What the stream reads, and the mob it reads it of: the router's own
+    // mob, or the mob the request names. `owner` is the stream's lease on a
+    // mob other than the launch mob, kept until the stream ends.
+    let (subscribe_fn, prime_runtime, other_mob, owner, caller) = match state.source {
+        MobStreamSource::Own(own) => {
+            let MobStreamOwn {
+                subscribe_fn,
+                prime_runtime,
+            } = *own;
+            let caller = refuse_stream_of_another_mob(
+                &uri,
+                resolver,
+                prime_runtime.as_ref().map(MobRuntime::mob_id),
+                caller,
+            )
+            .await?;
+            (subscribe_fn, prime_runtime, None, None, caller)
+        }
+        MobStreamSource::Resolved => {
+            let resolver = resolver.ok_or_else(stream_route_without_resolver)?;
+            let (mut mob, caller) = stream_mob_of_request(&uri, resolver, caller).await?;
+            let owner = mob.take_owner();
+            let other_mob = mob.other_mob().cloned();
+            let mob_runtime = mob.mob_runtime().clone();
+            let subscribing = mob_runtime.clone();
+            let subscribe_fn: MobEventSubscribeFn = Arc::new(move || {
+                let mob_runtime = subscribing.clone();
+                Box::pin(async move { mob_runtime.handle().subscribe_mob_events().await })
+            });
+            (subscribe_fn, Some(mob_runtime), other_mob, owner, caller)
+        }
+    };
+    let SseCaller {
+        audience,
+        mut authentication,
+        ..
+    } = caller;
     // The stream's audience controller: the access controller when one is
     // wired, else the stream's own, primed either way.
     let audience_access = audience.controller();
-    prime_sse_access_cache(state.prime_runtime.as_ref(), Some(&audience_access)).await;
+    prime_sse_access_cache(
+        prime_runtime.as_ref(),
+        Some(&audience_access),
+        other_mob.as_ref(),
+    )
+    .await;
     // The stream decides under the policy committed before each event, not
     // the one the request read; the gate below reads the same view.
     let mut live_view = Some(LiveAccessView::new(audience));
+    // The mob's address by the live view, ahead of the stream's own grant.
+    stream_mob_addressed_at_its_opening(live_view.as_ref(), other_mob.as_ref())?;
     // The attributes were read just above; the stream reads them again
     // before it decides an item once that read is as old as a kept
     // record's bound.
@@ -1172,11 +1667,12 @@ async fn mob_events_sse_handler(
     // Captured so the long-lived stream can re-prime the shared attribute cache
     // for members spawned AFTER the one-time subscribe prime (the view reads
     // attributes through the controller's shared cache).
-    let reprime_runtime = state.prime_runtime.clone();
+    let reprime_runtime = prime_runtime.clone();
     let reprime_access = Some(audience_access);
-    let visibility_runtime = state.prime_runtime.clone();
+    let reprime_mob = other_mob;
+    let visibility_runtime = prime_runtime;
     let visibility_policy = state.visibility_policy;
-    let mut router_handle = (state.subscribe_fn)().await.map_err(|err| {
+    let mut router_handle = subscribe_fn().await.map_err(|err| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": format!("mob event subscription failed: {err}")})),
@@ -1185,6 +1681,10 @@ async fn mob_events_sse_handler(
 
     let mut shutdown = shutdown.map(|axum::Extension(shutdown)| shutdown);
     let stream = stream! {
+        // The stream's owner lease on its mob, given back when the stream
+        // ends; the stream ends when that mob's actor closes its admission.
+        let owner = owner;
+        let mut mob_gone = owner.as_ref().map(meerkat_mob::MobHandle::admission_closed);
         let mut seq = 0_u64;
         // Roster role/labels are immutable for one concrete member generation.
         // Re-prime on the first event and whenever the same public alias moves
@@ -1195,7 +1695,10 @@ async fn mob_events_sse_handler(
             let (policy_changed, attributed) = match wake_or_policy_change(
                 live_view.as_mut(),
                 authentication.as_mut(),
-                next_until_stream_shutdown(shutdown.as_mut(), router_handle.event_rx.recv()),
+                next_until_mob_gone(
+                    mob_gone.as_mut(),
+                    next_until_stream_shutdown(shutdown.as_mut(), router_handle.event_rx.recv()),
+                ),
             )
             .await
             {
@@ -1208,12 +1711,19 @@ async fn mob_events_sse_handler(
                     policy_changed || prime_age.due(std::time::Instant::now());
                 while live.refresh() || changed {
                     changed = false;
-                    prime_sse_access_cache(reprime_runtime.as_ref(), reprime_access.as_ref())
+                    prime_sse_access_cache(
+                        reprime_runtime.as_ref(),
+                        reprime_access.as_ref(),
+                        reprime_mob.as_ref(),
+                    )
                         .await;
                 }
                 // A revoked `mob.observe` ends the stream, so the client
-                // reconnects under the current policy.
-                if !mob_stream_allowed(live.view()) {
+                // reconnects under the current policy. So does a mob the
+                // caller may no longer address.
+                if !mob_stream_allowed(live.view())
+                    || !stream_mob_still_addressed(live.view(), reprime_mob.as_ref())
+                {
                     break;
                 }
             }
@@ -1239,7 +1749,11 @@ async fn mob_events_sse_handler(
             // Every stream decides per agent (the private-owner rule binds
             // without enforced access too), so a new source is primed.
             if source_changed {
-                prime_sse_access_cache(reprime_runtime.as_ref(), reprime_access.as_ref()).await;
+                prime_sse_access_cache(
+                        reprime_runtime.as_ref(),
+                        reprime_access.as_ref(),
+                        reprime_mob.as_ref(),
+                    ).await;
             }
             let exact = if let Some(runtime) = visibility_runtime.as_ref() {
                 let Some(exact) = crate::http_console::sse_member_authorization_projection(
@@ -1262,13 +1776,22 @@ async fn mob_events_sse_handler(
                 None
             };
             // Settled after the last await: the event is decided under the
-            // configuration committed before it is sent.
+            // configuration committed before it is sent. The stream's grant
+            // and its mob's address are both asked here once more: a change
+            // of the rules that lands between the wake above and this send
+            // ends the stream ahead of the event.
             if let Some(live) = live_view.as_mut() {
                 while live.refresh() {
-                    prime_sse_access_cache(reprime_runtime.as_ref(), reprime_access.as_ref())
+                    prime_sse_access_cache(
+                        reprime_runtime.as_ref(),
+                        reprime_access.as_ref(),
+                        reprime_mob.as_ref(),
+                    )
                         .await;
                 }
-                if !mob_stream_allowed(live.view()) {
+                if !mob_stream_allowed(live.view())
+                    || !stream_mob_still_addressed(live.view(), reprime_mob.as_ref())
+                {
                     break;
                 }
             }
@@ -1596,6 +2119,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         futures::pin_mut!(stream);
 
@@ -1626,6 +2150,7 @@ mod tests {
         let stream = workgraph_facts_event_stream(
             receiver,
             forced_lag_resync_serialization_failure,
+            None,
             None,
             None,
             None,
@@ -1680,6 +2205,7 @@ impl MobStructuralStreamQuery {
             member_id: self.member_id,
             identity: self.identity,
             mob_id: self.mob_id,
+            mob_incarnation: None,
             run_id: self.run_id,
             step_id: self.step_id,
             event_types: self
@@ -1698,9 +2224,21 @@ impl MobStructuralStreamQuery {
     }
 }
 
+/// What the WorkGraph fact stream route reads its facts from.
+#[derive(Clone)]
+enum WorkGraphFactsSource {
+    /// One fact hub: a router a host built by hand. It holds no mob, so it
+    /// refuses every id a request names unless the host's resolver says
+    /// the id is the launch mob's.
+    Own(WorkGraphFactHub),
+    /// The fact hub of the mob a request names, resolved by the host's
+    /// resolver: a router the runtime built.
+    Resolved,
+}
+
 #[derive(Clone)]
 struct WorkGraphFactsSseState {
-    hub: WorkGraphFactHub,
+    source: WorkGraphFactsSource,
     decisions: Option<RuntimeDecisionState>,
     /// See [`AgentSseState::session_fences`].
     session_fences: ConsoleSessionFences,
@@ -1739,17 +2277,40 @@ pub(crate) fn workgraph_facts_sse_router_under_session_fences(
     access: Option<AccessController>,
     session_fences: ConsoleSessionFences,
 ) -> Router {
+    workgraph_facts_router(WorkGraphFactsSseState {
+        source: WorkGraphFactsSource::Own(hub),
+        decisions,
+        session_fences,
+        access,
+    })
+}
+
+/// The WorkGraph fact stream router of a [`crate::UnifiedRuntime`]: it
+/// serves the facts of the mob a request names with `mob_id`, resolved by
+/// the resolver the runtime layers over its routers, and the launch mob's
+/// for a request that names none. A mob that has no WorkGraph view answers
+/// a caller who may address it that it has none.
+pub(crate) fn workgraph_facts_sse_router_of_resolved_mobs(
+    decisions: Option<RuntimeDecisionState>,
+    access: Option<AccessController>,
+    session_fences: ConsoleSessionFences,
+) -> Router {
+    workgraph_facts_router(WorkGraphFactsSseState {
+        source: WorkGraphFactsSource::Resolved,
+        decisions,
+        session_fences,
+        access,
+    })
+}
+
+/// The one mount of the WorkGraph fact stream route.
+fn workgraph_facts_router(state: WorkGraphFactsSseState) -> Router {
     Router::new()
         .route(
             WORKGRAPH_FACTS_STREAM_PATH,
             get(workgraph_facts_sse_handler),
         )
-        .with_state(WorkGraphFactsSseState {
-            hub,
-            decisions,
-            session_fences,
-            access,
-        })
+        .with_state(state)
 }
 
 type WorkGraphEventSerializer =
@@ -1782,10 +2343,15 @@ fn workgraph_module_sse_event(
     }
 }
 
+/// The WorkGraph fact stream of the hub `receiver` subscribes to.
+/// `other_mob` is the stream's mob when it is not the launch mob: the
+/// stream ends once its caller may no longer address it
+/// ([`stream_mob_still_addressed`]).
 fn workgraph_facts_event_stream(
     mut receiver: broadcast::Receiver<crate::types::UnifiedEvent>,
     serializer: WorkGraphEventSerializer,
     mut live_view: Option<LiveAccessView>,
+    other_mob: Option<meerkat_mob::MobId>,
     mut authentication: Option<StreamAuthentication>,
     mut shutdown: Option<StreamShutdown>,
 ) -> impl futures::Stream<Item = Result<Event, Infallible>> {
@@ -1816,10 +2382,12 @@ fn workgraph_facts_event_stream(
                 StreamWake::Item(Some(received)) => (false, Some(received)),
             };
             // A revoked `workgraph.view` ends the stream, so the client
-            // reconnects under the current policy; so does a lapsed token.
+            // reconnects under the current policy; so does a lapsed token,
+            // and so does a mob the caller may no longer address.
             if let Some(live) = live_view.as_mut()
                 && (live.refresh() || policy_changed)
-                && !workgraph_stream_allowed(live.view())
+                && !(workgraph_stream_allowed(live.view())
+                    && stream_mob_still_addressed(live.view(), other_mob.as_ref()))
             {
                 return;
             }
@@ -1854,15 +2422,12 @@ fn workgraph_facts_event_stream(
 async fn workgraph_facts_sse_handler(
     State(state): State<WorkGraphFactsSseState>,
     shutdown: Option<axum::Extension<StreamShutdown>>,
+    resolver: Option<axum::Extension<crate::unified_runtime::MobResolver>>,
     headers: HeaderMap,
     uri: Uri,
 ) -> Result<Sse<impl futures::Stream<Item = Result<Event, Infallible>>>, (StatusCode, Json<Value>)>
 {
-    let SseCaller {
-        access_view,
-        authentication,
-        ..
-    } = sse_access_context(
+    let caller = sse_access_context(
         state.decisions.as_ref(),
         &state.session_fences,
         state.access.as_ref(),
@@ -1870,24 +2435,74 @@ async fn workgraph_facts_sse_handler(
         &uri,
     )
     .map_err(|()| sse_unauthorized("workgraph facts stream requires a valid auth token"))?;
+    let resolver = resolver.as_ref().map(|axum::Extension(resolver)| resolver);
+    // The mob the request names is judged with the caller before the
+    // stream opens. A router built over one fact hub holds no mob: without
+    // the host's resolver it knows no mob by its id and refuses every id a
+    // request names. The runtime's router reads the hub of the mob the
+    // request names; `owner` is the stream's lease on a mob other than the
+    // launch mob, kept until the stream ends.
+    let (hub, owner, other_mob, caller) = match state.source {
+        WorkGraphFactsSource::Own(hub) => {
+            let caller = refuse_stream_of_another_mob(&uri, resolver, None, caller).await?;
+            (Some(hub), None, None, caller)
+        }
+        WorkGraphFactsSource::Resolved => {
+            let resolver = resolver.ok_or_else(stream_route_without_resolver)?;
+            let (mut mob, caller) = stream_mob_of_request(&uri, resolver, caller).await?;
+            let other_mob = mob.other_mob().cloned();
+            (
+                mob.resolved.workgraph_fact_hub(),
+                mob.take_owner(),
+                other_mob,
+                caller,
+            )
+        }
+    };
+    let SseCaller {
+        access_view,
+        authentication,
+        ..
+    } = caller;
     // The stream decides under the policy committed before each fact, not
     // the one the request read; the gate below reads the same view.
     let live_view = access_view.map(LiveAccessView::new);
+    // The mob's address by the live view, ahead of the stream's own grant.
+    stream_mob_addressed_at_its_opening(live_view.as_ref(), other_mob.as_ref())?;
     if live_view
         .as_ref()
         .is_some_and(|live| !workgraph_stream_allowed(live.view()))
     {
         return Err(sse_access_denied(ACTION_WORKGRAPH_VIEW));
     }
+    // A mob that has no WorkGraph view has no facts to stream: a caller
+    // who may address the mob and may watch WorkGraph facts is told so.
+    let Some(hub) = hub else {
+        return Err(http_error(
+            StatusCode::NOT_FOUND,
+            WORKGRAPH_UNAVAILABLE_KIND,
+        ));
+    };
 
-    let receiver = state.hub.subscribe();
-    let stream = workgraph_facts_event_stream(
+    let receiver = hub.subscribe();
+    let facts = workgraph_facts_event_stream(
         receiver,
         serialize_workgraph_event,
         live_view,
+        other_mob,
         authentication,
         shutdown.map(|axum::Extension(shutdown)| shutdown),
     );
+    let stream = stream! {
+        // The stream's owner lease on its mob, given back when the stream
+        // ends; the stream ends when that mob's actor closes its admission.
+        let owner = owner;
+        let mut mob_gone = owner.as_ref().map(meerkat_mob::MobHandle::admission_closed);
+        tokio::pin!(facts);
+        while let Some(event) = next_until_mob_gone(mob_gone.as_mut(), facts.next()).await {
+            yield event;
+        }
+    };
 
     Ok(Sse::new(stream).keep_alive(
         KeepAlive::new()
@@ -1896,13 +2511,33 @@ async fn workgraph_facts_sse_handler(
     ))
 }
 
+/// `error` of the WorkGraph fact stream's answer for a mob that has no
+/// WorkGraph view: the kind the request methods answer for a runtime
+/// without one.
+const WORKGRAPH_UNAVAILABLE_KIND: &str = "workgraph_unavailable";
+
+/// What the structural stream route reads its ledger from.
 #[derive(Clone)]
-struct MobStructuralSseState {
+enum StructuralStreamSource {
+    /// One mob's own handle and event store: a router a host built by
+    /// hand. It serves that mob only.
+    Own(Box<StructuralStreamOwn>),
+    /// The ledger of the mob a request names, resolved by the host's
+    /// resolver: a router the runtime built. The handle, the event store
+    /// and the runtime the attributes are primed from are that mob's.
+    Resolved,
+}
+
+/// What a structural stream router built over one mob holds of that mob.
+#[derive(Clone)]
+struct StructuralStreamOwn {
     handle: MobHandle,
     store: MobEventsStore,
-    /// See [`AgentSseState::prime_runtime`]. `None` falls back to a
-    /// roster-only prime from `handle`.
-    prime_runtime: Option<MobRuntime>,
+}
+
+#[derive(Clone)]
+struct MobStructuralSseState {
+    source: StructuralStreamSource,
     /// Optional auth context. When `Some`, requests are gated by the
     /// same `require_app_auth` toggle the console RPC route uses; when
     /// `None`, the route is unauthenticated (in-process or trusted
@@ -1954,45 +2589,40 @@ pub fn mob_structural_events_sse_router_with_access(
     access: Option<AccessController>,
 ) -> Router {
     mob_structural_events_sse_router_configured(
-        handle,
-        store,
+        StructuralStreamSource::Own(Box::new(StructuralStreamOwn { handle, store })),
         decisions,
         access,
-        None,
         Arc::new(AllowAllConsoleVisibilityPolicy),
         false,
         ConsoleSessionFences::detached(),
     )
 }
 
-pub(crate) fn mob_structural_events_sse_router_with_access_and_priming(
-    handle: MobHandle,
-    store: MobEventsStore,
+/// The structural stream router of a [`crate::UnifiedRuntime`]: it serves
+/// the ledger of the mob a request names with `mob_id`, resolved by the
+/// resolver the runtime layers over its routers, and the launch mob's for
+/// a request that names none. It requires an exact roster authority, as
+/// the runtime's router over one mob does.
+pub(crate) fn mob_structural_events_sse_router_of_resolved_mobs(
     decisions: Option<RuntimeDecisionState>,
     access: Option<AccessController>,
-    prime_runtime: Option<MobRuntime>,
     visibility_policy: Arc<dyn ConsoleVisibilityPolicy>,
     session_fences: ConsoleSessionFences,
 ) -> Router {
     mob_structural_events_sse_router_configured(
-        handle,
-        store,
+        StructuralStreamSource::Resolved,
         decisions,
         access,
-        prime_runtime,
         visibility_policy,
         true,
         session_fences,
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn mob_structural_events_sse_router_configured(
-    handle: MobHandle,
-    store: MobEventsStore,
+    source: StructuralStreamSource,
     decisions: Option<RuntimeDecisionState>,
     access: Option<AccessController>,
-    prime_runtime: Option<MobRuntime>,
     visibility_policy: Arc<dyn ConsoleVisibilityPolicy>,
     require_exact_authority: bool,
     session_fences: ConsoleSessionFences,
@@ -2003,9 +2633,7 @@ fn mob_structural_events_sse_router_configured(
             get(mob_structural_events_sse_handler),
         )
         .with_state(MobStructuralSseState {
-            handle,
-            store,
-            prime_runtime,
+            source,
             decisions,
             session_fences,
             access,
@@ -2126,6 +2754,20 @@ pub(crate) struct SseCaller {
     pub(crate) authentication: Option<StreamAuthentication>,
 }
 
+impl crate::rpc::mob_addressing::DoorCaller for SseCaller {
+    fn access_view(&self) -> Option<&AccessView> {
+        Some(&self.audience)
+    }
+
+    fn seeing_mob(self, mob_id: &meerkat_mob::MobId) -> Self {
+        Self {
+            access_view: self.access_view.map(|view| view.in_mob(mob_id)),
+            audience: self.audience.in_mob(mob_id),
+            authentication: self.authentication,
+        }
+    }
+}
+
 fn sse_unauthorized(reason: &str) -> (StatusCode, Json<Value>) {
     (
         StatusCode::UNAUTHORIZED,
@@ -2149,16 +2791,13 @@ fn sse_access_denied(action: &str) -> (StatusCode, Json<Value>) {
 async fn mob_structural_events_sse_handler(
     State(state): State<MobStructuralSseState>,
     shutdown: Option<axum::Extension<StreamShutdown>>,
+    resolver: Option<axum::Extension<crate::unified_runtime::MobResolver>>,
     headers: HeaderMap,
     uri: Uri,
     Query(params): Query<MobStructuralStreamQuery>,
 ) -> Result<Sse<impl futures::Stream<Item = Result<Event, Infallible>>>, (StatusCode, Json<Value>)>
 {
-    let SseCaller {
-        audience,
-        mut authentication,
-        ..
-    } = sse_access_context(
+    let caller = sse_access_context(
         state.decisions.as_ref(),
         &state.session_fences,
         state.access.as_ref(),
@@ -2166,18 +2805,57 @@ async fn mob_structural_events_sse_handler(
         &uri,
     )
     .map_err(|()| sse_unauthorized("mob_events stream requires a valid auth token"))?;
+    let resolver = resolver.as_ref().map(|axum::Extension(resolver)| resolver);
+    // The `mob_id` of this route names the mob whose ledger is read: it is
+    // judged with the caller, and an id the host does not serve is refused
+    // before the stream opens. The runtime's router reads the ledger of the
+    // mob the request names (`owner` is the stream's lease on a mob other
+    // than the launch mob, kept until the stream ends); a router built over
+    // one mob's handle serves that mob alone.
+    let (handle, store, prime_runtime, other_mob, owner, caller) = match state.source {
+        StructuralStreamSource::Resolved => {
+            let resolver = resolver.ok_or_else(stream_route_without_resolver)?;
+            let (mut mob, caller) = stream_mob_of_request(&uri, resolver, caller).await?;
+            let owner = mob.take_owner();
+            let other_mob = mob.other_mob().cloned();
+            (
+                mob.resolved.mob_handle(),
+                mob.resolved.mob_events_store(),
+                Some(mob.mob_runtime().clone()),
+                other_mob,
+                owner,
+                caller,
+            )
+        }
+        // A router built over one mob's handle primes from the roster the
+        // handle answers: it holds no runtime.
+        StructuralStreamSource::Own(own) => {
+            let StructuralStreamOwn { handle, store } = *own;
+            let caller =
+                refuse_stream_of_another_mob(&uri, resolver, Some(handle.mob_id()), caller).await?;
+            (handle, store, None, None, None, caller)
+        }
+    };
+    let SseCaller {
+        audience,
+        mut authentication,
+        ..
+    } = caller;
     // The stream's audience controller: the access controller when one is
     // wired, else the stream's own, primed either way.
     let audience_access = audience.controller();
     prime_structural_access_cache(
-        state.prime_runtime.as_ref(),
-        &state.handle,
+        prime_runtime.as_ref(),
+        &handle,
         Some(&audience_access),
+        other_mob.as_ref(),
     )
     .await;
     // The stream decides under the policy committed before each event, not
     // the one the request read; the gate below reads the same view.
     let mut live_view = Some(LiveAccessView::new(audience));
+    // The mob's address by the live view, ahead of the stream's own grant.
+    stream_mob_addressed_at_its_opening(live_view.as_ref(), other_mob.as_ref())?;
     // The attributes were read just above; the stream reads them again
     // before it decides an item once that read is as old as a kept
     // record's bound.
@@ -2195,7 +2873,7 @@ async fn mob_structural_events_sse_handler(
         return Err(sse_access_denied(ACTION_MOB_OBSERVE));
     }
     let query = params.into_event_query();
-    let events_view = state.handle.events();
+    let events_view = handle.events();
 
     let latest = events_view.latest_cursor().await.map_err(|err| {
         (
@@ -2234,13 +2912,13 @@ async fn mob_structural_events_sse_handler(
             )
         })?;
 
-    let store = state.store;
     // Captured so the long-lived stream can re-prime the shared attribute cache
     // for members spawned AFTER the one-time subscribe prime.
-    let reprime_runtime = state.prime_runtime.clone();
-    let reprime_handle = state.handle.clone();
+    let reprime_runtime = prime_runtime;
+    let reprime_handle = handle.clone();
     let reprime_access = Some(audience_access);
-    let visibility_handle = state.handle.clone();
+    let reprime_mob = other_mob;
+    let visibility_handle = handle;
     let visibility_policy = state.visibility_policy;
     let require_exact_authority = state.require_exact_authority;
     // The members a mob-level event named that the attributes did not
@@ -2248,11 +2926,18 @@ async fn mob_structural_events_sse_handler(
     let mut primed_unknown = std::collections::HashSet::<String>::new();
     let mut shutdown = shutdown.map(|axum::Extension(shutdown)| shutdown);
     let stream = stream! {
+        // The stream's owner lease on its mob, given back when the stream
+        // ends; the stream ends when that mob's actor closes its admission.
+        let owner = owner;
+        let mut mob_gone = owner.as_ref().map(meerkat_mob::MobHandle::admission_closed);
         loop {
             let (policy_changed, event) = match wake_or_policy_change(
                 live_view.as_mut(),
                 authentication.as_mut(),
-                next_until_stream_shutdown(shutdown.as_mut(), subscription.event_rx.recv()),
+                next_until_mob_gone(
+                    mob_gone.as_mut(),
+                    next_until_stream_shutdown(shutdown.as_mut(), subscription.event_rx.recv()),
+                ),
             )
             .await
             {
@@ -2269,12 +2954,16 @@ async fn mob_structural_events_sse_handler(
                         reprime_runtime.as_ref(),
                         &reprime_handle,
                         reprime_access.as_ref(),
+                        reprime_mob.as_ref(),
                     )
                     .await;
                 }
                 // A revoked `mob.observe` ends the stream, so the client
-                // reconnects under the current policy.
-                if !mob_stream_allowed(live.view()) {
+                // reconnects under the current policy. So does a mob the
+                // caller may no longer address.
+                if !mob_stream_allowed(live.view())
+                    || !stream_mob_still_addressed(live.view(), reprime_mob.as_ref())
+                {
                     break;
                 }
             }
@@ -2300,6 +2989,7 @@ async fn mob_structural_events_sse_handler(
                     reprime_runtime.as_ref(),
                     &reprime_handle,
                     reprime_access.as_ref(),
+                    reprime_mob.as_ref(),
                 )
                 .await;
             }
@@ -2323,21 +3013,28 @@ async fn mob_structural_events_sse_handler(
                     reprime_runtime.as_ref(),
                     &reprime_handle,
                     reprime_access.as_ref(),
+                    reprime_mob.as_ref(),
                 )
                 .await;
             }
             // Settled after the last await: the event is decided under the
-            // configuration committed before it is sent.
+            // configuration committed before it is sent. The stream's grant
+            // and its mob's address are both asked here once more: a change
+            // of the rules that lands between the wake above and this send
+            // ends the stream ahead of the event.
             if let Some(live) = live_view.as_mut() {
                 while live.refresh() {
                     prime_structural_access_cache(
                         reprime_runtime.as_ref(),
                         &reprime_handle,
                         reprime_access.as_ref(),
+                        reprime_mob.as_ref(),
                     )
                     .await;
                 }
-                if !mob_stream_allowed(live.view()) {
+                if !mob_stream_allowed(live.view())
+                    || !stream_mob_still_addressed(live.view(), reprime_mob.as_ref())
+                {
                     break;
                 }
             }

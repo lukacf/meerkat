@@ -51,7 +51,8 @@ import type { ConsoleAgent } from "../types";
 import { responsePhaseWords } from "../lib/agents";
 import { sideChatAudienceText } from "../lib/side-chat";
 import type { LiveSpeechItem } from "../lib/voice-session";
-import { VoiceButton } from "./VoiceBar";
+import { VoiceButton, VoiceUnavailable } from "./VoiceBar";
+import { AUTOMATIC, type ConsoleRequestBy } from "../../../packages/console-core/src/mob-door";
 import { humanizeEnum } from "../../../packages/console-components/src/panel-kit/format";
 import {
   composerImageFileKey,
@@ -135,7 +136,10 @@ interface ChatPaneProps extends ConversationApprovalProps {
   hasOlderHistory?: boolean;
   loadingOlderHistory?: boolean;
   isLoadingHistory?: boolean;
-  onLoadOlder?: () => void;
+  /** Loads an older page of history. `by` is passed when the chat asks on
+   * its own (its top came into view); the "Load older history" button is a
+   * person's act and passes nothing. */
+  onLoadOlder?: (by?: ConsoleRequestBy) => void;
   /// Pending-message stack rendered between conversation body and
   /// composer. ConsoleApp owns the state + handlers; ChatPane just
   /// reserves the slot. Pass `null` (or omit) to suppress.
@@ -155,6 +159,27 @@ interface ChatPaneProps extends ConversationApprovalProps {
   voiceDisabled?: boolean;
   /** Voice readiness has no definite answer yet; the button shows a checking state. */
   voiceChecking?: boolean;
+  /**
+   * Why voice cannot be started with this agent, where the console offers
+   * voice and would offer it to this agent otherwise. The voice control is
+   * then shown as unavailable with this reason, not left out. Only read
+   * when `onVoiceToggle` is absent.
+   */
+  voiceUnavailableReason?: string | null;
+  /** The person pressed the unavailable voice control: say the reason. */
+  onVoiceUnavailable?: () => void;
+  /** The agent's team, when it is not loaded: interactive views are not
+   * loaded for it, and each view's place says so. */
+  teamNotLoaded?: ChatTeamNotLoaded | null;
+  /** Why interactive views are not offered for this agent at all (they are
+   * the console's own team's in this version). Each view's place says it,
+   * with the tool's words and nothing to press; nothing is asked. */
+  appsUnavailableReason?: string | null;
+  /** Why no image is taken for a message to this agent, though its model
+   * sees images (a message with a file is the console's own team's in this
+   * version). The footer says images are not offered, an image the person
+   * drops or pastes is not taken and the reason is said; nothing is asked. */
+  imagesUnavailableReason?: string | null;
   /// Operator actions for inline WorkGraph cards. ConsoleApp gates these on
   /// `experience.workgraph.can_manage` and read-only state; omitted callbacks
   /// render no buttons.
@@ -1302,13 +1327,90 @@ const MessageRow = React.memo(function MessageRow({
   </ConversationRowStateScope>;
 }, messageRowPropsEqual);
 
+/**
+ * The team of the agent this chat is with, when it is not loaded. Nothing
+ * is asked for such an agent's interactive views, so each view's place
+ * says why, and offers the way to wake the team where there is one.
+ */
+export interface ChatTeamNotLoaded {
+  /** The team by its name for people; null when the console has none. */
+  name: string | null;
+  /** The team cannot be opened at all: nothing to press. */
+  unavailable?: boolean;
+  /** Wake the team: a person's act. Absent when the team cannot be woken from here. */
+  onWake?: () => void;
+  /** The team is being woken now. */
+  waking?: boolean;
+}
+
+const ChatTeamNotLoadedContext = React.createContext<ChatTeamNotLoaded | null>(null);
+
+/** In the place of an interactive view that was not loaded: why, the tool's own words, and the way to load it. */
+export function McpAppNotLoaded({ team, toolCallId, fallback }: { team: ChatTeamNotLoaded; toolCallId: string; fallback: string }): React.JSX.Element {
+  const name = team.name || "This agent's team";
+  return (
+    <div className="console-mcp-app console-mcp-app--not-loaded" role="status" data-testid={`mcp-app-asleep:${toolCallId}`}>
+      <p className="console-mcp-app__why">
+        {team.unavailable
+          ? `${name} is unavailable, so this interactive view cannot be loaded.`
+          : `${name} is asleep, so this interactive view was not loaded. Loading it wakes the team.`}
+      </p>
+      {!team.unavailable && team.onWake ? (
+        <button type="button" className="console-mcp-app__wake" disabled={team.waking === true} onClick={team.onWake}>
+          {team.waking ? "Waking" : "Wake and load the view"}
+        </button>
+      ) : null}
+      <p className="console-mcp-app__fallback">{fallback}</p>
+    </div>
+  );
+}
+
+/** In the place of an interactive view the console does not offer for this agent: the reason and the tool's own words. Nothing to press. */
+export function McpAppUnavailable({ reason, toolCallId, fallback }: { reason: string; toolCallId: string; fallback: string }): React.JSX.Element {
+  return (
+    <div className="console-mcp-app console-mcp-app--not-loaded" role="status" data-testid={`mcp-app-unavailable:${toolCallId}`}>
+      <p className="console-mcp-app__why">{reason}</p>
+      <p className="console-mcp-app__fallback">{fallback}</p>
+    </div>
+  );
+}
+
+/** The sentence for an agent interactive views are not offered for: they are the console's own team's in this version. */
+export function interactiveViewsLimitedReason(agentLabel: string, launchTeamName: string | null | undefined): string {
+  const where = launchTeamName?.trim() || "this console's own team";
+  return `Interactive views are not available for ${agentLabel} yet. For now they work with agents of ${where} only.`;
+}
+
+/** The sentence for an agent no image is taken for: a message with a file is the console's own team's in this version. */
+export function imagesLimitedReason(agentLabel: string, launchTeamName: string | null | undefined): string {
+  const where = launchTeamName?.trim() || "this console's own team";
+  return `Images cannot be attached for ${agentLabel} yet. For now they work with agents of ${where} only.`;
+}
+
+/** The footer's words where no image is taken for an agent of another team. */
+export const IMAGES_NOT_OFFERED_FACT = "images not available for this team yet";
+
+const ChatAppsUnavailableContext = React.createContext<string | null>(null);
+
+function McpAppRow({ message: m }: { message: MessageRowProps["message"] }): React.JSX.Element | null {
+  const teamNotLoaded = React.useContext(ChatTeamNotLoadedContext);
+  const appsUnavailable = React.useContext(ChatAppsUnavailableContext);
+  const entry = m.mcpAppEntry;
+  if (!entry?.mcpApp) return null;
+  const fallback = m.text ?? "Tool result";
+  // Not offered for this agent at all (waking its team would not load it): said first.
+  if (appsUnavailable) return <McpAppUnavailable reason={appsUnavailable} toolCallId={entry.mcpApp.toolCallId} fallback={fallback} />;
+  if (teamNotLoaded) return <McpAppNotLoaded team={teamNotLoaded} toolCallId={entry.mcpApp.toolCallId} fallback={fallback} />;
+  return <ConsoleMcpAppView locator={{ ...entry.mcpApp, identity: entry.identity.id }} fallback={fallback} />;
+}
+
 function MessageRowBody({
   message: m,
   suppressWorked,
   workGraphActions,
   markdownUrlPolicy,
 }: MessageRowProps) {
-  if (m.mcpAppEntry?.mcpApp) return <ConsoleMcpAppView locator={{ ...m.mcpAppEntry.mcpApp, identity: m.mcpAppEntry.identity.id }} fallback={m.text ?? "Tool result"} />;
+  if (m.mcpAppEntry?.mcpApp) return <McpAppRow message={m} />;
   if (m.kind === "event" || m.kind === "origin") {
     return <EventRow message={m} />;
   }
@@ -1720,6 +1822,8 @@ const ComposerTextarea = React.memo(function ComposerTextarea({
   voiceDisabled,
   voiceChecking,
   onVoiceToggle,
+  voiceUnavailableReason,
+  onVoiceUnavailable,
   stagedCount,
   canAttachImages,
   sending,
@@ -1739,6 +1843,8 @@ const ComposerTextarea = React.memo(function ComposerTextarea({
   voiceDisabled: boolean;
   voiceChecking: boolean;
   onVoiceToggle?: () => void;
+  voiceUnavailableReason?: string | null;
+  onVoiceUnavailable?: () => void;
   stagedCount: number;
   canAttachImages: boolean;
   sending: boolean;
@@ -1797,6 +1903,9 @@ const ComposerTextarea = React.memo(function ComposerTextarea({
             checking={voiceChecking && !voiceActive}
             onClick={onVoiceToggle}
           />
+        )}
+        {!onVoiceToggle && voiceUnavailableReason && !readOnly && !sendWithheld && (
+          <VoiceUnavailable reason={voiceUnavailableReason} onExplain={onVoiceUnavailable} />
         )}
         <button
           className="composer__send"
@@ -1895,6 +2004,11 @@ export function ChatPane({
   voiceActive = false,
   voiceDisabled = false,
   voiceChecking = false,
+  voiceUnavailableReason = null,
+  onVoiceUnavailable,
+  teamNotLoaded = null,
+  appsUnavailableReason = null,
+  imagesUnavailableReason = null,
   workGraphActions = null,
   peerLabels = null,
 }: ChatPaneProps): React.JSX.Element {
@@ -2205,9 +2319,9 @@ export function ChatPane({
 
   const onLoadOlderRef = React.useRef(onLoadOlder);
   onLoadOlderRef.current = onLoadOlder;
-  const requestOlderHistory = React.useCallback(() => {
+  const requestOlderHistory = React.useCallback((by?: ConsoleRequestBy) => {
     scroll.captureBeforePrepend();
-    onLoadOlderRef.current?.();
+    onLoadOlderRef.current?.(by);
   }, [scroll.captureBeforePrepend]);
   const hasOlderHistoryRef = React.useRef(hasOlderHistory);
   hasOlderHistoryRef.current = hasOlderHistory;
@@ -2264,8 +2378,11 @@ export function ChatPane({
         revealEarlierRef.current();
         return;
       }
+      // A scroll is not a person's act the console can tell from its own
+      // (a restored position, a jump to a row): the read it starts is the
+      // console's own.
       if (hasOlderHistoryRef.current && !loadingOlderHistoryRef.current) {
-        requestOlderHistory();
+        requestOlderHistory(AUTOMATIC);
       }
     },
     [requestOlderHistory, scheduleActiveTurnUpdate],
@@ -2276,7 +2393,12 @@ export function ChatPane({
     () => (phase === "tool-executing" ? runningToolOf(entries) : null),
     [phase, entries],
   );
-  const canAttachImages = !readOnly && agent?.model_capabilities?.image_input === true;
+  const modelSeesImages = agent?.model_capabilities?.image_input === true;
+  // An image is taken where the model sees images and a message with a file
+  // is served for this agent. Where it is not served, nothing is staged and
+  // nothing with a file is sent: the footer and a refused drop say why.
+  const imagesNotOffered = !readOnly && modelSeesImages && Boolean(imagesUnavailableReason);
+  const canAttachImages = !readOnly && modelSeesImages && !imagesUnavailableReason;
   // Access control can grant view without send; `false` means the runtime
   // explicitly withheld the send affordance. Unknown (absent) stays sendable.
   const sendWithheld = accessEnforcing && agent?.affordances?.can_send_message === false;
@@ -2563,6 +2685,8 @@ export function ChatPane({
   return (
     <ConversationPresentationProvider labels={presentationLabels} viewportKey={viewportKey} autoFold={scroll.mode === "following-end"}>
     <ConversationBlobReaderProvider reader={blobReader}>
+    <ChatTeamNotLoadedContext.Provider value={teamNotLoaded}>
+    <ChatAppsUnavailableContext.Provider value={appsUnavailableReason}>
     <div
       className="conv"
       data-testid={`chat-pane:${identity}`}
@@ -2642,7 +2766,7 @@ export function ChatPane({
         onRevealEarlier={revealEarlier}
         bodyRef={bodyRef}
         onScroll={onBodyScroll}
-        onRequestOlderHistory={requestOlderHistory}
+        onRequestOlderHistory={() => requestOlderHistory()}
         markdownUrlPolicy={markdownUrlPolicy}
         conversationId={conversationId}
         approvalSnapshot={approvalSnapshot}
@@ -2675,12 +2799,25 @@ export function ChatPane({
           className={`composer__shell${dragActive && canAttachImages ? " is-drag-active" : ""}`}
           onDragLeave={() => setDragActive(false)}
           onDragOver={(event) => {
-            if (!canAttachImages) return;
+            if (!canAttachImages) {
+              // The shell stays the place a file may be dropped on, so the
+              // drop comes here to be refused and is not the browser's.
+              if (imagesNotOffered) event.preventDefault();
+              return;
+            }
             event.preventDefault();
             setDragActive(true);
           }}
           onDrop={(event) => {
-            if (!canAttachImages) return;
+            if (!canAttachImages) {
+              // An image for an agent no image is taken for: it is not left to
+              // the browser to open, and the reason is said.
+              if (imagesNotOffered && imageTransferPayloadHasImage(collectImageTransferPayload(event.dataTransfer))) {
+                event.preventDefault();
+                setAttachmentError(imagesUnavailableReason);
+              }
+              return;
+            }
             event.preventDefault();
             setDragActive(false);
             const payload = collectImageTransferPayload(event.dataTransfer);
@@ -2693,7 +2830,14 @@ export function ChatPane({
             });
           }}
           onPaste={(event) => {
-            if (!canAttachImages) return;
+            if (!canAttachImages) {
+              // Pasted words go into the composer as ever; a pasted image is not taken.
+              if (imagesNotOffered && imageTransferPayloadHasImage(collectImageTransferPayload(event.clipboardData))) {
+                event.preventDefault();
+                setAttachmentError(imagesUnavailableReason);
+              }
+              return;
+            }
             const payload = collectImageTransferPayload(event.clipboardData);
             if (imageTransferPayloadHasImage(payload)) {
               event.preventDefault();
@@ -2729,6 +2873,8 @@ export function ChatPane({
             voiceDisabled={voiceDisabled}
             voiceChecking={voiceChecking}
             onVoiceToggle={onVoiceToggle}
+            voiceUnavailableReason={voiceUnavailableReason}
+            onVoiceUnavailable={onVoiceUnavailable}
             stagedCount={staged.length}
             canAttachImages={canAttachImages}
             sending={sending}
@@ -2752,11 +2898,14 @@ export function ChatPane({
           {phase && <FooterFact tone="live">{responsePhaseWords(phase)}</FooterFact>}
           {readOnly && <FooterFact tone="locked">view only</FooterFact>}
           {!readOnly && sendWithheld && <FooterFact tone="locked">send not permitted</FooterFact>}
-          {!readOnly && !canAttachImages && <FooterFact>model cannot see images</FooterFact>}
+          {!readOnly && !modelSeesImages && <FooterFact>model cannot see images</FooterFact>}
+          {imagesNotOffered && <FooterFact>{IMAGES_NOT_OFFERED_FACT}</FooterFact>}
           {attachmentError && <FooterFact tone="crit">{attachmentError}</FooterFact>}
         </div>
       </div>
     </div>
+    </ChatAppsUnavailableContext.Provider>
+    </ChatTeamNotLoadedContext.Provider>
     </ConversationBlobReaderProvider>
     </ConversationPresentationProvider>
   );

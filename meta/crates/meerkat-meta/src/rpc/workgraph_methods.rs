@@ -1107,6 +1107,20 @@ pub(crate) async fn handle_workgraph_method(
         "meta/workgraph/attention/pause" => {
             reject_non_default_namespace(service, &object)?;
             let request: AttentionPauseRequest = parse_request(object)?;
+            // A pause with a deadline ends by itself: at the deadline the
+            // binding is active again and no method is asked. For a binding
+            // that names a member private to a person that is a resume, so
+            // it is refused as one; a pause with no deadline is taken.
+            if request.until.is_some() {
+                admission
+                    .refuse_private_member_resume(
+                        service,
+                        request.namespace.clone(),
+                        &request.binding_id,
+                    )
+                    .await
+                    .map_err(admission_error_to_rpc)?;
+            }
             let result = service
                 .pause_attention(request)
                 .await
@@ -1116,6 +1130,16 @@ pub(crate) async fn handle_workgraph_method(
         "meta/workgraph/attention/resume" => {
             reject_non_default_namespace(service, &object)?;
             let request: AttentionResumeRequest = parse_request(object)?;
+            // A binding that names a member private to a person is not
+            // resumed, as none is made onto one.
+            admission
+                .refuse_private_member_resume(
+                    service,
+                    request.namespace.clone(),
+                    &request.binding_id,
+                )
+                .await
+                .map_err(admission_error_to_rpc)?;
             let _permit = admission.acquire().await.map_err(admission_error_to_rpc)?;
             admission
                 .check_resume_target_free(service, request.namespace.clone(), &request.binding_id)

@@ -4590,6 +4590,25 @@ pub enum LiveStalenessPosition {
     OutsideTurnBoundary,
 }
 
+/// What a staleness caller that holds the turn boundary does with the
+/// WholeBlob checkpoint base of a live actor the authority verdict keeps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeptLiveActorBase {
+    /// The actor runs again: its base is compared with the store's committed
+    /// authority and the actor is rebased on the committed document when
+    /// they differ.
+    RebasedWhenItDiffers,
+    /// The caller ends the actor (an archive, which cancels the actor's
+    /// checkpointer gate before its own save): no later checkpoint is taken
+    /// from the base, so it is not compared. The actor can also be one whose
+    /// runtime registration a durability reload replaced under it; a
+    /// retirement reloads the registration and leaves the actor to its
+    /// archive. That actor's tool scope still answers to the replaced
+    /// registration's visibility owner, which refuses every change, so the
+    /// actor cannot be synchronized in place.
+    LeftAsItIs,
+}
+
 /// What [`PersistentSessionService::live_session_export`] observed.
 ///
 /// A live session that durable authority outranks has no live export; that
@@ -4620,6 +4639,11 @@ enum LiveSessionSyncCause {
     TranscriptRewriteCommitted,
     /// Synchronization after a detached model-routing terminal became durable.
     ModelRoutingTerminalCommitted,
+    /// Synchronization at a held turn boundary because the WholeBlob store's
+    /// committed authority differs from the live actor's checkpoint base
+    /// while the authority verdict keeps the actor (equal transcripts): the
+    /// runtime promoted a run's closing save as it is.
+    WholeBlobBaseDiffersFromStore,
 }
 
 impl LiveSessionSyncCause {
@@ -4640,6 +4664,9 @@ impl LiveSessionSyncCause {
             LiveSessionSyncCause::TranscriptRewriteCommitted => "transcript_rewrite_committed",
             LiveSessionSyncCause::ModelRoutingTerminalCommitted => {
                 "model_routing_terminal_committed"
+            }
+            LiveSessionSyncCause::WholeBlobBaseDiffersFromStore => {
+                "whole_blob_base_differs_from_store"
             }
         }
     }
@@ -7862,37 +7889,78 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         id: &SessionId,
         position: LiveStalenessPosition,
     ) -> Result<bool, SessionError> {
-        let LiveSessionAuthority::DurableAuthoritative { reason } =
-            self.live_session_authority(id).await?
-        else {
-            return Ok(false);
-        };
-        // A live actor that continues the store's standing provisional tail
-        // of a run the runtime holds open is ahead of the committed boundary
-        // by construction, never behind it, wherever the caller stands: kept.
-        // An actor whose run compacted can trail the boundary's row count and
-        // classify as diverged rather than uncommitted, so the proof is asked
-        // for either; an archived session is never kept.
-        if reason != LiveSessionAuthorityReason::StoredArchived
-            && self.live_actor_continues_open_run_tail(id).await?
-        {
-            return Ok(false);
-        }
-        match reason {
-            // A run may be between its apply and its boundary commit: its
-            // actor and checkpoint receipt are what that commit promotes.
-            LiveSessionAuthorityReason::LiveUncommittedTranscript
-                if !self.uncommitted_live_transcript_is_stale(id, position) =>
-            {
-                return Ok(false);
+        self.discard_stale_live_session_if_needed_with_kept_base(
+            id,
+            position,
+            KeptLiveActorBase::RebasedWhenItDiffers,
+        )
+        .await
+    }
+
+    /// [`Self::discard_stale_live_session_if_needed`], with what happens to
+    /// the checkpoint base of an actor the verdict keeps given by the caller.
+    async fn discard_stale_live_session_if_needed_with_kept_base(
+        &self,
+        id: &SessionId,
+        position: LiveStalenessPosition,
+        kept_base: KeptLiveActorBase,
+    ) -> Result<bool, SessionError> {
+        let cause = match self.live_session_authority(id).await? {
+            LiveSessionAuthority::DurableAuthoritative { reason } => {
+                // A live actor that continues the store's standing provisional
+                // tail of a run the runtime holds open is ahead of the
+                // committed boundary by construction, never behind it,
+                // wherever the caller stands: kept. An actor whose run
+                // compacted can trail the boundary's row count and classify
+                // as diverged rather than uncommitted, so the proof is asked
+                // for either; an archived session is never kept.
+                if reason != LiveSessionAuthorityReason::StoredArchived
+                    && self.live_actor_continues_open_run_tail(id).await?
+                {
+                    return Ok(false);
+                }
+                match reason {
+                    // A run may be between its apply and its boundary commit:
+                    // its actor and checkpoint receipt are what that commit
+                    // promotes.
+                    LiveSessionAuthorityReason::LiveUncommittedTranscript
+                        if !self.uncommitted_live_transcript_is_stale(id, position) =>
+                    {
+                        return Ok(false);
+                    }
+                    LiveSessionAuthorityReason::LiveUncommittedTranscript
+                    | LiveSessionAuthorityReason::StoredArchived
+                    | LiveSessionAuthorityReason::StoredTranscriptRevisionDiverged => {}
+                }
+                LiveSessionSyncCause::Authority(reason)
             }
-            LiveSessionAuthorityReason::LiveUncommittedTranscript
-            | LiveSessionAuthorityReason::StoredArchived
-            | LiveSessionAuthorityReason::StoredTranscriptRevisionDiverged => {}
-        }
+            // The verdict compares transcripts. A run's closing save that the
+            // runtime alone promotes as it is (its settle of a cancelled or
+            // settled run) moves the WholeBlob store's committed authority
+            // and leaves the transcript the actor's own, so the verdict keeps
+            // the actor while its checkpoint base names the former authority,
+            // and the next run's first checkpoint would be refused. Holding
+            // the turn boundary, no boundary commit stands between its store
+            // write and its acknowledgement here, so a base that differs is
+            // one this layer was never told of: the actor is rebased on the
+            // committed document, as the runtime's settle relies on. Outside
+            // the boundary a commit and its acknowledgement are legitimately
+            // apart, and nothing is compared. Nor for a caller that ends the
+            // actor (`KeptLiveActorBase::LeftAsItIs`).
+            LiveSessionAuthority::LiveAuthoritative { .. } => {
+                if kept_base != KeptLiveActorBase::RebasedWhenItDiffers
+                    || position != LiveStalenessPosition::TurnBoundaryHeld
+                    || !self.live_whole_blob_base_differs_from_store(id).await?
+                {
+                    return Ok(false);
+                }
+                LiveSessionSyncCause::WholeBlobBaseDiffersFromStore
+            }
+            LiveSessionAuthority::NoLive => return Ok(false),
+        };
 
         if self
-            .synchronize_runtime_backed_live_from_durable_authority(id, reason)
+            .synchronize_runtime_backed_live_from_durable_authority(id, cause)
             .await?
         {
             return Ok(false);
@@ -7908,7 +7976,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             session_id = %id,
             live_updated_at = ?live.updated_at(),
             live_message_count = live.messages().len(),
-            reason = ?reason,
+            reason = cause.trace_label(),
             "discarding stale live session in favor of newer RuntimeStore authority"
         );
         // Only the live actor is discarded: a runtime registration of the
@@ -7917,6 +7985,56 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         // stops hosting the session here.
         self.discard_live_session_unfenced(id).await?;
         Ok(true)
+    }
+
+    /// Whether this service's live WholeBlob actor of `id` checkpoints from a
+    /// committed base other than the store's committed authority.
+    ///
+    /// Body-free: the actor's base and one authority read. The comparison is
+    /// `!=`, as the checkpoint's own is: it proves a difference, not an
+    /// order. `false` on a HeadCanonical store (its base is the store's head,
+    /// read at each commit), without a live checkpointer, and while either
+    /// side is unknown.
+    async fn live_whole_blob_base_differs_from_store(
+        &self,
+        id: &SessionId,
+    ) -> Result<bool, SessionError> {
+        if self.runtime_store.session_persistence_profile()
+            != RuntimeSessionPersistenceProfile::WholeBlobV1
+        {
+            return Ok(false);
+        }
+        // Bound first, so the map lock is not held across the store read.
+        let checkpointer = self
+            .live_checkpointers
+            .lock()
+            .await
+            .get(id)
+            .cloned()
+            .and_then(|checkpointer| checkpointer.upgrade());
+        let Some(checkpointer) = checkpointer else {
+            return Ok(false);
+        };
+        let base = checkpointer
+            .whole_blob_base_authority
+            .lock()
+            .map_err(|_| {
+                SessionError::Agent(AgentError::InternalError(format!(
+                    "WholeBlob actor base authority lock is poisoned for session {id}"
+                )))
+            })?
+            .clone();
+        let Some(base) = base else {
+            return Ok(false);
+        };
+        let committed = self
+            .runtime_store
+            .load_whole_blob_store_authority(&Self::runtime_id_for_session(id))
+            .await
+            .map_err(|error| {
+                whole_blob_read_error_to_session_error(id, "live session base comparison", error)
+            })?;
+        Ok(committed.is_some_and(|committed| committed != base))
     }
 
     async fn synchronize_live_session_from_durable(
@@ -7989,7 +8107,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     async fn synchronize_runtime_backed_live_from_durable_authority(
         &self,
         id: &SessionId,
-        reason: LiveSessionAuthorityReason,
+        cause: LiveSessionSyncCause,
     ) -> Result<bool, SessionError> {
         if self.session_archived_by_runtime_store_authority(id).await? {
             return Ok(false);
@@ -8003,7 +8121,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             Err(error) if Self::is_transcript_revision_conflict_error(&error) => {
                 tracing::info!(
                     session_id = %id,
-                    ?reason,
+                    reason = cause.trace_label(),
                     "a provisional tail the live actor does not continue stands ahead of the committed body; the actor is not synchronized"
                 );
                 return Ok(false);
@@ -8012,11 +8130,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         };
 
         match self
-            .synchronize_live_session_from_durable(
-                id,
-                &durable,
-                LiveSessionSyncCause::Authority(reason),
-            )
+            .synchronize_live_session_from_durable(id, &durable, cause)
             .await
         {
             Ok(()) => {}
@@ -8074,8 +8188,11 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 Ok(false)
             }
             LiveSessionAuthority::DurableAuthoritative { reason } => {
-                self.synchronize_runtime_backed_live_from_durable_authority(id, reason)
-                    .await
+                self.synchronize_runtime_backed_live_from_durable_authority(
+                    id,
+                    LiveSessionSyncCause::Authority(reason),
+                )
+                .await
             }
             LiveSessionAuthority::NoLive | LiveSessionAuthority::LiveAuthoritative { .. } => {
                 Ok(false)
@@ -19075,9 +19192,14 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             // boundary commit left a durable tail every committed read
             // refuses. This archive holds the quiescent boundary and the
             // recovery gate, so it settles that tail and observes once more;
-            // a held or refused tail ends the archive typed.
+            // a held or refused tail ends the archive typed. An actor the
+            // verdict keeps is left as it is: this archive ends it.
             match self
-                .discard_stale_live_session_if_needed(id, LiveStalenessPosition::TurnBoundaryHeld)
+                .discard_stale_live_session_if_needed_with_kept_base(
+                    id,
+                    LiveStalenessPosition::TurnBoundaryHeld,
+                    KeptLiveActorBase::LeftAsItIs,
+                )
                 .await
             {
                 Err(conflict) if Self::is_transcript_revision_conflict_error(&conflict) => {
@@ -19090,9 +19212,10 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     )
                     .await?;
                     let _ = self
-                        .discard_stale_live_session_if_needed(
+                        .discard_stale_live_session_if_needed_with_kept_base(
                             id,
                             LiveStalenessPosition::TurnBoundaryHeld,
+                            KeptLiveActorBase::LeftAsItIs,
                         )
                         .await?;
                 }
@@ -25305,6 +25428,159 @@ mod tests {
             "the message must not claim an ordering the comparison never established: {error}"
         );
         assert_teardown_required_projection_authority(error, "differs from the live actor base");
+    }
+
+    /// A run's closing save that the runtime alone promotes to the committed
+    /// document (its settle of a cancelled run) moves the store's WholeBlob
+    /// authority while the live actor's checkpoint base stays at the former
+    /// one. The promoted transcript is the live actor's own, so the turn
+    /// entry's transcript verdict reads live-authoritative. The turn entry
+    /// under the held boundary still rebases the actor's base to the store's
+    /// authority, so the next run's first checkpoint is accepted. RED before:
+    /// the base stayed behind and that checkpoint was refused with "differs
+    /// from the live actor base", which abandoned the first turn after a
+    /// cancel on a WholeBlob store.
+    #[tokio::test]
+    async fn a_runtime_promoted_closing_save_is_rebased_at_the_next_turn_entry_whole_blob() {
+        use meerkat_core::SessionCheckpointer as _;
+
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        // The builder keeps the build's checkpointer alive, as a real agent
+        // does; the service holds it weakly.
+        let service = PersistentSessionService::new(
+            CheckpointerHoldingBuilder::new(DummyBuilder),
+            4,
+            Arc::new(MemoryStore::new()),
+            runtime_store.clone(),
+            memory_blob_store(),
+        );
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create the WholeBlob live actor");
+        let session_id = created.session_id;
+        let runtime_id =
+            PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&session_id);
+        let checkpointer = service
+            .live_checkpointers
+            .lock()
+            .await
+            .get(&session_id)
+            .cloned()
+            .and_then(|checkpointer| checkpointer.upgrade())
+            .expect("the created actor registers its checkpointer");
+        let base_before =
+            RuntimeStore::load_whole_blob_store_authority(runtime_store.as_ref(), &runtime_id)
+                .await
+                .expect("read the committed authority")
+                .expect("the created session has a committed authority");
+
+        // The run: its closing save through the actor's checkpointer, and the
+        // same rows on the live actor.
+        let run_id = RunId::new();
+        let mut closing = service
+            .inner
+            .export_session(&session_id)
+            .await
+            .expect("the created actor exports its session");
+        closing.push(Message::User(UserMessage::text(
+            "the run's prompt".to_string(),
+        )));
+        closing.push(run_stamped_assistant(
+            &run_id,
+            vec![meerkat_core::AssistantBlock::Text {
+                text: "the run's answer".to_string(),
+                meta: None,
+            }],
+            StopReason::EndTurn,
+        ));
+        checkpointer
+            .checkpoint_run(&mut closing, &run_id, None)
+            .await
+            .expect("the closing save checkpoints")
+            .expect("a durable session writes a provisional candidate");
+        service
+            .inner
+            .sync_session_from_durable_snapshot(&session_id, closing.clone())
+            .await
+            .expect("the live actor holds the rows its run saved");
+
+        // The runtime's settle of the cancelled run, on the store alone.
+        let settled = meerkat_runtime::recovery::recover_durable_tail_for_run(
+            runtime_store.as_ref(),
+            &session_id,
+            &run_id,
+        )
+        .await
+        .expect("the settle runs");
+        assert!(
+            matches!(
+                settled,
+                Some(meerkat_runtime::recovery::DurableTailRecoveryOutcome::Committed { .. })
+            ),
+            "the settle commits the run's candidate: {settled:?}"
+        );
+        let promoted =
+            RuntimeStore::load_whole_blob_store_authority(runtime_store.as_ref(), &runtime_id)
+                .await
+                .expect("read the promoted authority")
+                .expect("the promoted authority");
+        assert_ne!(
+            promoted, base_before,
+            "the settle moved the store's committed authority"
+        );
+        let committed =
+            RuntimeStore::load_committed_whole_blob_snapshot(runtime_store.as_ref(), &runtime_id)
+                .await
+                .expect("read the committed document")
+                .expect("the committed document");
+        assert_eq!(
+            meerkat_core::transcript_messages_digest(committed.session().messages()).unwrap(),
+            meerkat_core::transcript_messages_digest(closing.messages()).unwrap(),
+            "the candidate is promoted as it is: the committed transcript is the live actor's"
+        );
+        assert!(
+            matches!(
+                service
+                    .live_session_authority(&session_id)
+                    .await
+                    .expect("the turn entry's verdict"),
+                LiveSessionAuthority::LiveAuthoritative { .. }
+            ),
+            "equal transcripts read live-authoritative: the verdict alone asks for no rebase"
+        );
+
+        // The next turn's entry, under the held turn boundary.
+        let discarded = service
+            .synchronize_live_session_for_runtime_turn(&session_id)
+            .await
+            .expect("the turn entry synchronizes");
+        assert!(
+            !discarded,
+            "the actor is synchronized in place, not discarded"
+        );
+        assert_eq!(
+            checkpointer
+                .whole_blob_base_authority
+                .lock()
+                .expect("actor base authority lock")
+                .as_ref(),
+            Some(&promoted),
+            "the turn entry rebases the live actor's base to the store's committed authority"
+        );
+        let mut next = service
+            .inner
+            .export_session(&session_id)
+            .await
+            .expect("the synchronized actor exports its session");
+        next.push(Message::User(UserMessage::text(
+            "the next run's prompt".to_string(),
+        )));
+        checkpointer
+            .checkpoint_run(&mut next, &RunId::new(), None)
+            .await
+            .expect("the next run's first checkpoint is accepted")
+            .expect("a durable session writes a provisional candidate");
     }
 
     #[tokio::test]
@@ -59398,7 +59674,7 @@ mod tests {
                 .take_boundary_for_test(&run_id, true)
                 .await
                 .map_err(|error| AgentError::InternalError(error.to_string()))?;
-            if taken.applied_durable.is_none() {
+            if taken.applied_durable.is_empty() {
                 return Err(AgentError::InternalError(
                     "the probe boundary carried no durable delivery".to_string(),
                 ));

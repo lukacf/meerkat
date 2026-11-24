@@ -201,7 +201,7 @@ fn the_runtime_drain_closes_ingress_then_stops_the_mob_then_waits() {
             "close_foreground_operations_for_drain()",
             "cancel_identity_bootstrap()",
             "join_foreground_operations()",
-            "self.actor_loop_probe_task",
+            "self.default_mob().actor_loop_probe_task",
             "stop_runtime_delivery()",
             "stop_mob_with(",
             "drain_stopped_runs(",

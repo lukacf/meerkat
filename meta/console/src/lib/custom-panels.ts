@@ -1,5 +1,5 @@
 import React from "react";
-import { consolePanelModuleUrl, validateConsolePanels, type ConsolePanelDefinition, type ConsolePanelService } from "@console-core";
+import { consolePanelModuleUrl, validateConsolePanels, type ConsolePanelDefinition, type ConsolePanelService, type MemberDoor } from "@console-core";
 
 const EMPTY_PANELS: readonly ConsolePanelDefinition[] = [];
 
@@ -43,8 +43,18 @@ function loadModule(url: string): Promise<{ default: readonly ConsolePanelDefini
   return import(/* @vite-ignore */ url);
 }
 
-/** No credentials are handed to plugins, and requests are never replayed. */
-export function createConsolePanelService(baseUrl: string): ConsolePanelService {
+/**
+ * No credentials are handed to plugins, and requests are never replayed.
+ * `memberDoor` is the door of a member (see mob-door): the conversation
+ * locator of a member of a mob the host created beside the launch mob names
+ * that mob (`mob_id`) and the member as that mob's door knows it.
+ */
+export function createConsolePanelService(baseUrl: string, memberDoor?: (identity: string) => MemberDoor): ConsolePanelService {
+  const locator = (conversation: unknown): unknown => {
+    const named = conversation && typeof conversation === "object" ? (conversation as { identity?: unknown }).identity : undefined;
+    const door = typeof named === "string" ? memberDoor?.(named) : undefined;
+    return door?.mobId ? { ...(conversation as object), identity: door.identity, mob_id: door.mobId } : conversation;
+  };
   return async (request, scope, signal) => {
     const method = request.method ?? "GET";
     if (scope.readOnly && method !== "GET") throw new Error("This console is view only");
@@ -52,7 +62,7 @@ export function createConsolePanelService(baseUrl: string): ConsolePanelService 
     // Locators only. The server derives the viewer from its authenticated session.
     const headers: Record<string, string> = {
       "X-Console-Authority": encodeURIComponent(JSON.stringify(scope.authority)),
-      "X-Console-Conversation": encodeURIComponent(JSON.stringify(scope.conversation)),
+      "X-Console-Conversation": encodeURIComponent(JSON.stringify(locator(scope.conversation))),
     };
     if (request.body !== undefined) headers["Content-Type"] = "application/json";
     const response = await fetch(url, { method, signal, headers, credentials: "same-origin", redirect: "error",

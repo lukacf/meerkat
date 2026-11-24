@@ -375,8 +375,15 @@ impl ManifestLockGuard {
 }
 
 impl Drop for ManifestLockGuard {
+    /// Release the lock before the holder returns: remove the file here,
+    /// synchronously. A removal handed to a spawned task is lost when the
+    /// runtime is dropped before it polls the task, which is what happens
+    /// when a command ends right after the holder returned; the file would
+    /// then refuse every taker until it reached the takeover age. One
+    /// unlink on the dropping thread is the price. A killed process still
+    /// leaves the file; [`MANIFEST_LOCK_STALE_AFTER`] covers that.
     fn drop(&mut self) {
-        remove_file_nonblocking_on_drop(self.path.clone());
+        let _ = std::fs::remove_file(&self.path);
     }
 }
 
@@ -406,6 +413,13 @@ impl Drop for RealmLeaseGuard {
         }
         if let Some(join) = self.join.take() {
             if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                // The heartbeat task removes the record as its last step,
+                // but only if the runtime polls it again: a runtime dropped
+                // right after this guard (a server at an ordinary end)
+                // never does, and the record would read as a live lease
+                // until it went stale. So the record is removed here too,
+                // synchronously; the task's own removal then finds nothing.
+                let _ = std::fs::remove_file(&self.lease_path);
                 std::mem::drop(handle.spawn(async move {
                     let _ = join.await;
                 }));
@@ -414,16 +428,6 @@ impl Drop for RealmLeaseGuard {
                 let _ = std::fs::remove_file(&self.lease_path);
             }
         }
-    }
-}
-
-fn remove_file_nonblocking_on_drop(path: PathBuf) {
-    if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        std::mem::drop(handle.spawn(async move {
-            let _ = tokio::fs::remove_file(path).await;
-        }));
-    } else {
-        let _ = std::fs::remove_file(path);
     }
 }
 
@@ -1092,10 +1096,14 @@ impl FirstStartReservation {
 
 impl Drop for FirstStartReservation {
     fn drop(&mut self) {
-        // Crash-safety net for early-return paths; the normal paths release
-        // explicitly. Markers left by a hard kill age out via staleness.
+        // The net for the early returns (an error or a cancellation while
+        // markers are held); the normal paths release explicitly and leave
+        // nothing here. The markers are removed synchronously, like the
+        // manifest lock's file: a removal handed to a spawned task is lost
+        // when the runtime is dropped before it polls the task. Markers
+        // left by a hard kill age out via staleness.
         for path in std::mem::take(&mut self.markers) {
-            remove_file_nonblocking_on_drop(path);
+            let _ = std::fs::remove_file(path);
         }
     }
 }
@@ -2498,7 +2506,386 @@ mod tests {
         );
     }
 
+    /// The realm manifest lock is one file in the realm's directory. A
+    /// holder that has returned has released it: its lock file is gone, so
+    /// the next taker acquires without waiting, even when the holder's
+    /// runtime (its process) ends right after it returned.
+    ///
+    /// RED before, for the four rows about a holder that has returned: the
+    /// guard removed its file on a task it spawned at drop and did not
+    /// await. A current-thread runtime polls that task only once the caller
+    /// awaits again, so the file was still there when the holder returned;
+    /// a runtime dropped at that point never polled it, the file stayed,
+    /// and the next taker waited its five seconds and failed with
+    /// `RealmManifestLockTimeout` until the file was thirty seconds old.
+    ///
+    /// The three controls hold before and after: a held lock and a leftover
+    /// file younger than the takeover age make a taker wait and time out,
+    /// and a leftover file older than that age is taken over.
+    mod manifest_lock {
+        use super::*;
+
+        const REALM: &str = "lab";
+
+        fn lock_path(realms_root: &Path) -> PathBuf {
+            realm_paths_in(realms_root, REALM)
+                .root
+                .join(".realm_manifest.lock")
+        }
+
+        /// A current-thread runtime with a paused clock: a taker's bounded
+        /// wait elapses virtually, and a taker that did not wait leaves the
+        /// clock where it was.
+        pub(super) fn paused_runtime() -> tokio::runtime::Runtime {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .start_paused(true)
+                .build()
+                .expect("a runtime")
+        }
+
+        pub(super) fn runtime() -> tokio::runtime::Runtime {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("a runtime")
+        }
+
+        /// Materialize the realm, in a runtime of its own that is driven
+        /// until the manifest lock of that first open is gone.
+        fn materialized_realm(realms_root: &Path) {
+            runtime().block_on(async {
+                ensure_realm_manifest_in(
+                    realms_root,
+                    REALM,
+                    Some(supported_backend()),
+                    Some(RealmOrigin::Explicit),
+                )
+                .await
+                .expect("the realm");
+                let lock = lock_path(realms_root);
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while lock.exists() && Instant::now() < deadline {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                assert!(!lock.exists(), "the first open's lock is released");
+            });
+        }
+
+        /// The next taker after a holder: governing takes the manifest lock
+        /// whether or not the realm is governed already. It must acquire on
+        /// its first attempt: on the paused clock, no retry delay elapsed.
+        async fn the_next_taker_acquires_at_once(realms_root: &Path) {
+            let started = Instant::now();
+            let governed = govern_realm_in(realms_root, REALM).await;
+            assert!(
+                governed.is_ok(),
+                "the next taker acquires the manifest lock: {governed:?}"
+            );
+            assert_eq!(
+                started.elapsed(),
+                Duration::ZERO,
+                "the next taker did not wait for the manifest lock"
+            );
+        }
+
+        #[test]
+        fn a_first_open_that_has_returned_leaves_no_manifest_lock_file() {
+            let temp = tempfile::tempdir().unwrap();
+            let realms_root = temp.path().join("realms");
+            let lock = lock_path(&realms_root);
+            paused_runtime().block_on(async {
+                ensure_realm_manifest_in(
+                    &realms_root,
+                    REALM,
+                    Some(supported_backend()),
+                    Some(RealmOrigin::Explicit),
+                )
+                .await
+                .expect("the first open");
+                // Nothing is awaited between the holder's return and this.
+                assert!(
+                    !lock.exists(),
+                    "the first open released the manifest lock before it returned"
+                );
+                the_next_taker_acquires_at_once(&realms_root).await;
+            });
+        }
+
+        #[test]
+        fn a_provider_first_open_that_has_returned_leaves_no_manifest_lock_file() {
+            let temp = tempfile::tempdir().unwrap();
+            let realms_root = temp.path().join("realms");
+            let lock = lock_path(&realms_root);
+            paused_runtime().block_on(async {
+                ensure_realm_manifest_pin_in(&realms_root, REALM, Some("bigquery"), None, None)
+                    .await
+                    .expect("the first open of a provider realm");
+                // Nothing is awaited between the holder's return and this.
+                assert!(
+                    !lock.exists(),
+                    "the first open released the manifest lock before it returned"
+                );
+                the_next_taker_acquires_at_once(&realms_root).await;
+            });
+        }
+
+        #[test]
+        fn a_governing_that_has_returned_leaves_no_manifest_lock_file() {
+            let temp = tempfile::tempdir().unwrap();
+            let realms_root = temp.path().join("realms");
+            materialized_realm(&realms_root);
+            let lock = lock_path(&realms_root);
+            paused_runtime().block_on(async {
+                govern_realm_in(&realms_root, REALM)
+                    .await
+                    .expect("the selection");
+                // Nothing is awaited between the holder's return and this.
+                assert!(
+                    !lock.exists(),
+                    "governing released the manifest lock before it returned"
+                );
+                the_next_taker_acquires_at_once(&realms_root).await;
+            });
+        }
+
+        /// What a command line does: one command runs to its end and its
+        /// runtime is dropped, then the next command starts in a runtime of
+        /// its own.
+        #[test]
+        fn a_holder_whose_runtime_ends_at_once_leaves_no_manifest_lock_file() {
+            let temp = tempfile::tempdir().unwrap();
+            let realms_root = temp.path().join("realms");
+            let first_command = runtime();
+            first_command
+                .block_on(ensure_realm_manifest_in(
+                    &realms_root,
+                    REALM,
+                    Some(supported_backend()),
+                    Some(RealmOrigin::Explicit),
+                ))
+                .expect("the first command creates the realm");
+            drop(first_command);
+
+            paused_runtime().block_on(the_next_taker_acquires_at_once(&realms_root));
+            assert!(
+                !lock_path(&realms_root).exists(),
+                "no command left a manifest lock file"
+            );
+            assert_eq!(
+                runtime()
+                    .block_on(read_realm_posture_in(&realms_root, REALM))
+                    .expect("the posture"),
+                RealmPosture::Governed
+            );
+        }
+
+        #[test]
+        fn a_held_manifest_lock_makes_a_taker_wait_and_time_out() {
+            let temp = tempfile::tempdir().unwrap();
+            let realms_root = temp.path().join("realms");
+            materialized_realm(&realms_root);
+            let lock = lock_path(&realms_root);
+            paused_runtime().block_on(async {
+                let held = ManifestLockGuard::acquire(&lock, REALM)
+                    .await
+                    .expect("the holder");
+                let started = Instant::now();
+                let refused = govern_realm_in(&realms_root, REALM).await;
+                assert!(
+                    matches!(
+                        refused,
+                        Err(StoreError::RealmManifestLockTimeout { ref realm_id }) if realm_id == REALM
+                    ),
+                    "a taker times out behind a held manifest lock: {refused:?}"
+                );
+                assert!(
+                    started.elapsed() >= MANIFEST_LOCK_TIMEOUT,
+                    "the taker waited its whole bounded wait: {:?}",
+                    started.elapsed()
+                );
+                assert!(lock.exists(), "the taker left the holder's lock file");
+                assert_eq!(
+                    read_realm_posture_in(&realms_root, REALM)
+                        .await
+                        .expect("the posture"),
+                    RealmPosture::Ungoverned,
+                    "the refused taker changed nothing"
+                );
+
+                drop(held);
+                govern_realm_in(&realms_root, REALM)
+                    .await
+                    .expect("the taker acquires once the holder has released");
+            });
+        }
+
+        /// What a killed holder leaves: a lock file nobody holds. Until it
+        /// reaches the takeover age it refuses takers like a held lock.
+        #[test]
+        fn a_leftover_manifest_lock_younger_than_the_takeover_age_still_blocks() {
+            let temp = tempfile::tempdir().unwrap();
+            let realms_root = temp.path().join("realms");
+            materialized_realm(&realms_root);
+            let lock = lock_path(&realms_root);
+            std::fs::write(&lock, b"realm-manifest-lock").expect("a leftover lock file");
+            paused_runtime().block_on(async {
+                let refused = govern_realm_in(&realms_root, REALM).await;
+                assert!(
+                    matches!(
+                        refused,
+                        Err(StoreError::RealmManifestLockTimeout { ref realm_id }) if realm_id == REALM
+                    ),
+                    "a taker times out behind a young leftover lock file: {refused:?}"
+                );
+            });
+            assert!(lock.exists(), "the young leftover lock file is not removed");
+        }
+
+        #[test]
+        fn a_leftover_manifest_lock_older_than_the_takeover_age_is_taken_over() {
+            let temp = tempfile::tempdir().unwrap();
+            let realms_root = temp.path().join("realms");
+            materialized_realm(&realms_root);
+            let lock = lock_path(&realms_root);
+            std::fs::write(&lock, b"realm-manifest-lock").expect("a leftover lock file");
+            let leftover = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&lock)
+                .expect("the leftover lock file");
+            leftover
+                .set_times(std::fs::FileTimes::new().set_modified(
+                    SystemTime::now() - MANIFEST_LOCK_STALE_AFTER - Duration::from_secs(5),
+                ))
+                .expect("an old modification time");
+            drop(leftover);
+            runtime().block_on(async {
+                let governed = govern_realm_in(&realms_root, REALM)
+                    .await
+                    .expect("a taker takes an old leftover lock file over");
+                assert_eq!(governed.governance(), Some(RealmGovernance::Governed));
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while lock.exists() && Instant::now() < deadline {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                assert!(!lock.exists(), "the taker released the lock it took over");
+            });
+        }
+    }
+
+    /// A realm lease is one record file per holder. A holder whose guard
+    /// has dropped has released the lease: its record is gone, so the realm
+    /// no longer reads as active, even when the holder's runtime (its
+    /// process) ends right after the drop.
+    ///
+    /// RED before, for the two rows about a dropped guard: inside a runtime
+    /// the guard only signalled its heartbeat task and spawned a wait for
+    /// it; removing the record was that task's last step. A current-thread
+    /// runtime polls the task only once the caller awaits again, so the
+    /// record was still there when the guard had dropped; a runtime dropped
+    /// at that point never polled it, the record stayed and read as a live
+    /// lease until thirty seconds after its last heartbeat.
+    ///
+    /// The control holds before and after: the record a killed holder
+    /// leaves reads active until that age and blocks, and reads stale after.
+    mod lease_release {
+        use super::manifest_lock::runtime;
+        use super::*;
+
+        const REALM: &str = "lab";
+
+        #[test]
+        fn a_dropped_lease_guard_has_removed_its_lease_record() {
+            let temp = tempfile::tempdir().unwrap();
+            let realms_root = temp.path().join("realms");
+            runtime().block_on(async {
+                let guard = start_realm_lease_in(&realms_root, REALM, Some("server"), "rest")
+                    .await
+                    .expect("the lease");
+                let record = guard.lease_path().to_path_buf();
+                assert!(record.exists(), "a held lease has its record");
+                drop(guard);
+                // Nothing is awaited between the guard's drop and this.
+                assert!(
+                    !record.exists(),
+                    "the dropped guard removed its lease record"
+                );
+            });
+        }
+
+        /// What a server does at an ordinary end: its state, and the lease
+        /// guard in it, drops as its main future returns, and the runtime
+        /// is dropped next. Then another command asks whether the realm is
+        /// active.
+        #[test]
+        fn a_lease_guard_dropped_as_its_runtime_ends_leaves_no_lease_record() {
+            let temp = tempfile::tempdir().unwrap();
+            let realms_root = temp.path().join("realms");
+            let server = runtime();
+            let record = server.block_on(async {
+                let guard = start_realm_lease_in(&realms_root, REALM, Some("server"), "rest")
+                    .await
+                    .expect("the lease");
+                let record = guard.lease_path().to_path_buf();
+                drop(guard);
+                record
+            });
+            drop(server);
+
+            let status = runtime()
+                .block_on(inspect_realm_leases_in(&realms_root, REALM, false))
+                .expect("the lease status");
+            assert!(
+                !status.blocks_destructive_prune(),
+                "the ended holder's realm does not read as active: {status:?}"
+            );
+            assert!(status.stale.is_empty(), "no record is left: {status:?}");
+            assert!(!record.exists(), "the ended holder left no lease record");
+        }
+
+        /// What a killed holder leaves: its last record, which nobody
+        /// removes. It reads as a live lease until it is older than the
+        /// stale age, and as a stale one after.
+        #[test]
+        fn a_killed_holders_lease_record_reads_active_until_the_stale_age_and_blocks() {
+            let temp = tempfile::tempdir().unwrap();
+            let realms_root = temp.path().join("realms");
+            let record_path =
+                realm_lease_dir(&realm_paths_in(&realms_root, REALM)).join("server.json");
+            let record = |heartbeat_at: u64| RealmLeaseRecord {
+                realm_id: REALM.to_string(),
+                instance_id: "server".to_string(),
+                surface: "rest".to_string(),
+                pid: 7,
+                started_at: 1,
+                heartbeat_at,
+            };
+            let runtime = runtime();
+
+            runtime
+                .block_on(write_lease_record(&record_path, &record(now_unix_secs())))
+                .expect("the record of a holder killed just now");
+            let status = runtime
+                .block_on(inspect_realm_leases_in(&realms_root, REALM, true))
+                .expect("the lease status");
+            assert_eq!(status.active.len(), 1, "a young record is live: {status:?}");
+            assert!(status.blocks_destructive_prune());
+            assert!(record_path.exists(), "a live record is not cleaned up");
+
+            let old = now_unix_secs() - REALM_LEASE_STALE_TTL_SECS - 5;
+            runtime
+                .block_on(write_lease_record(&record_path, &record(old)))
+                .expect("the record of a holder killed a while ago");
+            let status = runtime
+                .block_on(inspect_realm_leases_in(&realms_root, REALM, false))
+                .expect("the lease status");
+            assert_eq!(status.stale.len(), 1, "an old record is stale: {status:?}");
+            assert!(!status.blocks_destructive_prune());
+        }
+    }
+
     mod first_start_reservation {
+        use super::manifest_lock::{paused_runtime, runtime};
         use super::*;
 
         fn candidates(a: &Path, b: &Path) -> Vec<PathBuf> {
@@ -2850,6 +3237,133 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(pin.realm().as_str(), "a_b");
+        }
+
+        fn markers_left(roots: &[&Path], realm_id: &str) -> Vec<PathBuf> {
+            roots
+                .iter()
+                .map(|root| first_start_marker_path(root, realm_id))
+                .filter(|marker| marker.exists())
+                .collect()
+        }
+
+        /// The next command's first start, in a runtime of its own with a
+        /// paused clock: it must reserve on its first attempt (no retry
+        /// delay elapsed) and materialize the realm.
+        fn the_next_first_start_reserves_at_once(root_a: &Path, root_b: &Path) {
+            paused_runtime().block_on(async {
+                let started = Instant::now();
+                let opened = ensure_realm_manifest_pin_with_candidates(
+                    root_a,
+                    &candidates(root_a, root_b),
+                    "team",
+                    None,
+                    Some(supported_backend()),
+                    Some(RealmOrigin::Explicit),
+                )
+                .await;
+                assert!(
+                    opened.is_ok(),
+                    "the next first start reserves and materializes: {opened:?}"
+                );
+                assert_eq!(
+                    started.elapsed(),
+                    Duration::ZERO,
+                    "the next first start did not wait for the reservation"
+                );
+            });
+            assert_eq!(
+                markers_left(&[root_a, root_b], "team"),
+                Vec::<PathBuf>::new(),
+                "no first start left a marker"
+            );
+        }
+
+        /// A first start that fails while it holds markers (here: the
+        /// second candidate root cannot be created, after the first root's
+        /// marker was written) has released them when it returns, also when
+        /// its runtime is dropped right after, as a command's is.
+        ///
+        /// RED before: the reservation removed the markers of such an early
+        /// return on tasks it spawned at drop and did not await. The dropped
+        /// runtime never polled them, the marker stayed, and the next first
+        /// start of the realm failed with `Contention` until the marker was
+        /// thirty seconds old.
+        #[cfg(unix)]
+        #[test]
+        fn a_first_start_that_failed_under_its_reservation_leaves_no_marker() {
+            let temp = tempfile::tempdir().unwrap();
+            let root_a = temp.path().join("a");
+            let root_b = temp.path().join("b");
+            // A dangling link in the second candidate's place: nothing is
+            // found under it, and it cannot be created as a directory.
+            std::os::unix::fs::symlink(temp.path().join("absent"), &root_b)
+                .expect("a dangling link");
+
+            let first_command = runtime();
+            let failed = first_command.block_on(ensure_realm_manifest_pin_with_candidates(
+                &root_a,
+                &candidates(&root_a, &root_b),
+                "team",
+                None,
+                Some(supported_backend()),
+                Some(RealmOrigin::Explicit),
+            ));
+            assert!(
+                matches!(failed, Err(RealmFirstStartError::Store(StoreError::Io(_)))),
+                "the first start fails on the second candidate root: {failed:?}"
+            );
+            drop(first_command);
+
+            // The operator repairs the second candidate root and runs the
+            // next command.
+            std::fs::remove_file(&root_b).expect("the dangling link is removed");
+            the_next_first_start_reserves_at_once(&root_a, &root_b);
+        }
+
+        /// A first start that is cancelled while it holds its markers (here:
+        /// a caller's timeout fires while it waits behind a manifest lock
+        /// file a killed process left) has released them, also when its
+        /// runtime is dropped right after.
+        ///
+        /// RED before, for the same reason as the row above.
+        #[test]
+        fn a_cancelled_first_start_leaves_no_marker() {
+            let temp = tempfile::tempdir().unwrap();
+            let root_a = temp.path().join("a");
+            let root_b = temp.path().join("b");
+            let leftover_lock = realm_paths_in(&root_a, "team")
+                .root
+                .join(".realm_manifest.lock");
+            std::fs::create_dir_all(leftover_lock.parent().expect("the realm directory"))
+                .expect("the realm directory");
+            std::fs::write(&leftover_lock, b"realm-manifest-lock").expect("a leftover lock file");
+
+            let first_command = paused_runtime();
+            let cancelled = first_command.block_on(async {
+                tokio::time::timeout(
+                    Duration::from_secs(1),
+                    ensure_realm_manifest_pin_with_candidates(
+                        &root_a,
+                        &candidates(&root_a, &root_b),
+                        "team",
+                        None,
+                        Some(supported_backend()),
+                        Some(RealmOrigin::Explicit),
+                    ),
+                )
+                .await
+            });
+            assert!(
+                cancelled.is_err(),
+                "the caller's timeout cancels the first start while it holds its markers"
+            );
+            drop(first_command);
+
+            // The leftover manifest lock is gone (aged out, or removed), and
+            // the next command runs.
+            std::fs::remove_file(&leftover_lock).expect("the leftover lock file is removed");
+            the_next_first_start_reserves_at_once(&root_a, &root_b);
         }
     }
 
@@ -3225,10 +3739,11 @@ mod tests {
 
         const REALM: &str = "team";
 
-        /// Run `future` to its end, then wait until the manifest lock of the
-        /// realm under `root` is gone: a lock guard removes its file on a
-        /// task of the runtime, which a current-thread runtime runs only
-        /// while it is driven.
+        /// Run `future` to its end, then wait (bounded) until the manifest
+        /// lock of the realm under `root` is gone. A lock guard removes its
+        /// file when it drops, so the lock is gone when `future` returns
+        /// and the wait ends at once; the rows below list the realm's
+        /// files and must not see a lock file.
         fn settled<T>(root: &Path, future: impl std::future::Future<Output = T>) -> T {
             runtime().block_on(async {
                 let output = future.await;
@@ -3521,7 +4036,7 @@ mod tests {
                     let runtime = runtime();
                     let acquired = runtime.block_on(ManifestLockGuard::acquire(&lock_path, REALM));
                     let error = acquired.as_ref().err().map(ToString::to_string);
-                    // A guard removes its file on a task of the runtime.
+                    // A guard that was acquired removes its file here.
                     drop(acquired);
                     assert!(
                         error.is_some(),

@@ -202,4 +202,42 @@ describe("the console's changes of long-term agents", () => {
     expect((await result.current!.loadOffRoster()).map((agent) => [agent.name, agent.archived]))
       .toEqual([["oldhand", true], ["porter", false], ["relic", true]]);
   });
+
+  it("makes every request of an agent's change about the agent it was asked for, never about a name an answer gave", async () => {
+    // An agent the console knows by one key (`support/reviewer`), whose
+    // gateway answers with the agent as it knows it (`reviewer`).
+    const family = createScriptedIdentityFamily({ agents: [{ name: "reviewer", profile: "worker", instructions: ["Review the work."] }] });
+    family.setProfileChange("reviewer", "require_approval");
+    const asked: Array<[string, unknown, unknown]> = [];
+    const run = async (command: IdentityCommand, params: Record<string, unknown>, about?: string) => {
+      asked.push([command, params.name, about]);
+      const own = typeof params.name === "string" ? { ...params, name: params.name.replace(/^support\//, "") } : params;
+      const answer = family.handle(consoleCommandMethod(CONSOLE_COMMAND_NAMES[command]), own);
+      if (answer.error) throw Object.assign(new Error(answer.error.message), { rpcError: answer.error });
+      return answer.result;
+    };
+    const hook = renderHook(() => useIdentityChanges({ flags: ALL, readable: true, run, onChanged: () => {} }));
+    const api = () => hook.result.current!;
+
+    // The record is the one of the agent asked for: under the key it was asked by.
+    const record = await api().loadRecord("support/reviewer");
+    expect(record.name).toBe("support/reviewer");
+    await (api().loadDirectory as (about?: string) => Promise<unknown>)("support/reviewer");
+    const request = { name: record.name, expected_spec_digest: record.specDigest, set: { profile: "reviewer" } };
+    await api().plan("update", request);
+    const requestId = api().mintRequestId();
+    await act(async () => { await api().change("update", request, requestId, "Reviewer"); });
+    expect(api().pending.map((entry) => entry.requestId)).toEqual([requestId]);
+    // The held request is read and withdrawn by its id: still about that agent.
+    await act(async () => { await api().refreshPending(); });
+    await act(async () => { await api().withdraw(requestId); });
+    expect(asked).toEqual([
+      ["getAgentRecord", "support/reviewer", "support/reviewer"],
+      ["listAgentDirectory", undefined, "support/reviewer"],
+      ["planAgentChange", "support/reviewer", "support/reviewer"],
+      ["updateAgent", "support/reviewer", "support/reviewer"],
+      ["getAgentChange", undefined, "support/reviewer"],
+      ["withdrawAgentChange", undefined, "support/reviewer"],
+    ]);
+  });
 });

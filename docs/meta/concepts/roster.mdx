@@ -4,7 +4,7 @@ description: "Understand Meta's lightweight roster projection, deep member statu
 icon: "users"
 ---
 
-*Mirrored from Meerkat Meta main at [de520227a811](https://github.com/lukacf/meerkat/commit/de520227a81178fce9ffea3abcafa4a7bddfbf27) on 2026-11-17; Meta version 0.9.16 at that commit.*
+*Mirrored from Meerkat Meta main at [03eac87a63cd](https://github.com/lukacf/meerkat/commit/03eac87a63cd7d2448ac6d4a47ca76ef79e47d15) on 2026-11-24; Meta version 0.9.18 at that commit.*
 
 The mob roster is the operational view of the members known to a mob. Roster
 reads return lightweight `MobMemberListEntry` projections. Deep execution
@@ -297,6 +297,10 @@ answers the check from that WorkGraph:
   not decode, the check answers unavailable. Meerkat asks again, up to three
   attempts, then settles the run the same way.
 
+A mob runtime composed without a WorkGraph service has no check, and
+neither has one whose storage provider has no WorkGraph: there is no item
+and no claim to check, and its durable workers continue unchecked.
+
 The check knows the worker by its member owner key
 (`agent:mob/<mob_id>/agent/<identity>`) and by its session (`session:<id>`);
 a claim under any other key belongs to another owner. Two limits apply. A
@@ -336,6 +340,11 @@ or the member tool `spawn_member`) or into a child mob it creates
   restart. The member tool `spawn_member` wires the two only when the agent
   passes `auto_wire_parent: true`. The host reaches the member by its member
   id with `meta/send_message`.
+- **In the Console (after 0.9.17).** The member is listed in the roster and the topology
+  with its mob. A child mob is shown as a mob nested under the mob of the
+  member that created it (see [Mobs](/meta/guides/console#mobs)), and its members
+  are named by the mob and their name (`<mob id>/<name>`); listing it wakes
+  no member.
 - **On a host store realm** child mobs are process-bound and do not survive a
   restart, while members of the realm's root mob do (see
   [Keeping a Meta realm in your own database](/meta/guides/unified-runtime#keeping-a-meta-realm-in-your-own-database)).

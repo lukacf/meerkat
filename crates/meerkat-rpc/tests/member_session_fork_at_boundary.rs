@@ -36,7 +36,15 @@ use serde_json::{Value, json};
 use tokio::sync::Notify;
 
 const MODEL: &str = "claude-sonnet-4-5";
-const MOB_ID: &str = "tui";
+/// A mob id for one rig. A mob's participant names are held for the whole
+/// process, so two tests of this binary that run at once must not share one.
+fn next_mob_id() -> String {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    format!(
+        "tui-{}",
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    )
+}
 const MAIN: &str = "main";
 /// The user turns every source session runs.
 const PROMPTS: [&str; 3] = ["first question", "second question", "third question"];
@@ -151,6 +159,7 @@ impl LlmClient for ScriptedClient {
 }
 
 struct Rig {
+    mob_id: String,
     router: MethodRouter,
     client: Arc<ScriptedClient>,
     _temp: tempfile::TempDir,
@@ -187,6 +196,7 @@ fn rig() -> Rig {
     let router = MethodRouter::new(Arc::new(runtime), config_store, NotificationSink::noop())
         .expect("construct the method router");
     Rig {
+        mob_id: next_mob_id(),
         router,
         client,
         _temp: temp,
@@ -298,7 +308,7 @@ impl Rig {
             "mob/create",
             json!({
                 "definition": {
-                    "id": MOB_ID,
+                    "id": self.mob_id.as_str(),
                     "profiles": {
                         "main": { "model": MODEL, "tools": { "comms": true } }
                     }
@@ -307,7 +317,7 @@ impl Rig {
         )
         .await;
         let mut spawn = json!({
-            "mob_id": MOB_ID,
+            "mob_id": self.mob_id.as_str(),
             "profile": "main",
             "agent_identity": MAIN,
             "runtime_mode": "turn_driven"
@@ -331,7 +341,7 @@ impl Rig {
     async fn mob(&self) -> meerkat_mob::MobHandle {
         self.router
             .mob_state()
-            .handle_for(&meerkat_mob::MobId::from(MOB_ID))
+            .handle_for(&meerkat_mob::MobId::from(self.mob_id.as_str()))
             .await
             .expect("mob handle")
     }
@@ -339,7 +349,7 @@ impl Rig {
     async fn member_turn(&self, identity: &str, prompt: &str) {
         self.ok(
             "mob/turn_start",
-            json!({ "mob_id": MOB_ID, "agent_identity": identity, "prompt": prompt }),
+            json!({ "mob_id": self.mob_id.as_str(), "agent_identity": identity, "prompt": prompt }),
         )
         .await;
     }
@@ -483,7 +493,7 @@ async fn session_fork_at_refuses_a_member_session() {
         .ok(
             "mob/fork_helper",
             json!({
-                "mob_id": MOB_ID,
+                "mob_id": rig.mob_id.as_str(),
                 "source_member_id": MAIN,
                 "agent_identity": "rewind-helper",
                 "prompt": "continue from here",
@@ -522,13 +532,13 @@ async fn session_fork_at_refuses_a_member_session() {
 
     rig.ok(
         "mob/retire",
-        json!({ "mob_id": MOB_ID, "agent_identity": MAIN }),
+        json!({ "mob_id": rig.mob_id.as_str(), "agent_identity": MAIN }),
     )
     .await;
     rig.ok(
         "mob/spawn",
         json!({
-            "mob_id": MOB_ID,
+            "mob_id": rig.mob_id.as_str(),
             "profile": "main",
             "agent_identity": MAIN,
             "runtime_mode": "turn_driven",
@@ -567,7 +577,7 @@ async fn mob_fork_member_forks_a_member_into_a_new_member_at_a_boundary() {
         rig.call(
             "mob/fork_member",
             json!({
-                "mob_id": MOB_ID,
+                "mob_id": rig.mob_id.as_str(),
                 "source_member_id": MAIN,
                 "agent_identity": agent_identity,
                 "message_index": BOUNDARY
@@ -627,7 +637,7 @@ async fn mob_fork_member_forks_a_member_into_a_new_member_at_a_boundary() {
     let held = {
         let router_turn = rig.call(
             "mob/turn_start",
-            json!({ "mob_id": MOB_ID, "agent_identity": MAIN, "prompt": HOLD }),
+            json!({ "mob_id": rig.mob_id.as_str(), "agent_identity": MAIN, "prompt": HOLD }),
         );
         let entered = rig.client.entered.notified();
         tokio::pin!(router_turn);
@@ -681,7 +691,7 @@ async fn mob_fork_member_onto_a_seated_identity_commits_nothing() {
         rig.member_turn(MAIN, prompt).await;
     }
     let params = json!({
-        "mob_id": MOB_ID,
+        "mob_id": rig.mob_id.as_str(),
         "source_member_id": MAIN,
         "agent_identity": CHILD,
         "message_index": BOUNDARY
@@ -767,7 +777,7 @@ async fn main_cannot_be_reseated_on_another_members_session() {
     for identity in ["main-rewound", MAIN] {
         rig.ok(
             "mob/retire",
-            json!({ "mob_id": MOB_ID, "agent_identity": identity }),
+            json!({ "mob_id": rig.mob_id.as_str(), "agent_identity": identity }),
         )
         .await;
     }
@@ -777,7 +787,7 @@ async fn main_cannot_be_reseated_on_another_members_session() {
         .call(
             "mob/spawn",
             json!({
-                "mob_id": MOB_ID,
+                "mob_id": rig.mob_id.as_str(),
                 "profile": "main",
                 "agent_identity": MAIN,
                 "runtime_mode": "turn_driven",
@@ -799,7 +809,7 @@ async fn main_cannot_be_reseated_on_another_members_session() {
     );
     assert_eq!(data["session_id"], child.as_str(), "{data}");
     assert_eq!(data["member_id"], MAIN, "{data}");
-    assert_eq!(data["bound_mob_id"], MOB_ID, "{data}");
+    assert_eq!(data["bound_mob_id"], rig.mob_id.as_str(), "{data}");
     assert_eq!(data["bound_member_id"], "main-rewound", "{data}");
     assert!(
         error.message.contains("main-rewound") && !error.message.contains("MobMemberBinding"),
@@ -812,7 +822,7 @@ async fn main_cannot_be_reseated_on_another_members_session() {
     rig.ok(
         "mob/spawn",
         json!({
-            "mob_id": MOB_ID,
+            "mob_id": rig.mob_id.as_str(),
             "profile": "main",
             "agent_identity": MAIN,
             "runtime_mode": "turn_driven",
@@ -886,7 +896,7 @@ async fn a_member_session_forks_at_a_message_boundary() {
     let held = {
         let router_turn = rig.call(
             "mob/turn_start",
-            json!({ "mob_id": MOB_ID, "agent_identity": MAIN, "prompt": HOLD }),
+            json!({ "mob_id": rig.mob_id.as_str(), "agent_identity": MAIN, "prompt": HOLD }),
         );
         let entered = rig.client.entered.notified();
         tokio::pin!(router_turn);

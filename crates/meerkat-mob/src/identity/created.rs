@@ -434,7 +434,10 @@ pub enum IdentityEntered {
 
 /// How, when and at whose request an identity's row entered the store, and
 /// under what consent. Written once, by the operation that wrote the row
-/// first; recorded and shown, never read for a decision.
+/// first; recorded and shown. Whether an adoption from a roster spec wrote
+/// the row is read for two decisions: by an import of the row, and for the
+/// seat labels of the member such an adoption found
+/// (`CreatedIdentityRecord::adopted_from_roster`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
@@ -803,6 +806,19 @@ impl CreatedIdentityRecord {
     ) -> Result<Self, IdentityIntentError> {
         self.label_restamp_owed = owed;
         self.resealed()
+    }
+
+    /// Whether an adoption from a roster spec wrote this row: its spec is
+    /// what the identity's host declared for it, and the member the
+    /// adoption found was seated before the identity had a row.
+    pub(crate) fn adopted_from_roster(&self) -> bool {
+        matches!(
+            self.provenance.entered,
+            IdentityEntered::Adopted {
+                from: crate::identity::IdentityAdoptedFrom::Roster,
+                ..
+            }
+        )
     }
 
     /// The row with its removal record set, sealed again.

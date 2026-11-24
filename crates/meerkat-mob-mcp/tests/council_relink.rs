@@ -106,6 +106,25 @@ async fn completion_records(
         .collect()
 }
 
+/// Whether council job `job_id`'s outcome is committed for `owner`: a
+/// member's commit and a plain session's are kept under different owners.
+async fn committed_for(
+    state: &meerkat_mob_mcp::MobMcpState,
+    owner: &meerkat::ContinuationOwner,
+    job_id: &str,
+) -> bool {
+    let key = meerkat::ContinuationKey::new(format!("council:{job_id}")).expect("key");
+    !matches!(
+        state
+            .continuation_service()
+            .expect("the state binds its continuation service")
+            .continuation_status(owner, &key)
+            .await
+            .expect("the continuation's status"),
+        meerkat::ContinuationStatus::NotCommitted
+    )
+}
+
 fn one_participant_request(fixture: &CouncilFixture, id: &str) -> TemporaryCouncilRequest {
     TemporaryCouncilRequest::new(
         fixture.council_id(id),
@@ -942,6 +961,18 @@ async fn without_a_host_hook_a_plain_session_convener_is_delivered_on_attach() {
         council.settled().await,
         "a durable submission settles the job"
     );
+    assert!(
+        committed_for(
+            &restarted,
+            &meerkat::ContinuationOwner::Session {
+                session_id: council.owner.clone(),
+            },
+            &council.job_id,
+        )
+        .await,
+        "a convener whose stored binding names no mob of this host is a plain session to it: \
+         the outcome is committed for the session"
+    );
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert!(
         completion_records(&council.fixture, &council.owner, &council.job_id)
@@ -966,4 +997,233 @@ async fn without_a_host_hook_a_plain_session_convener_is_delivered_on_attach() {
         1
     );
     council.fixture.teardown().await;
+}
+
+/// A council outcome owed to a member of the host's default mob when the
+/// process died is delivered after the restart, as that member's: the
+/// recovery sweep starts at the first verb, finds the convener's stored
+/// binding naming a mob that is not loaded, and leaves the outcome owed
+/// instead of committing it to the convener's session as a plain session.
+/// The launch's serve loads the mob, the sweep runs again, and the outcome
+/// is committed for the member and lands once. (The sweep that re-drives
+/// an owed outcome takes the set's census before it resolves the convener:
+/// `relink_delivers_a_council_sealed_before_the_restart_exactly_once` asks
+/// it of a restarted set that no verb has touched.)
+#[tokio::test(flavor = "multi_thread")]
+async fn a_council_outcome_owed_to_a_default_mob_member_is_delivered_after_the_launchs_serve() {
+    let launch = meerkat_mob::MobId::from(format!(
+        "relink-launch-{}",
+        &uuid::Uuid::new_v4().simple().to_string()[..12]
+    ));
+    let declare = |state: meerkat_mob_mcp::MobMcpState,
+                   state_root: &std::path::Path,
+                   launch: &meerkat_mob::MobId| {
+        state
+            .with_default_mob(meerkat_mob_mcp::DefaultMobDeclaration::persistent(
+                launch.clone(),
+                state_root
+                    .parent()
+                    .expect("the fixture root")
+                    .join("launch.sqlite3"),
+            ))
+            .expect("the default mob is declared once")
+    };
+    let fixture = {
+        let launch = launch.clone();
+        CouncilFixture::new_with(
+            |_| ScriptedTurn::Text("DEFAULT-MOB-POSITION".to_string()),
+            move |state, state_root| declare(state, state_root, &launch),
+        )
+    };
+    fixture
+        .state
+        .serve_default_mob(council_definition(launch.as_str()))
+        .await
+        .expect("the launch creates its default mob");
+    for member in ["convener", "researcher"] {
+        fixture
+            .state
+            .mob_spawn(
+                &launch,
+                ProfileName::from("participant"),
+                identity(member),
+                Some(meerkat_mob::MobRuntimeMode::TurnDriven),
+                Some(meerkat_mob::MobBackendKind::Session),
+                None,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("spawn default mob member {member}: {error}"));
+    }
+    let owner = fixture
+        .state
+        .handle_for(&launch)
+        .await
+        .expect("the default mob")
+        .resolve_bridge_session_id(&AgentIdentity::from("convener"))
+        .await
+        .expect("the convener's session");
+    let job_id = "council-job-default-mob";
+    fixture
+        .state
+        .temporary_council()
+        .run_detached(
+            TemporaryCouncilRequest::new(
+                fixture.council_id("relink-default-mob"),
+                council_definition("template-is-replaced"),
+                vec![TemporaryCouncilParticipantSpec::new(
+                    0,
+                    "analyst",
+                    launch.clone(),
+                    identity("researcher"),
+                    identity("analyst"),
+                    ProfileName::from("participant"),
+                )],
+                "Should we ship the migration this week?",
+                TemporaryCouncilBounds::relative(Duration::from_mins(4), 1, 4096),
+                MergeBackPolicy::NoMerge,
+            ),
+            TemporaryCouncilJobBinding::new(job_id, owner.clone()),
+        )
+        .await
+        .expect("the council runs");
+    assert!(
+        completion_records(&fixture, &owner, job_id)
+            .await
+            .is_empty()
+    );
+    fixture.shut_down_predecessor().await;
+    tokio::time::sleep(Duration::from_millis(5)).await;
+
+    let restarted =
+        fixture.restart_state_with(|state, state_root| declare(state, state_root, &launch));
+    // The first verb takes the census and starts the recovery sweep. Its
+    // convener is a member of the default mob, which awaits its launch's
+    // serve: nothing reaches the member before that.
+    restarted
+        .mob_inventory()
+        .await
+        .expect("the first verb of the restarted set");
+    // Many mobs are registered before the launch serves (child mobs, host
+    // builds): more than the sweep has passes. None of them is the mob the
+    // outcome waits for, so none uses a pass up.
+    for index in 0..18 {
+        restarted
+            .mob_create_definition(council_definition(&format!("{launch}-extra-{index}")))
+            .await
+            .expect("a further mob is created before the launch's serve");
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        completion_records(&fixture, &owner, job_id)
+            .await
+            .is_empty(),
+        "nothing is delivered to a member of the default mob before the launch's serve"
+    );
+    let as_member = meerkat::ContinuationOwner::Member {
+        mob_id: launch.to_string(),
+        identity: "convener".to_string(),
+    };
+    let as_session = meerkat::ContinuationOwner::Session {
+        session_id: owner.clone(),
+    };
+    assert!(
+        !committed_for(&restarted, &as_member, job_id).await
+            && !committed_for(&restarted, &as_session, job_id).await,
+        "the outcome stays owed while the convener's mob awaits its serve: it is not committed \
+         to the convener's session as a plain session"
+    );
+    restarted
+        .serve_default_mob(council_definition(launch.as_str()))
+        .await
+        .expect("the launch serves its default mob");
+    let delivered = await_completion_records(&fixture, &owner, job_id).await;
+    assert_eq!(delivered.len(), 1, "the sweep delivers exactly once");
+    assert!(
+        delivered[0].contains("DEFAULT-MOB-POSITION"),
+        "the council's real result is delivered: {}",
+        delivered[0]
+    );
+    assert!(
+        committed_for(&restarted, &as_member, job_id).await
+            && !committed_for(&restarted, &as_session, job_id).await,
+        "the outcome is committed for the member, bound to its mob, and never for its session \
+         as a plain session"
+    );
+    for (_, handle) in restarted.mob_handles_snapshot().await.unwrap_or_default() {
+        let _ = handle.shutdown().await;
+    }
+    fixture.teardown().await;
+}
+
+/// A council outcome owed to a member of a mob that is known and not loaded
+/// (an on-demand set after a restart) is the member's: the re-link does not
+/// commit it to the convener's session as a plain session. The delivery is
+/// demand for the convener's mob, so the re-link loads it, as a live
+/// delivery does, and commits the outcome for the member; it lands once.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_council_outcome_owed_to_a_member_of_a_dormant_mob_loads_its_mob() {
+    let fixture = CouncilFixture::new(|_| ScriptedTurn::Text("DORMANT-MOB-POSITION".to_string()));
+    fixture.seed_source_mob(&["convener", "researcher"]).await;
+    let owner = member_session(&fixture, "convener").await;
+    let job_id = "council-job-dormant-mob";
+    fixture
+        .state
+        .temporary_council()
+        .run_detached(
+            one_participant_request(&fixture, "relink-dormant-mob"),
+            TemporaryCouncilJobBinding::new(job_id, owner.clone()),
+        )
+        .await
+        .expect("the council runs");
+    fixture.shut_down_predecessor().await;
+    tokio::time::sleep(Duration::from_millis(5)).await;
+
+    let restarted = fixture.restart_state_on_demand();
+    assert_eq!(
+        restarted
+            .mob_inventory()
+            .await
+            .expect("the inventory")
+            .dormant,
+        vec![fixture.source_mob_id()],
+        "the convener's mob is known and not loaded after the restart"
+    );
+    let reports = restarted.relink_detached_councils().await;
+    let report = reports
+        .iter()
+        .find(|report| report.council_id == fixture.council_id("relink-dormant-mob"))
+        .expect("the council is visited");
+    assert_eq!(report.action, CouncilRelinkAction::Delivered);
+    let as_member = meerkat::ContinuationOwner::Member {
+        mob_id: fixture.source_mob_id().to_string(),
+        identity: "convener".to_string(),
+    };
+    let as_session = meerkat::ContinuationOwner::Session {
+        session_id: owner.clone(),
+    };
+    assert!(
+        committed_for(&restarted, &as_member, job_id).await
+            && !committed_for(&restarted, &as_session, job_id).await,
+        "the outcome is committed for the member, not for its session as a plain session"
+    );
+    assert!(
+        restarted
+            .mob_inventory()
+            .await
+            .expect("the inventory")
+            .dormant
+            .is_empty(),
+        "the delivery loaded the convener's mob"
+    );
+    let delivered = await_completion_records(&fixture, &owner, job_id).await;
+    assert_eq!(delivered.len(), 1, "the outcome lands exactly once");
+    assert!(
+        delivered[0].contains("DORMANT-MOB-POSITION"),
+        "the council's real result is delivered: {}",
+        delivered[0]
+    );
+    for (_, handle) in restarted.mob_handles_snapshot().await.unwrap_or_default() {
+        let _ = handle.shutdown().await;
+    }
+    fixture.teardown().await;
 }

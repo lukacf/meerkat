@@ -1008,6 +1008,52 @@ impl McpRouterAdapter {
             .stdio_stderr_tail(server, None)
     }
 
+    /// Host report: every retained failed stdio attempt this router has not
+    /// handed out yet, by server name, each with its typed failure and its
+    /// retained stderr tail. Each retained failure is returned by one call
+    /// only, so a host that reports at several points tells its operator
+    /// once. The claim releases nothing: [`Self::stdio_setup_failure`] and
+    /// [`Self::stdio_stderr_tail`] keep answering under their retention.
+    /// It waits at most half a second in all for the captures of servers
+    /// that just exited to end, so their last lines are in the tails; a
+    /// tail whose capture is still open then is returned as it stands
+    /// (`complete` is false).
+    ///
+    /// SENSITIVE: the tail is host and operator only, never model context,
+    /// events or untrusted clients; redaction is defence in depth only
+    /// ([`meerkat_core::mcp_attachment::McpStdioStderrTail`]).
+    pub async fn claim_stdio_failure_reports(
+        &self,
+    ) -> Vec<(
+        meerkat_core::mcp_attachment::McpStdioSetupFailure,
+        Option<meerkat_core::mcp_attachment::McpStdioStderrTail>,
+    )> {
+        let failures = match self.router.read().await.as_ref() {
+            Some(router) => router.claim_stdio_failures(),
+            None => return Vec::new(),
+        };
+        // One bound for the whole claim; the router's lock is never held
+        // across a wait.
+        let deadline = tokio::time::Instant::now() + crate::stdio_diagnostics::STDERR_CLAIM_SETTLE;
+        let mut reports = Vec::with_capacity(failures.len());
+        for failure in failures {
+            let tail = loop {
+                let (tail, ended) = match self.router.read().await.as_ref() {
+                    Some(router) => {
+                        router.stdio_stderr_tail_and_capture_end(&failure.server, failure.attempt)
+                    }
+                    None => (None, true),
+                };
+                if ended || tokio::time::Instant::now() >= deadline {
+                    break tail;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            };
+            reports.push((failure, tail));
+        }
+        reports
+    }
+
     /// The retained stderr tail of `server`'s exact failed `attempt`, for
     /// that attempt's observer; `None` once released or the router is gone.
     pub(crate) async fn stdio_stderr_tail_of(

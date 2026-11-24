@@ -22,8 +22,9 @@ export interface Question {
  * (`meta/gating/questions`). */
 export interface QuestionSet {
   pendingId: string;
-  /** The asking agent. */
-  origin: { identity: string };
+  /** The asking agent, and the mob the entry carries beside its name (the
+   * pair of a frame) when it carries one. */
+  origin: { identity: string; mobId?: string };
   title?: string;
   questions: readonly Question[];
   createdAtMs?: number;
@@ -108,7 +109,9 @@ export interface ClosedQuestionSet {
 /** Why a card left the screen: the read no longer lists its set (`gone`),
  * it did so after a send this console could not confirm
  * (`sent_unconfirmed`), or the gateway refused this console's decide
- * because the set is no longer open (`not_open`) or expired (`expired`). */
+ * because the set is no longer open (`not_open`) or timed out (`expired`:
+ * the gateway said so, or it said `not_open` after the set's own
+ * deadline). */
 export type QuestionSetNoticeKind = "gone" | "sent_unconfirmed" | "not_open" | "expired";
 /** One neutral line for a card that left. It holds nothing of the set: the
  * card's own place on this page (`slot`), why it left, and when. */
@@ -250,6 +253,7 @@ function normalizeQuestion(value: unknown): { question: Question; cut: boolean }
 export function normalizeQuestionSet(value: unknown): QuestionSet | null {
   const raw = record(value);
   const pendingId = text(raw?.pending_id), identity = text(record(raw?.origin)?.identity), subjectDigest = text(raw?.subject_digest);
+  const mobId = text(record(raw?.origin)?.mob_id);
   if (!raw || !pendingId || !identity || !subjectDigest || !Array.isArray(raw.questions) || raw.questions.length === 0) return null;
   const questions: Question[] = [];
   const title = words(raw.title, QUESTION_SET_READ_LIMITS.title);
@@ -264,7 +268,7 @@ export function normalizeQuestionSet(value: unknown): QuestionSet | null {
   const createdAtMs = millis(raw.created_at_ms), deadlineAtMs = millis(raw.deadline_at_ms);
   const omittedQuestions = raw.questions.length - questions.length;
   return {
-    pendingId, origin: { identity }, ...(title ? { title: title.text } : {}), questions,
+    pendingId, origin: { identity, ...(mobId ? { mobId } : {}) }, ...(title ? { title: title.text } : {}), questions,
     ...(createdAtMs !== undefined ? { createdAtMs } : {}), ...(deadlineAtMs !== undefined ? { deadlineAtMs } : {}),
     subjectDigest,
     ...(omittedQuestions > 0 ? { omittedQuestions } : {}), ...(cut ? { shortened: true as const } : {}),
@@ -679,7 +683,16 @@ export function createQuestionSetResource(input: {
           setDecision(pendingId, { phase: "failed", action, ...sent, error: errorText(error) });
         } else if (refusal.kind === "not_open" || refusal.kind === "expired") {
           // The gateway says the set is no longer answerable: its card goes.
-          remove(pendingId, refusal.kind);
+          // A reply after the deadline is refused `not_open` too (the
+          // gateway's read finds the set ended), and the refusal does not
+          // say how the set ended. The set's own deadline does: past it, by
+          // this page's clock, the line is the one of a set that timed out;
+          // before it, or for a set that names none, someone closed the set.
+          // Two edges, where the line can be the wrong one of the two: a set
+          // another person closed whose deadline also passed before this
+          // reply, and a page whose clock is not the gateway's.
+          const timedOut = refusal.kind === "not_open" && set.deadlineAtMs !== undefined && env.now() >= set.deadlineAtMs;
+          remove(pendingId, timedOut ? "expired" : refusal.kind);
         } else if (refusal.kind === "not_accepted") {
           // The set reads as sending until a read has said whether it is
           // still listed; it is never shown as refused before that.

@@ -329,7 +329,7 @@ class BuildTools:
                         "errors.py": {"RpcError": None},
                     },
                     "flows": {"runtime.py": {"MobKitRuntime": {"mob_handle"}, "MobHandle": {"list_flows", "run_flow", "flow_status", "cancel_flow"}}},
-                    "schedule": {"runtime.py": {"MobKitRuntime": {"on_schedule_fire"}}, "builder.py": {"MobKitBuilder": {"host_runnables"}}},
+                    "schedule": {"runtime.py": {"MobKitRuntime": {"on_schedule_fire"}}, "builder.py": {"MobKitBuilder": {"host_runnables", "on_schedule_fire"}}},
                     "roster": {
                         "identity_first_providers.py": {
                             "RosterProviderProtocol": None,

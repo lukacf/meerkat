@@ -1,5 +1,6 @@
 import { validateConsoleContexts, type ConsoleContextRecord } from "../../../packages/console-core/src/context-record";
 import { recoverConsoleSendAttempt, validateConsoleSendAttempt, type ConsoleSendAttempt } from "../../../packages/console-core/src/send-attempt";
+import { memberKeyPrefixes } from "./mob-incarnations";
 
 export interface ConsoleSendStorage {
   getItem(key: string): string | null;
@@ -86,6 +87,27 @@ export function purgeConsoleSendScope(local: ConsoleEnumerableStorage | null, se
   removeKeysWithPrefixes(local, queues);
   removeKeysWithPrefixes(session, [`meta-composer-draft:v1:${scope}:`, `meta-composer-draft:v2:${scope}:`]);
   return forgetConsoleQueueLockRecords([], queues);
+}
+
+/**
+ * Forgetting a mob: removes what this browser keeps, in one user's console
+ * scope, for the members of one mob (the members whose key is
+ * `<mob id>/<name>`): their queued messages from `local` and their composer
+ * drafts from this tab's `session` storage. A mob created again under the
+ * id of a destroyed one, or a mob that left the console's list, starts with
+ * none of it. Members of other mobs, and a mob whose id only starts the
+ * same way, keep theirs. Either storage may be null: only the other is
+ * cleared. The storage removals are done when it returns; the promise
+ * settles once the storage lock's records of the queues are gone too.
+ */
+export function purgeConsoleMobKeys(local: ConsoleEnumerableStorage | null, session: ConsoleEnumerableStorage | null, namespace: string, mobId: string, door?: string | null): Promise<void> {
+  const scope = encodeURIComponent(namespace);
+  // A member's key holds its identity encoded, so a `/` of it is `%2F`.
+  const members = memberKeyPrefixes(mobId, door).map((prefix) => encodeURIComponent(prefix));
+  const queues = members.flatMap((prefix) => [`meta-send-attempts:v1:${scope}:${prefix}`, `mobkit-send-attempts:v1:${scope}:${prefix}`]);
+  removeKeysWithPrefixes(local, queues);
+  removeKeysWithPrefixes(session, members.flatMap((prefix) => [`meta-composer-draft:v1:${scope}:${prefix}`, `meta-composer-draft:v2:${scope}:${prefix}`]));
+  return local ? forgetConsoleQueueLockRecords([], queues) : Promise.resolve();
 }
 
 /**

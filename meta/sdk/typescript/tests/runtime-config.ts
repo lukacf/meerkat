@@ -28,6 +28,7 @@ const DEFAULTS = {
   allowRemote: null,
   consoleRequireAppAuth: null,
   consoleReadOnly: null,
+  consoleListNestedMobs: null,
   consoleFetchTimeoutMs: null,
   demoLlm: false,
   memberCommsAddress: null,

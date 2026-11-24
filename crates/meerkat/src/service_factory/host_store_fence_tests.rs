@@ -225,6 +225,14 @@ struct FenceControl {
     /// it answers `Unavailable` and every head load fails, so nothing the
     /// writer asks settles it, until the row clears it.
     unsettled_batch: StdMutex<Option<String>>,
+    /// The row's word to a model call that waits for it
+    /// ([`ModelStep::HeldTools`], [`ModelStep::HeldText`]).
+    model_release: tokio::sync::Notify,
+    /// While set, the next call of `probe` waits for the row's word
+    /// ([`Self::tool_release`]) before it answers.
+    tool_hold: AtomicBool,
+    /// The row's word to a call of `probe` that waits for it.
+    tool_release: tokio::sync::Notify,
 }
 
 impl FenceControl {
@@ -704,6 +712,12 @@ enum ModelStep {
     /// is set, the store keeps the next host commit, the round's first,
     /// unsettled ([`FenceControl::unsettle_next_commit`]).
     NamedTools(&'static str, Option<bool>),
+    /// Wait for the row's word ([`FenceControl::model_release`]), then ask
+    /// for one call of `probe` under this call id.
+    HeldTools(&'static str),
+    /// Wait for the row's word ([`FenceControl::model_release`]), then
+    /// answer with text.
+    HeldText,
 }
 
 /// Answers each request with the next step of its script, and with text past
@@ -746,6 +760,48 @@ impl LlmClient for FenceModel {
             return Box::pin(stream::once(std::future::pending::<
                 Result<LlmEvent, LlmError>,
             >()));
+        }
+        if let ModelStep::HeldTools(id) = step {
+            let control = Arc::clone(&self.control);
+            let events: Vec<Result<LlmEvent, LlmError>> = vec![
+                Ok(LlmEvent::ToolCallComplete {
+                    id: id.into(),
+                    name: "probe".into(),
+                    args: json!({}),
+                    meta: None,
+                }),
+                Ok(LlmEvent::UsageUpdate { usage }),
+                Ok(LlmEvent::Done {
+                    outcome: LlmDoneOutcome::success(meerkat_core::StopReason::ToolUse),
+                }),
+            ];
+            return Box::pin(futures::StreamExt::flat_map(
+                stream::once(async move {
+                    control.model_release.notified().await;
+                    events
+                }),
+                stream::iter,
+            ));
+        }
+        if step == ModelStep::HeldText {
+            let control = Arc::clone(&self.control);
+            let events: Vec<Result<LlmEvent, LlmError>> = vec![
+                Ok(LlmEvent::TextDelta {
+                    delta: "probed".into(),
+                    meta: None,
+                }),
+                Ok(LlmEvent::UsageUpdate { usage }),
+                Ok(LlmEvent::Done {
+                    outcome: LlmDoneOutcome::success(meerkat_core::StopReason::EndTurn),
+                }),
+            ];
+            return Box::pin(futures::StreamExt::flat_map(
+                stream::once(async move {
+                    control.model_release.notified().await;
+                    events
+                }),
+                stream::iter,
+            ));
         }
         if let ModelStep::NamedTools(id, unsettle) = step {
             if let Some(applied) = unsettle {
@@ -883,6 +939,9 @@ impl AgentToolDispatcher for FenceTools {
             | ClosesDuring::OnlyCall
             | ClosesDuring::TextModelCall
             | ClosesDuring::Never => {}
+        }
+        if self.control.tool_hold.swap(false, Ordering::SeqCst) {
+            self.control.tool_release.notified().await;
         }
         Ok(ToolDispatchOutcome::sync_result(ToolResult::new(
             call.id.into(),
@@ -2552,3 +2611,7 @@ async fn a_requeue_stop_suspends_a_facade_run_in_flight_for_the_next_start() {
 /// A round commit unsettled past its retry budget, the scope poison, a
 /// restart, and the run resuming at the next registration.
 mod unsettled_restart;
+
+/// An orderly stop with a run in flight, a restart over the same store,
+/// and the run going on from its last round.
+mod orderly_stop;

@@ -747,6 +747,11 @@ impl MobActor {
         let runtime_adapter = self.runtime_adapter.clone();
         #[cfg(not(feature = "runtime-adapter"))]
         let runtime_adapter = None;
+        // The runtime reports a session whose committed run stays unsettled;
+        // only the mob knows whose session that is.
+        let unsettled_run_runtime: Option<Arc<meerkat_runtime::MeerkatMachine>> =
+            runtime_adapter.clone();
+        let mob_id = self.definition.id.clone();
         let capacity = Arc::clone(&self.member_status_observation_capacity);
         let view_reads = self.member_status_view_reads.clone();
         let command_tx = self.command_tx.clone();
@@ -771,6 +776,26 @@ impl MobActor {
                         &view_reads,
                     )
                     .await;
+                    // A member whose committed run stays unsettled starts
+                    // nothing further: name it. A report only; the status
+                    // this read answers with is unchanged.
+                    if !expected_target.dormant
+                        && let Some(session_id) = expected_target
+                            .bridge_session_id
+                            .as_ref()
+                            .filter(|_| expected_target.include_local_session_details)
+                        && let Some(unsettled) = unsettled_run_runtime
+                            .as_deref()
+                            .and_then(|runtime| runtime.unsettled_run(session_id))
+                    {
+                        super::report_member_unsettled_run(
+                            &mob_id,
+                            &agent_identity,
+                            session_id,
+                            &unsettled.run_id,
+                            unsettled.unsettled_for,
+                        );
+                    }
                     // The capacity unit bounds concurrent session reads, so a
                     // read still running after the deadline keeps it while it
                     // drains, up to the drain ceiling; the callers are

@@ -238,12 +238,28 @@ impl ToolExecutionPolicy {
     /// Name-list policies ignore the class; read-only intent decides on the
     /// class alone and admits nothing but a positive
     /// [`ToolMutationClass::ReadOnly`] declaration.
+    ///
+    /// A tool that is never wider than another
+    /// ([`crate::tool_scope::tool_never_wider_than`]) is permitted only where
+    /// the name lists also admit that other tool: a deny list that names
+    /// `shell` refuses `monitor_start` too.
     #[must_use]
     pub fn permits_call(&self, name: &str, declared: ToolMutationClass) -> bool {
         self.constraints.iter().all(|constraint| match constraint {
             crate::ops::ToolAccessConstraint::AllowNames(names) => names.contains(name),
             crate::ops::ToolAccessConstraint::DenyNames(names) => !names.contains(name),
             crate::ops::ToolAccessConstraint::ReadOnly => declared.is_declared_read_only(),
+        }) && crate::tool_scope::tool_never_wider_than(name)
+            .is_none_or(|bound| self.name_lists_admit(bound))
+    }
+
+    /// Whether the policy's name lists admit `name`, whatever its mutation
+    /// class.
+    fn name_lists_admit(&self, name: &str) -> bool {
+        self.constraints.iter().all(|constraint| match constraint {
+            crate::ops::ToolAccessConstraint::AllowNames(names) => names.contains(name),
+            crate::ops::ToolAccessConstraint::DenyNames(names) => !names.contains(name),
+            crate::ops::ToolAccessConstraint::ReadOnly => true,
         })
     }
 
@@ -437,6 +453,14 @@ impl<T: AgentToolDispatcher + ?Sized> ExecutionPolicyGatedDispatcher<T> {
     /// that serves it, so a gated server's tool that appeared after the last
     /// boundary is gated too. The seam reads the clock after its own awaits,
     /// so the caller hands the call on with no await in between.
+    ///
+    /// A tool that is never wider than another
+    /// ([`crate::tool_scope::tool_never_wider_than`]) stands on that tool's
+    /// grant: where the gate gates the bound, the call is first adjudicated
+    /// as a use of the bound, under the bound's name, so a grant of `shell`
+    /// that ended since the model request refuses a `monitor_start` call as
+    /// it refuses `shell`. The call's own gate, when it has one, is
+    /// adjudicated last, so its reading is the one the call is handed on at.
     async fn admit_grant_gated_call(
         &self,
         call: ToolCallView<'_>,
@@ -445,27 +469,32 @@ impl<T: AgentToolDispatcher + ?Sized> ExecutionPolicyGatedDispatcher<T> {
         let Some(gate) = self.tool_grant_gate.as_ref() else {
             return Ok(());
         };
-        let provenance = self
-            .inner
-            .tools()
-            .iter()
-            .find(|tool| tool.name == call.name)
-            .and_then(|tool| tool.provenance.clone());
-        if !gate.is_gated(call.name, provenance.as_ref()) {
-            return Ok(());
+        let tools = self.inner.tools();
+        let names = crate::tool_scope::tool_never_wider_than(call.name)
+            .into_iter()
+            .chain(std::iter::once(call.name));
+        for name in names {
+            let provenance = tools
+                .iter()
+                .find(|tool| tool.name == name)
+                .and_then(|tool| tool.provenance.clone());
+            if !gate.is_gated(name, provenance.as_ref()) {
+                continue;
+            }
+            let server = provenance
+                .as_ref()
+                .filter(|provenance| provenance.kind == crate::types::ToolSourceKind::Mcp)
+                .map(|provenance| provenance.source_id.as_str());
+            gate.admit_call(crate::tool_grant::ToolGrantCall {
+                name,
+                server,
+                call_id: call.id,
+                run_id: context.and_then(ToolDispatchContext::run_id),
+            })
+            .await
+            .map_err(|refusal| refusal.into_tool_error(name))?;
         }
-        let server = provenance
-            .as_ref()
-            .filter(|provenance| provenance.kind == crate::types::ToolSourceKind::Mcp)
-            .map(|provenance| provenance.source_id.as_str());
-        gate.admit_call(crate::tool_grant::ToolGrantCall {
-            name: call.name,
-            server,
-            call_id: call.id,
-            run_id: context.and_then(ToolDispatchContext::run_id),
-        })
-        .await
-        .map_err(|refusal| refusal.into_tool_error(call.name))
+        Ok(())
     }
 
     async fn evaluate_consequence_policy(
@@ -1580,6 +1609,27 @@ pub(crate) mod tests {
         assert!(ToolExecutionPolicy::unrestricted().is_unrestricted());
         assert!(!allow_list(&["a"]).is_unrestricted());
         assert!(!deny_list(&["a"]).is_unrestricted());
+    }
+
+    /// `monitor_start` is never wider than `shell`: a name list that leaves
+    /// `shell` out refuses a `monitor_start` call too, and read-only intent
+    /// still decides on the call's own class.
+    #[test]
+    fn a_name_list_that_leaves_shell_out_refuses_monitor_start() {
+        use crate::ToolMutationClass::{Mutating, ReadOnly};
+
+        assert!(!deny_list(&["shell"]).permits_call("monitor_start", Mutating));
+        assert!(!deny_list(&["shell"]).permits("monitor_start"));
+        assert!(deny_list(&["shell"]).permits("shell_jobs"));
+        assert!(!allow_list(&["monitor_start"]).permits_call("monitor_start", Mutating));
+        assert!(allow_list(&["monitor_start", "shell"]).permits_call("monitor_start", Mutating));
+        assert!(deny_list(&["monitor_start"]).permits("shell"));
+        assert!(deny_list(&["other"]).permits_call("monitor_start", Mutating));
+        assert!(ToolExecutionPolicy::unrestricted().permits_call("monitor_start", Mutating));
+        // Read-only refuses the monitor for its own class, and would admit a
+        // read-only tool of that name whatever `shell` declares.
+        assert!(!read_only().permits_call("monitor_start", Mutating));
+        assert!(read_only().permits_call("monitor_start", ReadOnly));
     }
 
     // ── List preservation ────────────────────────────────────────────────
@@ -3049,6 +3099,66 @@ pub(crate) mod tests {
             .expect_err("the gated name is refused");
         assert_grant_refusal(&error, crate::tool_grant::TOOL_GRANT_EXPIRED_CODE);
         assert_eq!(grants.asked(), ["shell"]);
+    }
+
+    /// A gate on the name `shell` adjudicates a `monitor_start` call too.
+    /// The monitor is never wider than `shell`, so it stands on the grant
+    /// that opens `shell`: where that grant ended before the call is
+    /// dispatched, the call is refused as `shell` is, and it never reaches
+    /// the tool. While the grant is live the call is handed on.
+    #[tokio::test]
+    async fn a_gate_on_shell_adjudicates_a_monitor_start_call_as_a_use_of_shell() {
+        let clock = Arc::new(std::sync::atomic::AtomicU64::new(5_000));
+        // Every grant is past its deadline: the grant that opened `shell` at
+        // the model request ended before the calls are dispatched.
+        let grants = Arc::new(ClockedGrants::new(&clock, 1_000));
+        let inner = Arc::new(SpyDispatcher::new(&["shell", "monitor_start", "read_file"]));
+        let gated = ExecutionPolicyGatedDispatcher::new(
+            Arc::clone(&inner),
+            ToolExecutionPolicy::unrestricted(),
+        )
+        .with_tool_grant_gate(tool_grant_gate(Arc::clone(&grants), &["shell"]));
+
+        let error = dispatch_named(&gated, "monitor_start")
+            .await
+            .expect_err("a monitor is refused where the grant of shell ended");
+        assert_grant_refusal(&error, crate::tool_grant::TOOL_GRANT_EXPIRED_CODE);
+        let error = dispatch_named_with_context(&gated, "monitor_start")
+            .await
+            .expect_err("the context entry refuses it too");
+        assert_grant_refusal(&error, crate::tool_grant::TOOL_GRANT_EXPIRED_CODE);
+        assert!(
+            inner.dispatched().is_empty(),
+            "the monitor never starts under an ended grant of shell"
+        );
+        assert_eq!(
+            grants.asked(),
+            ["shell", "shell"],
+            "the call is adjudicated as a use of the grant of shell"
+        );
+
+        // A live grant of `shell` hands the monitor on.
+        clock.store(500, Ordering::SeqCst);
+        dispatch_named(&gated, "monitor_start")
+            .await
+            .expect("a monitor runs under a live grant of shell");
+        assert_eq!(inner.dispatched(), ["monitor_start"]);
+
+        // Where both names are gated, the call needs both grants: the one of
+        // `shell` it stands on, then its own.
+        let both_grants = Arc::new(ClockedGrants::new(&clock, 1_000));
+        let both = ExecutionPolicyGatedDispatcher::new(
+            Arc::clone(&inner),
+            ToolExecutionPolicy::unrestricted(),
+        )
+        .with_tool_grant_gate(tool_grant_gate(
+            Arc::clone(&both_grants),
+            &["shell", "monitor_start"],
+        ));
+        dispatch_named(&both, "monitor_start")
+            .await
+            .expect("both grants are live");
+        assert_eq!(both_grants.asked(), ["shell", "monitor_start"]);
     }
 
     /// Admits a gated call only when it comes from an MCP server the test

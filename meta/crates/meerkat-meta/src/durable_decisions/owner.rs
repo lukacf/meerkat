@@ -5,7 +5,10 @@ use std::sync::Arc;
 
 use meerkat_core::RealmId;
 use meerkat_core::approval::decision::{DecisionId, DecisionIngress, DecisionReference};
-use meerkat_runtime::decision::{DecisionWriteMode, DurableDecisionService};
+use meerkat_runtime::decision::{
+    DecisionClock, DecisionClockError, DecisionWriteMode, DurableDecisionService,
+    SystemDecisionClock,
+};
 
 use super::ingress::DecisionIngressDeclarations;
 use crate::runtime::metadata::PersistentMetadataStore;
@@ -31,6 +34,22 @@ pub struct RuntimeDecisions {
     /// owe work (held, decided, withdrawn): what wakes the executors the
     /// runtime drives ([`super::DecisionExecutorDriver`]).
     work: Arc<tokio::sync::Notify>,
+}
+
+/// The clock of a runtime's durable decisions: the system clock, never
+/// earlier than the floor of this process's entry times
+/// (`crate::runtime::raise_entry_time_floor`). A question set is placed
+/// against the seatings of its asker's name by the time of its hold, and
+/// the journal's rows are stamped by the same host clock: after that clock
+/// steps back, a set held at the floor still follows the seating of the
+/// member that asked it.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct EntryTimeClock;
+
+impl DecisionClock for EntryTimeClock {
+    fn now_ms(&self) -> Result<u64, DecisionClockError> {
+        Ok(crate::runtime::entry_time_ms(SystemDecisionClock.now_ms()?))
+    }
 }
 
 /// Where the runtime records which decision each attested decide event was
@@ -92,10 +111,13 @@ impl RuntimeDecisions {
         mob_id: impl Into<String>,
         speaks_for_composition: bool,
     ) -> Self {
-        let owner = meerkat::ApprovalIssuerSelection::Persistent {
-            store_path: state_dir.to_path_buf(),
-        }
-        .open_decisions();
+        let owner = DurableDecisionService::with_clock(
+            // The store `meerkat::ApprovalIssuerSelection::Persistent` opens
+            // for its decisions: `approval_decisions.sqlite3` under the
+            // state directory; opening reads and creates nothing.
+            Arc::new(meerkat_store::SqliteDecisionStore::in_store_path(state_dir)),
+            Arc::new(EntryTimeClock),
+        );
         Self {
             owner: if speaks_for_composition {
                 owner

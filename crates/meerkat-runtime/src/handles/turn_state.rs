@@ -26,6 +26,9 @@ use crate::meerkat_machine::dsl as mm_dsl;
 pub struct RuntimeTurnStateHandle {
     dsl: Arc<HandleDslAuthority>,
     standalone_session_id: Option<meerkat_core::SessionId>,
+    /// The session registration's announcements of acknowledged durable
+    /// steers, for the agent's boundary coordinator.
+    pending_boundary_admissions: Option<meerkat_core::PendingBoundaryAdmissions>,
 }
 
 impl RuntimeTurnStateHandle {
@@ -34,7 +37,19 @@ impl RuntimeTurnStateHandle {
         Self {
             dsl,
             standalone_session_id: None,
+            pending_boundary_admissions: None,
         }
+    }
+
+    /// Carry the session registration's announcements of acknowledged
+    /// durable steers to the agent built with this handle.
+    #[must_use]
+    pub(crate) fn with_pending_boundary_admissions(
+        mut self,
+        admissions: meerkat_core::PendingBoundaryAdmissions,
+    ) -> Self {
+        self.pending_boundary_admissions = Some(admissions);
+        self
     }
 
     /// Construct the standalone facade handle. With no runtime loop to stage
@@ -47,6 +62,7 @@ impl RuntimeTurnStateHandle {
         Self {
             dsl,
             standalone_session_id: Some(session_id),
+            pending_boundary_admissions: None,
         }
     }
 
@@ -459,6 +475,10 @@ impl RuntimeTurnStateHandle {
 }
 
 impl TurnStateHandle for RuntimeTurnStateHandle {
+    fn pending_boundary_admissions(&self) -> Option<meerkat_core::PendingBoundaryAdmissions> {
+        self.pending_boundary_admissions.clone()
+    }
+
     fn isolated_live_bridge_child(&self) -> Result<Arc<dyn TurnStateHandle>, DslTransitionError> {
         Ok(Arc::new(Self::isolated_live_bridge()))
     }

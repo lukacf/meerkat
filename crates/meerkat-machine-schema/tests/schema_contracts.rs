@@ -114,6 +114,13 @@ fn canonical_machine_registry_contains_kernel_and_perimeter_entries() {
             // mob-set state holds one machine state per quarantined store in
             // memory, and every restore pass derives them again.
             "MobStoreRestoreLifecycleMachine",
+            // The hosted mob set owns the facts about a host's mob set as a
+            // whole, which no store's record can hold: how far the pass
+            // over the stores from before came, whether a census is owed
+            // and complete, whether a host inserts its own handles, and
+            // whether every mob is known. Set-scoped and volatile: one
+            // machine state per mob set, in memory.
+            "MobHostedSetLifecycleMachine",
             // Host store writer fence owns the writer fence of ONE realm:
             // the writer's phase, the token it commits with, the grant it
             // has not installed, the acquires it gave up on, the holder it

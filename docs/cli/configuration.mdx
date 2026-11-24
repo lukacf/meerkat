@@ -46,7 +46,12 @@ the same root. Without `--realm`, RPC still creates an isolated realm.
 For CLI commands, the default invocation context is the current directory. The
 project-local state root is `<project-root>/.rkat/realms`, where the project
 root is the nearest ancestor containing a `.rkat` entry. If none exists, the
-context root is used. `--context-root` changes the ancestor-search starting
+context root is used. A realm that already exists (has its manifest) under a
+farther ancestor's `.rkat/realms` is used where it lies, so a `.rkat`
+directory that appears nearer, for example after `rkat init` in a
+subdirectory, does not leave it behind; only a new realm goes to the nearest
+root. A realm found under more than one of these roots is refused.
+`--context-root` changes the ancestor-search starting
 point; `--state-root` bypasses discovery.
 
 Use `--verbose` on `rkat run` to print the active realm, context root, and
@@ -74,15 +79,18 @@ The active realm document is the head of the runtime config chain. Under the
 default project-local state root it is
 `<project-root>/.rkat/realms/<realm>/config.toml`.
 
-Compatibility files still exist:
+Two more files carry the same name:
 
-| Scope | Path |
-|-------|------|
-| User | `~/.rkat/config.toml` |
-| Project | `.rkat/config.toml` |
+| Scope | Path | What reads it |
+|-------|------|---------------|
+| User | `~/.rkat/config.toml` | The reserved `global` realm's document: every realm whose chain ends in `global` inherits it, and its `[confinement]` applies to every realm |
+| Project | `.rkat/config.toml` | Written by `rkat init` as a copy of the user document. A run reads only its hook entries (`[[hooks.entries]]`); no other table in it has an effect, `[confinement]` and `[governance]` included |
 
-These remain convention inputs for templates and compatibility workflows.
-CLI, RPC, REST, and MCP all resolve the same realm chain.
+Ordinary settings for one project (models, tools, limits and the like) go in
+that project's realm document, not in the project file; `rkat doctor` prints
+the realm document's path on its `config` line. For `[confinement]` see
+[OS process confinement](#os-process-confinement). CLI, RPC, REST, and MCP
+all resolve the same realm chain.
 
 Realm config supports explicit inheritance:
 
@@ -119,6 +127,7 @@ comms_enabled = false
 mob_enabled = false
 schedule_enabled = true
 workgraph_enabled = false
+agent_schedules_may_create_sessions = false
 default_timeout = "10m"
 max_concurrent = 10
 
@@ -136,6 +145,14 @@ explicit composition by a trusted embedding host. OS process confinement is the
 for the current supported profiles and [native governed embedding](/rust/native-authorization)
 for Rust setup.
 </Note>
+
+`agent_schedules_may_create_sessions` says whether an agent's schedule may
+create a session when it fires (a `materialize_on_demand_session` target).
+Off, the default, only the host writes such a schedule, and an agent whose
+own session is built as the host builds one by default; any other agent's
+write is refused (`schedule_session_creation_not_allowed`). On, every agent
+that holds the schedule tools may. The host reads it when it starts. See
+[scheduling](/guides/scheduling).
 
 `default_timeout` and each per-tool timeout in `[tools.tool_timeouts]` accept
 humantime strings such as `"30s"`, `"2m"` or `"1h 2m"`. A per-tool timeout
@@ -489,7 +506,7 @@ Important files:
 - `<store_path>/approvals.json` (RPC approval-record sidecar when the persistence bundle exposes a store path)
 - `<store_path>/approval_decisions.sqlite3` (durable decisions, created by the first hold)
 - `<store_path>/approval_decisions.executor.lock` and `<store_path>/approval_decisions.executor.<kind>.lock` (the decision executors' OS locks, one per decision kind, created when an executor starts; they hold no data)
-- `mobs/` (per-mob `<mob_id>.db` SQLite storage plus `realm_profiles.db`)
+- `mobs/` (per-mob SQLite files named `mob--<escaped-mob-id>.db`, plus `realm_profiles.db`; see [Upgrading to 0.8.31](/guides/upgrading#upgrading-to-0-8-31) for older filenames)
 
 `<store_path>/approvals.json` is not an eighth `RealmStorageProvider` durability domain.
 The current `storage doctor` and `storage migrate` commands do not inventory or
@@ -537,6 +554,15 @@ expanding it would let an API caller copy host environment variables into a
 request to a server of its choice. Writes refuse a realm server holding `${`,
 and a realm config that already holds one fails when its MCP servers are
 resolved. Put env-derived values in an `mcp.toml` server.
+
+A variable that is not set fails only the `mcp.toml` server that names it.
+`rkat mcp list` and `rkat mcp get` show that server with nothing expanded
+(`--json` prints it as written; the text forms mask its env and header values
+as for any server), marked unresolved with the field and the variable's name,
+and the commands for the other servers work. A run starts without it: the server is reported as failed,
+with a warning naming the server, the field and the variable. `rkat mcp login`
+for that server, and a run in a governed realm, are refused with the same
+message until the variable is set.
 
 A literal token in a server's args, env or headers is in the file as written.
 On Unix `rkat` writes `mcp.toml`, like every config document, readable by its
@@ -715,6 +741,20 @@ list is not loaded yet), where the same command can succeed later with no
 change; the exit status is 2 for it too. A word that is not a level
 (`--reasoning-effort x_high`) is an argument error: exit status 2 with the
 argument parser's text on stderr and nothing on stdout.
+
+For an automated caller, retry the unchanged request later only if `error.details`
+has `kind: "reasoning_effort_refused"`, `reasoning_effort_refusal.reason` is
+`"supported_levels_unavailable"`, and `retryable` is the boolean `true`.
+If the reason is unrecognized or any of these fields is missing or malformed,
+surface the original error instead of retrying.
+
+`retryable` says the level may be accepted later, not that the refused run
+left nothing: a run refused at its session's build creates no session; after
+a refusal inside the turn, check `rkat session list` before a fresh run.
+
+Do not infer the decision
+from the message or from `supported`: both unreadable and unstated levels
+give `null`, while an empty list means the model or route accepts no level.
 
 ## See also
 

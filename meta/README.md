@@ -16,13 +16,13 @@ gateway. For packaged installation, follow the instructions for your release.
 
 ## Start a local runtime
 
-From this checkout, with Rust 1.97+ and Python 3.10+:
+From `meta/` in the repository, with Rust 1.97+ and Python 3.10+:
 
 ```bash
 python3 -m venv .venv
 .venv/bin/python -m pip install -e ./sdk/python
-./scripts/repo-cargo build -p meerkat-meta --bin rpc_gateway --locked
-./scripts/repo-cargo --print-env
+../scripts/repo-cargo build -p meerkat-meta --bin rpc_gateway --locked
+../scripts/repo-cargo --print-env
 ```
 
 The last command prints `CARGO_TARGET_DIR`. Set `META_GATEWAY` to that
@@ -71,7 +71,7 @@ control a gateway; they do not bundle its executable. Rust hosts can embed Meta.
   work, approvals and the timeline in one browser interface.
 
 <p align="center">
-  <img src="docs/images/meta-console.png" alt="Meta console with conversations, topology and roster" width="900">
+  <img src="docs/images/meta-console.png" alt="Meerkat Meta console showing a sample team conversation, the agent roster, and a pending approval" width="900">
 </p>
 
 Core owns the agent loop, sessions, stable agent identity, spawning, mob

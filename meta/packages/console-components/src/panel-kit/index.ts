@@ -23,6 +23,7 @@ export {
   EMPTY_AGENT_DIRECTORY,
   agentDisplayName,
   agentInitial,
+  agentOpenable,
   createAgentDirectory,
   stripAgentKeyPrefix,
 } from "./agents";

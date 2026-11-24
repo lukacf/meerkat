@@ -115,9 +115,10 @@ pub use consequences::{
     consequences_callback_params, host_consequences_of, parse_consequences_callback_result,
 };
 pub use decided::{
-    HELD_CHANGE_FORMAT, HeldChangeHost, HeldIdentityChange, HeldTarget, IDENTITY_DECISION_KINDS,
-    IdentityDecisionNotice, IdentityDecisionNotices, IdentityDecisions, KeyedSendNotices,
-    NoRequesterNotices, REQUESTER_TRUST_DOMAIN_PREFIX, SUBJECT_WIDENED_REFUSAL,
+    HELD_CHANGE_FORMAT, HeldChangeFamilies, HeldChangeHost, HeldFamily, HeldIdentityChange,
+    HeldTarget, IDENTITY_DECISION_KINDS, IdentityDecisionNotice, IdentityDecisionNotices,
+    IdentityDecisions, KeyedSendNotices, MOB_REPLACED_REFUSAL, NoRequesterNotices,
+    REQUESTER_TRUST_DOMAIN_PREFIX, SUBJECT_WIDENED_REFUSAL,
 };
 pub use digest::Sha256Digest;
 pub use executor::{
@@ -138,6 +139,11 @@ pub use family::{
 };
 pub use family::{SettlePreparation, SettlePreparationCall};
 pub(crate) use gate::IdentityGate;
+// For the composition of a mob a host serves beside its launch mob.
+pub(crate) use gate::{LaunchIdentityPolicy, attach_host_mob_family};
+// For the rows that ask the gate's own reader about a mob of a mob set.
+#[cfg(test)]
+pub(crate) use gate::PrivateMembers;
 pub use gate::{
     FIRST_MESSAGE_IN_GOVERNED_REALM, IdentityFamilyOptions, IdentityFamilySlot, IdentityHostHooks,
     PeerVisibility,

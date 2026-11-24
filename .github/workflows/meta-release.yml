@@ -146,6 +146,20 @@ jobs:
       !cancelled() &&
       needs.resolve_release.result == 'success'
     runs-on: ubuntu-24.04
+    # A backstop on the whole job, above the wait's own deadline (120
+    # minutes, 240 for a candidate, by the same mode): 15 minutes more. It is
+    # not that deadline, not proof that a request in flight is cancelled, and
+    # not a bound on a streaming response or on the network. The wait ends
+    # itself at its deadline and starts no request from then on. The 15
+    # minutes are an allowance: 5 for this job's steps before the wait (the
+    # checkout and one git read), which spend the same budget, and 10 for a
+    # request that outlived its abandonment and made no progress (the client
+    # ends one after 300 seconds without headers, and after 300 seconds
+    # between two parts of a body; that second limit starts again with every
+    # part, so a response that keeps streaming is ended only here). Past the
+    # limit the job is cancelled, and the jobs that need it take only its
+    # success.
+    timeout-minutes: ${{ needs.resolve_release.outputs.mode == 'candidate' && 255 || 135 }}
     outputs:
       run_id: ${{ steps.ci_run.outputs.run_id }}
       run_attempt: ${{ steps.ci_run.outputs.run_attempt }}
@@ -209,10 +223,179 @@ jobs:
             const timeoutMinutes = process.env.RELEASE_MODE === "candidate" ? 240 : 120;
             const timeoutMs = timeoutMinutes * 60 * 1000;
             const pollMs = 30 * 1000;
+            // One read of GitHub may take this long, and never longer than
+            // what is left of the deadline.
+            const readMs = 60 * 1000;
             const started = Date.now();
             let cancelledReported = false;
+            let failedReads = 0;
+            const timeLeft = () => timeoutMs - (Date.now() - started);
 
-            async function exactMainRuns() {
+            // A failed read of these classes says nothing about CI: it is "not
+            // yet known", never green and never red, and is read again at the
+            // next poll inside the same deadline: an HTTP answer of a server
+            // error (500, 502, 503, 504), a transport failure whose cause has
+            // one of the named codes, and a read that did not answer within
+            // its bound. Nothing else is retried: any other status, an answer
+            // of the wrong shape and an error of this script's own code fail
+            // the wait at once. The class is read from the error's fields,
+            // never from the words of its message.
+            //
+            // A status alone is not an HTTP answer: the client gives status
+            // 500, with no answer and no cause, to every failure that never
+            // got one (a name that does not resolve, a refused connection, a
+            // body that does not parse). Only an error that carries the
+            // answer itself, with that status, counts as answered; a status
+            // with no answer behind it and no named cause fails at once.
+            const TRANSIENT_STATUS = new Set([500, 502, 503, 504]);
+            const TRANSIENT_CODES = new Set(["ECONNRESET", "ETIMEDOUT", "EAI_AGAIN"]);
+            class ReadTimedOut extends Error {}
+            class WrongShape extends Error {}
+            // The status of the HTTP answer an error carries, or null.
+            function answeredStatus(error) {
+              const response = error && typeof error === "object" ? error.response : null;
+              return response && typeof response === "object" && typeof error.status === "number" &&
+                response.status === error.status
+                ? error.status
+                : null;
+            }
+            function transientClass(error) {
+              if (error instanceof ReadTimedOut) {
+                return "no answer within its bound";
+              }
+              if (error instanceof WrongShape || !error || typeof error !== "object") {
+                return null;
+              }
+              const answered = answeredStatus(error);
+              if (answered !== null) {
+                return TRANSIENT_STATUS.has(answered) ? `HTTP ${answered}` : null;
+              }
+              // No answer: the cause's code, or the error's own where it has
+              // no status (the client's errors answer `code` with the status).
+              const cause = error.cause && typeof error.cause === "object" ? error.cause.code : undefined;
+              const code = typeof error.status === "number" || !TRANSIENT_CODES.has(error.code) ? cause : error.code;
+              return TRANSIENT_CODES.has(code) ? String(code) : null;
+            }
+
+            // No request begins at or after the deadline, and none begins for a
+            // read that was abandoned at its bound: every request of this
+            // script, and every request the parent's reader makes through the
+            // client it is given, passes this test first.
+            class DeadlinePassed extends Error {}
+            let cutAtDeadline = null;
+            function startRequest(signal) {
+              if (timeLeft() <= 0) {
+                throw new DeadlinePassed("the deadline passed before the request began");
+              }
+              if (signal && signal.aborted) {
+                throw new ReadTimedOut("its read was abandoned at its bound");
+              }
+            }
+            // `trace`, where given, notes what the artifact download of this
+            // read came to: `downloaded` and the answer's `data` once it
+            // answered, `gone` with the error when the answer was a 404 or a 410 for
+            // that artifact.
+            function guardedClient(signal, trace) {
+              const actions = new Proxy(github.rest.actions, {
+                get(target, name) {
+                  const method = target[name];
+                  if (typeof method !== "function") {
+                    return method;
+                  }
+                  return (params) => {
+                    startRequest(signal);
+                    const sent = method.call(target, { ...params, request: { ...(params && params.request), signal } });
+                    if (!trace || name !== "downloadArtifact") {
+                      return sent;
+                    }
+                    return Promise.resolve(sent).then(
+                      (answer) => {
+                        trace.downloaded = true;
+                        trace.data = answer ? answer.data : undefined;
+                        return answer;
+                      },
+                      (error) => {
+                        // That artifact's own 404 or 410, as an HTTP answer.
+                        const status = answeredStatus(error);
+                        if (status === 404 || status === 410) {
+                          trace.gone = error;
+                        }
+                        throw error;
+                      }
+                    );
+                  };
+                },
+              });
+              return Object.create(github, {
+                rest: { value: Object.create(github.rest, { actions: { value: actions } }) },
+              });
+            }
+            // Valid evidence in hand only at or after the deadline gives no
+            // credit, whichever answer came late.
+            function late(what) {
+              core.setFailed(
+                `Release commit ${ref} has ${what}, read only after the ${timeoutMinutes} minute deadline: ` +
+                  `an answer that arrives late gives no credit. Run the release again.`
+              );
+            }
+
+            // One read under its bound: the bound is what is left of the
+            // deadline when that is less. The read gets a signal for its
+            // requests; a read that has not answered at the bound is abandoned
+            // and is a failed read.
+            async function bounded(read) {
+              const limit = Math.min(readMs, timeLeft());
+              if (limit <= 0) {
+                throw new DeadlinePassed("the deadline passed before the read began");
+              }
+              const abort = new AbortController();
+              const timedOut = () => new ReadTimedOut(`no answer within ${Math.ceil(limit / 1000)} s`);
+              let timer;
+              const late = new Promise((resolve, reject) => {
+                timer = setTimeout(() => {
+                  reject(timedOut());
+                  abort.abort();
+                }, limit);
+              });
+              try {
+                return await Promise.race([read(abort.signal), late]);
+              } catch (error) {
+                // An error of the read after this bound aborted it is the bound.
+                throw abort.signal.aborted && !(error instanceof ReadTimedOut) ? timedOut() : error;
+              } finally {
+                clearTimeout(timer);
+              }
+            }
+            async function readOrNotYet(what, read) {
+              try {
+                return { known: true, value: await bounded(read) };
+              } catch (error) {
+                // The deadline, not a failed read: nothing is counted, and the
+                // expiry says which read it cut.
+                if (error instanceof DeadlinePassed) {
+                  cutAtDeadline = what;
+                  return { known: false, value: null };
+                }
+                const transient = transientClass(error);
+                if (!transient) {
+                  throw error;
+                }
+                failedReads += 1;
+                core.warning(`Could not read ${what} (${transient}: ${error.message}); failed read ${failedReads}, not counted as an answer.`);
+                return { known: false, value: null };
+              }
+            }
+            // An answer that parses but is not a list of records is a wrong
+            // answer, not a failed read: it fails the wait at once.
+            function listOf(value, what) {
+              if (!Array.isArray(value) || value.some((entry) => !entry || typeof entry !== "object")) {
+                throw new WrongShape(`${what} is not a list of records`);
+              }
+              return value;
+            }
+
+            async function exactMainRuns(signal) {
+              startRequest(signal);
               const { data } = await github.rest.actions.listWorkflowRuns({
                 owner,
                 repo,
@@ -221,10 +404,39 @@ jobs:
                 event: "push",
                 head_sha: ref,
                 per_page: 100,
+                request: { signal },
               });
-              return data.workflow_runs.filter(
+              return listOf(data && data.workflow_runs, "the ci.yml run list").filter(
                 (run) => run.head_sha === ref && run.head_branch === "main" && run.event === "push"
               );
+            }
+
+            // The jobs of one run attempt, page by page. The script asks for
+            // each page itself, so each page passes the start test: the
+            // client's own pagination would request the later pages untested.
+            // A page shorter than the page size, or the listing's total
+            // reached, ends the read.
+            const jobsPageSize = 100;
+            async function jobsOfAttempt(run, signal) {
+              const jobs = [];
+              for (let page = 1; ; page += 1) {
+                startRequest(signal);
+                const { data } = await github.rest.actions.listJobsForWorkflowRunAttempt({
+                  owner,
+                  repo,
+                  run_id: run.id,
+                  attempt_number: run.run_attempt,
+                  per_page: jobsPageSize,
+                  page,
+                  request: { signal },
+                });
+                const batch = listOf(data && data.jobs, "a page of the job list of a Meta CI run");
+                jobs.push(...batch);
+                const total = data && typeof data.total_count === "number" ? data.total_count : null;
+                if (batch.length < jobsPageSize || (total !== null && jobs.length >= total)) {
+                  return jobs;
+                }
+              }
             }
 
             // Meta's own suites (console, browser, SDK, flow editor and,
@@ -232,9 +444,10 @@ jobs:
             // "Meta gate" succeeds trivially when a push left Meta alone. The
             // release needs a green Meta CI run at this commit that ran
             // Meta's lanes: the push that reached Meta, or a dispatch on main.
-            async function metaEvidence() {
+            async function metaEvidence(signal) {
               const metaRuns = [];
               for (const event of ["push", "workflow_dispatch"]) {
+                startRequest(signal);
                 const { data: listing } = await github.rest.actions.listWorkflowRuns({
                   owner,
                   repo,
@@ -243,17 +456,13 @@ jobs:
                   event,
                   head_sha: ref,
                   per_page: 100,
+                  request: { signal },
                 });
-                metaRuns.push(...listing.workflow_runs.filter((run) => run.head_sha === ref && run.head_branch === "main"));
+                metaRuns.push(...listOf(listing && listing.workflow_runs, "the meta-ci.yml run list")
+                  .filter((run) => run.head_sha === ref && run.head_branch === "main"));
               }
               for (const run of metaRuns.filter((candidate) => candidate.status === "completed" && candidate.conclusion === "success")) {
-                const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRunAttempt, {
-                  owner,
-                  repo,
-                  run_id: run.id,
-                  attempt_number: run.run_attempt,
-                  per_page: 100,
-                });
+                const jobs = await jobsOfAttempt(run, signal);
                 // meta-checks runs exactly when the run reached Meta (changes'
                 // meta output); warm-cache and the gate run either way.
                 if (jobs.some((job) => job.name === "meta-checks" && job.conclusion === "success")) {
@@ -268,8 +477,12 @@ jobs:
             // say): its exact-tree attestation records each job's product, and
             // the release commit's parent's scripts/ci-product-evidence.mjs
             // (written by the step above with the commit's changed paths)
-            // judges it, once per attempt. Anything it cannot attribute, or no
-            // reader, keeps waiting for a green run.
+            // judges it, once per attempt. What it cannot attribute, an
+            // attempt with no attestation the reader can use, or no reader,
+            // keeps waiting for a green run. A read of the attestation that
+            // fails in a retried class is read again at the next round. Any
+            // other failure of that read, and a fault of the reader's own
+            // code, end the wait and say which attempt it was.
             const parentReader = require("path").join(process.env.RUNNER_TEMP || "", "ci-evidence-parent");
             let evidence = null;
             try {
@@ -287,21 +500,201 @@ jobs:
             } catch (error) {
               core.info(`The release commit's changed paths are unknown (${error.message}); only a green run counts.`);
             }
+            // What the bytes of a completed download say against themselves
+            // as the archive of one attestation.json, or null: null for a
+            // good archive, and null for no bytes at all, which is no
+            // statement about an archive. It reads the bytes and nothing
+            // else: the end record, the directory, the one member, its JSON.
+            //
+            // A body the client handed over as text is complete (the client
+            // reads a text body to its end) but decoded, and bytes that are
+            // not UTF-8 are lost in that. Every ASCII byte survives it,
+            // though, and a zip archive holds its end record's signature,
+            // four ASCII bytes. So one thing can be said of a text body: with
+            // no such signature in it, it was no archive. A text body that
+            // has one may be an archive decoded with loss, and an empty one
+            // is no body: neither says anything.
+            function archiveFlaw(data) {
+              if (typeof data === "string") {
+                return data.length > 0 && !data.includes("PK\u0005\u0006")
+                  ? "its complete body is text with no zip end record"
+                  : null;
+              }
+              let bytes = null;
+              if (Buffer.isBuffer(data)) {
+                bytes = data;
+              } else if (data instanceof ArrayBuffer) {
+                bytes = Buffer.from(data);
+              } else if (ArrayBuffer.isView(data)) {
+                bytes = Buffer.from(data.buffer, data.byteOffset, data.byteLength);
+              }
+              if (!bytes) {
+                return null;
+              }
+              const member = "attestation.json";
+              let end = bytes.length - 22;
+              while (end >= 0 && bytes.readUInt32LE(end) !== 0x06054b50) {
+                end -= 1;
+              }
+              if (end < 0) {
+                return "it has no zip end record";
+              }
+              if (bytes.readUInt32LE(0) !== 0x04034b50) {
+                return "it does not start as a zip archive";
+              }
+              const entries = bytes.readUInt16LE(end + 10);
+              let offset = bytes.readUInt32LE(end + 16);
+              for (let index = 0; index < entries; index += 1) {
+                if (offset + 46 > bytes.length || bytes.readUInt32LE(offset) !== 0x02014b50) {
+                  return "its directory is malformed";
+                }
+                const nameLength = bytes.readUInt16LE(offset + 28);
+                const skip = 46 + nameLength + bytes.readUInt16LE(offset + 30) + bytes.readUInt16LE(offset + 32);
+                if (offset + 46 + nameLength > bytes.length) {
+                  return "its directory is malformed";
+                }
+                if (bytes.toString("utf8", offset + 46, offset + 46 + nameLength) !== member) {
+                  offset += skip;
+                  continue;
+                }
+                const method = bytes.readUInt16LE(offset + 10);
+                const compressed = bytes.readUInt32LE(offset + 20);
+                const local = bytes.readUInt32LE(offset + 42);
+                if (local + 30 > bytes.length || bytes.readUInt32LE(local) !== 0x04034b50) {
+                  return `its ${member} is malformed`;
+                }
+                const start = local + 30 + bytes.readUInt16LE(local + 26) + bytes.readUInt16LE(local + 28);
+                if (start + compressed > bytes.length) {
+                  return `its ${member} runs past its end`;
+                }
+                let text;
+                if (method === 0) {
+                  text = bytes.subarray(start, start + compressed);
+                } else if (method === 8) {
+                  try {
+                    text = require("zlib").inflateRawSync(bytes.subarray(start, start + compressed));
+                  } catch (error) {
+                    // zlib's own word on the bytes: its codes begin with Z_.
+                    if (typeof error.code === "string" && error.code.startsWith("Z_")) {
+                      return `its ${member} does not inflate (${error.code})`;
+                    }
+                    throw error;
+                  }
+                } else {
+                  return `its ${member} uses zip method ${method}`;
+                }
+                try {
+                  JSON.parse(text.toString("utf8"));
+                } catch (error) {
+                  if (error instanceof SyntaxError) {
+                    return `its ${member} is not JSON`;
+                  }
+                  throw error;
+                }
+                return null;
+              }
+              return `it holds no ${member}`;
+            }
+            // What of an attestation record's shape the judge reads without
+            // testing it: null when the shape is right, else what is wrong.
+            function recordShapeFault(record) {
+              const plain = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+              if (!plain(record)) {
+                return "it is not a JSON object";
+              }
+              const product = record.product_evidence;
+              if (product === undefined || product === null) {
+                return null;
+              }
+              if (!plain(product)) {
+                return "its product_evidence is not an object";
+              }
+              if (Array.isArray(product.jobs) && product.jobs.some((job) => !plain(job) || typeof job.name !== "string")) {
+                return "an entry of its job list is not a record with a name";
+              }
+              return null;
+            }
             const verdicts = new Map();
             async function metaScopedVerdict(run) {
               const key = `${run.id}/${run.run_attempt}`;
               if (!verdicts.has(key)) {
                 let verdict = { accepted: false, reasons: ["no product-scoped evidence reader"] };
                 if (evidence) {
+                  // The attestation read has three outcomes, kept apart.
+                  // NOT YET KNOWN: cut by the deadline, failed in a retried
+                  // class or abandoned at its bound: no verdict is said or
+                  // kept for the attempt, and the next round reads it again.
+                  // A VERDICT, kept for the attempt, which never changes: the
+                  // reader's own judgement of a read that completed; and "not
+                  // enough" when the attempt has no attestation, when its
+                  // artifact answers 404 or 410, when the download completed and
+                  // what it brought is no valid archive, or when the record
+                  // in it is not one the reader can judge. The wait goes on
+                  // for a green run or a later attempt.
+                  // A FAILURE OF THE WAIT, at once and by name: every other
+                  // error (an authorization or other API failure, a fault of
+                  // the reader's own code while it reads or judges).
+                  const ends = (what, error) =>
+                    new Error(
+                      `${what} the attestation of CI attempt ${run.run_attempt} (${run.html_url}): ` +
+                        `${(error && error.name) || "Error"}: ${error && error.message}. ` +
+                        `That is no verdict on the attempt; the wait ends.`,
+                      { cause: error }
+                    );
+                  const trace = { downloaded: false, gone: null };
+                  let attestation = null;
+                  let negative = null;
                   try {
-                    const attestation = await evidence.attestationOfRun(github, {
-                      owner, repo, runId: run.id, attempt: run.run_attempt, commit: ref,
-                    });
-                    verdict = attestation
-                      ? evidence.acceptance(attestation, "meta", { changedPaths })
-                      : { accepted: false, reasons: ["the attempt has no exact-tree attestation"] };
+                    const read = await readOrNotYet(`the attestation of CI attempt ${run.run_attempt}`, (signal) =>
+                      evidence.attestationOfRun(guardedClient(signal, trace), {
+                        owner, repo, runId: run.id, attempt: run.run_attempt, commit: ref,
+                      }));
+                    if (!read.known) {
+                      return { accepted: false, reasons: ["its attestation is not yet known"] };
+                    }
+                    attestation = read.value;
+                    if (attestation === null || attestation === undefined) {
+                      negative = "the attempt has no exact-tree attestation";
+                    }
                   } catch (error) {
-                    verdict = { accepted: false, reasons: [`unreadable attestation: ${error.message}`] };
+                    // A verdict on the archive only where the bytes that
+                    // came say so themselves; the kind and the words of the
+                    // reader's error decide nothing. With bytes that are a
+                    // good archive, or with none, the reader's throw is a
+                    // fault of the reader.
+                    const flaw = trace.downloaded ? archiveFlaw(trace.data) : null;
+                    if (trace.gone === error) {
+                      negative = `the attempt's attestation artifact is gone (HTTP ${error.status})`;
+                    } else if (flaw) {
+                      negative = `the attempt's attestation is no valid archive (${flaw})`;
+                    } else if (trace.downloaded) {
+                      throw ends("The evidence reader of the release commit's parent failed while reading", error);
+                    } else {
+                      throw ends("A read outside the retried classes failed for", error);
+                    }
+                  }
+                  // The judge returns "not enough" for a record with a part
+                  // missing, but it reads the entries of the job list without
+                  // testing them and throws on one that is no record, with
+                  // the same kind of error a fault of its own would give. So
+                  // the record's shape is tested here first: a record of
+                  // another shape is "not enough" for the attempt, and
+                  // whatever the judge throws on a record of the right shape
+                  // is a fault of the reader, which ends the wait.
+                  if (!negative) {
+                    const shape = recordShapeFault(attestation);
+                    if (shape) {
+                      negative = `the attempt's attestation is no record the reader can judge (${shape})`;
+                    }
+                  }
+                  if (negative) {
+                    verdict = { accepted: false, reasons: [negative] };
+                  } else {
+                    try {
+                      verdict = evidence.acceptance(attestation, "meta", { changedPaths });
+                    } catch (error) {
+                      throw ends("The evidence reader of the release commit's parent failed while judging", error);
+                    }
                   }
                 }
                 verdicts.set(key, verdict);
@@ -311,8 +704,11 @@ jobs:
             }
 
             for (;;) {
-              const runs = await exactMainRuns();
-              if (runs.length > 0) {
+              const listing = await readOrNotYet("the exact-main CI runs", exactMainRuns);
+              const runs = listing.known ? listing.value : [];
+              if (!listing.known) {
+                core.info(`The exact-main CI runs of ${ref} are not known this round`);
+              } else if (runs.length > 0) {
                 core.info(
                   runs
                     .map((run) => `CI attempt ${run.run_attempt}: ${run.status}/${run.conclusion || "pending"} (${run.html_url})`)
@@ -335,13 +731,27 @@ jobs:
               }
               let meta = null;
               if (success) {
+                const ciEvidence = scoped ? "exact-main CI that failed only in rows Meta does not depend on" : "green exact-main CI";
+                // A CI answer that counts, in hand only at or after the
+                // deadline: no credit, and the Meta read is not begun.
+                if (timeLeft() <= 0) {
+                  late(ciEvidence);
+                  return;
+                }
                 core.info(
                   scoped
                     ? `Release commit ${ref} has exact-main CI that failed only in rows Meta does not depend on: ${success.html_url}`
                     : `Release commit ${ref} has green exact-main CI: ${success.html_url}`
                 );
-                meta = await metaEvidence();
+                const metaRead = await readOrNotYet("the Meta CI runs", metaEvidence);
+                meta = metaRead.known ? metaRead.value : { run: null, count: 0 };
                 if (meta.run) {
+                  // Credit only for an answer in hand before the deadline: a
+                  // valid answer that arrives late gives none.
+                  if (timeLeft() <= 0) {
+                    late(`${ciEvidence} and green Meta CI`);
+                    return;
+                  }
                   core.info(`Release commit ${ref} has green Meta CI with Meta's lanes: ${meta.run.html_url}`);
                   if (scoped) {
                     core.warning(`Exact-main CI at ${ref} failed (${success.html_url}), only in rows Meta does not depend on: ${scoped.reasons.join("; ")}`);
@@ -365,18 +775,29 @@ jobs:
                 }
               }
 
-              if (Date.now() - started >= timeoutMs) {
+              // The deadline, tested before and after the sleep, so that no
+              // round begins at or after it; the sleep is cut to what is left.
+              const expire = () => {
+                const unread = failedReads > 0 ? ` ${failedReads} read(s) of GitHub failed and were not counted.` : "";
+                const cut = cutAtDeadline ? ` The deadline passed during the read of ${cutAtDeadline}; it was not finished.` : "";
                 core.setFailed(
                   success
                     ? `Release commit ${ref} has no green Meta CI run that ran Meta's lanes after ${timeoutMinutes} minutes ` +
-                        `(${meta.count} run(s) found). Dispatch meta-ci.yml on main at this commit.`
+                        `(${meta.count} run(s) found). Dispatch meta-ci.yml on main at this commit.${unread}${cut}`
                     : `Release commit ${ref} has no green exact-main CI after ${timeoutMinutes} minutes (${runs.length} run(s) found). ` +
-                        `A tag is not evidence: fix the red, or re-run a cancelled run.`
+                        `A tag is not evidence: fix the red, or re-run a cancelled run.${unread}${cut}`
                 );
+              };
+              if (timeLeft() <= 0) {
+                expire();
                 return;
               }
 
-              await new Promise((resolve) => setTimeout(resolve, pollMs));
+              await new Promise((resolve) => setTimeout(resolve, Math.min(pollMs, timeLeft())));
+              if (timeLeft() <= 0) {
+                expire();
+                return;
+              }
             }
 
   release_validate:
@@ -1093,6 +1514,34 @@ jobs:
             fi
           fi
 
+      # The readback runs the workflow's own copy of the verifier: this
+      # workflow file is always main's, while the checkout above is the
+      # released commit, whose copy can be older than the flags used here.
+      # It arrives after the publish steps, which build from the released
+      # commit's tree alone.
+      - name: Checkout immutable workflow tools
+        if: needs.resolve_release.outputs.dry_run == 'false'
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .release-tools
+      # A registry accepts an upload before it serves the version (npm has
+      # taken from one to more than six minutes). This job ends only when
+      # PyPI and npm serve the exact packages, so the crate job's readback of
+      # every registry does not start against one that has not served yet.
+      # The verifier reads public URLs with no credential. It waits up to its
+      # own deadline for a version that is not served yet, and refuses one
+      # that is served wrong. Once npm serves the version, a rerun of this
+      # job publishes nothing again and passes here at the first read.
+      - name: Wait until PyPI and npm serve the exact SDK packages
+        if: needs.resolve_release.outputs.dry_run == 'false'
+        env:
+          RELEASE_VERSION: ${{ needs.resolve_release.outputs.version }}
+        run: |
+          set -euo pipefail
+          python3 .release-tools/meta/scripts/verify-published-registries.py --version "${RELEASE_VERSION}" \
+            --only-registry PyPI --only-registry npm
+
   # The crate bytes the publisher must upload. No verify build here:
   # floor_check compiled these crates' packaged sources against published
   # Core. Its own archives differ from these in Cargo.lock only (it
@@ -1208,10 +1657,22 @@ jobs:
           MEERKAT_CRATE_PUBLISH_PATCH: "false"
           MEERKAT_REGISTRY_DRY_RUN: ${{ needs.resolve_release.outputs.dry_run }}
         run: scripts/release-publish-rust-crates.sh
+      # The readback of every registry, by the workflow's own copy of the
+      # verifier (see publish_sdk_packages), checked out after the crates
+      # were packaged and published from the released commit's tree alone.
+      # It runs after a failed SDK job too, so it keeps the verifier's own
+      # wait: up to its deadline for each registry to serve the exact
+      # packages, then a failure that names the registries still failing.
+      - name: Checkout immutable workflow tools
+        if: needs.resolve_release.outputs.dry_run == 'false'
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .release-tools
       - name: Verify exact packages are public on every registry
         if: needs.resolve_release.outputs.dry_run == 'false'
         run: |
           set -euo pipefail
-          python3 meta/scripts/verify-published-registries.py --version "${RELEASE_VERSION}" \
+          python3 .release-tools/meta/scripts/verify-published-registries.py --version "${RELEASE_VERSION}" \
             --crate-sha256 "meta-extension-state=${VERIFIED_EXTENSION_SHA256}" \
             --crate-sha256 "meerkat-meta=${VERIFIED_META_SHA256}"

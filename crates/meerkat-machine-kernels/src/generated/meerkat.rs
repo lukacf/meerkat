@@ -13360,6 +13360,70 @@ impl std::fmt::Display for SurfaceStagedOp {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum TargetReasoningEffortVerdict {
+    #[default]
+    #[serde(rename = "NoHeldEffort")]
+    NoHeldEffort,
+    #[serde(rename = "HeldEffortAccepted")]
+    HeldEffortAccepted,
+    #[serde(rename = "LegacyUnverified")]
+    LegacyUnverified,
+    #[serde(rename = "Refused")]
+    Refused,
+    #[serde(rename = "LevelsUnreadable")]
+    LevelsUnreadable,
+}
+impl TargetReasoningEffortVerdict {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::NoHeldEffort => "NoHeldEffort",
+            Self::HeldEffortAccepted => "HeldEffortAccepted",
+            Self::LegacyUnverified => "LegacyUnverified",
+            Self::Refused => "Refused",
+            Self::LevelsUnreadable => "LevelsUnreadable",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for TargetReasoningEffortVerdict {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "NoHeldEffort" => Ok(Self::NoHeldEffort),
+            "HeldEffortAccepted" => Ok(Self::HeldEffortAccepted),
+            "LegacyUnverified" => Ok(Self::LegacyUnverified),
+            "Refused" => Ok(Self::Refused),
+            "LevelsUnreadable" => Ok(Self::LevelsUnreadable),
+            other => Err(format!(
+                "invalid TargetReasoningEffortVerdict value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for TargetReasoningEffortVerdict {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for TargetReasoningEffortVerdict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum TerminalCauseClass {
     #[default]
     #[serde(rename = "Missing")]
@@ -16992,6 +17056,8 @@ pub mod inputs {
         pub approval_reason: Option<RoutingSwitchApprovalReason>,
         pub realtime_detach_allowed: bool,
         pub target_carries_transcript: bool,
+        pub target_reasoning_effort: Option<TargetReasoningEffortVerdict>,
+        pub inspected_current_identity: Option<SessionLlmIdentity>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RequestUntilChangedSwitchTurn {
@@ -17004,6 +17070,8 @@ pub mod inputs {
         pub approval_reason: Option<RoutingSwitchApprovalReason>,
         pub realtime_detach_allowed: bool,
         pub target_carries_transcript: bool,
+        pub target_reasoning_effort: Option<TargetReasoningEffortVerdict>,
+        pub inspected_current_identity: Option<SessionLlmIdentity>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct CompleteUntilChangedSwitchTurnReconfigure {
@@ -17254,6 +17322,7 @@ pub mod inputs {
     pub struct ClassifyRecoveredInputDurability {
         pub input_id: String,
         pub durability: InputDurabilityKind,
+        pub pending_terminal_carrier: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResolveInputPublicLifecycle {
@@ -17548,6 +17617,7 @@ pub mod inputs {
         pub runtime_peer_response_terminal_apply_intent:
             Option<RecoveredPeerResponseTerminalApplyIntent>,
         pub is_prompt: bool,
+        pub live_boundary_delivery: Option<LiveBoundaryDelivery>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct QueueAccepted {
@@ -26563,6 +26633,18 @@ pub enum TransitionId {
     DeferInputBehindBacklogEndedWithRefusedRunRunning,
     DeferInputBehindBacklogEndedWithRefusedRunRetired,
     DeferInputBehindBacklogEndedWithRefusedRunStopped,
+    ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierInitializing,
+    ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierIdle,
+    ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierAttached,
+    ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierRunning,
+    ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierRetired,
+    ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierStopped,
+    RequestFiniteSwitchTurnReasoningEffortRefusedIdle,
+    RequestFiniteSwitchTurnReasoningEffortRefusedAttached,
+    RequestFiniteSwitchTurnReasoningEffortRefusedRunning,
+    RequestUntilChangedSwitchTurnReasoningEffortRefusedIdle,
+    RequestUntilChangedSwitchTurnReasoningEffortRefusedAttached,
+    RequestUntilChangedSwitchTurnReasoningEffortRefusedRunning,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

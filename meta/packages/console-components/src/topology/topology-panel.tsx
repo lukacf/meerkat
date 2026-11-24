@@ -109,6 +109,13 @@ export interface TopologyPanelProps {
   teamName?: string;
   /** The team's key (its id), the role view root's tooltip. */
   teamKey?: string;
+  /**
+   * The mob choice of a console that lists several mobs: the "More actions"
+   * menu offers All mobs and each mob, and the header names the choice.
+   * The host narrows `nodes` and `agents` to the chosen mobs. Absent for a
+   * console with one mob.
+   */
+  mobChoice?: TopologyMobChoice;
 
   /** Every pair the topology query reports. When given, the query decides the wiring. */
   links?: readonly ConsoleTopologyLink[] | null;
@@ -156,6 +163,24 @@ export interface TopologyPanelProps {
   /** Where "How wiring works" links. */
   wiringDocsHref?: string;
 }
+
+/**
+ * The topology's mob choice (see `TopologyPanelProps.mobChoice`): the mobs a
+ * console lists, in tree order, each with its name for people, what tells it
+ * apart from another mob of that name (`detail`, shown muted beside it) and
+ * how deep it is nested, and the chosen one (null for all mobs). A name or a
+ * detail is never a mob id.
+ */
+export interface TopologyMobChoice {
+  mobs: ReadonlyArray<{ mobId: string; name: string; detail?: string | null; depth: number }>;
+  selected: string | null;
+  onSelect: (mobId: string | null) => void;
+}
+
+/** The menu's option for all mobs: no mob id is empty. */
+const ALL_MOBS_OPTION = "";
+/** A mob option steps in once per nesting level, up to this many levels. */
+const MOB_OPTION_INDENT_CAP = 4;
 
 type EdgeMode = "all" | "focus";
 type OnOff = "on" | "off";
@@ -301,6 +326,7 @@ export function TopologyPanel({
   onOpenMemory,
   teamName,
   teamKey,
+  mobChoice,
   links,
   routes,
   routesAccess,
@@ -617,6 +643,39 @@ export function TopologyPanel({
     onRefresh,
     testIdPrefix: "topology",
   });
+  // With several mobs the menu starts with the mob choice: All mobs, then
+  // each mob in tree order, indented by its nesting. Choosing keeps the
+  // menu open; the host narrows the map to the choice.
+  const mobChoiceItems: MenuEntry[] = mobChoice && mobChoice.mobs.length > 1 ? [
+    {
+      kind: "radio",
+      id: "topology-mob",
+      label: "Mob",
+      value: mobChoice.selected ?? ALL_MOBS_OPTION,
+      options: [
+        { id: ALL_MOBS_OPTION, label: "All mobs", testId: "topology-mob:all" },
+        ...mobChoice.mobs.map((mob) => ({
+          id: mob.mobId,
+          label: (
+            <span className="topo__mob-option" style={{ paddingInlineStart: `${Math.min(mob.depth, MOB_OPTION_INDENT_CAP) * 12}px` }}>
+              {mob.name}
+              {mob.detail ? <span className="topo__mob-option-detail"> {mob.detail}</span> : null}
+            </span>
+          ),
+          textValue: mob.detail ? `${mob.name} (${mob.detail})` : mob.name,
+          testId: `topology-mob:${mob.mobId}`,
+        })),
+      ],
+      onChange: (id) => mobChoice.onSelect(id === ALL_MOBS_OPTION ? null : id),
+    },
+    { kind: "separator", id: "topology-mob-end" },
+  ] : [];
+  const chosenMobEntry = mobChoice?.selected
+    ? mobChoice.mobs.find((mob) => mob.mobId === mobChoice.selected) ?? null
+    : null;
+  const chosenMobName = chosenMobEntry
+    ? chosenMobEntry.detail ? `${chosenMobEntry.name} (${chosenMobEntry.detail})` : chosenMobEntry.name
+    : null;
 
   const summary = topologySummaryFacts(model).map((fact) => ({ key: fact.key, text: fact.text, tone: fact.tone }));
   const noAgents = !loading && graph.agents.length === 0;
@@ -771,7 +830,9 @@ export function TopologyPanel({
         statusById={model.statusById}
         onSelectAgent={onSelectAgent}
         teamName={teamName}
-        teamKey={teamKey}
+        // The root stands for every mob when all mobs show: it carries no
+        // one mob's id as its tooltip.
+        teamKey={mobChoice && mobChoice.mobs.length > 1 && !mobChoice.selected ? undefined : teamKey}
       />
     );
   } else if (shownView === "connections" && management) {
@@ -834,7 +895,11 @@ export function TopologyPanel({
       >
         <PanelHeader
           title={title}
-          scope={teamName ? <Chip variant="quiet" title={teamKey}>{teamName}</Chip> : undefined}
+          scope={mobChoiceItems.length > 0 ? (
+            <Chip variant="quiet" title={mobChoice?.selected ?? undefined} testId="topology-mob-choice">
+              {chosenMobName ?? "All mobs"}
+            </Chip>
+          ) : teamName ? <Chip variant="quiet" title={teamKey}>{teamName}</Chip> : undefined}
           summary={summary}
           freshness={{ at: updatedAtMs ?? undefined, updating: refreshing }}
           refreshing={refreshing}
@@ -848,7 +913,7 @@ export function TopologyPanel({
           tools={onRefresh ? (
             <IconButton label="Refresh topology" glyph="refresh" reveal onClick={onRefresh} data-testid="topology-refresh" />
           ) : undefined}
-          menu={{ label: "More actions for Topology", items: menuItems, triggerTestId: "topology-menu" }}
+          menu={{ label: "More actions for Topology", items: [...mobChoiceItems, ...menuItems], triggerTestId: "topology-menu" }}
         />
         {!noAgents ? (
           <TopologyGlance

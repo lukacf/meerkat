@@ -25,7 +25,7 @@ may apply explicit presets of their own.
 | `shell_jobs` | Shell | No | -- | List background shell jobs |
 | `shell_job_status` | Shell | No | -- | Check background job status |
 | `shell_job_cancel` | Shell | No | -- | Cancel a background job |
-| `monitor_start` | Shell monitor | No | durable job + blob stores | Start a high-trust framed script monitor |
+| `monitor_start` | Shell | No | durable job + blob stores | Start a framed script monitor |
 | `memory_search` | Memory | N/A | `memory-store-session` | Search semantic memory |
 | `datetime` | Utility | Yes | -- | Get current date/time |
 | `apply_patch` | Utility | Yes | -- | Apply structured file patches inside the project root |
@@ -99,7 +99,7 @@ may apply explicit presets of their own.
 | Flag | Builder Method | Default | Controls |
 |------|---------------|---------|----------|
 | `enable_builtins` | `.builtins(bool)` | `false` | Task tools, utility tools (`datetime`, `apply_patch`, `view_image`), and blob file tools when a blob store is wired |
-| `enable_shell` | `.shell(bool)` | `false` | Standard shell tools (`shell`, `shell_jobs`, `shell_job_status`, `shell_job_cancel`); `monitor_start` remains an explicit high-trust policy decision |
+| `enable_shell` | `.shell(bool)` | `false` | The shell family: `shell`, `shell_jobs`, `shell_job_status`, `shell_job_cancel` and, where the session has durable job and blob stores, `monitor_start` |
 | `enable_memory` | `.memory(bool)` | `false` | `memory_search` (requires `memory-store-session` feature) |
 | `enable_schedule` | `.schedule(bool)` | `false` | Scheduler tools (`meerkat_schedule_*`) |
 | `enable_workgraph` | `.workgraph(bool)` | `false` | WorkGraph tools (`workgraph_*`) |
@@ -142,9 +142,10 @@ category does not enable general builtins.
 Individual tools can be enabled or disabled via `ToolPolicyLayer` in
 `BuiltinToolConfig`, but policy can only select tools from a category that was
 actually composed. When shell is enabled, the factory applies a policy that
-activates the four standard shell tools (which have `default_enabled: false`).
-The high-trust `monitor_start` and all five skill tools also default off and
-require an explicit policy enable in a custom dispatcher build.
+activates the shell family (its tools have `default_enabled: false`): the four
+standard shell tools and, where the session has durable job and blob stores,
+`monitor_start`. The five skill tools also default off and require an explicit
+policy enable in a custom dispatcher build, as does every shell tool there.
 </Accordion>
 
 <Accordion title="Execution contracts and mutation classes">
@@ -167,7 +168,7 @@ undeclared tools, not an assertion that the call is harmless.
 Capabilities are registered via the `inventory` crate in `crates/meerkat-tools/src/lib.rs`:
 
 - **Builtins** (`CapabilityId::Builtins`): `task_list`, `task_create`, `task_get`, `task_update`, `datetime`, `apply_patch`, `view_image`, and runtime-backed `blob_save_file`/`blob_load_file`/`blob_inspect` when a blob store is available. Controlled by `config.tools.builtins_enabled`.
-- **Shell** (`CapabilityId::Shell`): `shell`, `shell_jobs`, `shell_job_status`, `shell_job_cancel`, plus opt-in `monitor_start`. Controlled by `config.tools.shell_enabled` and per-tool policy.
+- **Shell** (`CapabilityId::Shell`): `shell`, `shell_jobs`, `shell_job_status`, `shell_job_cancel` and `monitor_start`. Controlled by `config.tools.shell_enabled` and per-tool policy.
 - **Image generation**: runtime-owned `generate_image`, controlled by `override_image_generation` after runtime capability resolution.
 - **Web search**: provider-native search when the active model owns it, otherwise the Meerkat-owned `web_search` fallback; controlled by `override_web_search`.
 - **Schedule** (`CapabilityId::Schedule`): `meerkat_schedule_*`. Controlled by `config.tools.schedule_enabled`.
@@ -310,10 +311,29 @@ interrupted, or hook-denied runs do not commit the switch, and later
 realization can still be denied or held. A staging result is not proof that
 the model has changed.
 
-The switch keeps the session's reasoning effort level and is not judged
-against it. After a `brain_swap` to a model whose route does not accept the
-session's level, each request is refused before it reaches the provider
-until the level is changed or cleared.
+The switch keeps the session's reasoning effort level, and is judged against
+it where it is decided, before the next input. A target whose route is known
+to refuse the level (alone, or together with the session's other reasoning
+settings) is denied: the request ends with the denial `CapabilityPolicy`, the
+session keeps its model and its level, and the next input runs on them. A
+target for which no source states the supported levels is denied in the same
+way. The denied switch is not applied later when the level is changed or
+cleared; ask for it again. Nothing in a later turn tells the agent that its
+switch was denied; the routing record and a warning in the host's log say so.
+
+When a source for the target's supported levels exists but cannot currently
+be read (an account's model list that is not loaded), a target whose client
+can be built can still be switched to without a compatibility verdict: the
+switch is carried out, as it was before the level was judged, and each
+request is refused as retryable until the levels can be read. If they then do
+not include the session's level, requests stay refused until the level or the
+model is changed. On the stock host, a target whose client cannot be built is
+held.
+
+A Rust host that implements `SessionLlmReconfigureHost` itself keeps its own
+hooks: for a session that holds a level its judge is asked where the switch
+is decided, and its acceptance is taken as the host's own word until it
+implements `inspect_target_session_llm_identity`.
 
 **Source:** `crates/meerkat-tools/src/builtin/brain_swap.rs`,
 `crates/meerkat-tools/src/builtin/composite.rs`,
@@ -706,10 +726,11 @@ the privileged spawn arguments, unless its controlling host narrowed it with
 an operator authority ceiling on its spawn request. See
 [Placed-member operator authority](/guides/mobs#placed-member-operator-authority).
 
-Retirement cascades like a process tree. Retiring a member retires every member
-it transitively spawned, deepest first, then the member itself, each through
-the same exact-incarnation retire; every retirement is attempted and the first
-failure is reported, so a retry converges. The cascade lives in the core
+Retirement follows the recorded fork tree. It retires a member's fork
+descendants deepest first, then the member itself. An ordinary `spawn_member`,
+`spawn_many_members` or `mob_spawn_member` does not add the new member to
+that tree. Each retirement targets the exact incarnation; every retirement
+is attempted and the first failure is reported, so a retry converges. The cascade lives in the core
 retire, so every path takes it: `mob_retire_member`, `retire_member`, the
 `max_run_secs` autokill, the retirement of a child whose turn failed,
 host-side retirement (`mob/retire` over JSON-RPC, `meerkat_mob_retire` over
@@ -948,11 +969,18 @@ Update an existing task. Only provided fields are modified; omitted fields remai
 
 ## Shell tools
 
-Shell tools execute commands and manage background jobs. They are all
-`default_enabled: false`. The effective shell category must first be composed;
-the factory then uses `ToolPolicyLayer` to activate the four standard shell
-tools. A policy cannot create an absent shell category, and `monitor_start`
-still requires its own explicit policy enable.
+Shell tools execute commands, manage background jobs and run script monitors.
+They are all `default_enabled: false`. The effective shell category must first
+be composed; the factory then uses `ToolPolicyLayer` to activate the whole
+family: `shell`, the three job tools and `monitor_start`. A policy cannot
+create an absent shell category. A session without durable job and blob stores
+is not offered `monitor_start`, as its `shell` offers no `background`.
+
+Every agent with shell is therefore offered `monitor_start` with no further
+configuration. To keep the four-tool list, deny the name: in a mob profile
+`deny = ["monitor_start"]` under `[profiles.<name>.tools]`. The
+`monitor_start` entry below says what a monitor may do and every way to
+narrow it.
 
 <Warning>
 `background: true` is available only when the session has a persistent realm
@@ -1111,14 +1139,14 @@ split by the capture buffer's edge is not invalid output and is not flagged.
 </Accordion>
 
 <Accordion title="monitor_start">
-Start an explicitly enabled, high-trust durable script monitor. Unlike an
-ordinary background shell command, the monitor consumes a typed output
-protocol and can publish notifications, checkpoints, progress, and completion.
-Notifications do not complete the job.
+Start a durable script monitor. Unlike an ordinary background shell command,
+the monitor consumes a typed output protocol and can publish notifications,
+checkpoints, progress, and completion. Notifications do not complete the job.
 
-**Default enabled:** No. `enable_shell` alone does not grant this high-trust
-tool; an embedding surface must enable it through tool policy. Persistent realm
-job and blob stores are required.
+**Default enabled:** No. It is on with the shell family (`enable_shell`,
+`tools.shell_enabled`, a mob profile's `shell = true`) where the session has
+persistent realm job and blob stores; a session without them is not offered
+the tool.
 
 | Field | Default | Meaning |
 |-------|---------|---------|
@@ -1147,6 +1175,101 @@ job and blob stores are required.
 Restart class is a declaration enforced by the detached execution contract,
 not a promise inferred from the command text. Replayable and resumable scripts
 must implement the corresponding idempotency/checkpoint behavior.
+
+**What a monitor may do**
+
+- **Wake its own session.** Every `notify` frame is delivered to the session
+  that started the monitor, never to another one. With
+  `delivery = "notification"` (the default) it is appended to the session's
+  context and read at its next turn. With `event_steer` or `event_queue` each
+  notification is an input of its own: it starts a turn of the session with
+  no outside input, and wakes a dormant mob member.
+- **At a rate the call chooses.** `max_notifications_per_window`,
+  `notification_window_ms` and `max_line_bytes` are arguments of the call, so
+  the model chooses them, within hard caps: at most 1000 notifications per
+  window, a window between 1 second and 24 hours, lines of at most 1 MiB and
+  4 MiB of retained diagnostics. Notifications over the rate are suppressed
+  and the monitor keeps running. No host setting bounds the rate below the
+  caps; `deny` is the control.
+- **Run again after a host restart.** A `replayable` monitor, and a
+  `checkpoint_resumable` one that recorded a checkpoint, is run again after a
+  restart lost its worker, at the session's next shell job call (a
+  `background` `shell` command, `shell_jobs`, `shell_job_status`,
+  `shell_job_cancel` or `monitor_start`). A background `shell` command is
+  never run again; it ends as `worker_lost`.
+- It counts against the shell family's limit of concurrent processes, and
+  its lifetime is its `timeout_secs`.
+
+**Narrowing it**
+
+- A mob profile: `deny = ["monitor_start"]` under `[profiles.<name>.tools]`
+  hides the tool and refuses every call by name. This keeps the tool list a
+  shell member had before `shell` turned the monitor on.
+- The grant gate: `grant_gated = { families = ["shell"] }` mounts the family
+  closed until a grant, which opens all five tools;
+  `grant_gated = { tools = ["monitor_start"] }` gates the monitor alone.
+- Whatever closes `shell` by name closes `monitor_start` with it: a deny
+  list, a spawn's or a fork's `tool_access_policy`, a session's tool
+  filter, a turn's block list, or a grant gate on the name `shell`
+  (`grant_gated = { tools = ["shell"] }`), whose grant then opens both.
+  A `monitor_start` call is admitted as a use of that grant when it is
+  dispatched, so a call made after the grant ended is refused with the
+  gate's refusal for `shell`.
+  The monitor is never offered or callable where `shell` is not, at every
+  build and after a restart. An allow list that names `monitor_start` and
+  not `shell` does not admit it. The rule goes by the tool's name: a
+  host's or an MCP server's tool exposed as `monitor_start` is bound to
+  `shell` in the same way.
+- A pre-tool hook or a host's dispatch admission that refuses or inspects
+  `shell` calls by the tool's name does not take a `monitor_start` call for
+  one: add `monitor_start` to such a guard, or deny the tool.
+- A read-only profile lists the tool, as it lists `shell`, and refuses every
+  call.
+- Outside a mob, `session/create` takes a session tool filter,
+  `"tool_filter": {"Deny": ["monitor_start"]}`, which hides the tool and
+  refuses a call by name for the session. A turn's
+  `turn_tool_overlay.blocked_tools` (CLI `--block-tool monitor_start`, for a
+  run's first turn) does so for that turn; a fork's or a mob spawn's
+  `tool_access_policy`
+  (`{"type": "deny_list", "value": ["monitor_start"]}`) and a Rust
+  build's `tool_access_policy` deny it for the session.
+
+**A later deny holds for the re-run.** A recorded monitor is run again only
+while its session may still start one: `monitor_start` enabled for it, not
+denied, not closed by its grant gate, its profile not read-only, as the
+session's current build resolves them, and not hidden by the session's own
+tool filter or an inherited filter. Otherwise the session never runs it
+again. At its next shell job call, a monitor its own tool started ends as
+`needs_attention` with the failure code `monitor_start_not_permitted`; a
+monitor the host's route started, and one recorded before jobs said who
+started them, is left as it is for the host's route. A session whose shell
+family was turned off has no shell job call, so nothing of its own runs a
+recorded monitor again. Where what the session may do cannot be read at
+that moment (its tool filters or its grants are unreadable), nothing is
+decided: the monitor is neither run again nor ended, and the session's next
+shell job call asks again.
+
+What the re-run asks is the session's execution policy, its durable tool
+filters and its grant gate. It happens outside any run, so a grant scoped to
+one run does not admit it. A turn's block list, a governed application tool
+policy and a host's dispatch admission are not asked.
+
+A monitor that is already running is not stopped by a deny: cancel its job
+(`shell_job_cancel`, or the host's `jobs/cancel` with the job's id; the
+host's `jobs/list` with the session's id lists a session's jobs, and a
+monitor's `runner.name` is `meerkat.monitor_script`). Cancel before the
+restart that brings the deny: after a restart, the host's cancel of a lost
+resumable monitor starts it once more before it cancels it.
+
+The host's own route is separate. An operator's `monitors/start` or job
+cancel for a session runs that session's recorded resumable monitors again
+under the host's authority; a member's deny does not bind the operator's
+route. A monitor job says who started it, so a session that may not start a
+monitor ends only the ones its own tool started and leaves an operator's
+monitor for it untouched. Such a session does not resume an operator's lost
+monitor either: it waits until an operator calls `monitors/start` or
+`jobs/cancel` for that session, since the host's route recovers a session's
+jobs only when it is called.
 
 **Source:** `crates/meerkat-tools/src/builtin/shell/monitor_tool.rs`
 </Accordion>
@@ -1314,8 +1437,8 @@ move:
   project root, with everything under it: the realm state root (also one
   given with `--state-root`), the realm's documents (`config.toml`,
   `config_state.json`, `realm_manifest.json`, the `authorization`
-  directory), the user config document, the MCP, hook and skill sources and
-  a file credential store. `rkat`, `rkat-rpc`, `rkat-rest` and `rkat-mcp`
+  directory) and stores, the user config document, the MCP, hook and skill
+  sources and a file credential store. `rkat`, `rkat-rpc`, `rkat-rest` and `rkat-mcp`
   declare theirs. A Rust host declares its own with
   `AgentFactory::with_protected_host_inputs` (or
   `CompositeDispatcher::protect_host_paths` on a dispatcher it builds
@@ -1324,10 +1447,16 @@ move:
   create the link's target, wherever it points.
 
 The refusal is an ordinary invalid-arguments tool error, returned to the
-model, and nothing is written. Reading (`view_image`, `blob_load_file`, an
-update hunk's context of an ordinary file) is not restricted by this rule,
-and neither is the `shell` tool, whose reach its
-[confinement](/concepts/configuration#the-host%E2%80%99s-own-inputs) decides. To change
+model, and nothing is written.
+
+The reading tools `blob_load_file` and `view_image` refuse the same paths: a
+file in a `.rkat` directory or under a path the host declares as its own is
+not loaded or viewed, under any spelling of its path or through a symbolic
+link, whether it exists or not. The call answers an invalid-arguments tool
+error and nothing is read.
+
+The `shell` tool is not bound by this rule: its reach is decided by its
+[confinement](/concepts/configuration#the-host%E2%80%99s-own-inputs). To change
 engine configuration, use the CLI (`rkat mcp add`, `rkat config`,
 `rkat auth`, `rkat skill add`) or edit the files yourself.
 
@@ -1335,17 +1464,25 @@ A declared path that contains the project root, or is the project root, is
 not applied as a whole. That is the layout of `rkat-rpc` and `rkat-mcp`
 started without `--context-root`: they root these tools in the realm
 directory itself. The realm's documents are refused there like everywhere
-else, with the hooks and skills read from that directory's `.rkat`, and
-other files are written as before. The realm's stores (sessions, runtime,
-jobs, tasks, blobs and the rest) lie in the same directory and are not
-refused in that layout. Start the server with `--context-root <dir>` (SDK
+else, with the hooks and skills read from that directory's `.rkat`, and so
+are the realm's stores: the session, runtime, job, work graph, memory and
+task stores, the blob, artifact and mob stores, the approval records and
+decisions, the shell tools' process custody records, the lease, hosting
+lock and delivery directories, and the realm's two lock files
+(`admission.lock`, `realm.mfence`). A listed
+file is refused with its side files: an entry beside it whose name is the
+file's name followed by `-` or `.` (a database's write-ahead log, a lock, a
+backup), or the file's name without its extension followed by `.` and ending
+in `.lock` (a lock file made from its name). Other files in that directory
+are written and read as before.
+Start the server with `--context-root <dir>` (SDK
 option `context_root` / `contextRoot`) to give agents a project directory of
 their own and keep the whole realm out of these tools' reach. `rkat-rest`
 without a context root roots the tools in its own instance directory, which
 does not hold the realm.
 
 Three limits of the rule: a hard link that already exists in the project to
-a protected file is written through; a symbolic link deeper inside a
+a protected file is written and read through; a symbolic link deeper inside a
 protected directory is not followed (the rule follows a link at
 `<project root>/.rkat` and at each declared path, so the directory such a
 link leads to is refused under its own name; a link inside it to another
@@ -1413,13 +1550,15 @@ Read an image file from the project directory and return its contents as a base6
   Path to the image file, relative to the project root.
 </ParamField>
 
-**Supported formats:** PNG, JPEG, GIF, WebP, SVG.
+**Supported formats:** PNG, JPEG, GIF, WebP. The file's name must end in `png`, `jpg`, `jpeg`, `gif` or `webp`, and its content must be an image of one of these formats. A file whose content is not is refused with an invalid-arguments tool error, and no image is returned.
 
 **Size limit:** 5 MB. Files exceeding this limit return an error.
 
+**Paths:** a file in a `.rkat` directory or under a path the host declares as its own is refused; see [paths the file tools never write](#paths-the-file-tools-never-write).
+
 **Capability gating:** `view_image` is currently hidden via `ToolScope` when the active model does not support image content in tool results (`ModelProfile.image_tool_results == false`).
 
-**Returns:** A content-block result containing a single `ContentBlock::Image` with the base64-encoded image data and detected media type.
+**Returns:** A content-block result containing a single `ContentBlock::Image` with the base64-encoded image data and the media type its content shows (a PNG stored as `photo.jpg` is returned as `image/png`).
 
 **Source:** `crates/meerkat-tools/src/builtin/utility/view_image.rs`
 </Accordion>
@@ -1463,6 +1602,8 @@ Read a file inside the project root and store its bytes in the realm blob store.
 </ParamField>
 
 **Size limit:** 25 MB.
+
+**Paths:** a file in a `.rkat` directory or under a path the host declares as its own is refused; see [paths the file tools never write](#paths-the-file-tools-never-write).
 
 **Returns:** JSON metadata: `blob_id`, `media_type`, `path`, and `bytes_read`. Raw bytes are never returned in the tool result.
 

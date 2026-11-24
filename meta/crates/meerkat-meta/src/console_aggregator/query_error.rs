@@ -44,3 +44,76 @@ impl From<ConsoleLogError> for ConsoleTimelineQueryError {
 }
 
 pub type ConsoleTimelineQueryResult<T> = Result<T, ConsoleTimelineQueryError>;
+
+/// The refusal of a mob beside the host's default mob over a console log
+/// store that does not read one mob's frames itself
+/// (`ConsoleLogStore::reads_one_mob`): such a store serves the default mob
+/// alone. The mob's console events are not registered over it, and a read
+/// of the mob's timeline is answered this refusal, never a page.
+///
+/// It travels as a log error: it is the error of the refused registration,
+/// and for the read it is the boxed error of
+/// [`ConsoleTimelineQueryError::Operational`], where
+/// [`ConsoleTimelineQueryError::store_serves_the_default_mob_alone`] tells
+/// it from a store's fault. The published error type gains no variant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StoreServesTheDefaultMobAlone {
+    /// The mob that has no console log in the store.
+    pub(crate) mob: meerkat_mob::MobId,
+}
+
+impl std::fmt::Display for StoreServesTheDefaultMobAlone {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "this console log store does not read one mob's frames \
+             (ConsoleLogStore::reads_one_mob): it serves the host's default mob alone, and the \
+             mob `{}` has no console log in it",
+            self.mob.as_str()
+        )
+    }
+}
+
+impl std::error::Error for StoreServesTheDefaultMobAlone {}
+
+/// The refusal of an operation that names a mob beside the host's default
+/// mob, by a console log store that keeps the trait's provided form of it
+/// (such as [`super::ConsoleLogStore::update_frame_status_of_mob`]): that form
+/// reaches the default mob's frames alone. It is boxed into the store's
+/// error and told apart from a store's fault by its type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OperationServesTheDefaultMobAlone {
+    /// The mob the operation named.
+    pub(crate) mob: meerkat_mob::MobId,
+    /// What the operation does, in words.
+    pub(crate) operation: &'static str,
+}
+
+impl std::fmt::Display for OperationServesTheDefaultMobAlone {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "this console log store does not {} for a mob beside the host's default mob: it \
+             keeps the provided form of the operation, and the mob `{}` is not reached by it",
+            self.operation,
+            self.mob.as_str()
+        )
+    }
+}
+
+impl std::error::Error for OperationServesTheDefaultMobAlone {}
+
+impl ConsoleTimelineQueryError {
+    /// This error as the refusal of a mob beside the default mob over a
+    /// store that reads no one mob's frames
+    /// ([`StoreServesTheDefaultMobAlone`]), when it is that refusal: a door
+    /// answers it as what it is, apart from a store's fault.
+    pub(crate) fn store_serves_the_default_mob_alone(
+        &self,
+    ) -> Option<&StoreServesTheDefaultMobAlone> {
+        match self {
+            Self::Operational(error) => error.downcast_ref(),
+            _ => None,
+        }
+    }
+}

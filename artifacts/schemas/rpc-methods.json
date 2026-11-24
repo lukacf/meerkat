@@ -59,7 +59,7 @@
       "result_type": "JobsHealthResult"
     },
     {
-      "description": "Start a high-trust durable script monitor",
+      "description": "Start a durable script monitor",
       "name": "monitors/start",
       "params_type": "MonitorsStartParams",
       "result_type": "MonitorsStartResult"

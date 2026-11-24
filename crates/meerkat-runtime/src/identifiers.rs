@@ -208,7 +208,11 @@ impl LogicalRuntimeId {
         Self(session_id.to_string())
     }
 
-    pub(crate) fn session_id(&self) -> Option<SessionId> {
+    /// The session whose runtime this id names: `Some` for
+    /// [`Self::for_session`]'s spelling and for the bare session id of rows
+    /// minted before the prefix existed, `None` for every other namespace
+    /// (a member delivery address is never a session).
+    pub fn session_id(&self) -> Option<SessionId> {
         let raw = self
             .0
             .strip_prefix(Self::SESSION_RUNTIME_PREFIX)

@@ -2438,6 +2438,10 @@ fn r68_f9_the_identity_runtime_keeps_no_wake_policy_of_its_own() {
             include_str!("../../unified_runtime/cross_mob.rs"),
         ),
         (
+            "unified_runtime/cross_mob_routes.rs",
+            include_str!("../../unified_runtime/cross_mob_routes.rs"),
+        ),
+        (
             "unified_runtime/edge_reconcile.rs",
             include_str!("../../unified_runtime/edge_reconcile.rs"),
         ),
@@ -2468,6 +2472,10 @@ fn r68_f9_the_identity_runtime_keeps_no_wake_policy_of_its_own() {
         (
             "unified_runtime/live_compose.rs",
             include_str!("../../unified_runtime/live_compose.rs"),
+        ),
+        (
+            "unified_runtime/mob_entry.rs",
+            include_str!("../../unified_runtime/mob_entry.rs"),
         ),
         (
             "unified_runtime/mob_events.rs",
@@ -4371,6 +4379,13 @@ impl crate::runtime::PersistentMetadataStore for RotationReadsFail {
         self.inner
             .prune_lifecycle_effect_failures(mob_id, keep)
             .await
+    }
+
+    async fn release_mob_records(
+        &self,
+        mob_id: &str,
+    ) -> Result<crate::runtime::MobRecordsRelease, crate::runtime::MetadataStoreError> {
+        self.inner.release_mob_records(mob_id).await
     }
 }
 
@@ -11154,6 +11169,11 @@ fn membership_is_read_from_a_binding_s_label_only_where_allowed() {
         (
             "unified_runtime/mod.rs",
             production_code(include_str!("../../unified_runtime/mod.rs")),
+            0,
+        ),
+        (
+            "unified_runtime/mob_entry.rs",
+            production_code(include_str!("../../unified_runtime/mob_entry.rs")),
             0,
         ),
         (

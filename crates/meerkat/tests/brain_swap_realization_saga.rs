@@ -10,7 +10,14 @@
 //!   a crash between them converges instead of claiming a change nothing
 //!   recorded;
 //! * a retry must converge rather than rotate identity twice;
-//! * an unresolvable target must hold with no identity rebinding at all.
+//! * an unresolvable target must hold with no identity rebinding at all;
+//! * a host that implements only the older hooks is asked, for a session
+//!   that holds a reasoning effort level, whether the target takes it: its
+//!   typed definite refusal ends the request Denied; its typed refusal that
+//!   the levels cannot be read now carries the request out, as before, once
+//!   the target is proven buildable; any other failure of it holds the
+//!   request; and a denial or an applied target is never looked at a second
+//!   time.
 //!
 //! What these do NOT cover, stated plainly: they assert identity REBINDING via
 //! `apply_live_session_llm_identity`, not an observed provider call. Proving
@@ -90,6 +97,8 @@ async fn seed_committed_boundary_receipt(
 enum HostCall {
     Hydrate,
     Resolve,
+    Judge,
+    Preflight,
     ApplyIdentity(String),
     PrepareRecord(&'static str),
     Persist,
@@ -102,11 +111,57 @@ struct ScriptedReconfigureHost {
     /// The last durably persisted log. A discard reverts `history` to this.
     persisted_history: Mutex<SessionModelRoutingControlHistory>,
     current_identity: Mutex<SessionLlmIdentity>,
+    judge: Mutex<ScriptedJudge>,
     preflight_fails: Mutex<Option<String>>,
     append_fails: Mutex<Option<String>>,
     persist_fails: Mutex<Option<String>>,
     terminal_commit_fails: Mutex<Option<String>>,
     discard_fails: Mutex<Option<String>>,
+}
+
+/// What the host's judge answers when it is asked whether a target takes
+/// the reasoning effort level it carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScriptedJudge {
+    Accepts,
+    /// The typed refusal of a route that states its levels and does not
+    /// state this one.
+    RefusesTheLevel,
+    /// The typed refusal of a route for which no source states the levels:
+    /// it holds until a configuration changes.
+    KnowsNoLevelsForTheTarget,
+    /// The typed refusal of a level that the target does not take together
+    /// with another reasoning setting the session holds.
+    RefusesTheLevelBesideAnotherSetting,
+    /// The typed refusal of a route whose levels cannot be read now.
+    CannotReadTheLevelsNow,
+    /// A failure that says nothing about the level.
+    FailsUntyped,
+}
+
+/// A typed reasoning effort refusal of `model`, read from its wire form as
+/// code outside the core crate reads one.
+fn level_refusal(model: &str, reason: &str) -> RuntimeDriverError {
+    let supported = match reason {
+        "unsupported_level" => serde_json::json!(["low"]),
+        _ => serde_json::Value::Null,
+    };
+    let facts = match reason {
+        "unsupported_level" => serde_json::json!("account"),
+        _ => serde_json::Value::Null,
+    };
+    let refusal: meerkat_core::ReasoningEffortRefusal = serde_json::from_value(serde_json::json!({
+        "requested": "high", "provider": "openai", "model": model, "route": null,
+        "reason": reason, "supported": supported, "facts": facts,
+        "conflicting_param": match reason {
+            "conflicting_thinking_budget" => {
+                serde_json::json!("provider_params.thinking_budget_tokens")
+            }
+            _ => serde_json::Value::Null,
+        },
+    }))
+    .expect("a refusal is read from its wire form");
+    RuntimeDriverError::ReasoningEffortRefused(Box::new(refusal))
 }
 
 fn identity(model: &str) -> SessionLlmIdentity {
@@ -143,6 +198,7 @@ impl ScriptedReconfigureHost {
             history: Mutex::new(history.clone()),
             persisted_history: Mutex::new(history),
             current_identity: Mutex::new(identity(MODEL_A)),
+            judge: Mutex::new(ScriptedJudge::Accepts),
             preflight_fails: Mutex::new(None),
             append_fails: Mutex::new(None),
             persist_fails: Mutex::new(None),
@@ -238,6 +294,32 @@ impl ScriptedReconfigureHost {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(reason.to_string());
     }
 
+    /// The session holds the reasoning effort level `high` from now on.
+    fn hold_the_high_level(&self) {
+        self.current_identity
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .provider_params = Some(
+            meerkat_core::lifecycle::run_primitive::ProviderParamsOverride {
+                reasoning_effort: Some(
+                    meerkat_core::model_profile::capabilities::EffortLevel::High,
+                ),
+                ..Default::default()
+            },
+        );
+    }
+
+    fn script_judge(&self, judge: ScriptedJudge) {
+        *self
+            .judge
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = judge;
+    }
+
+    fn count(&self, wanted: &HostCall) -> usize {
+        self.calls().iter().filter(|call| *call == wanted).count()
+    }
+
     fn fail_preflight(&self, reason: &str) {
         *self
             .preflight_fails
@@ -276,14 +358,52 @@ impl SessionLlmReconfigureHost for ScriptedReconfigureHost {
     async fn resolve_target_session_llm_identity(
         &self,
         request: &SessionLlmReconfigureRequest,
-        _current_identity: &SessionLlmIdentity,
+        current_identity: &SessionLlmIdentity,
     ) -> Result<ResolvedSessionLlmReconfigure, RuntimeDriverError> {
         self.record(HostCall::Resolve);
         let model = request.model.clone().unwrap_or_else(|| MODEL_B.to_string());
+        // A model-only change keeps the session's provider params, the
+        // reasoning effort level among them.
         Ok(ResolvedSessionLlmReconfigure {
-            target_identity: identity(&model),
+            target_identity: SessionLlmIdentity {
+                provider_params: current_identity.provider_params.clone(),
+                ..identity(&model)
+            },
             target_capability_surface: capability_surface(),
         })
+    }
+
+    async fn judge_requested_target_session_llm_identity(
+        &self,
+        _session_id: &SessionId,
+        target_identity: &SessionLlmIdentity,
+    ) -> Result<(), RuntimeDriverError> {
+        self.record(HostCall::Judge);
+        let judge = *self
+            .judge
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match judge {
+            ScriptedJudge::Accepts => Ok(()),
+            ScriptedJudge::RefusesTheLevel => {
+                Err(level_refusal(&target_identity.model, "unsupported_level"))
+            }
+            ScriptedJudge::KnowsNoLevelsForTheTarget => Err(level_refusal(
+                &target_identity.model,
+                "supported_levels_unknown",
+            )),
+            ScriptedJudge::RefusesTheLevelBesideAnotherSetting => Err(level_refusal(
+                &target_identity.model,
+                "conflicting_thinking_budget",
+            )),
+            ScriptedJudge::CannotReadTheLevelsNow => Err(level_refusal(
+                &target_identity.model,
+                "supported_levels_unavailable",
+            )),
+            ScriptedJudge::FailsUntyped => Err(RuntimeDriverError::Internal(
+                "the judge's backend is unreachable".to_string(),
+            )),
+        }
     }
 
     async fn apply_live_session_llm_identity(
@@ -305,6 +425,7 @@ impl SessionLlmReconfigureHost for ScriptedReconfigureHost {
         _session_id: &SessionId,
         _target_identity: &SessionLlmIdentity,
     ) -> Result<(), RuntimeDriverError> {
+        self.record(HostCall::Preflight);
         match self
             .preflight_fails
             .lock()
@@ -1112,4 +1233,380 @@ async fn a_mismatched_durable_terminal_is_refused_by_reconciliation() {
         .reconcile_committed_model_routing_terminals(&fixture.session_id)
         .await
         .expect_err("a terminal bound to a different run must be refused, not absorbed");
+}
+
+// ---------------------------------------------------------------------------
+// A session that holds a reasoning effort level, on a host that implements
+// only the older hooks (its judge and its preflight)
+// ---------------------------------------------------------------------------
+
+/// A fixture whose session holds `high` and owes one handoff to B.
+async fn fixture_holding_the_high_level(byte: u8) -> Fixture {
+    let run = RunId::new();
+    let fixture = fixture_with(
+        committed_request_history(request_id(byte), &run, MODEL_B),
+        Some(run),
+    )
+    .await;
+    fixture.host.hold_the_high_level();
+    fixture
+}
+
+async fn realize_the_one_pending_handoff(
+    fixture: &Fixture,
+) -> Result<ModelRoutingHandoffRealization, RuntimeDriverError> {
+    let pending = fixture
+        .adapter
+        .committed_model_routing_handoffs_awaiting_decision(&fixture.session_id)
+        .await
+        .expect("read committed log");
+    assert_eq!(pending.len(), 1, "the committed log owes one decision");
+    fixture
+        .adapter
+        .realize_committed_model_routing_handoff_under_turn_finalization_boundary(
+            &fixture.session_id,
+            pending[0].clone(),
+        )
+        .await
+}
+
+fn assert_denied_for_the_targets_capability(fixture: &Fixture) {
+    let history = fixture.host.history();
+    assert_eq!(history.len(), 2, "Requested then Denied");
+    assert!(
+        matches!(
+            history.records().last(),
+            Some(SessionModelRoutingControlRecord::ModelRoutingIntentDenied {
+                reason: SwitchTurnDenialReason::CapabilityPolicy,
+                ..
+            })
+        ),
+        "the one terminal is a denial for the target's capability: {:?}",
+        history.records()
+    );
+    assert!(
+        history.awaiting_decision().next().is_none(),
+        "a denied request owes nothing"
+    );
+    assert!(
+        fixture.host.identity_applications().is_empty(),
+        "a denied request never rebinds identity"
+    );
+}
+
+/// The host's judge refuses, typed and definitely, the level the session
+/// holds: the handoff ends Denied and nothing is rebound. The preflight is
+/// not reached. Definite is every typed refusal but the one that says the
+/// levels cannot be read now: each is what a caller's own set of that level
+/// on that target is refused with.
+async fn a_definite_refusal_of_the_held_level_ends_the_handoff_denied(
+    byte: u8,
+    judge: ScriptedJudge,
+) {
+    let fixture = fixture_holding_the_high_level(byte).await;
+    fixture.host.script_judge(judge);
+
+    let realization = realize_the_one_pending_handoff(&fixture)
+        .await
+        .expect("a refused level is a decision, not a failure");
+    assert!(
+        matches!(
+            realization,
+            ModelRoutingHandoffRealization::Denied {
+                reason: SwitchTurnDenialReason::CapabilityPolicy
+            }
+        ),
+        "a target that refuses the held level is denied, got {realization:?}"
+    );
+    assert_denied_for_the_targets_capability(&fixture);
+    assert_eq!(fixture.host.count(&HostCall::Judge), 1);
+    assert_eq!(fixture.host.count(&HostCall::Preflight), 0);
+}
+
+/// The target's route states its levels and the held one is not among them.
+#[tokio::test]
+async fn a_host_whose_judge_refuses_the_held_level_ends_the_handoff_denied() {
+    a_definite_refusal_of_the_held_level_ends_the_handoff_denied(
+        21,
+        ScriptedJudge::RefusesTheLevel,
+    )
+    .await;
+}
+
+/// No source states the levels the target's route accepts: that holds until
+/// a configuration changes, so it is a refusal and not a wait.
+#[tokio::test]
+async fn a_host_whose_judge_knows_no_levels_for_the_target_ends_the_handoff_denied() {
+    a_definite_refusal_of_the_held_level_ends_the_handoff_denied(
+        28,
+        ScriptedJudge::KnowsNoLevelsForTheTarget,
+    )
+    .await;
+}
+
+/// The target does not take the level together with another reasoning
+/// setting the session holds.
+#[tokio::test]
+async fn a_host_whose_judge_refuses_the_level_beside_another_setting_ends_the_handoff_denied() {
+    a_definite_refusal_of_the_held_level_ends_the_handoff_denied(
+        29,
+        ScriptedJudge::RefusesTheLevelBesideAnotherSetting,
+    )
+    .await;
+}
+
+async fn a_judge_failure_that_is_not_a_definite_refusal_holds(byte: u8, judge: ScriptedJudge) {
+    let fixture = fixture_holding_the_high_level(byte).await;
+    fixture.host.script_judge(judge);
+
+    let realization = realize_the_one_pending_handoff(&fixture)
+        .await
+        .expect("a hold is typed");
+    match realization {
+        ModelRoutingHandoffRealization::Held {
+            reason: ModelRoutingHandoffHoldReason::TargetUnresolvable { target_model, .. },
+        } => assert_eq!(target_model, ModelId::new(MODEL_B)),
+        other => panic!("expected a target-unresolvable hold, got {other:?}"),
+    }
+    assert!(
+        fixture.host.identity_applications().is_empty(),
+        "a held request never rebinds identity"
+    );
+    assert_eq!(
+        fixture.host.history().len(),
+        1,
+        "a held request records no terminal"
+    );
+    assert_eq!(
+        fixture
+            .adapter
+            .committed_model_routing_handoffs_awaiting_decision(&fixture.session_id)
+            .await
+            .expect("reread")
+            .len(),
+        1,
+        "the request stays pending so a later pass can decide it"
+    );
+}
+
+/// A judge that fails without saying anything about the level does not
+/// refuse the level: the handoff is held, as an unbuildable target is.
+#[tokio::test]
+async fn a_host_whose_judge_fails_untyped_holds_the_handoff() {
+    a_judge_failure_that_is_not_a_definite_refusal_holds(22, ScriptedJudge::FailsUntyped).await;
+}
+
+/// The handoff is carried out with the level kept, and the host was asked
+/// once by its judge, then once by its preflight.
+async fn the_handoff_is_carried_out_after_one_judgement_and_one_preflight(
+    byte: u8,
+    judge: ScriptedJudge,
+) {
+    let fixture = fixture_holding_the_high_level(byte).await;
+    fixture.host.script_judge(judge);
+
+    let realization = realize_the_one_pending_handoff(&fixture)
+        .await
+        .expect("realization succeeds");
+    match realization {
+        ModelRoutingHandoffRealization::Realized { applied_identity } => {
+            assert_eq!(applied_identity.model, MODEL_B);
+            assert_eq!(
+                applied_identity
+                    .provider_params
+                    .as_ref()
+                    .and_then(|params| params.reasoning_effort),
+                Some(meerkat_core::model_profile::capabilities::EffortLevel::High),
+                "the handoff keeps the session's level"
+            );
+        }
+        other => panic!("expected Realized, got {other:?}"),
+    }
+    let calls = fixture.host.calls();
+    assert_eq!(
+        fixture.host.count(&HostCall::Judge),
+        1,
+        "the judge is asked once for a target that carries a level: {calls:?}"
+    );
+    assert_eq!(fixture.host.count(&HostCall::Preflight), 1, "{calls:?}");
+    let judge_index = calls.iter().position(|call| *call == HostCall::Judge);
+    let preflight_index = calls.iter().position(|call| *call == HostCall::Preflight);
+    assert!(
+        judge_index < preflight_index,
+        "the judge answers before the target is proven buildable: {calls:?}"
+    );
+}
+
+/// A host whose judge accepts the level is asked once, before its
+/// preflight, and the handoff is realized with the level kept.
+#[tokio::test]
+async fn a_host_whose_judge_accepts_the_held_level_is_asked_once_and_the_handoff_is_realized() {
+    the_handoff_is_carried_out_after_one_judgement_and_one_preflight(24, ScriptedJudge::Accepts)
+        .await;
+}
+
+/// A judge that cannot read the target's levels now neither refuses the
+/// level nor holds the handoff: the target is proven buildable and the
+/// handoff is carried out with the level kept, as it was before the level
+/// was judged at all.
+#[tokio::test]
+async fn a_host_whose_judge_cannot_read_the_levels_now_has_the_handoff_carried_out() {
+    the_handoff_is_carried_out_after_one_judgement_and_one_preflight(
+        23,
+        ScriptedJudge::CannotReadTheLevelsNow,
+    )
+    .await;
+}
+
+/// A target that cannot be built is held whatever the judge says of its
+/// levels: unreadable levels never carry a handoff onto a target whose
+/// client cannot be built.
+#[tokio::test]
+async fn a_target_that_cannot_be_built_is_held_when_its_levels_cannot_be_read() {
+    let fixture = fixture_holding_the_high_level(30).await;
+    fixture
+        .host
+        .script_judge(ScriptedJudge::CannotReadTheLevelsNow);
+    fixture
+        .host
+        .fail_preflight("model-b provider client is unavailable");
+
+    let realization = realize_the_one_pending_handoff(&fixture)
+        .await
+        .expect("a hold is typed");
+    match realization {
+        ModelRoutingHandoffRealization::Held {
+            reason: ModelRoutingHandoffHoldReason::TargetUnresolvable { target_model, .. },
+        } => assert_eq!(target_model, ModelId::new(MODEL_B)),
+        other => panic!("expected a target-unresolvable hold, got {other:?}"),
+    }
+    assert!(
+        fixture.host.identity_applications().is_empty(),
+        "a held request never rebinds identity"
+    );
+    assert_eq!(
+        fixture.host.history().len(),
+        1,
+        "a held request records no terminal"
+    );
+}
+
+/// Without a level the session's handoff makes the calls it always made:
+/// the preflight once, the judge never, whatever the judge would answer.
+#[tokio::test]
+async fn a_host_is_not_judged_for_a_handoff_without_a_level() {
+    let run = RunId::new();
+    let fixture = fixture_with(
+        committed_request_history(request_id(25), &run, MODEL_B),
+        Some(run),
+    )
+    .await;
+    fixture.host.script_judge(ScriptedJudge::RefusesTheLevel);
+
+    let realization = realize_the_one_pending_handoff(&fixture)
+        .await
+        .expect("realization succeeds");
+    assert!(
+        matches!(realization, ModelRoutingHandoffRealization::Realized { .. }),
+        "a handoff without a level is realized as before, got {realization:?}"
+    );
+    assert_eq!(fixture.host.count(&HostCall::Judge), 0);
+    assert_eq!(fixture.host.count(&HostCall::Preflight), 1);
+}
+
+/// A denial that was decided, and whose durable record then failed to land,
+/// is the answer on the next pass: the record is written, and the target is
+/// not looked at a second time, so a judge that fails by then cannot turn
+/// the denial into a hold.
+#[tokio::test]
+async fn a_denial_whose_record_failed_to_land_is_finished_without_a_second_look_at_the_target() {
+    let fixture = fixture_holding_the_high_level(26).await;
+    fixture.host.script_judge(ScriptedJudge::RefusesTheLevel);
+    fixture.host.fail_terminal_commit("disk full");
+
+    realize_the_one_pending_handoff(&fixture)
+        .await
+        .expect_err("a persistence failure must surface");
+    assert_eq!(
+        fixture.host.history().len(),
+        1,
+        "the failed commit leaves only Requested durable"
+    );
+    assert_eq!(fixture.host.count(&HostCall::Judge), 1);
+
+    *fixture
+        .host
+        .terminal_commit_fails
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    fixture.host.script_judge(ScriptedJudge::FailsUntyped);
+    let retry = realize_the_one_pending_handoff(&fixture)
+        .await
+        .expect("the retry lands the decided denial");
+    assert!(
+        matches!(
+            retry,
+            ModelRoutingHandoffRealization::Denied {
+                reason: SwitchTurnDenialReason::CapabilityPolicy
+            }
+        ),
+        "the decided denial is the answer, got {retry:?}"
+    );
+    assert_denied_for_the_targets_capability(&fixture);
+    assert_eq!(
+        fixture.host.count(&HostCall::Judge),
+        1,
+        "a decided denial is not judged again"
+    );
+    assert_eq!(fixture.host.count(&HostCall::Preflight), 0);
+}
+
+/// A target the session already runs on (the identity was applied and the
+/// terminal record then failed to land) is finished as applied: it is not
+/// judged again, so a judge that refuses the level by then cannot deny a
+/// switch that has happened.
+#[tokio::test]
+async fn an_applied_target_is_finished_without_being_judged_again() {
+    let fixture = fixture_holding_the_high_level(27).await;
+    fixture
+        .host
+        .fail_append("crash before Realized candidate preparation");
+    realize_the_one_pending_handoff(&fixture)
+        .await
+        .expect_err("the injected terminal-candidate crash must surface");
+    assert_eq!(
+        fixture.host.identity_applications(),
+        vec![MODEL_B.to_string()],
+        "the first attempt reached B before the append seam failed"
+    );
+    let judged = fixture.host.count(&HostCall::Judge);
+    let preflighted = fixture.host.count(&HostCall::Preflight);
+
+    *fixture
+        .host
+        .append_fails
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    fixture.host.script_judge(ScriptedJudge::RefusesTheLevel);
+    let retry = realize_the_one_pending_handoff(&fixture)
+        .await
+        .expect("the retry converges on the applied identity");
+    assert!(
+        matches!(retry, ModelRoutingHandoffRealization::Realized { .. }),
+        "an applied switch is finished as applied, got {retry:?}"
+    );
+    assert_eq!(
+        fixture.host.count(&HostCall::Judge),
+        judged,
+        "an applied target is not judged again"
+    );
+    assert_eq!(fixture.host.count(&HostCall::Preflight), preflighted);
+    assert_eq!(
+        fixture.host.identity_applications(),
+        vec![MODEL_B.to_string()],
+        "no second rotation"
+    );
+    let history = fixture.host.history();
+    assert_eq!(history.len(), 2, "Requested then Realized");
+    assert!(history.awaiting_decision().next().is_none());
 }

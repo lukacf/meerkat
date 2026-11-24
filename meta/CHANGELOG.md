@@ -51,8 +51,16 @@ memory steward.
   adds no migration and no column, and a purged record is the row it
   was, tombstoned or superseded, with its text emptied as the Added
   entry on the purge describes; 0.9.16, 0.9.17 and 0.9.18 read it as
-  that record, with empty text. A purge cannot be undone on any
-  release: going back does not bring the blanked text back.
+  that record, with empty text. On those releases a purged record that
+  is tombstoned is listed again among the recent tombstones the memory
+  steward and the distiller are shown, as a line with no title that
+  takes a place in the list's limit, and a quarantine review that names
+  a record released and then purged is answered `content_mismatch`, or
+  with a store error when the request carries the content digest of an
+  empty record, where a gateway with this change answers
+  `not_quarantined`; neither returns the blanked text. A purge cannot
+  be undone on any release: going back does not bring the blanked text
+  back.
 
 ### Added
 

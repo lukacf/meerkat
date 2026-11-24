@@ -3934,7 +3934,9 @@ A record of a member private to a person, which lies under its owner and its nam
 `forget` is not erasure. What becomes of the stored text is the provider's
 to say, and the bundled SQLite store erases nothing on a `forget`: it marks
 the record tombstoned and keeps its title, description, body, tags and
-provenance in the realm's database until the record is purged. The Console's
+provenance in the realm's database. The title, description, body and tags
+stay there until the record is purged; a purge keeps the provenance and
+blanks only the free text of its verification claim. The Console's
 Memory panel still lists the record
 (`meta/memory/panel/records`, without its body) and still returns its body
 (`meta/memory/panel/record`): with access control enforced, to a caller with

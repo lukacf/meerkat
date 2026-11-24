@@ -5216,7 +5216,9 @@ first check whether it still lists its mobs and must keep managing them.
 No remedy was shown to preserve that management after this failure. If
 you proceed, use `meta/respawn` only while the provider is available.
 Wait for a successful return **and** one answered message from the
-identity before any stop or restart. Do not use a second compact call or
+identity before any stop or restart. If the gateway stops before the identity
+wakes successfully on the same session, its next start can permanently remove
+the stores of mobs that session owns. Do not use a second compact call or
 reset for this case. This order is read from the source; the failed-call
 remedies were tested on an identity without mobs or delegates.
 

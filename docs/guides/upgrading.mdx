@@ -3429,7 +3429,9 @@ compiling. A Meta probe that must keep the earlier rule checks
   keep running. A completed `meta/compact_member` had the same cost. If you
   proceed, use `meta/respawn` only while the provider is available. Wait
   for the respawn to return without an error **and** for the identity to
-  answer one message before stopping or restarting the gateway. Do not
+  answer one message before stopping or restarting the gateway. If the gateway
+  stops before the identity wakes successfully on the same session, its next
+  start can permanently remove the stores of mobs that session owns. Do not
   use a second compact call or a reset for this case. This order is read
   from the source, not tested on a creator with this failure. See the
   [Meta 0.9.14 release note](https://github.com/lukacf/meerkat/releases/tag/meta-v0.9.14).

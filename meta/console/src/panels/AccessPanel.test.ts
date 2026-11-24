@@ -12,6 +12,7 @@ const {
   summarizeRuleSubjects,
   summarizeRuleResources,
   ruleFromDraft,
+  draftFromRule,
   emptyRuleDraft,
   ruleTitle,
   ruleDeleteConfirmText,
@@ -113,4 +114,44 @@ test("the tool grant permission reads in words and joins the agent family", () =
   assert.equal(accessActionLabel("agent.tool_grants.manage"), "Grant tools to agents");
   assert.equal(isKnownAccessAction("agent.tool_grants.manage"), true);
   assert.equal(accessActionLabel("agent.tool_grants.*"), "All agent tool grant actions");
+});
+
+test("member_keyed: a rule that lists mobs keeps them through the editor's draft", () => {
+  const stored = {
+    id: "harbor-desks",
+    effect: "allow" as const,
+    groups: ["ops"],
+    actions: ["agent.view"],
+    agents: ["billing"],
+    mobs: ["harbor", "quay"],
+  };
+  const draft = draftFromRule(stored);
+  draft.description = "Ops see the harbor desks";
+  draft.actions = ["agent.view", "agent.send"];
+  assert.deepEqual(ruleFromDraft(draft), {
+    ...stored,
+    description: "Ops see the harbor desks",
+    actions: ["agent.view", "agent.send"],
+  });
+  // Every mob stays every mob.
+  assert.deepEqual(ruleFromDraft(draftFromRule({ id: "all", actions: ["agent.view"], mobs: ["*"] })).mobs, ["*"]);
+  // The saved rule holds its own list, not the stored rule's array.
+  assert.notEqual(ruleFromDraft(draftFromRule(stored)).mobs, stored.mobs);
+});
+
+test("member_keyed: a rule of the default mob is saved without mobs", () => {
+  assert.equal("mobs" in ruleFromDraft(draftFromRule({ id: "desks", actions: ["agent.view"] })), false);
+  assert.equal("mobs" in ruleFromDraft(draftFromRule({ id: "desks", actions: ["agent.view"], mobs: [] })), false);
+  const fresh = emptyRuleDraft();
+  fresh.id = "new";
+  fresh.actions = ["agent.view"];
+  assert.equal("mobs" in ruleFromDraft(fresh), false);
+});
+
+test("member_keyed: a rule summary names the teams the rule lists", () => {
+  assert.equal(
+    summarizeRuleResources({ id: "r", actions: ["agent.view"], agents: ["billing"], mobs: ["harbor", "quay"] }),
+    "agents: billing · teams: harbor, quay",
+  );
+  assert.equal(summarizeRuleResources({ id: "r", actions: ["agent.view"], mobs: ["*"] }), "every team");
 });

@@ -125,6 +125,18 @@ pub(crate) async fn run_storage_doctor(
     params: &StorageDoctorParams,
     resolved: Option<ResolvedStorageSummary>,
 ) -> Value {
+    run_storage_doctor_leaving_out(params, resolved, storage_doctor::MobStoresLeftOut::none()).await
+}
+
+/// [`run_storage_doctor`] without the mob stores `left_out` names: the
+/// doctor of a door whose caller may not address every mob of its host
+/// ([`storage_doctor::MobStoresLeftOut`]). The stdio surfaces have one
+/// caller, the host, and run the whole diagnosis.
+pub(crate) async fn run_storage_doctor_leaving_out(
+    params: &StorageDoctorParams,
+    resolved: Option<ResolvedStorageSummary>,
+    left_out: storage_doctor::MobStoresLeftOut,
+) -> Value {
     let (census, note) = match resolved {
         Some(summary) if summary_covers_state_dir(&summary, &params.state_dir) => {
             (Some(summary), None)
@@ -138,10 +150,11 @@ pub(crate) async fn run_storage_doctor(
         ),
         None => (None, None),
     };
-    let diagnosis = storage_doctor::diagnose_state_dir_with_options(
+    let diagnosis = storage_doctor::diagnose_state_dir_leaving_out(
         &params.scope(),
         census.clone(),
         params.doctor_options(),
+        left_out,
     )
     .await;
     let mut result = storage_doctor_result_json(params, &diagnosis, census);

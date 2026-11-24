@@ -156,6 +156,74 @@ impl Default for AgentMemoryConfig {
     }
 }
 
+impl AgentMemoryConfig {
+    /// The memory realm of `mob_id` on a host whose default mob is
+    /// `default_mob`.
+    ///
+    /// Two mobs of one host may each have a member of the same name, so
+    /// each mob has a memory realm of its own. The default mob's is the
+    /// configured [`Self::realm`], which is where every record written
+    /// before a host served more than one mob is. Any other mob's is
+    /// derived from the mob: Meerkat's realm of that mob (`mob.<mob id>`),
+    /// the one owner of that form.
+    ///
+    /// The realm names a mob's memory; it does not keep two mobs' memory
+    /// apart by itself, since one store opens whatever realm it is asked
+    /// for. A host keeps each other mob's memory in a store of that mob's
+    /// own besides, a directory of the mob below the default mob's memory
+    /// root, and hands that store to that mob's owners alone.
+    ///
+    /// # Errors
+    /// [`AgentMemoryError::InvalidConfig`] when `mob_id` has no realm form,
+    /// or when its realm is the configured realm: the default mob and that
+    /// mob would then share every memory scope.
+    pub fn realm_of_mob(
+        &self,
+        default_mob: &crate::member_key::DefaultMob,
+        mob_id: &meerkat_mob::MobId,
+    ) -> Result<String, AgentMemoryError> {
+        if default_mob.is(mob_id) {
+            return Ok(self.realm.clone());
+        }
+        let realm = meerkat_core::connection::mob_realm_id(mob_id.as_str())
+            .map_err(|error| {
+                AgentMemoryError::InvalidConfig(format!(
+                    "mob {mob_id} has no memory realm: {error}"
+                ))
+            })?
+            .as_str()
+            .to_string();
+        if realm == self.realm {
+            return Err(AgentMemoryError::InvalidConfig(format!(
+                "the configured agent memory realm {realm:?} is the memory realm of mob \
+                 {mob_id}: the default mob {} would share its memory",
+                default_mob.mob_id()
+            )));
+        }
+        Ok(realm)
+    }
+
+    /// This configuration for the members of `mob_id`: the same in
+    /// everything but the realm, which is the mob's
+    /// ([`Self::realm_of_mob`]). Every owner that keys agent memory by an
+    /// identity (recall, the recorder tool, the distiller and the steward)
+    /// reads its realm from the configuration it is built with, so a mob's
+    /// owners are built with this one.
+    ///
+    /// # Errors
+    /// As [`Self::realm_of_mob`].
+    pub fn for_mob(
+        &self,
+        default_mob: &crate::member_key::DefaultMob,
+        mob_id: &meerkat_mob::MobId,
+    ) -> Result<Self, AgentMemoryError> {
+        Ok(Self {
+            realm: self.realm_of_mob(default_mob, mob_id)?,
+            ..self.clone()
+        })
+    }
+}
+
 /// §7.2 operator-scope activation semantics. `Off` keeps the scope schema
 /// present but unpopulated (the P0 posture); `Provisional` gives each
 /// console person an operator scope keyed by their caller scope, which a
@@ -544,6 +612,9 @@ pub struct AgentMemoryCustomizer {
     /// is not available at the identity customizer boundary (notably
     /// `RealmRef`). Explicit entries also allow per-profile overrides.
     profile_memory_policy: BTreeMap<meerkat_mob::ProfileName, bool>,
+    /// Which agents are listed their own memory only
+    /// ([`Self::with_own_memory_only`]); none without it.
+    own_memory_only: Option<crate::memory::own_memory_only::OwnMemoryOnly>,
 }
 
 /// Ambient per-turn memory injection plus inbound defanging. Thin caller
@@ -937,6 +1008,22 @@ impl AgentMemoryRuntimeInjector {
         self.coordinator.provider()
     }
 
+    /// Test builds only: whether this delivers with a distiller, and with
+    /// a steward.
+    #[cfg(test)]
+    pub(crate) fn engines_in_tests(&self) -> (bool, bool) {
+        (self.distiller.is_some(), self.steward.is_some())
+    }
+
+    /// Test builds only: the distiller this injector hands its members'
+    /// rotations to.
+    #[cfg(test)]
+    pub(crate) fn distiller_in_tests(
+        &self,
+    ) -> Option<Arc<crate::memory::distiller::DistillerEngine>> {
+        self.distiller.clone()
+    }
+
     pub fn config(&self) -> AgentMemoryConfig {
         self.coordinator.config()
     }
@@ -998,6 +1085,7 @@ impl AgentMemoryCustomizer {
             inner: None,
             coordinator: RecallCoordinator::new(provider, config),
             profile_memory_policy: BTreeMap::new(),
+            own_memory_only: None,
         }
     }
 
@@ -1010,7 +1098,22 @@ impl AgentMemoryCustomizer {
             inner,
             coordinator: RecallCoordinator::new(provider, config),
             profile_memory_policy: BTreeMap::new(),
+            own_memory_only: None,
         }
+    }
+
+    /// The agents that are listed their own memory only: the memory index
+    /// of their build holds the records of their own scope and none of
+    /// their mob's shared scope or the realm's
+    /// ([`crate::memory::own_memory_only`]). `None`, or a rule that lists
+    /// no profile, withholds nothing.
+    #[must_use]
+    pub fn with_own_memory_only(
+        mut self,
+        rule: Option<crate::memory::own_memory_only::OwnMemoryOnly>,
+    ) -> Self {
+        self.own_memory_only = rule;
+        self
     }
 
     /// Set the identity-first memory-tool policy for one durable profile.
@@ -1034,6 +1137,26 @@ impl AgentMemoryCustomizer {
     ) -> Self {
         self.coordinator = self.coordinator.with_mob_resolver(resolver);
         self
+    }
+
+    /// Whether the memory index of `spec`'s build lists the shared scopes
+    /// beside the agent's own ([`Self::with_own_memory_only`]).
+    async fn shared_index_of(
+        &self,
+        context: &AgentBuildContext,
+        spec: &DurableAgentSpec,
+    ) -> crate::memory::coordinator::SharedIndex {
+        use crate::memory::coordinator::SharedIndex;
+        let Some(rule) = self.own_memory_only.as_ref() else {
+            return SharedIndex::Listed;
+        };
+        let handle = context.runtime_services.mob_handle();
+        let definition = handle.as_ref().map(meerkat_mob::MobHandle::definition);
+        if rule.restricts(spec, definition).await {
+            SharedIndex::Withheld
+        } else {
+            SharedIndex::Listed
+        }
     }
 }
 
@@ -1091,12 +1214,14 @@ impl AgentCustomizer for AgentMemoryCustomizer {
             return Ok(());
         }
 
+        let shared = self.shared_index_of(context, spec).await;
         let injection = self
             .coordinator
-            .assemble_build_injection(
+            .assemble_build_injection_with(
                 &context.identity,
                 build_query_text(context, spec),
                 build_query_terms(context, spec),
+                shared,
             )
             .await
             .map_err(|err| CustomizerError::Io(err.to_string()))?;
@@ -5379,5 +5504,545 @@ memory = false
             "distiller-scope record must inject: {injected_text}"
         );
         Ok(())
+    }
+
+    /// The agents a host listed as reading their own memory only
+    /// ([`crate::memory::own_memory_only`]): what their build is listed, and
+    /// what the builds beside them are.
+    mod own_memory_only_rows {
+        use super::*;
+        use crate::memory::coordinator::MobScopeResolver;
+        use crate::memory::own_memory_only::{LineageAbove, OwnMemoryOnly, TrustedLineage};
+        use crate::memory::records::MemoryKind;
+        use std::collections::{BTreeMap, BTreeSet};
+
+        const MOB_ALPHA: &str = "mob:alpha";
+        const MOB_BETA: &str = "mob:beta";
+        const ALPHA_SHARED_ID: &str = "mem-alpha-shared";
+        const ALPHA_SHARED_TITLE: &str = "Alpha rota";
+        const BETA_SHARED_ID: &str = "mem-beta-shared";
+        const BETA_SHARED_TITLE: &str = "Beta rota";
+        const REALM_ID: &str = "mem-realm";
+        const REALM_TITLE: &str = "Realm notice";
+        const OWN_ID: &str = "mem-own";
+        const OWN_TITLE: &str = "Own note";
+
+        fn meta(id: &str, title: &str) -> RecordMeta {
+            RecordMeta {
+                id: id.to_string(),
+                kind: MemoryKind::Fact,
+                title: title.to_string(),
+                description: String::new(),
+                age_days: 0,
+                rank: None,
+            }
+        }
+
+        /// The memory store of one mob: one record in the asking identity's
+        /// own scope, one in the mob's shared scope and one in the realm's.
+        /// It keeps every scope it was asked a manifest for, in order.
+        struct MobStore {
+            mob: &'static str,
+            shared: (&'static str, &'static str),
+            asked: Mutex<Vec<MemoryScope>>,
+        }
+
+        impl MobStore {
+            fn of_alpha() -> Arc<Self> {
+                Arc::new(Self {
+                    mob: MOB_ALPHA,
+                    shared: (ALPHA_SHARED_ID, ALPHA_SHARED_TITLE),
+                    asked: Mutex::new(Vec::new()),
+                })
+            }
+
+            fn of_beta() -> Arc<Self> {
+                Arc::new(Self {
+                    mob: MOB_BETA,
+                    shared: (BETA_SHARED_ID, BETA_SHARED_TITLE),
+                    asked: Mutex::new(Vec::new()),
+                })
+            }
+
+            fn asked(&self) -> Vec<MemoryScope> {
+                self.asked
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone()
+            }
+        }
+
+        #[async_trait]
+        impl AgentMemoryProvider for MobStore {
+            async fn recall(
+                &self,
+                _request: AgentMemoryRecallRequest,
+            ) -> Result<Vec<AgentMemoryRecord>, AgentMemoryError> {
+                Ok(Vec::new())
+            }
+
+            async fn forget(
+                &self,
+                _realm: &str,
+                _identity: &AgentIdentity,
+                memory_id: &str,
+            ) -> Result<AgentMemoryForgetResult, AgentMemoryError> {
+                Ok(AgentMemoryForgetResult {
+                    memory_id: memory_id.to_string(),
+                    deleted: false,
+                })
+            }
+
+            fn supports_manifest(&self) -> bool {
+                true
+            }
+
+            async fn manifest(
+                &self,
+                scopes: &[MemoryScope],
+                _tier: ManifestTier,
+            ) -> Result<Vec<RecordMeta>, AgentMemoryError> {
+                let mut out = Vec::new();
+                for scope in scopes {
+                    self.asked
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(scope.clone());
+                    match scope {
+                        MemoryScope::Identity { .. } => out.push(meta(OWN_ID, OWN_TITLE)),
+                        MemoryScope::Mob { mob, .. } if mob == self.mob => {
+                            out.push(meta(self.shared.0, self.shared.1));
+                        }
+                        MemoryScope::Realm { .. } => out.push(meta(REALM_ID, REALM_TITLE)),
+                        _ => {}
+                    }
+                }
+                Ok(out)
+            }
+        }
+
+        /// Every identity of a mob's store is bound to that mob.
+        struct BoundTo(&'static str);
+
+        impl MobScopeResolver for BoundTo {
+            fn active_mobs(&self, _realm: &str, _identity: &str) -> Vec<String> {
+                vec![self.0.to_string()]
+            }
+        }
+
+        /// A lineage as a mob's records would say it: for each identity,
+        /// what is above it. An identity the map does not hold cannot be
+        /// read.
+        struct RecordedLineage(BTreeMap<&'static str, LineageAbove>);
+
+        #[async_trait]
+        impl TrustedLineage for RecordedLineage {
+            async fn above(&self, identity: &AgentIdentity) -> LineageAbove {
+                self.0
+                    .get(identity.as_str())
+                    .cloned()
+                    .unwrap_or(LineageAbove::Unreadable)
+            }
+        }
+
+        fn agent(name: &str) -> Result<AgentIdentity, Box<dyn Error>> {
+            AgentIdentity::parse(name).map_err(|err| {
+                std::io::Error::other(format!("test identity {name} should parse: {err}")).into()
+            })
+        }
+
+        fn spec_of(name: &str, profile: &str) -> Result<DurableAgentSpec, Box<dyn Error>> {
+            let mut spec = durable_spec()?;
+            spec.identity = agent(name)?;
+            spec.profile = ProfileName::from(profile);
+            Ok(spec)
+        }
+
+        fn context_of(name: &str) -> Result<AgentBuildContext, Box<dyn Error>> {
+            let mut context = build_context()?;
+            context.identity = agent(name)?;
+            Ok(context)
+        }
+
+        /// The agents the host declared: `identity:guest` and
+        /// `identity:staff` in each mob.
+        fn declared() -> BTreeMap<&'static str, LineageAbove> {
+            BTreeMap::from([
+                ("identity:guest", LineageAbove::HostDeclared),
+                ("identity:staff", LineageAbove::HostDeclared),
+            ])
+        }
+
+        /// The host listed the profile `guest`.
+        fn rule(lineage: BTreeMap<&'static str, LineageAbove>) -> OwnMemoryOnly {
+            OwnMemoryOnly::new(
+                BTreeSet::from([ProfileName::from("guest")]),
+                Arc::new(RecordedLineage(lineage)),
+            )
+        }
+
+        /// The memory customizer of the mob `store` is the store of.
+        fn customizer(store: Arc<MobStore>, rule: Option<OwnMemoryOnly>) -> AgentMemoryCustomizer {
+            let mob = store.mob;
+            AgentMemoryCustomizer::new(store, AgentMemoryConfig::default())
+                .with_mob_resolver(Some(Arc::new(BoundTo(mob))))
+                .with_own_memory_only(rule)
+        }
+
+        /// The memory text a build of `name` on `profile` is given.
+        async fn build_text(
+            customizer: &AgentMemoryCustomizer,
+            name: &str,
+            profile: &str,
+        ) -> Result<String, Box<dyn Error>> {
+            let mut draft = draft();
+            customizer
+                .customize_build(&context_of(name)?, &spec_of(name, profile)?, &mut draft)
+                .await?;
+            Ok(draft.additional_instructions.join("\n"))
+        }
+
+        /// `text` with its envelope nonce left out: the nonce is minted by
+        /// each coordinator.
+        fn without_nonce(text: &str) -> String {
+            const MARKER: &str = "[mem-token:";
+            match text.find(MARKER) {
+                Some(start) => {
+                    let after = start + MARKER.len();
+                    let end = text[after..]
+                        .find(']')
+                        .map_or(text.len(), |end| after + end);
+                    format!("{}{}", &text[..after], &text[end..])
+                }
+                None => text.to_string(),
+            }
+        }
+
+        /// A listed profile's agent of mob alpha is listed its own record
+        /// and neither its mob's shared record nor the realm's.
+        #[tokio::test]
+        async fn an_own_memory_only_agent_of_mob_alpha_is_listed_no_shared_record_of_its_mob_or_realm()
+        -> Result<(), Box<dyn Error>> {
+            let text = build_text(
+                &customizer(MobStore::of_alpha(), Some(rule(declared()))),
+                "identity:guest",
+                "guest",
+            )
+            .await?;
+            assert!(text.contains(OWN_ID), "its own row stays: {text}");
+            assert!(text.contains("Identity records:"), "{text}");
+            for withheld in [
+                ALPHA_SHARED_ID,
+                ALPHA_SHARED_TITLE,
+                REALM_ID,
+                REALM_TITLE,
+                "Mob records:",
+                "Realm records:",
+            ] {
+                assert!(
+                    !text.contains(withheld),
+                    "{withheld:?} is withheld from a listed profile's agent: {text}"
+                );
+            }
+            Ok(())
+        }
+
+        /// For such a build the store is asked for the agent's own scope
+        /// and for no other: what is not read reaches no log, event or
+        /// count.
+        #[tokio::test]
+        async fn an_own_memory_only_build_asks_the_store_for_its_own_scope_alone()
+        -> Result<(), Box<dyn Error>> {
+            let store = MobStore::of_alpha();
+            build_text(
+                &customizer(store.clone(), Some(rule(declared()))),
+                "identity:guest",
+                "guest",
+            )
+            .await?;
+            let asked = store.asked();
+            assert!(!asked.is_empty(), "the agent's own scope is asked");
+            assert!(
+                asked.iter().all(|scope| matches!(
+                    scope,
+                    MemoryScope::Identity { identity, .. } if identity == "identity:guest"
+                )),
+                "only the agent's own scope is asked: {asked:?}"
+            );
+            Ok(())
+        }
+
+        /// An agent created by an own-memory-only agent is one too,
+        /// whatever profile its creation named.
+        #[tokio::test]
+        async fn an_agent_created_by_an_own_memory_only_agent_is_listed_no_shared_record()
+        -> Result<(), Box<dyn Error>> {
+            let mut lineage = declared();
+            lineage.insert(
+                "identity:made-by-guest",
+                LineageAbove::CreatedBy {
+                    identity: agent("identity:guest")?,
+                    profile: Some(ProfileName::from("guest")),
+                },
+            );
+            // And one more link down: created by the agent the guest created.
+            lineage.insert(
+                "identity:made-by-that",
+                LineageAbove::CreatedBy {
+                    identity: agent("identity:made-by-guest")?,
+                    profile: Some(ProfileName::from("staff")),
+                },
+            );
+            for name in ["identity:made-by-guest", "identity:made-by-that"] {
+                let text = build_text(
+                    &customizer(MobStore::of_alpha(), Some(rule(lineage.clone()))),
+                    name,
+                    "staff",
+                )
+                .await?;
+                assert!(text.contains(OWN_ID), "{name}: {text}");
+                assert!(!text.contains(ALPHA_SHARED_ID), "{name}: {text}");
+                assert!(!text.contains(REALM_ID), "{name}: {text}");
+            }
+            Ok(())
+        }
+
+        /// A link that cannot be read counts as own-memory-only: an agent
+        /// whose creator is no registered agent of the mob, and an agent
+        /// the records say nothing of.
+        #[tokio::test]
+        async fn an_agent_above_an_unreadable_link_is_listed_no_shared_record()
+        -> Result<(), Box<dyn Error>> {
+            let mut lineage = declared();
+            lineage.insert(
+                "identity:made-by-helper",
+                LineageAbove::CreatedBy {
+                    identity: agent("identity:helper")?,
+                    profile: None,
+                },
+            );
+            for name in ["identity:made-by-helper", "identity:unrecorded"] {
+                let text = build_text(
+                    &customizer(MobStore::of_alpha(), Some(rule(lineage.clone()))),
+                    name,
+                    "staff",
+                )
+                .await?;
+                assert!(
+                    !text.contains(ALPHA_SHARED_ID) && !text.contains(REALM_ID),
+                    "{name}: {text}"
+                );
+            }
+            Ok(())
+        }
+
+        /// A chain of creators longer than the walk follows counts as
+        /// own-memory-only, though no agent of it is on a listed profile.
+        #[tokio::test]
+        async fn an_agent_under_more_links_than_the_walk_follows_is_listed_no_shared_record()
+        -> Result<(), Box<dyn Error>> {
+            const CHAIN: [&str; 10] = [
+                "identity:link-0",
+                "identity:link-1",
+                "identity:link-2",
+                "identity:link-3",
+                "identity:link-4",
+                "identity:link-5",
+                "identity:link-6",
+                "identity:link-7",
+                "identity:link-8",
+                "identity:link-9",
+            ];
+            let mut lineage = BTreeMap::from([(CHAIN[0], LineageAbove::HostDeclared)]);
+            for pair in CHAIN.windows(2) {
+                lineage.insert(
+                    pair[1],
+                    LineageAbove::CreatedBy {
+                        identity: agent(pair[0])?,
+                        profile: Some(ProfileName::from("staff")),
+                    },
+                );
+            }
+            let short = build_text(
+                &customizer(MobStore::of_alpha(), Some(rule(lineage.clone()))),
+                CHAIN[2],
+                "staff",
+            )
+            .await?;
+            assert!(
+                short.contains(ALPHA_SHARED_ID),
+                "two links end at a declared agent: {short}"
+            );
+            let long = build_text(
+                &customizer(MobStore::of_alpha(), Some(rule(lineage))),
+                CHAIN[9],
+                "staff",
+            )
+            .await?;
+            assert!(!long.contains(ALPHA_SHARED_ID), "{long}");
+            Ok(())
+        }
+
+        /// The second mob: a listed profile's agent of mob beta is listed no
+        /// shared record of beta's store and no realm record.
+        #[tokio::test]
+        async fn an_own_memory_only_agent_of_mob_beta_is_listed_no_shared_record_of_its_mob_or_realm()
+        -> Result<(), Box<dyn Error>> {
+            let text = build_text(
+                &customizer(MobStore::of_beta(), Some(rule(declared()))),
+                "identity:guest",
+                "guest",
+            )
+            .await?;
+            assert!(text.contains(OWN_ID), "{text}");
+            for withheld in [BETA_SHARED_ID, BETA_SHARED_TITLE, REALM_ID, "Mob records:"] {
+                assert!(!text.contains(withheld), "{withheld}: {text}");
+            }
+            Ok(())
+        }
+
+        /// An unlisted profile's agent of mob alpha, beside the listed one,
+        /// is given byte for byte the text it is given with no rule: its
+        /// own record, mob alpha's and the realm's.
+        #[tokio::test]
+        async fn an_unlisted_agent_of_mob_alpha_is_given_the_text_it_was_given_before()
+        -> Result<(), Box<dyn Error>> {
+            let with_rule = build_text(
+                &customizer(MobStore::of_alpha(), Some(rule(declared()))),
+                "identity:staff",
+                "staff",
+            )
+            .await?;
+            let without = build_text(
+                &customizer(MobStore::of_alpha(), None),
+                "identity:staff",
+                "staff",
+            )
+            .await?;
+            assert_eq!(without_nonce(&with_rule), without_nonce(&without));
+            for listed in [OWN_ID, ALPHA_SHARED_ID, REALM_ID] {
+                assert!(without.contains(listed), "{listed}: {without}");
+            }
+            assert!(!without.contains(BETA_SHARED_ID), "{without}");
+            Ok(())
+        }
+
+        /// No rule, or a rule that lists no profile: nothing is withheld
+        /// and no lineage is read.
+        #[tokio::test]
+        async fn without_a_listed_profile_nothing_is_withheld_and_no_lineage_is_read()
+        -> Result<(), Box<dyn Error>> {
+            struct NeverAsked;
+            #[async_trait]
+            impl TrustedLineage for NeverAsked {
+                async fn above(&self, _identity: &AgentIdentity) -> LineageAbove {
+                    // A lineage read without a listed profile restricts the
+                    // build, which the assertions below then refuse.
+                    LineageAbove::Unreadable
+                }
+            }
+            let empty = OwnMemoryOnly::new(BTreeSet::new(), Arc::new(NeverAsked));
+            let with_empty = build_text(
+                &customizer(MobStore::of_alpha(), Some(empty)),
+                "identity:guest",
+                "guest",
+            )
+            .await?;
+            let without = build_text(
+                &customizer(MobStore::of_alpha(), None),
+                "identity:guest",
+                "guest",
+            )
+            .await?;
+            assert_eq!(without_nonce(&with_empty), without_nonce(&without));
+            assert!(without.contains(ALPHA_SHARED_ID), "{without}");
+            assert!(without.contains(REALM_ID), "{without}");
+            Ok(())
+        }
+
+        /// The second mob, unlisted: an unlisted profile's agent of mob beta
+        /// is listed beta's shared record.
+        #[tokio::test]
+        async fn an_unlisted_agent_of_mob_beta_is_listed_its_mobs_shared_record()
+        -> Result<(), Box<dyn Error>> {
+            let text = build_text(
+                &customizer(MobStore::of_beta(), Some(rule(declared()))),
+                "identity:staff",
+                "staff",
+            )
+            .await?;
+            assert!(text.contains(BETA_SHARED_ID), "{text}");
+            assert!(!text.contains(ALPHA_SHARED_ID), "{text}");
+            Ok(())
+        }
+
+        /// An agent created by an unlisted agent the host declared, on an
+        /// unlisted profile, is listed as before.
+        #[tokio::test]
+        async fn an_agent_created_by_an_unlisted_agent_is_listed_as_before()
+        -> Result<(), Box<dyn Error>> {
+            let mut lineage = declared();
+            lineage.insert(
+                "identity:made-by-staff",
+                LineageAbove::CreatedBy {
+                    identity: agent("identity:staff")?,
+                    profile: Some(ProfileName::from("staff")),
+                },
+            );
+            let text = build_text(
+                &customizer(MobStore::of_alpha(), Some(rule(lineage))),
+                "identity:made-by-staff",
+                "staff",
+            )
+            .await?;
+            assert!(text.contains(ALPHA_SHARED_ID), "{text}");
+            Ok(())
+        }
+
+        /// A label or a name a request can set decides nothing: an unlisted
+        /// agent whose labels name the listed profile, a creator and the
+        /// rule itself is listed as before.
+        #[tokio::test]
+        async fn a_label_a_request_set_decides_nothing() -> Result<(), Box<dyn Error>> {
+            let customizer = customizer(MobStore::of_alpha(), Some(rule(declared())));
+            let mut spec = spec_of("identity:staff", "staff")?;
+            for (key, value) in [
+                ("profile", "guest"),
+                ("profile_name", "guest"),
+                ("role", "guest"),
+                ("spawned_by", "identity:guest"),
+                ("own_memory_only", "true"),
+            ] {
+                spec.labels.insert(key.to_string(), value.to_string());
+            }
+            let mut draft = draft();
+            customizer
+                .customize_build(&context_of("identity:staff")?, &spec, &mut draft)
+                .await?;
+            let text = draft.additional_instructions.join("\n");
+            assert!(text.contains(ALPHA_SHARED_ID), "{text}");
+            Ok(())
+        }
+
+        /// The rule is configuration, held by no process: a customizer made
+        /// anew from the same rule withholds the same.
+        #[tokio::test]
+        async fn a_customizer_made_anew_from_the_same_rule_withholds_the_same()
+        -> Result<(), Box<dyn Error>> {
+            let first = build_text(
+                &customizer(MobStore::of_alpha(), Some(rule(declared()))),
+                "identity:guest",
+                "guest",
+            )
+            .await?;
+            let second = build_text(
+                &customizer(MobStore::of_alpha(), Some(rule(declared()))),
+                "identity:guest",
+                "guest",
+            )
+            .await?;
+            assert_eq!(without_nonce(&first), without_nonce(&second));
+            Ok(())
+        }
     }
 }

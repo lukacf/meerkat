@@ -24,6 +24,12 @@ pub(super) struct Request {
     /// The caller a tool call was made for (`expectedCallerScope`).
     #[serde(default)]
     expected_caller_scope: Option<String>,
+    /// The mob the request is for: `mob_id`, the addressing id of a console
+    /// request, under that one name on every route. Absent or `null` for
+    /// the default mob. It is read once the caller is known, so a body
+    /// that carries it parses as it did without it.
+    #[serde(default, rename = "mob_id")]
+    mob_id: Option<Value>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -192,6 +198,7 @@ impl Ingress {
                     .as_ref()
                     .map_or("", |registration| registration.namespace()),
                 first_read_reader(&self.state, self.registration.as_ref()),
+                None,
             )
             .await;
         }
@@ -248,8 +255,10 @@ async fn authorize_session_in_namespace(
         .filter(|controller| controller.enabled())
     {
         Some(controller) => {
-            prime_access_cache_from_runtime_in_namespace(runtime, controller, namespace, reader)
-                .await
+            prime_access_cache_from_runtime_in_namespace(
+                runtime, controller, namespace, reader, None,
+            )
+            .await
         }
         None => BTreeSet::new(),
     };
@@ -478,22 +487,30 @@ async fn execute(
 
 async fn handle(
     state: ConsoleJsonState,
+    resolver: Option<crate::unified_runtime::MobResolver>,
     headers: HeaderMap,
     uri: Uri,
     request: Request,
     operation: Operation,
 ) -> axum::response::Response {
-    handle_noting_dispatch(state, headers, uri, request, operation, None).await
+    handle_noting_dispatch(state, resolver, headers, uri, request, operation, None).await
 }
 
 /// [`handle`], noting in `dispatched` the moment the operation enters the
 /// member's tool application ([`execute`]): from then on its tool may have
 /// run, whatever the route answers.
+///
+/// `resolver` is the host's mob resolver, absent on a router that carries
+/// none. The request names its mob in its body (`mob_id`); the mob is
+/// judged with the caller once the caller is known and before the route's
+/// own rules, and what the route reads of a mob from there on is that
+/// mob's ([`console_route_state`]).
 async fn handle_noting_dispatch(
     state: ConsoleJsonState,
+    resolver: Option<crate::unified_runtime::MobResolver>,
     headers: HeaderMap,
     uri: Uri,
-    request: Request,
+    mut request: Request,
     operation: Operation,
     dispatched: Option<&std::sync::atomic::AtomicBool>,
 ) -> axum::response::Response {
@@ -503,6 +520,25 @@ async fn handle_noting_dispatch(
             "unauthorized",
             "Console app access requires authorization",
         );
+    };
+    // The app routes take no selector of mobs: a request that carries one
+    // is one the route cannot read.
+    if let Err(refusal) = super::route_mobs(&uri, super::MobsParameter::NotTaken) {
+        return refusal.into_response();
+    }
+    // The route's reads are not all per mob yet (the session routing and
+    // the caller it validates again are the launch mob's): it serves the
+    // launch mob only.
+    let (state, LaunchMobOnly(auth)) = match console_route_state_for_member(
+        state,
+        resolver.as_ref(),
+        request.mob_id.take(),
+        LaunchMobOnly(auth),
+    )
+    .await
+    {
+        Ok(served) => served,
+        Err(refusal) => return refusal.into_response(),
     };
     if operation == Operation::CallTool
         && let Err(refusal) = auth.refuse_other_caller(request.expected_caller_scope.as_deref())
@@ -658,26 +694,51 @@ async fn handle_noting_dispatch(
 
 pub(super) async fn resolve(
     State(state): State<ConsoleJsonState>,
+    resolver: Option<axum::Extension<crate::unified_runtime::MobResolver>>,
     headers: HeaderMap,
     uri: Uri,
     Json(request): Json<Request>,
 ) -> axum::response::Response {
-    handle(state, headers, uri, request, Operation::Resolve).await
+    let resolver = resolver.map(|axum::Extension(resolver)| resolver);
+    handle(state, resolver, headers, uri, request, Operation::Resolve).await
 }
 pub(super) async fn read_resource(
     State(state): State<ConsoleJsonState>,
+    resolver: Option<axum::Extension<crate::unified_runtime::MobResolver>>,
     headers: HeaderMap,
     uri: Uri,
     Json(request): Json<Request>,
 ) -> axum::response::Response {
-    handle(state, headers, uri, request, Operation::ReadResource).await
+    let resolver = resolver.map(|axum::Extension(resolver)| resolver);
+    handle(
+        state,
+        resolver,
+        headers,
+        uri,
+        request,
+        Operation::ReadResource,
+    )
+    .await
 }
 pub(super) async fn call_tool(
     State(state): State<ConsoleJsonState>,
+    resolver: Option<axum::Extension<crate::unified_runtime::MobResolver>>,
     headers: HeaderMap,
     uri: Uri,
     Json(request): Json<Request>,
 ) -> axum::response::Response {
+    let resolver = resolver.map(|axum::Extension(resolver)| resolver);
+    // The mob of the call, as its row keeps it: the id the request names,
+    // and none for a call of the launch mob (a request that names no mob,
+    // or the launch mob's id as this door knows it). A blank id names no
+    // mob and is not kept: a stored record never holds one.
+    let launch_mob = console_launch_mob(&state, resolver.as_ref()).await;
+    let mob_of_the_call = request
+        .mob_id
+        .as_ref()
+        .and_then(Value::as_str)
+        .filter(|named| launch_mob.as_ref().map(meerkat_mob::MobId::as_str) != Some(*named))
+        .filter(|named| crate::member_key::names_a_mob(&meerkat_mob::MobId::from(*named)));
     // Every tool call writes a row in the console audit log, among its tool
     // calls, whatever its tool does: the console cannot tell whether a tool
     // changes anything. The call and its row run on the server, so a caller
@@ -689,13 +750,14 @@ pub(super) async fn call_tool(
             Arc::clone(log),
             &auth,
             crate::console_audit::target_of(&[
+                (crate::console_audit::TARGET_MOB_FIELD, mob_of_the_call),
                 ("identity", Some(request.identity.as_str())),
                 ("tool", request.name.as_deref()),
             ]),
         ))
     });
     let Some(intent) = intent else {
-        return handle(state, headers, uri, request, Operation::CallTool).await;
+        return handle(state, resolver, headers, uri, request, Operation::CallTool).await;
     };
     let answered = intent
         .run(
@@ -703,6 +765,7 @@ pub(super) async fn call_tool(
                 let dispatched = std::sync::atomic::AtomicBool::new(false);
                 let response = handle_noting_dispatch(
                     state,
+                    resolver,
                     headers,
                     uri,
                     request,
@@ -804,6 +867,7 @@ mod tests {
             name: None,
             arguments: None,
             expected_caller_scope: None,
+            mob_id: None,
         }
     }
 
@@ -1719,6 +1783,7 @@ mcp_apps_sandbox_url = " "
             let request = request(&meerkat_core::SessionId::new());
             let call = handle(
                 state(Some(runtime.clone())),
+                None,
                 HeaderMap::new(),
                 Uri::from_static("/console/mcp-apps/call-tool"),
                 request.clone(),
@@ -1730,6 +1795,7 @@ mcp_apps_sandbox_url = " "
                 serde_json::from_slice(&axum::body::to_bytes(call.into_body(), usize::MAX).await?)?;
             let resolve = handle(
                 state(Some(runtime)),
+                None,
                 HeaderMap::new(),
                 Uri::from_static("/console/mcp-apps/resolve"),
                 request,
@@ -1760,6 +1826,7 @@ mcp_apps_sandbox_url = " "
     async fn unavailable_responses_are_not_cacheable() {
         let response = handle(
             state(None),
+            None,
             HeaderMap::new(),
             Uri::from_static("/console/mcp-apps/resolve"),
             request(&meerkat_core::SessionId::new()),
@@ -1832,5 +1899,227 @@ mcp_apps_sandbox_url = " "
             "the admission's own check refuses a primed private target"
         );
         Ok(())
+    }
+
+    /// A runtime that keeps a console audit log (it has a state directory)
+    /// over a mob whose id starts with `tag`, and its open console.
+    async fn audited_console(
+        tag: &str,
+        state_dir: &std::path::Path,
+    ) -> (crate::UnifiedRuntime, axum::Router) {
+        let definition = meerkat_mob::MobDefinition::from_toml(&format!(
+            "[mob]\nid = \"mcp-app-audit-{tag}-{}\"\n\n[profiles.worker]\nmodel = \"gpt-5.5\"\n",
+            uuid::Uuid::new_v4().simple()
+        ))
+        .expect("mob definition");
+        let runtime = Box::pin(
+            crate::UnifiedRuntime::builder()
+                .definition(definition)
+                .persistent_state(state_dir)
+                .default_llm_client(Arc::new(meerkat_client::TestClient::default()))
+                .build(),
+        )
+        .await
+        .expect("runtime builds");
+        let router = runtime.build_console_json_router(RuntimeDecisionState::local_console(
+            crate::ConsolePolicy {
+                require_app_auth: false,
+                ..Default::default()
+            },
+            None,
+        ));
+        (runtime, router)
+    }
+
+    /// A tool call for a member the fixture does not have, which the
+    /// console refuses before any tool runs.
+    fn tool_call_of_no_member(tool_call_id: &str) -> serde_json::Value {
+        serde_json::json!({
+            "identity": "worker-1",
+            "sessionId": meerkat_core::SessionId::new().to_string(),
+            "toolCallId": tool_call_id,
+            "name": "file_ticket",
+            "arguments": {},
+        })
+    }
+
+    /// One tool call on `router`: its status and its JSON body (`null` for
+    /// a body that is no JSON).
+    async fn post_call_tool(
+        router: &axum::Router,
+        body: &serde_json::Value,
+    ) -> (axum::http::StatusCode, serde_json::Value) {
+        use tower::ServiceExt;
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/console/mcp-apps/call-tool")
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(body.to_string()))
+            .expect("request");
+        let response = router.clone().oneshot(request).await.expect("the answer");
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .expect("the answer's body");
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    /// The tool call rows `runtime`'s console audit log keeps, oldest
+    /// first, each as the JSON it is stored as.
+    async fn tool_call_rows(runtime: &crate::UnifiedRuntime) -> Vec<serde_json::Value> {
+        let log = runtime
+            .console_audit_log()
+            .expect("the runtime keeps a console audit log");
+        log.page_in(crate::console_audit::ConsoleAuditSet::ToolCalls, None, 500)
+            .await
+            .expect("the tool call rows read")
+            .records
+            .into_iter()
+            .map(|row| serde_json::Value::Object(row.fields))
+            .collect()
+    }
+
+    /// A tool call's audit row names the mob the call named: a call that
+    /// names an id the host does not serve is refused for that id, and its
+    /// row keeps the id beside the member and the tool.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_tool_call_that_names_a_mob_the_host_does_not_serve_writes_its_row_with_that_id() {
+        let state_dir = tempfile::tempdir().expect("tempdir");
+        let (runtime, router) = audited_console("absent", state_dir.path()).await;
+        let absent = "mcp-app-audit-rows-absent-mob";
+        let mut call = tool_call_of_no_member("call-absent");
+        call["mob_id"] = serde_json::json!(absent);
+        let (status, answer) = post_call_tool(&router, &call).await;
+        assert_eq!(
+            (status, &answer["error"]),
+            (
+                axum::http::StatusCode::NOT_FOUND,
+                &serde_json::json!("foreign_mob_target")
+            ),
+            "the call is refused for the mob it names: {answer}"
+        );
+        let rows = tool_call_rows(&runtime).await;
+        assert_eq!(rows.len(), 1, "the call writes one row: {rows:?}");
+        let target = &rows[0]["target"];
+        assert_eq!(
+            target["mob_id"],
+            serde_json::json!(absent),
+            "the row names the mob the call named: {target}"
+        );
+        assert_eq!(
+            target["identity"],
+            serde_json::json!("worker-1"),
+            "{target}"
+        );
+        assert_eq!(target["tool"], serde_json::json!("file_ticket"), "{target}");
+        runtime.shutdown().await;
+    }
+
+    /// A tool call that names no mob, a `null` mob or the host's own mob by
+    /// its id is a call of the host's own mob: its row names the member and
+    /// the tool and no mob, the row such a call always wrote.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_tool_call_of_the_hosts_own_mob_writes_a_row_that_names_no_mob() {
+        let state_dir = tempfile::tempdir().expect("tempdir");
+        let (runtime, router) = audited_console("own", state_dir.path()).await;
+        let own_mob = runtime.mob_id();
+        for (tool_call_id, mob_id) in [
+            ("call-no-mob", None),
+            ("call-null-mob", Some(serde_json::Value::Null)),
+            ("call-own-mob", Some(serde_json::json!(own_mob.as_str()))),
+        ] {
+            let mut call = tool_call_of_no_member(tool_call_id);
+            if let Some(mob_id) = mob_id {
+                call["mob_id"] = mob_id;
+            }
+            let (status, answer) = post_call_tool(&router, &call).await;
+            assert_ne!(
+                answer["error"],
+                serde_json::json!("foreign_mob_target"),
+                "{tool_call_id}: a call of the host's own mob is not refused for its mob: \
+                 {status} {answer}"
+            );
+        }
+        let rows = tool_call_rows(&runtime).await;
+        assert_eq!(rows.len(), 3, "each call writes one row: {rows:?}");
+        for row in &rows {
+            assert_eq!(
+                row["target"],
+                serde_json::json!({"identity": "worker-1", "tool": "file_ticket"}),
+                "the row names the member and the tool and no mob: {row}"
+            );
+        }
+        runtime.shutdown().await;
+    }
+
+    /// A tool call the console refuses for the mob it names writes its
+    /// audit row like every tool call whose caller the console knows: one
+    /// row, recorded as refused, with the refusal's status and kind.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_tool_call_refused_for_its_mob_writes_its_audit_row() {
+        let state_dir = tempfile::tempdir().expect("tempdir");
+        let (runtime, router) = audited_console("refused", state_dir.path()).await;
+        let mut call = tool_call_of_no_member("call-refused");
+        call["mob_id"] = serde_json::json!("mcp-app-audit-rows-absent-mob");
+        let (status, _) = post_call_tool(&router, &call).await;
+        assert_eq!(status, axum::http::StatusCode::NOT_FOUND);
+        let rows = tool_call_rows(&runtime).await;
+        assert_eq!(rows.len(), 1, "the refused call writes one row: {rows:?}");
+        let row = &rows[0];
+        assert_eq!(
+            row["method"],
+            serde_json::json!("/console/mcp-apps/call-tool"),
+            "{row}"
+        );
+        assert_eq!(row["outcome"], serde_json::json!("refused"), "{row}");
+        assert_eq!(row["code"], serde_json::json!(404), "{row}");
+        assert_eq!(
+            row["kind"],
+            serde_json::json!("foreign_mob_target"),
+            "{row}"
+        );
+        runtime.shutdown().await;
+    }
+
+    /// A tool call that names a blank mob (an empty id, or white space
+    /// alone) names no mob. It is refused for the id it names, and its row
+    /// names the member and the tool and no mob: no row holds a blank mob,
+    /// which a reading of a stored record would take for no mob at all.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_tool_call_that_names_a_blank_mob_writes_a_row_that_names_no_mob() {
+        let state_dir = tempfile::tempdir().expect("tempdir");
+        let (runtime, router) = audited_console("blank", state_dir.path()).await;
+        let blank_ids = ["", " ", "\t "];
+        for (index, blank) in blank_ids.iter().enumerate() {
+            let mut call = tool_call_of_no_member(&format!("call-blank-{index}"));
+            call["mob_id"] = serde_json::json!(blank);
+            let (status, answer) = post_call_tool(&router, &call).await;
+            assert_eq!(
+                (status, &answer["error"]),
+                (
+                    axum::http::StatusCode::NOT_FOUND,
+                    &serde_json::json!("foreign_mob_target")
+                ),
+                "a call that names the blank mob {blank:?} is refused for it: {answer}"
+            );
+        }
+        let rows = tool_call_rows(&runtime).await;
+        assert_eq!(
+            rows.len(),
+            blank_ids.len(),
+            "each call writes one row: {rows:?}"
+        );
+        for row in &rows {
+            assert_eq!(
+                row["target"],
+                serde_json::json!({"identity": "worker-1", "tool": "file_ticket"}),
+                "the row names the member and the tool and no mob: {row}"
+            );
+            assert_eq!(row["outcome"], serde_json::json!("refused"), "{row}");
+        }
+        runtime.shutdown().await;
     }
 }

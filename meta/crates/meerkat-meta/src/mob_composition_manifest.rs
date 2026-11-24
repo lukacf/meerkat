@@ -1085,6 +1085,54 @@ pub fn persistent_mob_storage(
     Ok((storage, MobStorageProvenance::persistent(path)))
 }
 
+/// The place of a launch's mob store, declared and not opened: the launch
+/// names where its mob's store is, and the mob set it declares its mob to
+/// opens the store, creates the mob in it when it holds none and loads it
+/// when it holds one (`MobBootstrapSpec::declared`).
+///
+/// Opaque for the reason [`MobStorageProvenance`] is: the place and what is
+/// declared about it are one value, so a launch cannot name one store and
+/// have another's composition verified. A file is declared by
+/// [`declared_mob_store`], a store in memory by [`Self::in_memory`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeclaredMobStore {
+    /// The store's file; `None` for a store in memory.
+    file: Option<PathBuf>,
+    provenance: MobStorageProvenance,
+}
+
+impl DeclaredMobStore {
+    /// A mob store in memory: it holds no mob when the process starts and
+    /// nothing of it outlives the process
+    /// ([`MobStorageProvenance::declared_ephemeral`]).
+    pub fn in_memory() -> Self {
+        Self {
+            file: None,
+            provenance: MobStorageProvenance::declared_ephemeral(),
+        }
+    }
+
+    /// The store's file, when the store is one. The file need not exist.
+    pub fn file(&self) -> Option<&Path> {
+        self.file.as_deref()
+    }
+
+    /// What is declared about the store.
+    pub fn provenance(&self) -> &MobStorageProvenance {
+        &self.provenance
+    }
+}
+
+/// Declare the persistent mob store at `path` without opening it: the
+/// declared form of [`persistent_mob_storage`]. The file need not exist: the
+/// mob set the store is declared to creates it.
+pub fn declared_mob_store(path: PathBuf) -> DeclaredMobStore {
+    DeclaredMobStore {
+        file: Some(path.clone()),
+        provenance: MobStorageProvenance::persistent(path),
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {

@@ -218,6 +218,37 @@ pub(crate) fn launch_resume_gate(
         .map(WorkGraphResumeGate::new)
 }
 
+/// The resume gate of the mob `mob_id`, one of the mobs a launch builds,
+/// over the launch's WorkGraph `host_service`: none without a service, none
+/// over a backend that has no WorkGraph, and none on a candidate launch
+/// ([`launch_resume_gate`]). The gate reads the
+/// realm of the mob it is for ([`realm_service_of`]): a member's items,
+/// claims and attention live in its own mob's realm, so a gate over another
+/// mob's realm would find none of them.
+pub(crate) fn mob_resume_gate(
+    host_service: Option<&WorkGraphService>,
+    mob_id: &meerkat_mob::MobId,
+    authority: crate::mob_composition_manifest::CompositionAuthority,
+) -> Option<WorkGraphResumeGate> {
+    launch_resume_gate(
+        host_service.map(|host| realm_service_of(host, mob_id)),
+        authority,
+    )
+}
+
+/// The launch's WorkGraph `host` scoped to the realm of the mob `mob_id`,
+/// by the formula the mob's members are built with
+/// ([`meerkat_mob::mob_scoped_workgraph_service`]). The launch scopes its
+/// service to the launch mob, so for that mob this is `host` as it is; it
+/// is also `host` as it is where the formula yields no service of another
+/// realm (a mob id that forms no realm, a backend without a WorkGraph).
+fn realm_service_of(host: &WorkGraphService, mob_id: &meerkat_mob::MobId) -> WorkGraphService {
+    match meerkat_mob::mob_scoped_workgraph_service(host, mob_id) {
+        Ok(Some(scoped)) if scoped.default_realm_id() != host.default_realm_id() => scoped,
+        _ => host.clone(),
+    }
+}
+
 impl WorkGraphResumeGate {
     pub(crate) fn new(service: WorkGraphService) -> Self {
         Self {
@@ -577,6 +608,29 @@ mod tests {
         WorkOwnerKey::mob_agent(MOB, identity).expect("member owner key")
     }
 
+    /// A second mob the launch of [`MOB`] hosts.
+    const HOSTED: &str = "hosted-mob";
+
+    fn hosted_mob() -> meerkat_mob::MobId {
+        meerkat_mob::MobId::from(HOSTED)
+    }
+
+    fn hosted_member_key(identity: &str) -> WorkOwnerKey {
+        WorkOwnerKey::mob_agent(HOSTED, identity).expect("member owner key")
+    }
+
+    /// The launch's WorkGraph `host` as the members of the hosted mob see
+    /// it: the realm their tools, their attention and their claims live in.
+    fn hosted_view(host: &WorkGraphService) -> WorkGraphService {
+        meerkat_mob::mob_scoped_workgraph_service(host, &hosted_mob())
+            .expect("the hosted mob has a realm")
+            .expect("the backend is not disabled")
+    }
+
+    fn authoritative() -> crate::mob_composition_manifest::CompositionAuthority {
+        crate::mob_composition_manifest::CompositionAuthority::Authoritative
+    }
+
     struct Worker {
         mob_id: meerkat_mob::MobId,
         identity: meerkat_mob::AgentIdentity,
@@ -586,8 +640,13 @@ mod tests {
 
     impl Worker {
         fn named(identity: &str) -> Self {
+            Self::of(MOB, identity)
+        }
+
+        /// The worker `identity` of the mob `mob`.
+        fn of(mob: &str, identity: &str) -> Self {
             Self {
-                mob_id: meerkat_mob::MobId::from(MOB),
+                mob_id: meerkat_mob::MobId::from(mob),
                 identity: meerkat_mob::AgentIdentity::from(identity),
                 session_id: SessionId::new(),
                 run_id: RunId::new(),
@@ -841,6 +900,138 @@ mod tests {
         );
     }
 
+    /// A launch builds every mob it hosts with a gate of that mob. A member
+    /// of a hosted mob works in that mob's realm: its interrupted run, which
+    /// was dispatched for an item it still holds there, continues.
+    #[tokio::test]
+    async fn a_hosted_mobs_interrupted_worker_under_attention_continues() {
+        let host = service();
+        let hosted = hosted_view(&host);
+        let worker = Worker::of(HOSTED, WORKER);
+        let (item, projection) = goal_for(
+            &hosted,
+            GoalAttentionTarget::Owner {
+                owner_key: hosted_member_key(WORKER),
+            },
+        )
+        .await;
+        claim(&hosted, &item, hosted_member_key(WORKER), in_an_hour()).await;
+
+        let gate = mob_resume_gate(Some(&host), &hosted_mob(), authoritative())
+            .expect("an authoritative launch with a WorkGraph binds a hosted mob's gate");
+        assert_eq!(
+            gate.check_worker(worker.resuming(Some(&projection))).await,
+            ResumeCheck::Continue
+        );
+    }
+
+    /// A hosted mob's gate reads that mob's realm: a run whose item another
+    /// member of the hosted mob claimed is superseded, and the reason names
+    /// that owner.
+    #[tokio::test]
+    async fn a_hosted_mobs_worker_whose_item_another_owner_took_is_superseded_for_that_reason() {
+        let host = service();
+        let hosted = hosted_view(&host);
+        let worker = Worker::of(HOSTED, WORKER);
+        let (item, projection) = goal_for(
+            &hosted,
+            GoalAttentionTarget::Owner {
+                owner_key: hosted_member_key(WORKER),
+            },
+        )
+        .await;
+        claim(&hosted, &item, hosted_member_key(OTHER), in_an_hour()).await;
+
+        let gate = mob_resume_gate(Some(&host), &hosted_mob(), authoritative())
+            .expect("an authoritative launch with a WorkGraph binds a hosted mob's gate");
+        let check = gate.check_worker(worker.resuming(Some(&projection))).await;
+        let reason = superseded_reason(&check);
+        assert!(
+            reason.contains(&hosted_member_key(OTHER).canonical()),
+            "the reason names the new owner: {reason}"
+        );
+    }
+
+    /// The launch mob's gate reads the launch mob's realm: its worker's run
+    /// continues on an item it holds there, and a run that names an item of
+    /// the hosted mob's realm is not that worker's work.
+    #[tokio::test]
+    async fn the_launch_mobs_resume_gate_reads_the_launch_mobs_realm() {
+        let host = service();
+        let worker = Worker::named(WORKER);
+        let (item, projection) = goal_for(
+            &host,
+            GoalAttentionTarget::Owner {
+                owner_key: member_key(WORKER),
+            },
+        )
+        .await;
+        claim(&host, &item, member_key(WORKER), in_an_hour()).await;
+        let (_hosted_item, hosted_projection) = goal_for(
+            &hosted_view(&host),
+            GoalAttentionTarget::Owner {
+                owner_key: hosted_member_key(WORKER),
+            },
+        )
+        .await;
+
+        let gate = mob_resume_gate(Some(&host), &meerkat_mob::MobId::from(MOB), authoritative())
+            .expect("an authoritative launch with a WorkGraph binds the gate");
+        assert_eq!(
+            gate.check_worker(worker.resuming(Some(&projection))).await,
+            ResumeCheck::Continue
+        );
+        let foreign = gate
+            .check_worker(worker.next_run().resuming(Some(&hosted_projection)))
+            .await;
+        assert!(
+            superseded_reason(&foreign)
+                .contains(&hosted_view(&host).default_realm_id().to_string()),
+            "{foreign:?}"
+        );
+    }
+
+    /// A hosted mob has no gate where the launch mob has none: on a
+    /// candidate launch, and on a launch without a WorkGraph.
+    #[tokio::test]
+    async fn a_hosted_mob_has_no_resume_gate_on_a_candidate_launch_or_without_a_service() {
+        use crate::mob_composition_manifest::CompositionAuthority;
+
+        let host = service();
+        assert!(
+            mob_resume_gate(
+                Some(&host),
+                &hosted_mob(),
+                CompositionAuthority::NonAuthoritative
+            )
+            .is_none(),
+            "a candidate launch binds no resume gate"
+        );
+        assert!(
+            mob_resume_gate(None, &hosted_mob(), authoritative()).is_none(),
+            "without a WorkGraph there is nothing to check"
+        );
+    }
+
+    /// The service of a launch whose storage backend has no WorkGraph.
+    fn disabled_service() -> WorkGraphService {
+        WorkGraphService::with_scope(
+            Arc::new(DisabledWorkGraphStore),
+            mob_realm(),
+            WorkNamespace::default(),
+        )
+    }
+
+    /// A mob the launch hosts has no gate over a backend without a WorkGraph,
+    /// as the launch and its launch mob have none.
+    #[test]
+    fn a_hosted_mob_of_a_launch_with_a_disabled_workgraph_backend_binds_no_resume_gate() {
+        assert!(
+            mob_resume_gate(Some(&disabled_service()), &hosted_mob(), authoritative()).is_none(),
+            "a hosted mob has no gate over a backend without a WorkGraph"
+        );
+    }
+
     #[tokio::test]
     async fn a_projected_item_that_ended_or_is_gone_supersedes_the_run() {
         let service = service();
@@ -1051,8 +1242,18 @@ mod tests {
             WorkNamespace::default(),
         );
         assert!(
-            launch_resume_gate(Some(disabled), CompositionAuthority::Authoritative).is_none(),
+            launch_resume_gate(Some(disabled.clone()), CompositionAuthority::Authoritative)
+                .is_none(),
             "a backend without a WorkGraph leaves nothing to check"
+        );
+        assert!(
+            mob_resume_gate(
+                Some(&disabled),
+                &meerkat_mob::MobId::from(MOB),
+                CompositionAuthority::Authoritative
+            )
+            .is_none(),
+            "the launch mob has no gate over a backend without a WorkGraph"
         );
     }
 

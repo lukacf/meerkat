@@ -209,6 +209,21 @@ if [[ ! -x "${durable_steer_audit}" ]]; then
   exit 1
 fi
 
+# The same audit's recovery scene, as a block of its own (the audit's main
+# runs fill most of their shard): a start over the same store recovers the
+# run's batch input bound to the run it resumes and the late Steer input from
+# one stored row, and resumes the run. A row that never left the Steer lane
+# must join the resumed run; a row with a stage attempt, a row that still
+# names a run, a row in the Queue lane, a row that stores no class and a
+# governed row must hold no delivery class after recovery and never join. Four
+# seeded defects (a recovery that ignores the attempts, the run or the lane,
+# and a binding that keeps the class) must each be refused. Four runs and
+# four mutant runs, four free steps after the scene's prefix.
+if run_part audits-d; then
+  echo "running bounded durable in-turn steer recovery scene TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${durable_steer_audit}" "${DURABLE_STEER_AUDIT_MAX_STEPS:-16}" --recovery-scene --mutants
+fi
+
 # The live-context outbox invariants (no closed channel leaves a queued row;
 # no queued row is one a channel's provider session already carries) are
 # model-checked by a second bounded audit over the same generated model: one
@@ -786,6 +801,38 @@ fi
 if run_part audits-s; then
   echo "running bounded requester batch TLC audit"
   TLC_WORKERS="${tlc_workers}" "${requester_batch_audit}" "${REQUESTER_BATCH_AUDIT_MAX_STEPS:-14}" --mutants
+fi
+
+# Several durable Steer inputs of one requester at one model boundary. The
+# durable in-turn steer audit above explores one late Steer input and the
+# requester batch audit pairs Steer inputs of different requesters, so
+# neither takes two inputs of one requester through one boundary. A
+# hand-written audit over the same generated model admits two or three Steer
+# inputs of the run's own requester, in order, at the run's first model
+# boundary, and explores for each the durable join, its three resolutions and
+# normalization, a tool round that leaves the boundary and returns to it, a
+# recall of any of them and one more Steer input admitted later, under every
+# generated invariant plus six safety invariants (the three exactly-once
+# invariants over every joined input; a retained join is never undone or
+# joined again; a recalled input holds no join and was never retained; no
+# input joins a stay at the boundary earlier than the first it may join) and
+# two action properties (a recalled input stays abandoned; a recall changes
+# no other input's place, delivery or join). It requires six witnesses
+# reached (two and three inputs all joined in the first stay and retained;
+# the first of three recalled, and the middle one, with the other two
+# retained; three joins of one stay each resolved on its own; a later input
+# joined in the next stay) and refuses three seeded defects (--mutants): the
+# join without its model-boundary guard, the recall without its Queued guard
+# and a recall that drops every delivery. 20 steps reach every witness and
+# mutant; deeper bounds run by hand.
+durable_multi_steer_audit="${workspace_root}/specs/machines/meerkat_machine/durable_multi_steer_audit.sh"
+if [[ ! -x "${durable_multi_steer_audit}" ]]; then
+  echo "error: durable multi-steer audit runner is missing from workspace runfiles: ${durable_multi_steer_audit}" >&2
+  exit 1
+fi
+if run_part audits-d; then
+  echo "running bounded durable multi-steer TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${durable_multi_steer_audit}" "${DURABLE_MULTI_STEER_AUDIT_MAX_STEPS:-20}" --mutants
 fi
 
 # The AuthMachine source-credential publication (a publisher that re-reads
@@ -1687,7 +1734,11 @@ run_machine_verify() {
 # 25-29 s): about 600-700 s;
 # audits-d = durable-tail recovery ownership with --mutants 143-238,
 # live-context outbox 100-146, peer request maps with --mutants 87-134,
-# live-context result barrier with --mutants 25-39: 383-555 s;
+# live-context result barrier with --mutants 25-39: 383-555 s, and the
+# durable in-turn steer audit's recovery scene with --mutants (eight runs,
+# 60 s locally with 4 TLC workers, not yet measured on a hosted runner,
+# about 70-230 s at the 1.2-3.8x below): about 455-785 s, whose upper end
+# is past the 720 s target below;
 # audits-e = member lifecycle with --mutants 441-522, empty-resume residency
 # with --mutants 52-64, durable-tail classification with --mutants 36-48, the
 # MobMachine arm coverage gate under 1: 558-646 s;
@@ -1826,7 +1877,11 @@ run_machine_verify() {
 # tool grant expiry audit 47 s and 46 s. The downgrade cycle run moved to
 # audits-ab: about 505-515 s, and about 790 s at the pace of the shard's
 # slowest run (1152 s);
-# audits-v = its reseat and names runs: 500-665, the shard 525-690 s.
+# audits-v = its reseat and names runs: 500-665, the shard 525-690 s;
+# audits-d also runs the durable multi-steer audit with --mutants (eleven
+# runs of the MeerkatMachine model: 75 s locally with 4 TLC workers, beside
+# the part's other audits' 288 s in the same local run; not yet measured on
+# a hosted runner).
 # The "about" figures are those runs' job times with the moved audit's own
 # time added or taken away, not yet measured as one job. Hosted time ran
 # about 1.2-3.8x the local times with 4 TLC workers recorded for these

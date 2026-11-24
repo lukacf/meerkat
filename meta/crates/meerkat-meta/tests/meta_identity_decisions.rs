@@ -35,8 +35,8 @@ use meerkat_core::{Message, PrincipalKind, PrincipalRef, TrustDomainId};
 use meerkat_meta::identity_creation::{
     AdoptIdentitySpec, AgentTools, ArchiveIdentitySpec, ChangeCommit, ChangeCommitted,
     ChangeConsent, ChangeRequester, ConsequenceLine, CoreChangeExecutor, CreateIdentitySpec,
-    ExecutorError, HeldChangeHost, HeldIdentityChange, HeldTarget, HookRefusal,
-    IDENTITY_DECISION_KINDS, IdentityChangeExecutor, IdentityCreationPolicy,
+    ExecutorError, HeldChangeFamilies, HeldChangeHost, HeldFamily, HeldIdentityChange, HeldTarget,
+    HookRefusal, IDENTITY_DECISION_KINDS, IdentityChangeExecutor, IdentityCreationPolicy,
     IdentityDecisionNotice, IdentityDecisionNotices, IdentityDecisions, IdentityEntryFacts,
     IdentityOutcome, IdentityRefusal, IdentityRequest, KeyedSendNotices, NormalizedRequest,
     OperationId, ProfileTools, RemoveIdentitySpec, RequestContext, RequestEnvelope, Requester,
@@ -1975,6 +1975,71 @@ async fn an_agent_requester_is_told_the_outcome_by_a_keyed_send() {
         "the notice is delivered once"
     );
     rig.shutdown().await;
+}
+
+/// Where a row says the mob of its held changes stands on the host: what
+/// the host's holders of held changes answer its one driver.
+struct StandsAs(Mutex<HeldFamily>);
+
+#[async_trait]
+impl HeldChangeFamilies for StandsAs {
+    async fn of(&self, _mob_id: &str) -> HeldFamily {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+/// A change that ended while the host does not run its mob is told to
+/// nobody, and is told once when the host runs the mob again. The host's
+/// one driver carries the changes of every mob it serves; while the mob of
+/// a rejected change is away no notice of it is sent on any route, however
+/// often the driver passes; when the mob is there, the notice goes through
+/// that mob's own holder, once.
+///
+/// RED before the end of a change was told through the holder of its own
+/// mob alone: while the mob was away the notice went out on the driver's
+/// own route, which is asked nothing about the mob the change was held
+/// for.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_change_that_ended_while_its_mob_is_away_is_told_only_once_the_mob_is_there() {
+    let temp = tempfile::tempdir().unwrap();
+    let rig = boot(temp.path(), &fresh_mob_id()).await;
+    let facts = host_facts();
+    let (decision_id, _) = pending(&rig.ask_create(&facts, "away-1", &["scout"]).await);
+    rig.present(&decision_id);
+    let answer = rig.chat_decides(&decision_id, OWNER, false).await;
+    assert!(answer["error"].is_null(), "{answer:#?}");
+
+    let stands = Arc::new(StandsAs(Mutex::new(HeldFamily::Away)));
+    let of_the_host = rig
+        .decisions
+        .clone()
+        .with_families(Arc::clone(&stands) as Arc<dyn HeldChangeFamilies>);
+    let mut executors = of_the_host
+        .executor_loop(rig.runtime.decision_approver_currentness())
+        .expect("the executor loop starts");
+    let passes_while_away = drive(&mut executors).await;
+    let told_while_away = rig.notices.all();
+
+    *stands.0.lock().unwrap() = HeldFamily::Here(Box::new(rig.decisions.clone()));
+    let passes_once_there = drive(&mut executors).await;
+    let told_once_there = rig.notices.all();
+    rig.shutdown().await;
+    assert_eq!(
+        told_while_away,
+        Vec::new(),
+        "nobody is told while the host does not run the change's mob: {passes_while_away:?}"
+    );
+    assert_eq!(
+        passes_once_there,
+        vec![DecisionPassOutcome::NoticeSettled],
+        "the notice is settled once the host runs the mob"
+    );
+    assert_eq!(told_once_there.len(), 1, "{told_once_there:?}");
+    assert_eq!(told_once_there[0].decision_id, decision_id);
+    assert_eq!(
+        told_once_there[0].outcome.to_json()["state"],
+        json!("rejected")
+    );
 }
 
 /// The driver makes one pass when it starts, which reads decision records

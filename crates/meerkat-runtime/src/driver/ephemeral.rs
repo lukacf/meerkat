@@ -305,14 +305,19 @@ impl KeptInputKind {
 
 /// Session-local order of durable-class live-boundary Steer deliveries.
 ///
-/// Each boundary of a running run accepts one durable delivery, so durable
-/// Steer inputs prepare one at a time, oldest first in the steer lane. A
-/// durable Steer whose live-boundary work finds an older durable Steer still
-/// in the lane waits until that one's work settles, then reads the lane
-/// again: once the older one has joined the run it prepares for the next
-/// boundary, and if the older one went back to its follow-up turn it follows
-/// it there. The generated lanes stay the order authority; this only
-/// sequences the live ingress tasks and is never persisted.
+/// Each boundary of a running run has one durable claim, so durable Steer
+/// inputs prepare one at a time, oldest first in the steer lane: the
+/// preparing one holds the claim for the lane. Once the runner has parked at
+/// the boundary, the holder's work joins its own input and every durable
+/// Steer waiting behind it in the lane to the run and publishes them
+/// together. A durable Steer whose live-boundary work finds an older durable
+/// Steer still in the lane waits until that one's work settles, then reads
+/// the lane again: if the holder joined it, it is done; if it is still
+/// queued it prepares for the next boundary; and if an older one went back
+/// to its follow-up turn it follows it there. A holder whose own input is
+/// recalled while it waits keeps the claim for the steers behind it. The
+/// generated lanes stay the order authority; this only sequences the live
+/// ingress tasks and is never persisted.
 #[derive(Debug, Default)]
 pub(crate) struct DurableSteerOrder {
     state: std::sync::Mutex<DurableSteerOrderState>,
@@ -363,6 +368,11 @@ impl DurableSteerOrder {
             order: Arc::clone(self),
             input_id: input_id.clone(),
         }
+    }
+
+    /// Whether `input_id`'s live-boundary work is running.
+    pub(crate) fn is_working(&self, input_id: &InputId) -> bool {
+        self.state().working.contains(input_id)
     }
 }
 
@@ -2964,6 +2974,25 @@ impl EphemeralRuntimeDriver {
         self.dsl_steer_lane()
     }
 
+    /// The first input of the steer lane for which the machine holds a
+    /// durable live-boundary delivery, when no live-boundary work runs for
+    /// it. Such a steer still waits for a boundary of its run with nothing
+    /// to register it there: the work its admission started did not outlive
+    /// the process.
+    pub(crate) fn durable_steer_waiting_without_work(&self) -> Option<InputId> {
+        let lane = self.dsl_steer_lane();
+        let head = self.with_dsl_state(|state| {
+            lane.into_iter().find(|input_id| {
+                state
+                    .input_live_boundary_delivery
+                    .get(&Self::dsl_key(input_id))
+                    .copied()
+                    == Some(mm_dsl::LiveBoundaryDelivery::DurableAppend)
+            })
+        })?;
+        (!self.durable_steer_order.is_working(&head)).then_some(head)
+    }
+
     /// DSL-tracked lifecycle phase for the given input, if known.
     pub fn ingress_lifecycle(&self, input_id: &InputId) -> Option<InputLifecycleState> {
         self.input_phase(input_id)
@@ -3339,6 +3368,12 @@ impl EphemeralRuntimeDriver {
         let lane = matches!(lifecycle_state, InputLifecycleState::Queued)
             .then_some(recovery_lane)
             .flatten();
+        // The delivery class the machine stamped on the row at admission goes
+        // back with the row's other admission stamps. The machine decides
+        // whether the recovered input keeps it.
+        let live_boundary_delivery = runtime_grouping
+            .and_then(|(runtime_semantics, _)| runtime_semantics.live_boundary_delivery())
+            .map(mm_dsl::LiveBoundaryDelivery::from);
         let (
             runtime_boundary,
             runtime_execution_kind,
@@ -3395,6 +3430,7 @@ impl EphemeralRuntimeDriver {
                 runtime_execution_kind,
                 runtime_peer_response_terminal_apply_intent,
                 is_prompt,
+                live_boundary_delivery,
             },
             "RecoverInputLifecycle",
         )
@@ -10724,6 +10760,7 @@ mod tests {
                     runtime_execution_kind: None,
                     runtime_peer_response_terminal_apply_intent: None,
                     is_prompt: false,
+                    live_boundary_delivery: None,
                 },
                 "RecoverInputLifecycle(test)",
             )

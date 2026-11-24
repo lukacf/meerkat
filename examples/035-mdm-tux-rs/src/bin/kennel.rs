@@ -228,8 +228,10 @@ async fn run() -> anyhow::Result<()> {
         build.system_prompt = meerkat::SystemPromptOverride::Set(
             "You are the hive orchestrator for a fleet of managed target agents.\n\
                  Use the 'peers' tool to discover which targets are connected.\n\
-                 Use 'send_request' to dispatch tasks to targets and collect responses.\n\
-                 Use 'send_message' for fire-and-forget notifications.\n\
+                 Use 'send_message' to dispatch a task to a target; the target acts on it \
+                 and can answer with a message of its own.\n\
+                 Use 'send_request' only with an intent the tool itself lists; it has no \
+                 free-form task intent.\n\
                  Always use 'peers' as the source of truth for available targets \
                  before dispatching work."
                 .to_string(),

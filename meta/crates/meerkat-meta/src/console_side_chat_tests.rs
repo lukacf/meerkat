@@ -803,6 +803,7 @@ async fn a_side_chat_frame_is_decided_along_its_source() -> TestResult {
     let frame = aggregator
         .store()
         .append_if_absent(NewConsoleFrame {
+            mob_id: None,
             id: None,
             dedupe_key: "side-chat-frame".to_string(),
             timestamp_ms: 2_000,
@@ -3227,7 +3228,8 @@ async fn a_member_row_names_its_mob_and_host_from_where_it_was_read() -> TestRes
     let other =
         projected_row_labels(&runtime, Some("a-host"), Some("a-child-mob"), &registered).await;
     for name in ["alpha", "beta", "gamma"] {
-        let labels = &other[name];
+        // A row read as another mob's is named by that mob and its name.
+        let labels = &other[format!("a-child-mob/{name}").as_str()];
         assert_eq!(
             labels.get("source_mob_id").map(String::as_str),
             Some("a-child-mob"),

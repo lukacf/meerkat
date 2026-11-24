@@ -1672,6 +1672,10 @@ mod tests {
                 include_str!("unified_runtime/mod.rs"),
             ),
             (
+                "unified_runtime/mob_entry.rs",
+                include_str!("unified_runtime/mob_entry.rs"),
+            ),
+            (
                 "console_aggregator/mod.rs",
                 include_str!("console_aggregator/mod.rs"),
             ),

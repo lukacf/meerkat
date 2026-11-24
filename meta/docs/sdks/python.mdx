@@ -30,6 +30,9 @@ pip install meerkat-meta
 
 ## Quick start
 
+For a complete application that tracks its own turns and keeps its agents across
+restarts, see the [supervised Python example](https://github.com/lukacf/meerkat/tree/main/meta/examples/007-supervised-python-app).
+
 In a fresh project directory, create `config/mob.toml`:
 
 ```toml
@@ -964,6 +967,167 @@ if health.last_delivery_error and health.last_delivery_error["class"] == "reload
 status enum is non-exhaustive, so consumers should tolerate future state
 strings.
 
+### More than one mob on a gateway
+
+A gateway hosts the mob its launch names and can host more. `runtime.mob_handle()`
+is the handle of the launch's own mob. `runtime.mob(mob_id)` is the same
+`MobHandle` for a mob named by its id, and `runtime.mobs` creates, lists and
+reads the mobs of the host, and stops, resumes, redefines and destroys them.
+
+```python
+from pathlib import Path
+
+entry = await runtime.mobs.create(Path("research.toml").read_text())
+for mob in await runtime.mobs.list():
+    print(mob.mob_id, mob.default, mob.state)
+
+research = runtime.mob(entry.mob_id)          # sends nothing
+members = await research.list_members()       # every call carries mob_id
+await research.send(members[0].agent_identity, "Review PR #42")
+```
+
+**The hosting calls.** `runtime.mobs` has six calls, and each asks the
+gateway every time: the SDK keeps no list of mobs and no state of one.
+
+| Call | Wire method | Returns |
+|------|-------------|---------|
+| `mobs.create(mob_config)` | `meta/mobs/create` | the new mob's `HostedMob`; `mob_config` is the mob definition as TOML text, and the mob's id is the definition's `[mob] id` |
+| `mobs.list()` | `meta/mobs/list` | `list[HostedMob]`, the launch's own mob first; loads no mob |
+| `mobs.get(mob_id)` | `meta/mobs/get` | one `HostedMob`; loads the mob when the host created it and it is not loaded |
+| `mobs.lifecycle(mob_id, action)` | `meta/mobs/lifecycle` | `MobLifecycleResult`: the mob's entry (`mob`) and, for a stop, its stop report (`stop_report`); `action` is `"stop"` or `"resume"` |
+| `mobs.redefine(mob_id, mob_config, expected_revision)` | `meta/mobs/redefine` | `MobRedefineResult`: the mob's entry and the update's `receipt` (`MobRedefineReceipt`: `previous_revision`, `committed_revision`, `projection_revision`, `event_cursor`, `declared_fields`); `expected_revision` is the mob's `revision` (below) |
+| `mobs.destroy(mob_id)` | `meta/mobs/destroy` | `MobDestroyResult`: `mob_id` and the `destroy_report`; removes the mob's storage |
+
+A `HostedMob` has `mob_id`, `default` (true for the mob the launch names) and
+`state`, and when the gateway sent them `provenance`, `failure`,
+`quarantine` and `revision`. `state` says where the mob stands. `creating`,
+`running`, `completed` and `destroyed` are the lifecycle of a loaded mob.
+`stopped` is the mob's own stop and holds whether the host has the mob
+loaded or not: the host's records keep it, across a restart too. `dormant`
+says that the host knows the mob, has not loaded it and does not know it as
+stopped. `quarantined` says that its store could not be opened or restored,
+and `held` that a mob one of the host's agents created waits for its owner.
+The list
+(`HOSTED_MOB_STATES`) is open: a state newer than this SDK is kept as its
+text and `known_state` is false, so read `state` as advice. `provenance`
+(the kind of the mob's creation record: `host`, `member` or another kind)
+is `None` for a quarantined or held mob, and for a mob that is not loaded
+and whose store the host has not read yet: for a short time after a start
+such a mob reads `dormant`, a stopped one too, until the host has read its
+store, which it does by itself.
+
+`mobs.list` loads nothing: it answers from the host's records. `mobs.get`
+loads the mob it names when the host created it and it is not loaded, as its
+store has it: a stopped mob loads stopped, no agent of it runs and nothing is
+started. A mob one of the host's agents created is answered from the records
+and is not loaded by a `get`. A load that fails raises what a `lifecycle` of
+that mob would raise, unless the host's records show what became of the mob:
+a store that cannot be opened is kept quarantined, and the entry says so.
+
+`revision` is the revision of the mob's definition: a whole number that every
+committed redefinition advances. A mob that was never redefined reports the
+revision its create recorded. `mobs.get` carries it for a loaded mob, which a
+mob the host created is after a `get`, and so does the entry in a `create`,
+`lifecycle` or `redefine` answer; an entry of `mobs.list` never carries it,
+and a `quarantined` or `held` mob has `None`.
+
+```python
+await runtime.mobs.lifecycle("research", "stop")
+entry = await runtime.mobs.get("research")
+if entry.revision is not None:
+    result = await runtime.mobs.redefine(
+        "research", Path("research.toml").read_text(), expected_revision=entry.revision
+    )
+    await runtime.mobs.lifecycle("research", "resume")
+```
+
+Read `mobs.get(mob_id).revision` before a `redefine` and pass it as
+`expected_revision`: the `get` loads a mob the host created, so its entry
+carries the revision. A `quarantined` or `held` mob has none.
+
+The calls need the gateway's `hosted_mobs` feature capability
+(`supports_hosted_mobs`). Their own refusals raise `MobHostingRefusedError`
+(code `-32059`) with `kind`, `mob_id`, `retryable` and `detail`. The kinds
+(`MOB_HOSTING_REFUSAL_KINDS`) are a closed list: `mob_exists` (a create under
+an id a mob of the host has, loaded or not), `invalid_mob_id`,
+`default_mob` (a destroy, a redefinition, a stop or a resume of the mob the
+launch names), `mob_not_stopped`
+(a redefinition of a mob that is not stopped: stop the mob, redefine it,
+resume it) and `mob_busy` (a redefinition of a stopped mob that still holds
+something: the one kind with `retryable` true; its `detail` ends with
+`held: ` and one closed word for each thing held, `work`, `roster` or
+`owner`, or the word `unanswered`). A kind newer than this
+SDK is still this error, with `known_kind` false.
+
+`lifecycle`, `redefine` and `destroy` name their mob themselves: there is no
+default, so none of them can reach the launch's own mob by omission. A stop
+and a resume are the mob's own. The launch's own mob is not stopped or
+resumed through `lifecycle` (`default_mob`): its host stops it by its own
+means. A
+storage refusal with code `-32014` raises `StorageResolutionError`, even
+when it carries no structured `data`; the error keeps its message and code.
+These answers remain plain `RpcError` with their data: a mob the host does
+not have (`foreign_mob_target`), a mob whose store did not load
+(`mob_quarantined`; such a mob cannot be destroyed through `destroy`). A
+call that lacks what the wire requires (an id or a definition that is not
+text, another action, a revision that is not
+a whole number or is negative) is refused before anything is sent, with a
+`TypeError` or a `ValueError`. An answer the SDK cannot read raises
+`ContractMismatchError` instead, so the two are told apart: the request was
+sent and the gateway acted on it. That is an answer without its entry, its
+id or a member of its receipt, a stop answered without its stop report, and
+a report that is not an object.
+
+**A handle for a named mob.** Obtaining `runtime.mob(mob_id)` sends nothing
+and loads nothing, and it does not say whether the host has such a mob. Every
+call of the handle then carries `mob_id`: in each JSON-RPC request, in the
+multipart upload of `send` with attachments and `upload_blob`, and as
+`?mob_id=` on the streams of `subscribe_agent` and `subscribe_mob`. A call on
+a mob the host does not have raises a plain `RpcError` (`-32602`, data `kind`
+`foreign_mob_target`). `handle.mob_id` is the id, and `None` on the handle of
+the launch's own mob, whose requests name no mob, as before.
+
+A method with a `mob_id` of its own keeps it: the announcement methods that
+take `mob_id` (`announce`, `announcement_get`, `announcement_audit_list` and
+the `announcement_source_*` methods), `query_events(mob_id=...)` and an
+`EventQuery.mob_id` send the value you pass, and the handle's id when you
+pass none.
+
+The agent memory calls of a handle send `realm` beside the mob when you give
+one, as you gave it, and leave it out otherwise: the gateway then takes the
+memory realm of the mob the request names.
+
+A gateway of an earlier release ignores `mob_id` and answers for its own mob.
+So a named handle first reads the gateway's `mob_addressing` feature
+capability (`supports_mob_addressing`), once per started gateway, and without
+it every call raises `CapabilityUnavailableError` and nothing else is sent.
+The handle of the launch's own mob reads it before one call only, a
+`query_events` that names a mob, and refuses that query without it: such a
+gateway would answer the query without an error and for its own mob.
+
+`runtime.jobs`, `runtime.monitors`, the realm MCP calls and
+`runtime.list_identities()` are the host's whichever mob is named; they stay
+on the runtime.
+
+**Providers under a host with more than one mob.** The three callbacks that
+build a member name the member's mob: `customize_build`'s
+`AgentBuildContext.mob_id`, `after_create`'s context (`mob_id`), and the
+`context` a topology provider's `compute_edges` is given (`mob_id`). A host
+that names none serves its own mob only, and the value is `None` (absent in
+the topology context). In the two context classes `mob_id` is given by
+keyword only. A `mob_id` that is not text is refused: the callback answers
+an error (`ContractMismatchError`) and the customizer or the provider is
+not asked. The callback tools a customizer registers with
+`draft.register_tool` are kept per mob and identity, so a build of
+`analyst` in one mob leaves the tools of `analyst` in another in place. An
+SDK older than this one keeps them per identity name alone: under a host
+with two mobs, a build of a member in one mob releases the callback tools of
+the member with the same name in the other. A mob created under the id of a
+destroyed mob starts with none of that mob's callback tools: the gateway
+names each mob's incarnation with the build (`mob_incarnation` beside
+`mob_id`), and the first member build of the later mob releases every tool
+kept under that mob id.
+
 ### Cross-mob peering (two gateways)
 
 From 0.9.15. Through 0.9.14 `wire_cross_mob` wired nothing, and the Python builder had no `member_comms_tcp`.
@@ -1101,6 +1265,7 @@ rt = await (
 | `.auth(config)` | Auth configuration |
 | `.console_auth_required(required)` | Set `runtime_options.console_require_app_auth`; `False` is the explicit opt-out from the fail-closed console default (see [Console access](#console-access)) |
 | `.console_read_only(read_only=True)` | View-only console: mutating console RPCs are denied and omitted from capabilities |
+| `.console_list_nested_mobs(listed)` | After 0.9.17. Set `runtime_options.console_list_nested_mobs`; `False` hides the mobs nested under the gateway's mob, and their members, on every console read (the default lists them) |
 | `.console_fetch_timeout_ms(ms)` | Bundled-console JSON fetch timeout override (positive integer) |
 | `.console_config(path)` | Console UI TOML (`ConsoleUiConfig`) forwarded as `runtime_options.console_config_path` |
 | `.fork_instruction_policy(policy)` | What a fork of a member with activated instructions does with them, forwarded as `runtime_options.fork_instruction_policy`: `"require_explicit_activation"` (the default when unset), `"reactivate_inherited"` or `"refuse"`. Another value raises `ValueError`. See [Fork instruction policy](/reference/configuration#fork-instruction-policy) |
@@ -1221,6 +1386,10 @@ runtime = await (
 )
 ```
 
+`handle.query_events(...)` reads the declared event log. A gateway with no
+event log configured reads as an empty list through the SDK: an empty result
+does not show that no event happened.
+
 The resolved picture is the typed storage census: `StatusResult.storage` /
 `CapabilitiesResult.storage` parse the gateway's `storage` object into
 `StorageSummary` (blob durability, the H2 incremental probe, and the
@@ -1323,6 +1492,19 @@ finally:
     await rt.shutdown()
 ```
 
+The [supervised example](https://github.com/lukacf/meerkat/tree/main/meta/examples/007-supervised-python-app)
+shows how to recover after the gateway child dies. It skips respawn when the
+provider key is absent. In a separate check with the released Meta 0.9.16
+Python SDK and gateway, respawning the OpenAI-backed agent without its
+provider credential raised `RpcError` with `MemberRestoreFailed` and
+`missing_secret`.
+
+If the gateway child dies, a status call can raise `TransportReaderFailedError`
+or its subclass `GatewayChildEndedError`, depending on when the SDK observes
+the exit. Still call `shutdown()` to release local resources. On 0.9.16 it
+raised `RuntimeError` after bounded cleanup in this case. The example lets
+that error pass only if `last_gateway_termination.state` is `"exited"`.
+
 ### Startup: no built-in total deadline
 
 `connect()` (and `build()`) runs `meta/init` as accepted-then-settled. The
@@ -1356,7 +1538,8 @@ The wait ends only when one of these happens:
 `meta/init_progress` phase seen, such as `"roster"` or `"restore"`) and
 `reason`. That makes a stuck or interrupted init diagnosable. The gateway may
 already have changed native state, so the SDK never retries it automatically
-and asks the gateway to shut down.
+and asks the gateway to shut down. See [step 6 of the supervised example](https://github.com/lukacf/meerkat/tree/main/meta/examples/007-supervised-python-app)
+for how to distinguish an unknown startup outcome from a refused start.
 
 Provider callbacks that run during startup (roster, topology, session
 builder, customizer) must not call ordinary runtime RPCs on the same
@@ -1609,7 +1792,8 @@ class MyCustomizer(AgentCustomizerProtocol):
         spec: DurableAgentSpec,
         draft: AgentBuildDraft,
     ) -> None:
-        # context.identity, context.active_peers, context.managed_edges are read-only.
+        # context.identity, context.active_peers, context.managed_edges and
+        # context.mob_id are read-only.
         if spec.profile == "security":
             draft.register_tool("unifi_scan", my_scan_handler, description="Scan the UniFi controller")
         draft.additional_instructions.append(f"Your wired peers: {', '.join(context.active_peers)}")
@@ -1618,6 +1802,21 @@ class MyCustomizer(AgentCustomizerProtocol):
 `draft` also carries `model`, `system_prompt`, `additional_instructions`,
 `labels`, `app_context`, and `provider_params`. A tool registered here rides
 the same `callback/call_tool` dispatch as `build_agent` tools.
+
+`context.mob_id` is the mob of the member being customized (`context.mobId`
+in TypeScript). A gateway can host several mobs, and two of them can have a
+member of one name: the mob and `context.identity` together name the member,
+and the SDK keeps the handlers each build registers per mob and member name,
+so a build of one mob's member never releases the handlers of another mob's
+member of the same name. The gateway sends the mob as `mob_id` beside
+`scope_id` in the params of `callback/agent_customizer/customize_build`, not
+inside the context object. With an earlier gateway the callback
+names no mob: `context.mob_id` is `None` (`context.mobId` is absent) and the
+handlers are kept per member name, as before. An earlier SDK
+ignores `mob_id`: while a gateway hosts two mobs that each have a member of
+one name, one mob's build of that name releases the other mob's customizer
+tools for it until that mob builds it again, and a call to them fails with
+`no handler registered for tool`.
 
 Each identity member has one stable tool dispatcher for its whole life, and
 every `customize_build` publishes its tools into it. The tool list and the
@@ -1894,6 +2093,7 @@ from meerkat_meta.errors import (
     IdentityWakeHeldError,             # The wake is held until an operator acts (-32603): .kind names the hold
     ToolGrantRequestRefusedError,      # A refused meta/tool_grants/* request (-32602): .refusal_kind, .refusal
     IdentityRefusedError,              # From 0.9.15: a refused meta/identity/* request (-32058): .kind, .field, .detail, .retryable, .details
+    MobHostingRefusedError,            # A refused meta/mobs/* request (-32059): .kind, .mob_id, .retryable, .detail
     RealmMcpRefusedError,              # A refused meta/realm_mcp/* request (-32602): .refusal_kind, .refusal
     RealmMcpUnavailableError,          # A realm MCP write could not be made now, or no credential store (-32004)
     RealmMcpOutcomeUnknownError,       # A realm MCP write began and its result is unknown (-32603)
@@ -2157,6 +2357,12 @@ from meerkat_meta import (
     IdentityChangePlan, identity_outcome_from_dict,
     IDENTITY_REFUSAL_KINDS, IDENTITY_REFUSED_CODE, IDENTITY_OUTCOMES,
     INSTRUCTION_OUTCOME_KINDS, INSTRUCTION_NEXT_SESSION_REASONS, AGENT_SEATS,
+    # More than one mob on a gateway
+    MobsHandle, HostedMob, HOSTED_MOB_STATES,
+    MobLifecycleResult, MobRedefineResult, MobRedefineReceipt, MobDestroyResult,
+    MOB_ADDRESSING, supports_mob_addressing, HOSTED_MOBS, supports_hosted_mobs,
+    MobHostingRefusal, MobHostingRefusedError,
+    MOB_HOSTING_REFUSAL_KINDS, MOB_HOSTING_REFUSED_CODE,
     # Config modules
     auth, event_log, memory, runtime_store,
 )

@@ -14,8 +14,8 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
@@ -65,6 +65,364 @@ pub(crate) use set_aside::set_aside_scope_key;
 /// tracing; deterministic code never evicts.
 pub const DEFAULT_SCOPE_FLOOR_RECORDS: usize = 4_000;
 pub const DEFAULT_SCOPE_FLOOR_BYTES: usize = 32 * 1024 * 1024;
+
+/// The directory, below a launch's memory root, that holds the agent memory
+/// of the mobs the launch hosts beside its launch mob: one directory per
+/// mob beneath it. A stored contract.
+///
+/// The name holds a `.`, which [`encode_path_segment`] never writes: no
+/// realm's file stem and no realm's import directory has this name, so no
+/// realm a caller names leads the launch's store into it.
+pub(crate) const HOSTED_MOBS_DIR: &str = "hosted-mobs.d";
+
+/// The name of a hosted mob's directory under [`HOSTED_MOBS_DIR`]: the mob
+/// id with its ASCII lowercase letters, digits, `-` and `_` kept and every
+/// other byte, a capital letter included, written `%xx` in lowercase hex.
+/// A stored contract. `None` for an empty id.
+///
+/// The name is one path segment that holds no separator and no `.`, and no
+/// capital letter: two ids have two names on a file system that ignores
+/// letter case too, and each name spells back exactly one id.
+pub(crate) fn hosted_mob_segment(mob_id: &str) -> Option<String> {
+    if mob_id.is_empty() {
+        return None;
+    }
+    let mut segment = String::with_capacity(mob_id.len());
+    for byte in mob_id.bytes() {
+        if byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-' || byte == b'_' {
+            segment.push(char::from(byte));
+        } else {
+            segment.push_str(&format!("%{byte:02x}"));
+        }
+    }
+    Some(segment)
+}
+
+/// What the name of a hosted mob's directory ends with once a release took
+/// the directory out of the mob's name, until the release has removed it:
+/// `<the mob's segment>.released`, directly under [`HOSTED_MOBS_DIR`].
+///
+/// [`hosted_mob_segment`] writes no `.`, so no mob id has this name: a mob
+/// created under the id of a released mob never opens what the release left,
+/// and a directory with this name exists only because a release was asked
+/// for its mob.
+const RELEASED_SUFFIX: &str = ".released";
+
+/// What every operation through a store value answers once the memory it
+/// keeps was released with its mob: the one text of that refusal.
+const RELEASED_STORE_IS_CLOSED: &str = "this memory was released with its mob: the store is closed";
+
+/// The name of the file, directly in a hosted mob's memory directory, that
+/// says which mob, and which incarnation of it, the directory was made for.
+/// A stored contract.
+pub(crate) const HOSTED_MOB_MARK: &str = "mob-incarnation";
+
+/// What stands between a hosted mob's segment and the incarnation in the
+/// name of the directory a first use makes beside the mob's own, before it
+/// has the mob's name. No mob id's segment holds a `.`, so the name is no
+/// mob's, and it does not end in [`RELEASED_SUFFIX`].
+const MAKING_INFIX: &str = ".making-";
+
+/// What a hosted mob's memory directory says of itself
+/// ([`HOSTED_MOB_MARK`]): the mob it was made for and that mob's
+/// incarnation, a value minted at the mob's create and kept in the mob's
+/// own durable record.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HostedMobMark {
+    mob_id: String,
+    incarnation: meerkat_core::service::MobIncarnationId,
+}
+
+/// The mob, its incarnation and the directory a [`HostedMemoryRefusal`] is
+/// about.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HostedMobDirectory {
+    mob_id: meerkat_mob::MobId,
+    incarnation: meerkat_core::service::MobIncarnationId,
+    directory: PathBuf,
+}
+
+/// Why a hosted mob is served no memory from the directory under its name:
+/// the directory is not proved to be that mob's. Nothing of it was read
+/// into an agent, written or initialized, and nothing in it was changed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum HostedMemoryRefusal {
+    /// The directory's mark names another mob, or another incarnation.
+    WrittenForAnotherMob {
+        of: HostedMobDirectory,
+        marked_mob: String,
+        marked_incarnation: meerkat_core::service::MobIncarnationId,
+    },
+    /// A directory stands under the mob's name with no mark, whatever it
+    /// holds.
+    NotMarked { of: HostedMobDirectory },
+    /// The directory's mark, or the directory's own entry, cannot be read.
+    MarkUnreadable {
+        of: HostedMobDirectory,
+        detail: String,
+    },
+    /// What stands under the mob's name is no directory.
+    NotADirectory { of: HostedMobDirectory },
+    /// The directory this value found or made is gone: a value makes its
+    /// directory once, before it has used it.
+    Gone { of: HostedMobDirectory },
+}
+
+impl HostedMemoryRefusal {
+    fn of(&self) -> &HostedMobDirectory {
+        match self {
+            Self::WrittenForAnotherMob { of, .. }
+            | Self::NotMarked { of }
+            | Self::MarkUnreadable { of, .. }
+            | Self::NotADirectory { of }
+            | Self::Gone { of } => of,
+        }
+    }
+}
+
+impl HostedMemoryRefusal {
+    /// Why the directory is refused, in words that name no path, no mob
+    /// and no incarnation: what a refusal says outside the host's log.
+    pub(crate) fn kind(&self) -> &'static str {
+        match self {
+            Self::WrittenForAnotherMob { .. } => {
+                "it is marked for another mob, or for another incarnation of this mob"
+            }
+            Self::NotMarked { .. } => "a directory stands there with no mark",
+            Self::MarkUnreadable { .. } => "its mark cannot be read",
+            Self::NotADirectory { .. } => "what stands there is no directory",
+            Self::Gone { .. } => "the directory this store used is gone",
+        }
+    }
+}
+
+/// Why no agent of a hosted mob is built, where the mob's launch builds an
+/// agent only with the mob's agent memory (the recall failure policy
+/// `fail`). While one of these stands, every build of the mob's members is
+/// refused, to be retried; a composition of the mob that succeeds ends it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum HostedAgentsNotBuilt {
+    /// The mob's agent memory is not composed yet: no composition of the
+    /// mob has succeeded since the mob was built.
+    MemoryNotComposedYet,
+    /// The directory under the mob's name is not proved to be the mob's.
+    MemoryRefused(HostedMemoryRefusal),
+}
+
+/// What a refused build is told: no path, no mob and no incarnation.
+impl std::fmt::Display for HostedAgentsNotBuilt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MemoryNotComposedYet => f.write_str(
+                "the mob's agent memory is not composed yet, and the launch's recall failure \
+                 policy is `fail`: none of the mob's agents is built before the mob is composed",
+            ),
+            Self::MemoryRefused(refusal) => write!(
+                f,
+                "the mob's agent memory directory is not proved to be the mob's ({}), and the \
+                 launch's recall failure policy is `fail`: none of the mob's agents is built \
+                 until the directory is the mob's",
+                refusal.kind()
+            ),
+        }
+    }
+}
+
+impl std::fmt::Display for HostedMemoryRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let of = self.of();
+        write!(
+            f,
+            "the agent memory directory {} is not proved to be the mob '{}''s (incarnation \
+             {}): ",
+            of.directory.display(),
+            of.mob_id,
+            of.incarnation
+        )?;
+        match self {
+            Self::WrittenForAnotherMob {
+                marked_mob,
+                marked_incarnation,
+                ..
+            } => write!(
+                f,
+                "it is marked for the mob '{marked_mob}' at the incarnation {marked_incarnation}"
+            ),
+            Self::NotMarked { .. } => f.write_str("a directory stands there with no mark"),
+            Self::MarkUnreadable { detail, .. } => {
+                write!(f, "its mark cannot be read ({detail})")
+            }
+            Self::NotADirectory { .. } => f.write_str("what stands there is no directory"),
+            Self::Gone { .. } => f.write_str("the directory this store used is gone"),
+        }
+    }
+}
+
+/// Where the directory of a hosted mob's store stands for the mob the
+/// value was made for, when it is not refused.
+enum DirectoryStanding {
+    /// Nothing stands under the mob's name.
+    Absent,
+    /// A directory whose mark names this mob and this incarnation.
+    Own,
+}
+
+/// Whose directory a hosted mob's store value serves.
+struct HostedOwner {
+    mob_id: meerkat_mob::MobId,
+    incarnation: meerkat_core::service::MobIncarnationId,
+    /// Set once this value, or a clone of it, found its directory marked
+    /// its own or made it. From then on a directory that is gone is not
+    /// made again.
+    touched: AtomicBool,
+    /// One maker at a time per mob directory in the process: shared by
+    /// every value made for the directory.
+    making: Arc<Mutex<()>>,
+}
+
+/// Sync a directory's own entry list, where the platform lets a directory
+/// be opened for it.
+fn sync_directory(dir: &Path) {
+    if let Ok(opened) = fs::File::open(dir) {
+        let _ = opened.sync_all();
+    }
+}
+
+/// Test builds only: where a row cuts the making of a hosted mob's
+/// directory short, what a row does at a making's start and once the making
+/// holds its maker's lock, and what a row does between a hosted store's
+/// question and its open of a realm file.
+#[cfg(test)]
+pub(crate) mod making_in_tests {
+    use std::path::Path;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicU8, Ordering};
+
+    use crate::identity_first::agent_memory::AgentMemoryError;
+
+    /// What a row does right before a hosted store opens a realm file.
+    type BeforeAnOpen = Box<dyn Fn(&Path) + Send>;
+
+    /// Where a making of a hosted mob's directory stands when it tells a
+    /// row.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum MakingStands {
+        /// At its start: its maker's lock is not taken yet.
+        AtItsStart,
+        /// Under its maker's lock, the release's mark read, nothing made.
+        UnderItsLock,
+    }
+
+    /// What a row does where a making stands.
+    type InAMaking = Box<dyn Fn(MakingStands) + Send>;
+
+    /// The step of a making after which it stops; 0 for none.
+    static STOPS_AFTER: AtomicU8 = AtomicU8::new(0);
+    static BEFORE_AN_OPEN: Mutex<Option<BeforeAnOpen>> = Mutex::new(None);
+    static IN_A_MAKING: Mutex<Option<InAMaking>> = Mutex::new(None);
+
+    /// From now on a making stops after its step `step` (1: the directory
+    /// beside the mob's is made; 2: the mark is written under its writer's
+    /// own name; 3: the mark has its name), or runs to its end for 0.
+    pub(crate) fn stops_after(step: u8) {
+        STOPS_AFTER.store(step, Ordering::SeqCst);
+    }
+
+    pub(super) fn stop_after(step: u8) -> Result<(), AgentMemoryError> {
+        if STOPS_AFTER.load(Ordering::SeqCst) == step {
+            return Err(AgentMemoryError::Io(format!(
+                "a row cut the making short after its step {step}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// From now on `before` runs right before a hosted store opens a realm
+    /// file it holds no connection of, with the store's directory; `None`
+    /// ends it.
+    pub(crate) fn before_an_open(before: Option<BeforeAnOpen>) {
+        *BEFORE_AN_OPEN
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = before;
+    }
+
+    pub(super) fn an_open_comes(directory: &Path) {
+        if let Some(before) = BEFORE_AN_OPEN
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+        {
+            before(directory);
+        }
+    }
+
+    /// From now on `row` runs in each making of a hosted mob's directory,
+    /// at its start and once it holds its maker's lock; `None` ends it.
+    pub(crate) fn in_a_making(row: Option<InAMaking>) {
+        *IN_A_MAKING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = row;
+    }
+
+    pub(super) fn a_making_stands(stands: MakingStands) {
+        if let Some(row) = IN_A_MAKING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+        {
+            row(stands);
+        }
+    }
+}
+
+/// Whether `name` is the name of what a release left of a hosted mob's
+/// directory: a mob's segment and [`RELEASED_SUFFIX`].
+fn is_released_name(name: &str) -> bool {
+    name.strip_suffix(RELEASED_SUFFIX).is_some_and(|segment| {
+        !segment.is_empty()
+            && segment.bytes().all(|byte| {
+                byte.is_ascii_lowercase()
+                    || byte.is_ascii_digit()
+                    || matches!(byte, b'-' | b'_' | b'%')
+            })
+    })
+}
+
+/// The realm connections one store value caches.
+type RealmConnectionCache = Mutex<HashMap<String, Arc<Mutex<Connection>>>>;
+
+/// A store value's cache of realm connections, shared by its clones.
+type RealmConnections = Arc<RealmConnectionCache>;
+
+/// What a launch's store keeps of the stores it made for the mobs the
+/// launch hosts ([`SqliteAgentMemoryStore::of_hosted_mob`]), by each mob's
+/// directory: what a release of that mob's memory closes.
+#[derive(Default)]
+struct HostedStores {
+    by_dir: HashMap<PathBuf, HostedStore>,
+    /// Test builds only: whether every removal a release attempts fails.
+    #[cfg(test)]
+    fail_removals: bool,
+}
+
+/// The values made for one hosted mob's store.
+#[derive(Default)]
+struct HostedStore {
+    /// The mark every value made for this mob carries: set by the mob's
+    /// release, never cleared.
+    released: Arc<AtomicBool>,
+    /// The connection cache of each value made for this mob that is still
+    /// alive.
+    connections: Vec<Weak<RealmConnectionCache>>,
+    /// One maker of the mob's directory at a time in the process
+    /// ([`HostedOwner`]).
+    making: Arc<Mutex<()>>,
+    /// Test builds only: the incarnation the test-only door gives the
+    /// values it makes for this directory while nothing on disk names one.
+    #[cfg(test)]
+    incarnation_in_tests: Option<meerkat_core::service::MobIncarnationId>,
+}
 
 /// Staged-but-uncommitted batches older than this are garbage-collected on
 /// realm open — a dead producer leaves a token that is never applied.
@@ -558,7 +916,25 @@ pub struct SqliteAgentMemoryStore {
     root: PathBuf,
     scope_floor_records: usize,
     scope_floor_bytes: usize,
-    connections: Arc<Mutex<HashMap<String, Arc<Mutex<Connection>>>>>,
+    connections: RealmConnections,
+    /// Set once the memory this value keeps was released with its mob
+    /// ([`Self::release_hosted_mob`]): from then on every operation through
+    /// this value, or a clone of it, is refused, for good. Shared by every
+    /// value made for the same hosted mob; never set for a launch's own
+    /// store.
+    released: Arc<AtomicBool>,
+    /// The mob and the incarnation a hosted mob's store value was made for
+    /// ([`Self::of_hosted_mob`]); none for a launch's own store. Shared by
+    /// the clones of one value.
+    owner: Option<Arc<HostedOwner>>,
+    /// The stores this value made for the mobs its launch hosts, by each
+    /// mob's directory, which a release closes. Shared across clones; a
+    /// hosted mob's store made none. It holds each such value's mark and,
+    /// weakly, its connection cache, and it is read by
+    /// [`Self::of_hosted_mob`] and the release alone: no read, recall or
+    /// listing of this store walks it, and nothing reaches a hosted mob's
+    /// connections, or this store's, through it.
+    hosted: Arc<Mutex<HostedStores>>,
     /// §10.1 write-seam enforcement: consulted for every LLM-authored
     /// create/supersede across ALL write paths (direct and staged commits),
     /// so taint/posture quarantine holds for any caller — the Recorder
@@ -575,6 +951,32 @@ pub struct SqliteAgentMemoryStore {
     event_sink: Arc<Mutex<Option<Arc<dyn crate::memory::events::MemoryEventSink>>>>,
 }
 
+impl HostedStores {
+    /// Remove `released`, what a release took out of a mob's name
+    /// ([`RELEASED_SUFFIX`]): a directory with every file in it. Nothing
+    /// there is no failure.
+    fn remove_released(&self, released: &Path) -> std::io::Result<()> {
+        let metadata = match fs::symlink_metadata(released) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+            Ok(metadata) => metadata,
+        };
+        #[cfg(test)]
+        {
+            if self.fail_removals {
+                return Err(std::io::Error::other(
+                    "the removal was made to fail by a test",
+                ));
+            }
+        }
+        if metadata.is_dir() {
+            fs::remove_dir_all(released)
+        } else {
+            fs::remove_file(released)
+        }
+    }
+}
+
 impl SqliteAgentMemoryStore {
     pub fn open(root: impl Into<PathBuf>) -> Result<Self, AgentMemoryError> {
         let root = root.into();
@@ -589,6 +991,9 @@ impl SqliteAgentMemoryStore {
             scope_floor_records: DEFAULT_SCOPE_FLOOR_RECORDS,
             scope_floor_bytes: DEFAULT_SCOPE_FLOOR_BYTES,
             connections: Arc::new(Mutex::new(HashMap::new())),
+            released: Arc::new(AtomicBool::new(false)),
+            owner: None,
+            hosted: Arc::default(),
             llm_write_gate: Arc::new(Mutex::new(None)),
             evidence_resolver: Arc::new(Mutex::new(None)),
             event_sink: Arc::new(Mutex::new(None)),
@@ -630,19 +1035,617 @@ impl SqliteAgentMemoryStore {
             .join(format!("{}.sqlite3", encode_path_segment(realm)))
     }
 
+    /// The directory of the store that keeps the agent memory of the mob
+    /// `mob_id`, a mob a host serves beside its launch mob:
+    /// `<this store's root>/hosted-mobs.d/<the mob's segment>`
+    /// ([`HOSTED_MOBS_DIR`], [`hosted_mob_segment`]). The one maker of that
+    /// path: the store of the mob is opened there and what releases a
+    /// mob's memory removes exactly that directory.
+    ///
+    /// # Errors
+    /// [`AgentMemoryError::InvalidConfig`] for an empty mob id: it has no
+    /// directory.
+    pub(crate) fn root_of_hosted_mob(
+        &self,
+        mob_id: &meerkat_mob::MobId,
+    ) -> Result<PathBuf, AgentMemoryError> {
+        let segment = hosted_mob_segment(mob_id.as_str()).ok_or_else(|| {
+            AgentMemoryError::InvalidConfig(
+                "a mob with an empty id has no agent memory store".to_string(),
+            )
+        })?;
+        Ok(self.root.join(HOSTED_MOBS_DIR).join(segment))
+    }
+
+    /// The store that keeps the agent memory of the mob `mob_id`, a mob a
+    /// host serves beside its launch mob: the bundled store over that
+    /// mob's own directory ([`Self::root_of_hosted_mob`]), with this
+    /// store's retention floors.
+    ///
+    /// It is a value of its own, not a copy of this one: it shares no realm
+    /// connection, write gate, evidence resolver or event sink with this
+    /// store or with another mob's. Every operation of a store opens a
+    /// realm file directly in the store's own root, so no realm, identity,
+    /// scope key or record id a caller names leads the mob's store to
+    /// another mob's memory, or this store to the mob's. Nothing is made on
+    /// disk here: the mob's directory is made with its first realm file, at
+    /// its first operation.
+    ///
+    /// The value lives as long as the mob's memory does: once that memory
+    /// is released ([`Self::release_hosted_mob`]) every operation through
+    /// it is refused, and a value made afterwards, for a mob created under
+    /// the id, is another store.
+    ///
+    /// The value is made for ONE mob and ONE incarnation of it, the one
+    /// `incarnation` names: the mob's own, read from its durable record by
+    /// whoever makes the value. It serves the directory under the mob's
+    /// name only where the directory's mark ([`HOSTED_MOB_MARK`]) names
+    /// that mob and that incarnation ([`Self::proved_its_own`]); it makes
+    /// the directory, with its mark, where nothing stands there; and every
+    /// other directory there is refused at that question, before a file of
+    /// it is opened or made. The question is asked before each operation
+    /// and before each open of a realm file. A directory another process
+    /// put in the mob's place between that question and the open is
+    /// refused at the read of the mark that follows the open: its realm
+    /// file was opened by then, or made where it held none of that name,
+    /// and the value uses the connection for nothing.
+    ///
+    /// # Errors
+    /// As [`Self::root_of_hosted_mob`].
+    pub(crate) fn of_hosted_mob(
+        &self,
+        mob_id: &meerkat_mob::MobId,
+        incarnation: meerkat_core::service::MobIncarnationId,
+    ) -> Result<Self, AgentMemoryError> {
+        let root = self.root_of_hosted_mob(mob_id)?;
+        let connections: RealmConnections = Arc::new(Mutex::new(HashMap::new()));
+        let (released, making) = {
+            let mut hosted = self
+                .hosted
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let of_the_mob = hosted.by_dir.entry(root.clone()).or_default();
+            #[cfg(test)]
+            {
+                of_the_mob.incarnation_in_tests = Some(incarnation);
+            }
+            of_the_mob
+                .connections
+                .retain(|cache| cache.strong_count() > 0);
+            of_the_mob.connections.push(Arc::downgrade(&connections));
+            (
+                Arc::clone(&of_the_mob.released),
+                Arc::clone(&of_the_mob.making),
+            )
+        };
+        Ok(Self {
+            root,
+            scope_floor_records: self.scope_floor_records,
+            scope_floor_bytes: self.scope_floor_bytes,
+            connections,
+            released,
+            owner: Some(Arc::new(HostedOwner {
+                mob_id: mob_id.clone(),
+                incarnation,
+                touched: AtomicBool::new(false),
+                making,
+            })),
+            hosted: Arc::default(),
+            llm_write_gate: Arc::new(Mutex::new(None)),
+            evidence_resolver: Arc::new(Mutex::new(None)),
+            event_sink: Arc::new(Mutex::new(None)),
+        })
+    }
+
+    /// Release the agent memory of the mob `mob_id`, a mob a host served
+    /// beside its launch mob: the one directory of that mob
+    /// ([`Self::root_of_hosted_mob`]) with every file in it. Called on the
+    /// launch's own store, the value that made the mob's stores.
+    ///
+    /// In this order, under the one lock of this store's hosted stores:
+    ///
+    /// 1. Every value made for the mob is closed: its mark is set, so each
+    ///    later operation through it is refused, and the connections it
+    ///    cached are dropped. Whatever still holds such a value (a run that
+    ///    outlived the mob) is refused at its next operation and cannot
+    ///    make the directory again. A call that had taken its connection
+    ///    before the mark was set is not stopped: it finishes on its open
+    ///    connection, and what it writes goes to the files the release
+    ///    removes. A close of that connection after the rename of step 3
+    ///    removes nothing by name.
+    /// 2. What an earlier release of the mob left is removed.
+    /// 3. The directory is taken out of the mob's name: renamed, inside the
+    ///    hosted directory, to a name no mob id has ([`RELEASED_SUFFIX`]).
+    ///    From here a mob created under the id finds nothing.
+    /// 4. The renamed directory is removed.
+    ///
+    /// A mob with no directory has nothing to release, and a second call
+    /// finds nothing: neither is a failure. The path is this store's own,
+    /// made from the typed id: no text of a caller reaches it, and a mob id
+    /// that holds path characters names its own directory and no other.
+    ///
+    /// # Errors
+    /// When the mob id has no directory (an empty id); when what stands at
+    /// the mob's path is no directory (a file, a link: it is not removed
+    /// and not followed); when the rename cannot be made; and when anything
+    /// a release of this mob took out of its name is still on disk at the
+    /// end. What is left then is removed by the next release of the mob,
+    /// and at the launch's next start
+    /// ([`Self::finish_releases_of_hosted_mobs`]).
+    pub(crate) fn release_hosted_mob(&self, mob_id: &meerkat_mob::MobId) -> std::io::Result<()> {
+        let dir = self
+            .root_of_hosted_mob(mob_id)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        let Some(name) = dir.file_name().and_then(|name| name.to_str()) else {
+            return Err(std::io::Error::other(
+                "the mob has no directory of its own below the hosted directory",
+            ));
+        };
+        let released = dir.with_file_name(format!("{name}{RELEASED_SUFFIX}"));
+        let mut hosted = self
+            .hosted
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let makers = hosted.by_dir.remove(&dir).map(|of_the_mob| {
+            // The mark first: a value that opens a realm file reads it
+            // under its connections' lock, which is taken next.
+            of_the_mob.released.store(true, Ordering::SeqCst);
+            for cache in of_the_mob.connections.iter().filter_map(Weak::upgrade) {
+                cache
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clear();
+            }
+            of_the_mob.making
+        });
+        // No value of the mob makes the mob's directory from here on. A
+        // making reads the mark under its maker's lock
+        // ([`Self::make_new_storage`]), which is taken here once the mark
+        // is set: a making that began before the mark is over, and what it
+        // made is there to be released; one that comes after makes nothing.
+        let _no_maker = makers.as_ref().map(|making| {
+            making
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        });
+        hosted.remove_released(&released)?;
+        // What a first use of a mob of this id began and did not finish: a
+        // directory beside the mob's own that never had the mob's name
+        // ([`MAKING_INFIX`]). It holds a mark and no memory that was served.
+        if let Some(hosted_dir) = dir.parent()
+            && let Ok(entries) = fs::read_dir(hosted_dir)
+        {
+            let begun = format!("{name}{MAKING_INFIX}");
+            for entry in entries.filter_map(Result::ok) {
+                if entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|entry| entry.starts_with(&begun))
+                {
+                    hosted.remove_released(&entry.path())?;
+                }
+            }
+        }
+        match fs::symlink_metadata(&dir) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+            Ok(metadata) if !metadata.is_dir() => {
+                return Err(std::io::Error::other(
+                    "what stands where the mob's memory directory would be is no directory; \
+                     nothing was removed",
+                ));
+            }
+            Ok(_) => {}
+        }
+        fs::rename(&dir, &released)?;
+        hosted.remove_released(&released)
+    }
+
+    /// Finish the releases of hosted mobs' memory that an earlier process
+    /// began and did not end: every directory a release took out of its
+    /// mob's name ([`RELEASED_SUFFIX`]) and could not remove is removed
+    /// now. A launch calls it once at its start.
+    ///
+    /// Nothing else is touched. A directory under a mob's name is never
+    /// removed here, whatever mobs the launch hosts: only a release, asked
+    /// for a mob by its typed id, takes a directory out of its mob's name.
+    /// One that still cannot be removed is logged and stays for the next
+    /// start.
+    pub(crate) fn finish_releases_of_hosted_mobs(&self) {
+        let hosted_dir = self.root.join(HOSTED_MOBS_DIR);
+        let Ok(entries) = fs::read_dir(&hosted_dir) else {
+            return;
+        };
+        let hosted = self
+            .hosted
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for entry in entries.filter_map(Result::ok) {
+            if !entry.file_name().to_str().is_some_and(is_released_name) {
+                continue;
+            }
+            if let Err(error) = hosted.remove_released(&entry.path()) {
+                tracing::warn!(
+                    left = %entry.path().display(),
+                    error = %error,
+                    "what a release of a hosted mob's memory left could not be removed; it \
+                     stays until the next start"
+                );
+            }
+        }
+    }
+
+    /// Test builds only: make every removal a release attempts fail, or
+    /// work again.
+    #[cfg(test)]
+    pub(crate) fn fail_removals_in_tests(&self, fail: bool) {
+        self.hosted
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .fail_removals = fail;
+    }
+
+    /// The directory this store keeps its realm files in.
+    #[cfg(test)]
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// Test builds only: whether this value and `other` share anything a
+    /// store keeps beside its files: the realm connections, the write gate,
+    /// the evidence resolver, the event sink, the mark a release sets or the
+    /// record of the stores it made for hosted mobs.
+    #[cfg(test)]
+    pub(crate) fn shares_a_slot_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.connections, &other.connections)
+            || Arc::ptr_eq(&self.released, &other.released)
+            || Arc::ptr_eq(&self.hosted, &other.hosted)
+            || Arc::ptr_eq(&self.llm_write_gate, &other.llm_write_gate)
+            || Arc::ptr_eq(&self.evidence_resolver, &other.evidence_resolver)
+            || Arc::ptr_eq(&self.event_sink, &other.event_sink)
+    }
+
+    /// Whether the directory under the mob's name is the mob's own, for a
+    /// hosted mob's store value: asked by whoever composes the mob's
+    /// memory, FIRST, before anything is built over the value. Nothing
+    /// under the name, and a directory whose mark names this mob and this
+    /// incarnation, are the mob's. Any other directory is refused: it holds
+    /// no mark, or another's, or one that cannot be read, whatever else it
+    /// holds, an empty directory included. It reads the directory's own
+    /// entry and its mark, nothing else, and makes and changes nothing.
+    ///
+    /// A launch's own store answers that it is its own: its root is not
+    /// keyed by a mob.
+    pub(crate) fn proved_its_own(&self) -> Result<(), HostedMemoryRefusal> {
+        let Some(owner) = self.owner.as_deref() else {
+            return Ok(());
+        };
+        match self.directory_standing(owner)? {
+            DirectoryStanding::Own => {
+                owner.touched.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+            DirectoryStanding::Absent if owner.touched.load(Ordering::SeqCst) => {
+                Err(HostedMemoryRefusal::Gone {
+                    of: self.directory_of(owner),
+                })
+            }
+            DirectoryStanding::Absent => Ok(()),
+        }
+    }
+
+    /// The same question before an operation of a hosted mob's store
+    /// touches its directory, with the answer an operation gives. Where
+    /// nothing stands under the mob's name and `may_make`, the directory is
+    /// made with its mark ([`Self::make_new_storage`]); a value that has
+    /// used its directory before finds it gone and is refused, and makes
+    /// none again.
+    ///
+    /// A stated limit: the question is asked at the start of an operation.
+    /// A call that had taken its connection before the directory went, or
+    /// before another's was put in its place, finishes on that open
+    /// connection: what it writes goes to the files it had open. Only
+    /// another process over the same root can do that to a live value.
+    fn owned_before(&self, may_make: bool) -> Result<(), AgentMemoryError> {
+        let Some(owner) = self.owner.as_deref() else {
+            return Ok(());
+        };
+        let refused = |refusal: HostedMemoryRefusal| AgentMemoryError::Io(refusal.to_string());
+        match self.directory_standing(owner).map_err(refused)? {
+            DirectoryStanding::Own => {
+                owner.touched.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+            DirectoryStanding::Absent if owner.touched.load(Ordering::SeqCst) => {
+                Err(refused(HostedMemoryRefusal::Gone {
+                    of: self.directory_of(owner),
+                }))
+            }
+            DirectoryStanding::Absent if may_make => self.make_new_storage(owner),
+            DirectoryStanding::Absent => Ok(()),
+        }
+    }
+
+    fn directory_of(&self, owner: &HostedOwner) -> HostedMobDirectory {
+        HostedMobDirectory {
+            mob_id: owner.mob_id.clone(),
+            incarnation: owner.incarnation,
+            directory: self.root.clone(),
+        }
+    }
+
+    /// Where the directory under the mob's name stands for `owner`. The
+    /// entry is read without following a link.
+    fn directory_standing(
+        &self,
+        owner: &HostedOwner,
+    ) -> Result<DirectoryStanding, HostedMemoryRefusal> {
+        let of = || self.directory_of(owner);
+        match fs::symlink_metadata(&self.root) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(DirectoryStanding::Absent);
+            }
+            Err(error) => {
+                return Err(HostedMemoryRefusal::MarkUnreadable {
+                    of: of(),
+                    detail: error.to_string(),
+                });
+            }
+            Ok(metadata) if !metadata.is_dir() => {
+                return Err(HostedMemoryRefusal::NotADirectory { of: of() });
+            }
+            Ok(_) => {}
+        }
+        let text = match fs::read_to_string(self.root.join(HOSTED_MOB_MARK)) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(HostedMemoryRefusal::NotMarked { of: of() });
+            }
+            Err(error) => {
+                return Err(HostedMemoryRefusal::MarkUnreadable {
+                    of: of(),
+                    detail: error.to_string(),
+                });
+            }
+        };
+        match serde_json::from_str::<HostedMobMark>(&text) {
+            Ok(mark)
+                if mark.mob_id == owner.mob_id.as_str()
+                    && mark.incarnation == owner.incarnation =>
+            {
+                Ok(DirectoryStanding::Own)
+            }
+            Ok(mark) => Err(HostedMemoryRefusal::WrittenForAnotherMob {
+                of: of(),
+                marked_mob: mark.mob_id,
+                marked_incarnation: mark.incarnation,
+            }),
+            Err(error) => Err(HostedMemoryRefusal::MarkUnreadable {
+                of: of(),
+                detail: error.to_string(),
+            }),
+        }
+    }
+
+    /// Make the directory of a hosted mob's store, where nothing stands
+    /// under the mob's name. A directory is made beside it, under a name
+    /// that is no mob's ([`MAKING_INFIX`]); the mark is written there under
+    /// a name of its writer's own, synced and renamed onto the mark's name;
+    /// then the directory is renamed onto the mob's name. So a directory
+    /// under a mob's name exists only with its mark, wherever the making is
+    /// cut short. One maker at a time per directory in the process; and
+    /// after the rename, won or lost to another process, the mark that
+    /// stands is read: the value goes on only where it names its own mob
+    /// and incarnation.
+    fn make_new_storage(&self, owner: &HostedOwner) -> Result<(), AgentMemoryError> {
+        let io = |error: std::io::Error| AgentMemoryError::Io(error.to_string());
+        let refused = |refusal: HostedMemoryRefusal| AgentMemoryError::Io(refusal.to_string());
+        #[cfg(test)]
+        making_in_tests::a_making_stands(making_in_tests::MakingStands::AtItsStart);
+        let _one_maker = owner
+            .making
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // The release's mark is read under the maker's lock, which the
+        // mob's release takes once it set the mark: a making that holds
+        // the lock is over before the release looks for the directory, and
+        // a making that takes the lock after the release makes nothing.
+        self.refused_once_released()?;
+        #[cfg(test)]
+        making_in_tests::a_making_stands(making_in_tests::MakingStands::UnderItsLock);
+        if matches!(
+            self.directory_standing(owner).map_err(refused)?,
+            DirectoryStanding::Own
+        ) {
+            owner.touched.store(true, Ordering::SeqCst);
+            return Ok(());
+        }
+        let (Some(hosted_dir), Some(name)) = (
+            self.root.parent(),
+            self.root.file_name().and_then(|name| name.to_str()),
+        ) else {
+            return Err(AgentMemoryError::InvalidConfig(
+                "a hosted mob's store has no directory of its own below the hosted directory"
+                    .to_string(),
+            ));
+        };
+        fs::create_dir_all(hosted_dir).map_err(io)?;
+        let making = hosted_dir.join(format!("{name}{MAKING_INFIX}{}", owner.incarnation));
+        match fs::create_dir(&making) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(io(error)),
+        }
+        #[cfg(test)]
+        making_in_tests::stop_after(1)?;
+        let mark = serde_json::to_string(&HostedMobMark {
+            mob_id: owner.mob_id.to_string(),
+            incarnation: owner.incarnation,
+        })
+        .map_err(|error| AgentMemoryError::Io(error.to_string()))?;
+        let written_as = making.join(format!("{HOSTED_MOB_MARK}.{}", std::process::id()));
+        {
+            let mut file = fs::File::create(&written_as).map_err(io)?;
+            std::io::Write::write_all(&mut file, mark.as_bytes()).map_err(io)?;
+            file.sync_all().map_err(io)?;
+        }
+        #[cfg(test)]
+        making_in_tests::stop_after(2)?;
+        fs::rename(&written_as, making.join(HOSTED_MOB_MARK)).map_err(io)?;
+        sync_directory(&making);
+        #[cfg(test)]
+        making_in_tests::stop_after(3)?;
+        // The directory takes the mob's name. A rename that loses (another
+        // process put its own there first) leaves that one standing: what
+        // stands is read next, whoever put it there.
+        let _ = fs::rename(&making, &self.root);
+        sync_directory(hosted_dir);
+        match self.directory_standing(owner).map_err(refused)? {
+            DirectoryStanding::Own => {
+                owner.touched.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+            DirectoryStanding::Absent => Err(AgentMemoryError::Io(
+                "the directory of a hosted mob's memory could not be given the mob's name"
+                    .to_string(),
+            )),
+        }
+    }
+
+    /// Test builds only: a store value for the mob `mob_id` as the
+    /// directory under its name is marked: for the incarnation the mark
+    /// names; or, while nothing on disk names one, for the incarnation this
+    /// launch value knows for the directory (the one a value was made for
+    /// through [`Self::of_hosted_mob`], or the one a row told it,
+    /// [`Self::hosted_mob_stands_at_in_tests`]); or else for one of its own,
+    /// which the launch value keeps until the mob's release.
+    #[cfg(test)]
+    pub(crate) fn of_hosted_mob_in_tests(
+        &self,
+        mob_id: &meerkat_mob::MobId,
+    ) -> Result<Self, AgentMemoryError> {
+        let root = self.root_of_hosted_mob(mob_id)?;
+        let marked = fs::read_to_string(root.join(HOSTED_MOB_MARK))
+            .ok()
+            .and_then(|text| serde_json::from_str::<HostedMobMark>(&text).ok())
+            .map(|mark| mark.incarnation);
+        let incarnation = marked.unwrap_or_else(|| {
+            *self
+                .hosted
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .by_dir
+                .entry(root)
+                .or_default()
+                .incarnation_in_tests
+                .get_or_insert_with(meerkat_core::service::MobIncarnationId::mint)
+        });
+        self.of_hosted_mob(mob_id, incarnation)
+    }
+
+    /// Test builds only: a row tells this launch value at which incarnation
+    /// the mob `mob_id` stands in its mob set, so that the values the row
+    /// makes for the mob's store ([`Self::of_hosted_mob_in_tests`]) are
+    /// made for that mob, whoever touches the directory first.
+    #[cfg(test)]
+    pub(crate) fn hosted_mob_stands_at_in_tests(
+        &self,
+        mob_id: &meerkat_mob::MobId,
+        incarnation: meerkat_core::service::MobIncarnationId,
+    ) {
+        if let Ok(root) = self.root_of_hosted_mob(mob_id) {
+            self.hosted
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .by_dir
+                .entry(root)
+                .or_default()
+                .incarnation_in_tests = Some(incarnation);
+        }
+    }
+
+    /// The release's refusal, when the memory this value keeps was released
+    /// with its mob. An early word for an operation that would otherwise
+    /// touch the store's directory before it reaches
+    /// [`Self::realm_connection`]; that function's own read of the mark,
+    /// under the connections' lock, stays the one a release is ordered
+    /// against.
+    fn refused_once_released(&self) -> Result<(), AgentMemoryError> {
+        if self.released.load(Ordering::SeqCst) {
+            return Err(AgentMemoryError::Io(RELEASED_STORE_IS_CLOSED.to_string()));
+        }
+        Ok(())
+    }
+
+    /// Whether this store has no directory yet: a hosted mob's store before
+    /// its first write ([`Self::of_hosted_mob`] makes nothing on disk; a
+    /// launch's own store has its directory from [`Self::open`]). Such a
+    /// store holds no realm file and nothing an open of a realm would
+    /// import, so a read of it has nothing to find. A read that asks this
+    /// first answers empty and opens nothing: it makes no directory and no
+    /// realm file. A store whose memory was released answers the release's
+    /// refusal, as every operation does; and anything but "not there" is
+    /// left to the open, which reports it.
+    fn has_no_directory_yet(&self) -> Result<bool, AgentMemoryError> {
+        let _connections = self
+            .connections
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.released.load(Ordering::SeqCst) {
+            return Err(AgentMemoryError::Io(RELEASED_STORE_IS_CLOSED.to_string()));
+        }
+        // A directory that is not the mob's own is no "not there": it is
+        // refused, and nothing of it is read.
+        self.owned_before(false)?;
+        Ok(matches!(
+            fs::symlink_metadata(&self.root),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound
+        ))
+    }
+
     fn realm_connection(&self, realm: &str) -> Result<Arc<Mutex<Connection>>, AgentMemoryError> {
         let mut connections = self
             .connections
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Every operation of a store passes here, and so does every open of
+        // a realm file. The mark is read under the connections' lock: a
+        // release sets it and then takes this lock to drop the cache, so an
+        // open that came first has made its file before the release renames
+        // the directory, and one that comes after is refused and makes
+        // nothing.
+        if self.released.load(Ordering::SeqCst) {
+            return Err(AgentMemoryError::Io(RELEASED_STORE_IS_CLOSED.to_string()));
+        }
         if let Some(existing) = connections.get(realm) {
             return Ok(existing.clone());
         }
-        let mut conn = meerkat_sqlite::open(
-            &self.path_for_realm(realm),
-            meerkat_sqlite::ConnectionProfile::PRIMARY,
-        )
-        .map_err(sqlite_store_err)?;
+        let path = self.path_for_realm(realm);
+        let profile = if self.owner.is_some() {
+            // A hosted mob's store opens no realm file before its
+            // directory is its own, and its open makes no parent: the
+            // value makes the realm file itself, where it is absent, in a
+            // directory that must stand, and opens it as a file that is
+            // there. A directory that went meanwhile is not made again
+            // without its mark by the open.
+            self.owned_before(true)?;
+            #[cfg(test)]
+            making_in_tests::an_open_comes(&self.root);
+            fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(&path)
+                .map_err(|error| AgentMemoryError::Io(error.to_string()))?;
+            meerkat_sqlite::ConnectionProfile::Primary { create: false }
+        } else {
+            meerkat_sqlite::ConnectionProfile::PRIMARY
+        };
+        let mut conn = meerkat_sqlite::open(&path, profile).map_err(sqlite_store_err)?;
+        // The mark is read again once the file is open, before the
+        // connection is used or kept: a directory that was put in the
+        // place of the mob's meanwhile is not written into.
+        self.owned_before(false)?;
         meerkat_sqlite::apply_domain_migrations(&mut conn, &META_MEMORY_DOMAIN)
             .map_err(sqlite_store_err)?;
         let now = now_ms();
@@ -843,6 +1846,19 @@ impl SqliteAgentMemoryStore {
         // open — every operation takes its own shared guard instead, and
         // offline maintenance drains in-flight guards before touching the
         // file.
+        //
+        // A released value is refused before the guard: the guard opens,
+        // and makes, a lock file beside the realm file, and where a mob
+        // created under the id has its directory that file would be made
+        // in that mob's directory.
+        self.refused_once_released()?;
+        // A hosted mob's store touches its directory only where the
+        // directory is the mob's own, and it asks before the guard, which
+        // makes its lock file in a directory that stands: a directory of
+        // another mob, or one nothing proves the mob's, gets no file from
+        // this value. Where nothing stands under the mob's name the
+        // directory is made here, with its mark, before any realm file.
+        self.owned_before(true)?;
         let _fence = meerkat_sqlite::OperationGuard::for_database(&self.path_for_realm(realm))
             .map_err(sqlite_store_err)?;
         let conn = self.realm_connection(realm)?;
@@ -1514,8 +2530,18 @@ impl SqliteAgentMemoryStore {
     }
 
     pub(crate) fn known_realms(&self) -> Result<Vec<String>, AgentMemoryError> {
-        let entries =
-            fs::read_dir(&self.root).map_err(|err| AgentMemoryError::Io(err.to_string()))?;
+        // A released value lists nothing: what stands at its path now is
+        // nothing, or the directory of a mob created under the id.
+        self.refused_once_released()?;
+        // And a directory that is not the mob's own is not listed.
+        self.owned_before(false)?;
+        let entries = match fs::read_dir(&self.root) {
+            Ok(entries) => entries,
+            // A hosted mob's store has no directory until its first
+            // operation: it holds no realm yet.
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(err) => return Err(AgentMemoryError::Io(err.to_string())),
+        };
         let mut realms = Vec::new();
         for entry in entries.filter_map(Result::ok) {
             let path = entry.path();
@@ -2222,6 +3248,12 @@ impl StewardStore for SqliteAgentMemoryStore {
         let store = self.clone();
         let realm = realm.to_string();
         run_blocking(move || {
+            // A composition of a hosted mob asks this before the mob's
+            // agents wrote anything: a store with no directory yet has no
+            // retirement, and the question must not make its directory.
+            if store.has_no_directory_yet()? {
+                return Ok(std::collections::BTreeSet::new());
+            }
             store.with_realm_conn(&realm, |conn| {
                 let mut stmt = conn
                     .prepare(
@@ -8092,6 +9124,1774 @@ mod tests {
                 .await?
                 .outcome_str(),
             "tombstoned"
+        );
+        Ok(())
+    }
+
+    fn member_keyed_config() -> crate::identity_first::agent_memory::AgentMemoryConfig {
+        crate::identity_first::agent_memory::AgentMemoryConfig {
+            realm: "team".to_string(),
+            ..Default::default()
+        }
+    }
+
+    async fn member_keyed_recall(
+        store: &SqliteAgentMemoryStore,
+        config: &crate::identity_first::agent_memory::AgentMemoryConfig,
+    ) -> Result<Vec<String>, Box<dyn Error>> {
+        let mut titles = store
+            .recall(recall_all(identity()?, &config.realm))
+            .await?
+            .into_iter()
+            .map(|record| record.title)
+            .collect::<Vec<_>>();
+        titles.sort();
+        Ok(titles)
+    }
+
+    /// Two mobs of one host each have a member of the same name. The
+    /// owners of each mob's agent memory are built with that mob's
+    /// configuration, so what one member remembers the other never recalls:
+    /// the realm alone tells them apart, also where one store value were
+    /// asked for both. (A host gives each mob hosted beside its default mob
+    /// a store of its own besides: see the rows of `of_hosted_mob` below.)
+    #[tokio::test]
+    async fn member_keyed_memory_two_mobs_members_of_one_name_recall_apart()
+    -> Result<(), Box<dyn Error>> {
+        let dir = tempfile::tempdir()?;
+        let store = SqliteAgentMemoryStore::open(dir.path())?;
+        let default_mob = crate::member_key::DefaultMob::new(meerkat_mob::MobId::from("launch"));
+        let config = member_keyed_config();
+        let of_launch = config.for_mob(&default_mob, &meerkat_mob::MobId::from("launch"))?;
+        let of_second = config.for_mob(&default_mob, &meerkat_mob::MobId::from("second"))?;
+        let of_third = config.for_mob(&default_mob, &meerkat_mob::MobId::from("third"))?;
+        let id = identity()?;
+        store
+            .remember(
+                &of_launch.realm,
+                &id,
+                new_memory("launch fact", "launch body"),
+            )
+            .await?;
+        store
+            .remember(
+                &of_second.realm,
+                &id,
+                new_memory("second fact", "second body"),
+            )
+            .await?;
+        assert_eq!(
+            member_keyed_recall(&store, &of_launch).await?,
+            ["launch fact"]
+        );
+        assert_eq!(
+            member_keyed_recall(&store, &of_second).await?,
+            ["second fact"]
+        );
+        assert!(member_keyed_recall(&store, &of_third).await?.is_empty());
+        // Nothing but the realm differs, and each mob has a file of its own.
+        assert_eq!(
+            of_second,
+            crate::identity_first::agent_memory::AgentMemoryConfig {
+                realm: of_second.realm.clone(),
+                ..config.clone()
+            }
+        );
+        assert_ne!(
+            store.path_for_realm(&of_launch.realm),
+            store.path_for_realm(&of_second.realm)
+        );
+        assert_ne!(of_second.realm, of_third.realm);
+        Ok(())
+    }
+
+    /// The default mob keeps the configured realm: a record written before
+    /// a host's mobs had memory realms of their own is the default mob's
+    /// member's, and no other mob's member of that name recalls it.
+    #[tokio::test]
+    async fn member_keyed_memory_a_record_of_the_configured_realm_is_the_default_mobs()
+    -> Result<(), Box<dyn Error>> {
+        let dir = tempfile::tempdir()?;
+        let store = SqliteAgentMemoryStore::open(dir.path())?;
+        let id = identity()?;
+        // As the parent wrote it: in the configured realm.
+        store
+            .remember("team", &id, new_memory("stored fact", "stored body"))
+            .await?;
+        let default_mob = crate::member_key::DefaultMob::new(meerkat_mob::MobId::from("launch"));
+        let config = member_keyed_config();
+        let of_launch = config.for_mob(&default_mob, default_mob.mob_id())?;
+        assert_eq!(
+            of_launch, config,
+            "the default mob's configuration is unchanged"
+        );
+        assert_eq!(
+            member_keyed_recall(&store, &of_launch).await?,
+            ["stored fact"]
+        );
+        let of_second = config.for_mob(&default_mob, &meerkat_mob::MobId::from("second"))?;
+        assert!(member_keyed_recall(&store, &of_second).await?.is_empty());
+        Ok(())
+    }
+
+    /// A configured realm that is another mob's memory realm is refused for
+    /// that mob: the default mob would share every memory scope with it.
+    #[test]
+    fn member_keyed_memory_a_configured_realm_that_is_a_mobs_realm_is_refused() {
+        let default_mob = crate::member_key::DefaultMob::new(meerkat_mob::MobId::from("launch"));
+        let config = crate::identity_first::agent_memory::AgentMemoryConfig {
+            realm: "mob.second".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(
+            config
+                .realm_of_mob(&default_mob, default_mob.mob_id())
+                .expect("the default mob keeps the configured realm"),
+            "mob.second"
+        );
+        let refused = config.realm_of_mob(&default_mob, &meerkat_mob::MobId::from("second"));
+        assert!(
+            matches!(refused, Err(AgentMemoryError::InvalidConfig(_))),
+            "{refused:?}"
+        );
+        config
+            .realm_of_mob(&default_mob, &meerkat_mob::MobId::from("third"))
+            .expect("another mob has a realm of its own");
+    }
+
+    /// The titles `store` recalls for the rows' agent in `realm`, sorted.
+    async fn recalled_titles(
+        store: &SqliteAgentMemoryStore,
+        realm: &str,
+    ) -> Result<Vec<String>, Box<dyn Error>> {
+        let mut titles = store
+            .recall(recall_all(identity()?, realm))
+            .await?
+            .into_iter()
+            .map(|record| record.title)
+            .collect::<Vec<_>>();
+        titles.sort();
+        Ok(titles)
+    }
+
+    /// The realm files (`*.sqlite3`) that lie directly in `dir`, by name.
+    fn realm_files_in(dir: &Path) -> Vec<String> {
+        let mut files = fs::read_dir(dir)
+            .map(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .map(|entry| entry.path())
+                    .filter(|path| path.extension().is_some_and(|ext| ext == "sqlite3"))
+                    .filter_map(|path| {
+                        path.file_name()
+                            .and_then(|name| name.to_str())
+                            .map(str::to_string)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        files.sort();
+        files
+    }
+
+    /// A read of a hosted mob's store that was never written makes nothing
+    /// on disk. The private retirements of a mob whose store has no
+    /// directory yet are none, and asking for them makes no directory and
+    /// no realm file; once the mob's agent remembered something, the same
+    /// read goes to the mob's realm file.
+    #[tokio::test]
+    async fn the_private_retirements_of_a_hosted_mobs_unwritten_store_are_read_without_making_it()
+    -> Result<(), Box<dyn Error>> {
+        let dir = tempfile::tempdir()?;
+        let of_the_launch = SqliteAgentMemoryStore::open(dir.path())?;
+        let default_mob = crate::member_key::DefaultMob::new(meerkat_mob::MobId::from("launch"));
+        let config = member_keyed_config();
+        let second = meerkat_mob::MobId::from("second");
+        let of_the_second = of_the_launch.of_hosted_mob_in_tests(&second)?;
+        let realm_of_the_second = config.realm_of_mob(&default_mob, &second)?;
+
+        assert!(
+            of_the_second
+                .private_retired_identities(&realm_of_the_second)
+                .await?
+                .is_empty(),
+            "a store with no directory yet has no private retirement"
+        );
+        assert!(
+            !dir.path().join(HOSTED_MOBS_DIR).exists(),
+            "and the read made no directory of hosted mobs' memory"
+        );
+
+        of_the_second
+            .remember(
+                &realm_of_the_second,
+                &identity()?,
+                new_memory("second fact", "second body"),
+            )
+            .await?;
+        assert!(
+            of_the_second.path_for_realm(&realm_of_the_second).exists(),
+            "the mob's first write makes its directory and its realm file"
+        );
+        assert!(
+            of_the_second
+                .private_retired_identities(&realm_of_the_second)
+                .await?
+                .is_empty(),
+            "and the read then goes to that file, which holds no private retirement"
+        );
+        Ok(())
+    }
+
+    /// The agent memory of a mob a host serves beside its launch mob is a
+    /// store of its own: a directory of that mob below the launch's memory
+    /// root, under [`HOSTED_MOBS_DIR`]. What the mob's agent remembers is
+    /// written there and nowhere in the launch's root, the launch's listing
+    /// of its realm files does not hold the mob's realm, and two hosted mobs
+    /// have two directories.
+    #[tokio::test]
+    async fn a_hosted_mobs_memory_store_is_a_directory_of_its_own_below_the_launchs()
+    -> Result<(), Box<dyn Error>> {
+        let dir = tempfile::tempdir()?;
+        let of_the_launch = SqliteAgentMemoryStore::open(dir.path())?;
+        let default_mob = crate::member_key::DefaultMob::new(meerkat_mob::MobId::from("launch"));
+        let config = member_keyed_config();
+        let second = meerkat_mob::MobId::from("second");
+        let third = meerkat_mob::MobId::from("third");
+        let of_the_second = of_the_launch.of_hosted_mob_in_tests(&second)?;
+        let of_the_third = of_the_launch.of_hosted_mob_in_tests(&third)?;
+        let realm_of_the_second = config.realm_of_mob(&default_mob, &second)?;
+
+        assert_eq!(
+            of_the_second.root(),
+            dir.path().join(HOSTED_MOBS_DIR).join("second"),
+            "the second mob's store is a directory of that mob below the launch's root"
+        );
+        assert_ne!(
+            of_the_second.root(),
+            of_the_third.root(),
+            "two hosted mobs have two directories"
+        );
+        assert!(
+            !of_the_second.shares_a_slot_with(&of_the_launch)
+                && !of_the_second.shares_a_slot_with(&of_the_third),
+            "a hosted mob's store is a value of its own: it shares no connection, write gate, \
+             evidence resolver or event sink with the launch's store or another mob's"
+        );
+
+        let id = identity()?;
+        of_the_launch
+            .remember(&config.realm, &id, new_memory("launch fact", "launch body"))
+            .await?;
+        of_the_second
+            .remember(
+                &realm_of_the_second,
+                &id,
+                new_memory("second fact", "second body"),
+            )
+            .await?;
+
+        assert_eq!(
+            realm_files_in(dir.path()),
+            ["team.sqlite3"],
+            "the launch's root holds the launch mob's realm file alone"
+        );
+        assert_eq!(
+            realm_files_in(of_the_second.root()),
+            ["mob%2Esecond.sqlite3"],
+            "the second mob's realm file is in its own directory"
+        );
+        assert_eq!(
+            of_the_launch.known_realms()?,
+            ["team"],
+            "the launch's listing of its realm files does not hold the second mob's realm"
+        );
+        assert_eq!(
+            recalled_titles(&of_the_launch, &config.realm).await?,
+            ["launch fact"]
+        );
+        assert_eq!(
+            recalled_titles(&of_the_second, &realm_of_the_second).await?,
+            ["second fact"]
+        );
+        assert!(
+            recalled_titles(&of_the_third, &config.realm_of_mob(&default_mob, &third)?)
+                .await?
+                .is_empty(),
+            "a mob that remembered nothing recalls nothing"
+        );
+        Ok(())
+    }
+
+    /// No realm a caller names leads a store out of its own directory. A
+    /// realm is one encoded path segment, and the encoder writes no `.`, so
+    /// it never writes the name of the hosted mobs' directory: whatever
+    /// realm the launch's store is asked for, its file lies directly in the
+    /// launch's root, and what a hosted mob's agent remembered is recalled
+    /// through the launch's store under no realm, the mob's own realm name
+    /// included. So with one hosted mob's store and another's, and with a
+    /// mob id that holds path separators.
+    #[tokio::test]
+    async fn no_realm_a_caller_names_leads_a_store_out_of_its_own_directory()
+    -> Result<(), Box<dyn Error>> {
+        let dir = tempfile::tempdir()?;
+        let of_the_launch = SqliteAgentMemoryStore::open(dir.path())?;
+        let default_mob = crate::member_key::DefaultMob::new(meerkat_mob::MobId::from("launch"));
+        let config = member_keyed_config();
+        let second = meerkat_mob::MobId::from("second");
+        let third = meerkat_mob::MobId::from("third");
+        let of_the_second = of_the_launch.of_hosted_mob_in_tests(&second)?;
+        let of_the_third = of_the_launch.of_hosted_mob_in_tests(&third)?;
+        let realm_of_the_second = config.realm_of_mob(&default_mob, &second)?;
+        of_the_second
+            .remember(
+                &realm_of_the_second,
+                &identity()?,
+                new_memory("second fact", "second body"),
+            )
+            .await?;
+
+        let named_by_a_caller = [
+            realm_of_the_second.clone(),
+            HOSTED_MOBS_DIR.to_string(),
+            format!("{HOSTED_MOBS_DIR}/second"),
+            format!("{HOSTED_MOBS_DIR}/second/{realm_of_the_second}"),
+            format!("{HOSTED_MOBS_DIR}/second/mob%2Esecond"),
+            "../second".to_string(),
+            "..".to_string(),
+            ".".to_string(),
+            "/".to_string(),
+        ];
+        for realm in &named_by_a_caller {
+            assert!(
+                !encode_path_segment(realm).contains('.'),
+                "the encoder writes no `.` for the realm {realm:?}"
+            );
+            let path = of_the_launch.path_for_realm(realm);
+            assert_eq!(
+                path.parent(),
+                Some(dir.path()),
+                "the launch's file of the realm {realm:?} lies directly in its root: {path:?}"
+            );
+            assert!(
+                recalled_titles(&of_the_launch, realm).await?.is_empty(),
+                "the launch's store recalls nothing of the second mob under the realm {realm:?}"
+            );
+            assert!(
+                recalled_titles(&of_the_third, realm).await?.is_empty(),
+                "another hosted mob's store recalls nothing of it under the realm {realm:?}"
+            );
+            assert_eq!(
+                of_the_third.path_for_realm(realm).parent(),
+                Some(of_the_third.root()),
+                "another hosted mob's file of the realm {realm:?} lies in its own directory"
+            );
+        }
+        assert_eq!(
+            recalled_titles(&of_the_second, &realm_of_the_second).await?,
+            ["second fact"],
+            "the second mob's own store still recalls it"
+        );
+
+        let hosted = dir.path().join(HOSTED_MOBS_DIR);
+        for mob_id in ["../launch", "a/b", "..", ".", "second/../third"] {
+            let root = of_the_launch
+                .of_hosted_mob_in_tests(&meerkat_mob::MobId::from(mob_id))?
+                .root()
+                .to_path_buf();
+            assert_eq!(
+                root.parent(),
+                Some(hosted.as_path()),
+                "the store of the mob {mob_id:?} is one directory below the hosted mobs': {root:?}"
+            );
+            assert!(
+                root.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| !name.contains('.') && !name.contains('/')),
+                "and its name holds no `.` and no separator: {root:?}"
+            );
+        }
+        Ok(())
+    }
+
+    /// The directory of a hosted mob tells apart ids that differ in letter
+    /// case alone, on a file system that ignores case too: its name holds
+    /// no capital letter, so two such ids never share a directory, and an
+    /// id that spells another id's written form is another directory. An
+    /// empty id has no directory.
+    #[test]
+    fn the_directory_of_a_hosted_mob_tells_apart_ids_that_differ_in_letter_case_alone()
+    -> Result<(), Box<dyn Error>> {
+        let dir = tempfile::tempdir()?;
+        let of_the_launch = SqliteAgentMemoryStore::open(dir.path())?;
+        let name_of = |mob_id: &str| -> Result<String, Box<dyn Error>> {
+            let root = of_the_launch.root_of_hosted_mob(&meerkat_mob::MobId::from(mob_id))?;
+            Ok(root
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default()
+                .to_string())
+        };
+        let ids = [
+            "desk-team",
+            "DESK-TEAM",
+            "Desk-Team",
+            "desk-Team",
+            "%44esk-team",
+            "%2544esk-team",
+            "desk_team",
+        ];
+        let named = ids
+            .iter()
+            .map(|mob_id| name_of(mob_id).map(|name| (*mob_id, name)))
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            named.first().map(|(_, name)| name.as_str()),
+            Some("desk-team"),
+            "a plain id is its own directory name"
+        );
+        for (at, (mob_id, name)) in named.iter().enumerate() {
+            assert!(
+                !name.is_empty() && !name.bytes().any(|byte| byte.is_ascii_uppercase()),
+                "the directory name of the mob {mob_id:?} holds no capital letter: {name:?}"
+            );
+            for (other_id, other) in named.iter().skip(at + 1) {
+                assert_ne!(
+                    name.to_ascii_lowercase(),
+                    other.to_ascii_lowercase(),
+                    "the mobs {mob_id:?} and {other_id:?} have two directories whatever the \
+                     letter case"
+                );
+            }
+        }
+        let nameless = meerkat_mob::MobId::from("");
+        assert!(
+            of_the_launch.root_of_hosted_mob(&nameless).is_err()
+                && of_the_launch.of_hosted_mob_in_tests(&nameless).is_err(),
+            "an empty mob id has no directory and no store"
+        );
+        Ok(())
+    }
+
+    /// A hosted mob's memory outlives the store value that wrote it: a
+    /// store opened anew over the launch's root answers the mob's store
+    /// over the same directory, which recalls what was remembered, and the
+    /// launch's own realm is as it was.
+    #[tokio::test]
+    async fn a_hosted_mobs_memory_is_read_again_from_its_directory_by_a_store_opened_anew()
+    -> Result<(), Box<dyn Error>> {
+        let dir = tempfile::tempdir()?;
+        let default_mob = crate::member_key::DefaultMob::new(meerkat_mob::MobId::from("launch"));
+        let config = member_keyed_config();
+        let second = meerkat_mob::MobId::from("second");
+        let realm_of_the_second = config.realm_of_mob(&default_mob, &second)?;
+        let id = identity()?;
+        {
+            let of_the_launch = SqliteAgentMemoryStore::open(dir.path())?;
+            of_the_launch
+                .remember(&config.realm, &id, new_memory("launch fact", "launch body"))
+                .await?;
+            of_the_launch
+                .of_hosted_mob_in_tests(&second)?
+                .remember(
+                    &realm_of_the_second,
+                    &id,
+                    new_memory("second fact", "second body"),
+                )
+                .await?;
+        }
+
+        let of_the_launch = SqliteAgentMemoryStore::open(dir.path())?;
+        assert_eq!(
+            recalled_titles(
+                &of_the_launch.of_hosted_mob_in_tests(&second)?,
+                &realm_of_the_second
+            )
+            .await?,
+            ["second fact"],
+            "the second mob's memory is read again from its directory"
+        );
+        assert_eq!(
+            recalled_titles(&of_the_launch, &config.realm).await?,
+            ["launch fact"],
+            "the launch mob's memory is as it was"
+        );
+        assert_eq!(
+            of_the_launch.known_realms()?,
+            ["team"],
+            "and the launch's listing holds the launch mob's realm alone"
+        );
+        Ok(())
+    }
+
+    /// Every file directly in `dir` with its bytes, by name.
+    fn files_directly_in(dir: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+        fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().is_file())
+            .filter_map(|entry| {
+                Some((
+                    entry.file_name().to_string_lossy().into_owned(),
+                    fs::read(entry.path()).ok()?,
+                ))
+            })
+            .collect()
+    }
+
+    /// The names of the entries directly in `dir`, sorted.
+    fn entries_directly_in(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// A release removes the one directory of the mob it names and can
+    /// reach no other, whatever the mob's id holds.
+    ///
+    /// Three hosted mobs keep a note each beside the launch mob's: one with
+    /// a plain id, and two whose ids hold what a path is made of (a parent
+    /// step with separators, and the plain mob's id behind a parent step).
+    /// Each has a directory of its own directly below the hosted directory:
+    /// no id names the hosted directory, its parent, the root, or another
+    /// mob's directory. Releasing each of the two removes its own directory
+    /// alone: the plain mob's files and the launch mob's are byte for byte
+    /// what they were, and so is a file beside the root. Ids that would be
+    /// those paths if they were taken as text (`..`, `.`, an absolute path,
+    /// the hosted directory's own name, a realm's name) remove nothing of
+    /// what exists, and an id that has no directory (the empty id) is
+    /// refused. What stands where a mob's directory would be and is no
+    /// directory (a file, a link) is not removed and not followed, and the
+    /// release fails.
+    #[tokio::test]
+    async fn a_release_removes_the_one_directory_of_its_mob_whatever_the_mobs_id_holds()
+    -> Result<(), Box<dyn Error>> {
+        let dir = tempfile::tempdir()?;
+        let root = dir.path().join("agent-memory");
+        let beside_the_root = dir.path().join("beside-the-root.txt");
+        fs::write(&beside_the_root, b"not the store's")?;
+        let launch = SqliteAgentMemoryStore::open(&root)?;
+        let id = identity()?;
+        launch
+            .remember("default", &id, new_memory("launch fact", "launch body"))
+            .await?;
+        let plain = meerkat_mob::MobId::from("plain");
+        let climbing = meerkat_mob::MobId::from("../../agent-memory");
+        let to_the_plain = meerkat_mob::MobId::from("../plain");
+        for mob in [&plain, &climbing, &to_the_plain] {
+            launch
+                .of_hosted_mob_in_tests(mob)?
+                .remember("of-the-mob", &id, new_memory("a fact", "a body"))
+                .await?;
+        }
+        let hosted = root.join(HOSTED_MOBS_DIR);
+        let dirs: Vec<PathBuf> = [&plain, &climbing, &to_the_plain]
+            .iter()
+            .map(|mob| launch.root_of_hosted_mob(mob))
+            .collect::<Result<_, _>>()?;
+        for (index, of_a_mob) in dirs.iter().enumerate() {
+            assert_eq!(
+                of_a_mob.parent(),
+                Some(hosted.as_path()),
+                "the directory of a mob is directly below the hosted directory: {of_a_mob:?}"
+            );
+            assert!(of_a_mob.is_dir(), "and it is there: {of_a_mob:?}");
+            assert!(
+                dirs.iter()
+                    .enumerate()
+                    .all(|(other, dir)| other == index || dir != of_a_mob),
+                "and it is no other mob's"
+            );
+        }
+        let (of_the_launch, of_the_plain) = (files_directly_in(&root), files_directly_in(&dirs[0]));
+        assert!(!of_the_launch.is_empty() && !of_the_plain.is_empty());
+
+        launch.release_hosted_mob(&climbing)?;
+        launch.release_hosted_mob(&to_the_plain)?;
+        assert!(!dirs[1].exists() && !dirs[2].exists(), "each went");
+        assert_eq!(
+            entries_directly_in(&hosted),
+            [dirs[0]
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default()],
+            "and left nothing under any other name: the plain mob's directory alone lies there"
+        );
+        assert_eq!(
+            files_directly_in(&dirs[0]),
+            of_the_plain,
+            "the plain mob's stays"
+        );
+        assert_eq!(
+            files_directly_in(&root),
+            of_the_launch,
+            "and the launch mob's"
+        );
+        assert!(beside_the_root.is_file());
+
+        for text in [
+            "..",
+            ".",
+            "",
+            "/",
+            HOSTED_MOBS_DIR,
+            "default",
+            "default.sqlite3",
+        ] {
+            let released = launch.release_hosted_mob(&meerkat_mob::MobId::from(text));
+            // An id with no directory (the empty id) is refused. Every other
+            // id here names a directory that is not there, which is no
+            // failure. Neither removes anything.
+            assert_eq!(
+                released.is_ok(),
+                !text.is_empty(),
+                "a release of a mob with no directory ({text:?}): {released:?}"
+            );
+            assert_eq!(
+                files_directly_in(&dirs[0]),
+                of_the_plain,
+                "({text:?}) the plain mob's stays"
+            );
+            assert_eq!(
+                files_directly_in(&root),
+                of_the_launch,
+                "({text:?}) and the launch mob's"
+            );
+            assert!(hosted.is_dir() && beside_the_root.is_file(), "({text:?})");
+        }
+
+        // What is no directory of a mob's memory is not removed.
+        let in_the_way = meerkat_mob::MobId::from("in-the-way");
+        fs::write(launch.root_of_hosted_mob(&in_the_way)?, b"no directory")?;
+        assert!(
+            launch.release_hosted_mob(&in_the_way).is_err(),
+            "a release that cannot be made fails"
+        );
+        assert_eq!(
+            fs::read(launch.root_of_hosted_mob(&in_the_way)?)?,
+            b"no directory"
+        );
+        #[cfg(unix)]
+        {
+            // A link where a mob's directory would be: the link is not
+            // followed, and what it names keeps every file.
+            let elsewhere = dir.path().join("elsewhere");
+            fs::create_dir_all(&elsewhere)?;
+            fs::write(elsewhere.join("kept.txt"), b"kept")?;
+            let linked = meerkat_mob::MobId::from("linked");
+            std::os::unix::fs::symlink(&elsewhere, launch.root_of_hosted_mob(&linked)?)?;
+            assert!(
+                launch.release_hosted_mob(&linked).is_err(),
+                "a link is no directory of a mob's memory"
+            );
+            assert_eq!(fs::read(elsewhere.join("kept.txt"))?, b"kept");
+        }
+        launch.release_hosted_mob(&plain)?;
+        assert!(!dirs[0].exists(), "the plain mob's goes when it is named");
+        assert_eq!(files_directly_in(&root), of_the_launch);
+        Ok(())
+    }
+
+    /// A store value of a mob made before the mob's release is refused for
+    /// good, and the store of a mob that takes the id starts empty.
+    ///
+    /// Two values of one mob's store are made (as the owners of one mob's
+    /// memory each hold one), and both write. After the release every read,
+    /// every write and every listing through either is an error, and none
+    /// of them makes the mob's directory again. A value made after the
+    /// release is another store: it starts empty, takes writes, and the
+    /// earlier values stay refused beside it: they list none of its realms
+    /// and make no file in its directory. The launch's own value and
+    /// another mob's are never refused.
+    #[tokio::test]
+    async fn a_store_value_made_before_a_release_is_refused_for_good_and_a_new_one_starts_empty()
+    -> Result<(), Box<dyn Error>> {
+        let dir = tempfile::tempdir()?;
+        let launch = SqliteAgentMemoryStore::open(dir.path())?;
+        let id = identity()?;
+        let (second, third) = (
+            meerkat_mob::MobId::from("second"),
+            meerkat_mob::MobId::from("third"),
+        );
+        let (earlier, earlier_too) = (
+            launch.of_hosted_mob_in_tests(&second)?,
+            launch.of_hosted_mob_in_tests(&second)?,
+        );
+        let of_the_third = launch.of_hosted_mob_in_tests(&third)?;
+        earlier
+            .remember(
+                "mob.second",
+                &id,
+                new_memory("earlier fact", "earlier body"),
+            )
+            .await?;
+        earlier_too
+            .remember(
+                "mob.second",
+                &id,
+                new_memory("earlier fact two", "earlier body two"),
+            )
+            .await?;
+        of_the_third
+            .remember("mob.third", &id, new_memory("third fact", "third body"))
+            .await?;
+        launch
+            .remember("team", &id, new_memory("launch fact", "launch body"))
+            .await?;
+        assert_eq!(
+            recalled_titles(&earlier, "mob.second").await?,
+            ["earlier fact", "earlier fact two"]
+        );
+
+        launch.release_hosted_mob(&second)?;
+        let of_the_second = launch.root_of_hosted_mob(&second)?;
+        assert!(!of_the_second.exists(), "the mob's directory is gone");
+        for value in [&earlier, &earlier_too, &earlier.clone()] {
+            assert!(
+                value
+                    .remember("mob.second", &id, new_memory("late fact", "late body"))
+                    .await
+                    .is_err(),
+                "a write through a value made before the release is refused"
+            );
+            assert!(
+                value
+                    .recall(recall_all(id.clone(), "mob.second"))
+                    .await
+                    .is_err(),
+                "and so is a read"
+            );
+            assert!(
+                value.open_realm_ledgered("mob.second").is_err(),
+                "and an open of a realm file"
+            );
+            assert!(
+                value
+                    .private_retired_identities("mob.second")
+                    .await
+                    .is_err(),
+                "and a read of its private retirements: a released store is refused, it is \
+                 not read as a store that holds nothing yet"
+            );
+            assert!(
+                value.known_realms().is_err(),
+                "and a listing of its realms: a released store lists nothing, not even an \
+                 empty list"
+            );
+        }
+        assert!(
+            !of_the_second.exists(),
+            "no refused call made the mob's directory again"
+        );
+
+        let later = launch.of_hosted_mob_in_tests(&second)?;
+        assert!(
+            recalled_titles(&later, "mob.second").await?.is_empty(),
+            "the store of a mob that takes the id starts empty"
+        );
+        later
+            .remember("mob.second", &id, new_memory("later fact", "later body"))
+            .await?;
+        assert_eq!(recalled_titles(&later, "mob.second").await?, ["later fact"]);
+        assert!(
+            earlier
+                .remember("mob.second", &id, new_memory("late fact", "late body"))
+                .await
+                .is_err(),
+            "the earlier value stays refused beside it"
+        );
+        // The later mob's directory stands where the earlier mob's stood.
+        // A refused call through an earlier value reads nothing of it and
+        // makes nothing in it: no listing of the later mob's realms, and no
+        // file for a realm the later mob never used.
+        assert!(
+            earlier.known_realms().is_err(),
+            "an earlier value lists none of the realms of the mob that took the id"
+        );
+        let of_the_later_mob = entries_directly_in(&of_the_second);
+        assert!(
+            earlier
+                .recall(recall_all(id.clone(), "mob.never-used"))
+                .await
+                .is_err(),
+            "a read through an earlier value is refused for a realm the later mob never used"
+        );
+        assert_eq!(
+            entries_directly_in(&of_the_second),
+            of_the_later_mob,
+            "and it made no file in the later mob's directory"
+        );
+        assert_eq!(recalled_titles(&later, "mob.second").await?, ["later fact"]);
+        assert_eq!(
+            recalled_titles(&of_the_third, "mob.third").await?,
+            ["third fact"]
+        );
+        assert_eq!(recalled_titles(&launch, "team").await?, ["launch fact"]);
+        Ok(())
+    }
+
+    /// A value of a hosted mob's store whose directory is gone after the
+    /// value wrote into it refuses, and makes none again.
+    ///
+    /// The value's first write makes its directory. The directory then goes
+    /// from under the live value, by no release of this process (what
+    /// another process over the same root can do). An operation that has to
+    /// open a realm the value holds no connection of is refused, the realms
+    /// of the store are not listed, and none of them makes the directory
+    /// again: a value makes its directory once, before it has touched it.
+    /// The launch's own value is as it was.
+    #[tokio::test]
+    async fn a_value_whose_directory_is_gone_after_it_wrote_refuses_and_makes_none_again()
+    -> Result<(), Box<dyn Error>> {
+        let dir = tempfile::tempdir()?;
+        let launch = SqliteAgentMemoryStore::open(dir.path())?;
+        let id = identity()?;
+        let second = meerkat_mob::MobId::from("second");
+        let of_the_second = launch.of_hosted_mob_in_tests(&second)?;
+        of_the_second
+            .remember("mob.second", &id, new_memory("a fact", "a body"))
+            .await?;
+        let its_directory = launch.root_of_hosted_mob(&second)?;
+        assert!(
+            its_directory.is_dir(),
+            "the value's first write made its directory"
+        );
+
+        fs::remove_dir_all(&its_directory)?;
+
+        assert!(
+            of_the_second
+                .remember("another.realm", &id, new_memory("late fact", "late body"))
+                .await
+                .is_err(),
+            "a write that has to open a realm is refused once the value's directory is gone"
+        );
+        assert!(
+            of_the_second.open_realm_ledgered("another.realm").is_err(),
+            "and so is an open of a realm file"
+        );
+        assert!(
+            of_the_second.known_realms().is_err(),
+            "and the realms of a store whose directory is gone are not listed"
+        );
+        assert!(
+            !its_directory.exists(),
+            "none of them made the directory again"
+        );
+        launch
+            .remember("team", &id, new_memory("launch fact", "launch body"))
+            .await?;
+        assert_eq!(recalled_titles(&launch, "team").await?, ["launch fact"]);
+        Ok(())
+    }
+
+    /// Every file below `dir` with its bytes and the time it was last
+    /// written, by its path below `dir`.
+    fn files_and_times(dir: &Path) -> std::collections::BTreeMap<PathBuf, (Vec<u8>, SystemTime)> {
+        fn walk(
+            root: &Path,
+            dir: &Path,
+            into: &mut std::collections::BTreeMap<PathBuf, (Vec<u8>, SystemTime)>,
+        ) {
+            let Ok(entries) = fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.filter_map(Result::ok) {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(root, &path, into);
+                } else if let (Ok(bytes), Ok(written)) = (
+                    fs::read(&path),
+                    fs::metadata(&path).and_then(|metadata| metadata.modified()),
+                ) {
+                    let below = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
+                    into.insert(below, (bytes, written));
+                }
+            }
+        }
+        let mut files = std::collections::BTreeMap::new();
+        walk(dir, dir, &mut files);
+        files
+    }
+
+    /// A store value made for another incarnation than the one the
+    /// directory's mark names is refused, and changes nothing; a value made
+    /// for the mark's own mob and incarnation is served.
+    ///
+    /// The first value's first write makes the directory with its mark,
+    /// which names the mob and the incarnation. A value made for the same
+    /// mob id at another incarnation (a mob created under the id) is told
+    /// the directory is not its own, with the incarnation the mark names;
+    /// every read, write, open and listing through it is an error; and no
+    /// file below the directory is made or changed: each has the bytes and
+    /// the time it had, and no lock file, realm file or write-ahead file
+    /// was added. A value made again for the first incarnation recalls what
+    /// was written.
+    #[tokio::test]
+    async fn a_store_value_made_for_another_incarnation_than_the_marks_is_refused_and_changes_nothing()
+    -> Result<(), Box<dyn Error>> {
+        let dir = tempfile::tempdir()?;
+        let launch = SqliteAgentMemoryStore::open(dir.path())?;
+        let id = identity()?;
+        let second = meerkat_mob::MobId::from("second");
+        let (earlier, later) = (
+            meerkat_core::service::MobIncarnationId::mint(),
+            meerkat_core::service::MobIncarnationId::mint(),
+        );
+        let of_the_earlier = launch.of_hosted_mob(&second, earlier)?;
+        assert_eq!(
+            of_the_earlier.proved_its_own(),
+            Ok(()),
+            "nothing stands under the mob's name: the mob's own"
+        );
+        of_the_earlier
+            .remember(
+                "mob.second",
+                &id,
+                new_memory("earlier fact", "earlier body"),
+            )
+            .await?;
+        let its_directory = launch.root_of_hosted_mob(&second)?;
+        let mark = fs::read_to_string(its_directory.join(HOSTED_MOB_MARK))?;
+        assert_eq!(
+            mark,
+            format!("{{\"mob_id\":\"second\",\"incarnation\":\"{earlier}\"}}"),
+            "the directory names the mob and the incarnation it was made for, in the mark's one \
+             form"
+        );
+        drop(of_the_earlier);
+        let before = files_and_times(&its_directory);
+
+        let of_the_later = launch.of_hosted_mob(&second, later)?;
+        assert!(
+            matches!(
+                of_the_later.proved_its_own(),
+                Err(HostedMemoryRefusal::WrittenForAnotherMob { marked_incarnation, .. })
+                    if marked_incarnation == earlier
+            ),
+            "a value made for another incarnation is told whose the directory is"
+        );
+        assert!(
+            of_the_later
+                .recall(recall_all(id.clone(), "mob.second"))
+                .await
+                .is_err(),
+            "a read through it is refused"
+        );
+        assert!(
+            of_the_later
+                .remember("mob.second", &id, new_memory("late fact", "late body"))
+                .await
+                .is_err(),
+            "and a write"
+        );
+        assert!(
+            of_the_later
+                .remember("another.realm", &id, new_memory("late fact", "late body"))
+                .await
+                .is_err(),
+            "and a write into a realm the directory does not hold"
+        );
+        assert!(
+            of_the_later.open_realm_ledgered("mob.second").is_err(),
+            "and an open of a realm file"
+        );
+        assert!(
+            of_the_later.known_realms().is_err(),
+            "and a listing of its realms"
+        );
+        assert_eq!(
+            files_and_times(&its_directory),
+            before,
+            "no file below the directory was made or changed"
+        );
+
+        let of_the_earlier_again = launch.of_hosted_mob(&second, earlier)?;
+        assert_eq!(of_the_earlier_again.proved_its_own(), Ok(()));
+        assert_eq!(
+            recalled_titles(&of_the_earlier_again, "mob.second").await?,
+            ["earlier fact"],
+            "the mob the directory was made for recalls what it wrote"
+        );
+        Ok(())
+    }
+
+    /// A directory has a mob's name only with its mark, wherever its making
+    /// was cut short.
+    ///
+    /// A first use makes the directory beside the mob's own name, puts the
+    /// mark there, and gives it the mob's name last. The making is cut
+    /// short after each of its steps in turn: after the directory beside
+    /// the mob's is made, after the mark is written under its writer's own
+    /// name, and after the mark has its name. Each time the write that
+    /// began the making fails, NOTHING stands under the mob's name, and
+    /// what is left lies under a name that is no mob's. The mob's next
+    /// first use finishes the making: the directory then has the mob's
+    /// name, a whole mark in its one form, and the mob's memory, and what
+    /// was being made is gone from beside it. The same holds where what
+    /// was left holds a mark that is not whole.
+    #[tokio::test]
+    async fn a_directory_has_a_mobs_name_only_with_its_mark() -> Result<(), Box<dyn Error>> {
+        let dir = tempfile::tempdir()?;
+        let launch = SqliteAgentMemoryStore::open(dir.path())?;
+        let id = identity()?;
+        for (mob, cut_short) in [
+            ("after-one", 1_u8),
+            ("after-two", 2),
+            ("after-three", 3),
+            ("a-cut-mark", 0),
+        ] {
+            let mob_id = meerkat_mob::MobId::from(mob);
+            let incarnation = meerkat_core::service::MobIncarnationId::mint();
+            let its_directory = launch.root_of_hosted_mob(&mob_id)?;
+            let hosted = its_directory
+                .parent()
+                .ok_or("the hosted directory")?
+                .to_path_buf();
+            let making = hosted.join(format!("{mob}{MAKING_INFIX}{incarnation}"));
+            let realm = format!("mob.{mob}");
+            let value = launch.of_hosted_mob(&mob_id, incarnation)?;
+            if cut_short == 0 {
+                fs::create_dir_all(&making)?;
+                fs::write(making.join(HOSTED_MOB_MARK), b"{\"mob_id\":\"a-cut")?;
+            } else {
+                making_in_tests::stops_after(cut_short);
+                assert!(
+                    value
+                        .remember(&realm, &id, new_memory("a fact", "a body"))
+                        .await
+                        .is_err(),
+                    "({mob}) the write that began the making fails with it"
+                );
+                making_in_tests::stops_after(0);
+                assert!(
+                    making.is_dir(),
+                    "({mob}) what is left lies under a name that is no mob's"
+                );
+            }
+            assert!(
+                fs::symlink_metadata(&its_directory).is_err(),
+                "({mob}) nothing stands under the mob's name"
+            );
+            assert_eq!(
+                value.proved_its_own(),
+                Ok(()),
+                "({mob}) and nothing there is the mob's own to make"
+            );
+            value
+                .remember(&realm, &id, new_memory("a fact", "a body"))
+                .await?;
+            assert_eq!(
+                fs::read_to_string(its_directory.join(HOSTED_MOB_MARK))?,
+                format!("{{\"mob_id\":\"{mob}\",\"incarnation\":\"{incarnation}\"}}"),
+                "({mob}) the directory has the mob's name with a whole mark"
+            );
+            assert!(
+                !making.exists(),
+                "({mob}) what was being made is the mob's directory now"
+            );
+            assert_eq!(recalled_titles(&value, &realm).await?, ["a fact"]);
+        }
+        Ok(())
+    }
+
+    /// A hosted mob's store opens a realm file in no directory it would
+    /// have to make, and uses no file it opened in a directory that is not
+    /// the mob's own.
+    ///
+    /// Between the store's question whose the directory is and its open of
+    /// a realm file, the directory goes: the open makes no directory, the
+    /// write is refused, and nothing stands under the mob's name. Between
+    /// the question and the open, another mob's mark is put in the place of
+    /// the mob's: the write is refused, the other mob's mark is as it was
+    /// put, and a value made for that other mob finds none of the refused
+    /// write in the realm.
+    #[tokio::test]
+    async fn a_hosted_stores_open_makes_no_parent_and_reads_the_mark_again()
+    -> Result<(), Box<dyn Error>> {
+        let dir = tempfile::tempdir()?;
+        let launch = SqliteAgentMemoryStore::open(dir.path())?;
+        let id = identity()?;
+
+        let second = meerkat_mob::MobId::from("second");
+        let of_the_second =
+            launch.of_hosted_mob(&second, meerkat_core::service::MobIncarnationId::mint())?;
+        of_the_second
+            .remember("mob.second", &id, new_memory("a fact", "a body"))
+            .await?;
+        let its_directory = launch.root_of_hosted_mob(&second)?;
+        making_in_tests::before_an_open(Some(Box::new(|directory: &Path| {
+            let _ = fs::remove_dir_all(directory);
+        })));
+        assert!(
+            of_the_second
+                .remember("another.realm", &id, new_memory("late fact", "late body"))
+                .await
+                .is_err(),
+            "a write whose directory went before its open is refused"
+        );
+        making_in_tests::before_an_open(None);
+        assert!(
+            fs::symlink_metadata(&its_directory).is_err(),
+            "and the open made no directory under the mob's name"
+        );
+
+        let third = meerkat_mob::MobId::from("third");
+        let (of_the_mob, of_another) = (
+            meerkat_core::service::MobIncarnationId::mint(),
+            meerkat_core::service::MobIncarnationId::mint(),
+        );
+        let of_the_third = launch.of_hosted_mob(&third, of_the_mob)?;
+        of_the_third
+            .remember("mob.third", &id, new_memory("a fact", "a body"))
+            .await?;
+        let anothers_mark = format!("{{\"mob_id\":\"third\",\"incarnation\":\"{of_another}\"}}");
+        let put = anothers_mark.clone();
+        making_in_tests::before_an_open(Some(Box::new(move |directory: &Path| {
+            let _ = fs::write(directory.join(HOSTED_MOB_MARK), &put);
+        })));
+        assert!(
+            of_the_third
+                .remember("another.realm", &id, new_memory("late fact", "late body"))
+                .await
+                .is_err(),
+            "a write into a directory that became another mob's before its open is refused"
+        );
+        making_in_tests::before_an_open(None);
+        let its_directory = launch.root_of_hosted_mob(&third)?;
+        assert_eq!(
+            fs::read_to_string(its_directory.join(HOSTED_MOB_MARK))?,
+            anothers_mark,
+            "the other mob's mark is as it was put"
+        );
+        let of_the_other = launch.of_hosted_mob(&third, of_another)?;
+        assert_eq!(
+            recalled_titles(&of_the_other, "another.realm").await?,
+            Vec::<String>::new(),
+            "and the other mob finds none of the refused write"
+        );
+        Ok(())
+    }
+
+    /// A directory under a mob's name that no mark proves the mob's is
+    /// refused, whatever it holds, and nothing in it is changed.
+    ///
+    /// Each of these stands under a mob's name when a value is made for the
+    /// mob: a directory with nothing in it; a directory with a file and no
+    /// mark; a mark that is no mark; a mark with a word more than a mark
+    /// has; a mark of another mob id at the same incarnation; a mark that
+    /// cannot be read from disk (a directory where the mark's file would
+    /// be); and a file where the directory would be. The value is told the
+    /// directory is not
+    /// proved its own, each with its own reason; a write through it is an
+    /// error; and what stood there is byte for byte, and to the time of its
+    /// last write, what it was.
+    #[tokio::test]
+    async fn a_directory_that_no_mark_proves_the_mobs_is_refused_whatever_it_holds()
+    -> Result<(), Box<dyn Error>> {
+        let dir = tempfile::tempdir()?;
+        let launch = SqliteAgentMemoryStore::open(dir.path())?;
+        let id = identity()?;
+        let incarnation = meerkat_core::service::MobIncarnationId::mint();
+        let whole_mark_of =
+            |mob: &str| format!("{{\"mob_id\":\"{mob}\",\"incarnation\":\"{incarnation}\"}}");
+        let cases: [(&str, Option<String>, bool); 5] = [
+            ("empty", None, false),
+            ("unmarked", None, true),
+            ("no-mark", Some("this is no mark".to_string()), true),
+            (
+                "one-word-more",
+                Some(format!(
+                    "{{\"mob_id\":\"one-word-more\",\"incarnation\":\"{incarnation}\",\"more\":1}}"
+                )),
+                false,
+            ),
+            ("anothers", Some(whole_mark_of("some-other-mob")), true),
+        ];
+        for (mob, mark, with_a_file) in cases {
+            let mob_id = meerkat_mob::MobId::from(mob);
+            let its_directory = launch.root_of_hosted_mob(&mob_id)?;
+            fs::create_dir_all(&its_directory)?;
+            if let Some(mark) = &mark {
+                fs::write(its_directory.join(HOSTED_MOB_MARK), mark)?;
+            }
+            if with_a_file {
+                fs::write(
+                    its_directory.join("mob%2eearlier.sqlite3"),
+                    b"what a mob left",
+                )?;
+            }
+            let before = files_and_times(&its_directory);
+            let value = launch.of_hosted_mob(&mob_id, incarnation)?;
+            let refusal = value.proved_its_own();
+            let as_expected = match mob {
+                "empty" | "unmarked" => {
+                    matches!(refusal, Err(HostedMemoryRefusal::NotMarked { .. }))
+                }
+                "no-mark" | "one-word-more" => {
+                    matches!(refusal, Err(HostedMemoryRefusal::MarkUnreadable { .. }))
+                }
+                _ => matches!(
+                    refusal,
+                    Err(HostedMemoryRefusal::WrittenForAnotherMob { ref marked_mob, .. })
+                        if marked_mob == "some-other-mob"
+                ),
+            };
+            assert!(as_expected, "({mob}) the refusal says why: {refusal:?}");
+            assert!(
+                value
+                    .remember("a.realm", &id, new_memory("late fact", "late body"))
+                    .await
+                    .is_err(),
+                "({mob}) a write through the value is refused"
+            );
+            assert_eq!(
+                files_and_times(&its_directory),
+                before,
+                "({mob}) nothing in the directory was made or changed"
+            );
+        }
+
+        // A mark that cannot be read from disk: a directory stands where
+        // the mark's file would be.
+        let no_file = meerkat_mob::MobId::from("mark-is-no-file");
+        let its_directory = launch.root_of_hosted_mob(&no_file)?;
+        fs::create_dir_all(its_directory.join(HOSTED_MOB_MARK))?;
+        fs::write(
+            its_directory.join("mob%2eearlier.sqlite3"),
+            b"what a mob left",
+        )?;
+        let before = files_and_times(&its_directory);
+        let value = launch.of_hosted_mob(&no_file, incarnation)?;
+        let refusal = value.proved_its_own();
+        assert!(
+            matches!(refusal, Err(HostedMemoryRefusal::MarkUnreadable { .. })),
+            "a mark that cannot be read from disk is refused as such: {refusal:?}"
+        );
+        assert!(
+            value
+                .remember("a.realm", &id, new_memory("late fact", "late body"))
+                .await
+                .is_err(),
+            "a write through the value is refused"
+        );
+        assert_eq!(
+            files_and_times(&its_directory),
+            before,
+            "nothing in the directory was made or changed"
+        );
+        assert!(
+            its_directory.join(HOSTED_MOB_MARK).is_dir(),
+            "and what stands where the mark would be is as it was"
+        );
+
+        let in_the_way = meerkat_mob::MobId::from("in-the-way");
+        let its_path = launch.root_of_hosted_mob(&in_the_way)?;
+        fs::write(&its_path, b"no directory")?;
+        let value = launch.of_hosted_mob(&in_the_way, incarnation)?;
+        assert!(
+            matches!(
+                value.proved_its_own(),
+                Err(HostedMemoryRefusal::NotADirectory { .. })
+            ),
+            "what is no directory is refused as such"
+        );
+        assert!(
+            value
+                .remember("a.realm", &id, new_memory("late fact", "late body"))
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            fs::read(&its_path)?,
+            b"no directory",
+            "and is left as it was"
+        );
+        Ok(())
+    }
+
+    /// A value's first use that meets its mob's release makes no directory.
+    ///
+    /// A value is made for a mob and nothing stands under the mob's name.
+    /// The mob's memory is released at the start of the making that the
+    /// value's first write begins: after the write's own early look at the
+    /// release's mark, and before the making takes its maker's lock. The
+    /// write is refused as every operation of a released value is, and
+    /// nothing stands under the mob's name or beside it: a release is not
+    /// followed by a directory that carries the released mob's mark.
+    #[tokio::test]
+    async fn a_first_use_that_meets_its_mobs_release_makes_no_directory()
+    -> Result<(), Box<dyn Error>> {
+        let dir = tempfile::tempdir()?;
+        let launch = SqliteAgentMemoryStore::open(dir.path())?;
+        let hosted = dir.path().join(HOSTED_MOBS_DIR);
+        let id = identity()?;
+        let mob_id = meerkat_mob::MobId::from("released-meanwhile");
+        let value =
+            launch.of_hosted_mob(&mob_id, meerkat_core::service::MobIncarnationId::mint())?;
+        let released: Arc<Mutex<Vec<Result<(), String>>>> = Arc::default();
+        let (releases, its_mob, answers) = (launch.clone(), mob_id.clone(), Arc::clone(&released));
+        making_in_tests::in_a_making(Some(Box::new(move |stands| {
+            if stands == making_in_tests::MakingStands::AtItsStart {
+                answers
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(
+                        releases
+                            .release_hosted_mob(&its_mob)
+                            .map_err(|error| error.to_string()),
+                    );
+            }
+        })));
+        let written = value
+            .remember(
+                "mob.released-meanwhile",
+                &id,
+                new_memory("a fact", "a body"),
+            )
+            .await;
+        making_in_tests::in_a_making(None);
+        assert_eq!(
+            *released
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            [Ok::<(), String>(())],
+            "the release ran once, at the making's start, and had nothing to remove"
+        );
+        let refused = written
+            .map(|record| record.title)
+            .map_err(|error| error.to_string());
+        assert!(
+            matches!(&refused, Err(text) if text.contains(RELEASED_STORE_IS_CLOSED)),
+            "the write is refused as every operation of a released value is: {refused:?}"
+        );
+        assert_eq!(
+            entries_directly_in(&hosted),
+            Vec::<String>::new(),
+            "nothing stands under the mob's name or beside it"
+        );
+        Ok(())
+    }
+
+    /// A release that meets a making waits for it, and removes what it
+    /// made.
+    ///
+    /// A value's first write begins the making of its mob's directory. Once
+    /// the making holds its maker's lock, the mob's memory is released from
+    /// another thread; the making waits until that release has set its
+    /// mark, and then half a second for the release to end. It does not
+    /// end: the release waits for the making. The
+    /// making then gives the directory the mob's name, and the release,
+    /// which goes on after it, takes the directory out of that name and
+    /// removes it. Nothing stands under the mob's name or beside it
+    /// afterwards.
+    #[tokio::test]
+    async fn a_release_that_meets_a_making_waits_for_it_and_removes_what_it_made()
+    -> Result<(), Box<dyn Error>> {
+        let dir = tempfile::tempdir()?;
+        let launch = SqliteAgentMemoryStore::open(dir.path())?;
+        let hosted = dir.path().join(HOSTED_MOBS_DIR);
+        let id = identity()?;
+        let mob_id = meerkat_mob::MobId::from("made-meanwhile");
+        let value =
+            launch.of_hosted_mob(&mob_id, meerkat_core::service::MobIncarnationId::mint())?;
+        let (ended_tx, ended_rx) = std::sync::mpsc::channel::<Result<(), String>>();
+        // What the making saw while it held its maker's lock: whether the
+        // release had set its mark, and whether the release ended.
+        let ended_early: Arc<Mutex<Vec<(bool, bool)>>> = Arc::default();
+        let (releases, its_mob, early) = (launch.clone(), mob_id.clone(), Arc::clone(&ended_early));
+        let marked = Arc::clone(&value.released);
+        let waits_for = Arc::new(Mutex::new(Some((ended_tx, ended_rx))));
+        let handed_back = Arc::clone(&waits_for);
+        making_in_tests::in_a_making(Some(Box::new(move |stands| {
+            if stands != making_in_tests::MakingStands::UnderItsLock {
+                return;
+            }
+            let Some((ended_tx, ended_rx)) = waits_for
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+            else {
+                return;
+            };
+            let (releases, its_mob, answer) = (releases.clone(), its_mob.clone(), ended_tx.clone());
+            std::thread::spawn(move || {
+                let _ = answer.send(
+                    releases
+                        .release_hosted_mob(&its_mob)
+                        .map_err(|error| error.to_string()),
+                );
+            });
+            // The release sets its mark before it waits for the maker's
+            // lock: the making goes on only once the mark is set.
+            for _ in 0..2000 {
+                if marked.load(Ordering::SeqCst) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            let ended = ended_rx.recv_timeout(std::time::Duration::from_millis(500));
+            early
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push((marked.load(Ordering::SeqCst), ended.is_ok()));
+            // An answer that came early is sent again for the row to read.
+            if let Ok(ended) = ended {
+                let _ = ended_tx.send(ended);
+            }
+            *waits_for
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((ended_tx, ended_rx));
+        })));
+        let written = value
+            .remember("mob.made-meanwhile", &id, new_memory("a fact", "a body"))
+            .await;
+        making_in_tests::in_a_making(None);
+        assert_eq!(
+            *ended_early
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            [(true, false)],
+            "the release set its mark and did not end while the making held its maker's lock"
+        );
+        let (_ended_tx, ended_rx) = handed_back
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .ok_or("the making told the row where it stood")?;
+        assert_eq!(
+            ended_rx.recv_timeout(std::time::Duration::from_secs(10)),
+            Ok(Ok(())),
+            "the release ends once the making is over, with no failure"
+        );
+        assert!(
+            written.is_err(),
+            "the write that began the making is refused: its mob's memory was released"
+        );
+        assert_eq!(
+            entries_directly_in(&hosted),
+            Vec::<String>::new(),
+            "nothing stands under the mob's name or beside it"
+        );
+        Ok(())
+    }
+
+    /// A release of a mob's memory removes what a making of the mob's
+    /// directory left beside the mob's name, and nothing of another mob.
+    ///
+    /// A first use of a mob's store is cut short after the mark has its
+    /// name: what is left lies beside the mob's name, under a name that is
+    /// no mob's, and holds the mark. The first use of another mob, whose id
+    /// begins with the first mob's, is cut short the same way. The first
+    /// mob's memory is released: what its making left is gone, the release
+    /// answers no failure, and what the other mob's making left is file for
+    /// file what it was.
+    #[tokio::test]
+    async fn a_release_removes_what_a_making_left_beside_the_mobs_name()
+    -> Result<(), Box<dyn Error>> {
+        async fn cut_short(
+            launch: &SqliteAgentMemoryStore,
+            hosted: &Path,
+            id: &AgentIdentity,
+            mob: &str,
+        ) -> Result<PathBuf, Box<dyn Error>> {
+            let incarnation = meerkat_core::service::MobIncarnationId::mint();
+            let value = launch.of_hosted_mob(&meerkat_mob::MobId::from(mob), incarnation)?;
+            making_in_tests::stops_after(3);
+            let cut = value
+                .remember(&format!("mob.{mob}"), id, new_memory("a fact", "a body"))
+                .await;
+            making_in_tests::stops_after(0);
+            assert!(
+                cut.is_err(),
+                "({mob}) the write that began the making fails"
+            );
+            let left = hosted.join(format!("{mob}{MAKING_INFIX}{incarnation}"));
+            assert!(
+                left.join(HOSTED_MOB_MARK).is_file(),
+                "({mob}) what the making left holds the mark, beside the mob's name"
+            );
+            Ok(left)
+        }
+        let dir = tempfile::tempdir()?;
+        let launch = SqliteAgentMemoryStore::open(dir.path())?;
+        let hosted = dir.path().join(HOSTED_MOBS_DIR);
+        let id = identity()?;
+        let of_the_mob = cut_short(&launch, &hosted, &id, "left").await?;
+        let of_another = cut_short(&launch, &hosted, &id, "left-too").await?;
+        let anothers = files_and_times(&of_another);
+        assert!(!anothers.is_empty());
+
+        launch.release_hosted_mob(&meerkat_mob::MobId::from("left"))?;
+        assert!(
+            !of_the_mob.exists(),
+            "what the released mob's making left is gone"
+        );
+        assert_eq!(
+            files_and_times(&of_another),
+            anothers,
+            "what another mob's making left is as it was"
+        );
+        assert_eq!(
+            entries_directly_in(&hosted),
+            [of_another
+                .file_name()
+                .ok_or("a name")?
+                .to_string_lossy()
+                .into_owned()],
+            "and nothing else is in the hosted directory"
+        );
+        Ok(())
+    }
+
+    /// A release takes the mob's directory out of the mob's name before it
+    /// removes it, and what a release could not remove is removed by the
+    /// next release of that mob or at the next start, and nothing else is.
+    ///
+    /// The removal is made to fail. The release answers its failure; the
+    /// mob's own path is free (the store of a mob that takes the id starts
+    /// empty), and what is left lies in the hosted directory under a name
+    /// no mob id has. A second release of the mob, with the removal
+    /// working, removes what was left and the mob's new directory, and
+    /// answers no failure. What a start removes is what a release left and
+    /// nothing else: another mob's directory, a directory someone else
+    /// made in the hosted directory and a file there all stay, byte for
+    /// byte.
+    #[tokio::test]
+    async fn a_release_takes_the_directory_out_of_the_mobs_name_before_it_removes_it()
+    -> Result<(), Box<dyn Error>> {
+        let dir = tempfile::tempdir()?;
+        let launch = SqliteAgentMemoryStore::open(dir.path())?;
+        let hosted = dir.path().join(HOSTED_MOBS_DIR);
+        let id = identity()?;
+        let (second, third) = (
+            meerkat_mob::MobId::from("second"),
+            meerkat_mob::MobId::from("third"),
+        );
+        launch
+            .of_hosted_mob_in_tests(&second)?
+            .remember(
+                "mob.second",
+                &id,
+                new_memory("earlier fact", "earlier body"),
+            )
+            .await?;
+        launch
+            .of_hosted_mob_in_tests(&third)?
+            .remember("mob.third", &id, new_memory("third fact", "third body"))
+            .await?;
+        let name_of = |mob: &meerkat_mob::MobId| -> Result<String, Box<dyn Error>> {
+            Ok(launch
+                .root_of_hosted_mob(mob)?
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default())
+        };
+        let (of_the_second, of_the_third) = (name_of(&second)?, name_of(&third)?);
+        let third_files = files_directly_in(&hosted.join(&of_the_third));
+
+        launch.fail_removals_in_tests(true);
+        assert!(
+            launch.release_hosted_mob(&second).is_err(),
+            "a release whose removal fails answers its failure"
+        );
+        let left: Vec<String> = entries_directly_in(&hosted)
+            .into_iter()
+            .filter(|name| name != &of_the_third)
+            .collect();
+        assert_eq!(
+            left.len(),
+            1,
+            "one entry is left of the released mob: {left:?}"
+        );
+        assert_ne!(left[0], of_the_second, "and not under the mob's name");
+        assert!(
+            left[0].contains('.'),
+            "its name is one no mob id has (a mob's directory name holds no `.`): {left:?}"
+        );
+        let later = launch.of_hosted_mob_in_tests(&second)?;
+        assert!(
+            recalled_titles(&later, "mob.second").await?.is_empty(),
+            "the mob's own path is free: the store of a mob that takes the id starts empty"
+        );
+        later
+            .remember("mob.second", &id, new_memory("later fact", "later body"))
+            .await?;
+
+        // The next release of the mob finishes the earlier one.
+        launch.fail_removals_in_tests(false);
+        launch.release_hosted_mob(&second)?;
+        assert_eq!(
+            entries_directly_in(&hosted),
+            [of_the_third.clone()],
+            "a release of the mob removes what an earlier release of it left, with the \
+             mob's new directory"
+        );
+
+        // A start removes what a release left, and nothing else.
+        launch
+            .of_hosted_mob_in_tests(&second)?
+            .remember(
+                "mob.second",
+                &id,
+                new_memory("a third fact", "a third body"),
+            )
+            .await?;
+        launch.fail_removals_in_tests(true);
+        assert!(launch.release_hosted_mob(&second).is_err());
+        launch.fail_removals_in_tests(false);
+        fs::create_dir_all(hosted.join("someone-elses.d"))?;
+        fs::write(hosted.join("someone-elses.d").join("kept.txt"), b"kept")?;
+        fs::write(hosted.join("a-file.txt"), b"kept")?;
+        let started_anew = SqliteAgentMemoryStore::open(dir.path())?;
+        started_anew.finish_releases_of_hosted_mobs();
+        assert_eq!(
+            entries_directly_in(&hosted),
+            ["a-file.txt", "someone-elses.d", of_the_third.as_str()],
+            "a start removed what the release left, and nothing else"
+        );
+        assert_eq!(
+            files_directly_in(&hosted.join(&of_the_third)),
+            third_files,
+            "the other mob's directory is byte for byte what it was"
+        );
+        assert_eq!(
+            fs::read(hosted.join("someone-elses.d").join("kept.txt"))?,
+            b"kept"
+        );
+        Ok(())
+    }
+
+    /// The mark a release sets, and the record a launch's store keeps of
+    /// the values it made, change nothing a mob that was not released can
+    /// see, and make nothing on disk.
+    ///
+    /// Making a hosted mob's store value, binding nothing, and finishing
+    /// earlier releases on a root that never hosted a mob make no directory:
+    /// the root holds what it held. A value's first operation makes its
+    /// mob's directory, directly under the hosted directory. The launch's
+    /// own listing of its realms holds its own realm alone before a mob's
+    /// first operation, after it, while what a failed release left lies in
+    /// the hosted directory, and after the release: an earlier gateway,
+    /// which lists the root the same way, sees none of it. A hosted value
+    /// shares no connection, gate, resolver or sink with the launch's value
+    /// or another mob's, whatever was released; and releasing one mob
+    /// closes neither the launch's value nor another mob's.
+    #[tokio::test]
+    async fn a_release_and_its_mark_reach_nothing_of_a_mob_that_was_not_released()
+    -> Result<(), Box<dyn Error>> {
+        let dir = tempfile::tempdir()?;
+        let launch = SqliteAgentMemoryStore::open(dir.path())?;
+        let hosted = dir.path().join(HOSTED_MOBS_DIR);
+        let id = identity()?;
+        launch
+            .remember("team", &id, new_memory("launch fact", "launch body"))
+            .await?;
+        let at_rest = entries_directly_in(dir.path());
+        let (second, third) = (
+            meerkat_mob::MobId::from("second"),
+            meerkat_mob::MobId::from("third"),
+        );
+
+        // Nothing on disk for a value that was made and never used, for a
+        // release of a mob that never used its memory, or for a start.
+        let of_the_second = launch.of_hosted_mob_in_tests(&second)?;
+        let of_the_third = launch.of_hosted_mob_in_tests(&third)?;
+        launch.finish_releases_of_hosted_mobs();
+        launch.release_hosted_mob(&meerkat_mob::MobId::from("never-used"))?;
+        // A mob whose id the store has no directory for (the empty id): the
+        // store's own function refuses it; the release a create and a
+        // destroy ask answers done, because nothing is kept under such an
+        // id, and makes nothing either.
+        let nameless = meerkat_mob::MobId::from("");
+        assert!(launch.release_hosted_mob(&nameless).is_err());
+        assert!(
+            crate::mob_memory_release::MobMemoryRelease::release_mob(&launch, &nameless).is_ok(),
+            "a mob the store can keep nothing for has nothing to release"
+        );
+        assert!(
+            !hosted.exists() && entries_directly_in(dir.path()) == at_rest,
+            "making a value, a start and a release of nothing make nothing on disk: {:?}",
+            entries_directly_in(dir.path())
+        );
+        assert_eq!(launch.known_realms()?, ["team"]);
+
+        of_the_second
+            .remember("mob.second", &id, new_memory("second fact", "second body"))
+            .await?;
+        of_the_third
+            .remember("mob.third", &id, new_memory("third fact", "third body"))
+            .await?;
+        assert_eq!(
+            entries_directly_in(&hosted),
+            ["second", "third"],
+            "a value's first operation makes its mob's directory, directly under the hosted \
+             directory"
+        );
+        assert_eq!(
+            launch.known_realms()?,
+            ["team"],
+            "the launch's listing of its realms holds no hosted mob's"
+        );
+        assert!(
+            !of_the_second.shares_a_slot_with(&launch)
+                && !of_the_second.shares_a_slot_with(&of_the_third)
+                && !of_the_third.shares_a_slot_with(&launch),
+            "a hosted mob's value shares nothing a read or a write passes with the launch's \
+             or another mob's"
+        );
+
+        // What a failed release leaves is a directory directly in the
+        // hosted directory, and the launch's listing does not see it.
+        launch.fail_removals_in_tests(true);
+        assert!(launch.release_hosted_mob(&second).is_err());
+        launch.fail_removals_in_tests(false);
+        assert_eq!(entries_directly_in(&hosted).len(), 2);
+        assert!(
+            entries_directly_in(&hosted)
+                .iter()
+                .all(|name| hosted.join(name).is_dir()),
+            "what a release left is a directory directly in the hosted directory"
+        );
+        assert_eq!(
+            launch.known_realms()?,
+            ["team"],
+            "and the launch's listing of its realms does not see it"
+        );
+        launch.release_hosted_mob(&second)?;
+        assert_eq!(entries_directly_in(&hosted), ["third"]);
+        assert_eq!(launch.known_realms()?, ["team"]);
+
+        // The release of one mob closed neither the launch's value nor the
+        // other mob's, and they still share nothing.
+        assert_eq!(recalled_titles(&launch, "team").await?, ["launch fact"]);
+        assert_eq!(
+            recalled_titles(&of_the_third, "mob.third").await?,
+            ["third fact"]
+        );
+        of_the_third
+            .remember(
+                "mob.third",
+                &id,
+                new_memory("third fact two", "third body two"),
+            )
+            .await?;
+        assert!(
+            of_the_second
+                .remember("mob.second", &id, new_memory("late fact", "late body"))
+                .await
+                .is_err(),
+            "the released mob's value is closed"
+        );
+        assert!(
+            !of_the_third.shares_a_slot_with(&launch)
+                && !of_the_second.shares_a_slot_with(&of_the_third)
         );
         Ok(())
     }

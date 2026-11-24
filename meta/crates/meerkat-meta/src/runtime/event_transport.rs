@@ -50,21 +50,76 @@ pub fn normalize_event_line(line: &str) -> Result<EventEnvelope<UnifiedEvent>, N
 }
 
 impl MetaRuntimeHandle {
+    /// [`Self::append_normalized_event_of_mob`] for an event of the launch
+    /// selection.
+    #[cfg(test)]
     pub(crate) fn append_normalized_event(
         &mut self,
         event: EventEnvelope<UnifiedEvent>,
     ) -> Result<(), NormalizationError> {
+        self.append_normalized_event_of_mob(event, None)
+    }
+
+    /// [`Self::append_normalized_event`] for an event that is not of the
+    /// launch selection when `mob` names a mob: the event's own mob (a mob
+    /// of the host other than the launch mob, or a mob below one), with
+    /// the incarnation of the mob it came from. A subscription that names
+    /// no mob is not answered such an event; one that names that mob is,
+    /// while the mob it names runs at that incarnation.
+    ///
+    /// The envelope names no mob (its bytes are what a client reads), so
+    /// the buffer keeps the mob beside it, by the event's id, and forgets
+    /// it once the event left the buffer.
+    pub(crate) fn append_normalized_event_of_mob(
+        &mut self,
+        event: EventEnvelope<UnifiedEvent>,
+        mob: Option<EventMob>,
+    ) -> Result<(), NormalizationError> {
         let event = enforce_source_consistency(event)?;
+        if let Some(mob) = mob {
+            self.event_mobs.insert(event.event_id.clone(), mob);
+        }
         insert_event_sorted(&mut self.merged_events, event);
+        // The buffer drops its oldest events in batches: once the mobs
+        // kept beside it outnumber what the buffer can hold, drop those of
+        // events that left it. An event in the buffer always keeps its own.
+        if self.event_mobs.len() > MERGED_EVENTS_RETAINED + MERGED_EVENTS_TRIM_SLACK {
+            let buffered: std::collections::HashSet<&str> = self
+                .merged_events
+                .iter()
+                .map(|event| event.event_id.as_str())
+                .collect();
+            self.event_mobs
+                .retain(|event_id, _| buffered.contains(event_id.as_str()));
+        }
         Ok(())
     }
 
     pub fn merged_events(&self) -> &[EventEnvelope<UnifiedEvent>] {
         &self.merged_events
     }
+
+    /// Answer `request` from the merged events of the launch selection:
+    /// the events that name no mob (`Self::subscribe_events_of_mob`).
     pub fn subscribe_events(
         &self,
         request: SubscribeRequest,
+    ) -> Result<SubscribeResponse, SubscribeError> {
+        self.subscribe_events_of_mob(request, None)
+    }
+
+    /// Answer `request` from the merged events of one selection: with
+    /// `mob`, the events of the members of that mob of the host at the
+    /// incarnation it names (the one the mob runs at now: an event of an
+    /// earlier mob of the same id is not answered); with none, the launch
+    /// selection (the launch mob's events and those of the mobs below it,
+    /// as on a host of one mob). An event of another selection is not
+    /// counted, replayed or matched as a checkpoint. A selection that
+    /// names a mob and no incarnation is answered nothing.
+    pub(crate) fn subscribe_events_of_mob(
+        &self,
+        request: SubscribeRequest,
+        mob: Option<&EventMob>,
     ) -> Result<SubscribeResponse, SubscribeError> {
         if let Some(checkpoint) = request.last_event_id.as_ref()
             && checkpoint.trim().is_empty()
@@ -85,6 +140,10 @@ impl MetaRuntimeHandle {
         let scoped_events: Vec<_> = self
             .merged_events
             .iter()
+            .filter(|event| {
+                mob.is_none_or(|mob| mob.incarnation.is_some())
+                    && self.event_mobs.get(&event.event_id) == mob
+            })
             .filter(|event| event_matches_request(event, &request))
             .collect();
         let skip = scoped_events
@@ -317,6 +376,17 @@ mod merged_event_buffer_tests {
         }
     }
 
+    /// `mob` as an event is kept under it, at the incarnation `incarnation`.
+    fn kept_under(
+        mob: &meerkat_mob::MobId,
+        incarnation: Option<meerkat_core::service::MobIncarnationId>,
+    ) -> EventMob {
+        EventMob {
+            mob_id: mob.clone(),
+            incarnation,
+        }
+    }
+
     fn event_ids(events: &[EventEnvelope<UnifiedEvent>]) -> Vec<String> {
         events.iter().map(|event| event.event_id.clone()).collect()
     }
@@ -450,6 +520,175 @@ mod merged_event_buffer_tests {
             (MERGED_EVENTS_RETAINED..=MERGED_EVENTS_RETAINED + MERGED_EVENTS_TRIM_SLACK)
                 .contains(&held),
             "{held} events held"
+        );
+    }
+
+    /// An event of a mob other than the launch mob is answered to a
+    /// subscription that names its mob and to no other, for as long as the
+    /// buffer holds it: the mob kept beside an event is never dropped
+    /// before the event is, and the mobs of events that left the buffer do
+    /// not pile up.
+    #[test]
+    fn an_event_of_another_mob_is_answered_to_its_mob_alone_while_the_buffer_holds_it() {
+        let mut runtime = runtime_with(Vec::new());
+        let second = meerkat_mob::MobId::from("second-mob");
+        let third = meerkat_mob::MobId::from("third-mob");
+        let of_the_second = meerkat_core::service::MobIncarnationId::mint();
+        let of_the_third = meerkat_core::service::MobIncarnationId::mint();
+        let request = || SubscribeRequest {
+            scope: SubscribeScope::Agent,
+            last_event_id: None,
+            agent_id: Some("worker".to_string()),
+        };
+        // One event of the launch selection, the oldest, then more events
+        // of the second mob than the buffer ever holds.
+        runtime
+            .append_normalized_event(agent_event(0, "worker", "text_delta"))
+            .expect("append");
+        let total = u64::try_from(MERGED_EVENTS_RETAINED + 2 * MERGED_EVENTS_TRIM_SLACK)
+            .expect("the count fits u64");
+        for index in 1..=total {
+            runtime
+                .append_normalized_event_of_mob(
+                    agent_event(index, "worker", "text_delta"),
+                    Some(kept_under(&second, Some(of_the_second))),
+                )
+                .expect("append");
+        }
+
+        let of_the_second = runtime
+            .subscribe_events_of_mob(request(), Some(&kept_under(&second, Some(of_the_second))))
+            .expect("subscription");
+        let of_the_third = runtime
+            .subscribe_events_of_mob(request(), Some(&kept_under(&third, Some(of_the_third))))
+            .expect("subscription");
+        let of_no_mob = runtime.subscribe_events(request()).expect("subscription");
+        assert_eq!(of_the_second.events.len(), SUBSCRIBE_REPLAY_EVENT_CAP);
+        assert!(
+            of_the_third.events.is_empty(),
+            "another mob's subscription is answered the second mob's events"
+        );
+        assert!(
+            of_no_mob.events.is_empty(),
+            "a subscription that names no mob is answered the second mob's events"
+        );
+        let unkept: Vec<&str> = runtime
+            .merged_events()
+            .iter()
+            .map(|event| event.event_id.as_str())
+            .filter(|event_id| !runtime.event_mobs.contains_key(*event_id))
+            .collect();
+        assert!(
+            unkept.is_empty(),
+            "events in the buffer lost their mob: {unkept:?}"
+        );
+        assert!(
+            runtime.event_mobs.len() <= MERGED_EVENTS_RETAINED + MERGED_EVENTS_TRIM_SLACK,
+            "{} mobs are kept for a buffer that holds {} events",
+            runtime.event_mobs.len(),
+            runtime.merged_events().len()
+        );
+    }
+
+    /// An event is answered to a subscription that names its mob at the
+    /// incarnation the event came from, and to no other: with the events
+    /// of an earlier mob and of the mob created under its id in the buffer
+    /// together, a request for the mob that runs now is answered that
+    /// mob's events alone, and an event kept with no incarnation is
+    /// answered to no request that names one.
+    #[test]
+    fn an_event_of_an_earlier_mob_of_the_same_id_is_not_answered_to_the_mob_that_runs_now() {
+        let mut runtime = runtime_with(Vec::new());
+        let second = meerkat_mob::MobId::from("second-mob");
+        let earlier = meerkat_core::service::MobIncarnationId::mint();
+        let now = meerkat_core::service::MobIncarnationId::mint();
+        let request = || SubscribeRequest {
+            scope: SubscribeScope::Agent,
+            last_event_id: None,
+            agent_id: Some("worker".to_string()),
+        };
+        let ids = |response: SubscribeResponse| -> Vec<String> {
+            response
+                .events
+                .into_iter()
+                .map(|event| event.event_id)
+                .collect()
+        };
+        let id_of = |index: u64| agent_event(index, "worker", "text_delta").event_id;
+        for (index, incarnation) in [
+            (0_u64, Some(earlier)),
+            (1, Some(now)),
+            (2, None),
+            (3, Some(earlier)),
+            (4, Some(now)),
+        ] {
+            runtime
+                .append_normalized_event_of_mob(
+                    agent_event(index, "worker", "text_delta"),
+                    Some(kept_under(&second, incarnation)),
+                )
+                .expect("append");
+        }
+
+        assert_eq!(
+            ids(runtime
+                .subscribe_events_of_mob(request(), Some(&kept_under(&second, Some(now))))
+                .expect("subscription")),
+            [id_of(1), id_of(4)],
+            "the mob that runs now is answered an event that is not its own"
+        );
+        assert_eq!(
+            ids(runtime
+                .subscribe_events_of_mob(request(), Some(&kept_under(&second, Some(earlier))))
+                .expect("subscription")),
+            [id_of(0), id_of(3)]
+        );
+        assert_eq!(
+            ids(runtime.subscribe_events(request()).expect("subscription")),
+            Vec::<String>::new(),
+            "an event kept under a mob is answered where no mob is named"
+        );
+    }
+
+    /// A selection that names a mob and no incarnation is answered
+    /// nothing. The incarnation of the mob a request names is not known
+    /// when the mob set has not read the record of a mob that is not
+    /// loaded, and an event kept with a mob and no incarnation is that
+    /// mob's by no record: neither is answered the other.
+    #[test]
+    fn a_selection_that_names_no_incarnation_is_answered_nothing() {
+        let mut runtime = runtime_with(Vec::new());
+        let second = meerkat_mob::MobId::from("second-mob");
+        let now = meerkat_core::service::MobIncarnationId::mint();
+        let request = || SubscribeRequest {
+            scope: SubscribeScope::Agent,
+            last_event_id: None,
+            agent_id: Some("worker".to_string()),
+        };
+        for (index, incarnation) in [(0_u64, None), (1, Some(now)), (2, None)] {
+            runtime
+                .append_normalized_event_of_mob(
+                    agent_event(index, "worker", "text_delta"),
+                    Some(kept_under(&second, incarnation)),
+                )
+                .expect("append");
+        }
+
+        let answered = runtime
+            .subscribe_events_of_mob(request(), Some(&kept_under(&second, None)))
+            .expect("subscription");
+        assert_eq!(
+            event_ids(&answered.events),
+            Vec::<String>::new(),
+            "a selection that names no incarnation is answered events"
+        );
+        assert!(answered.event_frames.is_empty());
+        let of_the_mob = runtime
+            .subscribe_events_of_mob(request(), Some(&kept_under(&second, Some(now))))
+            .expect("subscription");
+        assert_eq!(
+            event_ids(&of_the_mob.events),
+            [agent_event(1, "worker", "text_delta").event_id]
         );
     }
 }

@@ -30,6 +30,9 @@ mod cycle;
 // A definition update against the created agents' rows (0.9.15): an update
 // that drops a profile a row names is refused.
 mod definition_update;
+// Where a created identity's lineage goes: its record's requester and
+// consent.
+mod lineage;
 mod owned_edges;
 
 const STEP: Duration = Duration::from_mins(1);
@@ -7193,6 +7196,12 @@ const ORIGIN_READERS: &[(&str, &[&str], &str)] = &[
         "runtime/actor/declared_apply.rs",
         &["pub(super) async fn declare_identity_entries("],
         "the roster writer's custody guard of a store-owned update",
+    ),
+    (
+        "runtime/seat_lineage.rs",
+        &["pub async fn member_lineage_step("],
+        "the lineage read, which shows it and allows nothing: a declared identity's member is \
+         its mob's own, and a created identity's goes by its identity record",
     ),
     (
         "roster.rs",

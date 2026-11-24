@@ -3,8 +3,11 @@
 //! ([`mob_references`]), and which mob holds it ([`mob_id_holders`]).
 //!
 //! Documents name a mob by its id alone, as their owner (`Owner::Mob`) or in
-//! an audience grant or deny (`Audience::Mob`), so a new mob under the id of
-//! a destroyed one would inherit what they grant. A host refuses a create
+//! an audience grant or deny (`Audience::Mob`), or through an identity of the
+//! mob that owns a document or that a grant or a deny names
+//! (`Principal::MobAgent`), so a new mob under the id of a destroyed one, and
+//! its identities of the same names, would inherit what they grant. A host
+//! refuses a create
 //! while documents name the id, records the holder of every mob that
 //! activates under an id, and on a restore compares it: a restored mob of
 //! another holder is quarantined. A store that keeps the trait's default
@@ -14,7 +17,7 @@
 use meerkat_store_conformance::ConformanceFailure;
 use meta_extension_state::{
     Audience, DeniedOperation, Deny, DocumentAccess, DocumentContent, DocumentService, Grant,
-    HostAccessContext, HostPolicy, MobIdHolder, Mutation, NewDocument, Owner, Principal,
+    HostAccessContext, HostPolicy, MobIdHolder, Mutation, NewDocument, Owner, Principal, Reach,
     RequestIdentity, Role, VerifiedLineage,
 };
 use std::collections::BTreeSet;
@@ -91,9 +94,10 @@ pub async fn mob_id_holders(
 }
 
 /// Whether any live document of a realm, in any namespace, names a mob: as
-/// its owner, in a grant or in a deny. A deleted document, another realm and
-/// an unnamed mob do not count, and every answer follows the store's own
-/// writes at once.
+/// its owner, in a grant or in a deny, or through an identity of the mob
+/// that owns the document or that a grant or a deny names. A deleted
+/// document, another realm, an unnamed mob and the default mob's identity do
+/// not count, and every answer follows the store's own writes at once.
 pub async fn mob_references(
     factory: &dyn ExtensionDocumentStoreFactory,
 ) -> Result<(), ConformanceFailure> {
@@ -190,6 +194,59 @@ pub async fn mob_references(
         let named = steps.wrap(step, store.references_mob("realm", mob_id).await)?;
         steps.ensure(step, named, format!("no document names {mob_id}"))?;
     }
+
+    let step = "another_mobs_identity_names_its_mob";
+    // An identity of another mob names its mob by the id alone, like a mob
+    // owner or a mob audience: a new mob under that id would have an
+    // identity of the same name.
+    let identity = |mob_id: &str| Principal::agent(Some(mob_id), "alice");
+    let identity_audience = |mob_id: &str| Audience::Agent {
+        principal: identity(mob_id),
+        reach: Reach::SelfOnly,
+    };
+    let identity_owner = steps.wrap(
+        step,
+        HostAccessContext::new(
+            "realm",
+            identity("identity-owning"),
+            VerifiedLineage::root(),
+            HostPolicy::ALLOW,
+        ),
+    )?;
+    steps.wrap(
+        step,
+        in_namespace("four")?
+            .mutate(
+                &identity_owner,
+                &steps.wrap(step, request("identity-owned"))?,
+                create(
+                    None,
+                    DocumentAccess {
+                        grants: vec![Grant {
+                            audience: identity_audience("identity-granted"),
+                            role: Role::Reader,
+                        }],
+                        denies: vec![Deny {
+                            audience: identity_audience("identity-denied"),
+                            operation: DeniedOperation::Read,
+                        }],
+                        ..DocumentAccess::default()
+                    },
+                ),
+            )
+            .await,
+    )?;
+    for mob_id in ["identity-owning", "identity-granted", "identity-denied"] {
+        let named = steps.wrap(step, store.references_mob("realm", mob_id).await)?;
+        steps.ensure(
+            step,
+            named,
+            format!("no document names {mob_id} through its identity"),
+        )?;
+    }
+    // The default mob's identity carries no mob and names none.
+    let named = steps.wrap(step, store.references_mob("realm", "manager").await)?;
+    steps.ensure(step, !named, "the default mob's identity names a mob")?;
 
     let step = "other_mobs_and_realms_are_not_named";
     for (realm, mob_id) in [("realm", "unnamed"), ("another-realm", "owned")] {

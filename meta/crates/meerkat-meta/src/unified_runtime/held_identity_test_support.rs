@@ -366,5 +366,5 @@ pub(crate) fn stage_running_mob_activation(runtime: &mut UnifiedRuntime) {
     let pending = crate::mob_handle_runtime::PendingMobActivation::already_running_for_test(
         &runtime.mob_handle(),
     );
-    *runtime.pending_mob_activation.get_mut() = Some(pending);
+    *runtime.default_mob_mut().pending_mob_activation.get_mut() = Some(pending);
 }

@@ -64,7 +64,9 @@ LINES: tuple[tuple[str, str], ...] = (
 # A model name as it stands in a text: one of the three families, then a digit
 # or the live and realtime words.
 NAME = re.compile(
-    r"(?<![A-Za-z0-9_.-])"
+    # A shell default like ${MODEL:-gpt-...} begins after its operator,
+    # not inside a hyphenated model name. Keep the ordinary boundary elsewhere.
+    r"(?:(?<![A-Za-z0-9_.-])|(?<=:-))"
     r"(?:claude-(?:fable|opus|sonnet|haiku)-\d|gpt-(?:\d|live-|realtime-)|gemini-\d)"
     r"[A-Za-z0-9.-]*"
 )

@@ -807,13 +807,13 @@ AuditRecoverRow ==
           \/ /\ audit_recovery[i] = "Lifecycle"
              /\ RecoverInputLifecycleIdle(i, "Queued", None, None, None, None, 0,
                    r.attempts, None, None, Some(r.seq), None, Some(r.lane),
-                   Some(r.lane), Some(r.boundary), Some(r.exec), None, r.is_prompt)
+                   Some(r.lane), Some(r.boundary), Some(r.exec), None, r.is_prompt, None)
              /\ RecoveryStep(i, "Recovered")
           \* A row the verdict kept bound stays Staged, associated with its run.
           \/ /\ audit_recovery[i] = "LifecycleBound"
              /\ RecoverInputLifecycleIdle(i, "Staged", None, None, None, None, 0,
                    r.attempts, Some(AuditRun), None, Some(r.seq), None, Some(r.lane),
-                   None, None, None, None, FALSE)
+                   None, None, None, None, FALSE, None)
              /\ RecoveryStep(i, "Recovered")
 
 RecoveredRows == {i \in DOMAIN audit_recovery : audit_recovery[i] = "Recovered"}

@@ -24,6 +24,7 @@ fn frame(
     kind: &str,
 ) -> NewConsoleFrame {
     NewConsoleFrame {
+        mob_id: None,
         id: None,
         dedupe_key: key.to_string(),
         timestamp_ms,
@@ -684,6 +685,55 @@ async fn a_departure_drops_the_entry_and_a_later_read_walks_the_log_again() {
                 "{name}: the walk's result is kept again"
             );
         }
+    }
+}
+
+/// The entries are the default mob's members', by name. A frame of another
+/// mob's member of the same name is not that member's activity, and its
+/// departure is not that member's: the entry keeps its time and stays, so
+/// the next read neither answers the other mob's time nor walks the log.
+#[tokio::test]
+async fn another_mobs_member_of_the_same_name_neither_moves_nor_drops_the_entry() {
+    for (name, store) in stores() {
+        let observed = ObservedStore::new(store);
+        let aggregator = MetaConsoleAggregator::new(observed.clone());
+        let second = meerkat_mob::MobId::from("second");
+        append(&aggregator, acting("worker-acted", "worker", 100)).await;
+        assert_eq!(
+            read(&aggregator, &["worker"]).await,
+            times(&[("worker", 100)]),
+            "{name}"
+        );
+        let walks = observed.walks();
+
+        let mut acted = acting("second-worker-acted", "worker", 300);
+        acted.mob_id = Some(second.clone());
+        append(&aggregator, acted).await;
+        assert_eq!(
+            read(&aggregator, &["worker"]).await,
+            times(&[("worker", 100)]),
+            "{name}: another mob's member acting does not move the entry's time"
+        );
+
+        let mut left = frame(
+            "second-worker-left",
+            "worker",
+            400,
+            ConsoleFrameSourceKind::ConsoleEvent,
+            "identity_retired",
+        );
+        left.mob_id = Some(second);
+        append(&aggregator, left).await;
+        assert_eq!(
+            read(&aggregator, &["worker"]).await,
+            times(&[("worker", 100)]),
+            "{name}: another mob's member leaving does not change the entry"
+        );
+        assert_eq!(
+            observed.walks(),
+            walks,
+            "{name}: the entry stayed, so no read walked the log again"
+        );
     }
 }
 

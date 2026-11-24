@@ -1731,6 +1731,437 @@ impl From<RemoteMobError> for CrossMobError {
     }
 }
 
+/// What a peer needs to reach the member `member_id` of the resolved mob
+/// `mob`: the member is looked up in that mob's own roster, under that
+/// mob's own identity runtime, and its endpoint is read from that mob's
+/// wrapper.
+pub(super) async fn member_peer_facts_of(
+    mob: &super::MobEntryRef<'_>,
+    member_id: &str,
+) -> Result<LocalMemberPeerFacts, CrossMobError> {
+    let entry = mob.entry();
+    let handle = entry.mob_runtime.handle();
+    let mob_runtime = entry.mob_runtime.clone();
+    let mob_id = handle.mob_id().to_string();
+    let member_alias = crate::member_comms_id::runtime_alias_str(member_id).into_owned();
+    let identity_runtime = entry.identity_runtime_ref().cloned();
+    let target =
+        member_lifecycle_target_with_authority(identity_runtime.as_ref(), &member_alias, &mob_id)
+            .await?;
+    let identity_authoritative = target.is_some();
+    let operation_alias = member_alias.clone();
+    let operation_mob_id = mob_id.clone();
+    run_member_authority_transaction([target], member_alias, mob_id, move || async move {
+        let current_alias = resolve_member_alias_under_authority(
+            &handle,
+            identity_runtime.as_ref(),
+            identity_authoritative,
+            &operation_alias,
+            &operation_mob_id,
+        )
+        .await?;
+        let mid = crate::member_comms_id::mob_member_id(&current_alias);
+        let info = member_peer_info(&handle, &mid, &operation_mob_id).await?;
+        // A placed member reports its durable host address; a local
+        // member its in-process route.
+        let address = crate::runtime::cross_mob_control::member_peer_info_address(
+            &handle,
+            &mid,
+            &info.comms_name,
+        )
+        .await
+        .map_err(|fault| plane_fault_error(fault, &handle, &mid))?;
+        // An in-process address reaches only this process; a member
+        // without a socket endpoint has no dialable address to report.
+        let dialable_address = member_comms_advertised_address(&mob_runtime, &handle, &mid)
+            .await?
+            .filter(|advertised| !advertised.starts_with("inproc://"));
+        Ok(LocalMemberPeerFacts {
+            peer_id: info.peer_id,
+            comms_name: info.comms_name,
+            address,
+            pubkey_b64: info
+                .pubkey_b64
+                .trim()
+                .trim_start_matches("ed25519:")
+                .to_string(),
+            dialable_address,
+        })
+    })
+    .await
+}
+
+/// Wire the member `local_member_id` of the resolved mob `mob` to the
+/// member `remote_member_id` of the peer mob `remote_mob_id`, on both
+/// sides. The local member is looked up in that mob's own roster, under
+/// `local_identity_runtime`, and its link is held in that mob's own part of
+/// the link table; the peer mob is found in the host's contact directory
+/// and among the host's registered peer handles, which are one per process.
+pub(super) async fn wire_cross_mob_in(
+    mob: &super::MobEntryRef<'_>,
+    local_member_id: &str,
+    remote_member_id: &str,
+    remote_mob_id: &str,
+    local_identity_runtime: Option<&std::sync::Arc<crate::identity_first::IdentityRuntime>>,
+) -> Result<(), CrossMobError> {
+    let local_member_id = crate::member_comms_id::runtime_alias_str(local_member_id).into_owned();
+    let remote_member_id = crate::member_comms_id::runtime_alias_str(remote_member_id).into_owned();
+    // The link this wire declares is held in the mob's part of the link
+    // table, which the start-time read of its entry creates: a no-op for
+    // every mob that was started through its bootstrap. The other mob is
+    // reached through its handle here and ran its own read when it
+    // started.
+    mob.entry().restore_cross_mob_wake_routes().await;
+
+    let host = mob.runtime();
+    let local_runtime = mob.entry().mob_runtime.clone();
+    let local_handle = local_runtime.handle();
+    let local_mob_id = local_handle.mob_id().to_string();
+    let local_identity_runtime = local_identity_runtime.cloned();
+    let local_target = member_lifecycle_target_with_authority(
+        local_identity_runtime.as_ref(),
+        &local_member_id,
+        &local_mob_id,
+    )
+    .await?;
+    let local_identity_authoritative = local_target.is_some();
+    let entry = host.resolve_contact(remote_mob_id)?;
+    let remote = host.dispatch_for(&entry).await?;
+    let remote_target = match &remote {
+        LocalOrRemote::Local(authority) => {
+            member_lifecycle_target_with_authority(
+                authority.identity_runtime.as_ref(),
+                &remote_member_id,
+                remote_mob_id,
+            )
+            .await?
+        }
+        LocalOrRemote::Remote(_) => None,
+    };
+    let remote_identity_authoritative = remote_target.is_some();
+    let remote_mob_id = remote_mob_id.to_string();
+    run_member_authority_transaction(
+        [local_target, remote_target],
+        format!("{local_member_id} <-> {remote_member_id}"),
+        format!("{local_mob_id} <-> {remote_mob_id}"),
+        move || async move {
+            let local_member_id = resolve_member_alias_under_authority(
+                &local_handle,
+                local_identity_runtime.as_ref(),
+                local_identity_authoritative,
+                &local_member_id,
+                &local_mob_id,
+            )
+            .await?;
+            let local_mid = crate::member_comms_id::mob_member_id(&local_member_id);
+            let remote_member_id = match &remote {
+                LocalOrRemote::Local(authority) => {
+                    resolve_member_alias_under_authority(
+                        &authority.handle,
+                        authority.identity_runtime.as_ref(),
+                        remote_identity_authoritative,
+                        &remote_member_id,
+                        &remote_mob_id,
+                    )
+                    .await?
+                }
+                LocalOrRemote::Remote(_) => remote_member_id,
+            };
+            wire_cross_mob_transaction(
+                entry,
+                remote,
+                local_runtime,
+                local_mid,
+                local_mob_id,
+                local_member_id,
+                remote_member_id,
+                remote_mob_id,
+            )
+            .await
+        },
+    )
+    .await
+}
+
+/// Take back a wire between the member `local_member_id` of the resolved
+/// mob `mob` and the member `remote_member_id` of the peer mob
+/// `remote_mob_id`, on both sides: [`wire_cross_mob_in`] in reverse, with
+/// the same lookups.
+pub(super) async fn unwire_cross_mob_in(
+    mob: &super::MobEntryRef<'_>,
+    local_member_id: &str,
+    remote_member_id: &str,
+    remote_mob_id: &str,
+    local_identity_runtime: Option<&std::sync::Arc<crate::identity_first::IdentityRuntime>>,
+) -> Result<(), CrossMobError> {
+    let local_member_id = crate::member_comms_id::runtime_alias_str(local_member_id).into_owned();
+    let remote_member_id = crate::member_comms_id::runtime_alias_str(remote_member_id).into_owned();
+    let host = mob.runtime();
+    let local_runtime = mob.entry().mob_runtime.clone();
+    let local_handle = local_runtime.handle();
+    let local_mob_id = local_handle.mob_id().to_string();
+    let local_identity_runtime = local_identity_runtime.cloned();
+    let local_target = member_lifecycle_target_with_authority(
+        local_identity_runtime.as_ref(),
+        &local_member_id,
+        &local_mob_id,
+    )
+    .await?;
+    let local_identity_authoritative = local_target.is_some();
+    let entry = host.resolve_contact(remote_mob_id)?;
+    let remote = host.dispatch_for(&entry).await?;
+    let remote_target = match &remote {
+        LocalOrRemote::Local(authority) => {
+            member_lifecycle_target_with_authority(
+                authority.identity_runtime.as_ref(),
+                &remote_member_id,
+                remote_mob_id,
+            )
+            .await?
+        }
+        LocalOrRemote::Remote(_) => None,
+    };
+    let remote_identity_authoritative = remote_target.is_some();
+    let remote_mob_id = remote_mob_id.to_string();
+    run_member_authority_transaction(
+        [local_target, remote_target],
+        format!("{local_member_id} <-> {remote_member_id}"),
+        format!("{local_mob_id} <-> {remote_mob_id}"),
+        move || async move {
+            let local_member_id = resolve_member_alias_under_authority(
+                &local_handle,
+                local_identity_runtime.as_ref(),
+                local_identity_authoritative,
+                &local_member_id,
+                &local_mob_id,
+            )
+            .await?;
+            let local_mid = crate::member_comms_id::mob_member_id(&local_member_id);
+            let remote_member_id = match &remote {
+                LocalOrRemote::Local(authority) => {
+                    resolve_member_alias_under_authority(
+                        &authority.handle,
+                        authority.identity_runtime.as_ref(),
+                        remote_identity_authoritative,
+                        &remote_member_id,
+                        &remote_mob_id,
+                    )
+                    .await?
+                }
+                LocalOrRemote::Remote(_) => remote_member_id,
+            };
+            unwire_cross_mob_transaction(
+                entry,
+                remote,
+                local_runtime,
+                local_mid,
+                local_mob_id,
+                local_member_id,
+                remote_member_id,
+                remote_mob_id,
+            )
+            .await
+        },
+    )
+    .await
+}
+
+/// Send `content` from the member `from_local_member` of the resolved mob
+/// `mob` to the member `remote_member_id` of the peer mob `remote_mob_id`.
+/// The sender is a member of that mob: it is checked under
+/// `local_identity_runtime`, and a refusal names that mob. The peer mob is
+/// found in the host's contact directory and among the host's registered
+/// peer handles, which are one per process.
+pub(super) async fn send_cross_mob_in(
+    mob: &super::MobEntryRef<'_>,
+    from_local_member: &str,
+    remote_member_id: &str,
+    remote_mob_id: &str,
+    content: meerkat_core::ContentInput,
+    local_identity_runtime: Option<&std::sync::Arc<crate::identity_first::IdentityRuntime>>,
+) -> Result<String, CrossMobError> {
+    let from_local_member =
+        crate::member_comms_id::runtime_alias_str(from_local_member).into_owned();
+    let remote_member_id = crate::member_comms_id::runtime_alias_str(remote_member_id).into_owned();
+    let host = mob.runtime();
+    let local_mob_id = mob.mob_id().to_string();
+    let local_identity_runtime = local_identity_runtime.cloned();
+    let local_target = member_lifecycle_target_with_authority(
+        local_identity_runtime.as_ref(),
+        &from_local_member,
+        &local_mob_id,
+    )
+    .await?;
+    let entry = host.resolve_contact(remote_mob_id)?;
+    let remote = host.dispatch_for(&entry).await?;
+    let remote_target = match &remote {
+        LocalOrRemote::Local(authority) => {
+            member_lifecycle_target_with_authority(
+                authority.identity_runtime.as_ref(),
+                &remote_member_id,
+                remote_mob_id,
+            )
+            .await?
+        }
+        LocalOrRemote::Remote(_) => None,
+    };
+    let remote_identity_authoritative = remote_target.is_some();
+    let remote_mob_id = remote_mob_id.to_string();
+    // A durable identity of a same-process peer mob is reached through
+    // its identity door, whatever its residency: its admission guards
+    // (addressability, a pending first-boot row, an owed held completion,
+    // the registered row) and its delivery preparation apply, and Core
+    // wakes it when it is dormant. The door takes the identity's own
+    // lifecycle lock and checks a generated alias against its current
+    // incarnation, so the send holds no lock of the target itself.
+    if let (LocalOrRemote::Local(authority), Some(target)) = (&remote, remote_target.as_ref())
+        && let Some(identity_runtime) = authority.identity_runtime.clone()
+    {
+        let identity = target.durable_identity().clone();
+        // The sender is checked current under its own lock first; it
+        // names the message's origin and does not take the delivery.
+        // The door checks it again under the target's lock, just before
+        // delivery, without the sender's own: taking it there would nest
+        // one identity's lock inside another's.
+        let sender = local_target.clone();
+        run_member_authority_transaction(
+            [local_target],
+            from_local_member.clone(),
+            local_mob_id.clone(),
+            || async { Ok(()) },
+        )
+        .await?;
+        let sent = match sender {
+            Some(sender) => {
+                identity_runtime
+                    .send_through_identity_door_as(&identity, &remote_member_id, &content, sender)
+                    .await
+            }
+            None => {
+                identity_runtime
+                    .send_through_identity_door(&identity, &remote_member_id, &content)
+                    .await
+            }
+        };
+        return sent.map_err(|error| CrossMobError::IdentityAuthority {
+            member_id: remote_member_id.clone(),
+            mob_id: remote_mob_id.clone(),
+            message: error.to_string(),
+        });
+    }
+    run_member_authority_transaction(
+        [local_target, remote_target],
+        format!("{from_local_member} -> {remote_member_id}"),
+        format!("{local_mob_id} -> {remote_mob_id}"),
+        move || async move {
+            match remote {
+                LocalOrRemote::Local(authority) => {
+                    let remote_member_id = resolve_member_alias_under_authority(
+                        &authority.handle,
+                        authority.identity_runtime.as_ref(),
+                        remote_identity_authoritative,
+                        &remote_member_id,
+                        &remote_mob_id,
+                    )
+                    .await?;
+                    send_member_unchecked(
+                        authority.handle,
+                        &remote_member_id,
+                        &remote_mob_id,
+                        content,
+                    )
+                    .await
+                }
+                LocalOrRemote::Remote(proxy) => {
+                    let content_json = serde_json::to_value(&content).map_err(|err| {
+                        CrossMobError::PeerSpec(format!(
+                            "failed to serialize content for remote inject: {err}"
+                        ))
+                    })?;
+                    proxy
+                        .inject_message(&remote_member_id, content_json)
+                        .await
+                        .map_err(CrossMobError::Remote)
+                }
+            }
+        },
+    )
+    .await
+}
+
+/// Wire the member `local_member_id` of the resolved mob `mob` to the peer
+/// the remaining arguments describe, on the mob's side alone. The member is
+/// looked up in that mob's own roster, under `identity_runtime` or else
+/// that mob's own identity runtime, and its link is held in that mob's own
+/// part of the link table.
+pub(super) async fn wire_local_in(
+    mob: &super::MobEntryRef<'_>,
+    local_member_id: &str,
+    remote_comms_name: &str,
+    remote_peer_id: &str,
+    remote_address: &str,
+    remote_pubkey: Option<[u8; 32]>,
+    identity_runtime: Option<&std::sync::Arc<crate::identity_first::IdentityRuntime>>,
+) -> Result<(), CrossMobError> {
+    let spec = build_external_peer_spec(
+        remote_comms_name,
+        remote_peer_id,
+        remote_address,
+        remote_pubkey,
+    )?;
+    let member_alias = local_member_id.to_string();
+    // The link this wire declares is held in the mob's part of the link
+    // table, which the start-time read of its entry creates: a no-op here
+    // for every mob that was started through its bootstrap.
+    mob.entry().restore_cross_mob_wake_routes().await;
+    with_member_under_authority(
+        mob.entry().mob_runtime.handle(),
+        identity_runtime.or_else(|| mob.identity_runtime_ref()),
+        local_member_id,
+        mob.mob_id().as_ref(),
+        move |handle, current_member_id| async move {
+            wire_local_edge(
+                &handle,
+                local_roster_member(&current_member_id),
+                &member_alias,
+                spec,
+                SameProcessPeers::Resolve,
+            )
+            .await
+        },
+    )
+    .await
+}
+
+/// Take back a one-sided wire of the member `local_member_id` of the
+/// resolved mob `mob`: [`wire_local_in`] in reverse, with the same lookups.
+pub(super) async fn unwire_local_in(
+    mob: &super::MobEntryRef<'_>,
+    local_member_id: &str,
+    remote_comms_name: &str,
+    remote_peer_id: &str,
+    remote_address: &str,
+    remote_pubkey: Option<[u8; 32]>,
+    identity_runtime: Option<&std::sync::Arc<crate::identity_first::IdentityRuntime>>,
+) -> Result<(), CrossMobError> {
+    let spec = build_external_peer_spec(
+        remote_comms_name,
+        remote_peer_id,
+        remote_address,
+        remote_pubkey,
+    )?;
+    with_member_under_authority(
+        mob.entry().mob_runtime.handle(),
+        identity_runtime.or_else(|| mob.identity_runtime_ref()),
+        local_member_id,
+        mob.mob_id().as_ref(),
+        move |handle, current_member_id| async move {
+            unwire_local_edge(&handle, local_roster_member(&current_member_id), spec).await
+        },
+    )
+    .await
+}
+
 impl UnifiedRuntime {
     /// Same-process bilateral primitive used by the durable topology
     /// coordinator. Unlike the public contact-directory RPC this takes both
@@ -1767,8 +2198,8 @@ impl UnifiedRuntime {
         let peer_identity_runtime = peer.identity_runtime_ref().cloned();
         let local_mob_id = self.mob_id();
         let peer_mob_id = peer.mob_id();
-        let local_runtime = self.mob_runtime.clone();
-        let peer_runtime = peer.mob_runtime.clone();
+        let local_runtime = self.default_mob().mob_runtime.clone();
+        let peer_runtime = peer.default_mob().mob_runtime.clone();
         run_member_authority_transaction(
             [local_target, peer_target],
             format!("{local_member_id} <-> {peer_member_id}"),
@@ -1832,8 +2263,8 @@ impl UnifiedRuntime {
         let peer_identity_runtime = peer.identity_runtime_ref().cloned();
         let local_mob_id = self.mob_id();
         let peer_mob_id = peer.mob_id();
-        let local_runtime = self.mob_runtime.clone();
-        let peer_runtime = peer.mob_runtime.clone();
+        let local_runtime = self.default_mob().mob_runtime.clone();
+        let peer_runtime = peer.default_mob().mob_runtime.clone();
         run_member_authority_transaction(
             [local_target, peer_target],
             format!("{local_member_id} <-> {peer_member_id}"),
@@ -1879,8 +2310,8 @@ impl UnifiedRuntime {
     ) -> Result<(bool, bool), CrossMobError> {
         let local_member_id = self.topology_concrete_member_id(local_member_id).await?;
         let peer_member_id = peer.topology_concrete_member_id(peer_member_id).await?;
-        let local_handle = self.mob_runtime.handle();
-        let peer_handle = peer.mob_runtime.handle();
+        let local_handle = self.default_mob().mob_runtime.handle();
+        let peer_handle = peer.default_mob().mob_runtime.handle();
         // A read under the member-id alias rule: the topology's runtime id
         // came from the identity runtime just now, and it names the durable
         // roster row of its identity.
@@ -1947,7 +2378,7 @@ impl UnifiedRuntime {
         &self,
         logical_identity: &str,
     ) -> Result<String, CrossMobError> {
-        let Some(context) = self.identity_first_context.as_ref() else {
+        let Some(context) = self.default_mob().identity_first_context.get() else {
             return Ok(logical_identity.to_string());
         };
         let identity = crate::identity_first::AgentIdentity::parse(logical_identity)
@@ -2014,7 +2445,7 @@ impl UnifiedRuntime {
             PeerMobAuthority {
                 handle: peer.mob_handle(),
                 identity_runtime: peer.identity_runtime_ref().cloned(),
-                session_service: peer.mob_runtime.session_service().cloned(),
+                session_service: peer.default_mob().mob_runtime.session_service().cloned(),
             },
         );
     }
@@ -2066,10 +2497,30 @@ impl UnifiedRuntime {
     /// runtime because grants come from configuration the caller already
     /// holds before it starts the listener - unlike the gateway keypair,
     /// which hosts install late and which therefore needs a live slot.
+    ///
+    /// A request is served on the mob its signed audience names: the
+    /// default mob, or another mob this host serves that the caller's grant
+    /// reaches (see `ControlAuthorizer`). The listener asks the runtime's
+    /// resolver per request and keeps no list of mobs.
     pub async fn start_control_listener_with_authorizer(
         &self,
         addr: &crate::runtime::cross_mob_control::ControlListenAddr,
         authorizer: std::sync::Arc<crate::runtime::cross_mob_control::ControlAuthorizer>,
+    ) -> Result<String, CrossMobError> {
+        // The listener's task is the runtime's own: its resolver holds no
+        // public owner of the default mob.
+        self.start_control_listener_over(addr, authorizer, self.mob_resolver_of_its_own_task())
+            .await
+    }
+
+    /// [`Self::start_control_listener_with_authorizer`] over `mobs`, the
+    /// resolver of the mobs this host serves: the runtime's own, which the
+    /// public form passes. The listener's task keeps `mobs` for its life.
+    pub(crate) async fn start_control_listener_over(
+        &self,
+        addr: &crate::runtime::cross_mob_control::ControlListenAddr,
+        authorizer: std::sync::Arc<crate::runtime::cross_mob_control::ControlAuthorizer>,
+        mobs: super::MobResolver,
     ) -> Result<String, CrossMobError> {
         let mut task_slot = self.cross_mob_control_task.lock().await;
         if task_slot.is_some() {
@@ -2084,10 +2535,10 @@ impl UnifiedRuntime {
         let mut handler =
             crate::runtime::cross_mob_control::MobHandleControlHandler::with_shared_identity_authority(
                 // The runtime-owned listener is not a public owner.
-                self.mob_runtime.handle(),
-                std::sync::Arc::clone(&self.implicit_delegate_identity_runtime),
+                self.default_mob().mob_runtime.handle(),
+                std::sync::Arc::clone(self.default_mob().identity_plane.slot()),
             );
-        if let Some(service) = self.mob_runtime.session_service() {
+        if let Some(service) = self.default_mob().mob_runtime.session_service() {
             handler = handler.with_session_service(std::sync::Arc::clone(service));
         }
         self.install_remote_host_facts(&advertised);
@@ -2095,20 +2546,32 @@ impl UnifiedRuntime {
         handler = handler.with_keyed_inject_slot(std::sync::Arc::clone(&self.keyed_inject_slot));
         // A candidate launch's listener rewires no member and admits no
         // member input: a peer's Wire, Unwire and Inject are refused.
-        handler = handler.with_candidate_launch(!self.speaks_for_composition());
+        let candidate_launch = !self.speaks_for_composition();
+        handler = handler.with_candidate_launch(candidate_launch);
         // A member kept apart from other callers is no member for a peer
         // gateway: the handler asks the runtime's own record of its members.
         handler = handler.with_members_apart(
             crate::runtime::cross_mob_control::MembersApart::of_the_runtime(
-                self.mob_runtime.private_owners().clone(),
+                self.default_mob().mob_runtime.private_owners().clone(),
             ),
         );
         let handler: std::sync::Arc<dyn crate::runtime::cross_mob_control::ControlHandler> =
             std::sync::Arc::new(handler);
-        *task_slot = Some(tokio::spawn(bound.serve_with_authorizer(
+        // That handler serves the default mob, and the host verbs whatever
+        // mob a request is signed for. A request for a member of another
+        // mob of the host is served on that mob's own entry.
+        let other_mobs: std::sync::Arc<
+            dyn crate::runtime::cross_mob_control::ControlHostedMobRouter,
+        > = std::sync::Arc::new(HostedControlMobs {
+            mobs,
+            keyed_inject: std::sync::Arc::clone(&self.keyed_inject_slot),
+            candidate_launch,
+        });
+        *task_slot = Some(tokio::spawn(bound.serve_on_host(
             handler,
             std::sync::Arc::clone(&self.gateway_peer_keys),
             authorizer,
+            other_mobs,
         )));
         *self
             .cross_mob_control_advertised
@@ -2135,7 +2598,8 @@ impl UnifiedRuntime {
             "meerkat-meta",
             env!("CARGO_PKG_VERSION"),
         );
-        options.runtime_backed_sessions = self.mob_runtime.session_service().is_some();
+        options.runtime_backed_sessions =
+            self.default_mob().mob_runtime.session_service().is_some();
         options.mobs = true;
         options.multi_host_mobs = true;
         options.comms = true;
@@ -2364,104 +2828,21 @@ impl UnifiedRuntime {
     /// entry exists). The remote arm performs real cross-process control
     /// RPC against the peer gateway's control listener - see
     /// `runtime::cross_mob_remote::RemoteMobProxy`.
+    ///
+    /// The default mob's form: the local member is one of the mob the
+    /// launch names.
     pub async fn wire_cross_mob(
         &self,
         local_member_id: &str,
         remote_member_id: &str,
         remote_mob_id: &str,
     ) -> Result<(), CrossMobError> {
-        self.wire_cross_mob_with_identity_runtime(
+        wire_cross_mob_in(
+            &self.default_mob_resolved(),
             local_member_id,
             remote_member_id,
             remote_mob_id,
             self.identity_runtime_ref(),
-        )
-        .await
-    }
-
-    pub(crate) async fn wire_cross_mob_with_identity_runtime(
-        &self,
-        local_member_id: &str,
-        remote_member_id: &str,
-        remote_mob_id: &str,
-        local_identity_runtime: Option<&std::sync::Arc<crate::identity_first::IdentityRuntime>>,
-    ) -> Result<(), CrossMobError> {
-        let local_member_id =
-            crate::member_comms_id::runtime_alias_str(local_member_id).into_owned();
-        let remote_member_id =
-            crate::member_comms_id::runtime_alias_str(remote_member_id).into_owned();
-        // The link this wire declares is held in the runtime's part of the
-        // link table, which its start-time read creates: a no-op for every
-        // runtime whose mob was started through its bootstrap. The other
-        // mob's runtime is reached through its handle here and ran its own
-        // read when its mob started.
-        self.restore_cross_mob_wake_routes().await;
-
-        let local_handle = self.mob_runtime.handle();
-        let local_mob_id = local_handle.mob_id().to_string();
-        let local_identity_runtime = local_identity_runtime.cloned();
-        let local_target = member_lifecycle_target_with_authority(
-            local_identity_runtime.as_ref(),
-            &local_member_id,
-            &local_mob_id,
-        )
-        .await?;
-        let local_identity_authoritative = local_target.is_some();
-        let entry = self.resolve_contact(remote_mob_id)?;
-        let remote = self.dispatch_for(&entry).await?;
-        let remote_target = match &remote {
-            LocalOrRemote::Local(authority) => {
-                member_lifecycle_target_with_authority(
-                    authority.identity_runtime.as_ref(),
-                    &remote_member_id,
-                    remote_mob_id,
-                )
-                .await?
-            }
-            LocalOrRemote::Remote(_) => None,
-        };
-        let remote_identity_authoritative = remote_target.is_some();
-        let remote_mob_id = remote_mob_id.to_string();
-        let local_runtime = self.mob_runtime.clone();
-        run_member_authority_transaction(
-            [local_target, remote_target],
-            format!("{local_member_id} <-> {remote_member_id}"),
-            format!("{local_mob_id} <-> {remote_mob_id}"),
-            move || async move {
-                let local_member_id = resolve_member_alias_under_authority(
-                    &local_handle,
-                    local_identity_runtime.as_ref(),
-                    local_identity_authoritative,
-                    &local_member_id,
-                    &local_mob_id,
-                )
-                .await?;
-                let local_mid = crate::member_comms_id::mob_member_id(&local_member_id);
-                let remote_member_id = match &remote {
-                    LocalOrRemote::Local(authority) => {
-                        resolve_member_alias_under_authority(
-                            &authority.handle,
-                            authority.identity_runtime.as_ref(),
-                            remote_identity_authoritative,
-                            &remote_member_id,
-                            &remote_mob_id,
-                        )
-                        .await?
-                    }
-                    LocalOrRemote::Remote(_) => remote_member_id,
-                };
-                wire_cross_mob_transaction(
-                    entry,
-                    remote,
-                    local_runtime,
-                    local_mid,
-                    local_mob_id,
-                    local_member_id,
-                    remote_member_id,
-                    remote_mob_id,
-                )
-                .await
-            },
         )
         .await
     }
@@ -2471,97 +2852,21 @@ impl UnifiedRuntime {
     /// Best-effort on both sides — attempts to unwire both the local and
     /// remote members. Partial cleanup is better than aborting after one
     /// side fails, which would leave asymmetric peering.
+    ///
+    /// The default mob's form: the local member is one of the mob the
+    /// launch names.
     pub async fn unwire_cross_mob(
         &self,
         local_member_id: &str,
         remote_member_id: &str,
         remote_mob_id: &str,
     ) -> Result<(), CrossMobError> {
-        self.unwire_cross_mob_with_identity_runtime(
+        unwire_cross_mob_in(
+            &self.default_mob_resolved(),
             local_member_id,
             remote_member_id,
             remote_mob_id,
             self.identity_runtime_ref(),
-        )
-        .await
-    }
-
-    pub(crate) async fn unwire_cross_mob_with_identity_runtime(
-        &self,
-        local_member_id: &str,
-        remote_member_id: &str,
-        remote_mob_id: &str,
-        local_identity_runtime: Option<&std::sync::Arc<crate::identity_first::IdentityRuntime>>,
-    ) -> Result<(), CrossMobError> {
-        let local_member_id =
-            crate::member_comms_id::runtime_alias_str(local_member_id).into_owned();
-        let remote_member_id =
-            crate::member_comms_id::runtime_alias_str(remote_member_id).into_owned();
-        let local_handle = self.mob_runtime.handle();
-        let local_mob_id = local_handle.mob_id().to_string();
-        let local_identity_runtime = local_identity_runtime.cloned();
-        let local_target = member_lifecycle_target_with_authority(
-            local_identity_runtime.as_ref(),
-            &local_member_id,
-            &local_mob_id,
-        )
-        .await?;
-        let local_identity_authoritative = local_target.is_some();
-        let entry = self.resolve_contact(remote_mob_id)?;
-        let remote = self.dispatch_for(&entry).await?;
-        let remote_target = match &remote {
-            LocalOrRemote::Local(authority) => {
-                member_lifecycle_target_with_authority(
-                    authority.identity_runtime.as_ref(),
-                    &remote_member_id,
-                    remote_mob_id,
-                )
-                .await?
-            }
-            LocalOrRemote::Remote(_) => None,
-        };
-        let remote_identity_authoritative = remote_target.is_some();
-        let remote_mob_id = remote_mob_id.to_string();
-        let local_runtime = self.mob_runtime.clone();
-        run_member_authority_transaction(
-            [local_target, remote_target],
-            format!("{local_member_id} <-> {remote_member_id}"),
-            format!("{local_mob_id} <-> {remote_mob_id}"),
-            move || async move {
-                let local_member_id = resolve_member_alias_under_authority(
-                    &local_handle,
-                    local_identity_runtime.as_ref(),
-                    local_identity_authoritative,
-                    &local_member_id,
-                    &local_mob_id,
-                )
-                .await?;
-                let local_mid = crate::member_comms_id::mob_member_id(&local_member_id);
-                let remote_member_id = match &remote {
-                    LocalOrRemote::Local(authority) => {
-                        resolve_member_alias_under_authority(
-                            &authority.handle,
-                            authority.identity_runtime.as_ref(),
-                            remote_identity_authoritative,
-                            &remote_member_id,
-                            &remote_mob_id,
-                        )
-                        .await?
-                    }
-                    LocalOrRemote::Remote(_) => remote_member_id,
-                };
-                unwire_cross_mob_transaction(
-                    entry,
-                    remote,
-                    local_runtime,
-                    local_mid,
-                    local_mob_id,
-                    local_member_id,
-                    remote_member_id,
-                    remote_mob_id,
-                )
-                .await
-            },
         )
         .await
     }
@@ -2576,6 +2881,9 @@ impl UnifiedRuntime {
     ///
     /// `from_local_member` is recorded for audit/logging but does not
     /// affect delivery — the message is injected via the remote mob handle.
+    ///
+    /// The default mob's form: the sender is a member of the mob the launch
+    /// names.
     pub async fn send_cross_mob(
         &self,
         from_local_member: &str,
@@ -2583,135 +2891,13 @@ impl UnifiedRuntime {
         remote_mob_id: &str,
         content: impl Into<meerkat_core::ContentInput>,
     ) -> Result<String, CrossMobError> {
-        self.send_cross_mob_with_identity_runtime(
+        send_cross_mob_in(
+            &self.default_mob_resolved(),
             from_local_member,
             remote_member_id,
             remote_mob_id,
-            content,
+            content.into(),
             self.identity_runtime_ref(),
-        )
-        .await
-    }
-
-    pub(crate) async fn send_cross_mob_with_identity_runtime(
-        &self,
-        from_local_member: &str,
-        remote_member_id: &str,
-        remote_mob_id: &str,
-        content: impl Into<meerkat_core::ContentInput>,
-        local_identity_runtime: Option<&std::sync::Arc<crate::identity_first::IdentityRuntime>>,
-    ) -> Result<String, CrossMobError> {
-        let content = content.into();
-        let from_local_member =
-            crate::member_comms_id::runtime_alias_str(from_local_member).into_owned();
-        let remote_member_id =
-            crate::member_comms_id::runtime_alias_str(remote_member_id).into_owned();
-        let local_mob_id = self.mob_id();
-        let local_identity_runtime = local_identity_runtime.cloned();
-        let local_target = member_lifecycle_target_with_authority(
-            local_identity_runtime.as_ref(),
-            &from_local_member,
-            &local_mob_id,
-        )
-        .await?;
-        let entry = self.resolve_contact(remote_mob_id)?;
-        let remote = self.dispatch_for(&entry).await?;
-        let remote_target = match &remote {
-            LocalOrRemote::Local(authority) => {
-                member_lifecycle_target_with_authority(
-                    authority.identity_runtime.as_ref(),
-                    &remote_member_id,
-                    remote_mob_id,
-                )
-                .await?
-            }
-            LocalOrRemote::Remote(_) => None,
-        };
-        let remote_identity_authoritative = remote_target.is_some();
-        let remote_mob_id = remote_mob_id.to_string();
-        // A durable identity of a same-process peer mob is reached through
-        // its identity door, whatever its residency: its admission guards
-        // (addressability, a pending first-boot row, an owed held completion,
-        // the registered row) and its delivery preparation apply, and Core
-        // wakes it when it is dormant. The door takes the identity's own
-        // lifecycle lock and checks a generated alias against its current
-        // incarnation, so the send holds no lock of the target itself.
-        if let (LocalOrRemote::Local(authority), Some(target)) = (&remote, remote_target.as_ref())
-            && let Some(identity_runtime) = authority.identity_runtime.clone()
-        {
-            let identity = target.durable_identity().clone();
-            // The sender is checked current under its own lock first; it
-            // names the message's origin and does not take the delivery.
-            // The door checks it again under the target's lock, just before
-            // delivery, without the sender's own: taking it there would nest
-            // one identity's lock inside another's.
-            let sender = local_target.clone();
-            run_member_authority_transaction(
-                [local_target],
-                from_local_member.clone(),
-                local_mob_id.clone(),
-                || async { Ok(()) },
-            )
-            .await?;
-            let sent = match sender {
-                Some(sender) => {
-                    identity_runtime
-                        .send_through_identity_door_as(
-                            &identity,
-                            &remote_member_id,
-                            &content,
-                            sender,
-                        )
-                        .await
-                }
-                None => {
-                    identity_runtime
-                        .send_through_identity_door(&identity, &remote_member_id, &content)
-                        .await
-                }
-            };
-            return sent.map_err(|error| CrossMobError::IdentityAuthority {
-                member_id: remote_member_id.clone(),
-                mob_id: remote_mob_id.clone(),
-                message: error.to_string(),
-            });
-        }
-        run_member_authority_transaction(
-            [local_target, remote_target],
-            format!("{from_local_member} -> {remote_member_id}"),
-            format!("{local_mob_id} -> {remote_mob_id}"),
-            move || async move {
-                match remote {
-                    LocalOrRemote::Local(authority) => {
-                        let remote_member_id = resolve_member_alias_under_authority(
-                            &authority.handle,
-                            authority.identity_runtime.as_ref(),
-                            remote_identity_authoritative,
-                            &remote_member_id,
-                            &remote_mob_id,
-                        )
-                        .await?;
-                        send_member_unchecked(
-                            authority.handle,
-                            &remote_member_id,
-                            &remote_mob_id,
-                            content,
-                        )
-                        .await
-                    }
-                    LocalOrRemote::Remote(proxy) => {
-                        let content_json = serde_json::to_value(&content).map_err(|err| {
-                            CrossMobError::PeerSpec(format!(
-                                "failed to serialize content for remote inject: {err}"
-                            ))
-                        })?;
-                        proxy
-                            .inject_message(&remote_member_id, content_json)
-                            .await
-                            .map_err(CrossMobError::Remote)
-                    }
-                }
-            },
         )
         .await
     }
@@ -2756,7 +2942,7 @@ impl UnifiedRuntime {
 
     /// Return the local mob's ID.
     pub fn mob_id(&self) -> String {
-        self.mob_runtime.handle().mob_id().to_string()
+        self.default_mob().mob_runtime.handle().mob_id().to_string()
     }
 
     /// Get comms peer info for a member of this mob.
@@ -2778,63 +2964,13 @@ impl UnifiedRuntime {
     /// [`Self::local_member_peer_info`] with what a peer in ANOTHER process
     /// needs to describe the member: its transport public key, and its
     /// socket endpoint when it has one (`member_comms_address`, or a placed
-    /// member's host-acknowledged address).
+    /// member's host-acknowledged address). The default mob's form: the
+    /// member is one of the mob the launch names.
     pub(crate) async fn local_member_peer_facts(
         &self,
         member_id: &str,
     ) -> Result<LocalMemberPeerFacts, CrossMobError> {
-        let handle = self.mob_runtime.handle();
-        let mob_runtime = self.mob_runtime.clone();
-        let mob_id = handle.mob_id().to_string();
-        let member_alias = crate::member_comms_id::runtime_alias_str(member_id).into_owned();
-        let identity_runtime = self.identity_runtime_ref().cloned();
-        let target = member_lifecycle_target_with_authority(
-            identity_runtime.as_ref(),
-            &member_alias,
-            &mob_id,
-        )
-        .await?;
-        let identity_authoritative = target.is_some();
-        let operation_alias = member_alias.clone();
-        let operation_mob_id = mob_id.clone();
-        run_member_authority_transaction([target], member_alias, mob_id, move || async move {
-            let current_alias = resolve_member_alias_under_authority(
-                &handle,
-                identity_runtime.as_ref(),
-                identity_authoritative,
-                &operation_alias,
-                &operation_mob_id,
-            )
-            .await?;
-            let mid = crate::member_comms_id::mob_member_id(&current_alias);
-            let info = member_peer_info(&handle, &mid, &operation_mob_id).await?;
-            // A placed member reports its durable host address; a local
-            // member its in-process route.
-            let address = crate::runtime::cross_mob_control::member_peer_info_address(
-                &handle,
-                &mid,
-                &info.comms_name,
-            )
-            .await
-            .map_err(|fault| plane_fault_error(fault, &handle, &mid))?;
-            // An in-process address reaches only this process; a member
-            // without a socket endpoint has no dialable address to report.
-            let dialable_address = member_comms_advertised_address(&mob_runtime, &handle, &mid)
-                .await?
-                .filter(|advertised| !advertised.starts_with("inproc://"));
-            Ok(LocalMemberPeerFacts {
-                peer_id: info.peer_id,
-                comms_name: info.comms_name,
-                address,
-                pubkey_b64: info
-                    .pubkey_b64
-                    .trim()
-                    .trim_start_matches("ed25519:")
-                    .to_string(),
-                dialable_address,
-            })
-        })
-        .await
+        member_peer_facts_of(&self.default_mob_resolved(), member_id).await
     }
 
     /// Wire a local member to an external peer using provided comms info.
@@ -2864,6 +3000,9 @@ impl UnifiedRuntime {
     /// name with another endpoint, the call is refused with
     /// [`CrossMobError::PeerSpec`] (unwire both sides first) and nothing
     /// changes.
+    ///
+    /// The default mob's form: the local member is one of the mob the
+    /// launch names.
     pub async fn wire_local(
         &self,
         local_member_id: &str,
@@ -2872,52 +3011,14 @@ impl UnifiedRuntime {
         remote_address: &str,
         remote_pubkey: Option<[u8; 32]>,
     ) -> Result<(), CrossMobError> {
-        self.wire_local_with_identity_runtime(
+        wire_local_in(
+            &self.default_mob_resolved(),
             local_member_id,
             remote_comms_name,
             remote_peer_id,
             remote_address,
             remote_pubkey,
             None,
-        )
-        .await
-    }
-
-    pub(crate) async fn wire_local_with_identity_runtime(
-        &self,
-        local_member_id: &str,
-        remote_comms_name: &str,
-        remote_peer_id: &str,
-        remote_address: &str,
-        remote_pubkey: Option<[u8; 32]>,
-        identity_runtime: Option<&std::sync::Arc<crate::identity_first::IdentityRuntime>>,
-    ) -> Result<(), CrossMobError> {
-        let spec = build_external_peer_spec(
-            remote_comms_name,
-            remote_peer_id,
-            remote_address,
-            remote_pubkey,
-        )?;
-        let member_alias = local_member_id.to_string();
-        // The link this wire declares is held in the runtime's part of the
-        // link table, which its start-time read creates: a no-op here for
-        // every runtime whose mob was started through its bootstrap.
-        self.restore_cross_mob_wake_routes().await;
-        with_member_under_authority(
-            self.mob_runtime.handle(),
-            identity_runtime.or_else(|| self.identity_runtime_ref()),
-            local_member_id,
-            &self.mob_id(),
-            move |handle, current_member_id| async move {
-                wire_local_edge(
-                    &handle,
-                    local_roster_member(&current_member_id),
-                    &member_alias,
-                    spec,
-                    SameProcessPeers::Resolve,
-                )
-                .await
-            },
         )
         .await
     }
@@ -2926,6 +3027,9 @@ impl UnifiedRuntime {
     /// Only affects the local side; the remote side is left unchanged. The
     /// route this mob holds for a same-process peer goes with the trust,
     /// unless another member of this mob is still wired to that peer.
+    ///
+    /// The default mob's form: the local member is one of the mob the
+    /// launch names.
     pub async fn unwire_local(
         &self,
         local_member_id: &str,
@@ -2934,40 +3038,14 @@ impl UnifiedRuntime {
         remote_address: &str,
         remote_pubkey: Option<[u8; 32]>,
     ) -> Result<(), CrossMobError> {
-        self.unwire_local_with_identity_runtime(
+        unwire_local_in(
+            &self.default_mob_resolved(),
             local_member_id,
             remote_comms_name,
             remote_peer_id,
             remote_address,
             remote_pubkey,
             None,
-        )
-        .await
-    }
-
-    pub(crate) async fn unwire_local_with_identity_runtime(
-        &self,
-        local_member_id: &str,
-        remote_comms_name: &str,
-        remote_peer_id: &str,
-        remote_address: &str,
-        remote_pubkey: Option<[u8; 32]>,
-        identity_runtime: Option<&std::sync::Arc<crate::identity_first::IdentityRuntime>>,
-    ) -> Result<(), CrossMobError> {
-        let spec = build_external_peer_spec(
-            remote_comms_name,
-            remote_peer_id,
-            remote_address,
-            remote_pubkey,
-        )?;
-        with_member_under_authority(
-            self.mob_runtime.handle(),
-            identity_runtime.or_else(|| self.identity_runtime_ref()),
-            local_member_id,
-            &self.mob_id(),
-            move |handle, current_member_id| async move {
-                unwire_local_edge(&handle, local_roster_member(&current_member_id), spec).await
-            },
         )
         .await
     }
@@ -3100,13 +3178,14 @@ impl UnifiedRuntime {
                 member_id: local_member.to_string(),
                 mob_id: handle.mob_id().to_string(),
             })?;
-        let service =
-            self.mob_runtime
-                .session_service()
-                .ok_or_else(|| CrossMobError::NoCommsInfo {
-                    member_id: local_member.to_string(),
-                    mob_id: handle.mob_id().to_string(),
-                })?;
+        let service = self
+            .default_mob()
+            .mob_runtime
+            .session_service()
+            .ok_or_else(|| CrossMobError::NoCommsInfo {
+                member_id: local_member.to_string(),
+                mob_id: handle.mob_id().to_string(),
+            })?;
         let comms =
             service
                 .comms_runtime(&session_id)
@@ -3792,6 +3871,137 @@ fn unregister_cross_namespace_aliases(
     }
 }
 
+/// The mobs this host serves beside its default mob, as its control
+/// listener asks for them.
+///
+/// It holds a resolver and nothing else of a mob: which mobs the host
+/// serves, and whether one is loaded, are the mob set's facts, asked per
+/// request. The question whether a mob is served reads the set's records
+/// and loads nothing; the handler for a mob is the resolve, which is the
+/// one lookup that loads a mob the set has not loaded.
+struct HostedControlMobs {
+    mobs: super::MobResolver,
+    /// The host's keyed inject plane: one per host, sealed once by the
+    /// gateway's composition. The receiver for a mob is asked of it per
+    /// request.
+    keyed_inject: crate::runtime::keyed_inject::KeyedInjectSlot,
+    /// Whether the launch is a candidate launch, which rewires no member
+    /// and admits no member input in any mob.
+    candidate_launch: bool,
+}
+
+impl HostedControlMobs {
+    /// What the host's keyed inject plane serves for the mob `mob_id`: the
+    /// plane's own answer while it is not composed or does not serve, and
+    /// otherwise the plane's receiver for that mob, which reads the mob's
+    /// identity runtime when the request arrives. A plane whose receiver
+    /// serves the default mob alone has none for another mob and does not
+    /// serve it: a keyed inject signed for one mob is never delivered into
+    /// another.
+    async fn keyed_inject_of(
+        &self,
+        mob_id: &meerkat_mob::MobId,
+    ) -> crate::runtime::keyed_inject::KeyedInjectServing {
+        use crate::runtime::keyed_inject::{KeyedInjectServing, NotServedCause};
+        let plane = self
+            .keyed_inject
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        match plane {
+            KeyedInjectServing::Serving(receiver) => match receiver.for_mob(mob_id).await {
+                Some(of_the_mob) => KeyedInjectServing::Serving(of_the_mob),
+                None => KeyedInjectServing::NotServed(NotServedCause::NotIdentityFirst),
+            },
+            not_serving => not_serving,
+        }
+    }
+}
+
+impl crate::runtime::cross_mob_control::ControlHostedMobRouter for HostedControlMobs {
+    fn serves<'a>(
+        &'a self,
+        mob_id: &'a meerkat_mob::MobId,
+    ) -> crate::runtime::cross_mob_control::HostedMobAnswer<'a, bool> {
+        Box::pin(async move { self.mobs.served_mob_id(Some(mob_id)).await.is_ok() })
+    }
+
+    fn handler_for<'a>(
+        &'a self,
+        mob_id: &'a meerkat_mob::MobId,
+        verb: crate::runtime::cross_mob_control::ControlVerb,
+    ) -> crate::runtime::cross_mob_control::HostedMobAnswer<
+        'a,
+        Option<std::sync::Arc<dyn crate::runtime::cross_mob_control::ControlHandler>>,
+    > {
+        use crate::runtime::cross_mob_control::{
+            ControlHandler, MEMBERS_APART_READ_WAIT, MobHandleControlHandler,
+        };
+        Box::pin(async move {
+            // The resolve is the one lookup that loads a mob the set has
+            // not loaded.
+            let asked = self.mobs.resolve(Some(mob_id)).await.ok()?;
+            // A member the mob keeps apart from other callers is no member
+            // for a peer gateway: the handler asks the record of the mob it
+            // serves, as the launch handler asks the default mob's. That
+            // record owes its first read from the moment the mob is loaded,
+            // and this request can be the one that loaded it: while the
+            // read is on its first attempt the request waits for it, at
+            // most the control channel's own bound, and marks nothing for
+            // anyone else who waits. A read still owed after that answers
+            // every name as a name no member has. A keyed verb does not
+            // wait here: the delivery seam built for a keyed request waits
+            // for the same read, and a request waits once.
+            let mob = if verb.is_keyed_inject_plane() {
+                asked
+            } else {
+                // Nothing of the mob is held while the request waits. The
+                // wait is for this mob's own read first (the host marked
+                // it owed before the set built the mob, so a request that
+                // made the host load the mob finds the mark), then for the
+                // record's first reads: one bound in all.
+                let record = asked.mob_runtime().private_owners().clone();
+                drop(asked);
+                record
+                    .read_of_the_mob_awaited(mob_id.as_str(), MEMBERS_APART_READ_WAIT)
+                    .await;
+                // The mob as it is after the wait, not as it was before it:
+                // read from what is loaded, which asks the mob set nothing
+                // and is no resolve. Only a mob that is no longer loaded
+                // (it was closed while the request waited) is resolved a
+                // second time.
+                match self.mobs.resolve_if_loaded(mob_id) {
+                    Some(as_it_is_now) => as_it_is_now,
+                    None => self.mobs.resolve(Some(mob_id)).await.ok()?,
+                }
+            };
+            // The mob's identity runtime as it is attached now: a host may
+            // attach one to a mob after the listener started.
+            let mut handler = match mob.identity_runtime() {
+                Some(identities) => {
+                    MobHandleControlHandler::with_identity_runtime(mob.mob_handle(), identities)
+                }
+                None => MobHandleControlHandler::new(mob.mob_handle()),
+            };
+            if let Some(service) = mob.mob_runtime().session_service() {
+                handler = handler.with_session_service(std::sync::Arc::clone(service));
+            }
+            if verb.is_keyed_inject_plane() {
+                handler = handler.with_keyed_inject_slot(std::sync::Arc::new(
+                    std::sync::RwLock::new(self.keyed_inject_of(mob_id).await),
+                ));
+            }
+            let handler = handler.with_candidate_launch(self.candidate_launch);
+            let handler = handler.with_members_apart(
+                crate::runtime::cross_mob_control::MembersApart::of_the_runtime(
+                    mob.mob_runtime().private_owners().clone(),
+                ),
+            );
+            Some(std::sync::Arc::new(handler) as std::sync::Arc<dyn ControlHandler>)
+        })
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -4095,6 +4305,11 @@ mod tests {
         ));
     }
 }
+
+/// Rows of the control listener on a host of more than one mob.
+#[cfg(test)]
+#[path = "control_listener_mobs_tests.rs"]
+mod control_listener_mobs_tests;
 
 /// Rows of the control channel's member verbs for a member kept apart.
 #[cfg(test)]

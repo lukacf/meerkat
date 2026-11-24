@@ -1314,10 +1314,10 @@ jobs:
   # partly warm, from sccache's own hit and miss counters before and after
   # that target: cold is no hit, warm is no miss, and "unknown" when
   # sccache reports no counters or they did not move. No target directory
-  # is cached, so nothing else makes a build warm. Queue time cannot be
-  # printed from inside a job: it is the job record's created to started,
-  # and the summary says so. All three parts run even when one fails; the
-  # step then fails.
+  # is cached, so nothing else makes a build warm. Queue seconds are not
+  # printed: these jobs read no API; a first night's evaluation reads them
+  # from the job record, created to started. All three parts run even when
+  # one fails; the step then fails.
   #
   # When it fails: nightly-failure-issue.yml writes one line into the
   # "Nightly failures" issue, the run's address and the failed jobs' names,

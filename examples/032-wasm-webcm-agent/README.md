@@ -15,8 +15,7 @@ implement, and review code in a sandboxed Linux VM — no backend required.
 
 ## Prerequisites
 
-- **Node.js** (v18+) and npm
-- **curl** (for downloading the WebCM bundle)
+- **Node.js 22 or later** and npm. The downloader uses Node’s built-in `fetch`.
 - **wasm-pack** (used by the repo-local `sdks/web` WASM build step)
 - At least one API key: **Anthropic**, **OpenAI**, or **Gemini** (all three for full multi-provider demo)
 
@@ -46,9 +45,15 @@ In Meerkat 0.4.2 through 0.9.14 the build also wrote the values of
 a `dist/` built that way, rotate those keys; see the
 [known issue on the 0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/v0.9.14).
 
-Use `./examples.sh --clean` to force a fresh download/rebuild.
-The download cache is reused only when both WebCM files are nonempty; failed
-downloads remain unpromoted and a subsequent launch retries the pair.
+The helper downloads both files from a [pinned upstream revision](https://github.com/edubart/webcm/commit/8afdc285bc278ef1798d0604f83491d14e83c8cf).
+Before installing or reusing them, it checks each file’s length and SHA-1-based
+Git blob ID. These checks identify the committed files, not how they were built.
+
+A partial or corrupt cache stops startup. The helper does not delete it;
+use `./examples.sh --clean` to clear it and download the pinned pair again.
+If an upstream redeploy makes the pinned commit unreachable, a fresh download
+fails rather than fetching the latest build. In that case, maintainers must
+verify a new upstream revision and both file identities before updating the pin.
 
 ## Architecture
 

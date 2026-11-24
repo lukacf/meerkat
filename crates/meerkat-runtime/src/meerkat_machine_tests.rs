@@ -61795,13 +61795,27 @@ fn past_run_settlement_notice() -> chrono::DateTime<chrono::Utc> {
         + chrono::Duration::seconds(1)
 }
 
-/// Poll the run settlement census at `now` until it publishes `expected`,
-/// admitting only `None` (a transient unreadable ledger) on the way; any
-/// other count is a wrong reading and fails immediately.
+/// Poll the run settlement census at `now` until it publishes `expected`.
+///
+/// Two readings are admitted on the way, and probed again: `None` (the
+/// session registry was not readable), and `last_completed`, the census's
+/// last completed reading before this call where it differs from
+/// `expected`. The census answers that reading when a session's ledger
+/// cannot be read without blocking and no session is positively unsettled;
+/// as the census's own doc says, such a miss is what a healthy session in
+/// the middle of a commit looks like. Any other count is a wrong reading
+/// and fails immediately; an admitted reading that does not give way to
+/// `expected` fails at the bound. So a wrong reading that happens to equal
+/// `last_completed` is caught at the five second bound, not at once.
+///
+/// Each caller's `last_completed` is derived for a fixture with ONE
+/// session, whose census has one earlier completed reading to fall back
+/// on. A row that gains a second session must derive it again.
 async fn run_settlement_census_settles_at(
     machine: &Arc<MeerkatMachine>,
     now: impl Fn() -> chrono::DateTime<chrono::Utc>,
     expected: usize,
+    last_completed: Option<usize>,
     claim: &str,
 ) {
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -61810,6 +61824,7 @@ async fn run_settlement_census_settles_at(
                 .unsettled_run_session_count_at(crate::run_progress::RUN_SETTLEMENT_NOTICE, now())
             {
                 Some(count) if count == expected => break,
+                Some(count) if Some(count) == last_completed => tokio::task::yield_now().await,
                 Some(count) => {
                     panic!("census read {count} while exactly {expected} was true: {claim}")
                 }
@@ -61872,6 +61887,7 @@ async fn hold_a_run_after_its_terminal_commit() -> HeldAfterTerminalCommit {
         &machine,
         past_run_settlement_notice,
         0,
+        None,
         "a session that committed no run owes no settlement",
     )
     .await;
@@ -61927,6 +61943,7 @@ async fn unsettled_run_session_count_sees_a_committed_run_whose_loop_stands() {
         machine,
         chrono::Utc::now,
         0,
+        None,
         "a run committed a moment ago is inside the notice",
     )
     .await;
@@ -61939,6 +61956,7 @@ async fn unsettled_run_session_count_sees_a_committed_run_whose_loop_stands() {
         machine,
         past_run_settlement_notice,
         1,
+        Some(0),
         "a committed run whose terminal work stays unsettled past the notice is counted \
          while its loop stands",
     )
@@ -61961,20 +61979,32 @@ async fn unsettled_run_session_count_sees_a_committed_run_whose_loop_stands() {
     // a lock miss alone is never published as a failed read: the census
     // answers with its last completed reading, the per-session read with
     // nothing.
+    //
+    // The driver is held through a handle of its own, and no guard on the
+    // session registry is kept while the census is probed. The registry is
+    // the one lock whose miss the census does publish as a failed read
+    // (`None`), and a writer that waits behind a reader's guard keeps it
+    // unreadable for as long as that guard is held. The poll admits that
+    // failed read and probes again.
     {
-        let sessions = machine.sessions.read().await;
-        let entry = sessions
-            .get(&held.session_id)
-            .expect("registered session entry");
-        let driver_held = entry.driver.lock().await;
-        assert_eq!(
-            machine.unsettled_run_session_count_at(
-                crate::run_progress::RUN_SETTLEMENT_NOTICE,
-                past_run_settlement_notice(),
-            ),
-            Some(1),
-            "a lock miss with nothing read keeps the last completed reading"
-        );
+        let driver = {
+            let sessions = machine.sessions.read().await;
+            Arc::clone(
+                &sessions
+                    .get(&held.session_id)
+                    .expect("registered session entry")
+                    .driver,
+            )
+        };
+        let driver_held = driver.lock().await;
+        run_settlement_census_settles_at(
+            machine,
+            past_run_settlement_notice,
+            1,
+            None,
+            "a lock miss with nothing read keeps the last completed reading",
+        )
+        .await;
         assert_eq!(
             machine.unsettled_run_at(
                 &held.session_id,
@@ -61997,26 +62027,32 @@ async fn unsettled_run_session_count_sees_a_committed_run_whose_loop_stands() {
         machine,
         past_run_settlement_notice,
         0,
+        Some(1),
         "a run whose terminal work the loop settled owes nothing, however old its rows",
     )
     .await;
     // The same miss on a healthy session: the last completed reading is
     // zero, and that is what a busy healthy host publishes, not a failed
-    // read.
+    // read. Held and probed as above.
     {
-        let sessions = machine.sessions.read().await;
-        let entry = sessions
-            .get(&held.session_id)
-            .expect("registered session entry");
-        let driver_held = entry.driver.lock().await;
-        assert_eq!(
-            machine.unsettled_run_session_count_at(
-                crate::run_progress::RUN_SETTLEMENT_NOTICE,
-                past_run_settlement_notice(),
-            ),
-            Some(0),
-            "a lock miss on a healthy session is not a failed read"
-        );
+        let driver = {
+            let sessions = machine.sessions.read().await;
+            Arc::clone(
+                &sessions
+                    .get(&held.session_id)
+                    .expect("registered session entry")
+                    .driver,
+            )
+        };
+        let driver_held = driver.lock().await;
+        run_settlement_census_settles_at(
+            machine,
+            past_run_settlement_notice,
+            0,
+            None,
+            "a lock miss on a healthy session is not a failed read",
+        )
+        .await;
         drop(driver_held);
     }
     assert_eq!(
@@ -62105,6 +62141,7 @@ async fn unsettled_run_session_count_sees_a_committed_run_whose_loop_left() {
         machine,
         chrono::Utc::now,
         0,
+        None,
         "a run committed a moment ago is inside the notice",
     )
     .await;
@@ -62112,6 +62149,7 @@ async fn unsettled_run_session_count_sees_a_committed_run_whose_loop_left() {
         machine,
         past_run_settlement_notice,
         1,
+        Some(0),
         "a committed run whose terminal work stays unsettled past the notice is counted \
          with no loop alive",
     )
@@ -62150,6 +62188,7 @@ async fn unsettled_run_session_count_sees_a_committed_run_whose_loop_left() {
         machine,
         past_run_settlement_notice,
         1,
+        None,
         "the unsettled run stays counted for as long as its rows stand",
     )
     .await;

@@ -4,7 +4,7 @@ description: "Meta Python SDK — typed builder API, async runtime, and streamin
 icon: "python"
 ---
 
-*Mirrored from Meerkat Meta main at [5f09cda4ef4a](https://github.com/lukacf/meerkat/commit/5f09cda4ef4ac96d41b72f5fe7413b7da4c4454c) on 2026-11-24; Meta version 0.9.18 at that commit.*
+*Mirrored from Meerkat Meta main at [03eac87a63cd](https://github.com/lukacf/meerkat/commit/03eac87a63cd7d2448ac6d4a47ca76ef79e47d15) on 2026-11-24; Meta version 0.9.18 at that commit.*
 
 The Meta Python SDK provides a typed host API for launching and operating
 Meerkat mobs through the SDK-facing gateway. Apps own policy. Meerkat and
@@ -1575,6 +1575,15 @@ This was shown by a run of the 0.9.16 source against the released 0.9.15
 gateway with the SDK's start held open; one unforced start on the published
 0.9.15 did not meet it. 0.9.17 adds the handler on the builder.
 </Warning>
+
+### Who can schedule a host runnable?
+
+Any member with the schedule tools that is not private to a person can
+schedule any runnable your application registers and choose its parameters.
+The handler receives those parameters as `occurrence["payload"]` when supplied;
+the callback does not identify the member that created the schedule. Register
+only actions that any such member may invoke. Validate the payload in the
+handler; do not trust it to identify the caller.
 
 ## Adopting a gateway child the host started
 

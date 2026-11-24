@@ -38147,7 +38147,19 @@ mod tests {
     mod host_composition {
         use super::*;
 
-        const LAUNCH: &str = "launch-mob";
+        /// A mob id of the row's own, made from the line that asks for it,
+        /// so two rows cannot hold the same one. A mob's supervisor
+        /// registers `<mob_id>/__mob_supervisor__` in the process-global
+        /// in-process comms registry, so two rows that seat one id while
+        /// both run collide with `ParticipantNameOccupied`. A row asks once
+        /// per id, into a constant, and every host, reopen and assertion of
+        /// the row reads that constant: a row that declares a default mob
+        /// opens with `const LAUNCH: &str = row_id!("launch-mob");`.
+        macro_rules! row_id {
+            ($prefix:literal) => {
+                concat!($prefix, "-", line!())
+            };
+        }
 
         /// A host composition that records each build it is asked for and
         /// gives the builder what a host build needs: the session service
@@ -38291,8 +38303,9 @@ mod tests {
         }
 
         /// A host over `dir` with a persistent root, a composition and the
-        /// default mob [`LAUNCH`] at [`launch_store`].
+        /// default mob `launch`, the row's own id, at [`launch_store`].
         fn host_state(
+            launch: &str,
             svc: &Arc<MockSessionSvc>,
             dir: &std::path::Path,
             composition: &Arc<RecordingComposition>,
@@ -38305,7 +38318,7 @@ mod tests {
                     .with_mob_restore_policy(policy)
                     .with_host_mob_composition(composition.clone())
                     .with_default_mob(DefaultMobDeclaration::persistent(
-                        MobId::from(LAUNCH),
+                        MobId::from(launch),
                         launch_store(dir),
                     ))
                     .expect("the default mob is declared once"),
@@ -38370,13 +38383,15 @@ mod tests {
         #[tokio::test]
         async fn a_second_host_mob_is_built_with_the_host_composition_at_its_create_and_at_each_load()
          {
+            const LAUNCH: &str = row_id!("launch-mob");
+            const HOST_SECOND: &str = row_id!("host-second");
             for policy in [MobRestorePolicy::Eager, MobRestorePolicy::OnDemand] {
                 let svc = Arc::new(MockSessionSvc::new());
                 let dir = tempfile::tempdir().expect("tempdir");
                 let composition = RecordingComposition::new(&svc);
-                let state = host_state(&svc, dir.path(), &composition, policy);
+                let state = host_state(LAUNCH, &svc, dir.path(), &composition, policy);
                 let second = state
-                    .mob_create_definition(explicit_definition("host-second"))
+                    .mob_create_definition(explicit_definition(HOST_SECOND))
                     .await
                     .expect("create a second host mob");
                 assert_eq!(
@@ -38412,7 +38427,7 @@ mod tests {
 
                 let svc = Arc::new(svc.cold_restart().await);
                 let composition = RecordingComposition::new(&svc);
-                let restarted = host_state(&svc, dir.path(), &composition, policy);
+                let restarted = host_state(LAUNCH, &svc, dir.path(), &composition, policy);
                 restarted
                     .mob_status(&second)
                     .await
@@ -38497,11 +38512,12 @@ mod tests {
         /// serve answers the same mob.
         #[tokio::test]
         async fn the_default_mob_is_created_on_an_empty_store_at_its_declared_place() {
+            const LAUNCH: &str = row_id!("launch-mob");
             for policy in [MobRestorePolicy::Eager, MobRestorePolicy::OnDemand] {
                 let svc = Arc::new(MockSessionSvc::new());
                 let dir = tempfile::tempdir().expect("tempdir");
                 let composition = RecordingComposition::new(&svc);
-                let state = host_state(&svc, dir.path(), &composition, policy);
+                let state = host_state(LAUNCH, &svc, dir.path(), &composition, policy);
                 let launch = MobId::from(LAUNCH);
                 assert!(
                     launch_store(dir.path()).exists(),
@@ -38601,13 +38617,14 @@ mod tests {
         /// composition is asked for the load of the default mob.
         #[tokio::test]
         async fn the_default_mob_is_loaded_from_a_used_store_and_its_stored_definition_stands() {
+            const LAUNCH: &str = row_id!("launch-mob");
             for policy in [MobRestorePolicy::Eager, MobRestorePolicy::OnDemand] {
                 let svc = Arc::new(MockSessionSvc::new());
                 let dir = tempfile::tempdir().expect("tempdir");
                 let launch = MobId::from(LAUNCH);
                 {
                     let composition = RecordingComposition::new(&svc);
-                    let first = host_state(&svc, dir.path(), &composition, policy);
+                    let first = host_state(LAUNCH, &svc, dir.path(), &composition, policy);
                     first
                         .serve_default_mob(explicit_definition(LAUNCH))
                         .await
@@ -38628,7 +38645,7 @@ mod tests {
 
                 let svc = Arc::new(svc.cold_restart().await);
                 let composition = RecordingComposition::new(&svc);
-                let restarted = host_state(&svc, dir.path(), &composition, policy);
+                let restarted = host_state(LAUNCH, &svc, dir.path(), &composition, policy);
                 let mut supplied = explicit_definition(LAUNCH);
                 let mut extra = supplied
                     .profiles
@@ -38682,13 +38699,14 @@ mod tests {
         /// it, and every other mob serves.
         #[tokio::test]
         async fn a_default_mob_whose_store_cannot_be_opened_is_quarantined_by_the_set() {
+            const LAUNCH: &str = row_id!("launch-mob");
             for policy in [MobRestorePolicy::Eager, MobRestorePolicy::OnDemand] {
                 let svc = Arc::new(MockSessionSvc::new());
                 let dir = tempfile::tempdir().expect("tempdir");
                 let launch = MobId::from(LAUNCH);
                 let healthy = {
                     let composition = RecordingComposition::new(&svc);
-                    let first = host_state(&svc, dir.path(), &composition, policy);
+                    let first = host_state(LAUNCH, &svc, dir.path(), &composition, policy);
                     let healthy = first
                         .mob_create_definition(explicit_definition("host-healthy"))
                         .await
@@ -38700,7 +38718,7 @@ mod tests {
                     .expect("write an undecodable store at the default mob's place");
 
                 let composition = RecordingComposition::new(&svc);
-                let state = host_state(&svc, dir.path(), &composition, policy);
+                let state = host_state(LAUNCH, &svc, dir.path(), &composition, policy);
                 let refused = state
                     .serve_default_mob(explicit_definition(LAUNCH))
                     .await
@@ -38746,13 +38764,14 @@ mod tests {
         /// served, and that resumes no other mob.
         #[tokio::test]
         async fn a_stopped_default_mob_is_served_stopped_and_resumed_by_the_launch_on_its_handle() {
+            const LAUNCH: &str = row_id!("launch-mob");
             for policy in [MobRestorePolicy::Eager, MobRestorePolicy::OnDemand] {
                 let svc = Arc::new(MockSessionSvc::new());
                 let dir = tempfile::tempdir().expect("tempdir");
                 let launch = MobId::from(LAUNCH);
                 let second = {
                     let composition = RecordingComposition::new(&svc);
-                    let first = host_state(&svc, dir.path(), &composition, policy);
+                    let first = host_state(LAUNCH, &svc, dir.path(), &composition, policy);
                     first
                         .serve_default_mob(explicit_definition(LAUNCH))
                         .await
@@ -38774,7 +38793,7 @@ mod tests {
 
                 let svc = Arc::new(svc.cold_restart().await);
                 let composition = RecordingComposition::new(&svc);
-                let restarted = host_state(&svc, dir.path(), &composition, policy);
+                let restarted = host_state(LAUNCH, &svc, dir.path(), &composition, policy);
                 let served = restarted
                     .serve_default_mob(explicit_definition(LAUNCH))
                     .await
@@ -38818,10 +38837,17 @@ mod tests {
         /// written at its place by a refused create.
         #[tokio::test]
         async fn only_the_launch_creates_a_mob_under_the_default_mobs_id() {
+            const LAUNCH: &str = row_id!("launch-mob");
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
             let composition = RecordingComposition::new(&svc);
-            let state = host_state(&svc, dir.path(), &composition, MobRestorePolicy::Eager);
+            let state = host_state(
+                LAUNCH,
+                &svc,
+                dir.path(),
+                &composition,
+                MobRestorePolicy::Eager,
+            );
             let launch = MobId::from(LAUNCH);
             // The refusal is the one of every id the set knows: for a
             // caller the id is taken, before the default mob exists too.
@@ -38900,10 +38926,17 @@ mod tests {
         /// for the default mob's: for a caller the id is taken.
         #[tokio::test]
         async fn a_create_under_a_known_id_is_refused_as_mob_already_exists() {
+            const LAUNCH: &str = row_id!("launch-mob");
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
             let composition = RecordingComposition::new(&svc);
-            let state = host_state(&svc, dir.path(), &composition, MobRestorePolicy::Eager);
+            let state = host_state(
+                LAUNCH,
+                &svc,
+                dir.path(),
+                &composition,
+                MobRestorePolicy::Eager,
+            );
             let names_the_taken_id = |refused: &MobError, mob_id: &str| {
                 refused.structured_data()
                     == Some(serde_json::json!({
@@ -38942,9 +38975,10 @@ mod tests {
         /// the composition is not asked for a mob its launch never served.
         #[tokio::test]
         async fn a_lookup_a_stand_down_released_never_loads_the_default_mob() {
+            const LAUNCH: &str = row_id!("launch-mob");
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
-            launch_of_an_earlier_process(&svc, dir.path(), &[]).await;
+            launch_of_an_earlier_process(LAUNCH, &svc, dir.path(), &[]).await;
             let svc = Arc::new(svc.cold_restart().await);
             let composition = RecordingComposition::new(&svc);
             let launch = MobId::from(LAUNCH);
@@ -39014,10 +39048,17 @@ mod tests {
         /// stays served with its handle, whichever door let the destroy in.
         #[tokio::test]
         async fn a_destroy_the_record_refuses_leaves_the_default_mob_served() {
+            const LAUNCH: &str = row_id!("launch-mob");
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
             let composition = RecordingComposition::new(&svc);
-            let state = host_state(&svc, dir.path(), &composition, MobRestorePolicy::Eager);
+            let state = host_state(
+                LAUNCH,
+                &svc,
+                dir.path(),
+                &composition,
+                MobRestorePolicy::Eager,
+            );
             let launch = MobId::from(LAUNCH);
             state
                 .serve_default_mob(explicit_definition(LAUNCH))
@@ -39053,6 +39094,7 @@ mod tests {
         /// refused, and it names the default mob already declared.
         #[tokio::test]
         async fn a_second_declaration_of_a_default_mob_is_refused() {
+            const LAUNCH: &str = row_id!("launch-mob");
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
             let declared = MobMcpState::new(svc.clone(), meerkat_mob::MobControlPrincipal::Owner)
@@ -39087,6 +39129,7 @@ mod tests {
         #[tokio::test]
         async fn a_persistent_root_under_a_declared_default_store_opens_no_participant_table_of_its_own()
          {
+            const LAUNCH: &str = row_id!("launch-mob");
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
             let state = MobMcpState::new(svc, meerkat_mob::MobControlPrincipal::Owner)
@@ -39123,6 +39166,7 @@ mod tests {
         #[tokio::test]
         async fn a_persistent_root_opens_its_participant_table_when_the_declared_files_table_is_not_open()
          {
+            const LAUNCH: &str = row_id!("launch-mob");
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
             std::fs::write(launch_store(dir.path()), b"not a database").expect("a damaged store");
@@ -39155,6 +39199,7 @@ mod tests {
         #[cfg(unix)]
         #[tokio::test]
         async fn the_declared_table_is_reopened_before_the_first_pass_only() {
+            const LAUNCH: &str = row_id!("launch-mob");
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
             std::fs::write(launch_store(dir.path()), b"not a database").expect("a damaged store");
@@ -39204,10 +39249,17 @@ mod tests {
         /// declared no default mob: nothing is created.
         #[tokio::test]
         async fn a_serve_that_does_not_name_the_declared_default_mob_is_refused() {
+            const LAUNCH: &str = row_id!("launch-mob");
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
             let composition = RecordingComposition::new(&svc);
-            let state = host_state(&svc, dir.path(), &composition, MobRestorePolicy::Eager);
+            let state = host_state(
+                LAUNCH,
+                &svc,
+                dir.path(),
+                &composition,
+                MobRestorePolicy::Eager,
+            );
             let other = state
                 .serve_default_mob(explicit_definition("another-mob"))
                 .await;
@@ -39257,6 +39309,7 @@ mod tests {
         /// under its root, and the default mob is created in it.
         #[tokio::test]
         async fn an_empty_store_at_the_default_mobs_place_is_kept_and_the_mob_is_created_in_it() {
+            const LAUNCH: &str = row_id!("launch-mob");
             for policy in [MobRestorePolicy::Eager, MobRestorePolicy::OnDemand] {
                 let svc = Arc::new(MockSessionSvc::new());
                 let dir = tempfile::tempdir().expect("tempdir");
@@ -39265,7 +39318,7 @@ mod tests {
                         .expect("an empty store at the default mob's place"),
                 );
                 let composition = RecordingComposition::new(&svc);
-                let state = host_state(&svc, dir.path(), &composition, policy);
+                let state = host_state(LAUNCH, &svc, dir.path(), &composition, policy);
                 assert!(
                     listed(state.mob_list().await.expect("the mobs")).is_empty(),
                     "an empty store holds no mob to list"
@@ -39286,7 +39339,7 @@ mod tests {
                 // before the create removed nothing the create then wrote.
                 let svc = Arc::new(svc.cold_restart().await);
                 let composition = RecordingComposition::new(&svc);
-                let restarted = host_state(&svc, dir.path(), &composition, policy);
+                let restarted = host_state(LAUNCH, &svc, dir.path(), &composition, policy);
                 assert!(
                     !restarted
                         .serve_default_mob(explicit_definition(LAUNCH))
@@ -39304,6 +39357,7 @@ mod tests {
         #[cfg(unix)]
         #[tokio::test]
         async fn a_load_does_not_remove_an_empty_file_at_the_default_mobs_place() {
+            const LAUNCH: &str = row_id!("launch-mob");
             use std::os::unix::fs::MetadataExt as _;
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
@@ -39319,7 +39373,13 @@ mod tests {
             let _same_file =
                 std::fs::File::open(launch_store(dir.path())).expect("open the empty store file");
             let composition = RecordingComposition::new(&svc);
-            let state = host_state(&svc, dir.path(), &composition, MobRestorePolicy::Eager);
+            let state = host_state(
+                LAUNCH,
+                &svc,
+                dir.path(),
+                &composition,
+                MobRestorePolicy::Eager,
+            );
             let launch = MobId::from(LAUNCH);
             assert_eq!(
                 state.mob_inventory().await.expect("the inventory").dormant,
@@ -39356,12 +39416,19 @@ mod tests {
         /// about the read.
         #[tokio::test]
         async fn no_pass_is_offered_the_declared_store() {
+            const LAUNCH: &str = row_id!("launch-mob");
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
-            launch_of_an_earlier_process(&svc, dir.path(), &[]).await;
+            launch_of_an_earlier_process(LAUNCH, &svc, dir.path(), &[]).await;
             let svc = Arc::new(svc.cold_restart().await);
             let composition = RecordingComposition::new(&svc);
-            let state = host_state(&svc, dir.path(), &composition, MobRestorePolicy::OnDemand);
+            let state = host_state(
+                LAUNCH,
+                &svc,
+                dir.path(),
+                &composition,
+                MobRestorePolicy::OnDemand,
+            );
             let launch = MobId::from(LAUNCH);
             assert_eq!(
                 state.mob_inventory().await.expect("the inventory").dormant,
@@ -39377,7 +39444,7 @@ mod tests {
                 opens,
                 "the sweep opened no store: the declared one is not offered to it"
             );
-            still_awaits_its_serve(&state, &composition).await;
+            still_awaits_its_serve(LAUNCH, &state, &composition).await;
         }
 
         /// No pass of the set loads the default mob: the eager restore
@@ -39386,19 +39453,21 @@ mod tests {
         /// launch's serve loads it.
         #[tokio::test]
         async fn no_pass_of_the_set_loads_the_default_mob() {
+            const LAUNCH: &str = row_id!("launch-mob");
+            const HOST_SECOND: &str = row_id!("host-second");
             for policy in [MobRestorePolicy::Eager, MobRestorePolicy::OnDemand] {
                 let svc = Arc::new(MockSessionSvc::new());
                 let dir = tempfile::tempdir().expect("tempdir");
                 let launch = MobId::from(LAUNCH);
                 let second = {
                     let composition = RecordingComposition::new(&svc);
-                    let first = host_state(&svc, dir.path(), &composition, policy);
+                    let first = host_state(LAUNCH, &svc, dir.path(), &composition, policy);
                     first
                         .serve_default_mob(explicit_definition(LAUNCH))
                         .await
                         .expect("the first launch creates the default mob");
                     let second = first
-                        .mob_create_definition(explicit_definition("host-second"))
+                        .mob_create_definition(explicit_definition(HOST_SECOND))
                         .await
                         .expect("create a second host mob");
                     end_process(&first).await;
@@ -39407,7 +39476,7 @@ mod tests {
 
                 let svc = Arc::new(svc.cold_restart().await);
                 let composition = RecordingComposition::new(&svc);
-                let restarted = host_state(&svc, dir.path(), &composition, policy);
+                let restarted = host_state(LAUNCH, &svc, dir.path(), &composition, policy);
                 // The start cannot tell which mobs hold work: it loads
                 // every dormant mob it may load.
                 restarted.script_start_obligations_for_test(
@@ -39454,10 +39523,17 @@ mod tests {
         /// keeps taking every other id.
         #[tokio::test]
         async fn a_foreign_handle_is_not_inserted_under_the_default_mobs_id() {
+            const LAUNCH: &str = row_id!("launch-mob");
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
             let composition = RecordingComposition::new(&svc);
-            let state = host_state(&svc, dir.path(), &composition, MobRestorePolicy::Eager);
+            let state = host_state(
+                LAUNCH,
+                &svc,
+                dir.path(),
+                &composition,
+                MobRestorePolicy::Eager,
+            );
             let foreign = |id: &str| {
                 let svc = svc.clone();
                 let definition = explicit_definition(id);
@@ -39498,12 +39574,19 @@ mod tests {
         /// quarantine for a store that cannot be opened.
         #[tokio::test]
         async fn the_launch_reads_its_default_mobs_stored_definition_without_loading_it() {
+            const LAUNCH: &str = row_id!("launch-mob");
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
             let launch = MobId::from(LAUNCH);
             {
                 let composition = RecordingComposition::new(&svc);
-                let first = host_state(&svc, dir.path(), &composition, MobRestorePolicy::Eager);
+                let first = host_state(
+                    LAUNCH,
+                    &svc,
+                    dir.path(),
+                    &composition,
+                    MobRestorePolicy::Eager,
+                );
                 assert!(
                     first
                         .default_mob_stored_definition()
@@ -39526,7 +39609,13 @@ mod tests {
 
             let svc = Arc::new(svc.cold_restart().await);
             let composition = RecordingComposition::new(&svc);
-            let restarted = host_state(&svc, dir.path(), &composition, MobRestorePolicy::Eager);
+            let restarted = host_state(
+                LAUNCH,
+                &svc,
+                dir.path(),
+                &composition,
+                MobRestorePolicy::Eager,
+            );
             let stored = restarted
                 .default_mob_stored_definition()
                 .await
@@ -39561,7 +39650,13 @@ mod tests {
                 .expect("write an undecodable store at the default mob's place");
             let svc = Arc::new(svc.cold_restart().await);
             let composition = RecordingComposition::new(&svc);
-            let broken = host_state(&svc, dir.path(), &composition, MobRestorePolicy::Eager);
+            let broken = host_state(
+                LAUNCH,
+                &svc,
+                dir.path(),
+                &composition,
+                MobRestorePolicy::Eager,
+            );
             let refused = broken
                 .default_mob_stored_definition()
                 .await
@@ -39615,10 +39710,12 @@ mod tests {
         #[tokio::test]
         async fn a_store_at_the_default_mobs_place_that_names_another_mob_is_quarantined_under_the_default_id()
          {
+            const LAUNCH: &str = row_id!("launch-mob");
+            const ANOTHER_LAUNCH: &str = row_id!("another-launch");
             for policy in [MobRestorePolicy::Eager, MobRestorePolicy::OnDemand] {
                 let svc = Arc::new(MockSessionSvc::new());
                 let dir = tempfile::tempdir().expect("tempdir");
-                let other = MobId::from("another-launch");
+                let other = MobId::from(ANOTHER_LAUNCH);
                 {
                     let earlier = Arc::new(
                         MobMcpState::new(svc.clone(), meerkat_mob::MobControlPrincipal::Owner)
@@ -39630,7 +39727,7 @@ mod tests {
                             .expect("the default mob is declared once"),
                     );
                     earlier
-                        .serve_default_mob(explicit_definition("another-launch"))
+                        .serve_default_mob(explicit_definition(ANOTHER_LAUNCH))
                         .await
                         .expect("an earlier launch created another mob at the place");
                     end_process(&earlier).await;
@@ -39641,7 +39738,7 @@ mod tests {
 
                 let svc = Arc::new(svc.cold_restart().await);
                 let composition = RecordingComposition::new(&svc);
-                let state = host_state(&svc, dir.path(), &composition, policy);
+                let state = host_state(LAUNCH, &svc, dir.path(), &composition, policy);
                 let refused = state
                     .serve_default_mob(explicit_definition(LAUNCH))
                     .await
@@ -39715,6 +39812,8 @@ mod tests {
         #[tokio::test]
         async fn a_store_at_the_default_mobs_place_that_disagrees_with_itself_is_quarantined_under_the_default_id()
          {
+            const LAUNCH: &str = row_id!("launch-mob");
+            const ANOTHER_LAUNCH: &str = row_id!("another-launch");
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
             {
@@ -39722,13 +39821,13 @@ mod tests {
                     MobMcpState::new(svc.clone(), meerkat_mob::MobControlPrincipal::Owner)
                         .expect("runtime custody")
                         .with_default_mob(DefaultMobDeclaration::persistent(
-                            MobId::from("another-launch"),
+                            MobId::from(ANOTHER_LAUNCH),
                             launch_store(dir.path()),
                         ))
                         .expect("the default mob is declared once"),
                 );
                 earlier
-                    .serve_default_mob(explicit_definition("another-launch"))
+                    .serve_default_mob(explicit_definition(ANOTHER_LAUNCH))
                     .await
                     .expect("an earlier launch created another mob at the place");
                 end_process(&earlier).await;
@@ -39738,7 +39837,13 @@ mod tests {
 
             let svc = Arc::new(svc.cold_restart().await);
             let composition = RecordingComposition::new(&svc);
-            let state = host_state(&svc, dir.path(), &composition, MobRestorePolicy::OnDemand);
+            let state = host_state(
+                LAUNCH,
+                &svc,
+                dir.path(),
+                &composition,
+                MobRestorePolicy::OnDemand,
+            );
             let refused = state
                 .serve_default_mob(explicit_definition(LAUNCH))
                 .await
@@ -39767,6 +39872,7 @@ mod tests {
         /// loads it from the declared store with the host composition.
         #[tokio::test]
         async fn a_default_mob_created_outside_the_set_is_loaded_with_the_host_composition() {
+            const LAUNCH: &str = row_id!("launch-mob");
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
             let launch = MobId::from(LAUNCH);
@@ -39788,7 +39894,13 @@ mod tests {
 
             let svc = Arc::new(svc.cold_restart().await);
             let composition = RecordingComposition::new(&svc);
-            let state = host_state(&svc, dir.path(), &composition, MobRestorePolicy::Eager);
+            let state = host_state(
+                LAUNCH,
+                &svc,
+                dir.path(),
+                &composition,
+                MobRestorePolicy::Eager,
+            );
             let served = state
                 .serve_default_mob(explicit_definition(LAUNCH))
                 .await
@@ -39807,6 +39919,7 @@ mod tests {
         /// could read.
         #[tokio::test]
         async fn a_default_mob_declared_in_memory_writes_no_store() {
+            const LAUNCH: &str = row_id!("launch-mob");
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
             let launch = MobId::from(LAUNCH);
@@ -39852,6 +39965,7 @@ mod tests {
         /// no tool bundle.
         #[tokio::test]
         async fn the_serve_creates_a_default_mob_whose_profile_opts_into_a_tool_bundle() {
+            const LAUNCH: &str = row_id!("launch-mob");
             let svc = Arc::new(MockSessionSvc::new());
             let state = Arc::new(
                 MobMcpState::new(svc, meerkat_mob::MobControlPrincipal::Owner)
@@ -39881,6 +39995,7 @@ mod tests {
         /// first serve, and every waiting lookup is then served the mob.
         #[tokio::test]
         async fn lookups_of_a_default_mob_in_memory_wait_for_the_launchs_first_serve() {
+            const LAUNCH: &str = row_id!("launch-mob");
             let svc = Arc::new(MockSessionSvc::new());
             let launch = MobId::from(LAUNCH);
             let state = Arc::new(
@@ -39940,10 +40055,17 @@ mod tests {
         /// default mob stays loaded.
         #[tokio::test]
         async fn the_default_mob_is_not_asked_for_an_idle_unload() {
+            const LAUNCH: &str = row_id!("launch-mob");
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
             let composition = RecordingComposition::new(&svc);
-            let state = host_state(&svc, dir.path(), &composition, MobRestorePolicy::OnDemand);
+            let state = host_state(
+                LAUNCH,
+                &svc,
+                dir.path(),
+                &composition,
+                MobRestorePolicy::OnDemand,
+            );
             let launch = MobId::from(LAUNCH);
             state
                 .serve_default_mob(explicit_definition(LAUNCH))
@@ -39989,6 +40111,7 @@ mod tests {
         /// without a declaration of the host, and a restart loads the mob.
         #[tokio::test]
         async fn a_host_without_a_persistent_root_still_knows_its_default_mobs_store() {
+            const LAUNCH: &str = row_id!("launch-mob");
             for policy in [MobRestorePolicy::Eager, MobRestorePolicy::OnDemand] {
                 let svc = Arc::new(MockSessionSvc::new());
                 let dir = tempfile::tempdir().expect("tempdir");
@@ -40040,18 +40163,19 @@ mod tests {
             }
         }
 
-        /// The launch mob of an earlier process and `others` further host
-        /// mobs: created by the set, the launch mob at [`launch_store`], and
-        /// ended. The ids of the further mobs.
+        /// The launch mob `launch` of an earlier process and `others` further
+        /// host mobs: created by the set, the launch mob at [`launch_store`],
+        /// and ended. The ids of the further mobs.
         async fn launch_of_an_earlier_process(
+            launch: &str,
             svc: &Arc<MockSessionSvc>,
             dir: &std::path::Path,
             others: &[&str],
         ) -> Vec<MobId> {
             let composition = RecordingComposition::new(svc);
-            let first = host_state(svc, dir, &composition, MobRestorePolicy::Eager);
+            let first = host_state(launch, svc, dir, &composition, MobRestorePolicy::Eager);
             first
-                .serve_default_mob(explicit_definition(LAUNCH))
+                .serve_default_mob(explicit_definition(launch))
                 .await
                 .expect("the first launch creates the default mob");
             let mut created = Vec::new();
@@ -40088,10 +40212,14 @@ mod tests {
             assert!(tasks.iter().all(|task| !task.is_finished()), "{why}");
         }
 
-        /// The default mob still awaits its serve: nothing loaded it, and
-        /// the composition was not asked for it.
-        async fn still_awaits_its_serve(state: &MobMcpState, composition: &RecordingComposition) {
-            let launch = MobId::from(LAUNCH);
+        /// The default mob `launch` still awaits its serve: nothing loaded
+        /// it, and the composition was not asked for it.
+        async fn still_awaits_its_serve(
+            launch: &str,
+            state: &MobMcpState,
+            composition: &RecordingComposition,
+        ) {
+            let launch = MobId::from(launch);
             assert!(
                 !composition
                     .composed()
@@ -40132,6 +40260,7 @@ mod tests {
         /// a host whose only mob is its launch's.
         #[tokio::test]
         async fn a_wake_of_a_session_neither_waits_for_the_launchs_serve_nor_loads_its_mob() {
+            const LAUNCH: &str = row_id!("launch-mob");
             use meerkat_core::session_owner_wake::{
                 SessionOwnerWakeOutcome, SessionOwnerWakeRegistry,
             };
@@ -40141,6 +40270,7 @@ mod tests {
             let launch = MobId::from(LAUNCH);
             let worker = AgentIdentity::from("worker-1");
             let first = host_state(
+                LAUNCH,
                 &svc,
                 dir.path(),
                 &RecordingComposition::new(&svc),
@@ -40170,9 +40300,15 @@ mod tests {
             drop(first);
             let svc = Arc::new(svc.cold_restart().await);
             let composition = RecordingComposition::new(&svc);
-            let state = host_state(&svc, dir.path(), &composition, MobRestorePolicy::OnDemand);
+            let state = host_state(
+                LAUNCH,
+                &svc,
+                dir.path(),
+                &composition,
+                MobRestorePolicy::OnDemand,
+            );
             state.answer_wakes_of_unserved_member_sessions();
-            still_awaits_its_serve(&state, &composition).await;
+            still_awaits_its_serve(LAUNCH, &state, &composition).await;
             let opens = state.store_opens_for_test();
 
             let woken = at_once(
@@ -40184,7 +40320,7 @@ mod tests {
                 matches!(woken, None | Some(Ok(SessionOwnerWakeOutcome::NotOwned))),
                 "the set answers for no session of the launch's mob: {woken:?}"
             );
-            still_awaits_its_serve(&state, &composition).await;
+            still_awaits_its_serve(LAUNCH, &state, &composition).await;
             assert_eq!(
                 state.store_opens_for_test(),
                 opens,
@@ -40210,9 +40346,11 @@ mod tests {
         /// the serve itself is not held. The serve releases every waiter.
         #[tokio::test]
         async fn lookups_of_the_default_mob_wait_for_the_launchs_first_serve() {
+            const LAUNCH: &str = row_id!("launch-mob");
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
             let others = launch_of_an_earlier_process(
+                LAUNCH,
                 &svc,
                 dir.path(),
                 &[
@@ -40223,7 +40361,13 @@ mod tests {
             .await;
             let svc = Arc::new(svc.cold_restart().await);
             let composition = RecordingComposition::new(&svc);
-            let state = host_state(&svc, dir.path(), &composition, MobRestorePolicy::OnDemand);
+            let state = host_state(
+                LAUNCH,
+                &svc,
+                dir.path(),
+                &composition,
+                MobRestorePolicy::OnDemand,
+            );
             let launch = MobId::from(LAUNCH);
 
             let held = lookups(&state, &launch, 8);
@@ -40232,7 +40376,7 @@ mod tests {
                 "a lookup of the default mob waits for the launch's serve",
             )
             .await;
-            still_awaits_its_serve(&state, &composition).await;
+            still_awaits_its_serve(LAUNCH, &state, &composition).await;
             let inventory = at_once(state.mob_inventory(), "the inventory")
                 .await
                 .expect("the inventory");
@@ -40303,12 +40447,19 @@ mod tests {
         /// second waits for the first, not for a serve that never comes.
         #[tokio::test]
         async fn two_first_serves_answer_the_same_mob() {
+            const LAUNCH: &str = row_id!("launch-mob");
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
-            launch_of_an_earlier_process(&svc, dir.path(), &[]).await;
+            launch_of_an_earlier_process(LAUNCH, &svc, dir.path(), &[]).await;
             let svc = Arc::new(svc.cold_restart().await);
             let composition = RecordingComposition::new(&svc);
-            let state = host_state(&svc, dir.path(), &composition, MobRestorePolicy::Eager);
+            let state = host_state(
+                LAUNCH,
+                &svc,
+                dir.path(),
+                &composition,
+                MobRestorePolicy::Eager,
+            );
             let serves = (0..2)
                 .map(|_| {
                     let state = Arc::clone(&state);
@@ -40335,12 +40486,19 @@ mod tests {
         /// deadline.
         #[tokio::test]
         async fn a_stand_down_releases_the_lookups_held_for_the_launchs_serve() {
+            const LAUNCH: &str = row_id!("launch-mob");
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
-            launch_of_an_earlier_process(&svc, dir.path(), &[]).await;
+            launch_of_an_earlier_process(LAUNCH, &svc, dir.path(), &[]).await;
             let svc = Arc::new(svc.cold_restart().await);
             let composition = RecordingComposition::new(&svc);
-            let state = host_state(&svc, dir.path(), &composition, MobRestorePolicy::Eager);
+            let state = host_state(
+                LAUNCH,
+                &svc,
+                dir.path(),
+                &composition,
+                MobRestorePolicy::Eager,
+            );
             let launch = MobId::from(LAUNCH);
             let held = lookups(&state, &launch, 3);
             all_still_wait(
@@ -40348,7 +40506,7 @@ mod tests {
                 "a lookup of the default mob waits for the launch's serve",
             )
             .await;
-            still_awaits_its_serve(&state, &composition).await;
+            still_awaits_its_serve(LAUNCH, &state, &composition).await;
 
             let stood_down = tokio::time::timeout(
                 Duration::from_secs(30),
@@ -40374,13 +40532,20 @@ mod tests {
         /// answer the store's typed quarantine, not a wait without end.
         #[tokio::test]
         async fn a_failed_first_serve_releases_the_held_lookups_with_the_quarantine() {
+            const LAUNCH: &str = row_id!("launch-mob");
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
-            launch_of_an_earlier_process(&svc, dir.path(), &[]).await;
+            launch_of_an_earlier_process(LAUNCH, &svc, dir.path(), &[]).await;
             let svc = Arc::new(svc.cold_restart().await);
             let composition = RecordingComposition::new(&svc);
             composition.refuse(true);
-            let state = host_state(&svc, dir.path(), &composition, MobRestorePolicy::Eager);
+            let state = host_state(
+                LAUNCH,
+                &svc,
+                dir.path(),
+                &composition,
+                MobRestorePolicy::Eager,
+            );
             let launch = MobId::from(LAUNCH);
             let held = lookups(&state, &launch, 4);
             all_still_wait(
@@ -40388,7 +40553,7 @@ mod tests {
                 "a lookup of the default mob waits for the launch's serve",
             )
             .await;
-            still_awaits_its_serve(&state, &composition).await;
+            still_awaits_its_serve(LAUNCH, &state, &composition).await;
 
             let refused = state
                 .serve_default_mob(explicit_definition(LAUNCH))
@@ -40418,12 +40583,19 @@ mod tests {
         /// next serve releases the waiters.
         #[tokio::test]
         async fn a_serve_refused_on_its_arguments_releases_nobody() {
+            const LAUNCH: &str = row_id!("launch-mob");
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
-            launch_of_an_earlier_process(&svc, dir.path(), &[]).await;
+            launch_of_an_earlier_process(LAUNCH, &svc, dir.path(), &[]).await;
             let svc = Arc::new(svc.cold_restart().await);
             let composition = RecordingComposition::new(&svc);
-            let state = host_state(&svc, dir.path(), &composition, MobRestorePolicy::Eager);
+            let state = host_state(
+                LAUNCH,
+                &svc,
+                dir.path(),
+                &composition,
+                MobRestorePolicy::Eager,
+            );
             let launch = MobId::from(LAUNCH);
             let held = lookups(&state, &launch, 2);
             all_still_wait(
@@ -40431,7 +40603,7 @@ mod tests {
                 "a lookup of the default mob waits for the launch's serve",
             )
             .await;
-            still_awaits_its_serve(&state, &composition).await;
+            still_awaits_its_serve(LAUNCH, &state, &composition).await;
 
             assert!(matches!(
                 state
@@ -40480,12 +40652,19 @@ mod tests {
         /// destroy do not wait, and none of them touches the store.
         #[tokio::test]
         async fn a_refusal_under_the_default_mobs_id_does_not_wait_for_the_serve() {
+            const LAUNCH: &str = row_id!("launch-mob");
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
-            launch_of_an_earlier_process(&svc, dir.path(), &[]).await;
+            launch_of_an_earlier_process(LAUNCH, &svc, dir.path(), &[]).await;
             let svc = Arc::new(svc.cold_restart().await);
             let composition = RecordingComposition::new(&svc);
-            let state = host_state(&svc, dir.path(), &composition, MobRestorePolicy::Eager);
+            let state = host_state(
+                LAUNCH,
+                &svc,
+                dir.path(),
+                &composition,
+                MobRestorePolicy::Eager,
+            );
             let launch = MobId::from(LAUNCH);
 
             let create = at_once(
@@ -40545,10 +40724,18 @@ mod tests {
         /// mob still serves and its store file is still there.
         #[tokio::test]
         async fn the_default_mob_is_not_destroyed_through_the_set() {
+            const LAUNCH: &str = row_id!("launch-mob");
+            const HOST_SECOND: &str = row_id!("host-second");
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
             let composition = RecordingComposition::new(&svc);
-            let state = host_state(&svc, dir.path(), &composition, MobRestorePolicy::Eager);
+            let state = host_state(
+                LAUNCH,
+                &svc,
+                dir.path(),
+                &composition,
+                MobRestorePolicy::Eager,
+            );
             let launch = MobId::from(LAUNCH);
             state
                 .serve_default_mob(explicit_definition(LAUNCH))
@@ -40596,7 +40783,7 @@ mod tests {
             );
             // Another host mob is destroyed as before.
             let second = state
-                .mob_create_definition(explicit_definition("host-second"))
+                .mob_create_definition(explicit_definition(HOST_SECOND))
                 .await
                 .expect("create a second host mob");
             state
@@ -40611,13 +40798,20 @@ mod tests {
         /// the member: the mob is never read as gone while it awaits.
         #[tokio::test]
         async fn a_completion_owed_to_a_default_mob_member_waits_for_the_serve() {
+            const LAUNCH: &str = row_id!("launch-mob");
             use meerkat::ContinuationAddressResolver as _;
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
             let launch = MobId::from(LAUNCH);
             {
                 let composition = RecordingComposition::new(&svc);
-                let first = host_state(&svc, dir.path(), &composition, MobRestorePolicy::Eager);
+                let first = host_state(
+                    LAUNCH,
+                    &svc,
+                    dir.path(),
+                    &composition,
+                    MobRestorePolicy::Eager,
+                );
                 first
                     .serve_default_mob(explicit_definition(LAUNCH))
                     .await
@@ -40627,7 +40821,13 @@ mod tests {
             }
             let svc = Arc::new(svc.cold_restart().await);
             let composition = RecordingComposition::new(&svc);
-            let state = host_state(&svc, dir.path(), &composition, MobRestorePolicy::Eager);
+            let state = host_state(
+                LAUNCH,
+                &svc,
+                dir.path(),
+                &composition,
+                MobRestorePolicy::Eager,
+            );
             state
                 .mob_inventory()
                 .await
@@ -40650,7 +40850,7 @@ mod tests {
                 "a completion owed to a member of the default mob waits for the serve",
             )
             .await;
-            still_awaits_its_serve(&state, &composition).await;
+            still_awaits_its_serve(LAUNCH, &state, &composition).await;
             state
                 .serve_default_mob(explicit_definition(LAUNCH))
                 .await
@@ -40668,13 +40868,20 @@ mod tests {
         /// owner", which would drop the completion for good.
         #[tokio::test]
         async fn a_completion_owed_to_a_default_mob_member_stays_owed_when_the_serve_fails() {
+            const LAUNCH: &str = row_id!("launch-mob");
             use meerkat::ContinuationAddressResolver as _;
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
             let launch = MobId::from(LAUNCH);
             {
                 let composition = RecordingComposition::new(&svc);
-                let first = host_state(&svc, dir.path(), &composition, MobRestorePolicy::Eager);
+                let first = host_state(
+                    LAUNCH,
+                    &svc,
+                    dir.path(),
+                    &composition,
+                    MobRestorePolicy::Eager,
+                );
                 first
                     .serve_default_mob(explicit_definition(LAUNCH))
                     .await
@@ -40685,7 +40892,13 @@ mod tests {
             let svc = Arc::new(svc.cold_restart().await);
             let composition = RecordingComposition::new(&svc);
             composition.refuse(true);
-            let state = host_state(&svc, dir.path(), &composition, MobRestorePolicy::Eager);
+            let state = host_state(
+                LAUNCH,
+                &svc,
+                dir.path(),
+                &composition,
+                MobRestorePolicy::Eager,
+            );
             state
                 .mob_inventory()
                 .await
@@ -40704,7 +40917,7 @@ mod tests {
                 "a completion owed to a member of the default mob waits for the serve",
             )
             .await;
-            still_awaits_its_serve(&state, &composition).await;
+            still_awaits_its_serve(LAUNCH, &state, &composition).await;
             assert!(
                 state
                     .serve_default_mob(explicit_definition(LAUNCH))
@@ -40731,6 +40944,8 @@ mod tests {
         /// After the census the same question is answered from the set.
         #[tokio::test]
         async fn a_completion_owed_before_the_census_stays_owed_and_starts_no_restore() {
+            const LAUNCH: &str = row_id!("launch-mob");
+            const HOST_OTHER: &str = row_id!("host-other");
             use meerkat::ContinuationAddressResolver as _;
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
@@ -40738,14 +40953,20 @@ mod tests {
             let never_hosted = MobId::from("never-hosted");
             let other = {
                 let composition = RecordingComposition::new(&svc);
-                let first = host_state(&svc, dir.path(), &composition, MobRestorePolicy::Eager);
+                let first = host_state(
+                    LAUNCH,
+                    &svc,
+                    dir.path(),
+                    &composition,
+                    MobRestorePolicy::Eager,
+                );
                 first
                     .serve_default_mob(explicit_definition(LAUNCH))
                     .await
                     .expect("the first launch creates the default mob");
                 spawn_worker(&first, &launch).await;
                 let other = first
-                    .mob_create_definition(explicit_definition("host-other"))
+                    .mob_create_definition(explicit_definition(HOST_OTHER))
                     .await
                     .expect("create a further host mob");
                 spawn_worker(&first, &other).await;
@@ -40754,7 +40975,13 @@ mod tests {
             };
             let svc = Arc::new(svc.cold_restart().await);
             let composition = RecordingComposition::new(&svc);
-            let state = host_state(&svc, dir.path(), &composition, MobRestorePolicy::Eager);
+            let state = host_state(
+                LAUNCH,
+                &svc,
+                dir.path(),
+                &composition,
+                MobRestorePolicy::Eager,
+            );
             let resolver = super::lazy_hosted_set::host_resolver(&state);
             for mob_id in [&launch, &other, &never_hosted] {
                 let address = at_once(
@@ -40800,12 +41027,20 @@ mod tests {
         /// teardown does not wait for the launch's serve.
         #[tokio::test]
         async fn the_first_verb_returns_with_a_child_of_an_archived_default_mob_member() {
+            const LAUNCH: &str = row_id!("launch-mob");
+            const MEMBER_CHILD: &str = row_id!("member-child");
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
             let launch = MobId::from(LAUNCH);
             let owner = {
                 let composition = RecordingComposition::new(&svc);
-                let first = host_state(&svc, dir.path(), &composition, MobRestorePolicy::Eager);
+                let first = host_state(
+                    LAUNCH,
+                    &svc,
+                    dir.path(),
+                    &composition,
+                    MobRestorePolicy::Eager,
+                );
                 first
                     .serve_default_mob(explicit_definition(LAUNCH))
                     .await
@@ -40815,7 +41050,7 @@ mod tests {
                     .await;
                 first
                     .mob_create_definition_with_owner_bridge_session(
-                        explicit_definition("member-child"),
+                        explicit_definition(MEMBER_CHILD),
                         owner.clone(),
                         true,
                         false,
@@ -40832,7 +41067,13 @@ mod tests {
                 Ok(meerkat_mob::LiveDurableSourceObservation::Archived),
             );
             let composition = RecordingComposition::new(&svc);
-            let state = host_state(&svc, dir.path(), &composition, MobRestorePolicy::Eager);
+            let state = host_state(
+                LAUNCH,
+                &svc,
+                dir.path(),
+                &composition,
+                MobRestorePolicy::Eager,
+            );
             let inventory = at_once(state.mob_inventory(), "the first verb")
                 .await
                 .expect("the inventory");
@@ -40864,12 +41105,20 @@ mod tests {
         /// mob still awaiting its serve.
         #[tokio::test]
         async fn the_first_verb_returns_while_the_default_mob_awaits_its_serve() {
+            const LAUNCH: &str = row_id!("launch-mob");
+            const MEMBER_CHILD: &str = row_id!("member-child");
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
             let launch = MobId::from(LAUNCH);
             let child = {
                 let composition = RecordingComposition::new(&svc);
-                let first = host_state(&svc, dir.path(), &composition, MobRestorePolicy::Eager);
+                let first = host_state(
+                    LAUNCH,
+                    &svc,
+                    dir.path(),
+                    &composition,
+                    MobRestorePolicy::Eager,
+                );
                 first
                     .serve_default_mob(explicit_definition(LAUNCH))
                     .await
@@ -40879,7 +41128,7 @@ mod tests {
                     .await;
                 let child = first
                     .mob_create_definition_with_owner_bridge_session(
-                        explicit_definition("member-child"),
+                        explicit_definition(MEMBER_CHILD),
                         owner,
                         true,
                         false,
@@ -40891,7 +41140,13 @@ mod tests {
             };
             let svc = Arc::new(svc.cold_restart().await);
             let composition = RecordingComposition::new(&svc);
-            let state = host_state(&svc, dir.path(), &composition, MobRestorePolicy::Eager);
+            let state = host_state(
+                LAUNCH,
+                &svc,
+                dir.path(),
+                &composition,
+                MobRestorePolicy::Eager,
+            );
             let inventory = at_once(state.mob_inventory(), "the first verb")
                 .await
                 .expect("the inventory");
@@ -40917,13 +41172,20 @@ mod tests {
         /// request for its mob, whatever class the earlier failure had.
         #[tokio::test]
         async fn the_launchs_serve_re_attempts_a_quarantined_default_store_once() {
+            const LAUNCH: &str = row_id!("launch-mob");
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
-            launch_of_an_earlier_process(&svc, dir.path(), &[]).await;
+            launch_of_an_earlier_process(LAUNCH, &svc, dir.path(), &[]).await;
             let svc = Arc::new(svc.cold_restart().await);
             let composition = RecordingComposition::new(&svc);
             composition.refuse(true);
-            let state = host_state(&svc, dir.path(), &composition, MobRestorePolicy::Eager);
+            let state = host_state(
+                LAUNCH,
+                &svc,
+                dir.path(),
+                &composition,
+                MobRestorePolicy::Eager,
+            );
             let refused = state
                 .serve_default_mob(explicit_definition(LAUNCH))
                 .await
@@ -40963,6 +41225,7 @@ mod tests {
         /// loads from it, and it is not a profile of the set's own store.
         #[tokio::test]
         async fn the_default_mob_keeps_the_custody_of_its_own_store() {
+            const LAUNCH: &str = row_id!("launch-mob");
             use meerkat_mob::RealmProfileStore as _;
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
@@ -41000,7 +41263,13 @@ mod tests {
             };
             {
                 let composition = RecordingComposition::new(&svc);
-                let first = host_state(&svc, dir.path(), &composition, MobRestorePolicy::Eager);
+                let first = host_state(
+                    LAUNCH,
+                    &svc,
+                    dir.path(),
+                    &composition,
+                    MobRestorePolicy::Eager,
+                );
                 assert!(
                     first
                         .serve_default_mob(definition.clone())
@@ -41023,7 +41292,13 @@ mod tests {
             }
             let svc = Arc::new(svc.cold_restart().await);
             let composition = RecordingComposition::new(&svc);
-            let restarted = host_state(&svc, dir.path(), &composition, MobRestorePolicy::Eager);
+            let restarted = host_state(
+                LAUNCH,
+                &svc,
+                dir.path(),
+                &composition,
+                MobRestorePolicy::Eager,
+            );
             restarted
                 .serve_default_mob(definition)
                 .await
@@ -41039,10 +41314,18 @@ mod tests {
         /// asks the hook.
         #[tokio::test]
         async fn the_create_hook_is_not_asked_for_the_default_mobs_create() {
+            const LAUNCH: &str = row_id!("launch-mob");
+            const HOST_SECOND: &str = row_id!("host-second");
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
             let composition = RecordingComposition::new(&svc);
-            let state = host_state(&svc, dir.path(), &composition, MobRestorePolicy::Eager);
+            let state = host_state(
+                LAUNCH,
+                &svc,
+                dir.path(),
+                &composition,
+                MobRestorePolicy::Eager,
+            );
             let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
             let record = Arc::clone(&asked);
             state
@@ -41063,7 +41346,7 @@ mod tests {
                     .created
             );
             let second = state
-                .mob_create_definition(explicit_definition("host-second"))
+                .mob_create_definition(explicit_definition(HOST_SECOND))
                 .await
                 .expect_err("the hook refuses every create it is asked for");
             assert!(MobMcpState::is_create_refusal(&second), "{second:?}");
@@ -41071,7 +41354,7 @@ mod tests {
                 *asked
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner),
-                vec![MobId::from("host-second")],
+                vec![MobId::from(HOST_SECOND)],
                 "the hook was asked for the other create only"
             );
             end_process(&state).await;
@@ -41085,10 +41368,11 @@ mod tests {
         /// not loaded.
         #[tokio::test]
         async fn a_declared_definition_update_is_applied_by_the_serve_before_the_load() {
+            const LAUNCH: &str = row_id!("launch-mob");
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
             let launch = MobId::from(LAUNCH);
-            launch_of_an_earlier_process(&svc, dir.path(), &[]).await;
+            launch_of_an_earlier_process(LAUNCH, &svc, dir.path(), &[]).await;
             let mut updated = explicit_definition(LAUNCH);
             let extra = updated
                 .profiles
@@ -41100,7 +41384,13 @@ mod tests {
             // A declaration against a revision the store is not at.
             let svc = Arc::new(svc.cold_restart().await);
             let composition = RecordingComposition::new(&svc);
-            let state = host_state(&svc, dir.path(), &composition, MobRestorePolicy::Eager);
+            let state = host_state(
+                LAUNCH,
+                &svc,
+                dir.path(),
+                &composition,
+                MobRestorePolicy::Eager,
+            );
             let stale = state
                 .serve_default_mob(DefaultMobServe::new(updated.clone()).declaring_update(7))
                 .await;
@@ -41183,12 +41473,19 @@ mod tests {
         /// opened.
         #[tokio::test]
         async fn the_read_and_the_serve_open_the_default_mobs_store_once() {
+            const LAUNCH: &str = row_id!("launch-mob");
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
-            launch_of_an_earlier_process(&svc, dir.path(), &[]).await;
+            launch_of_an_earlier_process(LAUNCH, &svc, dir.path(), &[]).await;
             let svc = Arc::new(svc.cold_restart().await);
             let composition = RecordingComposition::new(&svc);
-            let state = host_state(&svc, dir.path(), &composition, MobRestorePolicy::OnDemand);
+            let state = host_state(
+                LAUNCH,
+                &svc,
+                dir.path(),
+                &composition,
+                MobRestorePolicy::OnDemand,
+            );
             state
                 .default_mob_stored_definition()
                 .await
@@ -41216,11 +41513,18 @@ mod tests {
         /// built with the state-wide configuration as before.
         #[tokio::test]
         async fn a_host_build_starts_clean_and_gets_only_what_the_composition_gives() {
+            const LAUNCH: &str = row_id!("launch-mob");
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
             let (host_mob, set_mob, owner) = {
                 let composition = RecordingComposition::new(&svc);
-                let first = host_state(&svc, dir.path(), &composition, MobRestorePolicy::Eager);
+                let first = host_state(
+                    LAUNCH,
+                    &svc,
+                    dir.path(),
+                    &composition,
+                    MobRestorePolicy::Eager,
+                );
                 let activated = super::lazy_hosted_set::count_activations(&first);
                 let host_mob = first
                     .mob_create_definition(explicit_definition("host-clean"))
@@ -41285,6 +41589,7 @@ mod tests {
         /// however its path is spelled.
         #[tokio::test]
         async fn a_default_store_under_the_sets_root_is_the_default_record_and_no_pass_loads_it() {
+            const LAUNCH: &str = row_id!("launch-mob");
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
             let launch = MobId::from(LAUNCH);
@@ -41360,6 +41665,7 @@ mod tests {
         /// names) is not asked of the declared store.
         #[tokio::test]
         async fn a_default_store_whose_file_name_decodes_to_another_id_serves_the_default_mob() {
+            const LAUNCH: &str = row_id!("launch-mob");
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
             let launch = MobId::from(LAUNCH);
@@ -41431,11 +41737,12 @@ mod tests {
         #[tokio::test]
         async fn another_root_store_that_names_the_default_mobs_id_is_never_served_as_the_default()
         {
+            const LAUNCH: &str = row_id!("launch-mob");
             for policy in [MobRestorePolicy::Eager, MobRestorePolicy::OnDemand] {
                 let svc = Arc::new(MockSessionSvc::new());
                 let dir = tempfile::tempdir().expect("tempdir");
                 let launch = MobId::from(LAUNCH);
-                launch_of_an_earlier_process(&svc, dir.path(), &[]).await;
+                launch_of_an_earlier_process(LAUNCH, &svc, dir.path(), &[]).await;
                 {
                     // A host that declared no default mob wrote a store of
                     // the root under the same id.
@@ -41457,7 +41764,7 @@ mod tests {
                 }
                 let svc = Arc::new(svc.cold_restart().await);
                 let composition = RecordingComposition::new(&svc);
-                let state = host_state(&svc, dir.path(), &composition, policy);
+                let state = host_state(LAUNCH, &svc, dir.path(), &composition, policy);
                 let served = state
                     .serve_default_mob(explicit_definition(LAUNCH))
                     .await
@@ -41494,13 +41801,21 @@ mod tests {
         /// a lookup of that mob waits for its one load.
         #[tokio::test]
         async fn a_composition_that_waits_does_not_hold_the_first_verb() {
+            const LAUNCH: &str = row_id!("launch-mob");
+            const HOST_SLOW: &str = row_id!("host-slow");
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
             let slow = {
                 let composition = RecordingComposition::new(&svc);
-                let first = host_state(&svc, dir.path(), &composition, MobRestorePolicy::Eager);
+                let first = host_state(
+                    LAUNCH,
+                    &svc,
+                    dir.path(),
+                    &composition,
+                    MobRestorePolicy::Eager,
+                );
                 let slow = first
-                    .mob_create_definition(explicit_definition("host-slow"))
+                    .mob_create_definition(explicit_definition(HOST_SLOW))
                     .await
                     .expect("create a host mob");
                 end_process(&first).await;
@@ -41548,6 +41863,7 @@ mod tests {
         /// session is archived is loaded as the default mob all the same.
         #[tokio::test]
         async fn the_child_restore_gate_never_removes_the_default_mobs_store() {
+            const LAUNCH: &str = row_id!("launch-mob");
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
             let owner = SessionId::new();
@@ -41574,7 +41890,13 @@ mod tests {
                 Ok(meerkat_mob::LiveDurableSourceObservation::Archived),
             );
             let composition = RecordingComposition::new(&svc);
-            let state = host_state(&svc, dir.path(), &composition, MobRestorePolicy::Eager);
+            let state = host_state(
+                LAUNCH,
+                &svc,
+                dir.path(),
+                &composition,
+                MobRestorePolicy::Eager,
+            );
             let served = state
                 .serve_default_mob(explicit_definition(LAUNCH))
                 .await
@@ -41592,11 +41914,18 @@ mod tests {
         /// declared store of the default mob.
         #[tokio::test]
         async fn a_refused_create_leaves_no_store_file() {
+            const LAUNCH: &str = row_id!("launch-mob");
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
             let composition = RecordingComposition::new(&svc);
             composition.refuse(true);
-            let state = host_state(&svc, dir.path(), &composition, MobRestorePolicy::Eager);
+            let state = host_state(
+                LAUNCH,
+                &svc,
+                dir.path(),
+                &composition,
+                MobRestorePolicy::Eager,
+            );
             assert!(
                 state
                     .mob_create_definition(explicit_definition("host-refused"))
@@ -41639,10 +41968,11 @@ mod tests {
             end_process(&state).await;
         }
 
-        /// A host with a persistent root and a composition whose build of a
-        /// host mob waits inside the composition until `release` is
-        /// notified.
+        /// A host with a persistent root, the default mob `launch` and a
+        /// composition whose build of a host mob waits inside the
+        /// composition until `release` is notified.
         fn a_host_whose_builds_wait(
+            launch: &str,
             svc: &Arc<MockSessionSvc>,
             dir: &std::path::Path,
         ) -> (
@@ -41656,7 +41986,7 @@ mod tests {
                 .block
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&release));
-            let state = host_state(svc, dir, &composition, MobRestorePolicy::Eager);
+            let state = host_state(launch, svc, dir, &composition, MobRestorePolicy::Eager);
             (state, composition, release)
         }
 
@@ -41692,9 +42022,10 @@ mod tests {
         #[tokio::test]
         async fn two_creates_under_one_id_one_wins_and_the_other_is_refused_before_the_composition_is_asked()
          {
+            const LAUNCH: &str = row_id!("launch-mob");
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
-            let (state, composition, release) = a_host_whose_builds_wait(&svc, dir.path());
+            let (state, composition, release) = a_host_whose_builds_wait(LAUNCH, &svc, dir.path());
             let twice = MobId::from("created-twice");
             let first = {
                 let state = Arc::clone(&state);
@@ -41751,9 +42082,10 @@ mod tests {
         /// create goes on and wins; nothing of it is undone by the handle.
         #[tokio::test]
         async fn a_host_handle_under_an_id_being_created_is_refused() {
+            const LAUNCH: &str = row_id!("launch-mob");
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
-            let (state, composition, release) = a_host_whose_builds_wait(&svc, dir.path());
+            let (state, composition, release) = a_host_whose_builds_wait(LAUNCH, &svc, dir.path());
             let created = MobId::from("created-first");
             let (_host, handle) = lazy_hosted_set::a_hosts_own_mob_under("created-first").await;
             handle.shutdown().await.expect("the host's own mob ends");
@@ -41796,9 +42128,10 @@ mod tests {
         /// does not keep the id: the next create under it is admitted.
         #[tokio::test]
         async fn a_create_whose_caller_was_dropped_frees_its_id() {
+            const LAUNCH: &str = row_id!("launch-mob");
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
-            let (state, composition, _release) = a_host_whose_builds_wait(&svc, dir.path());
+            let (state, composition, _release) = a_host_whose_builds_wait(LAUNCH, &svc, dir.path());
             let dropped = MobId::from("created-dropped");
             let first = {
                 let state = Arc::clone(&state);
@@ -41868,9 +42201,10 @@ mod tests {
         /// asked once, and nothing of a second mob is built.
         #[tokio::test]
         async fn pack_creates_under_one_id_wait_for_the_one_in_flight_and_answer_its_mob() {
+            const LAUNCH: &str = row_id!("launch-mob");
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
-            let (state, composition, release) = a_host_whose_builds_wait(&svc, dir.path());
+            let (state, composition, release) = a_host_whose_builds_wait(LAUNCH, &svc, dir.path());
             let packed = MobId::from("packed-once");
             let creator = pack_create(&state, "packed-once");
             until_the_create_is_composed(&composition, &packed).await;
@@ -41914,9 +42248,10 @@ mod tests {
         /// others wait for it and answer its mob.
         #[tokio::test]
         async fn a_pack_create_that_fails_hands_the_id_to_one_of_its_waiters() {
+            const LAUNCH: &str = row_id!("launch-mob");
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
-            let (state, composition, release) = a_host_whose_builds_wait(&svc, dir.path());
+            let (state, composition, release) = a_host_whose_builds_wait(LAUNCH, &svc, dir.path());
             let packed = MobId::from("packed-failed");
             composition.refuse_after_the_wait(true);
             let creator = pack_create(&state, "packed-failed");
@@ -41966,9 +42301,10 @@ mod tests {
         /// answer its mob.
         #[tokio::test]
         async fn a_pack_create_whose_caller_was_dropped_hands_the_id_to_one_of_its_waiters() {
+            const LAUNCH: &str = row_id!("launch-mob");
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
-            let (state, composition, release) = a_host_whose_builds_wait(&svc, dir.path());
+            let (state, composition, release) = a_host_whose_builds_wait(LAUNCH, &svc, dir.path());
             let packed = MobId::from("packed-dropped");
             let creator = pack_create(&state, "packed-dropped");
             until_the_create_is_composed(&composition, &packed).await;
@@ -42037,11 +42373,18 @@ mod tests {
         /// error, and the mob is not served without its composition.
         #[tokio::test]
         async fn a_host_composition_that_refuses_fails_the_create_and_quarantines_the_load() {
+            const LAUNCH: &str = row_id!("launch-mob");
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
             let second = {
                 let composition = RecordingComposition::new(&svc);
-                let first = host_state(&svc, dir.path(), &composition, MobRestorePolicy::OnDemand);
+                let first = host_state(
+                    LAUNCH,
+                    &svc,
+                    dir.path(),
+                    &composition,
+                    MobRestorePolicy::OnDemand,
+                );
                 let second = first
                     .mob_create_definition(explicit_definition("host-composed"))
                     .await
@@ -42070,7 +42413,13 @@ mod tests {
             composition
                 .refuse
                 .store(true, std::sync::atomic::Ordering::SeqCst);
-            let restarted = host_state(&svc, dir.path(), &composition, MobRestorePolicy::OnDemand);
+            let restarted = host_state(
+                LAUNCH,
+                &svc,
+                dir.path(),
+                &composition,
+                MobRestorePolicy::OnDemand,
+            );
             let refused = restarted
                 .mob_status(&second)
                 .await
@@ -42086,11 +42435,18 @@ mod tests {
         /// hold refuses the load, typed, before the mob runs.
         #[tokio::test]
         async fn a_load_is_bound_to_the_stored_definition_the_composition_names() {
+            const LAUNCH: &str = row_id!("launch-mob");
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
             let (bound, stale) = {
                 let composition = RecordingComposition::new(&svc);
-                let first = host_state(&svc, dir.path(), &composition, MobRestorePolicy::OnDemand);
+                let first = host_state(
+                    LAUNCH,
+                    &svc,
+                    dir.path(),
+                    &composition,
+                    MobRestorePolicy::OnDemand,
+                );
                 let bound = first
                     .mob_create_definition(explicit_definition("host-bound"))
                     .await
@@ -42117,7 +42473,13 @@ mod tests {
                 .bind
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(snapshot);
-            let restarted = host_state(&svc, dir.path(), &composition, MobRestorePolicy::OnDemand);
+            let restarted = host_state(
+                LAUNCH,
+                &svc,
+                dir.path(),
+                &composition,
+                MobRestorePolicy::OnDemand,
+            );
             restarted
                 .mob_status(&bound)
                 .await
@@ -42135,11 +42497,18 @@ mod tests {
         /// too: the store moved on since the host read it.
         #[tokio::test]
         async fn a_load_bound_to_an_older_definition_of_its_mob_is_refused() {
+            const LAUNCH: &str = row_id!("launch-mob");
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
             let moved = {
                 let composition = RecordingComposition::new(&svc);
-                let first = host_state(&svc, dir.path(), &composition, MobRestorePolicy::OnDemand);
+                let first = host_state(
+                    LAUNCH,
+                    &svc,
+                    dir.path(),
+                    &composition,
+                    MobRestorePolicy::OnDemand,
+                );
                 let moved = first
                     .mob_create_definition(explicit_definition("host-moved"))
                     .await
@@ -42177,7 +42546,13 @@ mod tests {
                 .bind
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(older);
-            let restarted = host_state(&svc, dir.path(), &composition, MobRestorePolicy::OnDemand);
+            let restarted = host_state(
+                LAUNCH,
+                &svc,
+                dir.path(),
+                &composition,
+                MobRestorePolicy::OnDemand,
+            );
             let refused = restarted
                 .mob_status(&moved)
                 .await
@@ -42192,11 +42567,18 @@ mod tests {
         /// quarantined with its error.
         #[tokio::test]
         async fn a_composition_that_refuses_its_expectation_quarantines_the_load() {
+            const LAUNCH: &str = row_id!("launch-mob");
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
             let unnamed = {
                 let composition = RecordingComposition::new(&svc);
-                let first = host_state(&svc, dir.path(), &composition, MobRestorePolicy::OnDemand);
+                let first = host_state(
+                    LAUNCH,
+                    &svc,
+                    dir.path(),
+                    &composition,
+                    MobRestorePolicy::OnDemand,
+                );
                 let unnamed = first
                     .mob_create_definition(explicit_definition("host-unnamed"))
                     .await
@@ -42209,7 +42591,13 @@ mod tests {
             composition
                 .refuse_expectation
                 .store(true, std::sync::atomic::Ordering::SeqCst);
-            let restarted = host_state(&svc, dir.path(), &composition, MobRestorePolicy::OnDemand);
+            let restarted = host_state(
+                LAUNCH,
+                &svc,
+                dir.path(),
+                &composition,
+                MobRestorePolicy::OnDemand,
+            );
             let refused = restarted
                 .mob_status(&unnamed)
                 .await
@@ -42227,10 +42615,17 @@ mod tests {
         /// composition builds it.
         #[tokio::test]
         async fn a_mobpack_create_is_built_with_the_host_composition() {
+            const LAUNCH: &str = row_id!("launch-mob");
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
             let composition = RecordingComposition::new(&svc);
-            let state = host_state(&svc, dir.path(), &composition, MobRestorePolicy::Eager);
+            let state = host_state(
+                LAUNCH,
+                &svc,
+                dir.path(),
+                &composition,
+                MobRestorePolicy::Eager,
+            );
             let packed = state
                 .mob_create_from_mobpack(
                     explicit_definition("host-packed"),
@@ -42252,10 +42647,11 @@ mod tests {
         /// and applies the update before that attempt's load.
         #[tokio::test]
         async fn a_declared_update_over_a_quarantined_store_is_applied_before_its_re_attempt() {
+            const LAUNCH: &str = row_id!("launch-mob");
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
             let launch = MobId::from(LAUNCH);
-            launch_of_an_earlier_process(&svc, dir.path(), &[]).await;
+            launch_of_an_earlier_process(LAUNCH, &svc, dir.path(), &[]).await;
             let epoch = MobStorage::persistent(launch_store(dir.path()))
                 .expect("open the default mob's store")
                 .created_definition_snapshot()
@@ -42274,7 +42670,13 @@ mod tests {
             let svc = Arc::new(svc.cold_restart().await);
             let composition = RecordingComposition::new(&svc);
             composition.refuse(true);
-            let state = host_state(&svc, dir.path(), &composition, MobRestorePolicy::Eager);
+            let state = host_state(
+                LAUNCH,
+                &svc,
+                dir.path(),
+                &composition,
+                MobRestorePolicy::Eager,
+            );
             assert!(
                 state
                     .serve_default_mob(explicit_definition(LAUNCH))
@@ -42322,9 +42724,10 @@ mod tests {
         /// moved. The next serve loads the committed definition.
         #[tokio::test]
         async fn a_committed_declared_update_is_reported_when_the_load_after_it_fails() {
+            const LAUNCH: &str = row_id!("launch-mob");
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
-            launch_of_an_earlier_process(&svc, dir.path(), &[]).await;
+            launch_of_an_earlier_process(LAUNCH, &svc, dir.path(), &[]).await;
             let mut updated = explicit_definition(LAUNCH);
             let extra = updated
                 .profiles
@@ -42336,7 +42739,13 @@ mod tests {
             let svc = Arc::new(svc.cold_restart().await);
             let composition = RecordingComposition::new(&svc);
             composition.refuse(true);
-            let state = host_state(&svc, dir.path(), &composition, MobRestorePolicy::Eager);
+            let state = host_state(
+                LAUNCH,
+                &svc,
+                dir.path(),
+                &composition,
+                MobRestorePolicy::Eager,
+            );
             let read = state
                 .default_mob_stored_definition()
                 .await
@@ -42396,15 +42805,22 @@ mod tests {
         /// default mob's id and the wait of the held lookups ends.
         #[tokio::test]
         async fn a_declared_update_over_a_store_that_cannot_be_opened_quarantines_it() {
+            const LAUNCH: &str = row_id!("launch-mob");
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
             let launch = MobId::from(LAUNCH);
-            launch_of_an_earlier_process(&svc, dir.path(), &[]).await;
+            launch_of_an_earlier_process(LAUNCH, &svc, dir.path(), &[]).await;
             std::fs::write(launch_store(dir.path()), b"not a sqlite database")
                 .expect("write an undecodable store at the default mob's place");
             let svc = Arc::new(svc.cold_restart().await);
             let composition = RecordingComposition::new(&svc);
-            let state = host_state(&svc, dir.path(), &composition, MobRestorePolicy::Eager);
+            let state = host_state(
+                LAUNCH,
+                &svc,
+                dir.path(),
+                &composition,
+                MobRestorePolicy::Eager,
+            );
             let held = lookups(&state, &launch, 2);
             all_still_wait(
                 &held,
@@ -42446,12 +42862,19 @@ mod tests {
         /// released and read the set as it is.
         #[tokio::test]
         async fn a_serve_that_panics_releases_the_lookups_held_for_it() {
+            const LAUNCH: &str = row_id!("launch-mob");
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
-            launch_of_an_earlier_process(&svc, dir.path(), &[]).await;
+            launch_of_an_earlier_process(LAUNCH, &svc, dir.path(), &[]).await;
             let svc = Arc::new(svc.cold_restart().await);
             let composition = RecordingComposition::new(&svc);
-            let state = host_state(&svc, dir.path(), &composition, MobRestorePolicy::Eager);
+            let state = host_state(
+                LAUNCH,
+                &svc,
+                dir.path(),
+                &composition,
+                MobRestorePolicy::Eager,
+            );
             let launch = MobId::from(LAUNCH);
             let held = lookups(&state, &launch, 4);
             all_still_wait(
@@ -42459,7 +42882,7 @@ mod tests {
                 "a lookup of the default mob waits for the launch's serve",
             )
             .await;
-            still_awaits_its_serve(&state, &composition).await;
+            still_awaits_its_serve(LAUNCH, &state, &composition).await;
 
             composition
                 .panic_once
@@ -42512,9 +42935,10 @@ mod tests {
         /// has ended, and every held lookup is then served.
         #[tokio::test]
         async fn a_serve_whose_caller_drops_it_still_ends_the_wait_for_the_launch() {
+            const LAUNCH: &str = row_id!("launch-mob");
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
-            launch_of_an_earlier_process(&svc, dir.path(), &[]).await;
+            launch_of_an_earlier_process(LAUNCH, &svc, dir.path(), &[]).await;
             let svc = Arc::new(svc.cold_restart().await);
             let composition = RecordingComposition::new(&svc);
             let launch = MobId::from(LAUNCH);
@@ -42591,11 +43015,18 @@ mod tests {
         /// waiting to be loaded, and the launch's next serve creates it.
         #[tokio::test]
         async fn a_lookup_of_a_declared_store_that_holds_no_mob_finds_none_without_a_load() {
+            const LAUNCH: &str = row_id!("launch-mob");
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
             let composition = RecordingComposition::new(&svc);
             composition.refuse(true);
-            let state = host_state(&svc, dir.path(), &composition, MobRestorePolicy::Eager);
+            let state = host_state(
+                LAUNCH,
+                &svc,
+                dir.path(),
+                &composition,
+                MobRestorePolicy::Eager,
+            );
             let launch = MobId::from(LAUNCH);
             // The first serve loads the declared store, finds no mob in it,
             // and its create is refused by the host's composition.
@@ -42655,6 +43086,7 @@ mod tests {
         /// process's launch.
         #[tokio::test]
         async fn the_wait_for_the_launch_is_never_written_and_begins_again_in_the_next_process() {
+            const LAUNCH: &str = row_id!("launch-mob");
             fn files_under(dir: &std::path::Path, found: &mut Vec<PathBuf>) {
                 for entry in std::fs::read_dir(dir)
                     .expect("read the directory")
@@ -42673,7 +43105,13 @@ mod tests {
             let launch = MobId::from(LAUNCH);
             {
                 let composition = RecordingComposition::new(&svc);
-                let first = host_state(&svc, dir.path(), &composition, MobRestorePolicy::Eager);
+                let first = host_state(
+                    LAUNCH,
+                    &svc,
+                    dir.path(),
+                    &composition,
+                    MobRestorePolicy::Eager,
+                );
                 assert_eq!(first.launch_serve_awaited().await, Some(launch.clone()));
                 first
                     .serve_default_mob(explicit_definition(LAUNCH))
@@ -42710,7 +43148,13 @@ mod tests {
             // this process's launch, and is served by it.
             let svc = Arc::new(svc.cold_restart().await);
             let composition = RecordingComposition::new(&svc);
-            let second = host_state(&svc, dir.path(), &composition, MobRestorePolicy::Eager);
+            let second = host_state(
+                LAUNCH,
+                &svc,
+                dir.path(),
+                &composition,
+                MobRestorePolicy::Eager,
+            );
             assert_eq!(
                 second.launch_serve_awaited().await,
                 Some(launch.clone()),
@@ -42725,10 +43169,13 @@ mod tests {
             end_process(&second).await;
         }
 
-        /// A host mob of an earlier process, and a state that owns its
-        /// tasks whose composition waits before it builds that mob: the
-        /// state, its composition, what releases the build, and the mob.
+        /// A host mob `slow_id` of an earlier process, whose host declared
+        /// the default mob `launch`, and a state that owns its tasks whose
+        /// composition waits before it builds that mob: the state, its
+        /// composition, what releases the build, and the mob.
         async fn a_host_mob_whose_build_waits(
+            launch: &str,
+            slow_id: &str,
             svc: &Arc<MockSessionSvc>,
             dir: &std::path::Path,
         ) -> (
@@ -42739,9 +43186,9 @@ mod tests {
         ) {
             let slow = {
                 let composition = RecordingComposition::new(svc);
-                let first = host_state(svc, dir, &composition, MobRestorePolicy::Eager);
+                let first = host_state(launch, svc, dir, &composition, MobRestorePolicy::Eager);
                 let slow = first
-                    .mob_create_definition(explicit_definition("host-slow"))
+                    .mob_create_definition(explicit_definition(slow_id))
                     .await
                     .expect("create a host mob");
                 end_process(&first).await;
@@ -42767,10 +43214,12 @@ mod tests {
         /// neither starts a second load nor waits for the first.
         #[tokio::test]
         async fn a_second_pass_does_not_wait_for_a_host_build_left_to_run() {
+            const LAUNCH: &str = row_id!("launch-mob");
+            const HOST_SLOW: &str = row_id!("host-slow");
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
             let (state, composition, release, slow) =
-                a_host_mob_whose_build_waits(&svc, dir.path()).await;
+                a_host_mob_whose_build_waits(LAUNCH, HOST_SLOW, &svc, dir.path()).await;
             assert!(
                 at_once(state.mob_list(), "the first verb")
                     .await
@@ -42814,10 +43263,12 @@ mod tests {
         /// register one.
         #[tokio::test]
         async fn a_host_build_left_to_run_holds_the_states_admission() {
+            const LAUNCH: &str = row_id!("launch-mob");
+            const HOST_SLOW: &str = row_id!("host-slow");
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
             let (state, composition, release, slow) =
-                a_host_mob_whose_build_waits(&svc, dir.path()).await;
+                a_host_mob_whose_build_waits(LAUNCH, HOST_SLOW, &svc, dir.path()).await;
             assert!(
                 at_once(state.mob_list(), "the first verb")
                     .await
@@ -42861,6 +43312,7 @@ mod tests {
         /// mob is served keeps nothing.
         #[tokio::test]
         async fn the_store_the_launchs_read_kept_is_released_without_a_serve() {
+            const LAUNCH: &str = row_id!("launch-mob");
             let kept = |state: &MobMcpState| {
                 state
                     .default_mob_opened
@@ -42870,10 +43322,16 @@ mod tests {
             };
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
-            launch_of_an_earlier_process(&svc, dir.path(), &[]).await;
+            launch_of_an_earlier_process(LAUNCH, &svc, dir.path(), &[]).await;
             let svc = Arc::new(svc.cold_restart().await);
             let composition = RecordingComposition::new(&svc);
-            let state = host_state(&svc, dir.path(), &composition, MobRestorePolicy::OnDemand);
+            let state = host_state(
+                LAUNCH,
+                &svc,
+                dir.path(),
+                &composition,
+                MobRestorePolicy::OnDemand,
+            );
             state
                 .default_mob_stored_definition()
                 .await
@@ -42893,7 +43351,13 @@ mod tests {
 
             let svc = Arc::new(svc.cold_restart().await);
             let composition = RecordingComposition::new(&svc);
-            let served = host_state(&svc, dir.path(), &composition, MobRestorePolicy::OnDemand);
+            let served = host_state(
+                LAUNCH,
+                &svc,
+                dir.path(),
+                &composition,
+                MobRestorePolicy::OnDemand,
+            );
             served
                 .serve_default_mob(explicit_definition(LAUNCH))
                 .await
@@ -42919,6 +43383,8 @@ mod tests {
         /// member of a quarantined mob stays owed.
         #[tokio::test]
         async fn an_outcome_owed_to_a_member_of_a_mob_that_is_not_served_is_not_a_plain_sessions() {
+            const LAUNCH: &str = row_id!("launch-mob");
+            const HOST_OTHER: &str = row_id!("host-other");
             fn kind(answer: &Result<DetachedOutcomeOwner, MobError>) -> &'static str {
                 match answer {
                     Ok(DetachedOutcomeOwner::Member(..)) => "a member",
@@ -42932,14 +43398,20 @@ mod tests {
             let launch = MobId::from(LAUNCH);
             let (launch_member, other, other_member) = {
                 let composition = RecordingComposition::new(&svc);
-                let first = host_state(&svc, dir.path(), &composition, MobRestorePolicy::Eager);
+                let first = host_state(
+                    LAUNCH,
+                    &svc,
+                    dir.path(),
+                    &composition,
+                    MobRestorePolicy::Eager,
+                );
                 first
                     .serve_default_mob(explicit_definition(LAUNCH))
                     .await
                     .expect("the first launch creates the default mob");
                 let launch_member = spawn_worker(&first, &launch).await;
                 let other = first
-                    .mob_create_definition(explicit_definition("host-other"))
+                    .mob_create_definition(explicit_definition(HOST_OTHER))
                     .await
                     .expect("create a further host mob");
                 let other_member = spawn_worker(&first, &other).await;
@@ -42951,7 +43423,13 @@ mod tests {
             svc.insert_persisted_session(Session::with_id(plain.clone()))
                 .await;
             let composition = RecordingComposition::new(&svc);
-            let state = host_state(&svc, dir.path(), &composition, MobRestorePolicy::OnDemand);
+            let state = host_state(
+                LAUNCH,
+                &svc,
+                dir.path(),
+                &composition,
+                MobRestorePolicy::OnDemand,
+            );
 
             // The default mob awaits its launch's serve.
             for session in [&launch_member, &plain] {
@@ -42966,7 +43444,7 @@ mod tests {
                     kind(&owed)
                 );
             }
-            still_awaits_its_serve(&state, &composition).await;
+            still_awaits_its_serve(LAUNCH, &state, &composition).await;
 
             // A member of an ordinary dormant mob: the delivery is demand,
             // and loads its mob.
@@ -43025,6 +43503,7 @@ mod tests {
         /// beside a second table.
         #[tokio::test]
         async fn the_default_mob_is_never_built_beside_a_second_forked_participant_table() {
+            const LAUNCH: &str = row_id!("launch-mob");
             let host = |svc: &Arc<MockSessionSvc>,
                         composition: &Arc<RecordingComposition>,
                         dir: &std::path::Path,
@@ -43105,12 +43584,19 @@ mod tests {
         /// became served between the decision's two reads.
         #[tokio::test]
         async fn an_outcome_owner_decided_while_the_launch_serves_is_the_member() {
+            const LAUNCH: &str = row_id!("launch-mob");
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
             let launch = MobId::from(LAUNCH);
             let launch_member = {
                 let composition = RecordingComposition::new(&svc);
-                let first = host_state(&svc, dir.path(), &composition, MobRestorePolicy::Eager);
+                let first = host_state(
+                    LAUNCH,
+                    &svc,
+                    dir.path(),
+                    &composition,
+                    MobRestorePolicy::Eager,
+                );
                 first
                     .serve_default_mob(explicit_definition(LAUNCH))
                     .await
@@ -43121,7 +43607,13 @@ mod tests {
             };
             let svc = Arc::new(svc.cold_restart().await);
             let composition = RecordingComposition::new(&svc);
-            let state = host_state(&svc, dir.path(), &composition, MobRestorePolicy::Eager);
+            let state = host_state(
+                LAUNCH,
+                &svc,
+                dir.path(),
+                &composition,
+                MobRestorePolicy::Eager,
+            );
             state
                 .mob_inventory()
                 .await
@@ -43184,11 +43676,18 @@ mod tests {
         /// signal for that mob is woken at once.
         #[tokio::test]
         async fn a_dropped_quarantined_record_wakes_what_waits_on_the_managed_mobs() {
+            const LAUNCH: &str = row_id!("launch-mob");
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
             let dropped = {
                 let composition = RecordingComposition::new(&svc);
-                let first = host_state(&svc, dir.path(), &composition, MobRestorePolicy::OnDemand);
+                let first = host_state(
+                    LAUNCH,
+                    &svc,
+                    dir.path(),
+                    &composition,
+                    MobRestorePolicy::OnDemand,
+                );
                 let dropped = first
                     .mob_create_definition(explicit_definition("host-dropped"))
                     .await
@@ -43199,7 +43698,13 @@ mod tests {
             let svc = Arc::new(svc.cold_restart().await);
             let composition = RecordingComposition::new(&svc);
             composition.refuse(true);
-            let state = host_state(&svc, dir.path(), &composition, MobRestorePolicy::OnDemand);
+            let state = host_state(
+                LAUNCH,
+                &svc,
+                dir.path(),
+                &composition,
+                MobRestorePolicy::OnDemand,
+            );
             assert!(
                 state.mob_status(&dropped).await.is_err(),
                 "the composition refuses the load: the store is quarantined"
@@ -43303,11 +43808,18 @@ mod tests {
         /// record too, and wakes what waits on the managed mobs.
         #[tokio::test]
         async fn a_dormant_store_with_no_mob_left_wakes_what_waits_on_the_managed_mobs() {
+            const LAUNCH: &str = row_id!("launch-mob");
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
             let emptied = {
                 let composition = RecordingComposition::new(&svc);
-                let first = host_state(&svc, dir.path(), &composition, MobRestorePolicy::OnDemand);
+                let first = host_state(
+                    LAUNCH,
+                    &svc,
+                    dir.path(),
+                    &composition,
+                    MobRestorePolicy::OnDemand,
+                );
                 let emptied = first
                     .mob_create_definition(explicit_definition("host-emptied"))
                     .await
@@ -43321,7 +43833,13 @@ mod tests {
             ));
             let svc = Arc::new(svc.cold_restart().await);
             let composition = RecordingComposition::new(&svc);
-            let state = host_state(&svc, dir.path(), &composition, MobRestorePolicy::OnDemand);
+            let state = host_state(
+                LAUNCH,
+                &svc,
+                dir.path(),
+                &composition,
+                MobRestorePolicy::OnDemand,
+            );
             assert!(
                 state
                     .mob_inventory()
@@ -43352,11 +43870,18 @@ mod tests {
         /// after the serve.
         #[tokio::test]
         async fn a_failed_first_serve_wakes_what_waits_on_the_managed_mobs() {
+            const LAUNCH: &str = row_id!("launch-mob");
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
             {
                 let composition = RecordingComposition::new(&svc);
-                let first = host_state(&svc, dir.path(), &composition, MobRestorePolicy::Eager);
+                let first = host_state(
+                    LAUNCH,
+                    &svc,
+                    dir.path(),
+                    &composition,
+                    MobRestorePolicy::Eager,
+                );
                 first
                     .serve_default_mob(explicit_definition(LAUNCH))
                     .await
@@ -43366,7 +43891,13 @@ mod tests {
             let svc = Arc::new(svc.cold_restart().await);
             let composition = RecordingComposition::new(&svc);
             composition.refuse(true);
-            let state = host_state(&svc, dir.path(), &composition, MobRestorePolicy::Eager);
+            let state = host_state(
+                LAUNCH,
+                &svc,
+                dir.path(),
+                &composition,
+                MobRestorePolicy::Eager,
+            );
             state
                 .mob_inventory()
                 .await
@@ -43399,6 +43930,7 @@ mod tests {
         /// decides nothing.
         #[tokio::test]
         async fn an_outcome_owed_to_a_session_with_no_binding_follows_the_default_mob() {
+            const LAUNCH: &str = row_id!("launch-mob");
             fn kind(answer: &Result<DetachedOutcomeOwner, MobError>) -> &'static str {
                 match answer {
                     Ok(DetachedOutcomeOwner::Member(..)) => "a member",
@@ -43412,7 +43944,13 @@ mod tests {
             let launch = MobId::from(LAUNCH);
             let unbound_member = {
                 let composition = RecordingComposition::new(&svc);
-                let first = host_state(&svc, dir.path(), &composition, MobRestorePolicy::Eager);
+                let first = host_state(
+                    LAUNCH,
+                    &svc,
+                    dir.path(),
+                    &composition,
+                    MobRestorePolicy::Eager,
+                );
                 first
                     .serve_default_mob(explicit_definition(LAUNCH))
                     .await
@@ -43428,7 +43966,13 @@ mod tests {
                 .await;
             let composition = RecordingComposition::new(&svc);
             composition.refuse(true);
-            let state = host_state(&svc, dir.path(), &composition, MobRestorePolicy::Eager);
+            let state = host_state(
+                LAUNCH,
+                &svc,
+                dir.path(),
+                &composition,
+                MobRestorePolicy::Eager,
+            );
             state
                 .mob_inventory()
                 .await
@@ -43489,6 +44033,7 @@ mod tests {
         /// no entry.
         #[tokio::test]
         async fn what_a_sweep_pass_leaves_owed_is_one_entry_per_mob_with_the_state_that_holds_it() {
+            const LAUNCH: &str = row_id!("launch-mob");
             fn entries(owed: &[OwedOutcomes]) -> Vec<(&str, usize, &'static str)> {
                 let mut entries = owed
                     .iter()
@@ -43502,7 +44047,13 @@ mod tests {
             let launch = MobId::from(LAUNCH);
             {
                 let composition = RecordingComposition::new(&svc);
-                let first = host_state(&svc, dir.path(), &composition, MobRestorePolicy::Eager);
+                let first = host_state(
+                    LAUNCH,
+                    &svc,
+                    dir.path(),
+                    &composition,
+                    MobRestorePolicy::Eager,
+                );
                 first
                     .serve_default_mob(explicit_definition(LAUNCH))
                     .await
@@ -43512,7 +44063,13 @@ mod tests {
             let svc = Arc::new(svc.cold_restart().await);
             let composition = RecordingComposition::new(&svc);
             composition.refuse(true);
-            let state = host_state(&svc, dir.path(), &composition, MobRestorePolicy::Eager);
+            let state = host_state(
+                LAUNCH,
+                &svc,
+                dir.path(),
+                &composition,
+                MobRestorePolicy::Eager,
+            );
             state
                 .mob_inventory()
                 .await

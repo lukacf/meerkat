@@ -1140,6 +1140,12 @@ source, not run).
 Meta 0.9.15 pins Core `=0.9.15`. The full list is in `meta/CHANGELOG.md`
 under `## [0.9.15]`.
 
+- If a Meta 0.9.9 through 0.9.14 gateway respawned an agent or rebuilt it
+  during `meta/compact_member`, upgrading to 0.9.15 does not restore the
+  agent's ability to list or manage mobs it created before that rebuild.
+  See "Agents that created mobs and were seated again on 0.9.15" under
+  [Rolling back to 0.9.14](#rolling-back-to-0-9-14).
+
 - Identity policy: an enabled policy that names an approval outcome or a
   preparation mode this release does not carry out is refused at init. That
   is the approval outcome `notify` or `review`, in a rule or as the default,
@@ -3412,25 +3418,48 @@ compiling. A Meta probe that must keep the earlier rule checks
   an ordinary turn whose compaction cannot shrink the request fails
   ("compaction is irreducible at the configured retention"), and every
   later `compact_member` on that identity is refused as busy until the
-  gateway restarts. A restart alone does not clear it. **Do:** after a
-  failed `compact_member`, restart the gateway (this ends the busy
-  refusal), then call `meta/respawn` for the identity while its provider is
-  available, and do not stop or restart the gateway again until the
-  respawn has answered without an error and the identity has then answered
-  one message: the respawn seats the member without the threshold and keeps
-  its conversation. On these releases a
-  stop or restart after a respawn, before the identity has woken on the
-  same session, is followed by the loss of the mobs its session owns. After
-  the restart a second `compact_member` that completes clears the threshold
-  too, whether or not it compacts (a `floor_tokens` above the conversation's
-  size completes without compacting), and `meta/reset` clears it and ends
-  the conversation. The respawn has a cost of its own for an identity that
-  created mobs, on 0.9.9 through 0.9.14: after it has completed,
-  the identity no longer lists a mob it created, and the calls tried that
-  name the mob were refused, while the mob's members can go on running; the
-  mobs' stores stay. A completed `compact_member` has the same cost on
-  those releases (see the `meta/compact_member` section of Meta's RPC
-  reference). From 0.9.15 a respawn of a member the same-session step
+  gateway restarts. A restart alone clears the busy refusal, not the threshold.
+
+  **If the configured identity created no mobs or delegates:** on 0.9.14,
+  `meta/respawn` cleared the threshold and kept the conversation, with or
+  without a later gateway restart (one run each). Another remedy was to
+  restart and complete a second `meta/compact_member` with `floor_tokens`
+  well above the conversation size (50000 in the run). It returned
+  `compaction_applied: false` and cleared the threshold. `meta/reset` also
+  cleared it but ended the conversation. The wider affected version range
+  is from the released source, not runs on every release.
+
+  **If the identity created mobs or delegates (Meta 0.9.9 through 0.9.14 inclusive):**
+  First check whether the identity still lists the mobs it created. The failed
+  call already rebuilt the identity before its maintenance turn, so it may
+  already have lost management (source reading). If it still lists a mob it
+  must keep managing, do not respawn it: none of these remedies was shown to
+  preserve that management. On the published 0.9.14 gateway, after a
+  completed respawn or a completed `meta/compact_member`, the identity
+  no longer listed its mob although its store remained. Members of an
+  unlisted mob can keep running.
+
+  If you choose to proceed on these releases, first have the identity destroy
+  any mob it created that has members acting on their own, while it can still
+  manage that mob. On 0.9.14, `mob_destroy` removed the mob; retiring its
+  members did not remove the mob. This avoids leaving a running mob the
+  creator can no longer manage. It is not a general upgrade step.
+
+  Use `meta/respawn` only while the provider is available. If it returns an
+  error, retry the respawn before stopping the gateway. Wait for the call to
+  succeed **and** for the identity to answer one message before any stop or
+  restart. If the gateway stops before the identity wakes successfully on the
+  same session, its next start can permanently remove the stores of mobs that
+  session owns.
+
+  For a creator on these affected releases, do not issue a second
+  `meta/compact_member`: it rebuilds the identity twice.
+  Do not use `meta/reset`: it ends the session, and the mobs that session owns
+  end no later than the next gateway start. This order is read from the
+  source, not tested on a creator with this failure.
+  See the first and fourth known issues in the release notes for Meta 0.9.14.
+
+  **Management from 0.9.15.** From 0.9.15 a respawn of a member the same-session step
   serves (every member but a placed one, one wired to a placed member, and
   one on a session service that keeps no durable sessions) keeps the
   identity's management of the mobs it created (confirmed by tests and by a
@@ -3439,18 +3468,8 @@ compiling. A Meta probe that must keep the earlier rule checks
   and one that completes without compacting, rebuild the member by the
   same step (read from the source; not run). A management lost on 0.9.9
   through 0.9.14 is not brought back.
-  A reset: it ends the identity's
-  session, and the mobs that session owns end with it, no later than the
-  gateway's next start (read from the source, not run). A
-  `meta/compact_member` that failed has rebuilt the identity once before
-  its maintenance turn, so on 0.9.9 through 0.9.14 the identity has
-  probably paid that cost already (read from the source, not run): check
-  whether it still lists the mobs it created. If it does and must go on
-  managing them, weigh that against the failing messages before you
-  respawn: on 0.9.9 through 0.9.14 none of the three steps (a respawn,
-  a second call that completes, a reset) is known to keep it; and before
-  the respawn have it retire the members of, or destroy, a mob it created
-  whose members act on their own (not run). **From 0.9.15** the call
+
+  **From 0.9.15** the call
   restores the member's threshold before it answers such a failure
   (`error.data.stage` is `profile_restored`) and a second call is taken at
   once; the call still answers the failure. The upgrade repairs nothing
@@ -6161,3 +6180,20 @@ variants listed under `### Breaking` in the CHANGELOG. The most common are:
    media-health and playback-hint notifications.
 8. Leave any SQLite session that 0.8.50 reported as `Corrupted` in place.
    0.8.51 loads it.
+
+## Upgrading to 0.8.31
+
+**Persistent mob store filenames (historical note added 2026-11-24).** A host
+restoring mobs from its `mobs` directory can skip a 0.8.30 store after the
+upgrade. 0.8.30 named each file `<escaped-mob-id>.db`; 0.8.31 adds the
+`mob--` prefix and scans only regular `.db` files whose names begin with
+that prefix. For a mob named `team`, the scan skips the old `team.db` without
+opening it. Not seeing that mob after restore does not mean its data was
+deleted.
+
+0.9.18 still filters by filename. If the old mob ID itself began with
+`mob--`, its old filename already passes that filter: for the mob
+`mob--team`, 0.8.30 wrote `mob--team.db`. In this case 0.9.18 can decode
+the whole filename stem and compare it with the ID in the store. This is not a general
+migration of older stores. These rules were read from the tagged source;
+an upgrade with an actual 0.8.30 store was not tested.

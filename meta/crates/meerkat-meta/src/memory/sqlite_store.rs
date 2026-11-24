@@ -4058,6 +4058,10 @@ impl crate::memory::distiller::TombstoneSource for SqliteAgentMemoryStore {
     /// these" list (§8.4). The mechanical backstop for exact recreation is
     /// the staged validator's content-hash check; this list closes the
     /// paraphrase gap at the prompt level.
+    ///
+    /// A purged row is left out: the list names a record by its title, and
+    /// a purged row has none, so it would take a place from a title and
+    /// say nothing. `limit` counts the rows that still hold text.
     async fn recent_tombstones(
         &self,
         scope: &MemoryScope,
@@ -4069,12 +4073,14 @@ impl crate::memory::distiller::TombstoneSource for SqliteAgentMemoryStore {
         run_blocking(move || {
             store.with_realm_conn(scope.realm(), |conn| {
                 let mut statement = conn
-                    .prepare(
+                    .prepare(&format!(
                         "SELECT title, kind, tombstoned_at_ms FROM records \
                          WHERE scope_kind = ?1 AND scope_key = ?2 \
                            AND status_kind = 'tombstoned' AND tombstoned_at_ms >= ?3 \
+                           AND {} \
                          ORDER BY tombstoned_at_ms DESC LIMIT ?4",
-                    )
+                        purge::ROW_NOT_PURGED_SQL
+                    ))
                     .map_err(sql_err)?;
                 let rows = statement
                     .query_map(
@@ -4454,6 +4460,17 @@ fn review_in_tx(
     else {
         return Ok(Err(QuarantineReviewRefusal::NotFound));
     };
+    // A purged record holds no content to decide over, and a release that
+    // was committed before the purge can no longer be compared with it: the
+    // successor kept the text the origin lost. It is not awaiting review,
+    // whatever digest the request carries, so this is answered before the
+    // content binding and before the replay evidence is read.
+    if purge::is_purged(&origin) {
+        return Ok(Err(QuarantineReviewRefusal::NotQuarantined {
+            status: origin.status.kind_str(),
+            released_as: release_successor_on_record(conn, &origin.id)?,
+        }));
+    }
     if content_hash(&origin.title, &origin.body) != request.expected_content_hash {
         return Ok(Err(QuarantineReviewRefusal::ContentMismatch));
     }
@@ -4630,6 +4647,42 @@ fn review_replay(
             released_as,
         }),
     })
+}
+
+/// The successor a committed review released `origin_id` as, read from the
+/// origin's own tombstone row and nothing else: the name the review wrote
+/// down, with none of [`recorded_review`]'s checks of the successor row. A
+/// row that is not a review of this origin, or does not read as one, names
+/// none.
+fn release_successor_on_record(
+    conn: &Connection,
+    origin_id: &str,
+) -> Result<Option<String>, AgentMemoryError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT detail FROM audit \
+             WHERE memory_id = ?1 AND op_kind = 'tombstone' ORDER BY audit_id DESC",
+        )
+        .map_err(sql_err)?;
+    let rows = stmt
+        .query_map(params![origin_id], |row| row.get::<_, String>(0))
+        .map_err(sql_err)?;
+    for row in rows {
+        let detail = row.map_err(sql_err)?;
+        let Ok(detail) = serde_json::from_str::<serde_json::Value>(&detail) else {
+            continue;
+        };
+        let Some(review) = detail
+            .get("review")
+            .and_then(|review| serde_json::from_value::<ReviewAudit>(review.clone()).ok())
+        else {
+            continue;
+        };
+        if review.origin == origin_id {
+            return Ok(review.successor);
+        }
+    }
+    Ok(None)
 }
 
 /// The committed review that tombstoned `origin`, read from its own audit

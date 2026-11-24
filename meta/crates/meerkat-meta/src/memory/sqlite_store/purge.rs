@@ -48,6 +48,10 @@ pub(crate) fn is_purged(record: &MemoryRecord) -> bool {
         && record.body.is_empty()
 }
 
+/// [`is_purged`] as a condition on the `records` table, for a query that
+/// already selects retired rows: true of a row that still holds text.
+pub(crate) const ROW_NOT_PURGED_SQL: &str = "NOT (title = '' AND body = '')";
+
 impl SqliteAgentMemoryStore {
     /// Blank the content of the tombstoned record `memory_id` of `scope`
     /// and of the earlier versions it replaced, in one transaction, with

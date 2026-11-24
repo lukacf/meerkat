@@ -92,7 +92,14 @@ memory steward.
   own audit rows; the rows stay, tombstoned or superseded as they were, and
   one audit row per record blanked records the purge. The record's id is
   kept, and an id made by the store was derived from the title and body
-  the record was created with. It does not touch copies that are records
+  the record was created with. A purged record is left out of the lists
+  of recent tombstones that the memory steward and the distiller are
+  shown: they name a retired record by its title, and it has none.
+  A quarantine review that names a purged record is refused as a record
+  that is not awaiting review (`not_quarantined`), whatever content
+  digest it carries; a repeat of a release committed before the purge,
+  answered `already_released` until then, is refused the same way.
+  It does not touch copies that are records
   of their own (a released, promoted or derived record), proposals, staged
   batches, the steward's notes about the record, session transcripts, or
   the bytes left in the database file and its `-wal` file; see "Removing

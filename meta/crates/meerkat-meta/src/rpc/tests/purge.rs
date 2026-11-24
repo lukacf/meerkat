@@ -475,6 +475,124 @@ async fn purge_blanks_the_reviewers_rationale_of_a_reviewed_record() -> RowResul
     Ok(())
 }
 
+/// A release of a quarantined record writes a successor that is a record of
+/// its own, and a purge of the origin leaves it: the origin's row is blank,
+/// the successor still holds the text. A review that names the purged
+/// origin is then refused as a record that is not awaiting review, with
+/// the successor the committed release wrote: the same typed answer for
+/// the digest of the content it had, for the digest of the empty content
+/// it has now, and for either verdict. Nothing is written. Before the
+/// purge the same release is answered as the committed decision again.
+#[tokio::test]
+async fn a_review_of_a_purged_released_origin_is_refused_as_not_awaiting_review_for_any_digest()
+-> RowResult {
+    use crate::memory::review::{
+        QuarantineDecision, QuarantineReviewError, QuarantineReviewOutcome,
+        QuarantineReviewRefusal, QuarantineReviewRequest, QuarantineReviewer,
+    };
+
+    let fixture = ScopedMemoryFixture::new("rpc-purge-released-origin").await?;
+    fixture.store.set_llm_write_gate(Arc::new(QuarantineAgents));
+    let (title, body) = ("Home address", "12 Example Lane");
+    let written = fixture
+        .store
+        .remember_authored(
+            &identity_scope(IDENTITY),
+            NewMemoryRecord {
+                kind: MemoryKind::Fact,
+                title: title.to_string(),
+                description: String::new(),
+                body: body.to_string(),
+                tags: Vec::new(),
+                evidence: Vec::new(),
+                verification: None,
+            },
+            MemoryAuthor::Agent {
+                identity: IDENTITY.to_string(),
+            },
+        )
+        .await?;
+    assert!(
+        matches!(written.status, RecordStatus::Quarantined { .. }),
+        "{written:?}"
+    );
+    let id = written.memory_id;
+    let release = QuarantineReviewRequest {
+        scope: identity_scope(IDENTITY),
+        memory_id: id.clone(),
+        decision: QuarantineDecision::Release,
+        expected_content_hash: crate::memory::records::content_hash(title, body),
+        reviewer: QuarantineReviewer::Operator {
+            principal: Some("reviewer@example.test".to_string()),
+        },
+        rationale: None,
+    };
+    let released = fixture
+        .store
+        .review_quarantined(release.clone())
+        .await
+        .map_err(|err| format!("{err:?}"))?;
+    let QuarantineReviewOutcome::Released { successor, .. } = &released else {
+        return Err(format!("expected a release, got {released:?}").into());
+    };
+    let successor_id = successor.memory_id.clone();
+    let replay = fixture
+        .store
+        .review_quarantined(release.clone())
+        .await
+        .map_err(|err| format!("{err:?}"))?;
+    assert_eq!(replay.outcome_str(), "already_released", "{replay:?}");
+
+    let response = fixture
+        .rpc("meta/agent_memory/purge", identity_params(&id))
+        .await;
+    assert_eq!(
+        response["result"],
+        json!({ "memory_id": id, "purged": true, "purged_ids": [id] }),
+        "{response:#?}"
+    );
+    assert_blank(&fixture.record(&id).await);
+    let kept = fixture.record(&successor_id).await;
+    assert_eq!(kept.status, RecordStatus::Active, "{kept:#?}");
+    assert_eq!(
+        (kept.title.as_str(), kept.body.as_str()),
+        (title, body),
+        "the successor is a record of its own: {kept:#?}"
+    );
+
+    let audit_rows_before = fixture.audit_rows(&id).len() + fixture.audit_rows(&successor_id).len();
+    let not_awaiting_review = QuarantineReviewRefusal::NotQuarantined {
+        status: "tombstoned",
+        released_as: Some(successor_id.clone()),
+    };
+    let empty = crate::memory::records::content_hash("", "");
+    for (digest, decision) in [
+        (
+            release.expected_content_hash.clone(),
+            QuarantineDecision::Release,
+        ),
+        (empty.clone(), QuarantineDecision::Release),
+        (empty, QuarantineDecision::Tombstone),
+    ] {
+        let mut request = release.clone();
+        request.expected_content_hash = digest;
+        request.decision = decision;
+        let after = fixture.store.review_quarantined(request).await;
+        match after {
+            Err(QuarantineReviewError::Refused(refusal)) => {
+                assert_eq!(refusal, not_awaiting_review, "{decision:?}");
+            }
+            other => return Err(format!("{decision:?}: expected a refusal, got {other:?}").into()),
+        }
+    }
+    assert_eq!(
+        fixture.audit_rows(&id).len() + fixture.audit_rows(&successor_id).len(),
+        audit_rows_before,
+        "a refusal writes nothing"
+    );
+    Ok(())
+}
+
 /// The record is named with its scope: another identity's name for the
 /// same id answers as an id that is not there, and nothing is blanked.
 #[tokio::test]

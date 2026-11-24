@@ -344,6 +344,8 @@ What a purge blanks, in one transaction: the record's title, description, body a
 
 The record's id is kept, and an id made by the store was derived from the title and body the record was created with.
 
+A purged record is no longer open to a quarantine review. A review that names it (`meta/memory/quarantine/decide`) is refused as a record that is not awaiting review (`reason: "not_quarantined"`, with the release successor's id in `released_as` where a review released it), whatever content digest the request carries. This is a limit of purge: until the purge a repeat of a committed release is answered `already_released`, and after it the same request is refused.
+
 What a purge does not touch:
 
 - copies that are records of their own: a quarantined record and the copy its release made (each holds the text, and a purge of one leaves the other), a promotion into the mob's scope, a record the steward derived from it. Retire and purge each by its own id;

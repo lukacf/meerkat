@@ -22,12 +22,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
-- Console: answering or dismissing a question set no longer leaves its full
-  card below every later turn in the asking agent's chat. Only unanswered sets
-  stay below the newest turn. The page uses the decision time to place a
-  one-line summary in the conversation; expand it to review the questions and
-  any answers, without submitting them again. The page keeps the 20 most
-  recently answered or dismissed sets across all agents. These summaries are
+- Console chat, two fixes. The runtime's record of the reasoning effort a
+  request was sent with (`request_reasoning_effort_resolved`) is no longer a
+  line of a chat, neither while a turn streams nor in a chat drawn again
+  after the page loads. The event itself is unchanged: the activity rail and
+  every other reader of the event stream still receive it, and other runtime
+  events and peer messages keep their lines. And answering or dismissing a
+  question set no longer leaves its full card below every later turn in the
+  asking agent's chat. Only unanswered sets stay below the newest turn. The
+  answered set stays in the conversation as one read-only row, placed by the
+  decision time, that shows each question with the answer given and can be
+  folded; nothing in it can be submitted again. The page keeps the 20 most
+  recently answered or dismissed sets across all agents. These rows are
   cleared when the page reloads. Cards in the Pending tab of Approvals are
   unchanged.
 

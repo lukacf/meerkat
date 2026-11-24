@@ -712,7 +712,7 @@ committed yet) and the admission state:
 
 | State | Meaning |
 |-------|---------|
-| `MarkedNotHeld` | The run is marked and its gate has not left it undecided: the first ask is still under way, or no gate is bound |
+| `MarkedNotHeld` | The run is marked and its gate has not left it undecided: it was not asked about yet, the first ask is still under way, or no gate is bound |
 | `Held` | Every attempt of the last ask ended undecided. `undecided`, when this registration noted the round, carries `rounds` (asks that ended undecided, each of up to 3 attempts), `undecided_for` (the time since the first of them), `cause` (`TimedOut` or `AnsweredUnavailable`) and `reason`, the gate's own text for the last round, cut at `RESUMED_RUN_ADMISSION_REASON_MAX_BYTES` (512 bytes). A gate's reason is the host's own text: do not put secrets in it |
 
 The answer comes from memory: the poll makes no store call, asks the gate
@@ -730,6 +730,9 @@ that has waited for long keeps its own first-seen time for the run id.
 
 No answer for a session means that no run waits there: the run resumed, or
 its settlement committed. Read the terminal of the run's input to tell which.
+A session with no registration in this process gets no answer either: a
+member that was not woken yet is not listed, whatever its store holds, and
+is answered from the moment its session registers.
 To end a run that waits, stop it (`MobHandle::stop_member_run`) or settle it
 (`MobHandle::settle_member_retained_run`); a later `Continue` or `Superseded`
 from the gate, at the next wake or the next start, ends the wait as well.

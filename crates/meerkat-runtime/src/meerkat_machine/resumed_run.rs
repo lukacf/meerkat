@@ -241,6 +241,11 @@ impl MeerkatMachine {
     /// (a store commit in flight holds it), or whose registration needs a
     /// reload, answers
     /// [`PendingResumedRunRead::NotReadableNow`](crate::PendingResumedRunRead::NotReadableNow).
+    /// The bound covers the wait for the session's own state. The lookup of
+    /// the session in the machine's session map comes first and is outside
+    /// it: that lookup returns promptly because no holder of the map waits
+    /// on a store or on a session while it holds the map, not because the
+    /// read bounds it.
     ///
     /// The machine decides the answer: the run it marks, whether it holds
     /// that run for its admission

@@ -11433,7 +11433,15 @@ impl MobHandle {
     /// memory, with no actor command, no wake, no store call and no change:
     /// a poll never moves a round count, and it answers for a member whose
     /// runtime loop makes no pass. A member whose session's state cannot be
-    /// read inside the runtime's read bound is listed as not readable now.
+    /// read inside the runtime's read bound is listed as not readable now;
+    /// the members are read one after another, so each such member costs
+    /// the call up to that bound. A member whose session has no
+    /// registration in this process (a member not woken yet) is not
+    /// listed: it is answered from the moment its session registers.
+    ///
+    /// The call fails whole, listing no one, when one member's session
+    /// binding in the published state does not parse as a session id
+    /// ([`MobError::Internal`], naming the member).
     /// The [`crate::ControlScope::List`] scope. A placed member (its session
     /// lives on its host) and a mob without the runtime adapter list none.
     pub async fn members_with_pending_resumed_runs(

@@ -1536,7 +1536,12 @@ class CiWorkflowTests(unittest.TestCase):
         backends) are measured without touching what they do. The compile
         step keeps exactly its commands, with Cargo's `--timings` on the
         compiling one: no suffix, pipe, wrapper, condition or
-        continue-on-error, so its exit stays the commands' own. The compiler
+        continue-on-error, so its exit stays the commands' own. The unit
+        build's step alone holds more than its command: the resource sampler
+        around it, which leaves the command on a line of its own and the
+        step's exit that command's
+        (test_the_unit_build_step_exits_with_its_archive_commands_status).
+        The compiler
         cache's statistics are read in a step directly before and a step
         directly after it, the same bytes in the four jobs, and the timing
         reports are uploaded by the job's last step. Each added step carries
@@ -1556,7 +1561,13 @@ class CiWorkflowTests(unittest.TestCase):
                     self.assertEqual(names.count(step_name), 1, step_name)
                 at = names.index(compile_name)
                 compile_step = steps[at]
-                self.assertEqual(compile_step["run"].strip(), command)
+                script = compile_step["run"].strip()
+                if name == "rust-unit-build":
+                    # The sampler's lines hold no Cargo command; the one
+                    # line that does is compared, as the whole script is in
+                    # the other three jobs.
+                    script = "\n".join(line.strip() for line in script.splitlines() if "repo-cargo" in line)
+                self.assertEqual(script, command)
                 for key in ("continue-on-error", "if", "shell"):
                     self.assertNotIn(key, compile_step)
                 for line in command.splitlines():

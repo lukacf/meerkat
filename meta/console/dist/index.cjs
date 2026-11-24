@@ -62522,7 +62522,7 @@ function createTimelineFold(agent, frames, options) {
       }
       return;
     }
-    if (HIDDEN_EVENTS2.has(frame2.event)) {
+    if (HIDDEN_EVENTS2.has(frame2.event) || frame2.event === "request_reasoning_effort_resolved") {
       return;
     }
     flushPendingReasoning(true);
@@ -95761,7 +95761,7 @@ function useQuestionSets(input) {
 // src/lib/console-bundle.ts
 var APP_SCRIPT_VERSION = /\/console-app\.js\?(?:[^#]*&)?v=([0-9A-Za-z._-]+)/;
 function builtBeside() {
-  const named = true ? "5ea92381428f".trim() : "";
+  const named = true ? "9e7058a006e7".trim() : "";
   return named || void 0;
 }
 function loadedByThePage(page) {

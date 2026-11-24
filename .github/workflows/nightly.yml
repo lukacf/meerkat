@@ -1299,30 +1299,42 @@ jobs:
   #
   # It is here and not in ci.yml, and no gate reads it: it cannot hold a
   # pull request, a push or a release, and a pull request that changes one
-  # of these examples gets no result of these tests before it merges.
+  # of these examples gets no result of these tests before it merges. Its
+  # contracts (scripts/ci-nightly-examples-selftest.mjs) run here too, as
+  # the first step, and in no push or pull-request lane: a change of an
+  # example cannot fail the CI gate through them.
   #
   # Its first purpose is to MEASURE: no hosted run of these builds exists
-  # (one job once ran example 035's tests alone in 1909 s). The step writes
-  # into the job summary when it started and ended, each target's seconds
-  # with its build and the rest apart, Cargo's own "Finished" lines, and
-  # the compiler cache's hit and miss counts when sccache reports them
-  # ("unknown" when it does not: the summary calls no build cold or warm).
-  # Queue time cannot be printed from inside a job: it is the job record's
-  # created to started. Both targets run even when the first fails; the
+  # (one job once ran example 035's tests alone in 1909 s). The timed step
+  # writes into the job summary when it started and ended and, for each
+  # target, its seconds, its build seconds and its test seconds apart: the
+  # split is at Cargo's own "Finished" lines, which are copied, and "tests"
+  # is whatever runs after such a line (the lock test of `mdm` included).
+  # Then the fixtures' seconds. Beside each build it says cold, warm or
+  # partly warm, from sccache's own hit and miss counters before and after
+  # that target: cold is no hit, warm is no miss, and "unknown" when
+  # sccache reports no counters or they did not move. No target directory
+  # is cached, so nothing else makes a build warm. Queue time cannot be
+  # printed from inside a job: it is the job record's created to started,
+  # and the summary says so. All three parts run even when one fails; the
   # step then fails.
   #
-  # A failure reaches the "Nightly failures" issue through
-  # nightly-failure-issue.yml, which writes one line: the run's address and
-  # the names of the jobs that failed (not the commit, not the assertion:
-  # those are in the run). Who answers it: a failing test or assertion of
-  # example 034, 035 or the Meta example pack 006 is the Examples owner's;
-  # a runner, workflow or environment failure of these two jobs is the CI
-  # owner's. That workflow names no one: nothing but a subscription to the
-  # issue tells either owner.
+  # When it fails: nightly-failure-issue.yml writes one line into the
+  # "Nightly failures" issue, the run's address and the failed jobs' names,
+  # and for these two jobs the route in words. The CI owner reads the
+  # nightly run's result and that issue. An infrastructure fault (the
+  # runner, the workflow, the environment) stays with the CI owner. A
+  # content failure (a failing test or assertion of example 034, 035 or
+  # the Meta example pack 006) the CI owner reports to the maintainers with
+  # the run, the job, the revision and the failing command or assertion;
+  # they route it to the Examples owner, who returns a fix or a blocker and
+  # reads the issue in their regular review as a backstop. Nothing mentions
+  # or assigns anyone.
   #
-  # Not run here: a locked all-target Clippy of either example (example
-  # 035's Makefile has no lint target) and the examples Makefile's other
-  # targets.
+  # Not run here: any lint of examples 034 and 035 (no lint target exists,
+  # and example 035's own `make check`, an all-target cargo check, is not
+  # run either); any feature set but the default; example 035's container
+  # suites (its docker-* targets); the examples Makefile's other targets.
   example-standalone:
     name: Standalone examples
     needs: meta-docs-lag
@@ -1331,11 +1343,18 @@ jobs:
     # Not measured on a hosted runner yet: the limit is generous on purpose
     # and is to be set from the first nights' summaries.
     timeout-minutes: 150
+    # The checkout and nothing else: not the workflow's identity token,
+    # which only the graph job uses.
+    permissions:
+      contents: read
     env:
       RUSTC_WRAPPER: sccache
     steps:
       - name: Checkout
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Contracts of the nightly example jobs
+        run: node scripts/ci-nightly-examples-selftest.mjs
 
       - name: Setup Rust
         uses: ./.github/actions/setup-rust-ci
@@ -1365,7 +1384,7 @@ jobs:
           cache-targets: "false"
           cache-on-failure: true
 
-      - name: Standalone example tests (034 and 035), timed
+      - name: Standalone example tests (034 and 035) and 035's script fixtures, timed
         shell: bash
         run: |
           codemob() {
@@ -1374,79 +1393,121 @@ jobs:
           mdm() {
             make -C examples mdm
           }
+          fixtures() {
+            (cd examples/035-mdm-tux-rs && python3 scripts/test-scripts.py)
+          }
           plain() {
             printf '%s' "$1" | sed -e 's/\x1b\[[0-9;]*m//g' -e 's/^ *//'
           }
+          # sccache's own counters, "hits misses"; nothing when it reports none.
+          counters() {
+            local line hits="" misses=""
+            while IFS= read -r line; do
+              if [[ "${line}" =~ ^Cache\ hits\ +([0-9]+)$ ]]; then hits="${BASH_REMATCH[1]}"; fi
+              if [[ "${line}" =~ ^Cache\ misses\ +([0-9]+)$ ]]; then misses="${BASH_REMATCH[1]}"; fi
+            done < <(sccache --show-stats 2>/dev/null || true)
+            if [[ -n "${hits}" && -n "${misses}" ]]; then printf '%s %s' "${hits}" "${misses}"; fi
+          }
+          # Cold, warm or partly warm, from the counters before and after a build.
+          warmth() {
+            local before="$1" after="$2" hits misses
+            if [[ -z "${before}" || -z "${after}" ]]; then
+              printf 'unknown'
+              return
+            fi
+            hits=$((${after% *} - ${before% *}))
+            misses=$((${after#* } - ${before#* }))
+            if ((hits < 0 || misses < 0 || hits + misses == 0)); then
+              printf 'unknown'
+            elif ((hits == 0)); then
+              printf 'cold (hits 0, misses %s)' "${misses}"
+            elif ((misses == 0)); then
+              printf 'warm (hits %s, misses 0)' "${hits}"
+            else
+              printf 'partly warm (hits %s, misses %s)' "${hits}" "${misses}"
+            fi
+          }
           status=0
           timed() {
-            local name="$1" begun="${SECONDS}" mark="${SECONDS}" phase=build build=0 rest=0 result=passed cargo="" line
+            local name="$1" begun="${SECONDS}" mark="${SECONDS}" phase=build build=0 tests=0 result=passed cargo="" line before
+            before="$(counters)"
             while IFS= read -r line; do
               printf '%s\n' "${line}"
               if [[ "${line}" == *"Finished"*" target(s) in "* ]]; then
                 build=$((build + SECONDS - mark))
                 mark="${SECONDS}"
-                phase=rest
-                cargo+="| Cargo, in ${name}: $(plain "${line}") | | |"$'\n'
-              elif [[ "${phase}" == rest && "${line}" == *"Compiling"* ]]; then
-                rest=$((rest + SECONDS - mark))
+                phase=tests
+                cargo+="| Cargo, in ${name}: $(plain "${line}") | | | |"$'\n'
+              elif [[ "${phase}" == tests && "${line}" == *"Compiling"* ]]; then
+                tests=$((tests + SECONDS - mark))
                 mark="${SECONDS}"
                 phase=build
               fi
             done < <("${name}" 2>&1)
             wait "$!" || { result=failed; status=1; }
-            if [[ "${phase}" == build ]]; then build=$((build + SECONDS - mark)); else rest=$((rest + SECONDS - mark)); fi
+            if [[ "${phase}" == build ]]; then build=$((build + SECONDS - mark)); else tests=$((tests + SECONDS - mark)); fi
             {
-              printf '| make -C examples %s | %s | %s |\n' "${name}" "$((SECONDS - begun))" "${result}"
-              printf '| make -C examples %s: build | %s | |\n' "${name}" "${build}"
-              printf '| make -C examples %s: tests and the rest | %s | |\n' "${name}" "${rest}"
+              printf '| make -C examples %s | %s | %s | |\n' "${name}" "$((SECONDS - begun))" "${result}"
+              printf '| make -C examples %s: build | %s | | %s |\n' "${name}" "${build}" "$(warmth "${before}" "$(counters)")"
+              printf '| make -C examples %s: tests | %s | | |\n' "${name}" "${tests}"
               printf '%s' "${cargo}"
             } >> "${GITHUB_STEP_SUMMARY}"
           }
           {
             printf '%s\n' '### Standalone examples' ''
             printf 'started %s (UTC); queue time is not printed here: read it from the job record (created to started)\n\n' "$(date -u +%H:%M:%SZ)"
-            printf '%s\n' '| part | seconds | result |' '| --- | --- | --- |'
+            printf '%s\n' '| part | seconds | result | compiler cache |' '| --- | --- | --- | --- |'
           } >> "${GITHUB_STEP_SUMMARY}"
           timed codemob
           timed mdm
-          hits="" misses=""
-          while IFS= read -r line; do
-            if [[ -z "${hits}" && "${line}" == "Cache hits "* ]]; then hits="${line##* }"; fi
-            if [[ -z "${misses}" && "${line}" == "Cache misses "* ]]; then misses="${line##* }"; fi
-          done < <(sccache --show-stats 2>/dev/null || true)
-          cache=unknown
-          if [[ "${hits}" =~ ^[0-9]+$ && "${misses}" =~ ^[0-9]+$ ]]; then cache="hits ${hits}, misses ${misses}"; fi
+          begun="${SECONDS}"
+          checked=passed
+          fixtures || { checked=failed; status=1; }
           {
-            printf '| both targets | %s | |\n' "${SECONDS}"
-            printf '| compiler cache, the whole job | %s | |\n\n' "${cache}"
+            printf '| example 035 script fixtures | %s | %s | |\n' "$((SECONDS - begun))" "${checked}"
+            printf '| all three parts | %s | | |\n\n' "${SECONDS}"
             printf 'ended %s (UTC)\n' "$(date -u +%H:%M:%SZ)"
           } >> "${GITHUB_STEP_SUMMARY}"
           exit "${status}"
-
-      - name: Example 035 script fixtures
-        working-directory: examples/035-mdm-tux-rs
-        run: python3 scripts/test-scripts.py
 
   # Meta's example pack 006 (long-term agents): its keyless script runs the
   # pack's Python program and its TypeScript program, twice each on one
   # state directory, against rpc_gateway, and checks what each run prints
   # and that the two languages print the same lines. No workflow ran it.
-  # Here and not in Meta CI, for the reasons of the job above, with the same
-  # failure route and the same two owners. The gateway is built first, in a
-  # timed part of its own, through the root wrapper with the script's own
-  # flags (so the script's build of it compiles nothing); the summary holds
-  # that build's seconds and the script's apart.
+  # Here and not in Meta CI, read by no gate, for the reasons of the job
+  # above, and with its route when it fails: an infrastructure fault stays
+  # with the CI owner; a content failure goes through the maintainers to
+  # the Examples owner.
+  #
+  # Three times apart in the summary. The gateway's build, through the
+  # root wrapper, with cold or warm from sccache's counters as above; the
+  # script then takes that binary and builds nothing. The script's package
+  # installs (the Python environment, pip, npm). Its four program runs.
+  # The script is not changed for this: it runs under the shell's own
+  # command trace, one line per command with the second it began, written
+  # to a file that is never printed; the step sums the seconds of the
+  # install commands and of the program runs, and prints "unknown" when the
+  # trace holds no such line. Queue time: as above.
+  #
+  # Not run here: every other Meta example pack.
   meta-example-006:
     name: Meta long-term agents example (keyless)
     needs: example-standalone
     if: ${{ !cancelled() && !inputs.graph_only }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+    # The checkout and nothing else: the script installs packages from the
+    # public registries.
+    permissions:
+      contents: read
     env:
       RUSTC_WRAPPER: sccache
     steps:
       - name: Checkout
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Contracts of the nightly example jobs
+        run: node scripts/ci-nightly-examples-selftest.mjs
 
       - name: Setup Rust
         uses: ./.github/actions/setup-rust-ci
@@ -1492,25 +1553,92 @@ jobs:
           gateway() {
             ./scripts/repo-cargo build --locked -p meerkat-meta --bin rpc_gateway
           }
+          # The script, with the gateway built above and under the shell's
+          # command trace: one line per command, with the second it began.
           example() {
-            meta/examples/006-long-term-agents/examples.sh
+            # shellcheck disable=SC2016
+            META_GATEWAY_BIN="${binary}" BASH_XTRACEFD=9 PS4='+ ${SECONDS} ' \
+              bash -x meta/examples/006-long-term-agents/examples.sh 9> "${trace}"
+          }
+          # sccache's own counters, "hits misses"; nothing when it reports none.
+          counters() {
+            local line hits="" misses=""
+            while IFS= read -r line; do
+              if [[ "${line}" =~ ^Cache\ hits\ +([0-9]+)$ ]]; then hits="${BASH_REMATCH[1]}"; fi
+              if [[ "${line}" =~ ^Cache\ misses\ +([0-9]+)$ ]]; then misses="${BASH_REMATCH[1]}"; fi
+            done < <(sccache --show-stats 2>/dev/null || true)
+            if [[ -n "${hits}" && -n "${misses}" ]]; then printf '%s %s' "${hits}" "${misses}"; fi
+          }
+          # Cold, warm or partly warm, from the counters before and after a build.
+          warmth() {
+            local before="$1" after="$2" hits misses
+            if [[ -z "${before}" || -z "${after}" ]]; then
+              printf 'unknown'
+              return
+            fi
+            hits=$((${after% *} - ${before% *}))
+            misses=$((${after#* } - ${before#* }))
+            if ((hits < 0 || misses < 0 || hits + misses == 0)); then
+              printf 'unknown'
+            elif ((hits == 0)); then
+              printf 'cold (hits 0, misses %s)' "${misses}"
+            elif ((misses == 0)); then
+              printf 'warm (hits %s, misses 0)' "${hits}"
+            else
+              printf 'partly warm (hits %s, misses %s)' "${hits}" "${misses}"
+            fi
           }
           status=0
+          trace="${RUNNER_TEMP}/pack-006-trace"
           started="$(date -u +%H:%M:%SZ)"
+          before="$(counters)"
           built=passed
           gateway || { built=failed; status=1; }
           build="${SECONDS}"
-          ran="not run"
+          cache="$(warmth "${before}" "$(counters)")"
+          ran="not run" whole=0 stamped="" installs=0 runs=0 other=0 seen=0
           if [[ "${status}" == 0 ]]; then
+            binary="$(./scripts/repo-cargo --print-env | sed -n 's/^CARGO_TARGET_DIR=//p')/debug/rpc_gateway" || true
             ran=passed
             example || { ran=failed; status=1; }
+            whole=$((SECONDS - build))
+            kind="" at=0
+            while IFS= read -r line; do
+              if [[ ! "${line}" =~ ^\++\ ([0-9]+)\ (.*)$ ]]; then continue; fi
+              now="${BASH_REMATCH[1]}" words="${BASH_REMATCH[2]}" stamped=yes
+              case "${kind}" in
+                installs) installs=$((installs + now - at)) ;;
+                runs) runs=$((runs + now - at)) ;;
+                other) other=$((other + now - at)) ;;
+              esac
+              at="${now}"
+              case "${words}" in
+                *" -m venv "* | *" -m pip install "* | "npm install "* | "npm run build "* | "npm ci "*)
+                  kind=installs
+                  ;;
+                *"/main.py" | "npx tsx "* | *" npx tsx "*)
+                  kind=runs
+                  seen=$((seen + 1))
+                  ;;
+                *)
+                  kind=other
+                  ;;
+              esac
+            done < "${trace}"
           fi
           {
             printf '%s\n' '### Meta long-term agents example' ''
             printf 'started %s (UTC); queue time is not printed here: read it from the job record (created to started)\n\n' "${started}"
-            printf '%s\n' '| part | seconds | result |' '| --- | --- | --- |'
-            printf '| gateway build | %s | %s |\n' "${build}" "${built}"
-            printf '| the script: Python and TypeScript, twice each | %s | %s |\n\n' "$((SECONDS - build))" "${ran}"
-            printf 'ended %s (UTC)\n' "$(date -u +%H:%M:%SZ)"
+            printf '%s\n' '| part | seconds | result | compiler cache |' '| --- | --- | --- | --- |'
+            printf '| gateway build | %s | %s | %s |\n' "${build}" "${built}" "${cache}"
+            printf '| the script: Python and TypeScript, twice each | %s | %s | |\n' "${whole}" "${ran}"
+            if [[ -n "${stamped}" ]]; then
+              printf '| the script: package installs (the Python environment, pip, npm) | %s | | |\n' "${installs}"
+              printf '| the script: the program runs (%s of 4 seen) | %s | | |\n' "${seen}" "${runs}"
+              printf '| the script: its other commands | %s | | |\n' "${other}"
+            elif [[ "${ran}" != "not run" ]]; then
+              printf '| the script: package installs and program runs apart | unknown | | |\n'
+            fi
+            printf '\nended %s (UTC)\n' "$(date -u +%H:%M:%SZ)"
           } >> "${GITHUB_STEP_SUMMARY}"
           exit "${status}"

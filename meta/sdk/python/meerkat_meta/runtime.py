@@ -4495,7 +4495,10 @@ class MobHandle:
         *,
         realm: str | None = None,
     ) -> AgentMemoryForgetResult:
-        """Delete a durable memory record for an identity-scoped agent."""
+        """Withdraw a record from the identity's future recall and injection.
+
+        The bundled SQLite store retains the record's text until it is purged.
+        """
         params: dict[str, Any] = {"identity": identity, "memory_id": memory_id}
         if realm is not None:
             params["realm"] = realm

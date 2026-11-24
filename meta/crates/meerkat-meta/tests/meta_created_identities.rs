@@ -2863,24 +2863,29 @@ impl Rig {
     }
 
     /// Whether `session`'s committed transcript holds the row that carries
-    /// `marker` and an assistant row after it; otherwise what it holds. A
-    /// run's rows stand ahead of the committed snapshot until its boundary
-    /// commit, and this read serves only that snapshot, so the answer to
-    /// `marker` is in it once that turn's run committed its boundary, and
-    /// not before.
+    /// `marker`, whatever its role, and an assistant row after that row;
+    /// otherwise what it holds. A run's rows stand ahead of the committed
+    /// snapshot until its boundary commit, and this read serves only that
+    /// snapshot, so the answer to `marker` is in it once that turn's run
+    /// committed its boundary, and not before.
     ///
     /// Only this yes or no leaves the read: the session it reads is dropped
-    /// here, and no assertion of a row reads it. Only a transcript that does
-    /// not hold the turn yet answers no: a read that fails, a session that is
-    /// not stored and a row that does not render fail the row at once, as
-    /// they do in `meta_instruction_append.rs`.
+    /// here, and no assertion of a row reads it.
+    ///
+    /// Three answers of the read are no answer about the transcript. The
+    /// typed transcript revision conflict is what this read answers when a
+    /// writer of the session commits between its store reads on every
+    /// attempt it makes: the turn is not settled yet, and the wait reads
+    /// again. Any other error fails the row at once, and so does a session
+    /// that is not stored: a created session's first boundary is stored
+    /// before its first turn can run.
     async fn turn_committed(
         &self,
         name: &str,
         marker: &str,
         session: &meerkat_core::types::SessionId,
     ) -> Result<(), String> {
-        let committed = meerkat_mob::MobSessionService::load_persisted_session_tolerating_tail(
+        let read = meerkat_mob::MobSessionService::load_persisted_session_tolerating_tail(
             &**self
                 .runtime
                 .mob_runtime()
@@ -2888,19 +2893,23 @@ impl Rig {
                 .expect("the runtime's session service"),
             session,
         )
-        .await
-        .unwrap_or_else(|error| {
-            panic!(
-                "{name}: the committed session {session} does not read while the turn \
-                 {marker:?} settles: {error:?}"
-            )
-        })
-        .unwrap_or_else(|| {
-            panic!(
+        .await;
+        let committed = match read {
+            Ok(Some(committed)) => committed,
+            Ok(None) => panic!(
                 "{name}: no committed session {session} is stored while the turn {marker:?} \
                  settles"
-            )
-        });
+            ),
+            Err(error) if is_transcript_revision_conflict(&error) => {
+                return Err(format!(
+                    "the committed read met a writer of the session on every attempt: {error}"
+                ));
+            }
+            Err(error) => panic!(
+                "{name}: the committed session {session} does not read while the turn \
+                 {marker:?} settles: {error:?}"
+            ),
+        };
         let rows = committed.messages();
         let asked = rows
             .iter()
@@ -2915,7 +2924,7 @@ impl Rig {
                     rows.len()
                 )
             })?;
-        if rows[asked..]
+        if rows[asked + 1..]
             .iter()
             .any(|row| matches!(row, meerkat_core::types::Message::BlockAssistant(_)))
         {
@@ -2928,6 +2937,24 @@ impl Rig {
             ))
         }
     }
+}
+
+/// Whether `error` is the typed transcript revision conflict of the session
+/// store, as the session service itself tells it from its other store
+/// errors: by the type of the boxed source, never by its text.
+fn is_transcript_revision_conflict(error: &meerkat_core::SessionError) -> bool {
+    matches!(
+        error,
+        meerkat_core::SessionError::Store(source)
+            if source
+                .downcast_ref::<meerkat_core::SessionStoreError>()
+                .is_some_and(|source| {
+                    matches!(
+                        source,
+                        meerkat_core::SessionStoreError::TranscriptRevisionConflict { .. }
+                    )
+                })
+    )
 }
 
 /// Fail unless `inputs`, a build of `name`, took every input the host's

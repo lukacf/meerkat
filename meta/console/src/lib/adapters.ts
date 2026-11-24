@@ -45,6 +45,7 @@ import {
   entryOriginFromFrameData,
   groupConversationTimelineEntries,
   humanizeRuntimeEventType,
+  isChatSilentRuntimeEvent,
   normalizeRoutingSectionView,
   runtimeEventFromFrame,
   runtimeEventText,
@@ -5563,6 +5564,9 @@ function createTimelineFold(
 
   function step(i: number): void {
     const frame = orderedFrames[i];
+    // A record that is never a line of a conversation: it adds no entry and
+    // closes no pending text, on the stream and in a transcript built again.
+    if (isChatSilentRuntimeEvent(frame.event)) return;
     // Canonical frame identity must survive insertion of older history.
     const entryId = frame.id || `${frame.event || "frame"}:${i}`;
 

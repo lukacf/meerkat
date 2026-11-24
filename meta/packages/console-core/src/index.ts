@@ -115,6 +115,7 @@ export {
   describePeer,
   entryOriginFromFrameData,
   humanizeRuntimeEventType,
+  isChatSilentRuntimeEvent,
   parseMemberCommsName,
   runtimeEventFromFrame,
   runtimeEventText,

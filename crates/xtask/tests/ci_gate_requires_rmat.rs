@@ -955,10 +955,33 @@ fn ci_runs_the_bounded_tlc_audits_on_machine_authority_changes() {
     assert_eq!(
         parts,
         [
-            "audits-a", "audits-b", "audits-c", "audits-d", "audits-e", "audits-f", "audits-g",
-            "audits-h", "audits-i", "audits-j", "audits-k", "audits-l", "audits-m", "audits-n",
-            "audits-o", "audits-q", "audits-r", "audits-s", "audits-t", "audits-u", "audits-v",
-            "audits-w", "audits-x", "audits-y"
+            "audits-a",
+            "audits-b",
+            "audits-c",
+            "audits-d",
+            "audits-e",
+            "audits-f",
+            "audits-g",
+            "audits-h",
+            "audits-i",
+            "audits-j",
+            "audits-k",
+            "audits-l",
+            "audits-m",
+            "audits-n",
+            "audits-o",
+            "audits-q",
+            "audits-r",
+            "audits-s",
+            "audits-t",
+            "audits-u",
+            "audits-v",
+            "audits-w",
+            "audits-x",
+            "audits-y",
+            "audits-z",
+            "audits-aa",
+            "audits-ab"
         ],
         "every audit shard runs"
     );
@@ -966,7 +989,7 @@ fn ci_runs_the_bounded_tlc_audits_on_machine_authority_changes() {
         job.get("timeout-minutes")
             .and_then(serde_json::Value::as_u64),
         Some(30),
-        "a TLC shard times out at 30 minutes: one audit (audits-j) cannot be split and runs near 20 hosted"
+        "a TLC shard times out at 30 minutes: a shard (audits-r) has run past 20 hosted"
     );
     let job_text = job_step_text(job);
     for required in [

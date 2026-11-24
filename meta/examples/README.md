@@ -1,6 +1,6 @@
 # Examples
 
-This repo now has a repo-root `examples/` surface for multi-language packs that prove the shipped Meta surfaces end to end.
+Meta's `meta/examples/` directory holds multi-language packs that prove the shipped Meta surfaces end to end.
 
 Numbered packs are intentionally browser-first and can include:
 
@@ -26,12 +26,14 @@ Host programs:
 - `009-mob-announcements` (Python and TypeScript; no console; a provider key for the steps in which agents run)
 - `010-ask-the-user` (Python and TypeScript; an agent asks a person and goes on with the answer; no console; needs a provider key)
 - `011-cross-gateway-peers` (Python; two local gateways, a signed peer message and reply; requires a provider key)
+- [012-agent-workgraph](012-agent-workgraph/) (Python; a member claims a task and attaches its output as evidence)
 - [TypeScript host runnable](../sdk/typescript/examples/README.md)
   (a durable source-runner schedule and its callback; no provider key)
 
 ## Prerequisites
 
-From the repository root, install the separate console and example JavaScript
+The commands on this page are relative to `meta/` in the repository. From
+`meta/`, install the separate console and example JavaScript
 dependencies before running packs that build the console:
 
 ```bash
@@ -40,6 +42,11 @@ npm --prefix examples ci
 ```
 
 Installing only `examples/` does not install the console's build tools.
+The packs build their Rust binaries through the wrapper at the repository
+root (`scripts/repo-cargo`), into the wrapper's build directory. The wrapper
+keeps one build directory per lane (`RUST_LANE_ID`; pack 001's topology
+script sets a lane of its own), so a pack reuses a gateway that its lane has
+already built.
 The structural `--smoke` modes in packs 002 and 003 exit before the console
 build; they only need the example JavaScript dependencies.
 
@@ -59,7 +66,7 @@ key. Pack 003's real browser/live lanes require `GEMINI_API_KEY` or
 
 ## Running packs
 
-After the setup above, enter `examples/` for the following commands:
+After the setup above, enter `meta/examples/` for the following commands:
 
 ```bash
 cd examples

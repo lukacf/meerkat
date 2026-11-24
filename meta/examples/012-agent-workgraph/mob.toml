@@ -1,0 +1,12 @@
+[mob]
+id = "work-notes"
+
+[profiles.writer]
+model = "claude-sonnet-5-5"
+runtime_mode = "autonomous_host"
+external_addressable = true
+
+[profiles.writer.tools]
+comms = true
+workgraph = true
+shell = true

@@ -377,9 +377,9 @@ impl MeerkatMachine {
             .await?;
         // This is the caller's entry: the host judges the resolved target
         // here, before the command stages anything. A committed
-        // model-routing handoff prepares its command without this entry, so
-        // its realization is not judged and its lifecycle stays the routing
-        // machine's.
+        // model-routing handoff prepares its command without this entry:
+        // its target was looked at where the handoff was decided, as
+        // evidence for the routing machine, which owns its lifecycle.
         if let MeerkatMachineCommand::ReconfigureSessionLlmIdentity {
             target_identity, ..
         } = &command

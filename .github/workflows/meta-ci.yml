@@ -396,13 +396,17 @@ jobs:
       # While the test command runs, a background sampler prints one
       # "resource reading" line every 30 seconds into this step's own log:
       # memory available, swap used, memory pressure, the root file system's
-      # free space and the three largest resident processes by name; every
-      # tenth line is followed by the target directory's size. At most 200
+      # free space (and the target directory's file system when it is
+      # another one) and resident memory summed under fixed labels. A
+      # process name is only compared with a fixed list and never printed;
+      # no line holds arguments, environment values or paths. At most 200
       # samples, each command under its own time limit. A leg whose runner
       # is lost while Meta compiles then leaves its last readings in the
-      # log. Readings only: nothing is cleaned, retried or resized. The
-      # sampler's failures are ignored and the step's exit status is the
-      # test command's (scripts/test_ci_workflow.py runs this script).
+      # log. Readings only: nothing is cleaned, retried or resized, and no
+      # cause is claimed; a gap in the lines is missing evidence, not a
+      # diagnosis. The sampler's failures are ignored and the step's exit
+      # status is the test command's (scripts/test_ci_workflow.py runs this
+      # script).
       - name: Lib tests
         working-directory: .
         env:
@@ -413,6 +417,15 @@ jobs:
           (
             export TZ=UTC
             trap 'kill "${nap:-}" 2>/dev/null; exit 0' TERM
+            place="${CARGO_TARGET_DIR}"
+            while [[ "${place}" == */* && ! -e "${place}" ]]; do place="${place%/*}"; done
+            if [[ ! -e "${place}" ]]; then place=/; fi
+            root_device="$(exec timeout 10 stat -c %d /)"
+            target_device="$(exec timeout 10 stat -c %d -- "${place}")"
+            distinct=""
+            if [[ "${root_device}" =~ ^[0-9]+$ && "${target_device}" =~ ^[0-9]+$ && "${root_device}" != "${target_device}" ]]; then
+              distinct=yes
+            fi
             for ((sample = 1; sample <= 200; sample++)); do
               kill -0 "$$" || exit 0
               total="" available="" swap_total="" swap_free=""
@@ -434,35 +447,50 @@ jobs:
               fi
               pressure="unavailable"
               while read -r kind average _; do
-                if [[ "${kind}" == full && "${average}" == avg10=* ]]; then pressure="${average#avg10=}"; fi
+                if [[ "${kind}" == full && "${average}" =~ ^avg10=[0-9.]+$ ]]; then pressure="${average#avg10=}"; fi
               done < /proc/pressure/memory
               root="unavailable"
-              while read -r _ size _ free _; do
-                if [[ "${size}" =~ ^[0-9]+$ && "${free}" =~ ^[0-9]+$ ]]; then
-                  root="$((free / 1024)) MiB free of $((size / 1024)) MiB"
-                fi
-              done < <(timeout 10 df -Pk /)
-              largest=""
-              count=0
-              while ((count < 3)) && read -r resident name _; do
-                if [[ "${resident}" =~ ^[0-9]+$ ]]; then
-                  largest+="${largest:+, }${name} $((resident / 1024)) MiB"
-                  count=$((count + 1))
-                fi
-              done < <(timeout 10 ps -eo rss=,comm= --sort=-rss)
-              printf -v now '%(%H:%M:%SZ)T' -1
-              printf 'resource reading [%s] %d: memory %s; swap %s; memory pressure full avg10 %s; root file system %s; largest resident: %s\n' \
-                "${now}" "${sample}" "${memory}" "${swap}" "${pressure}" "${root}" "${largest:-unavailable}"
-              if ((sample % 10 == 0)); then
-                size="$(timeout 20 du -skP -- "${CARGO_TARGET_DIR}")"
-                size="${size%%$'\t'*}"
-                if [[ "${size}" =~ ^[0-9]+$ ]]; then
-                  size="$((size / 1024)) MiB as reported by du (unverified)"
-                else
-                  size="unavailable"
-                fi
-                printf 'resource reading [%s] %d: target directory: %s\n' "${now}" "${sample}" "${size}"
+              if [[ "$(exec timeout 10 stat -f -c '%a %b %S' /)" =~ ^([0-9]+)\ ([0-9]+)\ ([0-9]+)$ ]]; then
+                root="$((BASH_REMATCH[1] * BASH_REMATCH[3] / 1048576)) MiB free of $((BASH_REMATCH[2] * BASH_REMATCH[3] / 1048576)) MiB"
               fi
+              target=""
+              if [[ -n "${distinct}" ]]; then
+                target="; target filesystem unavailable"
+                if [[ "$(exec timeout 10 stat -f -c '%a %b %S' -- "${place}")" =~ ^([0-9]+)\ ([0-9]+)\ ([0-9]+)$ ]]; then
+                  target="; target filesystem $((BASH_REMATCH[1] * BASH_REMATCH[3] / 1048576)) MiB free of $((BASH_REMATCH[2] * BASH_REMATCH[3] / 1048576)) MiB"
+                fi
+              fi
+              compiler=0 linker=0 cache=0 build=0 runner=0 other=0 counted=""
+              for entry in /proc/[0-9]*/status; do
+                name="" resident=""
+                while read -r key value rest; do
+                  case "${key}" in
+                    Name:) name="${value}${rest:+ ${rest}}" ;;
+                    VmRSS:)
+                      resident="${value}"
+                      break
+                      ;;
+                  esac
+                done < "${entry}"
+                if [[ ! "${resident}" =~ ^[0-9]+$ ]]; then continue; fi
+                counted=yes
+                case "${name}" in
+                  rustc) compiler=$((compiler + resident)) ;;
+                  ld | mold | ld.lld | lld | collect2 | cc | gcc) linker=$((linker + resident)) ;;
+                  sccache) cache=$((cache + resident)) ;;
+                  cargo) build=$((build + resident)) ;;
+                  cargo-nextest) runner=$((runner + resident)) ;;
+                  *) other=$((other + resident)) ;;
+                esac
+              done
+              sums="unavailable"
+              if [[ -n "${counted}" ]]; then
+                sums="compiler $((compiler / 1024)) MiB, linker $((linker / 1024)) MiB, compile cache $((cache / 1024)) MiB"
+                sums+=", build tool $((build / 1024)) MiB, test runner $((runner / 1024)) MiB, other $((other / 1024)) MiB"
+              fi
+              printf -v now '%(%H:%M:%SZ)T' -1
+              printf 'resource reading [%s] %d: memory %s; swap %s; memory pressure full avg10 %s; root filesystem %s%s; resident: %s\n' \
+                "${now}" "${sample}" "${memory}" "${swap}" "${pressure}" "${root}" "${target}" "${sums}"
               sleep 30 &
               nap=$!
               wait "${nap}" || exit 0

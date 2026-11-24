@@ -1035,7 +1035,7 @@ class CiWorkflowTests(unittest.TestCase):
         command = ("./scripts/repo-cargo nextest run -p meerkat-meta --lib "
                    f'--partition "count:${{PARTITION}}/{len(legs)}" --no-fail-fast')
         lines = [line.strip() for line in step["run"].splitlines()]
-        self.assertEqual([line for line in lines if "repo-cargo" in line or "nextest" in line], [command])
+        self.assertEqual([line for line in lines if "repo-cargo" in line or "nextest run" in line], [command])
 
     def test_the_unit_step_exits_with_its_test_commands_status(self):
         """The "Lib tests" step prints resource readings from a background
@@ -1044,7 +1044,10 @@ class CiWorkflowTests(unittest.TestCase):
         one subshell whose status nobody reads, the test command stands on a
         line of its own with nothing appended, and the step ends with that
         command's exit status. Only the sampler holds a trap, so a signal
-        ends the step's shell as it ends a one-line step. The step's script
+        ends the step's shell as it ends a one-line step. A reading holds
+        numbers and fixed words only: a process name is compared with a
+        fixed list and never printed, and no line holds arguments,
+        environment values or paths. The step's script
         is also run here, the way the runner starts a step that names no
         shell (`bash -e`), with a stand-in for the repository's wrapper."""
         job = load(CI_WORKFLOW)["jobs"]["rust-unit"]
@@ -1069,17 +1072,53 @@ class CiWorkflowTests(unittest.TestCase):
         self.assertFalse([line for line in outside if "trap" in line or "exec" in line], "only the sampler traps")
         self.assertEqual(sum("status" in line for line in outside), 2, "the status is set once and used once")
         for line in sampler:
-            self.assertNotIn("status", line)
+            self.assertIsNone(re.search(r"\bstatus=|\$\{?status\b", line), f"the sampler neither sets nor reads the status: {line}")
             self.assertNotIn("GITHUB_", line, "the sampler writes no workflow command file")
             self.assertIsNone(re.search(r"(^|[^<])>[^&]|>>", line.replace("2>/dev/null", "")),
                               f"the sampler writes to its output only: {line}")
             for exit_code in re.findall(r"\bexit\b\s*(\S*)", line):
                 self.assertIn(exit_code.rstrip(";'"), ("0",), line)
-            for tool in re.findall(r"(?:^|[\s(])(df|ps|du) -", line):
-                self.assertRegex(line, rf"timeout \d+ {tool} -", f"{tool} runs under a time limit")
+            # Every external command of the sampler but its sleep is one
+            # `stat` under a time limit, run as the command substitution's
+            # own process, so ending the sampler's children ends it.
+            self.assertEqual(line.count("$("), line.count("$((") + len(re.findall(r"\$\(exec timeout \d+ stat -", line)), line)
+            self.assertIsNone(re.search(r"(?:^|[\s(])(du|df|ps|find|ls|cat|env|printenv)(\s|$)", line),
+                              f"the sampler walks no directory and lists no process arguments or environment: {line}")
         self.assertIn("for ((sample = 1; sample <= 200; sample++)); do", sampler)
         self.assertIn("sleep 30 &", sampler)
         self.assertIn('wait "${nap}" || exit 0', sampler)
+        # A process name is compared with fixed names and never printed: the
+        # variable that holds it is set from the process's status file and
+        # used once, in the `case` whose arms are literal names; the lines
+        # are built from numbers and fixed words only.
+        self.assertIn("for entry in /proc/[0-9]*/status; do", sampler)
+        self.assertEqual([line for line in sampler if "name" in line],
+                         ['name="" resident=""', 'Name:) name="${value}${rest:+ ${rest}}" ;;', 'case "${name}" in'])
+        self.assertEqual([line for line in sampler if "entry" in line],
+                         ["for entry in /proc/[0-9]*/status; do", 'done < "${entry}"'])
+        arms = sampler[sampler.index('case "${name}" in') + 1:]
+        arms = arms[:arms.index("esac")]
+        self.assertEqual(arms[-1], "*) other=$((other + resident)) ;;")
+        for arm in arms[:-1]:
+            self.assertRegex(arm, r"^[a-z0-9][a-z0-9.-]*( \| [a-z0-9][a-z0-9.-]*)*\) [a-z]+=\$\(\([a-z]+ \+ resident\)\) ;;$")
+        printed = [line for line in sampler if line.startswith(("printf ", '"${now}"'))]
+        self.assertEqual(printed, [
+            "printf -v now '%(%H:%M:%SZ)T' -1",
+            "printf 'resource reading [%s] %d: memory %s; swap %s; memory pressure full avg10 %s; "
+            "root filesystem %s%s; resident: %s\\n' \\",
+            '"${now}" "${sample}" "${memory}" "${swap}" "${pressure}" "${root}" "${target}" "${sums}"',
+        ])
+        self.assertFalse([line for line in sampler if line.startswith("echo ")], "the sampler prints with one printf")
+        for variable in ("memory", "swap", "root", "target", "sums"):
+            for line in sampler:
+                assigned = re.match(rf'{variable}\+?="(.*)"$', line)
+                if assigned:
+                    self.assertIsNone(re.search(r"\$\{|\$[A-Za-z_]", assigned.group(1)),
+                                      f"{variable} is built from arithmetic and fixed words: {line}")
+        self.assertEqual([line for line in sampler if "pressure=" in line], [
+            'pressure="unavailable"',
+            'if [[ "${kind}" == full && "${average}" =~ ^avg10=[0-9.]+$ ]]; then pressure="${average#avg10=}"; fi',
+        ])
 
         program = "\n".join((
             f"#!{sys.executable}",
@@ -1089,8 +1128,12 @@ class CiWorkflowTests(unittest.TestCase):
             "sys.exit(int(os.environ['STAND_IN_STATUS']))",
             "",
         ))
-        reading = re.compile(r"^resource reading \[[0-9:Z]*\] 1: memory .+; swap .+; memory pressure full avg10 .+; "
-                             r"root file system .+; largest resident: .+$")
+        free = r"(\d+ MiB free of \d+ MiB|unavailable)"
+        reading = re.compile(
+            r"^resource reading \[[0-9:Z]*\] 1: memory (\d+ MiB available of \d+ MiB|unavailable); "
+            r"swap (\d+ MiB used of \d+ MiB|unavailable); memory pressure full avg10 ([0-9.]+|unavailable); "
+            rf"root filesystem {free}(; target filesystem {free})?; resident: (unavailable|compiler \d+ MiB, "
+            r"linker \d+ MiB, compile cache \d+ MiB, build tool \d+ MiB, test runner \d+ MiB, other \d+ MiB)$")
         cases = (
             ("the command passes", 0, os.environ.get("PATH", ""), None),
             ("the command fails", 1, os.environ.get("PATH", ""), None),
@@ -1121,10 +1164,10 @@ class CiWorkflowTests(unittest.TestCase):
                                  ["nextest", "run", "-p", "meerkat-meta", "--lib", "--partition", "count:3/4",
                                   "--no-fail-fast"])
                 if output is None:
-                    readings = [line for line in result.stdout.splitlines() if line.startswith("resource reading")]
+                    readings = result.stdout.splitlines()
                     self.assertEqual(len(readings), 1, result.stdout)
                     self.assertRegex(readings[0], reading)
-                    self.assertNotIn(tmp, result.stdout, "no line holds a path of the environment")
+                    self.assertEqual(result.stderr, "", "the sampler writes nothing to the step's error output")
 
     def test_the_examples_build_takes_the_bin_tests_profile_on_a_pull_request(self):
         """rust-examples builds every example with one wrapper line whose

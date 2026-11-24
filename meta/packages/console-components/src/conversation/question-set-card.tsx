@@ -664,10 +664,8 @@ export function useQuestionReceiptPlacement(
 }
 
 /** One set this console answered or dismissed, as its conversation keeps
- * it: one read-only row. Its line says what happened to the set, and under
- * it each question stands with the answer given. The row is shown open, so
- * the questions and the answers are read without a click; the line folds
- * it. Nothing in it can be answered again, and it shows no id. */
+ * it: one line, which opens to the questions with the answers given.
+ * Nothing in it can be answered again, and it shows no id. */
 function QuestionSetReceipt({ set, outcome, answers, closedAtMs }: {
   set: QuestionSet;
   outcome: ClosedQuestionSetOutcome;
@@ -686,7 +684,7 @@ function QuestionSetReceipt({ set, outcome, answers, closedAtMs }: {
     // On arrival only: a receipt that is drawn again takes no focus.
   }, []);
   return (
-    <details open className="cc-question-set__receipt" data-outcome={outcome} data-testid={`question-set-receipt:${set.pendingId}`}>
+    <details className="cc-question-set__receipt" data-outcome={outcome} data-testid={`question-set-receipt:${set.pendingId}`}>
       <summary ref={lineRef} className="cc-question-set__receipt-line" title={formatAbsoluteTime(closedAtMs)}>
         <span className="cc-question-set__receipt-state">{outcome === "answered" ? "Answered" : "Dismissed"}</span>
         <span className="cc-question-set__receipt-title">{title}</span>

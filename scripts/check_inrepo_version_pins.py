@@ -67,19 +67,21 @@ or `context` is stale when it covers no pin. A temporary entry names, in
 `removed_by`, the change that removes its pins; when that change lands the
 entry is stale and goes.
 
-An entry with `at` (a version; beside `match` or `context`, never `key`) is a
-hold decided for one release: it covers its pins only while the package they
-pin is at exactly that version in this tree. While that package is still
-below the version the entry waits for its release: the pins it will cover
-name the version in this tree and are no findings yet, and it is not stale as
-long as it finds a pin it will cover then: one its path and `match` find and,
-where it has a `context`, one that stands inside the text the `context`
-matches. A waiting entry whose `context` holds no such pin is stale at once,
-as it will be at its version, so the entry or the page is put right before
-the version bump the hold was written for and not during it. Once the package
-is past the version the entry covers nothing: its pins are findings again and
-the entry is stale, so the next version bump stops on both and the hold is
-decided again.
+An entry with `at` (a version; always beside a `match`, with or without a
+`context`, never beside a `key`) is a hold decided for one release: it covers
+its pins only while the package they pin is at exactly that version in this
+tree. The `match` says which pin the entry holds, so an entry with `at` and
+no `match` is refused when the configuration is read. While that package is
+still below the version the entry waits for its release: the pins it will
+cover name the version in this tree and are no findings yet, and it is not
+stale as long as it finds a pin it will cover then: one its path and `match`
+find and, where it has a `context`, one that stands inside the text the
+`context` matches. A waiting entry whose `context` holds no such pin is stale
+at once, as it will be at its version, so the entry or the page is put right
+before the version bump the hold was written for and not during it. Once the
+package is past the version the entry covers nothing: its pins are findings
+again and the entry is stale, so the next version bump stops on both and the
+hold is decided again.
 
 Published release inputs (`published_release_inputs` in the configuration,
 with its reason) are files that record a published release of an in-repo
@@ -604,11 +606,11 @@ class Scanner:
             return
         name, expected = self.inventory.expected(key)
         for hold in self.holds:
-            # A hold for a later version of this package waits on the pin: it is no finding
-            # of the hold's yet, and the entry is not stale while the pin is there. A hold with
-            # a context waits only on a pin inside the text its context matches, as it covers
-            # only such a pin at its version.
-            if below(expected, hold.at) and hold.path.match(path) and (hold.match is None or hold.match.search(pin)):
+            # A hold for a later version of this package waits on the pin its match finds (a
+            # hold always has one): it is no finding of the hold's yet, and the entry is not
+            # stale while the pin is there. A hold with a context waits only on a pin inside
+            # the text its context matches, as it covers only such a pin at its version.
+            if below(expected, hold.at) and hold.path.match(path) and hold.match.search(pin):
                 if hold.context is None:
                     hold.used += 1
                 else:
@@ -974,8 +976,10 @@ def load_allowlist(config: dict) -> list[AllowEntry]:
                 raise PinError(f"allow entry {index} ({raw['path']}) at must be a version")
             if patterns["key"] is not None:
                 raise PinError(f"allow entry {index} ({raw['path']}) at takes no key")
-            if patterns["match"] is None and patterns["context"] is None:
-                raise PinError(f"allow entry {index} ({raw['path']}) at needs a match or a context")
+            # A hold names the pin it holds: with a context alone, nothing but the words around
+            # a pin would say which pin the entry is for.
+            if patterns["match"] is None:
+                raise PinError(f"allow entry {index} ({raw['path']}) at needs a match")
         entries.append(AllowEntry(index, raw["path"], glob_regex(raw["path"]), patterns["match"], patterns["key"],
                                   patterns["context"], at))
     return entries

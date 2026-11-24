@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   that `state.refusal` is available on the result of `identities.operation()`.
   The other outcome strings narrow to their corresponding result types.
 
+### Fixed
+
+- An update of an agent's instructions that arrives while the agent's run is in a tool round answers by the agent's model, as one that arrives between runs does. Before, from the run's first tool round until the run committed, Meerkat's read of the agent's session failed and the update answered `applies_after_compaction` whatever the model: also for a model that takes the change at its next run (`applies_at_next_run`) and for a backend that takes it only with a fresh conversation (`applies_at_next_session`, reason `lowering_unavailable`). In the same state the agent's row of `meta/instruction_status` read `effective_read: unreadable`; it now shows the session's last committed state, in which a change the running run applied at its start reads `pending` until the run commits. Affected: 0.9.15 to 0.9.18 for the update's answer and 0.9.11 to 0.9.18 for the status row, agents on a SQLite realm. The change is in Meerkat's status read; no Meta code changed. Read from the source, not seen in a run.
+
 ### Upgrade notes
 
 - Type checkers can now report mistakes that a `str` annotation

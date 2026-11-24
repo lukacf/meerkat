@@ -15,7 +15,6 @@ import { memberKickoffNotice, memberKickoffPhaseLabel } from "./member-kickoff";
 import {
   decodeMemberAlias,
   entryOriginFromFrameData,
-  isChatSilentRuntimeEvent,
   runtimeEventFromFrame,
   runtimeEventText,
 } from "./transcript-source";
@@ -3886,9 +3885,6 @@ export function mapFramesToTimelineEntries(
 
   for (let i = 0; i < orderedFrames.length; i++) {
     const frame = orderedFrames[i];
-    // A record that is never a line of a conversation: it adds no entry and
-    // closes no pending text, on the stream and in a transcript built again.
-    if (isChatSilentRuntimeEvent(frame.event)) continue;
     // Canonical frame identity must survive insertion of older history.
     const entryId = frame.id || `${frame.event || "frame"}:${i}`;
 

@@ -187,25 +187,6 @@ export function humanizeRuntimeEventType(eventType: string): string {
   return `${words[0]!.toUpperCase()}${words.slice(1)}`;
 }
 
-/**
- * Runtime events that are a record and never a line of a conversation.
- * `request_reasoning_effort_resolved` states the reasoning effort one
- * provider request was sent with; the runtime publishes it for every such
- * request, so as a line it would stand in every turn. The transcript
- * builders leave these out, for frames that arrive on the stream and for
- * frames a page reads when it loads alike. Nothing else reads this list:
- * the frames stay in the event log, and whatever lists or counts events
- * (the activity rail, a host's own reader) still sees them.
- */
-const CHAT_SILENT_RUNTIME_EVENTS: ReadonlySet<string> = new Set([
-  "request_reasoning_effort_resolved",
-]);
-
-/** Whether a runtime event of this type is kept out of conversations. */
-export function isChatSilentRuntimeEvent(eventType: string): boolean {
-  return CHAT_SILENT_RUNTIME_EVENTS.has(eventType);
-}
-
 function recordOf(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>

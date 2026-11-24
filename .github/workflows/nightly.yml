@@ -1434,7 +1434,10 @@ jobs:
             while IFS= read -r line; do
               printf '%s\n' "${line}"
               if [[ "${line}" == *"Finished"*" target(s) in "* ]]; then
-                build=$((build + SECONDS - mark))
+                # The seconds before this line are build only when a "Compiling"
+                # line opened them: a Cargo call with nothing to build prints
+                # "Finished" straight after the tests that ran before it.
+                if [[ "${phase}" == build ]]; then build=$((build + SECONDS - mark)); else tests=$((tests + SECONDS - mark)); fi
                 mark="${SECONDS}"
                 phase=tests
                 cargo+="| Cargo, in ${name}: $(plain "${line}") | | | |"$'\n'

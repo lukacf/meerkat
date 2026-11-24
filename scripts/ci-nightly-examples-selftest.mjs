@@ -87,6 +87,18 @@ assert.deepEqual(
   "the nightly workflow starts on its schedule and by hand, and on no push or pull request",
 );
 assert.equal(nightlyLines.filter((line) => /^\s*- cron:/.test(line)).length, 1, "one schedule");
+// No environment that reaches the two jobs names a secret. Every job
+// inherits the workflow's top-level environment: it holds no secret or token
+// expression and no name of a credential. The jobs' own environment is
+// pinned below (the compiler wrapper alone, and no step has one).
+const envAt = nightlyLines.indexOf("env:");
+const envEnd = nightlyLines.findIndex((line, index) => index > envAt && /^[A-Za-z]/.test(line));
+const inherited = nightlyLines.slice(envAt + 1, envEnd).filter((line) => /^  [A-Za-z_][A-Za-z0-9_]*:/.test(line));
+assert.ok(envAt > 0 && inherited.length > 0, "the nightly workflow has a top-level environment");
+for (const line of inherited) {
+  assert.doesNotMatch(line, /secrets\.|github\.token/, `the workflow's top-level environment names no secret or token: ${line.trim()}`);
+  assert.doesNotMatch(line.trim().split(":")[0], /KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL/i, `the workflow's top-level environment has no name of a credential: ${line.trim()}`);
+}
 for (const [name, job, limit] of [["example-standalone", standalone, 150], ["meta-example-006", meta, 90]]) {
   assert.deepEqual(job.filter((line) => /timeout-minutes/.test(line)), [`    timeout-minutes: ${limit}`], `${name}: its limit (set it from the first nights' summaries, here too)`);
   // The checkout's read and nothing else: not the workflow's identity token.
@@ -167,6 +179,7 @@ for (const [label, text, patterns] of [
     /"Nightly failures" issue/, /stays with the CI owner/, /to the maintainers with the run, the job, the revision and the failing command or assertion/,
     /Examples owner/, /gets no result of these tests before it merges/, /any lint of 034 and 035/, /all-target check/,
     /any feature set but the default/, /container suites/, /every other Meta example pack/,
+    /queue seconds are not printed there: a first night's evaluation reads them from the job record, created to started/,
   ]],
 ]) {
   for (const pattern of patterns) assert.match(text, pattern, `${label} says ${pattern}`);
@@ -244,10 +257,24 @@ const bash = (text, cwd, env) => spawnSync("bash", ["--noprofile", "--norc", "-e
 const fakeMake = [
   "#!/usr/bin/env bash",
   'echo "$*" >> "${FAKE_CALLS}"',
+  "finished() { printf '\\033[1m\\033[32m    Finished\\033[0m `test` profile [unoptimized] target(s) in 1m 02s\\n' >&2; }",
+  // The slow target: one second of build, four of tests, then a Cargo call
+  // that has nothing to build: its "Finished" line has no "Compiling" line
+  // before it, and the four seconds before it are tests, not build.
+  'if [[ -n "${FAKE_SLOW-}" && "${3-}" == mdm ]]; then',
+  "  echo '   Compiling example v0.0.0' >&2",
+  "  sleep 1",
+  "  finished",
+  "  echo 'test result: ok. 1 passed; 0 failed'",
+  "  sleep 4",
+  "  finished",
+  "  echo 'test result: ok. 1 passed; 0 failed'",
+  "  exit 0",
+  "fi",
   'builds=1; if [[ "${3-}" == mdm ]]; then builds=2; fi',
   "for ((build = 0; build < builds; build++)); do",
   "  echo '   Compiling example v0.0.0' >&2",
-  "  printf '\\033[1m\\033[32m    Finished\\033[0m `test` profile [unoptimized] target(s) in 1m 02s\\n' >&2",
+  "  finished",
   "  echo 'test result: ok. 1 passed; 0 failed'",
   "done",
   'if [[ " ${FAKE_FAILS-} " == *" ${3-} "* ]]; then exit 2; fi',
@@ -277,11 +304,13 @@ const fakeCache = [
   "",
 ].join("\n");
 const cargoLine = (target) => `| Cargo, in ${target}: Finished \`test\` profile [unoptimized] target(s) in 1m 02s | | | |`;
-for (const [label, fails, cache, status, results, warmth] of [
+const pause = (milliseconds) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
+for (const [label, fails, cache, status, results, warmth, slow] of [
   ["all three parts pass", "", "0 0;0 300;0 300;200 300", 0, ["passed", "passed", "passed"], ["cold \\(hits 0, misses 300\\)", "warm \\(hits 200, misses 0\\)"]],
   ["example 034 fails", "codemob", "5 5;15 25;15 25;15 25", 1, ["failed", "passed", "passed"], ["partly warm \\(hits 10, misses 20\\)", "unknown"]],
   ["example 035 and the fixtures fail and the cache reports nothing", "mdm fixtures", "", 1, ["passed", "failed", "failed"], ["unknown", "unknown"]],
   ["the fixtures alone fail", "fixtures", "3 0;3 0;3 0;9 0", 1, ["passed", "passed", "failed"], ["unknown", "warm \\(hits 6, misses 0\\)"]],
+  ["one second of build, four of tests, then a Cargo call with nothing to build", "", "", 0, ["passed", "passed", "passed"], ["unknown", "unknown"], true],
 ]) {
   const scratch = mkdtempSync(join(tmpdir(), "nightly-examples-"));
   try {
@@ -294,7 +323,12 @@ for (const [label, fails, cache, status, results, warmth] of [
     const env = {
       PATH: `${join(scratch, "bin")}:${process.env.PATH}`, RUNNER_TEMP: scratch, GITHUB_STEP_SUMMARY: join(scratch, "summary"),
       FAKE_CALLS: join(scratch, "calls"), FAKE_FAILS: fails, FAKE_CACHE: cache, FAKE_CACHE_CALLS: join(scratch, "cache-calls"),
+      FAKE_SLOW: slow ? "yes" : "",
     };
+    // The step counts whole wall-clock seconds: start the slow case just
+    // after a second begins, so that its one and four seconds are counted
+    // as one and four.
+    if (slow) pause(1030 - (Date.now() % 1000));
     const run = bash(script(timedStep), scratch, env);
     assert.equal(run.status, status, `${label}: the step's status (${run.stderr})`);
     assert.deepEqual(
@@ -330,6 +364,14 @@ for (const [label, fails, cache, status, results, warmth] of [
       else assert.equal(summary[index], want, `${label}: summary line ${index + 1}`);
     });
     assert.equal((run.stdout.match(/test result: ok\. 1 passed/g) || []).length, 3, `${label}: the targets' output still reaches the log`);
+    if (slow) {
+      // The four seconds of tests before the second "Finished" line are
+      // tests. One second more is allowed for a second's boundary; a split
+      // that counts them as build prints build 5 and tests 0.
+      const seconds = (line) => Number(line.split("|")[2]);
+      const [build, tests] = [seconds(summary[11]), seconds(summary[12])];
+      assert.ok(build >= 1 && build <= 2 && tests >= 4 && tests <= 5, `${label}: build 1 and tests 4, printed build ${build} and tests ${tests}`);
+    }
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }

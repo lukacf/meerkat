@@ -3412,25 +3412,29 @@ compiling. A Meta probe that must keep the earlier rule checks
   an ordinary turn whose compaction cannot shrink the request fails
   ("compaction is irreducible at the configured retention"), and every
   later `compact_member` on that identity is refused as busy until the
-  gateway restarts. A restart alone does not clear it. **Do:** after a
-  failed `compact_member`, restart the gateway (this ends the busy
-  refusal), then call `meta/respawn` for the identity while its provider is
-  available, and do not stop or restart the gateway again until the
-  respawn has answered without an error and the identity has then answered
-  one message: the respawn seats the member without the threshold and keeps
-  its conversation. On these releases a
-  stop or restart after a respawn, before the identity has woken on the
-  same session, is followed by the loss of the mobs its session owns. After
-  the restart a second `compact_member` that completes clears the threshold
-  too, whether or not it compacts (a `floor_tokens` above the conversation's
-  size completes without compacting), and `meta/reset` clears it and ends
-  the conversation. The respawn has a cost of its own for an identity that
-  created mobs, on 0.9.9 through 0.9.14: after it has completed,
-  the identity no longer lists a mob it created, and the calls tried that
-  name the mob were refused, while the mob's members can go on running; the
-  mobs' stores stay. A completed `compact_member` has the same cost on
-  those releases (see the `meta/compact_member` section of Meta's RPC
-  reference). From 0.9.15 a respawn of a member the same-session step
+  gateway restarts. A restart alone clears the busy refusal, not the threshold.
+
+  **If the configured identity created no mobs or delegates:** on 0.9.14,
+  `meta/respawn` cleared the threshold and kept the conversation, with or
+  without a later gateway restart. A separate tested remedy was to restart
+  the gateway and then complete a second `meta/compact_member` with a floor
+  above the conversation size. It cleared the threshold without compacting.
+  `meta/reset` also cleared it, but ended the conversation.
+
+  **If the identity created mobs or delegates:** first check whether it
+  still lists the mobs it created and needs to keep managing them. No
+  remedy was shown to preserve that management after this failure. After a
+  completed respawn on these releases, the identity no longer listed a
+  mob it created, even though its store remained and its members could
+  keep running. A completed `meta/compact_member` had the same cost. If you
+  proceed, use `meta/respawn` only while the provider is available. Wait
+  for the respawn to return without an error **and** for the identity to
+  answer one message before stopping or restarting the gateway. Do not
+  use a second compact call or a reset for this case. This order is read
+  from the source, not tested on a creator with this failure. See the
+  [Meta 0.9.14 release note](https://github.com/lukacf/meerkat/releases/tag/meta-v0.9.14).
+
+  **Management from 0.9.15.** From 0.9.15 a respawn of a member the same-session step
   serves (every member but a placed one, one wired to a placed member, and
   one on a session service that keeps no durable sessions) keeps the
   identity's management of the mobs it created (confirmed by tests and by a
@@ -3439,18 +3443,8 @@ compiling. A Meta probe that must keep the earlier rule checks
   and one that completes without compacting, rebuild the member by the
   same step (read from the source; not run). A management lost on 0.9.9
   through 0.9.14 is not brought back.
-  A reset: it ends the identity's
-  session, and the mobs that session owns end with it, no later than the
-  gateway's next start (read from the source, not run). A
-  `meta/compact_member` that failed has rebuilt the identity once before
-  its maintenance turn, so on 0.9.9 through 0.9.14 the identity has
-  probably paid that cost already (read from the source, not run): check
-  whether it still lists the mobs it created. If it does and must go on
-  managing them, weigh that against the failing messages before you
-  respawn: on 0.9.9 through 0.9.14 none of the three steps (a respawn,
-  a second call that completes, a reset) is known to keep it; and before
-  the respawn have it retire the members of, or destroy, a mob it created
-  whose members act on their own (not run). **From 0.9.15** the call
+
+  **From 0.9.15** the call
   restores the member's threshold before it answers such a failure
   (`error.data.stage` is `profile_restored`) and a second call is taken at
   once; the call still answers the failure. The upgrade repairs nothing

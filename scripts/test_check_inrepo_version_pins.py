@@ -432,6 +432,26 @@ class ShapeTests(GuardTest):
                         f"See {releases}/tag/v1.4.1.5 and {releases}/tag/v1.4.1-rc.1.\n")
         self.assertClean()
 
+    def test_every_character_that_closes_a_release_link_ends_its_tag(self):
+        # A link is closed by what it is written in: quotes, a code span, an HTML tag,
+        # angle brackets, a bracket, an escape. None of them is part of the tag.
+        url = "https://github.com/lukacf/meerkat/releases/tag/v1.4.1"
+        lines = [
+            f'release = "{url}"',
+            f"release = '{url}'",
+            f"Open `{url}` in a browser.",
+            f"<a href={url}>the release</a>",
+            f"<li>the release: {url}</li>",
+            f"[the release]: [{url}]",
+            f'echo "{url}\\n"',
+        ]
+        self.repo.write("docs/get.md", "\n".join(lines) + "\n")
+        err = self.assertFindings()
+        for number in range(1, len(lines) + 1):
+            self.assertIn(f"docs/get.md:{number}: release lukacf/meerkat release v1.4.1: pins core 1.4.1, below",
+                          err, lines[number - 1])
+        self.assertIn(f"{len(lines)} pin(s) below", err)
+
     def test_an_entry_covers_a_release_link_with_a_fragment_by_its_tag(self):
         # The pin an entry matches is the release, without the fragment: an entry written for
         # the plain link covers the same link to a section of the page, and its context holds it.

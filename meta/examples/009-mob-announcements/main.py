@@ -1,4 +1,4 @@
-"""Mob announcements: agents hear about what they subscribed to (Meta 0.9.15 and later).
+"""Mob announcements: agents hear about what they subscribed to (Meta 0.9.17 and later).
 
 One program, six steps, each printed as it happens:
 
@@ -188,7 +188,7 @@ async def cancel_ops(handle) -> None:
 async def main() -> int:
     gateway = os.environ.get("META_GATEWAY_BIN")
     if not gateway:
-        print("Set META_GATEWAY_BIN to the rpc_gateway binary of Meta 0.9.15 or later.", file=sys.stderr)
+        print("Set META_GATEWAY_BIN to the rpc_gateway binary of Meta 0.9.17 or later.", file=sys.stderr)
         return 2
     state_dir = Path(os.environ.get("EXAMPLE_STATE_DIR", HERE / ".state" / "python"))
     live = bool(os.environ.get("OPENAI_API_KEY"))

@@ -1,4 +1,4 @@
-"""Ask the user: an agent stops to ask a person, and goes on with the answer (Meta 0.9.15 and later).
+"""Ask the user: an agent stops to ask a person, and goes on with the answer (Meta 0.9.17 and later).
 
 One program, six steps, each printed as it happens:
 
@@ -108,7 +108,7 @@ def describe(question_set) -> str:
 async def main() -> int:
     gateway = os.environ.get("META_GATEWAY_BIN")
     if not gateway:
-        print("Set META_GATEWAY_BIN to the rpc_gateway binary of Meta 0.9.15 or later.", file=sys.stderr)
+        print("Set META_GATEWAY_BIN to the rpc_gateway binary of Meta 0.9.17 or later.", file=sys.stderr)
         return 2
     state_dir = Path(os.environ.get("EXAMPLE_STATE_DIR", HERE / ".state" / "python"))
     choice = os.environ.get("EXAMPLE_CHOICE", "boat")

@@ -1,6 +1,6 @@
 /**
  * Ask the user: an agent stops to ask a person, and goes on with the answer
- * (Meta 0.9.15 and later).
+ * (Meta 0.9.17 and later).
  *
  * One program, six steps, each printed as it happens:
  *
@@ -104,7 +104,7 @@ function describe(questionSet: GatingQuestionSet): string {
 async function main(): Promise<number> {
   const gateway = process.env.META_GATEWAY_BIN;
   if (!gateway) {
-    console.error("Set META_GATEWAY_BIN to the rpc_gateway binary of Meta 0.9.15 or later.");
+    console.error("Set META_GATEWAY_BIN to the rpc_gateway binary of Meta 0.9.17 or later.");
     return 2;
   }
   const stateDir = process.env.EXAMPLE_STATE_DIR ?? join(HERE, ".state", "typescript");

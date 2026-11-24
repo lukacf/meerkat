@@ -346,6 +346,14 @@ jobs:
           }
           show_resources
           vmstat -t 30 >"${RUNNER_TEMP}/workspace-int-vmstat.log" 2>&1 </dev/null &
+          # Every two minutes, the root file system's free space, for the
+          # step after the tests to print (a logger like vmstat's above).
+          (
+            while :; do
+              echo "space reading [periodic $(date -u +%H:%M:%SZ)]: filesystem of /: $(df -Pk / | awk 'NR == 2 { printf "%d MiB free of %d MiB", $(NF - 2) / 1024, $(NF - 4) / 1024 }')" || true
+              sleep 120 || true
+            done
+          ) >"${RUNNER_TEMP}/workspace-int-disk.log" 2>&1 </dev/null &
           swapfile=/workspace-int-swapfile
           need_gib=40
           if mountpoint -q /mnt; then
@@ -367,6 +375,49 @@ jobs:
           sudo swapon "${swapfile}"
           show_resources
 
+      # Space readings before and after `make test-int`: when the root disk
+      # fills during its build they name the directories that hold the space.
+      # They remove nothing, and nothing here fails the job. Each directory
+      # total is one `du` of a named directory, ended after 60 seconds.
+      - name: Show disk use before the workspace integration-fast tests
+        continue-on-error: true
+        shell: bash
+        run: |
+          space_reading() {
+            local boundary="$1" path="" size="" status=0
+            for path in / "${GITHUB_WORKSPACE:-.}"; do
+              timeout 60 df -Pk -- "${path}" 2>/dev/null |
+                awk -v boundary="${boundary}" -v path="${path}" '
+                  NR == 2 { printf "space reading [%s]: filesystem of %s: %d MiB free of %d MiB\n", boundary, path, $(NF - 2) / 1024, $(NF - 4) / 1024 }
+                  END { if (NR < 2) printf "space reading [%s]: filesystem of %s: unavailable\n", boundary, path }' || true
+            done
+            for path in \
+              "${CARGO_TARGET_DIR:-target}" \
+              "${CARGO_TARGET_DIR:-target}/debug/deps" \
+              "${CARGO_TARGET_DIR:-target}/debug/build" \
+              "${CARGO_HOME:-${HOME}/.cargo}/registry" \
+              "${CARGO_HOME:-${HOME}/.cargo}/git" \
+              "${SCCACHE_DIR:-${HOME}/.cache/sccache}" \
+              "${RUNNER_TEMP:-/tmp}" \
+              /tmp; do
+              if [[ -L "${path}" || ! -d "${path}" ]]; then
+                echo "space reading [${boundary}]: ${path}: no such directory"
+                continue
+              fi
+              status=0
+              size="$(timeout 60 du -skP -- "${path}" 2>/dev/null)" || status=$?
+              size="${size%%$'\t'*}"
+              if [[ "${status}" -eq 124 ]]; then
+                echo "space reading [${boundary}]: ${path}: timed out after 60 s"
+              elif [[ "${size}" =~ ^[0-9]+$ ]]; then
+                echo "space reading [${boundary}]: ${path}: $((size / 1024)) MiB as reported by du (unverified)"
+              else
+                echo "space reading [${boundary}]: ${path}: unavailable"
+              fi
+            done
+          }
+          space_reading "before make test-int" || true
+
       - name: Workspace integration-fast tests
         run: make test-int
 
@@ -382,6 +433,41 @@ jobs:
           grep -E '^(pswpin|pswpout|oom_kill) ' /proc/vmstat || true
           cat "${RUNNER_TEMP}/workspace-int-vmstat.log" || true
           df -h /
+          cat "${RUNNER_TEMP}/workspace-int-disk.log" || true
+          space_reading() {
+            local boundary="$1" path="" size="" status=0
+            for path in / "${GITHUB_WORKSPACE:-.}"; do
+              timeout 60 df -Pk -- "${path}" 2>/dev/null |
+                awk -v boundary="${boundary}" -v path="${path}" '
+                  NR == 2 { printf "space reading [%s]: filesystem of %s: %d MiB free of %d MiB\n", boundary, path, $(NF - 2) / 1024, $(NF - 4) / 1024 }
+                  END { if (NR < 2) printf "space reading [%s]: filesystem of %s: unavailable\n", boundary, path }' || true
+            done
+            for path in \
+              "${CARGO_TARGET_DIR:-target}" \
+              "${CARGO_TARGET_DIR:-target}/debug/deps" \
+              "${CARGO_TARGET_DIR:-target}/debug/build" \
+              "${CARGO_HOME:-${HOME}/.cargo}/registry" \
+              "${CARGO_HOME:-${HOME}/.cargo}/git" \
+              "${SCCACHE_DIR:-${HOME}/.cache/sccache}" \
+              "${RUNNER_TEMP:-/tmp}" \
+              /tmp; do
+              if [[ -L "${path}" || ! -d "${path}" ]]; then
+                echo "space reading [${boundary}]: ${path}: no such directory"
+                continue
+              fi
+              status=0
+              size="$(timeout 60 du -skP -- "${path}" 2>/dev/null)" || status=$?
+              size="${size%%$'\t'*}"
+              if [[ "${status}" -eq 124 ]]; then
+                echo "space reading [${boundary}]: ${path}: timed out after 60 s"
+              elif [[ "${size}" =~ ^[0-9]+$ ]]; then
+                echo "space reading [${boundary}]: ${path}: $((size / 1024)) MiB as reported by du (unverified)"
+              else
+                echo "space reading [${boundary}]: ${path}: unavailable"
+              fi
+            done
+          }
+          space_reading "after make test-int" || true
 
   e2e-fast:
     name: Deterministic e2e lane

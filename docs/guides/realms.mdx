@@ -45,7 +45,10 @@ canonicalization fails, so ordinary symlink aliases converge.
 Storage discovery has a separate rule. Starting at the exact directory, Meerkat
 walks upward to the nearest existing `.rkat` entry and uses that project
 root's `.rkat/realms` as the local candidate. If no ancestor is already a
-project, the current directory becomes the fresh local candidate.
+project, the current directory becomes the fresh local candidate. A realm that
+already exists under a farther ancestor's `.rkat/realms` is still used there
+when a nearer `.rkat` directory appears (for example after `rkat init` in a
+subdirectory); a realm found under more than one root is refused.
 
 For example:
 
@@ -159,7 +162,10 @@ rkat --realm team-alpha storage doctor
 rkat --realm team-alpha storage migrate
 ```
 
-Storage verbs use their exact invocation context and do not walk upward. From a
+With no root given, `storage doctor` reads the same roots ordinary resolution
+probes (the context root's and every ancestor's `.rkat/realms`, and the
+user-global root). `storage migrate` and `storage prune` use their exact
+invocation context and do not walk upward. From a
 nested directory, either change to the detected project root first or pass each
 candidate explicitly with repeated `--root` as described in
 [Storage operations](/guides/storage-operations).
@@ -186,6 +192,7 @@ divergent domains or discard the backup.
 | Equal realm IDs on two hosts do not share | Each host selected a different local store | Configure one shared storage provider/root |
 | Backend override is rejected | The manifest already pinned another backend/provider | Open with the pinned profile or migrate intentionally |
 | Startup reports both candidate roots | Two physical copies exist | Run `storage doctor`, review `storage migrate`, then adopt one root |
+| A session moved with its state root has a new comms identity, or a restored mob member is marked broken | With in-process comms, the default, session comms keys are kept outside the state root and the realm | Copy the `session_comms_identity` directory with the state (see [where a session's keys are kept](/guides/comms#where-a-session%E2%80%99s-keys-are-kept)) |
 | A global login is visible in a workspace | Config and credential reads inherit from `global` | This is expected; state and sessions still remain realm-local |
 
 ## Recommended Profiles

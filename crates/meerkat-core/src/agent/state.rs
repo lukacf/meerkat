@@ -311,6 +311,16 @@ type TurnEffectsFuture<'a> =
 type TurnEffectsFuture<'a> =
     std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), AgentError>> + 'a>>;
 
+/// A future of the agent loop that is built and boxed in its own frame
+/// (see [`Agent::execute_turn_effects`]): `Send` wherever the loop's own
+/// futures are.
+#[cfg(not(target_arch = "wasm32"))]
+pub(super) type BoxedAgentFuture<'a, T> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
+#[cfg(target_arch = "wasm32")]
+pub(super) type BoxedAgentFuture<'a, T> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = T> + 'a>>;
+
 #[cfg(not(target_arch = "wasm32"))]
 type CallingLlmStepFuture<'a> = std::pin::Pin<
     Box<dyn std::future::Future<Output = Result<CallingLlmStep, AgentError>> + Send + 'a>,
@@ -7039,7 +7049,25 @@ where
     /// round's first commit takes the staged assistant message as the
     /// round's model response. Every exit of the run's rounds passes
     /// [`Agent::close_run_cursor_at_exit`].
-    pub(super) async fn run_loop(
+    ///
+    /// Built and boxed in its own frame, like
+    /// [`Self::execute_turn_effects`]: the loop's state lives on the heap,
+    /// so the run's poll frames above it (the run, its surface and the
+    /// session's turn) reserve a pointer for it. The future is polled to
+    /// completion where it is awaited and dropped there, as before.
+    #[inline(never)]
+    pub(super) fn run_loop(
+        &mut self,
+        run_input: Option<crate::types::RunInput>,
+        event_tx: Option<mpsc::Sender<AgentEvent>>,
+        deferred_callback: Option<crate::session::DeferredCallbackContinuation>,
+        resumed: Option<ResumedRunStart>,
+    ) -> BoxedAgentFuture<'_, Result<RunResult, AgentError>> {
+        Box::pin(self.run_loop_unboxed(run_input, event_tx, deferred_callback, resumed))
+    }
+
+    /// [`Self::run_loop`], awaited through its boxed form.
+    async fn run_loop_unboxed(
         &mut self,
         run_input: Option<crate::types::RunInput>,
         event_tx: Option<mpsc::Sender<AgentEvent>>,
@@ -9034,9 +9062,14 @@ where
         // synchronous segment: this request and every later one see them,
         // and the run's single final boundary commits them like tool
         // results. They land after this boundary's tool results and
-        // refreshed notices, before the next assistant message.
-        let applied_durable =
-            durable.and_then(|accepted| self.apply_durable_boundary_appends(ctx.run_id, accepted));
+        // refreshed notices, before the next assistant message. One boundary
+        // can carry the deliveries of several inputs: each is written in
+        // publication order with its own rows, witness, round-commit binding
+        // and events.
+        let applied_durable = durable
+            .into_iter()
+            .filter_map(|accepted| self.apply_durable_boundary_appends(ctx.run_id, accepted))
+            .collect::<Vec<_>>();
         let base_context_count = self.active_turn_request_contexts.len();
         self.active_turn_request_contexts.extend(boundary_contexts);
         let request_messages = self.llm_messages_for_boundary(!prepared.in_extraction);
@@ -10052,7 +10085,7 @@ where
         if llm_response_exhausted_during_thinking(&result) {
             let error = AgentError::MaxTokensReached {
                 turn: ctx.turn_count,
-                partial: "turn exhausted max_tokens during thinking; raise max_tokens or set a thinking budget"
+                partial: "turn exhausted max_tokens while thinking, before any answer; raise max_tokens, or lower the reasoning effort or the thinking budget where the model takes one"
                     .to_string(),
             };
             // Usage above is intentionally retained, but no empty assistant
@@ -10391,6 +10424,11 @@ where
         // dispatched again after a resume.
         self.tool_dispatch_context
             .bind_round(self.round_commits.round);
+        // What the session's live tool layers answer for this round: a tool
+        // that asks whether anything narrows the session reads it here, not
+        // from a value of its call.
+        self.tool_dispatch_context
+            .bind_live_tool_narrowing(self.tool_scope.narrowed_by_a_live_layer());
 
         // The round's first commit, before any of its tools is admitted. A
         // resumed round's first commit is the tail it resumed from. Boxed so
@@ -25586,6 +25624,251 @@ mod tests {
         assert!(!follow_up_results[1].is_error);
     }
 
+    /// Under a gate on the name `shell`, a `monitor_start` call stands on
+    /// the grant of `shell`. A grant that is live at the model request and
+    /// ends before the calls are dispatched refuses the monitor as it
+    /// refuses `shell`: neither body runs, both are adjudicated as a use of
+    /// `shell`, and the ungated sibling still runs. With no grant at all the
+    /// monitor's call reaches the same gate and is refused there, with the
+    /// gate's refusal.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn a_monitor_start_call_under_a_gate_on_shell_is_adjudicated_as_a_use_of_shell() {
+        /// A session whose grant of every gated name is live at each model
+        /// request, when `live_at_the_request`, and has ended by the time a
+        /// call is adjudicated. It records every call it adjudicates.
+        struct EndedBeforeDispatch {
+            live_at_the_request: bool,
+            adjudicated: Mutex<Vec<(String, String)>>,
+        }
+
+        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        impl crate::tool_grant::SessionToolGrants for EndedBeforeDispatch {
+            async fn open_names(
+                &self,
+                view: &crate::tool_grant::GatedToolView,
+                _run_id: Option<&crate::RunId>,
+            ) -> Result<crate::types::ToolNameSet, crate::tool_grant::ToolGrantRefusal>
+            {
+                Ok(if self.live_at_the_request {
+                    view.gated().iter().cloned().collect()
+                } else {
+                    crate::types::ToolNameSet::new()
+                })
+            }
+
+            async fn end_run(
+                &self,
+                _run_id: &crate::RunId,
+            ) -> Result<(), crate::tool_grant::ToolGrantRefusal> {
+                Ok(())
+            }
+
+            async fn admit_call(
+                &self,
+                call: crate::tool_grant::ToolGrantCall<'_>,
+            ) -> Result<(), crate::tool_grant::ToolGrantRefusal> {
+                self.adjudicated
+                    .lock()
+                    .unwrap()
+                    .push((call.call_id.to_string(), call.name.to_string()));
+                Err(crate::tool_grant::ToolGrantRefusal::Required)
+            }
+        }
+
+        struct RecordingDispatcher {
+            tools: Arc<[Arc<ToolDef>]>,
+            dispatched: Mutex<Vec<String>>,
+        }
+
+        #[async_trait]
+        impl AgentToolDispatcher for RecordingDispatcher {
+            fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+                Arc::clone(&self.tools)
+            }
+
+            async fn dispatch(
+                &self,
+                call: ToolCallView<'_>,
+            ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
+                self.dispatched.lock().unwrap().push(call.name.to_string());
+                Ok(crate::ops::ToolDispatchOutcome::from(ToolResult::new(
+                    call.id.to_string(),
+                    "ok".to_string(),
+                    false,
+                )))
+            }
+        }
+
+        /// Calls `shell`, `monitor_start` and an ungated sibling in one
+        /// response, then ends.
+        struct ShellFamilyCallClient {
+            call_count: Mutex<u32>,
+            observed_messages: Mutex<Vec<Vec<Message>>>,
+            observed_tools: Mutex<Vec<Vec<String>>>,
+        }
+
+        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        impl AgentLlmClient for ShellFamilyCallClient {
+            async fn stream_response(
+                &self,
+                messages: &[Message],
+                tools: &[Arc<ToolDef>],
+                _max_tokens: u32,
+                _temperature: Option<f32>,
+                _provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+            ) -> Result<super::LlmStreamResult, AgentError> {
+                self.observed_messages
+                    .lock()
+                    .unwrap()
+                    .push(messages.to_vec());
+                self.observed_tools
+                    .lock()
+                    .unwrap()
+                    .push(tools.iter().map(|tool| tool.name.to_string()).collect());
+                let mut calls = self.call_count.lock().unwrap();
+                let response = if *calls == 0 {
+                    super::LlmStreamResult::new(
+                        ["call-shell", "call-monitor", "call-open"]
+                            .into_iter()
+                            .zip(["shell", "monitor_start", "open_tool"])
+                            .map(|(id, name)| AssistantBlock::ToolUse {
+                                id: id.to_string(),
+                                name: name.into(),
+                                args: serde_json::value::RawValue::from_string("{}".to_string())
+                                    .expect("static raw value should parse"),
+                                meta: None,
+                            })
+                            .collect(),
+                        StopReason::ToolUse,
+                        normalized_test_usage(self, Usage::default()),
+                    )
+                } else {
+                    super::LlmStreamResult::new(
+                        vec![AssistantBlock::Text {
+                            text: "done".to_string(),
+                            meta: None,
+                        }],
+                        StopReason::EndTurn,
+                        normalized_test_usage(self, Usage::default()),
+                    )
+                };
+                *calls += 1;
+                Ok(response)
+            }
+
+            fn provider(&self) -> crate::provider::Provider {
+                crate::provider::Provider::Other
+            }
+
+            fn model(&self) -> &'static str {
+                "mock-model"
+            }
+        }
+
+        for live_at_the_request in [true, false] {
+            let inner = Arc::new(RecordingDispatcher {
+                tools: ["shell", "monitor_start", "open_tool"]
+                    .into_iter()
+                    .map(|name| {
+                        Arc::new(ToolDef::new(
+                            name,
+                            format!("{name} fixture"),
+                            serde_json::json!({ "type": "object" }),
+                        ))
+                    })
+                    .collect(),
+                dispatched: Mutex::new(Vec::new()),
+            });
+            let grants = Arc::new(EndedBeforeDispatch {
+                live_at_the_request,
+                adjudicated: Mutex::new(Vec::new()),
+            });
+            let gate = crate::tool_grant::gate_over_names(
+                Arc::clone(&grants) as Arc<dyn crate::tool_grant::SessionToolGrants>,
+                &["shell"],
+            );
+            let dispatcher = Arc::new(
+                crate::ExecutionPolicyGatedDispatcher::new(
+                    Arc::clone(&inner),
+                    crate::tool_execution_policy::ToolExecutionPolicy::unrestricted(),
+                )
+                .with_tool_grant_gate(gate.clone()),
+            );
+            let client = Arc::new(ShellFamilyCallClient {
+                call_count: Mutex::new(0),
+                observed_messages: Mutex::new(Vec::new()),
+                observed_tools: Mutex::new(Vec::new()),
+            });
+            let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+                .with_tool_visibility_owner(explicit_test_visibility_owner())
+                .with_tool_grant_gate(gate)
+                .build_standalone(client.clone(), dispatcher, Arc::new(NoopStore))
+                .await;
+
+            let (tx, mut rx) = mpsc::channel(256);
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                agent.run_with_events("watch it".to_string().into(), tx),
+            )
+            .await
+            .expect("run must complete promptly after the refusals")
+            .expect("a refused gated call is operation-local feedback");
+            while rx.try_recv().is_ok() {}
+            assert_eq!(result.text, "done");
+
+            let first_request = client.observed_tools.lock().unwrap()[0].clone();
+            assert_eq!(
+                first_request.iter().any(|name| name == "monitor_start"),
+                live_at_the_request,
+                "the monitor is offered exactly while the grant of shell is open: {first_request:?}"
+            );
+            assert_eq!(
+                *inner.dispatched.lock().unwrap(),
+                ["open_tool"],
+                "neither shell nor the monitor runs once the grant of shell ended \
+                 (live at the request: {live_at_the_request})"
+            );
+            assert_eq!(
+                *grants.adjudicated.lock().unwrap(),
+                [
+                    ("call-shell".to_string(), "shell".to_string()),
+                    ("call-monitor".to_string(), "shell".to_string()),
+                ],
+                "both calls are adjudicated as a use of the grant of shell \
+                 (live at the request: {live_at_the_request})"
+            );
+
+            let observations = client.observed_messages.lock().unwrap();
+            let follow_up_results = observations[1]
+                .iter()
+                .filter_map(|message| match message {
+                    Message::ToolResults { results, .. } => Some(results),
+                    _ => None,
+                })
+                .flatten()
+                .collect::<Vec<_>>();
+            assert_eq!(
+                follow_up_results
+                    .iter()
+                    .map(|result| result.tool_use_id.as_str())
+                    .collect::<Vec<_>>(),
+                ["call-shell", "call-monitor", "call-open"]
+            );
+            for refused in &follow_up_results[..2] {
+                assert!(refused.is_error);
+                let payload: serde_json::Value =
+                    serde_json::from_str(&crate::types::text_content(&refused.content))
+                        .expect("a grant refusal uses the canonical feedback envelope");
+                assert_eq!(payload["error"], "policy_denied");
+                assert_eq!(payload["data"]["code"], "tool_grant_required");
+            }
+            assert!(!follow_up_results[2].is_error);
+        }
+    }
+
     /// A generated visibility owner that refuses every extension of the grant
     /// gate and applies everything else as its inner owner does.
     #[cfg(feature = "workspace-tests")]
@@ -30577,14 +30860,16 @@ mod tests {
             .run("Use a tool".to_string().into())
             .await
             .expect_err("thinking-only max-token exhaustion must not complete silently");
+        // The whole sentence is pinned: it is what a developer acts on, so it
+        // may name only steps that work. A model that takes no thinking
+        // budget answers "set a thinking budget" with a second error.
+        const HINT: &str = "turn exhausted max_tokens while thinking, before any answer; raise max_tokens, or lower the reasoning effort or the thinking budget where the model takes one";
         assert!(
             matches!(
                 &error,
-                AgentError::MaxTokensReached { partial, .. }
-                    if partial.contains("raise max_tokens")
-                        && partial.contains("thinking budget")
+                AgentError::MaxTokensReached { partial, .. } if partial == HINT
             ),
-            "typed failure must carry an actionable recovery hint: {error}"
+            "typed failure must carry the whole recovery hint: {error}"
         );
         assert_eq!(agent.session.total_usage().output_tokens, 7);
         assert!(

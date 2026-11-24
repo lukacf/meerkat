@@ -61,7 +61,7 @@ import {
   type StoryRow,
   type TodayView,
 } from "./activity/story-model";
-import { useHistoryBackfill } from "./activity/use-history-backfill";
+import { useHistoryBackfill, type HistoryLoader } from "./activity/use-history-backfill";
 import { useVirtualRows } from "./activity/use-virtual-rows";
 import type { PendingApprovalLike } from "./activity/signals-model";
 
@@ -75,7 +75,9 @@ interface TimelinePanelProps {
   /** Approvals waiting for a decision. */
   approvals?: readonly PendingApprovalLike[];
   /** Loads one agent's history for the day (the console's identity log). */
-  loadHistory?: (identity: string) => Promise<void>;
+  loadHistory?: HistoryLoader;
+  /** A value that changes when the set of loaded mobs does: an agent not read while its mob was not loaded is asked again then. */
+  loadedMobs?: string;
   /** Fallbacks while the console provides no navigation context. */
   onOpenAgent?: (identity: string, how: "details" | "chat") => void;
   onOpenApproval?: (pendingId: string) => void;
@@ -169,6 +171,7 @@ export function TimelinePanel({
   agents,
   approvals,
   loadHistory,
+  loadedMobs,
   onOpenAgent,
   onOpenApproval,
 }: TimelinePanelProps): React.JSX.Element {
@@ -189,7 +192,7 @@ export function TimelinePanel({
   const nowMs = ledger.nowMs;
 
   // Load the day's history of the most active agents, four at a time.
-  const history = useHistoryBackfill(agents, loadHistory);
+  const history = useHistoryBackfill(agents, loadHistory, loadedMobs);
   const loading = history.loading;
   const loadedOnce = history.loaded;
 

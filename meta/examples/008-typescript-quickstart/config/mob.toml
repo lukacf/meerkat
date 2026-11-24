@@ -1,0 +1,16 @@
+# One profile. An agent is not declared here: the program names its agents in
+# a roster (see main.ts), and each agent runs on a profile.
+[mob]
+id = "typescript-quickstart"
+
+[profiles.worker]
+model = "gpt-6.2-astra"
+# A turn_driven agent runs when it is sent something, and its turn can be
+# waited for by a ticket. The default mode, autonomous_host, cannot be.
+runtime_mode = "turn_driven"
+# Lets the program, which is outside the mob, send to agents of this profile.
+external_addressable = true
+
+[profiles.worker.tools]
+# Every profile an agent is built from needs comms; it is off by default.
+comms = true

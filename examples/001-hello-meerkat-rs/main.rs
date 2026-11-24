@@ -29,6 +29,12 @@ use std::{path::Path, sync::Arc};
 
 type ExampleError = Box<dyn std::error::Error + Send + Sync>;
 
+/// Output limit of one turn. Current Claude models think before they answer,
+/// and the limit covers the thinking and the answer together: with a small
+/// limit a turn can end as `MaxTokensReached` while the model is still
+/// thinking. Leave room for both.
+const MAX_TOKENS_PER_TURN: u32 = 4096;
+
 fn main() -> Result<(), ExampleError> {
     meerkat_runtime::host_stack::run_host("hello-meerkat", run)?
 }
@@ -62,7 +68,7 @@ async fn run() -> Result<(), ExampleError> {
             system_prompt: meerkat::SystemPromptOverride::Set(
                 "You are a helpful assistant. Be concise.".into(),
             ),
-            max_tokens: Some(512),
+            max_tokens: Some(MAX_TOKENS_PER_TURN),
             event_tx: None,
             initial_turn: InitialTurnPolicy::RunImmediately,
             deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,

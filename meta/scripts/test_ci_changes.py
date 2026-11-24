@@ -170,6 +170,10 @@ CROSS_AREA_READS = {
     # examples/006's script installs the Python SDK from the checkout. It is
     # run by hand: no lane runs it, so the read has no lane to reach.
     ("examples/", "sdk/python/"): set(),
+    # The TypeScript smoke of examples/001 takes the frame parser from the
+    # console core. It is run by hand, from the examples.sh of the pack: no
+    # lane runs it, so the read has no lane to reach.
+    ("examples/", "packages/"): set(),
     # The flow editor's browser tests start console fixtures.
     ("flow-editor/", "console/"): {"flow_editor"},
     # The flow editor imports its component packages, and its source
@@ -284,6 +288,11 @@ CROSS_AREA_READS = {
     ("flow-editor/", "crates/"): {"flow_editor"},
     ("sdk/python/", "crates/"): {"python"},
     ("examples/", "crates/"): {"rust", "integration", "console"},
+    # The console core package's member reference test (the console job's
+    # vitest run) parses the cases file the crate's own unit test parses,
+    # crates/meerkat-meta/src/console_member_ref_cases.json, so the Rust and
+    # the TypeScript form of a nested member's identity cannot drift.
+    ("packages/", "crates/"): {"console"},
     # test-typescript runs on every run, fmt-lint runs the scripts and the
     # hooks' configuration, and the workspace manifest names its members.
     ("sdk/typescript/", "crates/"): set(),

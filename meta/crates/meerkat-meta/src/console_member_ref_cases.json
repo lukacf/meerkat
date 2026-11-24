@@ -1,0 +1,22 @@
+{
+  "compose": [
+    { "mob_id": "research-team", "name": "reviewer", "identity": "research-team/reviewer" },
+    { "mob_id": "implicit-0193b2a4", "name": "helper-1", "identity": "implicit-0193b2a4/helper-1" },
+    { "mob_id": "team", "name": "audit:singleton", "identity": "team/audit:singleton" },
+    { "mob_id": "team", "name": "a/b", "identity": "team/a/b" },
+    { "mob_id": "bad/mob", "name": "reviewer", "identity": null },
+    { "mob_id": "", "name": "reviewer", "identity": null },
+    { "mob_id": "team", "name": "", "identity": null }
+  ],
+  "parse": [
+    { "identity": "research-team/reviewer", "mob_id": "research-team", "name": "reviewer" },
+    { "identity": "team/audit:singleton", "mob_id": "team", "name": "audit:singleton" },
+    { "identity": "team/a/b", "mob_id": "team", "name": "a/b" },
+    { "identity": "reviewer", "mob_id": null, "name": null },
+    { "identity": "rt:audit:singleton:0", "mob_id": null, "name": null },
+    { "identity": "/reviewer", "mob_id": null, "name": null },
+    { "identity": "team/", "mob_id": null, "name": null },
+    { "identity": "/", "mob_id": null, "name": null },
+    { "identity": "", "mob_id": null, "name": null }
+  ]
+}

@@ -12724,6 +12724,26 @@ AuthorizeExternalPeerReciprocalTrustRunning(key, agent_identity) ==
     /\ UnchangedFrame_c428e187b00bc7e6
 
 
+AuthorizeExternalPeerReciprocalTrustRemovalRunning(key, agent_identity) ==
+    /\ phase = "Running"
+    /\ ((key \in DOMAIN external_peer_edges_by_key) = TRUE)
+    /\ mob_machine_external_peer_key_matches_local(key, agent_identity)
+    /\ ((agent_identity \in DOMAIN member_peer_ids) = TRUE)
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_c428e187b00bc7e6
+
+
+AuthorizeExternalPeerReciprocalTrustRemovalStopped(key, agent_identity) ==
+    /\ phase = "Stopped"
+    /\ ((key \in DOMAIN external_peer_edges_by_key) = TRUE)
+    /\ mob_machine_external_peer_key_matches_local(key, agent_identity)
+    /\ ((agent_identity \in DOMAIN member_peer_ids) = TRUE)
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_c428e187b00bc7e6
+
+
 RecoverExternalPeerWiringRunning(key, edge) ==
     /\ phase = "Running"
     /\ mob_machine_external_peer_key_matches_edge(key, edge)
@@ -29098,6 +29118,8 @@ Next ==
     \/ (phase = "Running") /\ \E edge \in WiringEdgeValues : \E a_identity \in AgentIdentityValues : \E a_peer_id \in PeerIdValues : \E b_identity \in AgentIdentityValues : \E b_peer_id \in PeerIdValues : \E agent_identity \in AgentIdentityValues : \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E generation \in GenerationValues : AuthorizeRetiringMemberTrustCleanupObservedRunning(edge, a_identity, a_peer_id, b_identity, b_peer_id, agent_identity, agent_runtime_id, fence_token, generation)
     \/ (phase = "Stopped") /\ \E edge \in WiringEdgeValues : \E a_identity \in AgentIdentityValues : \E a_peer_id \in PeerIdValues : \E b_identity \in AgentIdentityValues : \E b_peer_id \in PeerIdValues : \E agent_identity \in AgentIdentityValues : \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E generation \in GenerationValues : AuthorizeRetiringMemberTrustCleanupObservedStopped(edge, a_identity, a_peer_id, b_identity, b_peer_id, agent_identity, agent_runtime_id, fence_token, generation)
     \/ (phase = "Running") /\ \E key \in ExternalPeerKeyValues : \E agent_identity \in AgentIdentityValues : AuthorizeExternalPeerReciprocalTrustRunning(key, agent_identity)
+    \/ (phase = "Running") /\ \E key \in ExternalPeerKeyValues : \E agent_identity \in AgentIdentityValues : AuthorizeExternalPeerReciprocalTrustRemovalRunning(key, agent_identity)
+    \/ (phase = "Stopped") /\ \E key \in ExternalPeerKeyValues : \E agent_identity \in AgentIdentityValues : AuthorizeExternalPeerReciprocalTrustRemovalStopped(key, agent_identity)
     \/ (phase = "Running") /\ \E key \in ExternalPeerKeyValues : \E edge \in ExternalPeerEdgeValues : RecoverExternalPeerWiringRunning(key, edge)
     \/ (phase = "Running") /\ \E key \in ExternalPeerKeyValues : \E edge \in ExternalPeerEdgeValues : RecoverExternalPeerWiringAlreadyRecovered(key, edge)
     \/ (phase = "Running") /\ \E key \in ExternalPeerKeyValues : RecoverExternalPeerUnwireRunning(key)

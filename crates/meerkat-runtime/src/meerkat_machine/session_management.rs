@@ -2596,6 +2596,7 @@ impl MeerkatMachine {
             tool_surface_gate: meerkat_core::ToolSurfaceGateSlot::default(),
             resumed_run_admission: Default::default(),
             mcp_observation: meerkat_core::McpObservationSlot::default(),
+            legacy_host_trust_noted: std::sync::atomic::AtomicBool::new(false),
             runtime_id: runtime_id.clone(),
             _hosting_claim: self.grant_registration_hosting(session_id)?,
             // A storeless machine is the only possible host: its claim is
@@ -2772,6 +2773,7 @@ impl MeerkatMachine {
             tool_surface_gate: meerkat_core::ToolSurfaceGateSlot::default(),
             resumed_run_admission: Default::default(),
             mcp_observation: meerkat_core::McpObservationSlot::default(),
+            legacy_host_trust_noted: std::sync::atomic::AtomicBool::new(false),
             runtime_id: runtime_id.clone(),
             _hosting_claim: self.grant_registration_hosting(&session_id)?,
             // A storeless machine is the only possible host: its claim is
@@ -3151,6 +3153,7 @@ impl MeerkatMachine {
             tool_surface_gate: meerkat_core::ToolSurfaceGateSlot::default(),
             resumed_run_admission: Default::default(),
             mcp_observation: meerkat_core::McpObservationSlot::default(),
+            legacy_host_trust_noted: std::sync::atomic::AtomicBool::new(false),
             runtime_id: runtime_id.clone(),
             _hosting_claim: hosting_claim,
             // Taken only by the winning publication, after every fallible
@@ -5368,6 +5371,7 @@ impl MeerkatMachine {
                         tool_surface_gate: meerkat_core::ToolSurfaceGateSlot::default(),
                         resumed_run_admission: Default::default(),
                         mcp_observation: meerkat_core::McpObservationSlot::default(),
+                        legacy_host_trust_noted: std::sync::atomic::AtomicBool::new(false),
                         runtime_id,
                         _hosting_claim: hosting_claim,
                         owner_loss_proof,

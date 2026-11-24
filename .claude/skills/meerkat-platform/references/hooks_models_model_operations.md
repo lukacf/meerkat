@@ -39,8 +39,9 @@ structured output, retries, timeouts, model fallback and model switching.
 - `turn/start` refuses `max_tokens`; REST `POST /sessions/{id}/messages`
   accepts it and rebuilds the agent.
 - A response that hits the cap with only reasoning fails the run with
-  `MaxTokensReached` ("turn exhausted max_tokens during thinking; raise
-  max_tokens or set a thinking budget").
+  `MaxTokensReached` ("turn exhausted max_tokens while thinking, before any
+  answer; raise max_tokens, or lower the reasoning effort or the thinking
+  budget where the model takes one").
 
 ## Budgets and turn limits
 
@@ -333,11 +334,11 @@ multiplier = 2.0
   call_timeout`, else the catalog's `call_timeout_secs` (Claude Opus and Fable
   300s, Sonnet, `claude-haiku-5-5` and Gemini Flash 120s, Haiku 4.5 60s, most
   OpenAI models and `gemini-3.1-pro-preview` 600s, `gemini-4-carbon`,
-  `gemini-4-argon` and `gemini-4-hydrogen` 900s;
+  `gemini-4-argon`, `gemini-4-hydrogen` and `gemini-4-neon` 900s;
   custom models: `[models.<id>] call_timeout_secs`). No per-request setting.
 - Stream watchdog: a stream silent for the window is aborted as a retryable
   stall. The window is `[retry] stream_inactivity_timeout`, else the model's
-  own (`gemini-4-carbon`, `gemini-4-argon` and `gemini-4-hydrogen` 900s,
+  own (`gemini-4-carbon`, `gemini-4-argon`, `gemini-4-hydrogen` and `gemini-4-neon` 900s,
   `gpt-5.5-pro` 7200s;
   self-hosted models:
   `[self_hosted.models.<id>] stream_inactivity_timeout_secs`, at least 60),

@@ -294,6 +294,17 @@ pub(super) async fn lifetime(
     host: &Host,
     configure: impl FnOnce(MobBootstrapSpec) -> MobBootstrapSpec,
 ) -> Result<MobRuntime, MobRuntimeError> {
+    let spec = lifetime_spec(dir, mob_id, host, configure).await;
+    Box::pin(MobRuntime::bootstrap(spec)).await
+}
+
+/// The spec of one runtime lifetime ([`lifetime`]), not bootstrapped yet.
+async fn lifetime_spec(
+    dir: &Path,
+    mob_id: &str,
+    host: &Host,
+    configure: impl FnOnce(MobBootstrapSpec) -> MobBootstrapSpec,
+) -> MobBootstrapSpec {
     let (storage, provenance) =
         crate::mob_composition_manifest::persistent_mob_storage(dir.join("mob.sqlite3"))
             .expect("root mob storage");
@@ -316,7 +327,7 @@ pub(super) async fn lifetime(
     spec = configure(spec);
     let model: Arc<dyn LlmClient> = host.model.clone();
     spec.options.default_llm_client = Some(model);
-    Box::pin(MobRuntime::bootstrap(spec)).await
+    spec
 }
 
 async fn coordinator_session(runtime: &MobRuntime) -> meerkat_core::types::SessionId {
@@ -420,6 +431,17 @@ async fn run_tool_turn(host: &Host, child: &MobHandle, worker: &str) -> Vec<Stri
 // ---------------------------------------------------------------------------
 
 fn composed_spec(dir: &Path, storage: MobStorage) -> MobBootstrapSpec {
+    composed_with(dir, |definition, service| {
+        MobBootstrapSpec::new(definition, storage, service)
+    })
+}
+
+/// [`composed_spec`] over the spec `over` makes of the root definition and
+/// the session service: over an opened storage, or over a declared store.
+fn composed_with(
+    dir: &Path,
+    over: impl FnOnce(MobDefinition, Arc<dyn MobSessionService>) -> MobBootstrapSpec,
+) -> MobBootstrapSpec {
     let store: Arc<dyn meerkat_runtime::RuntimeStore> =
         Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
     let blobs: Arc<dyn meerkat_core::BlobStore> = Arc::new(Base64BlobStoreAdapter::new(Arc::new(
@@ -442,7 +464,7 @@ fn composed_spec(dir: &Path, storage: MobStorage) -> MobBootstrapSpec {
         store.clone(),
         blobs,
     ));
-    MobBootstrapSpec::new(root_definition(&unique("composed")), storage, service)
+    over(root_definition(&unique("composed")), service)
         .with_session_runtime_adapter(machine)
         .expect("adopt the runtime owner")
         .with_runtime_delivery(MobRuntimeDelivery::new(store, jobs))
@@ -707,8 +729,129 @@ async fn drive_lifetime(lifetime: &str, dir: &Path) {
                 .expect("destroy the child");
             stand_down_released(runtime, 0).await;
         }
+        // A launch that declares its root store reads it before preparation
+        // from its own open, then bootstraps: the child the mob set restores
+        // runs its members on the launch's default client.
+        "client:2" => {
+            let store_file = dir.join("mob.sqlite3");
+            let spec = lifetime_spec(dir, ROOT_MOB, &host, |spec| {
+                spec.with_child_mob_storage(durable(dir))
+            })
+            .await;
+            let mut spec = declaring(spec, &store_file);
+            spec.read_launch_definition()
+                .await
+                .expect("the read before preparation");
+            let runtime = Box::pin(MobRuntime::bootstrap(spec))
+                .await
+                .expect("bootstrap the lifetime");
+            let child = runtime
+                .agent_mob_mcp_state()
+                .expect("agent mob state")
+                .handle_for(&child_id)
+                .await
+                .expect("the stored child is restored");
+            let before = host.model.calls();
+            host.model.arm_tool_turn();
+            let bounded = BoundedResultSpec::new("turn", 4096).expect("bounded result spec");
+            let work = child
+                .start_work_for_identity_bounded(
+                    AgentIdentity::from(CHILD_WORKERS[0]),
+                    WorkSpec::new(ContentInput::Text("go".to_string()), WorkOrigin::Internal),
+                    HandlingMode::Queue,
+                    bounded.clone(),
+                )
+                .await
+                .expect("start a turn");
+            // Whatever the turn answers: the row is about which client ran it.
+            let _ = tokio::time::timeout(Duration::from_mins(1), work.wait_bounded(bounded)).await;
+            assert!(
+                host.model.calls() > before,
+                "a restored child's member runs its turn on the launch's default client"
+            );
+            drop(child);
+            runtime
+                .handle()
+                .shutdown()
+                .await
+                .expect("root mob shutdown");
+            let _ = runtime.stand_down_child_mobs(release_deadline()).await;
+        }
+        // A launch over the state directory `cold:1` left, with a stored
+        // child mob, whose definition the recorded composition does not
+        // permit: an operator changed it and declared no update. The launch
+        // is refused by its resume judgement, and has run nothing: no mob
+        // set declares the launch's mob, and the durable child root is left
+        // unowned, so no stored child mob was restored and no pass of a mob
+        // set runs over the root. `refused-console:2` declares its store and
+        // hands no open of it, as the console gateway's launch does;
+        // `refused-stdio:2` hands the launch's own open and reads nothing
+        // before the bootstrap, as a stdio launch without a roster provider
+        // does.
+        "refused-console:2" | "refused-stdio:2" => {
+            let store_file = dir.join("mob.sqlite3");
+            let spec = lifetime_spec(dir, ROOT_MOB, &host, |spec| {
+                spec.with_child_mob_storage(durable(dir))
+            })
+            .await;
+            let mut spec = if lifetime == "refused-console:2" {
+                declaring_with_no_open(spec, &store_file)
+            } else {
+                declaring(spec, &store_file)
+            };
+            spec.definition = MobDefinition::from_toml(&format!(
+                "[mob]\nid = \"{ROOT_MOB}\"\n\n[profiles.coordinator]\nmodel = \"gpt-5.4\"\n\
+                 runtime_mode = \"turn_driven\"\n[profiles.coordinator.tools]\ncomms = true\n"
+            ))
+            .expect("the root definition with another model");
+            let owners = spec.private_owners.clone();
+            let refused = Box::pin(MobRuntime::bootstrap(spec)).await;
+            assert!(
+                matches!(&refused, Err(MobRuntimeError::CompositionProvenance(_))),
+                "the launch is refused by its resume judgement: {:?}",
+                refused.as_ref().err()
+            );
+            if let Some(state) = owners.child_mob_state_for_tests() {
+                assert!(
+                    state.default_mob_id().is_none(),
+                    "the refused launch built no mob set that declares its mob"
+                );
+            }
+            let layout = MetaStorageLayout::with_injected_roots(dir.to_path_buf(), None);
+            crate::child_mob_storage::ChildMobRootClaim::acquire(&layout.child_mob_root()).expect(
+                "the refused launch left the durable child root unowned: no stored child mob \
+                 was restored and no pass of a mob set runs over the root",
+            );
+            assert_eq!(
+                host.model.calls(),
+                0,
+                "no member of a stored child mob ran a turn"
+            );
+        }
         other => panic!("unknown lifetime `{other}`"),
     }
+}
+
+/// `spec`, composed over the storage it opened at `store_file`, as the
+/// launch that declares that store to its mob set and hands no open of it:
+/// what a host that declares a file and opens nothing builds.
+fn declaring_with_no_open(mut spec: MobBootstrapSpec, store_file: &Path) -> MobBootstrapSpec {
+    let store = crate::mob_composition_manifest::declared_mob_store(store_file.to_path_buf());
+    spec.mob_storage_provenance = store.provenance().clone();
+    spec.declared_store = Some(store);
+    spec.storage = MobStorage::in_memory();
+    spec
+}
+
+/// `spec`, composed over the storage it opened at `store_file`, as the
+/// launch that declares that store to its mob set instead and keeps its own
+/// open only for what it reads before preparation.
+fn declaring(mut spec: MobBootstrapSpec, store_file: &Path) -> MobBootstrapSpec {
+    let store = crate::mob_composition_manifest::declared_mob_store(store_file.to_path_buf());
+    spec.mob_storage_provenance = store.provenance().clone();
+    spec.declared_store = Some(store);
+    let opened = std::mem::replace(&mut spec.storage, MobStorage::in_memory());
+    spec.with_declared_store_opened(opened)
 }
 
 async fn lifetime_with(dir: &Path, host: &Host, storage: ChildMobStorage) -> MobRuntime {
@@ -799,6 +942,174 @@ fn a_durable_child_mob_is_restored_with_its_sessions_and_no_new_turn() {
     run_lifetime("cold:2", dir.path());
 }
 
+/// A launch that declares its root store and reads it before preparation
+/// restores its durable child mobs in preparation, once the launch's default
+/// client is set: a restored child's member runs its turn on that client.
+#[test]
+fn a_child_mob_restored_after_the_read_before_preparation_runs_on_the_launchs_default_client() {
+    let dir = tempfile::tempdir().expect("state dir");
+    run_lifetime("cold:1", dir.path());
+    run_lifetime("client:2", dir.path());
+}
+
+/// What a launch reads of its declared store before preparation runs
+/// nothing of its mob set: no set that declares the mob is built, and the
+/// durable child root is not claimed, so no stored child mob is restored
+/// and no pass of the set runs over the root. A launch refused after that
+/// read leaves the root to the next owner.
+#[tokio::test]
+async fn the_read_before_preparation_of_a_declared_store_leaves_the_child_root_unowned() {
+    let dir = tempfile::tempdir().expect("state dir");
+    let store_file = dir.path().join("mob.sqlite3");
+    let layout = MetaStorageLayout::with_injected_roots(dir.path().to_path_buf(), None);
+    let opened = MobStorage::persistent(&store_file).expect("the launch's own open of its store");
+    let mut spec = composed_with(dir.path(), |definition, service| {
+        MobBootstrapSpec::declared(
+            definition,
+            crate::mob_composition_manifest::declared_mob_store(store_file.clone()),
+            service,
+        )
+    })
+    .with_meta_storage_layout(layout.clone())
+    .with_declared_store_opened(opened);
+    spec.read_launch_definition()
+        .await
+        .expect("the read before preparation");
+    assert!(
+        spec.declared_mob_set().is_none(),
+        "no mob set declares the launch's mob before preparation"
+    );
+    crate::child_mob_storage::ChildMobRootClaim::acquire(&layout.child_mob_root())
+        .expect("the read before preparation leaves the durable child root unowned");
+}
+
+/// A launch that declares its store and hands no open of it (the console
+/// gateway's persistent launch) and is refused by its resume judgement has
+/// run nothing: the stored child mob is not restored and nothing of a mob
+/// set runs over the child root.
+#[test]
+fn a_declared_launch_with_no_open_refused_by_its_resume_judgement_restores_no_child_mob() {
+    let dir = tempfile::tempdir().expect("state dir");
+    run_lifetime("cold:1", dir.path());
+    run_lifetime("refused-console:2", dir.path());
+}
+
+/// The same for a launch that hands its own open of the declared store and
+/// reads nothing of it before the bootstrap (a stdio launch with no roster
+/// provider).
+#[test]
+fn a_declared_launch_that_read_nothing_refused_by_its_resume_judgement_restores_no_child_mob() {
+    let dir = tempfile::tempdir().expect("state dir");
+    run_lifetime("cold:1", dir.path());
+    run_lifetime("refused-stdio:2", dir.path());
+}
+
+/// A spec declared over a file, handed no open of it, builds identity-first
+/// through the runtime builder, on a fresh state directory and again over
+/// what the first launch left: the builder reads the launch's definition
+/// before it prepares the mob, and that read opens the declared file itself.
+/// So does a spec made by the public constructor
+/// ([`MobBootstrapSpec::declared`]), which carries only what its caller
+/// composed on it.
+#[tokio::test]
+async fn a_spec_declared_over_a_file_builds_through_the_identity_first_builder() {
+    let options = || MobBootstrapOptions {
+        allow_ephemeral_sessions: false,
+        notify_orchestrator_on_resume: true,
+        default_llm_client: Some(Arc::new(meerkat_client::TestClient::default())),
+    };
+    let dir = tempfile::tempdir().expect("state dir");
+    let mob_id = unique("declared-builder");
+    let store_file = dir.path().join("mob.sqlite3");
+    for launch in [
+        "on a fresh state directory",
+        "over what the first launch left",
+    ] {
+        let (storage, provenance) =
+            crate::mob_composition_manifest::persistent_mob_storage(store_file.clone())
+                .expect("root mob storage");
+        let spec = MobBootstrapSpec::persistent(
+            root_definition(&mob_id),
+            storage,
+            provenance,
+            dir.path().to_path_buf(),
+            8,
+        )
+        .await
+        .expect("persistent spec")
+        .with_child_mob_storage(ChildMobStorage::ProcessBound)
+        .with_options(options());
+        let spec = declaring_with_no_open(spec, &store_file);
+        builds_through_the_identity_first_builder(spec, dir.path(), &mob_id, launch).await;
+    }
+    let dir = tempfile::tempdir().expect("state dir");
+    let mob_id = unique("declared-constructor");
+    let store_file = dir.path().join("mob.sqlite3");
+    for launch in [
+        "by the public constructor, on a fresh state directory",
+        "by the public constructor, over what the first launch left",
+    ] {
+        let spec = composed_with(dir.path(), |_, service| {
+            MobBootstrapSpec::declared(
+                root_definition(&mob_id),
+                crate::mob_composition_manifest::declared_mob_store(store_file.clone()),
+                service,
+            )
+        })
+        .with_child_mob_storage(ChildMobStorage::ProcessBound)
+        .with_options(options());
+        builds_through_the_identity_first_builder(spec, dir.path(), &mob_id, launch).await;
+    }
+}
+
+/// Build `spec` identity-first through the runtime builder over the state
+/// directory `dir`: the launch's mob runs, and the runtime shuts down clean.
+async fn builds_through_the_identity_first_builder(
+    spec: MobBootstrapSpec,
+    dir: &Path,
+    mob_id: &str,
+    launch: &str,
+) {
+    let built = Box::pin(
+        crate::UnifiedRuntimeBuilder::default()
+            .mob_spec(spec)
+            .persistent_state(dir)
+            .module_config(crate::MetaConfig {
+                modules: Vec::new(),
+                discovery: crate::DiscoverySpec {
+                    namespace: mob_id.to_string(),
+                    modules: Vec::new(),
+                },
+                pre_spawn: Vec::new(),
+            })
+            .timeout(Duration::from_secs(2))
+            .roster_provider(Arc::new(crate::identity_first::MutableRosterProvider::new(
+                Vec::new(),
+            )))
+            .build(),
+    )
+    .await;
+    let runtime = match built {
+        Ok(runtime) => runtime,
+        Err(error) => panic!(
+            "a spec declared over a file builds through the identity-first builder \
+             {launch}: {error:?}"
+        ),
+    };
+    assert_eq!(
+        runtime
+            .mob_handle()
+            .status()
+            .await
+            .expect("the launch's state"),
+        meerkat_mob::MobState::Running,
+        "{launch}"
+    );
+    let shutdown = runtime.shutdown().await;
+    assert!(shutdown.cleanup_completed(), "{launch}: {shutdown:?}");
+    drop(runtime);
+}
+
 /// R1, policy half: a restored child member runs under the CURRENT host child
 /// policy, with a denied operation and a permitted sibling. Needs the Core
 /// resume-policy handoff (`SpawnMemberSpec::application_tool_policy` as an
@@ -881,6 +1192,66 @@ async fn a_child_store_that_does_not_restore_is_quarantined_and_the_boot_goes_on
         "the quarantined store is kept as found"
     );
     stand_down_released(runtime, 0).await;
+}
+
+/// What agent memory's first start's step is handed for the mobs the agent
+/// mob tools host (`crate::memory::set_aside::HostedMobLogs`): a durable
+/// child mob that runs is handed with its event log, a durable child mob
+/// store that did not restore is named as not restored and has no event
+/// log there, and the root mob is not among them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_child_store_that_does_not_restore_is_handed_to_the_memory_step_as_not_restored() {
+    let dir = tempfile::tempdir().expect("state dir");
+    let root = crate::child_mob_storage::child_mob_root(dir.path());
+    std::fs::create_dir_all(&root).expect("child root");
+    std::fs::write(root.join("mob--broken-child.db"), b"not a sqlite database")
+        .expect("plant an undecodable child store");
+    let host = Host::new();
+    let mob_id = unique("memory-step-children");
+    let runtime = lifetime(dir.path(), &mob_id, &host, |spec| {
+        spec.with_child_mob_storage(durable(dir.path()))
+    })
+    .await
+    .expect("a quarantined child mob does not fail the boot");
+    let state = runtime.agent_mob_mcp_state().expect("agent mob state");
+    let running = MobId::from(unique("running-child").as_str());
+    state
+        .mob_create_definition(child_definition(&running))
+        .await
+        .expect("create a child mob that runs");
+
+    let hosted = crate::memory::set_aside::HostedMobLogs::of(Some(&*state), &mob_id)
+        .await
+        .expect("the hosted mobs read");
+    let mobs = hosted.mobs();
+
+    assert_eq!(
+        mobs.journals
+            .iter()
+            .map(|hosted| hosted.journal.mob())
+            .collect::<Vec<_>>(),
+        [running.to_string()],
+        "the child that runs is handed with its event log; the root mob is not"
+    );
+    assert!(
+        mobs.journals.iter().all(|hosted| hosted.creator.is_none()),
+        "a mob the host created names no creating member"
+    );
+    assert_eq!(
+        mobs.not_restored,
+        ["broken-child"],
+        "the child store that did not restore is named, and has no event log here"
+    );
+
+    drop(mobs);
+    drop(hosted);
+    drop(state);
+    runtime
+        .handle()
+        .shutdown()
+        .await
+        .expect("root mob shutdown");
+    let _ = runtime.stand_down_child_mobs(release_deadline()).await;
 }
 
 /// The boot answer of a root mob whose stored state could not be restored:
@@ -1069,6 +1440,7 @@ async fn a_release_is_reported_only_after_the_last_claim_holder_is_gone() {
         .expect("root mob shutdown");
 
     let holder = runtime
+        .process
         .child_mob_root
         .claim_holder_for_test()
         .expect("the runtime owns the root");
@@ -1121,6 +1493,8 @@ async fn a_child_created_during_the_stand_down_is_counted_or_refused() {
     let host = Host::new();
     let mob_id = unique("drain-insert");
     let runtime = lifetime(dir.path(), &mob_id, &host, |spec| {
+        // The row makes its child by a host's create, in the place of an
+        // agent's.
         spec.with_child_mob_storage(durable(dir.path()))
     })
     .await
@@ -1224,6 +1598,7 @@ async fn a_stand_down_waits_for_a_running_one_only_until_its_deadline() {
 
     // A running stand-down: the test owns the gate.
     let running = runtime
+        .process
         .child_mob_root
         .begin_stand_down(std::time::Instant::now() + Duration::from_secs(5))
         .await
@@ -1344,6 +1719,7 @@ async fn a_stand_down_stops_the_runtime_delivery_owner() {
     // Stopped, and joined: the owner's task ended before the stand-down
     // returned, so no pass of it can run past the release.
     let stopped = runtime
+        .process
         .runtime_delivery
         .as_ref()
         .map(|delivery| (delivery.is_stopped(), delivery.owner_task_ended()));
@@ -1417,7 +1793,7 @@ async fn a_retry_keeps_the_clean_receipt_of_a_stopped_child() {
         .await
         .expect("enumerate the children again");
     assert_eq!(
-        runtime.child_mob_root.outcome(child_mobs),
+        runtime.process.child_mob_root.outcome(child_mobs),
         crate::child_mob_storage::ChildMobStandDownOutcome::HeldUntilProcessExit { child_mobs: 1 },
         "the clean receipt holds; no unknown debt"
     );
@@ -1865,10 +2241,11 @@ async fn an_earlier_incarnations_pending_unregister_leaves_a_later_owners_regist
     let earlier = crate::child_mob_storage::ChildIncarnation::of(&first);
     assert!(
         runtime
+            .process
             .child_mob_root
             .pending_in(child_id.as_str(), &earlier),
         "the first incarnation owes a pending unregister: {:?}",
-        runtime.child_mob_root.outcome(child_mobs)
+        runtime.process.child_mob_root.outcome(child_mobs)
     );
 
     // The first incarnation's actor exits; its member's registration stays
@@ -2552,15 +2929,21 @@ async fn a_weak_identity_runtime_retains_none_of_the_agent_tool_composition() {
     let counts = |runtime: &MobRuntime| {
         (
             runtime
+                .process
                 .composition_release
                 .as_ref()
                 .map(|release| Arc::strong_count(&release.0)),
+            Some(Arc::strong_count(runtime.identity_plane().slot())),
             runtime
-                .identity_runtime_slot
+                .process
+                .session_service
                 .as_ref()
                 .map(Arc::strong_count),
-            runtime.session_service.as_ref().map(Arc::strong_count),
-            runtime.agent_mob_mcp_state.as_ref().map(Arc::strong_count),
+            runtime
+                .process
+                .agent_mob_mcp_state
+                .as_ref()
+                .map(Arc::strong_count),
         )
     };
     let view =
@@ -2661,9 +3044,10 @@ fn an_offered_bundle_is_forwarded_to_child_mob_creation() {
 // The launch's member auth binding reaches the root mob and the child mobs
 // ---------------------------------------------------------------------------
 
-/// A member auth binding goes on the root mob's spawn customizer and is child
-/// policy too: the agent mob-tool state is rebuilt with it at bootstrap, so
-/// the child mobs agents create build their members with the binding.
+/// A member auth binding goes into the launch's composition, for the spawns
+/// of every mob the launch hosts, and is child policy too: the agent
+/// mob-tool state is rebuilt with it at bootstrap, so the child mobs agents
+/// create build their members with the binding.
 #[tokio::test]
 async fn a_member_auth_binding_reaches_the_root_and_the_child_mobs() {
     let dir = tempfile::tempdir().expect("state dir");
@@ -2676,8 +3060,10 @@ async fn a_member_auth_binding_reaches_the_root_and_the_child_mobs() {
     let mut spec =
         composed_spec(dir.path(), custody_free_storage()).with_member_auth_binding(binding.clone());
     assert!(
-        spec.spawn_member_customizer.is_some(),
-        "the root mob's spawns carry the binding"
+        spec.launch_mob_composition()
+            .member_auth_binding_customizer
+            .is_some(),
+        "the spawns of every mob the launch hosts carry the binding"
     );
     let policy = spec.agent_mob_child_policy();
     assert_eq!(policy.member_auth_binding, Some(binding));
@@ -2995,12 +3381,23 @@ async fn a_spawn_refused_at_its_build_reaches_the_caller_typed() {
 #[derive(Default)]
 struct SurfaceRecordingHook {
     prepared: Mutex<Vec<Vec<String>>>,
+    projected: Mutex<Vec<Vec<String>>>,
 }
 
 impl SurfaceRecordingHook {
     /// The tool names of each prepared surface the hook decided, in order.
     fn prepared(&self) -> Vec<Vec<String>> {
         self.prepared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Of each prepared surface the hook decided, in order, the tool names
+    /// its static visibility filters leave: the tools the member's model can
+    /// be offered.
+    fn projected(&self) -> Vec<Vec<String>> {
+        self.projected
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
@@ -3045,6 +3442,16 @@ impl meerkat_mob::MemberRuntimeRegistrationHook for SurfaceRecordingHook {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(tools);
+        self.projected
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(
+                surface
+                    .projected
+                    .iter()
+                    .map(|tool| tool.name.as_str().to_string())
+                    .collect(),
+            );
         Ok(meerkat_core::ToolSurfaceSelection {
             binding: host_policy(),
             compiled_against: surface.clone(),
@@ -3067,6 +3474,20 @@ async fn governed_bound_lifetime(
     binding: meerkat_core::AuthBindingRef,
     hook: Option<Arc<dyn meerkat_mob::MemberRuntimeRegistrationHook>>,
 ) -> MobRuntime {
+    let model: Arc<dyn LlmClient> = host.model.clone();
+    governed_bound_lifetime_of(dir, root_definition(mob_id), model, config, binding, hook).await
+}
+
+/// [`governed_bound_lifetime`] over the root mob `definition`, with `model`
+/// as every member's model.
+async fn governed_bound_lifetime_of(
+    dir: &Path,
+    definition: MobDefinition,
+    model: Arc<dyn LlmClient>,
+    config: Config,
+    binding: meerkat_core::AuthBindingRef,
+    hook: Option<Arc<dyn meerkat_mob::MemberRuntimeRegistrationHook>>,
+) -> MobRuntime {
     let (storage, provenance) =
         crate::mob_composition_manifest::persistent_mob_storage(dir.join("mob.sqlite3"))
             .expect("root mob storage");
@@ -3075,7 +3496,7 @@ async fn governed_bound_lifetime(
         .expect("the state directory's meerkat-level realm")
         .clone();
     let mut spec = MobBootstrapSpec::persistent_inner_with_provider_stores(
-        root_definition(mob_id),
+        definition,
         storage,
         provenance,
         dir.to_path_buf(),
@@ -3098,6 +3519,7 @@ async fn governed_bound_lifetime(
         None,
         None,
         None,
+        Vec::new(),
     )
     .await
     .expect("persistent spec")
@@ -3107,7 +3529,6 @@ async fn governed_bound_lifetime(
     if let Some(hook) = hook {
         spec = spec.with_member_runtime_registration_hook(hook);
     }
-    let model: Arc<dyn LlmClient> = host.model.clone();
     spec.options.default_llm_client = Some(model);
     Box::pin(MobRuntime::bootstrap(spec))
         .await
@@ -3259,6 +3680,8 @@ async fn a_stored_child_mob_off_the_binding_refuses_a_bound_launch() {
     let dir = tempfile::tempdir().expect("state dir");
     let host = Host::new();
     let runtime = lifetime(dir.path(), &unique("unbound-root"), &host, |spec| {
+        // The row makes its child by a host's create, in the place of an
+        // agent's.
         spec.with_child_mob_storage(durable(dir.path()))
     })
     .await
@@ -3315,6 +3738,8 @@ async fn a_stored_child_mob_whose_destroy_is_pending_is_skipped() {
     let dir = tempfile::tempdir().expect("state dir");
     let host = Host::new();
     let runtime = lifetime(dir.path(), &unique("unbound-root"), &host, |spec| {
+        // The row makes its child by a host's create, in the place of an
+        // agent's.
         spec.with_child_mob_storage(durable(dir.path()))
     })
     .await
@@ -3720,4 +4145,427 @@ async fn a_socket_composition_serves_one_member_across_the_root_and_the_child_mo
         "second",
         &["worker-a".to_string(), child_id.to_string()],
     );
+}
+
+// ---------------------------------------------------------------------------
+// A profile's deny of the stock tool `ask_user`, on every member build
+// ---------------------------------------------------------------------------
+//
+// The rows below build one member each on the governed composition of the
+// rows above, with the host's registration hook (the member is built through
+// its registration's tool-surface gate, so Meta mounts no `ask_user` on it)
+// or without it and otherwise the same. That composition admits no turn that
+// is not governed work, so these rows judge the build: whether it is refused,
+// the surface its host decided, the tools the member's session lists for its
+// model, and the tool policy its session records. What a model's call is
+// answered is run in `tests/ask_user_denied.rs`.
+
+/// The stock tool the rows below deny.
+const ASK_USER: &str = "ask_user";
+/// The comms tools every member of the rows' mob has, and the tool catalog's
+/// control tools, which every member has but one whose spawn carries
+/// external tools of its own.
+const DENY_NAME_COMMS_TOOLS: [&str; 5] = [
+    "peers",
+    "reply_to_peer",
+    "send_message",
+    "send_request",
+    "send_response",
+];
+const DENY_NAME_CATALOG_TOOLS: [&str; 2] = ["tool_catalog_load", "tool_catalog_search"];
+
+/// A host's own tool named `ask_user`, as a host puts one among a member
+/// build's external tools.
+struct HostsOwnAskUser;
+
+#[async_trait]
+impl AgentToolDispatcher for HostsOwnAskUser {
+    fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+        vec![Arc::new(ToolDef::new(
+            ASK_USER,
+            "The host's own tool of this name.",
+            json!({"type": "object", "properties": {}}),
+        ))]
+        .into()
+    }
+
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+        Ok(ToolDispatchOutcome::sync_result(ToolResult::new(
+            call.id.to_string(),
+            "answered by the host's own tool".to_string(),
+            false,
+        )))
+    }
+
+    fn capabilities(&self) -> meerkat_core::agent::DispatcherCapabilities {
+        meerkat_core::agent::DispatcherCapabilities::default()
+    }
+}
+
+/// The rows' root mob: three profiles that differ only in `tools.deny`.
+/// `plain` denies nothing, `denier` denies the stock tool `ask_user`, and
+/// `mistyped` denies `ask_usr`, a name no tool of any build has.
+fn deny_name_definition(mob_id: &str) -> MobDefinition {
+    let profile = |name: &str, deny: &str| {
+        format!(
+            "[profiles.{name}]\nmodel = \"gpt-5.5\"\nruntime_mode = \"turn_driven\"\n\
+             [profiles.{name}.tools]\ncomms = true\n{deny}\n"
+        )
+    };
+    MobDefinition::from_toml(&format!(
+        "[mob]\nid = \"{mob_id}\"\n\n{}{}{}",
+        profile("plain", ""),
+        profile("denier", "deny = [\"ask_user\"]\n"),
+        profile("mistyped", "deny = [\"ask_usr\"]\n"),
+    ))
+    .expect("the deny rows' definition")
+}
+
+/// How a row's one member is built.
+#[derive(Clone, Copy)]
+struct DenyNameCase {
+    /// The host installs a member registration hook, so the member is built
+    /// through its registration's tool-surface gate and Meta mounts no
+    /// `ask_user` on it.
+    host_decides_surface: bool,
+    /// The member's profile: `plain`, `denier` or `mistyped`.
+    profile: &'static str,
+    /// The host supplies its own tool named `ask_user` among the member
+    /// build's external tools.
+    hosts_own_tool: bool,
+}
+
+/// What a row observed of a member that was built.
+struct DenyNameBuilt {
+    /// The member's spawn carried the host's own tool named `ask_user`.
+    hosts_own_tool: bool,
+    /// The tools the member's session lists for its model, sorted.
+    listed: Vec<String>,
+    /// The tool names of each prepared surface the host's hook decided:
+    /// every tool the build composed.
+    host_decided: Vec<Vec<String>>,
+    /// Of each of those surfaces, the tool names its static visibility
+    /// filters leave: the tools the member's model can be offered.
+    host_offered: Vec<Vec<String>>,
+    /// The tool access policy the member's session records as the one its
+    /// calls are judged by; none when it records none, or when the store
+    /// holds no record of the member's session.
+    recorded_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
+}
+
+/// The tool access policy the session of `member` records in the lifetime's
+/// session store, read from the session's own record; none when the session
+/// records none, or when the store holds no record of it.
+async fn recorded_tool_access_policy(
+    dir: &Path,
+    member: &str,
+) -> Option<meerkat_core::ops::ToolAccessPolicy> {
+    use meerkat::SessionStore as _;
+    let store = meerkat_store::SqliteSessionStore::open(
+        MetaStorageLayout::with_injected_roots(dir.to_path_buf(), None).runtime_db(),
+    )
+    .expect("open the session store");
+    for meta in store
+        .list(meerkat::SessionFilter::default())
+        .await
+        .expect("list the sessions")
+    {
+        let Some(session) = store.load(&meta.id).await.expect("load a session") else {
+            continue;
+        };
+        let Some(metadata) = session
+            .try_session_metadata()
+            .expect("decode the session metadata")
+        else {
+            continue;
+        };
+        if metadata
+            .mob_member_binding
+            .as_ref()
+            .is_some_and(|binding| binding.member == member)
+        {
+            return metadata.tooling.tool_access_policy;
+        }
+    }
+    None
+}
+
+/// Build the member of `case`. A refused build answers its error, after the
+/// row checked that nothing was built.
+async fn build_deny_name_member(case: DenyNameCase) -> Result<DenyNameBuilt, String> {
+    let dir = tempfile::tempdir().expect("state dir");
+    let native = tempfile::tempdir().expect("native realm root");
+    let host = Host::new();
+    let model: Arc<dyn LlmClient> = host.model.clone();
+    let hook = Arc::new(SurfaceRecordingHook::default());
+    let runtime = governed_bound_lifetime_of(
+        dir.path(),
+        deny_name_definition(&unique("deny-name")),
+        model,
+        native_team_config_with_default_credential(native.path()).await,
+        native_team_binding("b"),
+        case.host_decides_surface
+            .then(|| Arc::clone(&hook) as Arc<dyn meerkat_mob::MemberRuntimeRegistrationHook>),
+    )
+    .await;
+    let member = AgentIdentity::from("member");
+    let mut spawn = SpawnMemberSpec::new(ProfileName::from(case.profile), member.clone());
+    if case.hosts_own_tool {
+        spawn.external_tools = Some(Arc::new(HostsOwnAskUser));
+    }
+    if let Err(refused) = Box::pin(runtime.handle().spawn_spec(spawn)).await {
+        assert!(
+            runtime
+                .handle()
+                .resolve_bridge_session_id(&member)
+                .await
+                .is_none(),
+            "a refused build leaves no member"
+        );
+        stand_down_released(runtime, 0).await;
+        return Err(refused.to_string());
+    }
+    let session_id = runtime
+        .handle()
+        .resolve_bridge_session_id(&member)
+        .await
+        .expect("the member's session");
+    let mut listed = resolved_tools_for_session(runtime.session_service(), "member", session_id)
+        .await
+        .expect("the member's tools")
+        .tools;
+    listed.sort();
+    let host_decided = hook.prepared();
+    let host_offered = hook.projected();
+    stand_down_released(runtime, 0).await;
+    Ok(DenyNameBuilt {
+        hosts_own_tool: case.hosts_own_tool,
+        listed,
+        host_decided,
+        host_offered,
+        recorded_policy: recorded_tool_access_policy(dir.path(), "member").await,
+    })
+}
+
+/// The tools the built member has beside any tool named `ask_user`, with
+/// `ask_user` when `with_ask_user`, sorted.
+fn deny_name_tools(built: &DenyNameBuilt, with_ask_user: bool) -> Vec<String> {
+    let mut tools: Vec<String> = DENY_NAME_COMMS_TOOLS
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    if !built.hosts_own_tool {
+        tools.extend(DENY_NAME_CATALOG_TOOLS.iter().map(ToString::to_string));
+    }
+    if with_ask_user {
+        tools.push(ASK_USER.to_string());
+    }
+    tools.sort();
+    tools
+}
+
+/// The member built on the profile that denies `ask_user`. Its session
+/// lists its own tools for its model and no tool named `ask_user`, and
+/// records a policy that denies the name: the policy every call of the
+/// member is judged by, which refuses a call to whichever tool of the build
+/// carries a denied name (a call to a name no tool of the build has is
+/// answered as not found, with the deny or without it).
+fn assert_built_with_ask_user_denied(
+    built: Result<DenyNameBuilt, String>,
+    case: &str,
+) -> DenyNameBuilt {
+    let built = match built {
+        Ok(built) => built,
+        Err(refused) => panic!("{case}: the member builds, but its build was refused: {refused}"),
+    };
+    assert_eq!(
+        built.listed,
+        deny_name_tools(&built, false),
+        "{case}: the member's session lists its own tools and not ask_user"
+    );
+    assert!(
+        matches!(
+            &built.recorded_policy,
+            Some(meerkat_core::ops::ToolAccessPolicy::DenyList(names))
+                if names.contains(ASK_USER)
+        ),
+        "{case}: the member's session records a policy that denies ask_user: {:?}",
+        built.recorded_policy
+    );
+    built
+}
+
+/// Whether any of `surfaces` names `ask_user`.
+fn names_ask_user(surfaces: &[Vec<String>]) -> bool {
+    surfaces
+        .iter()
+        .any(|surface| surface.iter().any(|tool| tool == ASK_USER))
+}
+
+/// The host decided its member's surface, and the tools of that surface the
+/// member's model can be offered name no `ask_user`.
+fn assert_host_offered_no_ask_user(built: &DenyNameBuilt, case: &str) {
+    assert!(
+        !built.host_offered.is_empty() && !names_ask_user(&built.host_offered),
+        "{case}: the host decided the member's surface, and the tools of it the member's \
+         model can be offered name no ask_user: {:?}",
+        built.host_offered
+    );
+}
+
+/// A member whose host decides its tool surface (a host with a member
+/// registration hook) carries no stock `ask_user`. A profile that denies
+/// the stock tool is still a profile such a member builds on: the stock
+/// name is one a deny list may name on every member build, mounted there or
+/// not. The member is not offered the tool, the surface its host decided
+/// names none, and its session's policy denies the name.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_member_whose_host_decides_its_surface_builds_on_a_profile_that_denies_ask_user() {
+    let case = "not mounted (the host decides the surface) and denied";
+    let built = assert_built_with_ask_user_denied(
+        build_deny_name_member(DenyNameCase {
+            host_decides_surface: true,
+            profile: "denier",
+            hosts_own_tool: false,
+        })
+        .await,
+        case,
+    );
+    assert_host_offered_no_ask_user(&built, case);
+    assert!(
+        !names_ask_user(&built.host_decided),
+        "{case}: the build composed no tool named ask_user: {:?}",
+        built.host_decided
+    );
+}
+
+/// The same member without the deny builds as it did and is not offered the
+/// tool: Meta mounts none on a build whose surface its host decides.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_member_whose_host_decides_its_surface_is_not_offered_ask_user() {
+    let case = "not mounted (the host decides the surface) and not denied";
+    let built = build_deny_name_member(DenyNameCase {
+        host_decides_surface: true,
+        profile: "plain",
+        hosts_own_tool: false,
+    })
+    .await
+    .expect("the member builds");
+    assert_eq!(built.listed, deny_name_tools(&built, false), "{case}");
+    assert_host_offered_no_ask_user(&built, case);
+    assert!(
+        !names_ask_user(&built.host_decided),
+        "{case}: the build composed no tool named ask_user: {:?}",
+        built.host_decided
+    );
+}
+
+/// The control of the two rows above, on the same composition without the
+/// host's hook: Meta mounts the stock tool, and a profile that denies it
+/// keeps it from the member's model.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_member_whose_host_decides_no_surface_builds_on_a_profile_that_denies_ask_user() {
+    assert_built_with_ask_user_denied(
+        build_deny_name_member(DenyNameCase {
+            host_decides_surface: false,
+            profile: "denier",
+            hosts_own_tool: false,
+        })
+        .await,
+        "mounted and denied",
+    );
+}
+
+/// And without the deny that member is offered the stock tool.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_member_whose_host_decides_no_surface_is_offered_ask_user() {
+    let built = build_deny_name_member(DenyNameCase {
+        host_decides_surface: false,
+        profile: "plain",
+        hosts_own_tool: false,
+    })
+    .await
+    .expect("the member builds");
+    assert_eq!(
+        built.listed,
+        deny_name_tools(&built, true),
+        "mounted and not denied"
+    );
+}
+
+/// A host that decides its member's surface also supplies its own tool
+/// named `ask_user` among the build's external tools. A profile that denies
+/// the name is still a profile the member builds on, and the deny does to
+/// the host's own tool what a deny does to every tool. The tool stays one
+/// the build composed, so the surface its host decides names it; the tools
+/// of that surface the member's model can be offered do not, the member's
+/// session does not list it, and the session's policy denies the name.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_hosts_own_ask_user_on_a_surface_its_host_decides_builds_on_a_profile_that_denies_it() {
+    let case = "the host's own ask_user on a surface the host decides, denied";
+    let built = assert_built_with_ask_user_denied(
+        build_deny_name_member(DenyNameCase {
+            host_decides_surface: true,
+            profile: "denier",
+            hosts_own_tool: true,
+        })
+        .await,
+        case,
+    );
+    assert_host_offered_no_ask_user(&built, case);
+    assert!(
+        names_ask_user(&built.host_decided),
+        "{case}: the host's own tool is one the build composed: {:?}",
+        built.host_decided
+    );
+}
+
+/// The same member without the deny is offered the host's own tool under
+/// the name `ask_user`: its host decided a surface that offers it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_hosts_own_ask_user_on_a_surface_its_host_decides_is_offered_without_a_deny() {
+    let built = build_deny_name_member(DenyNameCase {
+        host_decides_surface: true,
+        profile: "plain",
+        hosts_own_tool: true,
+    })
+    .await
+    .expect("the member builds");
+    assert_eq!(built.listed, deny_name_tools(&built, true));
+    assert!(
+        names_ask_user(&built.host_offered),
+        "the host decided a surface that offers its own ask_user: {:?}",
+        built.host_offered
+    );
+}
+
+/// A mistyped name in `tools.deny` (`ask_usr`: in no tool vocabulary of the
+/// build, and no stock tool's name) still refuses the member's build, typed,
+/// naming the profile and the name, whether or not the host decides the
+/// member's surface and whether or not the host supplies its own tool named
+/// `ask_user`. Nothing is built.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_mistyped_deny_name_still_refuses_the_members_build() {
+    for (case, host_decides_surface, hosts_own_tool) in [
+        ("mounted", false, false),
+        ("the host decides the surface", true, false),
+        ("the host's own ask_user", true, true),
+    ] {
+        let refused = build_deny_name_member(DenyNameCase {
+            host_decides_surface,
+            profile: "mistyped",
+            hosts_own_tool,
+        })
+        .await
+        .err()
+        .unwrap_or_else(|| panic!("{case}: a mistyped deny name refuses the build"));
+        println!("MISTYPED DENY NAME ({case}): {refused}");
+        assert!(
+            refused.contains(
+                "profile 'mistyped' denies tool 'ask_usr', which is in none of its tool \
+                 vocabularies"
+            ),
+            "{case}: {refused}"
+        );
+    }
 }

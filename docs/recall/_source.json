@@ -6,12 +6,13 @@
   "source_version": "0.9.1",
   "source_docs_dirty": false,
   "public_pages": 45,
-  "content_sha256": "d6c372e2f751b6220df38b29ea2b2006966af3c9a46293f6ab436e4f570bd5a0",
+  "content_sha256": "8bd30bc414786be8fab7570828dc80b2d18f2c218267db709f9d1747e78dcc61",
   "content_hash_scope": "All mirrored files except _source.json, sorted by relative path; path NUL bytes NUL.",
   "mirror_adjustments": [
     "Local routes namespaced under /recall.",
     "Existing immutable technical Markdown/source links retain their original public commit; linked target bytes are unchanged.",
     "Missing page icons supplied; Pipeline Work Queue retains its stable punctuation-free fragment.",
+    "Literal braces around audit_id in the audit revert endpoint heading are escaped for MDX.",
     "Canonical source uses neutral consuming-host wording and explicitly distinguishes current source defaults from published 0.9.1 binaries; no downstream product or branch name is added to the mirror."
   ]
 }

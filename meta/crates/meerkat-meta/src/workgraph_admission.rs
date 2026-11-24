@@ -56,16 +56,25 @@
 //!
 //! The cross-process sidecar cannot be dropped in favour of the upstream
 //! guard either: the three residual cases are still check-then-act across two
-//! separate reads, so without the sidecar two processes sharing one
-//! `workgraph.sqlite3` can each observe a free target and both proceed.
+//! separate reads, so without the sidecar two processes that both have one
+//! `workgraph.sqlite3` open could each observe a free target and both proceed.
+//!
+//! Which two processes: not two runtimes of this crate's own persistent
+//! compositions. The gateways (where they open stores in the state
+//! directory), the builder's `persistent_state` and the persistent spec
+//! constructors (other than under host-store authority) take an exclusive
+//! claim on the directory before any store opens, and a second runtime there
+//! is refused (`state_dir_claim`). The sidecar serializes a holder of its
+//! lock file that takes no such claim: a runtime composed by hand over the
+//! same store.
 //!
 //! What remains here, then, is defense-in-depth for the exact-key
 //! Active/Active case and the PRIMARY refusal for the three residuals: the
 //! occupancy check (with session↔identity alias resolution through the mob
 //! roster and the shared session store's member-binding metadata), the
-//! in-process gate serializing every check-then-act window, and — for
-//! SQLite-backed stores that two processes may share — a cross-process
-//! sidecar lock.
+//! in-process gate serializing every check-then-act window, and - for
+//! SQLite-backed stores, which a process outside the state directory claim
+//! can open too - a cross-process sidecar lock.
 //!
 //! One [`WorkGraphAdmission`] exists per [`MobRuntime`](crate::MobRuntime).
 //! Every surface that can mint an attention binding must go through it:
@@ -89,11 +98,13 @@
 //!
 //! # Target spelling: normalize at write, alias at read (round-4 Q2, round-5 S1)
 //!
-//! The roster is PROCESS-LOCAL, but the SQLite store is documented as
-//! shareable by two processes (gateway + library-mode runtime on one state
-//! dir). A guard that needed the roster to equate a session-form row with an
-//! identity-form check would be alias-blind in the process that doesn't know
-//! the member — and in-process while a member is mid-respawn (absent from
+//! The roster is PROCESS-LOCAL, and a process that does not hold this roster
+//! can write to the SQLite store: a runtime composed by hand over the same
+//! store (a second runtime of this crate's persistent compositions on the
+//! state dir is refused, see above). A guard that needed the roster to equate
+//! a session-form row with an identity-form check would be alias-blind in the
+//! process that doesn't know the member - and in-process while a member is
+//! mid-respawn (absent from
 //! the roster). So meta normalizes at WRITE instead: every mutation that
 //! points a binding at a target (`goal/create` and `attention/reassign` on
 //! the RPC arms, `workgraph_attention_reassign` on the tool plane) first
@@ -189,9 +200,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use meerkat::{
-    AttentionBindingRequest, AttentionListRequest, GoalAttentionTarget, WorkAttentionBinding,
-    WorkAttentionBindingId, WorkAttentionStatus, WorkAttentionTarget, WorkGraphError,
-    WorkGraphService, WorkNamespace, WorkOwnerKey, WorkOwnerKind,
+    AttentionBindingRequest, AttentionListRequest, AttentionPauseRequest, GoalAttentionTarget,
+    WorkAttentionBinding, WorkAttentionBindingId, WorkAttentionStatus, WorkAttentionTarget,
+    WorkGraphError, WorkGraphService, WorkNamespace, WorkOwnerKey, WorkOwnerKind,
 };
 
 /// File name of the cross-process admission lock database, created in the
@@ -319,10 +330,11 @@ impl SidecarLock {
             .map_err(|error| {
                 format!(
                     "could not lock the workgraph admission sidecar {} within the {}s busy \
-                     timeout: {error}. The lock is held by another process sharing this state \
-                     dir (in the documented deployment: a gateway and a library-mode runtime on \
-                     one workgraph.sqlite3) — most likely a co-process is wedged mid-admission \
-                     or under heavy binding-mutation load; retry, or check that co-process",
+                     timeout: {error}. Another holder of this lock file has the admission: \
+                     another mob of this host, or a process that takes the lock file without \
+                     the claim on the state directory. Most likely that holder is wedged \
+                     mid-admission or under heavy binding-mutation load; retry, or check that \
+                     holder",
                     path.display(),
                     Self::BUSY_TIMEOUT.as_secs(),
                 )
@@ -348,11 +360,14 @@ pub struct WorkGraphAdmission {
     /// permits can hold an owned guard (the tool plane keeps one across the
     /// forwarded dispatch).
     gate: Arc<tokio::sync::Mutex<()>>,
-    /// Cross-process lock database, set only for SQLite-backed stores —
-    /// `workgraph.sqlite3` is documented as shareable by a gateway and a
-    /// library-mode runtime on one state dir, and two processes means two
-    /// in-process gates. Memory-backed runtimes are single-process by
-    /// construction and keep the in-process gate only.
+    /// Cross-process lock database, set only for SQLite-backed stores: a
+    /// second process with `workgraph.sqlite3` open has an in-process gate
+    /// of its own, which this one cannot see. A second runtime of this
+    /// crate's persistent compositions on the state dir is refused by the
+    /// state directory claim (`state_dir_claim`); the lock serializes a
+    /// holder of the lock file that takes no such claim. Memory-backed
+    /// runtimes are single-process by construction and keep the in-process
+    /// gate only.
     sidecar: Option<PathBuf>,
     /// Memo of POSITIVE session→member resolutions through the session-store
     /// fallback of [`Self::resolve_member_identity`].
@@ -386,6 +401,11 @@ pub struct WorkGraphAdmission {
     >,
     /// TTL for positive member-resolution entries; overridable in tests.
     member_resolution_ttl: std::time::Duration,
+    /// The admissions of the mobs this admission's host serves beside its
+    /// own mob, by mob id ([`Self::hold_builds_of`]): the build of a member
+    /// of such a mob private to a person is held by its own mob's
+    /// admission. Weak: an admission goes with its mob's entry.
+    hosted: std::sync::Mutex<HashMap<String, std::sync::Weak<Self>>>,
 }
 
 impl WorkGraphAdmission {
@@ -412,7 +432,52 @@ impl WorkGraphAdmission {
             sidecar,
             member_resolution_cache: std::sync::Mutex::new(HashMap::new()),
             member_resolution_ttl: Self::MEMBER_RESOLUTION_TTL,
+            hosted: std::sync::Mutex::new(HashMap::new()),
         }
+    }
+
+    /// From here on the build of a member private to a person of `hosted`'s
+    /// mob, a mob this admission's host serves beside its own, is held by
+    /// `hosted` when this admission is asked for it
+    /// ([`Self::hold_bindings_onto_private_member_build`]): the member
+    /// builds of every mob of a host ask the launch mob's admission. A mob
+    /// served again under the same id (a load after an unload, a mob
+    /// created again) takes the place of the earlier one.
+    pub(crate) fn hold_builds_of(&self, hosted: &Arc<Self>) {
+        self.hosted
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                hosted.mob_handle.definition().id.to_string(),
+                Arc::downgrade(hosted),
+            );
+    }
+
+    /// The admission of the mob `mob_id` that this admission's host serves
+    /// beside its own mob, while that mob's entry stands.
+    fn hosted_admission(&self, mob_id: &str) -> Option<Arc<Self>> {
+        self.hosted
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(mob_id)
+            .and_then(std::sync::Weak::upgrade)
+    }
+
+    /// The admission of another mob of this admission's host, the mob of
+    /// `mob_handle`: a gate and a member memo of its own, over that mob's
+    /// roster, and what this admission holds against another process on the
+    /// state directory, the session service of the launch (every mob of a
+    /// host builds its members' sessions in it, and a session's member
+    /// binding names its mob) and the lock file beside the store (every mob
+    /// of a host keeps its realm in the launch's one store). A request for
+    /// that mob is then serialized against a co-process as a request for
+    /// the launch mob is.
+    pub(crate) fn of_hosted_mob(&self, mob_handle: meerkat_mob::MobHandle) -> Self {
+        Self::new(
+            mob_handle,
+            self.session_service.clone(),
+            self.sidecar.clone(),
+        )
     }
 
     /// Test hook: shrink the positive-entry TTL so expiry is observable.
@@ -420,6 +485,14 @@ impl WorkGraphAdmission {
     pub(crate) fn with_member_resolution_ttl(mut self, ttl: std::time::Duration) -> Self {
         self.member_resolution_ttl = ttl;
         self
+    }
+
+    /// Test builds only: what this admission holds against another process
+    /// on its state directory: the lock file it takes, and whether it reads
+    /// a member's session where the roster misses.
+    #[cfg(test)]
+    pub(crate) fn cross_process_guards_in_tests(&self) -> (Option<PathBuf>, bool) {
+        (self.sidecar.clone(), self.session_service.is_some())
     }
 
     /// The mob whose roster backs alias resolution (and whose definition id
@@ -589,6 +662,38 @@ impl WorkGraphAdmission {
         Ok(())
     }
 
+    /// Whether a lowered target or supervisor key
+    /// ([`Self::lower_member_session_target`]) is of this mob's member form
+    /// and names no member WorkGraph work may be bound to: a name no member
+    /// of the mob holds, or a member private to a person. A key of any other
+    /// shape answers false.
+    ///
+    /// The agent tool plane asks this, and answers both cases with one
+    /// refusal: a caller that may not see a private member must not learn
+    /// from a tool's answer whether a name is hidden or free. The host's
+    /// methods keep [`Self::refuse_private_member_target`]: they may bind a
+    /// name before its member exists, and name a private member in their
+    /// refusal.
+    pub(crate) async fn names_no_bindable_member(
+        &self,
+        target: &GoalAttentionTarget,
+    ) -> Result<bool, WorkGraphAdmissionError> {
+        let Some(member) =
+            crate::rpc::workgraph_methods::target_member(&self.mob_handle.definition().id, target)
+        else {
+            return Ok(false);
+        };
+        let entry = self
+            .mob_handle
+            .get_member(&meerkat_mob::AgentIdentity::from(member.as_str()))
+            .await
+            .map_err(|error| WorkGraphAdmissionError::MemberUnreadable {
+                member: member.clone(),
+                detail: error.to_string(),
+            })?;
+        Ok(entry.is_none_or(|entry| crate::access::private_owner(&entry.labels).is_some()))
+    }
+
     /// Take the admission for one check-then-mutate window. The in-process
     /// gate is taken first so at most one task per process waits on the
     /// sidecar; the sidecar (when configured) then serializes against other
@@ -736,6 +841,257 @@ impl WorkGraphAdmission {
                 ),
             },
         })
+    }
+
+    /// Refuse the resume of a binding whose target names a member of this
+    /// mob private to a person, in either form of the target: no binding may
+    /// serve such a member ([`Self::refuse_private_member_target`]), and
+    /// `goal/create` and `attention/reassign` make none, so one that names
+    /// it all the same stays paused. A pause with a deadline asks this too:
+    /// it makes the binding active again when the deadline passes. An
+    /// unknown `binding_id` falls through
+    /// so the service reports its canonical not-found error.
+    pub(crate) async fn refuse_private_member_resume(
+        &self,
+        service: &WorkGraphService,
+        namespace: Option<WorkNamespace>,
+        binding_id: &WorkAttentionBindingId,
+    ) -> Result<(), WorkGraphAdmissionError> {
+        let resumed = match service
+            .attention_binding(AttentionBindingRequest {
+                binding_id: binding_id.clone(),
+                realm_id: None,
+                namespace,
+            })
+            .await
+        {
+            Ok(result) => result.attention,
+            Err(WorkGraphError::AttentionNotFound { .. }) => return Ok(()),
+            Err(error) => return Err(WorkGraphAdmissionError::Service(error)),
+        };
+        self.refuse_private_member_binding_target(&resumed.target)
+            .await
+    }
+
+    /// [`Self::refuse_private_member_target`] for the target a stored
+    /// binding carries: a session target is resolved to its member first.
+    pub(crate) async fn refuse_private_member_binding_target(
+        &self,
+        target: &WorkAttentionTarget,
+    ) -> Result<(), WorkGraphAdmissionError> {
+        let lowered = self.lowered_binding_target(target).await?;
+        self.refuse_private_member_target(&lowered).await
+    }
+
+    /// The target a stored binding carries, lowered as a target a caller
+    /// names is ([`Self::lower_member_session_target`]): a session target a
+    /// member holds becomes that member's owner form.
+    async fn lowered_binding_target(
+        &self,
+        target: &WorkAttentionTarget,
+    ) -> Result<GoalAttentionTarget, WorkGraphAdmissionError> {
+        let named = match target {
+            WorkAttentionTarget::Session { session_id } => GoalAttentionTarget::Session {
+                session_id: session_id.clone(),
+            },
+            WorkAttentionTarget::LoweredOwner { owner_key } => GoalAttentionTarget::Owner {
+                owner_key: owner_key.clone(),
+            },
+        };
+        self.lower_member_session_target(named).await
+    }
+
+    /// Hold every attention binding of `service`'s scope whose target is a
+    /// member of this mob private to a person: an active one, and one paused
+    /// with a deadline, is paused with no deadline, and the id of each one
+    /// found is returned.
+    ///
+    /// No method of the host and no tool of a member makes such a binding,
+    /// but a store may hold one from a release whose member tools did not
+    /// refuse it. While it is active every turn of the private member takes
+    /// the binding's tools, which the member was built without, and fails. A
+    /// start therefore pauses it before any member takes a turn; the host's
+    /// resume refuses it ([`Self::refuse_private_member_resume`]), so it
+    /// stays paused until it is reassigned to another member or its goal is
+    /// closed. The pause is the one `meta/workgraph/attention/pause` writes.
+    /// A binding that is paused with a deadline is paused again with none:
+    /// when the deadline passed it would be active again, by the attention
+    /// machine's own rule, which no method of the host stands in front of.
+    ///
+    /// A binding whose target cannot be judged, or whose pause the store
+    /// refuses, is logged and left as it is: the start goes on.
+    pub(crate) async fn hold_bindings_onto_private_members(
+        &self,
+        service: &WorkGraphService,
+    ) -> Result<Vec<WorkAttentionBindingId>, WorkGraphAdmissionError> {
+        self.hold_bindings(service, None).await
+    }
+
+    /// [`Self::hold_bindings_onto_private_members`] for one member of this
+    /// mob that is being built private to a person, named by its build: the
+    /// roster may not hold it yet, so the bindings are matched by the
+    /// member's name alone.
+    ///
+    /// The host may bind a goal to a name before its member exists. When
+    /// the member then created under that name is private to a person, the
+    /// binding would be active on it from its first turn; its build
+    /// therefore holds every binding that names it, as a start does.
+    ///
+    /// A member of a mob this admission's host serves beside its own mob
+    /// ([`Self::hold_builds_of`]) is held by that mob's own admission, over
+    /// that mob's realm of `service`'s store: the bindings that name the
+    /// member are that realm's. A member of any other mob holds nothing
+    /// here.
+    pub(crate) async fn hold_bindings_onto_private_member_build(
+        &self,
+        service: &WorkGraphService,
+        mob_id: &str,
+        member: &str,
+    ) -> Result<Vec<WorkAttentionBindingId>, WorkGraphAdmissionError> {
+        if mob_id == self.mob_handle.definition().id.as_str() {
+            return self.hold_bindings(service, Some(member)).await;
+        }
+        let Some(hosted) = self.hosted_admission(mob_id) else {
+            return Ok(Vec::new());
+        };
+        let of_its_realm =
+            match meerkat_mob::mob_scoped_workgraph_service(service, hosted.mob_handle.mob_id()) {
+                Ok(Some(of_its_realm)) => of_its_realm,
+                // No WorkGraph for that mob: nothing is bound in it.
+                Ok(None) => return Ok(Vec::new()),
+                Err(error) => {
+                    tracing::warn!(
+                        mob_id,
+                        member,
+                        %error,
+                        "the WorkGraph realm of a mob hosted beside the launch mob could not be \
+                         formed at the build of a member of it private to a person; no binding is \
+                         held at this build"
+                    );
+                    return Ok(Vec::new());
+                }
+            };
+        hosted.hold_bindings(&of_its_realm, Some(member)).await
+    }
+
+    /// The member of this mob the target of a stored binding names, in
+    /// either form of the target: a session target is resolved to its
+    /// member first.
+    async fn binding_target_member(
+        &self,
+        target: &WorkAttentionTarget,
+    ) -> Result<Option<String>, WorkGraphAdmissionError> {
+        let lowered = self.lowered_binding_target(target).await?;
+        Ok(crate::rpc::workgraph_methods::target_member(
+            &self.mob_handle.definition().id,
+            &lowered,
+        ))
+    }
+
+    /// The hold of [`Self::hold_bindings_onto_private_members`]: over every
+    /// member of the roster private to a person, or, with `built`, over
+    /// that one member by its name.
+    ///
+    /// A start with nothing to hold, over a lock file no admission has made
+    /// yet, takes no admission, and so makes no lock file: it lists the
+    /// bindings first, and takes the admission only when there is one or
+    /// when the lock file exists, to list them again under it. An
+    /// admission makes the lock file before it takes the lock, so where
+    /// the file exists another holder of it may be between its admission
+    /// and its write, and the start waits for it as for any admission. The
+    /// file is read after the list: a start that then finds neither ended
+    /// its read before any other holder took the lock. Every admission of
+    /// a process that holds the member refuses a binding onto a member
+    /// private to a person. The hold of a member's build always takes the
+    /// admission.
+    async fn hold_bindings(
+        &self,
+        service: &WorkGraphService,
+        built: Option<&str>,
+    ) -> Result<Vec<WorkAttentionBindingId>, WorkGraphAdmissionError> {
+        if built.is_none()
+            && list_occupying_attention(service, None)
+                .await
+                .map_err(WorkGraphAdmissionError::Service)?
+                .is_empty()
+            && !self.sidecar.as_deref().is_some_and(Path::is_file)
+        {
+            return Ok(Vec::new());
+        }
+        let _permit = self.acquire().await?;
+        let occupying = list_occupying_attention(service, None)
+            .await
+            .map_err(WorkGraphAdmissionError::Service)?;
+        let mut held = Vec::new();
+        for binding in occupying {
+            let judged = match built {
+                None => match self
+                    .refuse_private_member_binding_target(&binding.target)
+                    .await
+                {
+                    Ok(()) => Ok(None),
+                    Err(WorkGraphAdmissionError::PrivateMember { member }) => Ok(Some(member)),
+                    Err(error) => Err(error),
+                },
+                Some(built) => self
+                    .binding_target_member(&binding.target)
+                    .await
+                    .map(|member| member.filter(|member| member == built)),
+            };
+            let member = match judged {
+                Ok(Some(member)) => member,
+                Ok(None) => continue,
+                Err(error) => {
+                    tracing::warn!(
+                        binding_id = %binding.binding_id,
+                        error = ?error,
+                        "could not judge whether an attention binding's target is private to a \
+                         person; the binding is left as it is"
+                    );
+                    continue;
+                }
+            };
+            // An active binding is paused. A pause with a deadline is paused
+            // again with none: at its deadline the binding would be active
+            // again, by the attention machine's own rule, which asks no
+            // method of the host.
+            let found = match &binding.status {
+                WorkAttentionStatus::Active => Some("active"),
+                WorkAttentionStatus::Paused { until: Some(_) } => Some("paused with a deadline"),
+                _ => None,
+            };
+            if let Some(found) = found
+                && let Err(error) = service
+                    .pause_attention(AttentionPauseRequest {
+                        binding_id: binding.binding_id.clone(),
+                        realm_id: None,
+                        namespace: None,
+                        expected_revision: binding.machine_state.revision,
+                        until: None,
+                    })
+                    .await
+            {
+                tracing::error!(
+                    binding_id = %binding.binding_id,
+                    member = %member,
+                    found,
+                    %error,
+                    "an attention binding names a member private to a person and could not be \
+                     paused without a deadline; while it is active that member's turns fail, \
+                     until the binding is paused, reassigned or its goal is closed"
+                );
+                continue;
+            }
+            tracing::warn!(
+                binding_id = %binding.binding_id,
+                member = %member,
+                found = found.unwrap_or("paused"),
+                "an attention binding names a member private to a person and is held paused; \
+                 reassign it to another member or close its goal"
+            );
+            held.push(binding.binding_id);
+        }
+        Ok(held)
     }
 
     /// Every canonical owner-key spelling that addresses the same member as
@@ -932,6 +1288,123 @@ mod tests {
             dir.join("workgraph.admission.sqlite3")
         );
     }
+
+    /// A start with no binding to hold takes no admission while no lock file
+    /// exists, and so makes none. Once the lock file exists a start takes
+    /// the admission even when it lists no binding: another holder of the
+    /// lock file may be between its admission and its write. Here that
+    /// holder writes a binding onto a member private to a person while the
+    /// start waits for the lock; the start then lists the binding under its
+    /// own admission and holds it paused, with no deadline.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_start_waits_for_an_admission_in_flight_and_holds_the_binding_it_writes() {
+        const PRIVATE: &str = "private-helper";
+        let state = tempfile::tempdir().expect("state directory");
+        let lock_dir = tempfile::tempdir().expect("lock file directory");
+        let runtime = crate::unified_runtime::UnifiedRuntime::builder()
+            .definition(super::committed_read_tests::definition())
+            .default_llm_client(Arc::new(meerkat_client::TestClient::default()))
+            .persistent_state(state.path())
+            .build()
+            .await
+            .expect("the runtime builds");
+        Box::pin(runtime.mob_handle().spawn_spec(
+            meerkat_mob::SpawnMemberSpec::new("worker", PRIVATE).with_labels(
+                std::collections::BTreeMap::from([(
+                    crate::access::PRIVATE_TO_LABEL.to_string(),
+                    "console-caller:v1:someone".to_string(),
+                )]),
+            ),
+        ))
+        .await
+        .expect("the member private to a person spawns");
+        let service = runtime
+            .workgraph_service()
+            .expect("the runtime has a WorkGraph");
+        // The admission of a start over the runtime's roster, on a lock file
+        // no admission has made yet.
+        let lock_file = workgraph_admission_sidecar_path(lock_dir.path());
+        let admission = WorkGraphAdmission::new(
+            runtime.mob_runtime().handle(),
+            runtime.mob_runtime().session_service().cloned(),
+            Some(lock_file.clone()),
+        );
+        let mob_id = admission.mob_handle().definition().id.as_str().to_string();
+
+        // No binding and no lock file: the start takes no admission.
+        let held = admission
+            .hold_bindings_onto_private_members(&service)
+            .await
+            .expect("the hold of a start with nothing to hold");
+        assert!(held.is_empty(), "nothing is held: {held:?}");
+        assert!(
+            !lock_file.exists(),
+            "a start with no binding to hold makes no admission lock file: {}",
+            lock_file.display()
+        );
+
+        // Another holder of the lock file takes its admission, which makes
+        // the file, and has not written its binding yet.
+        let in_flight = SidecarLock::acquire(&lock_file).expect("the other holder's admission");
+        assert!(lock_file.is_file(), "an admission makes the lock file");
+        let mut start = Box::pin(admission.hold_bindings_onto_private_members(&service));
+        let returned_while_the_lock_was_held =
+            tokio::time::timeout(std::time::Duration::from_secs(2), &mut start).await;
+        let waited = returned_while_the_lock_was_held.is_err();
+
+        // The other holder writes its binding onto the private member's
+        // name under its admission, and ends the admission.
+        let request: meerkat::GoalCreateRequest = serde_json::from_value(serde_json::json!({
+            "title": "a goal bound under another holder's admission",
+            "target": {
+                "kind": "owner",
+                "owner_key": {
+                    "kind": "agent",
+                    "id": format!("mob/{mob_id}/agent/{PRIVATE}"),
+                },
+            },
+        }))
+        .expect("goal request");
+        let written = service
+            .create_goal(request)
+            .await
+            .expect("the other holder's goal")
+            .attention;
+        assert!(
+            matches!(written.status, WorkAttentionStatus::Active),
+            "the binding is active as it is written: {:?}",
+            written.status
+        );
+        drop(in_flight);
+
+        let held = match returned_while_the_lock_was_held {
+            Ok(returned) => returned,
+            Err(_) => start.await,
+        }
+        .expect("the start's hold");
+        let occupying = list_occupying_attention(&service, None)
+            .await
+            .expect("list the bindings");
+        let status = occupying
+            .iter()
+            .find(|binding| binding.binding_id == written.binding_id)
+            .map(|binding| &binding.status);
+        assert!(
+            matches!(status, Some(WorkAttentionStatus::Paused { until: None })),
+            "a start holds the binding onto a member private to a person that another holder \
+             of the lock file wrote under an admission in flight at the start: {status:?}"
+        );
+        assert_eq!(
+            held,
+            vec![written.binding_id.clone()],
+            "the start names the binding it holds"
+        );
+        assert!(
+            waited,
+            "the start waited while the other holder had the admission"
+        );
+        runtime.shutdown().await;
+    }
 }
 
 #[cfg(test)]
@@ -1018,7 +1491,7 @@ mod committed_read_tests {
         }
     }
 
-    fn definition() -> meerkat_mob::MobDefinition {
+    pub(super) fn definition() -> meerkat_mob::MobDefinition {
         meerkat_mob::MobDefinition::from_toml(&format!(
             "[mob]\nid = \"{MOB_ID}\"\n\n[profiles.worker]\nmodel = \"gpt-5.5\"\n\
              runtime_mode = \"turn_driven\"\nexternal_addressable = true\ndurable = true\n\n\

@@ -30,6 +30,12 @@ use meerkat_store::{JsonlStore, StoreAdapter};
 use meerkat_tools::EmptyToolDispatcher;
 use tokio::sync::mpsc;
 
+/// Output limit of one turn. Current Claude models think before they answer,
+/// and the limit covers the thinking and the answer together: with a small
+/// limit a turn can end as `MaxTokensReached` while the model is still
+/// thinking. Leave room for both.
+const MAX_TOKENS_PER_TURN: u32 = 4096;
+
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     meerkat_runtime::host_stack::run_host("streaming-events", run)?
 }
@@ -81,7 +87,7 @@ async fn run_streaming(
     let mut agent = AgentBuilder::new()
         .model(MODEL)
         .system_prompt("You are a creative writing assistant.")
-        .max_tokens_per_turn(1024)
+        .max_tokens_per_turn(MAX_TOKENS_PER_TURN)
         .build(Arc::new(llm), Arc::new(EmptyToolDispatcher), store)
         .await?;
 

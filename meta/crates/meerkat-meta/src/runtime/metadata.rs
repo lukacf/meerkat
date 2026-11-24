@@ -100,6 +100,18 @@ impl RuntimeMetadataTable {
             .map(|(scope, labels)| (scope.clone(), labels.clone()))
             .collect()
     }
+
+    /// Remove every label set kept under the mob `mob_id`: the mob's own
+    /// and those of its runs. Returns how many sets went. A host calls it
+    /// where it releases what it keeps under a mob's id, so a mob created
+    /// under the id of an earlier mob answers none of that mob's labels
+    /// and carries none on its events.
+    pub async fn release_mob(&self, mob_id: &str) -> usize {
+        let mut guard = self.inner.write().await;
+        let before = guard.len();
+        guard.retain(|scope, _| scope.mob_id() != mob_id);
+        before - guard.len()
+    }
 }
 
 /// Parse a JSON `labels` field as a string→string map.
@@ -248,6 +260,18 @@ impl std::fmt::Display for MetadataStoreError {
 }
 
 impl std::error::Error for MetadataStoreError {}
+
+/// What a metadata store did with the records of a destroyed mob
+/// ([`PersistentMetadataStore::release_mob_records`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MobRecordsRelease {
+    /// No record is kept under the mob's id any more; `records` of them
+    /// were removed by this call.
+    Released { records: u64 },
+    /// The store removed nothing: it has no release, and whatever it kept
+    /// under the mob's id is still there.
+    NotReleased,
+}
 
 /// How long records are kept: for the life of the process, or across
 /// restarts.
@@ -1122,6 +1146,27 @@ pub trait PersistentMetadataStore: Send + Sync {
         Ok(())
     }
 
+    /// Remove every record this store keeps under `mob_id`: what a mob that
+    /// was destroyed leaves behind (its cursors, its members' idle
+    /// retirement opt-ins, its identities' tool records, rotation intents,
+    /// lifecycle intents and failures). A mob created later under the same
+    /// id then starts from no record of the destroyed one. Realm documents
+    /// are kept under no mob and are not touched, and an empty `mob_id`
+    /// names no mob: nothing is removed for it.
+    ///
+    /// Every store answers for itself: a store that keeps records under a
+    /// mob's id removes them and says how many went
+    /// ([`MobRecordsRelease::Released`]); a store that keeps nothing under
+    /// a mob's id answers that zero went. A store that cannot remove what
+    /// it keeps says so ([`MobRecordsRelease::NotReleased`]): its host
+    /// must not let a new mob under that id read them, so the runtime
+    /// refuses every create of a mob beside the launch mob on such a
+    /// store.
+    async fn release_mob_records(
+        &self,
+        mob_id: &str,
+    ) -> Result<MobRecordsRelease, MetadataStoreError>;
+
     /// Wait until the writes this store runs off its callers' tasks (such as
     /// coalesced cursor writes) have landed. Shutdown calls it once the last
     /// writer stopped, under its own bound. The default runs no write off
@@ -1131,7 +1176,10 @@ pub trait PersistentMetadataStore: Send + Sync {
     /// How long this store keeps realm documents ([`Self::realm_document`]):
     /// named documents of the realm as a whole, beside every mob's records.
     /// The console audit log is kept as realm documents, and so is the
-    /// gating state of a runtime that keeps it.
+    /// gating state of a runtime that keeps it. They are the host's: one
+    /// set for all the mobs a host serves, never one mob's. A document that
+    /// names a member names it by its mob and its identity (a gating
+    /// request's origin, an audit row's target).
     ///
     /// The default keeps none (`None`): a store that keeps none has no
     /// console audit log and leaves gating in memory.
@@ -1470,6 +1518,37 @@ impl PersistentMetadataStore for InMemoryMetadataStore {
             lifecycle_failure_key_of(generation, effect, identity),
         ));
         Ok(())
+    }
+
+    async fn release_mob_records(
+        &self,
+        mob_id: &str,
+    ) -> Result<MobRecordsRelease, MetadataStoreError> {
+        if mob_id.is_empty() {
+            return Ok(MobRecordsRelease::Released { records: 0 });
+        }
+        /// Remove every entry of `map` whose key's mob is `mob_id`: how
+        /// many went.
+        fn release<K: Ord, V>(map: &mut BTreeMap<(String, K), V>, mob_id: &str) -> u64 {
+            let before = map.len();
+            map.retain(|(mob, _), _| mob != mob_id);
+            u64::try_from(before - map.len()).unwrap_or(u64::MAX)
+        }
+        let mut records = 0;
+        records += u64::from(self.cursors.write().await.remove(mob_id).is_some());
+        records += u64::from(
+            self.lifecycle_cursors
+                .write()
+                .await
+                .remove(mob_id)
+                .is_some(),
+        );
+        records += release(&mut *self.idle_retire_overrides.write().await, mob_id);
+        records += release(&mut *self.identity_tool_records.write().await, mob_id);
+        records += release(&mut *self.identity_rotation_intents.write().await, mob_id);
+        records += release(&mut *self.lifecycle_intents.write().await, mob_id);
+        records += release(&mut *self.lifecycle_failures.write().await, mob_id);
+        Ok(MobRecordsRelease::Released { records })
     }
 
     /// Kept for the life of the process.
@@ -2090,6 +2169,29 @@ impl PersistentMetadataStore for SqliteMetadataStore {
         Ok(())
     }
 
+    /// Every record of a mob is a row under its id, so they go in one
+    /// statement. Realm documents are rows under the empty id, which names
+    /// no mob.
+    async fn release_mob_records(
+        &self,
+        mob_id: &str,
+    ) -> Result<MobRecordsRelease, MetadataStoreError> {
+        if mob_id.is_empty() {
+            return Ok(MobRecordsRelease::Released { records: 0 });
+        }
+        let _fence = self.operation_fence()?;
+        let conn = self.lock_conn()?;
+        let records = conn
+            .execute(
+                "DELETE FROM meta_metadata WHERE mob_id = ?1",
+                rusqlite::params![mob_id],
+            )
+            .map_err(|err| MetadataStoreError::Io(format!("delete: {err}")))?;
+        Ok(MobRecordsRelease::Released {
+            records: u64::try_from(records).unwrap_or(u64::MAX),
+        })
+    }
+
     /// Kept in the store's file across restarts; a store opened in memory
     /// ([`SqliteMetadataStore::in_memory`]) keeps them for the process.
     fn realm_document_retention(&self) -> Option<RecordRetention> {
@@ -2460,6 +2562,164 @@ mod tests {
             reencoded.contains("\"record_revision\":7"),
             "a record is written under its current name: {reencoded}"
         );
+    }
+
+    /// What a row finds a store keeps under `mob_id`, by kind of record:
+    /// whether it has a subscription cursor, how many idle-retirement
+    /// opt-ins, whether `identity` has a tool record, how many rotation
+    /// intents, whether it has a lifecycle cursor, how many lifecycle
+    /// intents and how many lifecycle failures.
+    async fn kept_under(
+        store: &dyn PersistentMetadataStore,
+        mob_id: &str,
+        identity: &str,
+    ) -> (bool, usize, bool, usize, bool, usize, usize) {
+        (
+            store
+                .get_subscription_cursor(mob_id)
+                .await
+                .unwrap()
+                .is_some(),
+            store
+                .load_member_idle_retire_overrides()
+                .await
+                .unwrap()
+                .iter()
+                .filter(|record| record.mob_id == mob_id)
+                .count(),
+            store
+                .identity_tool_record(mob_id, identity)
+                .await
+                .unwrap()
+                .is_some(),
+            store
+                .load_identity_rotation_intents(mob_id)
+                .await
+                .unwrap()
+                .len(),
+            store
+                .lifecycle_projection_cursor(mob_id)
+                .await
+                .unwrap()
+                .is_some(),
+            store.lifecycle_effect_intents(mob_id).await.unwrap().len(),
+            store
+                .lifecycle_effect_failures(mob_id, 0, 16)
+                .await
+                .unwrap()
+                .len(),
+        )
+    }
+
+    /// The release of a destroyed mob's records removes every record the
+    /// store keeps under that mob's id, of every kind, and nothing else:
+    /// another mob's records of each kind and the realm's documents stay.
+    /// It answers how many records went; a second release finds none, and
+    /// an empty id, which names no mob, removes nothing.
+    #[tokio::test]
+    async fn the_release_of_a_mobs_records_removes_them_all_and_no_other_mobs() {
+        use crate::mob_handle_runtime::DelegateIdleRetireOverride;
+        const IDENTITY: &str = "personal:alice";
+        let dir = tempfile::tempdir().unwrap();
+        let sqlite = SqliteMetadataStore::open(dir.path().join("meta.sqlite")).unwrap();
+        let memory = InMemoryMetadataStore::new();
+        let stores: [&dyn PersistentMetadataStore; 2] = [&sqlite, &memory];
+        for store in stores {
+            for mob_id in ["mob-gone", "mob-kept"] {
+                store.set_subscription_cursor(mob_id, 7).await.unwrap();
+                store
+                    .set_member_idle_retire_override(&idle_record(
+                        mob_id,
+                        "helper",
+                        &meerkat_core::types::SessionId::new(),
+                        DelegateIdleRetireOverride::Disabled,
+                    ))
+                    .await
+                    .unwrap();
+                store
+                    .set_identity_tool_record(&tool_record(mob_id, IDENTITY, 1))
+                    .await
+                    .unwrap();
+                store
+                    .set_identity_rotation_intent(&rotation(mob_id, IDENTITY))
+                    .await
+                    .unwrap();
+                store
+                    .set_lifecycle_projection_cursor(&LifecycleProjectionCursor::new(
+                        mob_id,
+                        "incarnation-1",
+                        41,
+                        1_700_000_000_000,
+                    ))
+                    .await
+                    .unwrap();
+                store
+                    .set_lifecycle_effect_intent(&effect_intent(
+                        mob_id,
+                        IDENTITY,
+                        3,
+                        LifecycleEffectVerb::Reset,
+                    ))
+                    .await
+                    .unwrap();
+                for effect in [
+                    LifecycleEffectKind::RetirementHook,
+                    LifecycleEffectKind::CompactionHarvest,
+                ] {
+                    store
+                        .record_lifecycle_effect_failure(&LifecycleEffectFailure::new(
+                            mob_id,
+                            "incarnation-1",
+                            12,
+                            IDENTITY,
+                            3,
+                            effect,
+                            3,
+                            "timed out",
+                            1_700_000_000_001,
+                        ))
+                        .await
+                        .unwrap();
+                }
+            }
+            store
+                .set_realm_document("log/1", Some("a line"))
+                .await
+                .unwrap();
+            let all = (true, 1, true, 1, true, 1, 2);
+            assert_eq!(kept_under(store, "mob-gone", IDENTITY).await, all);
+
+            assert_eq!(
+                store.release_mob_records("").await.unwrap(),
+                MobRecordsRelease::Released { records: 0 },
+                "an empty id names no mob"
+            );
+            assert_eq!(
+                store.release_mob_records("mob-gone").await.unwrap(),
+                MobRecordsRelease::Released { records: 8 },
+                "every record of the mob went"
+            );
+            assert_eq!(
+                kept_under(store, "mob-gone", IDENTITY).await,
+                (false, 0, false, 0, false, 0, 0),
+                "nothing is kept under the released mob's id"
+            );
+            assert_eq!(
+                kept_under(store, "mob-kept", IDENTITY).await,
+                all,
+                "another mob's records stay"
+            );
+            assert_eq!(
+                store.realm_document("log/1").await.unwrap().as_deref(),
+                Some("a line"),
+                "the realm's documents stay"
+            );
+            assert_eq!(
+                store.release_mob_records("mob-gone").await.unwrap(),
+                MobRecordsRelease::Released { records: 0 },
+                "a second release finds nothing"
+            );
+        }
     }
 
     /// Realm documents round trip on the in-memory and the SQLite store

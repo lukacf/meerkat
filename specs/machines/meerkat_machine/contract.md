@@ -601,8 +601,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RecoverRevokedSupervisorReceipt`(peer_id: String, signing_public_key: String, epoch: u64)
 - `ModelRoutingStatus`(session_id: SessionId)
 - `SetModelRoutingBaseline`(baseline_model: String, realtime_capable: Bool)
-- `RequestFiniteSwitchTurn`(request_id: String, target_model: String, turns: u64, target_realtime_capable: Bool, requires_approval: Bool, approval_available: Bool, approval_denied: Bool, approval_reason: Option<RoutingSwitchApprovalReason>, realtime_detach_allowed: Bool, target_carries_transcript: Bool)
-- `RequestUntilChangedSwitchTurn`(request_id: String, target_model: String, target_realtime_capable: Bool, requires_approval: Bool, approval_available: Bool, approval_denied: Bool, approval_reason: Option<RoutingSwitchApprovalReason>, realtime_detach_allowed: Bool, target_carries_transcript: Bool)
+- `RequestFiniteSwitchTurn`(request_id: String, target_model: String, turns: u64, target_realtime_capable: Bool, requires_approval: Bool, approval_available: Bool, approval_denied: Bool, approval_reason: Option<RoutingSwitchApprovalReason>, realtime_detach_allowed: Bool, target_carries_transcript: Bool, target_reasoning_effort: Option<TargetReasoningEffortVerdict>, inspected_current_identity: Option<SessionLlmIdentity>)
+- `RequestUntilChangedSwitchTurn`(request_id: String, target_model: String, target_realtime_capable: Bool, requires_approval: Bool, approval_available: Bool, approval_denied: Bool, approval_reason: Option<RoutingSwitchApprovalReason>, realtime_detach_allowed: Bool, target_carries_transcript: Bool, target_reasoning_effort: Option<TargetReasoningEffortVerdict>, inspected_current_identity: Option<SessionLlmIdentity>)
 - `CompleteUntilChangedSwitchTurnReconfigure`(request_id: String)
 - `ArchiveUnresolvedModelRoutingHandoff`(request_id: String, observed: ModelRoutingHandoffRecord, record: ModelRoutingHandoffRecord)
 - `ResolveLiveBoundaryContextReceipt`(run_id: RunId, input_id: String)
@@ -621,7 +621,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ResolveAdmissionIdempotency`(input_id: String, idempotency_key: Option<String>)
 - `RegisterAcceptedIdempotency`(input_id: String, idempotency_key: String)
 - `NormalizeRecoveredInputLifecycle`(input_id: String, phase: RecoveredInputObservedPhase, applied_boundary_committed: Option<Bool>, bound_run_resumable: Bool)
-- `ClassifyRecoveredInputDurability`(input_id: String, durability: InputDurabilityKind)
+- `ClassifyRecoveredInputDurability`(input_id: String, durability: InputDurabilityKind, pending_terminal_carrier: Bool)
 - `ResolveInputPublicLifecycle`(input_id: String, phase: RecoveredInputObservedPhase)
 - `ResolveInputPublicTerminalOutcome`(input_id: String, phase: RecoveredInputObservedPhase, terminal_kind: Option<InputTerminalKind>, abandon_reason: Option<InputAbandonReason>)
 - `ClassifyInputTerminality`(input_id: String, phase: RecoveredInputObservedPhase, terminal_kind: Option<InputTerminalKind>, abandon_reason: Option<InputAbandonReason>)
@@ -674,7 +674,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RunFailed`(run_id: RunId, runtime_apply_failure_cause: Option<RuntimeApplyFailureCause>, runtime_apply_failure_message: Option<String>, machine_terminal_failure_observed: Bool, terminal_failure_source: Option<RunFailureSourceKind>, error: String)
 - `RunCancelled`(run_id: RunId)
 - `RecoverAdmittedInput`(input_id: String, input_kind: RecoveredInputKind, runtime_boundary: RecoveredRunApplyBoundary, runtime_execution_kind: RecoveredRuntimeExecutionKind, runtime_peer_response_terminal_apply_intent: Option<RecoveredPeerResponseTerminalApplyIntent>, lane: InputLane)
-- `RecoverInputLifecycle`(input_id: String, phase: InputPhase, terminal_kind: Option<InputTerminalKind>, superseded_by: Option<String>, aggregate_id: Option<String>, abandon_reason: Option<InputAbandonReason>, abandon_attempt_count: u64, attempt_count: u64, run_id: Option<RunId>, boundary_sequence: Option<u64>, admission_sequence: Option<u64>, admission_sequence_recovery: Option<RecoveredInputNormalizationReasonKind>, recovery_lane: Option<InputLane>, lane: Option<InputLane>, runtime_boundary: Option<RecoveredRunApplyBoundary>, runtime_execution_kind: Option<RecoveredRuntimeExecutionKind>, runtime_peer_response_terminal_apply_intent: Option<RecoveredPeerResponseTerminalApplyIntent>, is_prompt: Bool)
+- `RecoverInputLifecycle`(input_id: String, phase: InputPhase, terminal_kind: Option<InputTerminalKind>, superseded_by: Option<String>, aggregate_id: Option<String>, abandon_reason: Option<InputAbandonReason>, abandon_attempt_count: u64, attempt_count: u64, run_id: Option<RunId>, boundary_sequence: Option<u64>, admission_sequence: Option<u64>, admission_sequence_recovery: Option<RecoveredInputNormalizationReasonKind>, recovery_lane: Option<InputLane>, lane: Option<InputLane>, runtime_boundary: Option<RecoveredRunApplyBoundary>, runtime_execution_kind: Option<RecoveredRuntimeExecutionKind>, runtime_peer_response_terminal_apply_intent: Option<RecoveredPeerResponseTerminalApplyIntent>, is_prompt: Bool, live_boundary_delivery: Option<LiveBoundaryDelivery>)
 - `QueueAccepted`(input_id: String)
 - `SteerAccepted`(input_id: String)
 - `ChangeLane`(input_id: String, new_lane: InputLane)
@@ -1395,7 +1395,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ### `AuthorizedRuntimeCompletionResultClosure`
 - Authority: `RuntimeCompletionResultAuthority`
 - Source Inputs: `ResolveRuntimeCompletionResult`, `ResolveCheckpointCompletionResult`, `ResolveAbandonedCompletionResult`
-- Transitions: `ResolveRuntimeCompletionResultCompletedInitializing`, `ResolveRuntimeCompletionResultCompletedIdle`, `ResolveRuntimeCompletionResultCompletedAttached`, `ResolveRuntimeCompletionResultCompletedRunning`, `ResolveRuntimeCompletionResultCompletedRetired`, `ResolveRuntimeCompletionResultCompletedStopped`, `ResolveRuntimeCompletionResultWithoutResultInitializing`, `ResolveRuntimeCompletionResultWithoutResultIdle`, `ResolveRuntimeCompletionResultWithoutResultAttached`, `ResolveRuntimeCompletionResultWithoutResultRunning`, `ResolveRuntimeCompletionResultWithoutResultRetired`, `ResolveRuntimeCompletionResultWithoutResultStopped`, `ResolveRuntimeCompletionResultCallbackPendingInitializing`, `ResolveRuntimeCompletionResultCallbackPendingIdle`, `ResolveRuntimeCompletionResultCallbackPendingAttached`, `ResolveRuntimeCompletionResultCallbackPendingRunning`, `ResolveRuntimeCompletionResultCallbackPendingRetired`, `ResolveRuntimeCompletionResultCallbackPendingStopped`, `ResolveRuntimeCompletionResultCancelledInitializing`, `ResolveRuntimeCompletionResultCancelledIdle`, `ResolveRuntimeCompletionResultCancelledAttached`, `ResolveRuntimeCompletionResultCancelledRunning`, `ResolveRuntimeCompletionResultCancelledRetired`, `ResolveRuntimeCompletionResultCancelledStopped`, `ResolveRuntimeCompletionResultRuntimeApplyFailedInitializing`, `ResolveRuntimeCompletionResultRuntimeApplyFailedIdle`, `ResolveRuntimeCompletionResultRuntimeApplyFailedAttached`, `ResolveRuntimeCompletionResultRuntimeApplyFailedRunning`, `ResolveRuntimeCompletionResultRuntimeApplyFailedRetired`, `ResolveRuntimeCompletionResultRuntimeApplyFailedStopped`, `ResolveRuntimeCompletionResultMachineFailedInitializing`, `ResolveRuntimeCompletionResultMachineFailedIdle`, `ResolveRuntimeCompletionResultMachineFailedAttached`, `ResolveRuntimeCompletionResultMachineFailedRunning`, `ResolveRuntimeCompletionResultMachineFailedRetired`, `ResolveRuntimeCompletionResultMachineFailedStopped`, `ResolveRuntimeCompletionResultFinalizationFailureWithResultInitializing`, `ResolveRuntimeCompletionResultFinalizationFailureWithResultIdle`, `ResolveRuntimeCompletionResultFinalizationFailureWithResultAttached`, `ResolveRuntimeCompletionResultFinalizationFailureWithResultRunning`, `ResolveRuntimeCompletionResultFinalizationFailureWithResultRetired`, `ResolveRuntimeCompletionResultFinalizationFailureWithResultStopped`, `ResolveRuntimeCompletionResultFinalizationFailureWithoutResultInitializing`, `ResolveRuntimeCompletionResultFinalizationFailureWithoutResultIdle`, `ResolveRuntimeCompletionResultFinalizationFailureWithoutResultAttached`, `ResolveRuntimeCompletionResultFinalizationFailureWithoutResultRunning`, `ResolveRuntimeCompletionResultFinalizationFailureWithoutResultRetired`, `ResolveRuntimeCompletionResultFinalizationFailureWithoutResultStopped`, `ResolveRuntimeCompletionResultRuntimeTerminatedInitializing`, `ResolveRuntimeCompletionResultRuntimeTerminatedIdle`, `ResolveRuntimeCompletionResultRuntimeTerminatedAttached`, `ResolveRuntimeCompletionResultRuntimeTerminatedRunning`, `ResolveRuntimeCompletionResultRuntimeTerminatedRetired`, `ResolveRuntimeCompletionResultRuntimeTerminatedStopped`, `ResolveRuntimeCompletionResultOutcomeUnknownInitializing`, `ResolveRuntimeCompletionResultOutcomeUnknownIdle`, `ResolveRuntimeCompletionResultOutcomeUnknownAttached`, `ResolveRuntimeCompletionResultOutcomeUnknownRunning`, `ResolveRuntimeCompletionResultOutcomeUnknownRetired`, `ResolveRuntimeCompletionResultOutcomeUnknownStopped`, `ResolveCheckpointCompletionResultSucceededInitializing`, `ResolveCheckpointCompletionResultSucceededIdle`, `ResolveCheckpointCompletionResultSucceededAttached`, `ResolveCheckpointCompletionResultSucceededRunning`, `ResolveCheckpointCompletionResultSucceededRetired`, `ResolveCheckpointCompletionResultSucceededStopped`, `ResolveCheckpointCompletionResultFailedInitializing`, `ResolveCheckpointCompletionResultFailedIdle`, `ResolveCheckpointCompletionResultFailedAttached`, `ResolveCheckpointCompletionResultFailedRunning`, `ResolveCheckpointCompletionResultFailedRetired`, `ResolveCheckpointCompletionResultFailedStopped`, `ResolveAbandonedCompletionResultRuntimeApplyFailedInitializing`, `ResolveAbandonedCompletionResultRuntimeApplyFailedIdle`, `ResolveAbandonedCompletionResultRuntimeApplyFailedAttached`, `ResolveAbandonedCompletionResultRuntimeApplyFailedRunning`, `ResolveAbandonedCompletionResultRuntimeApplyFailedRetired`, `ResolveAbandonedCompletionResultRuntimeApplyFailedStopped`, `ResolveRuntimeCompletionResultRuntimeTerminatedDestroyedDestroyed`
+- Transitions: `ResolveRuntimeCompletionResultCompletedInitializing`, `ResolveRuntimeCompletionResultCompletedIdle`, `ResolveRuntimeCompletionResultCompletedAttached`, `ResolveRuntimeCompletionResultCompletedRunning`, `ResolveRuntimeCompletionResultCompletedRetired`, `ResolveRuntimeCompletionResultCompletedStopped`, `ResolveRuntimeCompletionResultWithoutResultInitializing`, `ResolveRuntimeCompletionResultWithoutResultIdle`, `ResolveRuntimeCompletionResultWithoutResultAttached`, `ResolveRuntimeCompletionResultWithoutResultRunning`, `ResolveRuntimeCompletionResultWithoutResultRetired`, `ResolveRuntimeCompletionResultWithoutResultStopped`, `ResolveRuntimeCompletionResultCallbackPendingInitializing`, `ResolveRuntimeCompletionResultCallbackPendingIdle`, `ResolveRuntimeCompletionResultCallbackPendingAttached`, `ResolveRuntimeCompletionResultCallbackPendingRunning`, `ResolveRuntimeCompletionResultCallbackPendingRetired`, `ResolveRuntimeCompletionResultCallbackPendingStopped`, `ResolveRuntimeCompletionResultCancelledInitializing`, `ResolveRuntimeCompletionResultCancelledIdle`, `ResolveRuntimeCompletionResultCancelledAttached`, `ResolveRuntimeCompletionResultCancelledRunning`, `ResolveRuntimeCompletionResultCancelledRetired`, `ResolveRuntimeCompletionResultCancelledStopped`, `ResolveRuntimeCompletionResultRuntimeApplyFailedInitializing`, `ResolveRuntimeCompletionResultRuntimeApplyFailedIdle`, `ResolveRuntimeCompletionResultRuntimeApplyFailedAttached`, `ResolveRuntimeCompletionResultRuntimeApplyFailedRunning`, `ResolveRuntimeCompletionResultRuntimeApplyFailedRetired`, `ResolveRuntimeCompletionResultRuntimeApplyFailedStopped`, `ResolveRuntimeCompletionResultRuntimeApplyRefusedInitializing`, `ResolveRuntimeCompletionResultRuntimeApplyRefusedIdle`, `ResolveRuntimeCompletionResultRuntimeApplyRefusedAttached`, `ResolveRuntimeCompletionResultRuntimeApplyRefusedRunning`, `ResolveRuntimeCompletionResultRuntimeApplyRefusedRetired`, `ResolveRuntimeCompletionResultRuntimeApplyRefusedStopped`, `ResolveRuntimeCompletionResultMachineFailedInitializing`, `ResolveRuntimeCompletionResultMachineFailedIdle`, `ResolveRuntimeCompletionResultMachineFailedAttached`, `ResolveRuntimeCompletionResultMachineFailedRunning`, `ResolveRuntimeCompletionResultMachineFailedRetired`, `ResolveRuntimeCompletionResultMachineFailedStopped`, `ResolveRuntimeCompletionResultFinalizationFailureWithResultInitializing`, `ResolveRuntimeCompletionResultFinalizationFailureWithResultIdle`, `ResolveRuntimeCompletionResultFinalizationFailureWithResultAttached`, `ResolveRuntimeCompletionResultFinalizationFailureWithResultRunning`, `ResolveRuntimeCompletionResultFinalizationFailureWithResultRetired`, `ResolveRuntimeCompletionResultFinalizationFailureWithResultStopped`, `ResolveRuntimeCompletionResultFinalizationFailureWithoutResultInitializing`, `ResolveRuntimeCompletionResultFinalizationFailureWithoutResultIdle`, `ResolveRuntimeCompletionResultFinalizationFailureWithoutResultAttached`, `ResolveRuntimeCompletionResultFinalizationFailureWithoutResultRunning`, `ResolveRuntimeCompletionResultFinalizationFailureWithoutResultRetired`, `ResolveRuntimeCompletionResultFinalizationFailureWithoutResultStopped`, `ResolveRuntimeCompletionResultRuntimeTerminatedInitializing`, `ResolveRuntimeCompletionResultRuntimeTerminatedIdle`, `ResolveRuntimeCompletionResultRuntimeTerminatedAttached`, `ResolveRuntimeCompletionResultRuntimeTerminatedRunning`, `ResolveRuntimeCompletionResultRuntimeTerminatedRetired`, `ResolveRuntimeCompletionResultRuntimeTerminatedStopped`, `ResolveRuntimeCompletionResultOutcomeUnknownInitializing`, `ResolveRuntimeCompletionResultOutcomeUnknownIdle`, `ResolveRuntimeCompletionResultOutcomeUnknownAttached`, `ResolveRuntimeCompletionResultOutcomeUnknownRunning`, `ResolveRuntimeCompletionResultOutcomeUnknownRetired`, `ResolveRuntimeCompletionResultOutcomeUnknownStopped`, `ResolveCheckpointCompletionResultSucceededInitializing`, `ResolveCheckpointCompletionResultSucceededIdle`, `ResolveCheckpointCompletionResultSucceededAttached`, `ResolveCheckpointCompletionResultSucceededRunning`, `ResolveCheckpointCompletionResultSucceededRetired`, `ResolveCheckpointCompletionResultSucceededStopped`, `ResolveCheckpointCompletionResultFailedInitializing`, `ResolveCheckpointCompletionResultFailedIdle`, `ResolveCheckpointCompletionResultFailedAttached`, `ResolveCheckpointCompletionResultFailedRunning`, `ResolveCheckpointCompletionResultFailedRetired`, `ResolveCheckpointCompletionResultFailedStopped`, `ResolveAbandonedCompletionResultRuntimeApplyFailedInitializing`, `ResolveAbandonedCompletionResultRuntimeApplyFailedIdle`, `ResolveAbandonedCompletionResultRuntimeApplyFailedAttached`, `ResolveAbandonedCompletionResultRuntimeApplyFailedRunning`, `ResolveAbandonedCompletionResultRuntimeApplyFailedRetired`, `ResolveAbandonedCompletionResultRuntimeApplyFailedStopped`, `ResolveAbandonedCompletionResultRuntimeApplyRefusedInitializing`, `ResolveAbandonedCompletionResultRuntimeApplyRefusedIdle`, `ResolveAbandonedCompletionResultRuntimeApplyRefusedAttached`, `ResolveAbandonedCompletionResultRuntimeApplyRefusedRunning`, `ResolveAbandonedCompletionResultRuntimeApplyRefusedRetired`, `ResolveAbandonedCompletionResultRuntimeApplyRefusedStopped`, `ResolveRuntimeCompletionResultRuntimeTerminatedDestroyedDestroyed`
 - Guard Expansion:
   - `ResolveRuntimeCompletionResultCompletedInitializing`: `session_registered`, `run_correlated`, `finalization_succeeded`, `terminal_run_result`
   - `ResolveRuntimeCompletionResultCompletedIdle`: `session_registered`, `run_correlated`, `finalization_succeeded`, `terminal_run_result`
@@ -1421,12 +1421,18 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `ResolveRuntimeCompletionResultCancelledRunning`: `session_registered`, `run_correlated`, `finalization_succeeded`, `terminal_machine`, `machine_cancelled`
   - `ResolveRuntimeCompletionResultCancelledRetired`: `session_registered`, `run_correlated`, `finalization_succeeded`, `terminal_machine`, `machine_cancelled`
   - `ResolveRuntimeCompletionResultCancelledStopped`: `session_registered`, `run_correlated`, `finalization_succeeded`, `terminal_machine`, `machine_cancelled`
-  - `ResolveRuntimeCompletionResultRuntimeApplyFailedInitializing`: `session_registered`, `run_correlated`, `finalization_succeeded`, `terminal_machine`, `machine_failed`, `machine_failure_cause_known`, `machine_runtime_apply_failed`
-  - `ResolveRuntimeCompletionResultRuntimeApplyFailedIdle`: `session_registered`, `run_correlated`, `finalization_succeeded`, `terminal_machine`, `machine_failed`, `machine_failure_cause_known`, `machine_runtime_apply_failed`
-  - `ResolveRuntimeCompletionResultRuntimeApplyFailedAttached`: `session_registered`, `run_correlated`, `finalization_succeeded`, `terminal_machine`, `machine_failed`, `machine_failure_cause_known`, `machine_runtime_apply_failed`
-  - `ResolveRuntimeCompletionResultRuntimeApplyFailedRunning`: `session_registered`, `run_correlated`, `finalization_succeeded`, `terminal_machine`, `machine_failed`, `machine_failure_cause_known`, `machine_runtime_apply_failed`
-  - `ResolveRuntimeCompletionResultRuntimeApplyFailedRetired`: `session_registered`, `run_correlated`, `finalization_succeeded`, `terminal_machine`, `machine_failed`, `machine_failure_cause_known`, `machine_runtime_apply_failed`
-  - `ResolveRuntimeCompletionResultRuntimeApplyFailedStopped`: `session_registered`, `run_correlated`, `finalization_succeeded`, `terminal_machine`, `machine_failed`, `machine_failure_cause_known`, `machine_runtime_apply_failed`
+  - `ResolveRuntimeCompletionResultRuntimeApplyFailedInitializing`: `session_registered`, `run_correlated`, `finalization_succeeded`, `terminal_machine`, `machine_failed`, `machine_failure_cause_known`, `machine_runtime_apply_failed`, `runtime_apply_not_refused`
+  - `ResolveRuntimeCompletionResultRuntimeApplyFailedIdle`: `session_registered`, `run_correlated`, `finalization_succeeded`, `terminal_machine`, `machine_failed`, `machine_failure_cause_known`, `machine_runtime_apply_failed`, `runtime_apply_not_refused`
+  - `ResolveRuntimeCompletionResultRuntimeApplyFailedAttached`: `session_registered`, `run_correlated`, `finalization_succeeded`, `terminal_machine`, `machine_failed`, `machine_failure_cause_known`, `machine_runtime_apply_failed`, `runtime_apply_not_refused`
+  - `ResolveRuntimeCompletionResultRuntimeApplyFailedRunning`: `session_registered`, `run_correlated`, `finalization_succeeded`, `terminal_machine`, `machine_failed`, `machine_failure_cause_known`, `machine_runtime_apply_failed`, `runtime_apply_not_refused`
+  - `ResolveRuntimeCompletionResultRuntimeApplyFailedRetired`: `session_registered`, `run_correlated`, `finalization_succeeded`, `terminal_machine`, `machine_failed`, `machine_failure_cause_known`, `machine_runtime_apply_failed`, `runtime_apply_not_refused`
+  - `ResolveRuntimeCompletionResultRuntimeApplyFailedStopped`: `session_registered`, `run_correlated`, `finalization_succeeded`, `terminal_machine`, `machine_failed`, `machine_failure_cause_known`, `machine_runtime_apply_failed`, `runtime_apply_not_refused`
+  - `ResolveRuntimeCompletionResultRuntimeApplyRefusedInitializing`: `session_registered`, `run_correlated`, `finalization_succeeded`, `terminal_machine`, `machine_failed`, `machine_failure_cause_known`, `machine_runtime_apply_failed`, `runtime_apply_refused`
+  - `ResolveRuntimeCompletionResultRuntimeApplyRefusedIdle`: `session_registered`, `run_correlated`, `finalization_succeeded`, `terminal_machine`, `machine_failed`, `machine_failure_cause_known`, `machine_runtime_apply_failed`, `runtime_apply_refused`
+  - `ResolveRuntimeCompletionResultRuntimeApplyRefusedAttached`: `session_registered`, `run_correlated`, `finalization_succeeded`, `terminal_machine`, `machine_failed`, `machine_failure_cause_known`, `machine_runtime_apply_failed`, `runtime_apply_refused`
+  - `ResolveRuntimeCompletionResultRuntimeApplyRefusedRunning`: `session_registered`, `run_correlated`, `finalization_succeeded`, `terminal_machine`, `machine_failed`, `machine_failure_cause_known`, `machine_runtime_apply_failed`, `runtime_apply_refused`
+  - `ResolveRuntimeCompletionResultRuntimeApplyRefusedRetired`: `session_registered`, `run_correlated`, `finalization_succeeded`, `terminal_machine`, `machine_failed`, `machine_failure_cause_known`, `machine_runtime_apply_failed`, `runtime_apply_refused`
+  - `ResolveRuntimeCompletionResultRuntimeApplyRefusedStopped`: `session_registered`, `run_correlated`, `finalization_succeeded`, `terminal_machine`, `machine_failed`, `machine_failure_cause_known`, `machine_runtime_apply_failed`, `runtime_apply_refused`
   - `ResolveRuntimeCompletionResultMachineFailedInitializing`: `session_registered`, `run_correlated`, `finalization_succeeded`, `terminal_machine`, `machine_failed`, `machine_failure_cause_known`, `machine_not_runtime_apply_failed`
   - `ResolveRuntimeCompletionResultMachineFailedIdle`: `session_registered`, `run_correlated`, `finalization_succeeded`, `terminal_machine`, `machine_failed`, `machine_failure_cause_known`, `machine_not_runtime_apply_failed`
   - `ResolveRuntimeCompletionResultMachineFailedAttached`: `session_registered`, `run_correlated`, `finalization_succeeded`, `terminal_machine`, `machine_failed`, `machine_failure_cause_known`, `machine_not_runtime_apply_failed`
@@ -1469,12 +1475,18 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `ResolveCheckpointCompletionResultFailedRunning`: `session_registered`, `checkpoint_input`, `exact_consumed_checkpoint`, `all_recipients_consumed_by_run`, `finalization_failed`
   - `ResolveCheckpointCompletionResultFailedRetired`: `session_registered`, `checkpoint_input`, `exact_consumed_checkpoint`, `all_recipients_consumed_by_run`, `finalization_failed`
   - `ResolveCheckpointCompletionResultFailedStopped`: `session_registered`, `checkpoint_input`, `exact_consumed_checkpoint`, `all_recipients_consumed_by_run`, `finalization_failed`
-  - `ResolveAbandonedCompletionResultRuntimeApplyFailedInitializing`: `session_registered`, `exact_abandoned_batch`, `exact_runtime_apply_failure`, `all_recipients_abandoned_by_run`, `finalization_succeeded`
-  - `ResolveAbandonedCompletionResultRuntimeApplyFailedIdle`: `session_registered`, `exact_abandoned_batch`, `exact_runtime_apply_failure`, `all_recipients_abandoned_by_run`, `finalization_succeeded`
-  - `ResolveAbandonedCompletionResultRuntimeApplyFailedAttached`: `session_registered`, `exact_abandoned_batch`, `exact_runtime_apply_failure`, `all_recipients_abandoned_by_run`, `finalization_succeeded`
-  - `ResolveAbandonedCompletionResultRuntimeApplyFailedRunning`: `session_registered`, `exact_abandoned_batch`, `exact_runtime_apply_failure`, `all_recipients_abandoned_by_run`, `finalization_succeeded`
-  - `ResolveAbandonedCompletionResultRuntimeApplyFailedRetired`: `session_registered`, `exact_abandoned_batch`, `exact_runtime_apply_failure`, `all_recipients_abandoned_by_run`, `finalization_succeeded`
-  - `ResolveAbandonedCompletionResultRuntimeApplyFailedStopped`: `session_registered`, `exact_abandoned_batch`, `exact_runtime_apply_failure`, `all_recipients_abandoned_by_run`, `finalization_succeeded`
+  - `ResolveAbandonedCompletionResultRuntimeApplyFailedInitializing`: `session_registered`, `exact_abandoned_batch`, `exact_runtime_apply_failure`, `all_recipients_abandoned_by_run`, `finalization_succeeded`, `runtime_apply_not_refused`
+  - `ResolveAbandonedCompletionResultRuntimeApplyFailedIdle`: `session_registered`, `exact_abandoned_batch`, `exact_runtime_apply_failure`, `all_recipients_abandoned_by_run`, `finalization_succeeded`, `runtime_apply_not_refused`
+  - `ResolveAbandonedCompletionResultRuntimeApplyFailedAttached`: `session_registered`, `exact_abandoned_batch`, `exact_runtime_apply_failure`, `all_recipients_abandoned_by_run`, `finalization_succeeded`, `runtime_apply_not_refused`
+  - `ResolveAbandonedCompletionResultRuntimeApplyFailedRunning`: `session_registered`, `exact_abandoned_batch`, `exact_runtime_apply_failure`, `all_recipients_abandoned_by_run`, `finalization_succeeded`, `runtime_apply_not_refused`
+  - `ResolveAbandonedCompletionResultRuntimeApplyFailedRetired`: `session_registered`, `exact_abandoned_batch`, `exact_runtime_apply_failure`, `all_recipients_abandoned_by_run`, `finalization_succeeded`, `runtime_apply_not_refused`
+  - `ResolveAbandonedCompletionResultRuntimeApplyFailedStopped`: `session_registered`, `exact_abandoned_batch`, `exact_runtime_apply_failure`, `all_recipients_abandoned_by_run`, `finalization_succeeded`, `runtime_apply_not_refused`
+  - `ResolveAbandonedCompletionResultRuntimeApplyRefusedInitializing`: `session_registered`, `exact_abandoned_batch`, `exact_runtime_apply_failure`, `all_recipients_abandoned_by_run`, `finalization_succeeded`, `runtime_apply_refused`
+  - `ResolveAbandonedCompletionResultRuntimeApplyRefusedIdle`: `session_registered`, `exact_abandoned_batch`, `exact_runtime_apply_failure`, `all_recipients_abandoned_by_run`, `finalization_succeeded`, `runtime_apply_refused`
+  - `ResolveAbandonedCompletionResultRuntimeApplyRefusedAttached`: `session_registered`, `exact_abandoned_batch`, `exact_runtime_apply_failure`, `all_recipients_abandoned_by_run`, `finalization_succeeded`, `runtime_apply_refused`
+  - `ResolveAbandonedCompletionResultRuntimeApplyRefusedRunning`: `session_registered`, `exact_abandoned_batch`, `exact_runtime_apply_failure`, `all_recipients_abandoned_by_run`, `finalization_succeeded`, `runtime_apply_refused`
+  - `ResolveAbandonedCompletionResultRuntimeApplyRefusedRetired`: `session_registered`, `exact_abandoned_batch`, `exact_runtime_apply_failure`, `all_recipients_abandoned_by_run`, `finalization_succeeded`, `runtime_apply_refused`
+  - `ResolveAbandonedCompletionResultRuntimeApplyRefusedStopped`: `session_registered`, `exact_abandoned_batch`, `exact_runtime_apply_failure`, `all_recipients_abandoned_by_run`, `finalization_succeeded`, `runtime_apply_refused`
   - `ResolveRuntimeCompletionResultRuntimeTerminatedDestroyedDestroyed`: `session_registered`, `no_run_result`, `finalization_succeeded`, `terminal_runtime_terminated`
 - Command Effects: `RuntimeCompletionResultResolved`, `CheckpointCompletionResultResolved`, `AbandonedCompletionResultResolved`
 - Effect Closure:
@@ -2947,8 +2959,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestFiniteSwitchTurnTranscriptUnsupportedIdle`
 - From: `Idle`
-- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
 - Guards:
+  - `inspection_identity_current`
   - `transcript_not_carried`
   - `request_not_pending`
 - Emits: `SwitchTurnDenied`
@@ -2956,8 +2969,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestFiniteSwitchTurnTranscriptUnsupportedAttached`
 - From: `Attached`
-- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
 - Guards:
+  - `inspection_identity_current`
   - `transcript_not_carried`
   - `request_not_pending`
 - Emits: `SwitchTurnDenied`
@@ -2965,8 +2979,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestFiniteSwitchTurnTranscriptUnsupportedRunning`
 - From: `Running`
-- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
 - Guards:
+  - `inspection_identity_current`
   - `transcript_not_carried`
   - `request_not_pending`
 - Emits: `SwitchTurnDenied`
@@ -2974,8 +2989,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestUntilChangedSwitchTurnTranscriptUnsupportedIdle`
 - From: `Idle`
-- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
 - Guards:
+  - `inspection_identity_current`
   - `transcript_not_carried`
   - `request_not_pending`
 - Emits: `SwitchTurnDenied`
@@ -2983,8 +2999,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestUntilChangedSwitchTurnTranscriptUnsupportedAttached`
 - From: `Attached`
-- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
 - Guards:
+  - `inspection_identity_current`
   - `transcript_not_carried`
   - `request_not_pending`
 - Emits: `SwitchTurnDenied`
@@ -2992,18 +3009,88 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestUntilChangedSwitchTurnTranscriptUnsupportedRunning`
 - From: `Running`
-- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
 - Guards:
+  - `inspection_identity_current`
   - `transcript_not_carried`
+  - `request_not_pending`
+- Emits: `SwitchTurnDenied`
+- To: `Running`
+
+### `RequestFiniteSwitchTurnReasoningEffortRefusedIdle`
+- From: `Idle`
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
+- Guards:
+  - `inspection_identity_current`
+  - `transcript_carried`
+  - `held_effort_refused`
+  - `request_not_pending`
+- Emits: `SwitchTurnDenied`
+- To: `Idle`
+
+### `RequestFiniteSwitchTurnReasoningEffortRefusedAttached`
+- From: `Attached`
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
+- Guards:
+  - `inspection_identity_current`
+  - `transcript_carried`
+  - `held_effort_refused`
+  - `request_not_pending`
+- Emits: `SwitchTurnDenied`
+- To: `Attached`
+
+### `RequestFiniteSwitchTurnReasoningEffortRefusedRunning`
+- From: `Running`
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
+- Guards:
+  - `inspection_identity_current`
+  - `transcript_carried`
+  - `held_effort_refused`
+  - `request_not_pending`
+- Emits: `SwitchTurnDenied`
+- To: `Running`
+
+### `RequestUntilChangedSwitchTurnReasoningEffortRefusedIdle`
+- From: `Idle`
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
+- Guards:
+  - `inspection_identity_current`
+  - `transcript_carried`
+  - `held_effort_refused`
+  - `request_not_pending`
+- Emits: `SwitchTurnDenied`
+- To: `Idle`
+
+### `RequestUntilChangedSwitchTurnReasoningEffortRefusedAttached`
+- From: `Attached`
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
+- Guards:
+  - `inspection_identity_current`
+  - `transcript_carried`
+  - `held_effort_refused`
+  - `request_not_pending`
+- Emits: `SwitchTurnDenied`
+- To: `Attached`
+
+### `RequestUntilChangedSwitchTurnReasoningEffortRefusedRunning`
+- From: `Running`
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
+- Guards:
+  - `inspection_identity_current`
+  - `transcript_carried`
+  - `held_effort_refused`
   - `request_not_pending`
 - Emits: `SwitchTurnDenied`
 - To: `Running`
 
 ### `RequestFiniteSwitchTurnApprovalUnavailableIdle`
 - From: `Idle`
-- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
 - Guards:
+  - `inspection_identity_current`
   - `transcript_carried`
+  - `held_effort_inspected`
+  - `held_effort_not_refused`
   - `baseline_known`
   - `approval_unavailable`
   - `request_not_pending`
@@ -3012,9 +3099,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestFiniteSwitchTurnApprovalUnavailableAttached`
 - From: `Attached`
-- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
 - Guards:
+  - `inspection_identity_current`
   - `transcript_carried`
+  - `held_effort_inspected`
+  - `held_effort_not_refused`
   - `baseline_known`
   - `approval_unavailable`
   - `request_not_pending`
@@ -3023,9 +3113,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestFiniteSwitchTurnApprovalUnavailableRunning`
 - From: `Running`
-- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
 - Guards:
+  - `inspection_identity_current`
   - `transcript_carried`
+  - `held_effort_inspected`
+  - `held_effort_not_refused`
   - `baseline_known`
   - `approval_unavailable`
   - `request_not_pending`
@@ -3034,9 +3127,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestFiniteSwitchTurnApprovalDeniedIdle`
 - From: `Idle`
-- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
 - Guards:
+  - `inspection_identity_current`
   - `transcript_carried`
+  - `held_effort_inspected`
+  - `held_effort_not_refused`
   - `approval_denied`
   - `approval_reason_present`
   - `request_not_pending`
@@ -3045,9 +3141,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestFiniteSwitchTurnApprovalDeniedAttached`
 - From: `Attached`
-- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
 - Guards:
+  - `inspection_identity_current`
   - `transcript_carried`
+  - `held_effort_inspected`
+  - `held_effort_not_refused`
   - `approval_denied`
   - `approval_reason_present`
   - `request_not_pending`
@@ -3056,9 +3155,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestFiniteSwitchTurnApprovalDeniedRunning`
 - From: `Running`
-- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
 - Guards:
+  - `inspection_identity_current`
   - `transcript_carried`
+  - `held_effort_inspected`
+  - `held_effort_not_refused`
   - `approval_denied`
   - `approval_reason_present`
   - `request_not_pending`
@@ -3067,9 +3169,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestFiniteSwitchTurnScopedConflictIdle`
 - From: `Idle`
-- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
 - Guards:
+  - `inspection_identity_current`
   - `transcript_carried`
+  - `held_effort_inspected`
+  - `held_effort_not_refused`
   - `scoped_conflict`
   - `request_not_pending`
 - Emits: `SwitchTurnDenied`
@@ -3077,9 +3182,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestFiniteSwitchTurnScopedConflictAttached`
 - From: `Attached`
-- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
 - Guards:
+  - `inspection_identity_current`
   - `transcript_carried`
+  - `held_effort_inspected`
+  - `held_effort_not_refused`
   - `scoped_conflict`
   - `request_not_pending`
 - Emits: `SwitchTurnDenied`
@@ -3087,9 +3195,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestFiniteSwitchTurnScopedConflictRunning`
 - From: `Running`
-- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
 - Guards:
+  - `inspection_identity_current`
   - `transcript_carried`
+  - `held_effort_inspected`
+  - `held_effort_not_refused`
   - `scoped_conflict`
   - `request_not_pending`
 - Emits: `SwitchTurnDenied`
@@ -3097,9 +3208,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestFiniteSwitchTurnAcceptedIdle`
 - From: `Idle`
-- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
 - Guards:
+  - `inspection_identity_current`
   - `transcript_carried`
+  - `held_effort_inspected`
+  - `held_effort_not_refused`
   - `baseline_known`
   - `positive_turns`
   - `approval_satisfied`
@@ -3109,9 +3223,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestFiniteSwitchTurnAcceptedAttached`
 - From: `Attached`
-- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
 - Guards:
+  - `inspection_identity_current`
   - `transcript_carried`
+  - `held_effort_inspected`
+  - `held_effort_not_refused`
   - `baseline_known`
   - `positive_turns`
   - `approval_satisfied`
@@ -3121,9 +3238,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestFiniteSwitchTurnAcceptedRunning`
 - From: `Running`
-- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
 - Guards:
+  - `inspection_identity_current`
   - `transcript_carried`
+  - `held_effort_inspected`
+  - `held_effort_not_refused`
   - `baseline_known`
   - `positive_turns`
   - `approval_satisfied`
@@ -3133,9 +3253,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestUntilChangedSwitchTurnAcceptedIdle`
 - From: `Idle`
-- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
 - Guards:
+  - `inspection_identity_current`
   - `transcript_carried`
+  - `held_effort_inspected`
+  - `held_effort_not_refused`
   - `baseline_known`
   - `approval_satisfied`
   - `no_other_pending_switch`
@@ -3145,9 +3268,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestUntilChangedSwitchTurnAcceptedAttached`
 - From: `Attached`
-- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
 - Guards:
+  - `inspection_identity_current`
   - `transcript_carried`
+  - `held_effort_inspected`
+  - `held_effort_not_refused`
   - `baseline_known`
   - `approval_satisfied`
   - `no_other_pending_switch`
@@ -3157,9 +3283,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestUntilChangedSwitchTurnAcceptedRunning`
 - From: `Running`
-- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
 - Guards:
+  - `inspection_identity_current`
   - `transcript_carried`
+  - `held_effort_inspected`
+  - `held_effort_not_refused`
   - `baseline_known`
   - `approval_satisfied`
   - `no_other_pending_switch`
@@ -3169,9 +3298,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestUntilChangedSwitchTurnApprovalUnavailableIdle`
 - From: `Idle`
-- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
 - Guards:
+  - `inspection_identity_current`
   - `transcript_carried`
+  - `held_effort_inspected`
+  - `held_effort_not_refused`
   - `baseline_known`
   - `approval_unavailable`
   - `request_not_pending`
@@ -3180,9 +3312,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestUntilChangedSwitchTurnApprovalUnavailableAttached`
 - From: `Attached`
-- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
 - Guards:
+  - `inspection_identity_current`
   - `transcript_carried`
+  - `held_effort_inspected`
+  - `held_effort_not_refused`
   - `baseline_known`
   - `approval_unavailable`
   - `request_not_pending`
@@ -3191,9 +3326,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestUntilChangedSwitchTurnApprovalUnavailableRunning`
 - From: `Running`
-- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
 - Guards:
+  - `inspection_identity_current`
   - `transcript_carried`
+  - `held_effort_inspected`
+  - `held_effort_not_refused`
   - `baseline_known`
   - `approval_unavailable`
   - `request_not_pending`
@@ -3202,9 +3340,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestUntilChangedSwitchTurnApprovalDeniedIdle`
 - From: `Idle`
-- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
 - Guards:
+  - `inspection_identity_current`
   - `transcript_carried`
+  - `held_effort_inspected`
+  - `held_effort_not_refused`
   - `approval_denied`
   - `approval_reason_present`
   - `request_not_pending`
@@ -3213,9 +3354,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestUntilChangedSwitchTurnApprovalDeniedAttached`
 - From: `Attached`
-- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
 - Guards:
+  - `inspection_identity_current`
   - `transcript_carried`
+  - `held_effort_inspected`
+  - `held_effort_not_refused`
   - `approval_denied`
   - `approval_reason_present`
   - `request_not_pending`
@@ -3224,9 +3368,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestUntilChangedSwitchTurnApprovalDeniedRunning`
 - From: `Running`
-- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
 - Guards:
+  - `inspection_identity_current`
   - `transcript_carried`
+  - `held_effort_inspected`
+  - `held_effort_not_refused`
   - `approval_denied`
   - `approval_reason_present`
   - `request_not_pending`
@@ -3235,9 +3382,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestUntilChangedSwitchTurnPendingConflictIdle`
 - From: `Idle`
-- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
 - Guards:
+  - `inspection_identity_current`
   - `transcript_carried`
+  - `held_effort_inspected`
+  - `held_effort_not_refused`
   - `approval_satisfied`
   - `pending_switch_conflict`
 - Emits: `SwitchTurnDenied`
@@ -3245,9 +3395,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestUntilChangedSwitchTurnPendingConflictAttached`
 - From: `Attached`
-- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
 - Guards:
+  - `inspection_identity_current`
   - `transcript_carried`
+  - `held_effort_inspected`
+  - `held_effort_not_refused`
   - `approval_satisfied`
   - `pending_switch_conflict`
 - Emits: `SwitchTurnDenied`
@@ -3255,9 +3408,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestUntilChangedSwitchTurnPendingConflictRunning`
 - From: `Running`
-- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
 - Guards:
+  - `inspection_identity_current`
   - `transcript_carried`
+  - `held_effort_inspected`
+  - `held_effort_not_refused`
   - `approval_satisfied`
   - `pending_switch_conflict`
 - Emits: `SwitchTurnDenied`
@@ -6762,6 +6918,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `machine_failed`
   - `machine_failure_cause_known`
   - `machine_runtime_apply_failed`
+  - `runtime_apply_not_refused`
 - Emits: `RuntimeCompletionResultResolved`
 - To: `Initializing`
 
@@ -6776,6 +6933,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `machine_failed`
   - `machine_failure_cause_known`
   - `machine_runtime_apply_failed`
+  - `runtime_apply_not_refused`
 - Emits: `RuntimeCompletionResultResolved`
 - To: `Idle`
 
@@ -6790,6 +6948,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `machine_failed`
   - `machine_failure_cause_known`
   - `machine_runtime_apply_failed`
+  - `runtime_apply_not_refused`
 - Emits: `RuntimeCompletionResultResolved`
 - To: `Attached`
 
@@ -6804,6 +6963,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `machine_failed`
   - `machine_failure_cause_known`
   - `machine_runtime_apply_failed`
+  - `runtime_apply_not_refused`
 - Emits: `RuntimeCompletionResultResolved`
 - To: `Running`
 
@@ -6818,6 +6978,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `machine_failed`
   - `machine_failure_cause_known`
   - `machine_runtime_apply_failed`
+  - `runtime_apply_not_refused`
 - Emits: `RuntimeCompletionResultResolved`
 - To: `Retired`
 
@@ -6832,6 +6993,97 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `machine_failed`
   - `machine_failure_cause_known`
   - `machine_runtime_apply_failed`
+  - `runtime_apply_not_refused`
+- Emits: `RuntimeCompletionResultResolved`
+- To: `Stopped`
+
+### `ResolveRuntimeCompletionResultRuntimeApplyRefusedInitializing`
+- From: `Initializing`
+- On: `ResolveRuntimeCompletionResult`(run_id, terminal, finalization)
+- Guards:
+  - `session_registered`
+  - `run_correlated`
+  - `finalization_succeeded`
+  - `terminal_machine`
+  - `machine_failed`
+  - `machine_failure_cause_known`
+  - `machine_runtime_apply_failed`
+  - `runtime_apply_refused`
+- Emits: `RuntimeCompletionResultResolved`
+- To: `Initializing`
+
+### `ResolveRuntimeCompletionResultRuntimeApplyRefusedIdle`
+- From: `Idle`
+- On: `ResolveRuntimeCompletionResult`(run_id, terminal, finalization)
+- Guards:
+  - `session_registered`
+  - `run_correlated`
+  - `finalization_succeeded`
+  - `terminal_machine`
+  - `machine_failed`
+  - `machine_failure_cause_known`
+  - `machine_runtime_apply_failed`
+  - `runtime_apply_refused`
+- Emits: `RuntimeCompletionResultResolved`
+- To: `Idle`
+
+### `ResolveRuntimeCompletionResultRuntimeApplyRefusedAttached`
+- From: `Attached`
+- On: `ResolveRuntimeCompletionResult`(run_id, terminal, finalization)
+- Guards:
+  - `session_registered`
+  - `run_correlated`
+  - `finalization_succeeded`
+  - `terminal_machine`
+  - `machine_failed`
+  - `machine_failure_cause_known`
+  - `machine_runtime_apply_failed`
+  - `runtime_apply_refused`
+- Emits: `RuntimeCompletionResultResolved`
+- To: `Attached`
+
+### `ResolveRuntimeCompletionResultRuntimeApplyRefusedRunning`
+- From: `Running`
+- On: `ResolveRuntimeCompletionResult`(run_id, terminal, finalization)
+- Guards:
+  - `session_registered`
+  - `run_correlated`
+  - `finalization_succeeded`
+  - `terminal_machine`
+  - `machine_failed`
+  - `machine_failure_cause_known`
+  - `machine_runtime_apply_failed`
+  - `runtime_apply_refused`
+- Emits: `RuntimeCompletionResultResolved`
+- To: `Running`
+
+### `ResolveRuntimeCompletionResultRuntimeApplyRefusedRetired`
+- From: `Retired`
+- On: `ResolveRuntimeCompletionResult`(run_id, terminal, finalization)
+- Guards:
+  - `session_registered`
+  - `run_correlated`
+  - `finalization_succeeded`
+  - `terminal_machine`
+  - `machine_failed`
+  - `machine_failure_cause_known`
+  - `machine_runtime_apply_failed`
+  - `runtime_apply_refused`
+- Emits: `RuntimeCompletionResultResolved`
+- To: `Retired`
+
+### `ResolveRuntimeCompletionResultRuntimeApplyRefusedStopped`
+- From: `Stopped`
+- On: `ResolveRuntimeCompletionResult`(run_id, terminal, finalization)
+- Guards:
+  - `session_registered`
+  - `run_correlated`
+  - `finalization_succeeded`
+  - `terminal_machine`
+  - `machine_failed`
+  - `machine_failure_cause_known`
+  - `machine_runtime_apply_failed`
+  - `runtime_apply_refused`
 - Emits: `RuntimeCompletionResultResolved`
 - To: `Stopped`
 
@@ -9152,55 +9404,115 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyRecoveredInputDurabilityDiscardEphemeralInitializing`
 - From: `Initializing`
-- On: `ClassifyRecoveredInputDurability`(input_id, durability)
+- On: `ClassifyRecoveredInputDurability`(input_id, durability, pending_terminal_carrier)
 - Guards:
   - `ephemeral_durability`
+  - `unfinished_work`
 - Emits: `RecoveredInputDurabilityClassified`
 - To: `Initializing`
 
 ### `ClassifyRecoveredInputDurabilityDiscardEphemeralIdle`
 - From: `Idle`
-- On: `ClassifyRecoveredInputDurability`(input_id, durability)
+- On: `ClassifyRecoveredInputDurability`(input_id, durability, pending_terminal_carrier)
 - Guards:
   - `ephemeral_durability`
+  - `unfinished_work`
 - Emits: `RecoveredInputDurabilityClassified`
 - To: `Idle`
 
 ### `ClassifyRecoveredInputDurabilityDiscardEphemeralAttached`
 - From: `Attached`
-- On: `ClassifyRecoveredInputDurability`(input_id, durability)
+- On: `ClassifyRecoveredInputDurability`(input_id, durability, pending_terminal_carrier)
 - Guards:
   - `ephemeral_durability`
+  - `unfinished_work`
 - Emits: `RecoveredInputDurabilityClassified`
 - To: `Attached`
 
 ### `ClassifyRecoveredInputDurabilityDiscardEphemeralRunning`
 - From: `Running`
-- On: `ClassifyRecoveredInputDurability`(input_id, durability)
+- On: `ClassifyRecoveredInputDurability`(input_id, durability, pending_terminal_carrier)
 - Guards:
   - `ephemeral_durability`
+  - `unfinished_work`
 - Emits: `RecoveredInputDurabilityClassified`
 - To: `Running`
 
 ### `ClassifyRecoveredInputDurabilityDiscardEphemeralRetired`
 - From: `Retired`
-- On: `ClassifyRecoveredInputDurability`(input_id, durability)
+- On: `ClassifyRecoveredInputDurability`(input_id, durability, pending_terminal_carrier)
 - Guards:
   - `ephemeral_durability`
+  - `unfinished_work`
 - Emits: `RecoveredInputDurabilityClassified`
 - To: `Retired`
 
 ### `ClassifyRecoveredInputDurabilityDiscardEphemeralStopped`
 - From: `Stopped`
-- On: `ClassifyRecoveredInputDurability`(input_id, durability)
+- On: `ClassifyRecoveredInputDurability`(input_id, durability, pending_terminal_carrier)
 - Guards:
   - `ephemeral_durability`
+  - `unfinished_work`
+- Emits: `RecoveredInputDurabilityClassified`
+- To: `Stopped`
+
+### `ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierInitializing`
+- From: `Initializing`
+- On: `ClassifyRecoveredInputDurability`(input_id, durability, pending_terminal_carrier)
+- Guards:
+  - `ephemeral_durability`
+  - `pending_terminal_carrier`
+- Emits: `RecoveredInputDurabilityClassified`
+- To: `Initializing`
+
+### `ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierIdle`
+- From: `Idle`
+- On: `ClassifyRecoveredInputDurability`(input_id, durability, pending_terminal_carrier)
+- Guards:
+  - `ephemeral_durability`
+  - `pending_terminal_carrier`
+- Emits: `RecoveredInputDurabilityClassified`
+- To: `Idle`
+
+### `ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierAttached`
+- From: `Attached`
+- On: `ClassifyRecoveredInputDurability`(input_id, durability, pending_terminal_carrier)
+- Guards:
+  - `ephemeral_durability`
+  - `pending_terminal_carrier`
+- Emits: `RecoveredInputDurabilityClassified`
+- To: `Attached`
+
+### `ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierRunning`
+- From: `Running`
+- On: `ClassifyRecoveredInputDurability`(input_id, durability, pending_terminal_carrier)
+- Guards:
+  - `ephemeral_durability`
+  - `pending_terminal_carrier`
+- Emits: `RecoveredInputDurabilityClassified`
+- To: `Running`
+
+### `ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierRetired`
+- From: `Retired`
+- On: `ClassifyRecoveredInputDurability`(input_id, durability, pending_terminal_carrier)
+- Guards:
+  - `ephemeral_durability`
+  - `pending_terminal_carrier`
+- Emits: `RecoveredInputDurabilityClassified`
+- To: `Retired`
+
+### `ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierStopped`
+- From: `Stopped`
+- On: `ClassifyRecoveredInputDurability`(input_id, durability, pending_terminal_carrier)
+- Guards:
+  - `ephemeral_durability`
+  - `pending_terminal_carrier`
 - Emits: `RecoveredInputDurabilityClassified`
 - To: `Stopped`
 
 ### `ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingInitializing`
 - From: `Initializing`
-- On: `ClassifyRecoveredInputDurability`(input_id, durability)
+- On: `ClassifyRecoveredInputDurability`(input_id, durability, pending_terminal_carrier)
 - Guards:
   - `retained_durability`
 - Emits: `RecoveredInputDurabilityClassified`
@@ -9208,7 +9520,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingIdle`
 - From: `Idle`
-- On: `ClassifyRecoveredInputDurability`(input_id, durability)
+- On: `ClassifyRecoveredInputDurability`(input_id, durability, pending_terminal_carrier)
 - Guards:
   - `retained_durability`
 - Emits: `RecoveredInputDurabilityClassified`
@@ -9216,7 +9528,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingAttached`
 - From: `Attached`
-- On: `ClassifyRecoveredInputDurability`(input_id, durability)
+- On: `ClassifyRecoveredInputDurability`(input_id, durability, pending_terminal_carrier)
 - Guards:
   - `retained_durability`
 - Emits: `RecoveredInputDurabilityClassified`
@@ -9224,7 +9536,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingRunning`
 - From: `Running`
-- On: `ClassifyRecoveredInputDurability`(input_id, durability)
+- On: `ClassifyRecoveredInputDurability`(input_id, durability, pending_terminal_carrier)
 - Guards:
   - `retained_durability`
 - Emits: `RecoveredInputDurabilityClassified`
@@ -9232,7 +9544,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingRetired`
 - From: `Retired`
-- On: `ClassifyRecoveredInputDurability`(input_id, durability)
+- On: `ClassifyRecoveredInputDurability`(input_id, durability, pending_terminal_carrier)
 - Guards:
   - `retained_durability`
 - Emits: `RecoveredInputDurabilityClassified`
@@ -9240,7 +9552,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingStopped`
 - From: `Stopped`
-- On: `ClassifyRecoveredInputDurability`(input_id, durability)
+- On: `ClassifyRecoveredInputDurability`(input_id, durability, pending_terminal_carrier)
 - Guards:
   - `retained_durability`
 - Emits: `RecoveredInputDurabilityClassified`
@@ -12681,7 +12993,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RecoverInputLifecycleIdle`
 - From: `Idle`
-- On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, admission_sequence, admission_sequence_recovery, recovery_lane, lane, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, is_prompt)
+- On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, admission_sequence, admission_sequence_recovery, recovery_lane, lane, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, is_prompt, live_boundary_delivery)
 - Guards:
   - `recovered_lifecycle_has_admission_witness`
   - `recovered_recovery_lane_matches_witness`
@@ -12697,7 +13009,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RecoverInputLifecycleAttached`
 - From: `Attached`
-- On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, admission_sequence, admission_sequence_recovery, recovery_lane, lane, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, is_prompt)
+- On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, admission_sequence, admission_sequence_recovery, recovery_lane, lane, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, is_prompt, live_boundary_delivery)
 - Guards:
   - `recovered_lifecycle_has_admission_witness`
   - `recovered_recovery_lane_matches_witness`
@@ -12713,7 +13025,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RecoverInputLifecycleRunning`
 - From: `Running`
-- On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, admission_sequence, admission_sequence_recovery, recovery_lane, lane, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, is_prompt)
+- On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, admission_sequence, admission_sequence_recovery, recovery_lane, lane, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, is_prompt, live_boundary_delivery)
 - Guards:
   - `recovered_lifecycle_has_admission_witness`
   - `recovered_recovery_lane_matches_witness`
@@ -12729,7 +13041,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RecoverInputLifecycleRetired`
 - From: `Retired`
-- On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, admission_sequence, admission_sequence_recovery, recovery_lane, lane, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, is_prompt)
+- On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, admission_sequence, admission_sequence_recovery, recovery_lane, lane, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, is_prompt, live_boundary_delivery)
 - Guards:
   - `recovered_lifecycle_has_admission_witness`
   - `recovered_recovery_lane_matches_witness`
@@ -12745,7 +13057,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RecoverInputLifecycleStopped`
 - From: `Stopped`
-- On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, admission_sequence, admission_sequence_recovery, recovery_lane, lane, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, is_prompt)
+- On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, admission_sequence, admission_sequence_recovery, recovery_lane, lane, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, is_prompt, live_boundary_delivery)
 - Guards:
   - `recovered_lifecycle_has_admission_witness`
   - `recovered_recovery_lane_matches_witness`
@@ -13046,6 +13358,46 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `DeferInputBehindBacklog`(input_id, cancelled_run_id)
 - Guards:
   - `exact_cancelled_batch`
+  - `input_not_live`
+- To: `Stopped`
+
+### `DeferInputBehindBacklogEndedWithRefusedRunIdle`
+- From: `Idle`
+- On: `DeferInputBehindBacklog`(input_id, cancelled_run_id)
+- Guards:
+  - `refused_run_sweep`
+  - `input_not_live`
+- To: `Idle`
+
+### `DeferInputBehindBacklogEndedWithRefusedRunAttached`
+- From: `Attached`
+- On: `DeferInputBehindBacklog`(input_id, cancelled_run_id)
+- Guards:
+  - `refused_run_sweep`
+  - `input_not_live`
+- To: `Attached`
+
+### `DeferInputBehindBacklogEndedWithRefusedRunRunning`
+- From: `Running`
+- On: `DeferInputBehindBacklog`(input_id, cancelled_run_id)
+- Guards:
+  - `refused_run_sweep`
+  - `input_not_live`
+- To: `Running`
+
+### `DeferInputBehindBacklogEndedWithRefusedRunRetired`
+- From: `Retired`
+- On: `DeferInputBehindBacklog`(input_id, cancelled_run_id)
+- Guards:
+  - `refused_run_sweep`
+  - `input_not_live`
+- To: `Retired`
+
+### `DeferInputBehindBacklogEndedWithRefusedRunStopped`
+- From: `Stopped`
+- On: `DeferInputBehindBacklog`(input_id, cancelled_run_id)
+- Guards:
+  - `refused_run_sweep`
   - `input_not_live`
 - To: `Stopped`
 
@@ -28987,6 +29339,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `exact_runtime_apply_failure`
   - `all_recipients_abandoned_by_run`
   - `finalization_succeeded`
+  - `runtime_apply_not_refused`
 - Emits: `AbandonedCompletionResultResolved`
 - To: `Initializing`
 
@@ -28999,6 +29352,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `exact_runtime_apply_failure`
   - `all_recipients_abandoned_by_run`
   - `finalization_succeeded`
+  - `runtime_apply_not_refused`
 - Emits: `AbandonedCompletionResultResolved`
 - To: `Idle`
 
@@ -29011,6 +29365,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `exact_runtime_apply_failure`
   - `all_recipients_abandoned_by_run`
   - `finalization_succeeded`
+  - `runtime_apply_not_refused`
 - Emits: `AbandonedCompletionResultResolved`
 - To: `Attached`
 
@@ -29023,6 +29378,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `exact_runtime_apply_failure`
   - `all_recipients_abandoned_by_run`
   - `finalization_succeeded`
+  - `runtime_apply_not_refused`
 - Emits: `AbandonedCompletionResultResolved`
 - To: `Running`
 
@@ -29035,6 +29391,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `exact_runtime_apply_failure`
   - `all_recipients_abandoned_by_run`
   - `finalization_succeeded`
+  - `runtime_apply_not_refused`
 - Emits: `AbandonedCompletionResultResolved`
 - To: `Retired`
 
@@ -29047,6 +29404,85 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `exact_runtime_apply_failure`
   - `all_recipients_abandoned_by_run`
   - `finalization_succeeded`
+  - `runtime_apply_not_refused`
+- Emits: `AbandonedCompletionResultResolved`
+- To: `Stopped`
+
+### `ResolveAbandonedCompletionResultRuntimeApplyRefusedInitializing`
+- From: `Initializing`
+- On: `ResolveAbandonedCompletionResult`(owner_input_id, run_id, candidate_digest, completion_input_ids_digest, recipient_input_ids, terminal_outcome, terminal_cause_kind, requires_session_checkpoint, has_interaction_terminal_outbox, finalization)
+- Guards:
+  - `session_registered`
+  - `exact_abandoned_batch`
+  - `exact_runtime_apply_failure`
+  - `all_recipients_abandoned_by_run`
+  - `finalization_succeeded`
+  - `runtime_apply_refused`
+- Emits: `AbandonedCompletionResultResolved`
+- To: `Initializing`
+
+### `ResolveAbandonedCompletionResultRuntimeApplyRefusedIdle`
+- From: `Idle`
+- On: `ResolveAbandonedCompletionResult`(owner_input_id, run_id, candidate_digest, completion_input_ids_digest, recipient_input_ids, terminal_outcome, terminal_cause_kind, requires_session_checkpoint, has_interaction_terminal_outbox, finalization)
+- Guards:
+  - `session_registered`
+  - `exact_abandoned_batch`
+  - `exact_runtime_apply_failure`
+  - `all_recipients_abandoned_by_run`
+  - `finalization_succeeded`
+  - `runtime_apply_refused`
+- Emits: `AbandonedCompletionResultResolved`
+- To: `Idle`
+
+### `ResolveAbandonedCompletionResultRuntimeApplyRefusedAttached`
+- From: `Attached`
+- On: `ResolveAbandonedCompletionResult`(owner_input_id, run_id, candidate_digest, completion_input_ids_digest, recipient_input_ids, terminal_outcome, terminal_cause_kind, requires_session_checkpoint, has_interaction_terminal_outbox, finalization)
+- Guards:
+  - `session_registered`
+  - `exact_abandoned_batch`
+  - `exact_runtime_apply_failure`
+  - `all_recipients_abandoned_by_run`
+  - `finalization_succeeded`
+  - `runtime_apply_refused`
+- Emits: `AbandonedCompletionResultResolved`
+- To: `Attached`
+
+### `ResolveAbandonedCompletionResultRuntimeApplyRefusedRunning`
+- From: `Running`
+- On: `ResolveAbandonedCompletionResult`(owner_input_id, run_id, candidate_digest, completion_input_ids_digest, recipient_input_ids, terminal_outcome, terminal_cause_kind, requires_session_checkpoint, has_interaction_terminal_outbox, finalization)
+- Guards:
+  - `session_registered`
+  - `exact_abandoned_batch`
+  - `exact_runtime_apply_failure`
+  - `all_recipients_abandoned_by_run`
+  - `finalization_succeeded`
+  - `runtime_apply_refused`
+- Emits: `AbandonedCompletionResultResolved`
+- To: `Running`
+
+### `ResolveAbandonedCompletionResultRuntimeApplyRefusedRetired`
+- From: `Retired`
+- On: `ResolveAbandonedCompletionResult`(owner_input_id, run_id, candidate_digest, completion_input_ids_digest, recipient_input_ids, terminal_outcome, terminal_cause_kind, requires_session_checkpoint, has_interaction_terminal_outbox, finalization)
+- Guards:
+  - `session_registered`
+  - `exact_abandoned_batch`
+  - `exact_runtime_apply_failure`
+  - `all_recipients_abandoned_by_run`
+  - `finalization_succeeded`
+  - `runtime_apply_refused`
+- Emits: `AbandonedCompletionResultResolved`
+- To: `Retired`
+
+### `ResolveAbandonedCompletionResultRuntimeApplyRefusedStopped`
+- From: `Stopped`
+- On: `ResolveAbandonedCompletionResult`(owner_input_id, run_id, candidate_digest, completion_input_ids_digest, recipient_input_ids, terminal_outcome, terminal_cause_kind, requires_session_checkpoint, has_interaction_terminal_outbox, finalization)
+- Guards:
+  - `session_registered`
+  - `exact_abandoned_batch`
+  - `exact_runtime_apply_failure`
+  - `all_recipients_abandoned_by_run`
+  - `finalization_succeeded`
+  - `runtime_apply_refused`
 - Emits: `AbandonedCompletionResultResolved`
 - To: `Stopped`
 

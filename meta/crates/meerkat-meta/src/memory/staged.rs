@@ -739,12 +739,24 @@ fn check_record_payload(op_index: usize, record: &NewMemoryRecord) -> Result<(),
 /// Scope legality (§7.2 write authority): scopes must live in the batch
 /// realm; agents write only their own identity scope (mob/operator writes
 /// are proposals, realm scope is application-side); steward/distiller and
-/// non-LLM principals may stage into any in-realm scope.
+/// non-LLM principals may stage into any in-realm scope, but for an
+/// identity scope whose key is no plain name
+/// ([`crate::memory::records::IdentityScopeKey`]), which no steward or
+/// distiller batch writes.
+///
+/// An agent's own identity scope is the scope of its name, or a scope kept
+/// under an owner whose member part is its name. The owner is not checked
+/// here: a batch carries no owner. The recorder pins the scope of the
+/// member's own owner, and this rule is the backstop for the name only.
+///
+/// A refusal names the scope's kind, never its key.
 fn check_scope(
     op_index: usize,
     batch: &StagedMutationBatch,
     scope: &MemoryScope,
 ) -> Result<(), StagedBatchError> {
+    use crate::memory::records::IdentityScopeKey;
+
     if scope.realm() != batch.realm {
         return Err(StagedBatchError::RealmMismatch {
             op_index,
@@ -752,23 +764,41 @@ fn check_scope(
             got: scope.realm().to_string(),
         });
     }
-    if let MemoryAuthor::Agent { identity } = &batch.author {
-        match scope {
-            MemoryScope::Identity {
-                identity: scope_identity,
-                ..
-            } if scope_identity == identity => {}
-            other => {
+    match &batch.author {
+        MemoryAuthor::Agent { identity } => {
+            let own = match scope {
+                MemoryScope::Identity {
+                    identity: scope_identity,
+                    ..
+                } => match IdentityScopeKey::of(scope_identity) {
+                    IdentityScopeKey::Named(name) => name == identity,
+                    IdentityScopeKey::PrivateMember { member, .. } => member == identity,
+                    IdentityScopeKey::Reserved => false,
+                },
+                _ => false,
+            };
+            if !own {
                 return Err(StagedBatchError::ScopeNotWritable {
                     op_index,
                     reason: format!(
                         "agent '{identity}' may only write its own identity scope, not \
                          {} scope (mob/operator writes go through proposals)",
-                        other.kind_str()
+                        scope.kind_str()
                     ),
                 });
             }
         }
+        MemoryAuthor::Steward { .. } | MemoryAuthor::Distiller { .. }
+            if scope.kept_apart_by_its_key() =>
+        {
+            return Err(StagedBatchError::ScopeNotWritable {
+                op_index,
+                reason: "no steward or distiller batch writes an identity scope kept apart \
+                         from the members of its name"
+                    .to_string(),
+            });
+        }
+        _ => {}
     }
     Ok(())
 }
@@ -1195,6 +1225,88 @@ mod tests {
             err,
             StagedBatchError::ScopeNotWritable { op_index: 0, .. }
         ));
+    }
+
+    /// An identity scope kept under an owner (`private/<owner>/<member>`) is
+    /// written by the member its key names and by no other agent, and by no
+    /// steward or distiller batch. An identity key of any other shape that
+    /// holds a `/` is written by none of them.
+    #[test]
+    fn a_scope_kept_under_an_owner_is_written_by_its_member_alone() {
+        let kept = |key: &str| MemoryScope::Identity {
+            realm: "family".to_string(),
+            identity: key.to_string(),
+        };
+        let own = kept("private/console-caller:v1:aa/identity:luka");
+        let refused = |batch: StagedMutationBatch| {
+            matches!(
+                validate_batch(
+                    &batch,
+                    &MapView::empty(),
+                    DEFAULT_TOMBSTONE_RECREATE_WINDOW_MS,
+                    1_000,
+                ),
+                Err(StagedBatchError::ScopeNotWritable { op_index: 0, .. })
+            )
+        };
+
+        validate_batch(
+            &agent_batch(vec![create_op(own.clone(), TrustTier::AgentObserved)]),
+            &MapView::empty(),
+            DEFAULT_TOMBSTONE_RECREATE_WINDOW_MS,
+            1_000,
+        )
+        .expect("the member writes its own scope kept under its owner");
+        for key in [
+            "private/console-caller:v1:aa/identity:other",
+            "private/identity:luka",
+            "private//identity:luka",
+            "set-aside/identity:luka",
+        ] {
+            assert!(
+                refused(agent_batch(vec![create_op(
+                    kept(key),
+                    TrustTier::AgentObserved
+                )])),
+                "an agent writes no scope keyed '{key}'"
+            );
+        }
+        for scope in [own, kept("set-aside/identity:luka")] {
+            assert!(
+                refused(steward_batch(vec![create_op(
+                    scope.clone(),
+                    TrustTier::AgentObserved
+                )])),
+                "a steward batch writes no scope keyed '{}'",
+                scope.key()
+            );
+            let mut distiller =
+                steward_batch(vec![create_op(scope.clone(), TrustTier::AgentObserved)]);
+            distiller.author = MemoryAuthor::Distiller {
+                run_id: "distill-1".to_string(),
+            };
+            assert!(
+                refused(distiller),
+                "a distiller batch writes no scope keyed '{}'",
+                scope.key()
+            );
+            // A refusal's text is shown where the scope's own records are
+            // not: it names the scope's kind, never its key.
+            let refusal = validate_batch(
+                &steward_batch(vec![create_op(scope.clone(), TrustTier::AgentObserved)]),
+                &MapView::empty(),
+                DEFAULT_TOMBSTONE_RECREATE_WINDOW_MS,
+                1_000,
+            )
+            .expect_err("refused")
+            .to_string();
+            for part in ["console-caller", "identity:luka", "set-aside", "private/"] {
+                assert!(
+                    !refusal.contains(part),
+                    "the refusal holds no part of the key: {refusal}"
+                );
+            }
+        }
     }
 
     #[test]

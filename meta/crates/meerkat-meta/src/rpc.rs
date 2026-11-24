@@ -22,12 +22,14 @@ use crate::runtime::{
     SubscribeError, SubscribeRequest, SubscribeScope, handle_console_rest_json_route,
     route_module_call,
 };
-use crate::unified_runtime::{EventQuery, UnifiedRuntime};
+use crate::unified_runtime::{EventQuery, MobEntryRef, UnifiedRuntime};
 
 mod console_ingress;
 mod gating_methods;
 pub(crate) mod identity_methods;
 pub(crate) mod memory_methods;
+pub(crate) mod mob_addressing;
+pub(crate) mod mob_hosting;
 pub(crate) mod mob_methods;
 pub(crate) mod operator_methods;
 pub(crate) mod params;
@@ -61,6 +63,7 @@ use routing_delivery_methods::{
     RoutingDeliveryParamsError, parse_delivery_history_params, parse_delivery_send_params,
     parse_routing_resolve_params, parse_routing_route_add_params,
     parse_routing_route_delete_params, parse_routing_routes_list_params,
+    resolution_of_another_mob_refusal,
 };
 use session_store_methods::{
     BigQuerySessionStoreOperation, BigQuerySessionStoreRpcError, format_bigquery_store_error,
@@ -70,7 +73,7 @@ use session_store_methods::{
 use subscribe_methods::{SubscribeParamsError, parse_subscribe_request};
 
 pub const JSONRPC_VERSION: &str = "2.0";
-pub const META_CONTRACT_VERSION: &str = "0.5.0";
+pub const META_CONTRACT_VERSION: &str = "0.6.0";
 /// JSON-RPC code for a known feature that is unavailable on this host.
 pub const CAPABILITY_UNAVAILABLE_CODE: i64 = -32004;
 /// Revoke every Console session of one principal as of now: the Console's
@@ -143,10 +146,11 @@ pub(crate) fn mobpack_authoring_capabilities() -> Value {
 }
 
 async fn mobpack_runtime_catalog_state(
-    runtime: &UnifiedRuntime,
+    mob: &MobEntryRef<'_>,
 ) -> crate::mobpack::MobpackRuntimeCatalogState {
+    let runtime = mob.runtime();
     let loaded_modules = runtime.loaded_modules().await;
-    let mob_handle = runtime.mob_handle();
+    let mob_handle = mob.mob_handle();
     let definition = mob_handle.definition();
     // The runtime projects its own definition, as the host.
     let (runtime_flow_rows, runtime_agent_definition_sources, runtime_skill_realms) =
@@ -196,11 +200,35 @@ async fn mobpack_runtime_catalog_state(
     }
 }
 
-async fn handle_unified_mobpack_authoring_rpc(
+/// Whether a mobpack authoring method answers with the runtime catalog of
+/// the mob a request addresses (that mob's definition: its flows, agent
+/// definitions and skill realms). Such a read resolves the request's mob;
+/// every other authoring method acts on the host alone and resolves none.
+fn mobpack_method_reads_the_runtime_catalog(method: &str) -> bool {
+    matches!(
+        method,
+        "meta/mobpacks/schema"
+            | "meta/mobpacks/catalogs"
+            | "meta/tools/catalog"
+            | "meta/skills/catalog"
+            | "meta/agent_definitions/list"
+            | "meta/mobpacks/templates"
+            | "meta/mobpacks/list"
+            | "meta/mobpacks/get"
+            | "meta/mobpacks/apply_operation"
+    )
+}
+
+/// One mobpack authoring method on the unified dispatch.
+/// `runtime_catalog_state` is the addressed mob's runtime catalog for a
+/// method that reads it ([`mobpack_method_reads_the_runtime_catalog`]) and
+/// `None` for every other method.
+fn handle_unified_mobpack_authoring_rpc(
     runtime: &UnifiedRuntime,
     method: &str,
     params: &Value,
     response_id: Value,
+    runtime_catalog_state: Option<crate::mobpack::MobpackRuntimeCatalogState>,
 ) -> JsonRpcResponse {
     if let Some(refusal) = explicit_provider_credentials_refusal(
         runtime.has_explicit_provider_credentials(),
@@ -210,18 +238,6 @@ async fn handle_unified_mobpack_authoring_rpc(
     ) {
         return refusal;
     }
-    let runtime_catalog_state = match method {
-        "meta/mobpacks/schema"
-        | "meta/mobpacks/catalogs"
-        | "meta/tools/catalog"
-        | "meta/skills/catalog"
-        | "meta/agent_definitions/list"
-        | "meta/mobpacks/templates"
-        | "meta/mobpacks/list"
-        | "meta/mobpacks/get"
-        | "meta/mobpacks/apply_operation" => Some(mobpack_runtime_catalog_state(runtime).await),
-        _ => None,
-    };
     // The host's own JSON-RPC channel (stdio, in-process SDK hosts): path
     // skills read as the host.
     crate::mobpack::with_host_path_skill_reads(|| {
@@ -507,13 +523,14 @@ pub const STORAGE_RESOLUTION_CODE: i64 = -32014;
 /// TypeScript SDKs.
 pub const INIT_IN_PROGRESS_CODE: i64 = -32018;
 
-/// JSON-RPC error code for the mob composition provenance refusals
-/// `rpc_gateway` emits at `meta/init`: a persistent mob storage whose
-/// recorded composition the launch cannot be proven to match (a diverged
-/// definition, a rehearsal-created store, a candidate whose definition
-/// differs from the stored one, an unreadable, malformed or unsupported
-/// manifest, or undeclared non-empty storage; an absent manifest is adopted
-/// by an authoritative launch rather than refused). The error `data` is a
+/// JSON-RPC error code for the mob composition provenance refusals the
+/// gateways (`rpc_gateway` and `meta_gateway`) emit at `meta/init`: a
+/// persistent mob storage whose recorded composition the launch cannot be
+/// proven to match (a diverged definition, a rehearsal-created store, a
+/// candidate whose definition differs from the stored one, an unreadable,
+/// malformed or unsupported manifest, or undeclared non-empty storage; an
+/// absent manifest is adopted by an authoritative launch whose definition
+/// matches the stored one rather than refused). The error `data` is a
 /// [`crate::mob_composition_manifest::CompositionProvenanceRefusal`]: its
 /// `kind` and, where the variant has them, the diverged `fields`. Distinct
 /// from `-32603` so SDKs can reify a deliberate composition refusal instead of
@@ -1014,9 +1031,11 @@ pub fn handle_meta_rpc_json(
             },
         },
         "meta/routing/routes/add" => {
+            // The module runtime's own add, named by its type: the hosting
+            // runtime has a method of the same name, which is a Rust host's
+            // door and not a handler's.
             match parse_routing_route_add_params(&request.params).and_then(|route| {
-                runtime
-                    .add_runtime_route(route)
+                MetaRuntimeHandle::add_runtime_route(runtime, route)
                     .map_err(RoutingDeliveryParamsError::RouteMutation)
             }) {
                 Ok(route) => JsonRpcResponse {
@@ -1532,6 +1551,88 @@ pub struct IdentityFirstContext {
     /// on the same registry the materialization path reads. `None` disables
     /// the verb with a typed refusal.
     pub compaction_floors: Option<std::sync::Arc<crate::identity_first::CompactionFloorRegistry>>,
+}
+
+/// The identity context of a mob this host serves, built from the mob's
+/// own entry: the identity runtime, the roster, the topology and the agent
+/// customizer of the identity context the host installed for that mob, the
+/// mob's own definition, and the three services the host gave that mob's
+/// entry for a request to its identity plane (the provider of its agent
+/// memory, its transcript service, its compaction floors). `None` while the
+/// mob's entry holds no identity context.
+///
+/// The stdio dispatch asks it for a mob that is not the launch mob; the
+/// launch mob's context is the one the launch hands the dispatch. Every
+/// member is read from the mob's entry and none is the launch's. A service
+/// the host gave the entry none of is none here, and the verbs that need
+/// it refuse for that mob, typed.
+fn identity_context_of_a_served_mob(mob: &MobEntryRef<'_>) -> Option<IdentityFirstContext> {
+    let context = mob.identity_first_context()?;
+    let services = mob.identity_request_services().unwrap_or_default();
+    Some(IdentityFirstContext {
+        runtime: context.runtime(),
+        roster_provider: std::sync::Arc::clone(&context.roster_provider),
+        topology_provider: context.topology_provider.clone(),
+        customizer: context.customizer.clone(),
+        agent_memory_provider: services.agent_memory_provider,
+        mob_definition: Some(mob.mob_handle().definition().clone()),
+        transcript_edit_service: services.transcript_edit_service,
+        compaction_floors: services.compaction_floors,
+    })
+}
+
+/// The console events of the mob a request is for: its identities' pending
+/// interactions, their run tracking and response phases, and their events.
+/// Every key of a console event store is an identity name, and an identity
+/// is a name inside one mob, so each mob has a store of its own. The launch
+/// mob's is the host's store, the very one every reader of the launch mob's
+/// console reads; any other mob's is its own store of the host's
+/// ([`crate::unified_runtime::ConsoleEventStore::of_mob`]). An arm of the
+/// dispatch, and a handler below it, takes a mob's console events here and
+/// nowhere else, so a request for one mob's identity never reaches those of
+/// another mob's identity of the same name.
+fn console_events_of_a_served_mob(
+    mob: &MobEntryRef<'_>,
+) -> crate::unified_runtime::ConsoleEventStore {
+    mob.console_events()
+}
+
+/// Test seam: the console events a handler of the unified dispatch takes
+/// for the mob `mob` it resolved ([`console_events_of_a_served_mob`]).
+#[cfg(test)]
+pub(crate) fn console_events_of_a_served_mob_for_tests(
+    mob: &MobEntryRef<'_>,
+) -> crate::unified_runtime::ConsoleEventStore {
+    console_events_of_a_served_mob(mob)
+}
+
+/// The params of an agent memory request, as its method parses them. A
+/// request that carries no `realm` is for the memory realm of the mob it
+/// names. The launch mob's is the wire's default realm, which the parse
+/// supplies, as before. Any other mob's is the realm that mob's own agent
+/// memory is configured with: it is read from the mob's identity runtime
+/// and written into the params here. A realm the request names is left as
+/// given, for either mob, and so are params that are no object.
+async fn agent_memory_params_for<'a>(
+    for_the_launch_mob: bool,
+    identity_runtime: &crate::identity_first::IdentityRuntime,
+    params: &'a Value,
+) -> std::borrow::Cow<'a, Value> {
+    if for_the_launch_mob {
+        return std::borrow::Cow::Borrowed(params);
+    }
+    let Some(object) = params
+        .as_object()
+        .filter(|object| !object.contains_key("realm"))
+    else {
+        return std::borrow::Cow::Borrowed(params);
+    };
+    let Some(realm) = identity_runtime.agent_memory_realm().await else {
+        return std::borrow::Cow::Borrowed(params);
+    };
+    let mut object = object.clone();
+    object.insert("realm".to_string(), Value::String(realm));
+    std::borrow::Cow::Owned(Value::Object(object))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2188,10 +2289,13 @@ pub(crate) const CANDIDATE_LAUNCH_REFUSED_METHODS: &[&str] = &[
 /// write ([`workgraph_methods::is_workgraph_mutating_method`]); the
 /// host-executing or externally writing arm of a method a candidate
 /// otherwise serves ([`candidate_launch_refuses_host_execution`]); or a
-/// Flow Editor change ([`candidate_launch_refuses_mobpack_change`]). Reads
+/// Flow Editor change ([`candidate_launch_refuses_mobpack_change`]); or a
+/// change of the mobs of the host
+/// ([`mob_hosting::is_mob_hosting_mutating_method`]): a create, a stop, a
+/// resume or a destroy of a mob is the authoritative launch's. Reads
 /// still answer: the declaration read, the grant reads, the WorkGraph reads,
-/// the draft reads, a deploy plan, a structural validation and a BigQuery
-/// read among them.
+/// the draft reads, a deploy plan, a structural validation, a BigQuery
+/// read and the list of the host's mobs among them.
 pub(crate) fn candidate_launch_refuses(
     method: &str,
     params: &Value,
@@ -2203,6 +2307,7 @@ pub(crate) fn candidate_launch_refuses(
         || realm_mcp_methods::is_realm_mcp_mutating_method(method)
         || identity_methods::is_identity_family_mutating_method(method)
         || workgraph_methods::is_workgraph_mutating_method(method)
+        || mob_hosting::is_mob_hosting_mutating_method(method)
         || candidate_launch_refuses_host_execution(method, params)
         || candidate_launch_refuses_mobpack_change(method, params, state_dir)
 }
@@ -2452,13 +2557,47 @@ fn candidate_launch_refused(method: &str, response_id: Value) -> JsonRpcResponse
     }
 }
 
+/// Whether the stdio dispatch gives `method` to the live arm: every
+/// `meta/live/*` method, and on an `openai-live` build the WebRTC answer
+/// method `live/webrtc/answer`, the one live method outside `meta/`.
+fn is_stdio_live_method(method: &str) -> bool {
+    method.starts_with("meta/live/")
+        || cfg!(feature = "openai-live") && method == "live/webrtc/answer"
+}
+
+/// Whether the stdio dispatch gives `method` to the loaded-module arm, as a
+/// call of the module its first segment names: a method with a slash that is
+/// outside `meta/` and is not a live method ([`is_stdio_live_method`]).
+/// `live/webrtc/answer` has a module call's shape, and the exclusion keeps
+/// the module arm from taking it as a call of a module named `live`. The
+/// two arms' guards are disjoint, so their order in the match decides
+/// nothing.
+fn is_stdio_module_method(method: &str) -> bool {
+    method.contains('/') && !method.starts_with("meta/") && !is_stdio_live_method(method)
+}
+
+/// The live arm's answer as the stdio dispatch gives it. On an `openai-live`
+/// build an error answer first rejects the response custody its handler left
+/// for the gateway's writer: an error publishes nothing, and the writer
+/// settles a written answer as delivered whatever it says.
+async fn stdio_live_answer(response: JsonRpcResponse) -> JsonRpcResponse {
+    #[cfg(feature = "openai-live")]
+    {
+        crate::live_wiring::reject_live_rpc_response_delivery_of_error(response).await
+    }
+    #[cfg(not(feature = "openai-live"))]
+    {
+        response
+    }
+}
+
 async fn handle_unified_rpc_json_inner(
     runtime: &UnifiedRuntime,
     runtime_owner: Option<&Arc<UnifiedRuntime>>,
     request_json: &str,
     timeout: Duration,
     http_base_url: Option<&str>,
-    identity_ctx: Option<&IdentityFirstContext>,
+    launch_identity_ctx: Option<&IdentityFirstContext>,
     live: Option<&crate::live_wiring::LiveRpcHandler>,
 ) -> String {
     let raw_request: Value = match serde_json::from_str(request_json) {
@@ -2537,6 +2676,151 @@ async fn handle_unified_rpc_json_inner(
         };
     }
 
+    // The mob the request names: read once, after the member alias check
+    // above, and taken off the params before the method's own parse reads
+    // them (`mob_addressing`). On a method whose own parameter the id is, a
+    // request by position names its mob as one by name does.
+    let mut request = request;
+    let taken = mob_addressing::take_named_mob_on_stdio(&request.method, &mut request.params);
+    let named_mob = match taken {
+        Ok(named_mob) => named_mob,
+        Err(error) => {
+            let response = JsonRpcResponse {
+                jsonrpc: JSONRPC_VERSION.to_string(),
+                id: response_id,
+                result: None,
+                error: Some(error),
+            };
+            return if is_notification {
+                String::new()
+            } else {
+                serialize_response(&response)
+            };
+        }
+    };
+
+    // An id this host does not serve is refused here, on every addressed
+    // method and before anything else judges the request. The question
+    // loads nothing.
+    let served_mob = match runtime.served_mob_id(named_mob.named()).await {
+        Ok(served_mob) => served_mob,
+        Err(error) => {
+            let response = JsonRpcResponse {
+                jsonrpc: JSONRPC_VERSION.to_string(),
+                id: response_id,
+                result: None,
+                error: Some(mob_addressing::mob_resolve_refusal(&error)),
+            };
+            return if is_notification {
+                String::new()
+            } else {
+                serialize_response(&response)
+            };
+        }
+    };
+
+    // The launch mob: the mob this host serves for a request that names
+    // none. The question loads nothing.
+    let launch_mob = match runtime.served_mob_id(None).await {
+        Ok(launch_mob) => launch_mob,
+        Err(error) => {
+            let response = JsonRpcResponse {
+                jsonrpc: JSONRPC_VERSION.to_string(),
+                id: response_id,
+                result: None,
+                error: Some(mob_addressing::mob_resolve_refusal(&error)),
+            };
+            return if is_notification {
+                String::new()
+            } else {
+                serialize_response(&response)
+            };
+        }
+    };
+    let for_the_launch_mob = served_mob == launch_mob;
+    // How a record of the host's services names the mob this request is
+    // for: nothing for the launch mob, the mob's id for any other. An arm
+    // whose service is keyed by the mob reads this and does not resolve
+    // the mob: the id was judged above, and that judgement loads nothing.
+    let stored_mob = (!for_the_launch_mob).then(|| served_mob.clone());
+
+    // The refusal of a request for another mob this host serves that the
+    // dispatch does not serve for that mob. It is the typed refusal of a
+    // mob id with both ids, and it says that the host has the mob: `hosted`
+    // is in its data. A caller tells it from the refusal of an id the host
+    // does not have by that member, never by its text.
+    let hosted_mob_refusal = |message: String, without_an_identity_context: bool| {
+        let mut error =
+            mob_addressing::foreign_mob_target(served_mob.as_str(), launch_mob.as_str());
+        error.message = message;
+        if let Some(data) = error.data.as_mut().and_then(Value::as_object_mut) {
+            data.insert("hosted".to_string(), Value::Bool(true));
+            if without_an_identity_context {
+                data.insert("identity_context".to_string(), Value::Bool(false));
+            }
+        }
+        error
+    };
+    // What serves the launch mob alone: the text names what is not served
+    // for that mob.
+    let serves_the_launch_mob_only = |what: &str| {
+        hosted_mob_refusal(
+            format!(
+                "mob '{}' is hosted on this gateway, but {what} serves the launch mob '{}' only",
+                served_mob.as_str(),
+                launch_mob.as_str()
+            ),
+            false,
+        )
+    };
+    // A method that works with an identity context, asked for a mob whose
+    // entry holds none on a host whose launch composed one. Its data says
+    // so (`identity_context`), and its code is the one of a refused mob id:
+    // not the code of a method the gateway does not have, which a client
+    // reads as an older gateway and answers by another method.
+    let has_no_identity_context = || {
+        hosted_mob_refusal(
+            format!(
+                "identity-first runtime not configured for mob '{}'",
+                served_mob.as_str()
+            ),
+            true,
+        )
+    };
+
+    // A method that serves the launch mob alone (one whose arm acts on the
+    // launch mob's services without resolving the request's mob, and the
+    // live family, whose one transport the launch composed for its mob) is
+    // refused here for another mob this host serves, before its arm.
+    // The family of changes and reads of a mob's long-term agents (the
+    // methods of `identity_methods::IDENTITY_FAMILY_METHODS`) is not such
+    // a method: each mob has the family of its own agents, and its arm
+    // takes the family of the mob the request names.
+    // `meta/identity/warm`, `meta/identity/resolved_tools` and
+    // `meta/identity/routing_status` are not of the family and are served
+    // for the mob a request names too.
+    // A request that names no mob, or the launch mob, never meets this.
+    let refused_for_another_mob = if for_the_launch_mob {
+        None
+    } else if mob_addressing::stdio_method_serves_the_launch_mob_only(request.method.as_str()) {
+        Some(serves_the_launch_mob_only(request.method.as_str()))
+    } else {
+        None
+    };
+    if let Some(error) = refused_for_another_mob {
+        let response = JsonRpcResponse {
+            jsonrpc: JSONRPC_VERSION.to_string(),
+            id: response_id,
+            result: None,
+            error: Some(error),
+        };
+        return if is_notification {
+            String::new()
+        } else {
+            serialize_response(&response)
+        };
+    }
+
     let speaks_for_composition = runtime.speaks_for_composition();
     let state_dir = if speaks_for_composition {
         None
@@ -2583,12 +2867,102 @@ async fn handle_unified_rpc_json_inner(
         };
     }
 
+    // A mob-scoped arm resolves the request's mob at its top
+    // (`request_mob!()`): the resolve is what loads a mob that is known and
+    // not loaded. An arm of a host-scoped method never resolves: the id was
+    // checked above, and that check loads nothing.
+    macro_rules! request_mob {
+        () => {
+            match runtime.resolve_mob(named_mob.named()).await {
+                Ok(mob) => mob,
+                Err(error) => {
+                    let response = JsonRpcResponse {
+                        jsonrpc: JSONRPC_VERSION.to_string(),
+                        id: response_id.clone(),
+                        result: None,
+                        error: Some(mob_addressing::mob_resolve_refusal(&error)),
+                    };
+                    return if is_notification {
+                        String::new()
+                    } else {
+                        serialize_response(&response)
+                    };
+                }
+            }
+        };
+    }
+
+    // The identity context of a mob that is not the launch mob: an arm's
+    // identity step builds it from that mob's entry, once, and it is kept
+    // here for the arm's whole body.
+    let served_identity_ctx: Option<IdentityFirstContext>;
+
+    // The identity context an arm works with (`request_identity!()`) is the
+    // identity context of the mob the request names. For the launch mob it
+    // is the one the launch composed and handed this dispatch, or none on a
+    // host that composed none. For any other mob the step resolves the mob
+    // and answers the context its own entry holds. A mob whose entry holds
+    // none is served like the launch mob of a host that composed none: the
+    // arm is handed none and works on the resolved mob. Only where the
+    // host composed an identity context and the mob's entry holds none is
+    // the request refused: with the typed refusal of a mob id that says the
+    // host has the mob and the mob has no identity context. No arm reads
+    // the launch's context except through this step or the one below, so
+    // no arm hands a handler the launch's identity runtime for another mob.
+    macro_rules! request_identity {
+        () => {
+            if for_the_launch_mob {
+                launch_identity_ctx
+            } else {
+                let mob_of_the_request = request_mob!();
+                served_identity_ctx = identity_context_of_a_served_mob(&mob_of_the_request);
+                if served_identity_ctx.is_none() && launch_identity_ctx.is_some() {
+                    let response = JsonRpcResponse {
+                        jsonrpc: JSONRPC_VERSION.to_string(),
+                        id: response_id.clone(),
+                        result: None,
+                        error: Some(has_no_identity_context()),
+                    };
+                    return if is_notification {
+                        String::new()
+                    } else {
+                        serialize_response(&response)
+                    };
+                }
+                served_identity_ctx.as_ref()
+            }
+        };
+    }
+
+    // The same step for an arm that is never refused for want of an
+    // identity context (`request_identity_if_any!()`): the launch's context
+    // for the launch mob, and for any other mob the context its own entry
+    // holds, or none. `meta/status` and `meta/capabilities` report on the
+    // mob they answer for, with or without an identity context. The five
+    // arms that wire, unwire and send across mobs hand their handlers the
+    // identity runtime of the mob the request names, or none; a handler
+    // handed none takes the resolved mob's own, so a request for a mob
+    // that is not the launch mob is never asked of the launch's.
+    macro_rules! request_identity_if_any {
+        () => {
+            if for_the_launch_mob {
+                launch_identity_ctx
+            } else {
+                let mob_of_the_request = request_mob!();
+                served_identity_ctx = identity_context_of_a_served_mob(&mob_of_the_request);
+                served_identity_ctx.as_ref()
+            }
+        };
+    }
+
     let response = match request.method.as_str() {
         "meta/status" => {
+            let mob = request_mob!();
+            let identity_ctx = request_identity_if_any!();
             // The last phase the mob's actor published, and, once the actor
             // has stopped, why: a fail-stopped actor keeps its last live
             // phase, so the phase alone reads a stopped mob as running.
-            let observation = runtime.mob_handle().lifecycle_observation();
+            let observation = mob.mob_handle().lifecycle_observation();
             let mob_state = Some(observation.phase);
             let is_running = runtime.module_is_running().await;
             let loaded = runtime.loaded_modules().await;
@@ -2616,8 +2990,8 @@ async fn handle_unified_rpc_json_inner(
                         .unwrap_or(Value::Null);
             }
             result["member_restore"] =
-                crate::mob_handle_runtime::member_restore_report(&runtime.mob_handle());
-            if let Some(storage) = runtime.resolved_storage() {
+                crate::mob_handle_runtime::member_restore_report(&mob.mob_handle());
+            if let Some(storage) = mob.resolved_storage() {
                 result["storage"] = storage.status_json();
             }
             if let Some(job_health) = runtime.job_health_projection() {
@@ -2633,8 +3007,7 @@ async fn handle_unified_rpc_json_inner(
             // Members created under one of the console's runtime-plane
             // identities before every creation path refused them.
             if let Some(reserved) =
-                crate::member_comms_id::reserved_identity_members_status(&runtime.mob_handle())
-                    .await
+                crate::member_comms_id::reserved_identity_members_status(&mob.mob_handle()).await
             {
                 result["reserved_identity_members"] = reserved;
             }
@@ -2643,7 +3016,7 @@ async fn handle_unified_rpc_json_inner(
             // gateway's init result carries the same entries for the moment
             // it became ready.
             let broken_members =
-                crate::mob_handle_runtime::broken_member_facts_of(&runtime.mob_handle()).await;
+                crate::mob_handle_runtime::broken_member_facts_of(&mob.mob_handle()).await;
             if !broken_members.is_empty() {
                 result["broken_members"] =
                     crate::unified_runtime::http::broken_members_json(&broken_members);
@@ -2722,6 +3095,8 @@ async fn handle_unified_rpc_json_inner(
             }
         }
         "meta/capabilities" => {
+            let mob = request_mob!();
+            let identity_ctx = request_identity_if_any!();
             let loaded = runtime.loaded_modules().await;
             let mut methods = vec![
                 "meta/init",
@@ -2807,7 +3182,7 @@ async fn handle_unified_rpc_json_inner(
             // The scoped tool grant family, derived from its registry: a grant
             // names an identity the identity runtime serves, so the family is
             // served and advertised with it.
-            if identity_ctx.is_some() || runtime.identity_runtime_ref().is_some() {
+            if identity_ctx.is_some() || mob.identity_runtime_ref().is_some() {
                 methods.extend_from_slice(tool_grant_methods::TOOL_GRANT_METHODS);
             }
             // The family of changes and reads of the mob's long-term agents,
@@ -2815,7 +3190,7 @@ async fn handle_unified_rpc_json_inner(
             // launch that has an identity runtime, which attached it.
             if identity_ctx
                 .map(|ctx| ctx.runtime.runtime())
-                .or_else(|| runtime.identity_runtime_ref())
+                .or_else(|| mob.identity_runtime_ref())
                 .is_some_and(|identity_runtime| identity_runtime.identity_family().is_some())
             {
                 methods.extend_from_slice(identity_methods::IDENTITY_FAMILY_METHODS);
@@ -2829,7 +3204,7 @@ async fn handle_unified_rpc_json_inner(
             // Workgraph methods are advertised only when the service is
             // configured (`runtime_options.workgraph = false` or a failed
             // store open leave them off).
-            let workgraph_configured = runtime.workgraph_service().is_some();
+            let workgraph_configured = mob.workgraph_service().is_some();
             if workgraph_configured {
                 methods.extend_from_slice(workgraph_methods::WORKGRAPH_READ_METHODS);
                 methods.extend_from_slice(workgraph_methods::WORKGRAPH_MUTATE_METHODS);
@@ -2968,20 +3343,41 @@ async fn handle_unified_rpc_json_inner(
                     methods.push("monitors/start");
                 }
             }
-            let topology = runtime.topology_runtime_handle();
+            let topology = mob.topology_runtime_handle();
             let (topology_methods, topology_capabilities) =
                 topology_methods::capability_projection(&topology, None, false);
             methods.extend(topology_methods);
+            // The list a mob is answered names what the dispatch serves for
+            // it: a method that serves the launch mob alone is refused for
+            // any other mob and is not listed for one. The family of a
+            // mob's long-term agents is listed above for the mob that has
+            // one.
+            if !for_the_launch_mob {
+                methods.retain(|method| {
+                    !mob_addressing::stdio_method_serves_the_launch_mob_only(method)
+                });
+            }
             // H1/H2 storage durability resolution — same object as
             // `meta/status`; `null` when the spec was composed externally
             // without a declaration.
-            let storage = runtime
+            let storage = mob
                 .resolved_storage()
                 .map(|summary| summary.status_json())
                 .unwrap_or(Value::Null);
+            // The live transport is the launch mob's: its feature
+            // capabilities are listed for the launch mob alone, as its
+            // methods are.
             let mut feature_capabilities = live
+                .filter(|_| for_the_launch_mob)
                 .map(crate::live_wiring::LiveRpcHandler::feature_capabilities)
                 .unwrap_or_default();
+            // The module form of `meta/spawn_member` serves the launch mob
+            // alone: another mob is offered the member form only.
+            let available_spawn_modes: &[&str] = if for_the_launch_mob {
+                &["module", "profile"]
+            } else {
+                &["profile"]
+            };
             if runtime.mob_announcements().is_some() {
                 for name in crate::mob_announcements::rpc::announcement_feature_capabilities() {
                     match crate::live_contracts::FeatureCapability::new(name) {
@@ -3027,6 +3423,39 @@ async fn handle_unified_rpc_json_inner(
                     ),
                 }
             }
+            // The gateway judges a request's `mob_id`. A client checks for
+            // this before it sends one: a gateway without it ignores the id
+            // on most methods and refuses it on the methods with strict
+            // params.
+            match crate::live_contracts::FeatureCapability::new(
+                mob_addressing::MOB_ADDRESSING_FEATURE,
+            ) {
+                Ok(capability) => feature_capabilities.push(capability),
+                Err(error) => tracing::error!(
+                    error,
+                    name = mob_addressing::MOB_ADDRESSING_FEATURE,
+                    "mob addressing feature capability refused"
+                ),
+            }
+            // The gateway serves the methods over the mobs of its host
+            // (`meta/mobs/*`): it lists them, and names the feature a
+            // client checks for before it calls one.
+            if mob_hosting::host_serves_mob_hosting(
+                mob.mob_runtime(),
+                runtime.mob_resolver().resolves_host_mobs(),
+            ) {
+                methods.extend_from_slice(mob_hosting::MOB_HOSTING_METHODS);
+                match crate::live_contracts::FeatureCapability::new(
+                    mob_hosting::HOSTED_MOBS_FEATURE,
+                ) {
+                    Ok(capability) => feature_capabilities.push(capability),
+                    Err(error) => tracing::error!(
+                        error,
+                        name = mob_hosting::HOSTED_MOBS_FEATURE,
+                        "hosted mobs feature capability refused"
+                    ),
+                }
+            }
             let announcement_capabilities = crate::mob_announcements::rpc::capabilities_projection(
                 runtime.mob_announcements().as_ref(),
             )
@@ -3059,8 +3488,7 @@ async fn handle_unified_rpc_json_inner(
                     "workgraph": workgraph_configured,
                     // Bootstrap migration of member-bound attention bindings
                     // into their mob realm (null without a WorkGraph service).
-                    "workgraph_realm_migration": runtime
-                        .workgraph_realm_migration()
+                    "workgraph_realm_migration": mob.workgraph_realm_migration()
                         .map(|report| serde_json::to_value(report.as_ref()).unwrap_or(Value::Null))
                         .unwrap_or(Value::Null),
                     "detached_jobs": job_health
@@ -3074,7 +3502,7 @@ async fn handle_unified_rpc_json_inner(
                         "can_send_messages": true,
                         "can_wire_members": true,
                         "can_retire_members": true,
-                        "available_spawn_modes": ["module", "profile"],
+                        "available_spawn_modes": available_spawn_modes,
                     },
                     "authoring_capabilities": mobpack_authoring_capabilities(),
                     "topology_control": topology_capabilities,
@@ -3083,15 +3511,18 @@ async fn handle_unified_rpc_json_inner(
             }
         }
         topology_methods::TOPOLOGY_QUERY_METHOD => {
-            let topology = runtime.topology_runtime_handle();
+            let mob = request_mob!();
+            let topology = mob.topology_runtime_handle();
             topology_methods::handle_query(&topology, response_id, None, false).await
         }
         topology_methods::TOPOLOGY_PLAN_METHOD => {
-            let topology = runtime.topology_runtime_handle();
+            let mob = request_mob!();
+            let topology = mob.topology_runtime_handle();
             topology_methods::handle_plan(&topology, response_id, &request.params, None).await
         }
         topology_methods::TOPOLOGY_APPLY_METHOD => {
-            let topology = runtime.topology_runtime_handle();
+            let mob = request_mob!();
+            let topology = mob.topology_runtime_handle();
             topology_methods::handle_apply(
                 &topology,
                 response_id,
@@ -3099,15 +3530,18 @@ async fn handle_unified_rpc_json_inner(
                 None,
                 Some("local-host"),
                 &crate::topology_control::TopologyApplyScope::LocalHost,
+                None,
             )
             .await
         }
         topology_methods::TOPOLOGY_OPERATION_METHOD => {
-            let topology = runtime.topology_runtime_handle();
+            let mob = request_mob!();
+            let topology = mob.topology_runtime_handle();
             topology_methods::handle_operation(&topology, response_id, &request.params, None).await
         }
         topology_methods::TOPOLOGY_AUDIT_METHOD => {
-            let topology = runtime.topology_runtime_handle();
+            let mob = request_mob!();
+            let topology = mob.topology_runtime_handle();
             topology_methods::handle_audit(&topology, response_id, &request.params, None).await
         }
         "meta/reconcile" => {
@@ -3153,6 +3587,27 @@ async fn handle_unified_rpc_json_inner(
         "meta/spawn_member" => {
             // Support both legacy module_id pattern and mob profile+meerkat_id pattern
             let module_id = request.params.get("module_id").and_then(Value::as_str);
+            // The host has one module runtime, the launch mob's: a module
+            // spawn that names another mob is refused. It is judged here,
+            // before the mob is resolved and before its identity context is
+            // asked for: neither is the module runtime's.
+            if module_id.is_some() && !for_the_launch_mob {
+                let response = JsonRpcResponse {
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: response_id,
+                    result: None,
+                    error: Some(serves_the_launch_mob_only(
+                        "a module spawn (meta/spawn_member with module_id)",
+                    )),
+                };
+                return if is_notification {
+                    String::new()
+                } else {
+                    serialize_response(&response)
+                };
+            }
+            let mob = request_mob!();
+            let identity_ctx = request_identity!();
             let profile = request.params.get("profile").and_then(Value::as_str);
             let meerkat_id = request.params.get("meerkat_id").and_then(Value::as_str);
 
@@ -3197,7 +3652,7 @@ async fn handle_unified_rpc_json_inner(
                 // console's runtime-plane identities among them.
                 let target_identity_runtime = identity_ctx
                     .map(|ctx| ctx.runtime.runtime())
-                    .or_else(|| runtime.identity_runtime_ref());
+                    .or_else(|| mob.identity_runtime_ref());
                 let raw_target_validation = crate::member_comms_id::validate_raw_member_target(
                     target_identity_runtime,
                     meerkat_id,
@@ -3220,7 +3675,7 @@ async fn handle_unified_rpc_json_inner(
                     // explicit identity context to a runtime without one; keep
                     // that authority's reservation through the lower-plane
                     // spawn without double-locking attached runtimes.
-                    let compatibility_reservation = if runtime.identity_runtime_ref().is_none() {
+                    let compatibility_reservation = if mob.identity_runtime_ref().is_none() {
                         crate::member_comms_id::reserve_raw_member_target(
                             target_identity_runtime,
                             meerkat_id,
@@ -3259,7 +3714,7 @@ async fn handle_unified_rpc_json_inner(
                                 None,
                                 None,
                             );
-                            let spawn_result = Box::pin(runtime.spawn(spec)).await;
+                            let spawn_result = Box::pin(mob.spawn(spec)).await;
                             drop(compatibility_reservation);
                             match spawn_result {
                                 Ok(_member_ref) => JsonRpcResponse {
@@ -3303,10 +3758,13 @@ async fn handle_unified_rpc_json_inner(
         }
         "meta/routing/resolve" => {
             let resolve_result = match parse_routing_resolve_params(&request.params) {
-                Ok(resolve_request) => runtime
-                    .resolve_routing(resolve_request)
-                    .await
-                    .map_err(RoutingDeliveryParamsError::Routing),
+                Ok(mut resolve_request) => {
+                    resolve_request.mob_id = stored_mob.clone();
+                    runtime
+                        .resolve_routing(resolve_request)
+                        .await
+                        .map_err(RoutingDeliveryParamsError::Routing)
+                }
                 Err(e) => Err(e),
             };
             match resolve_result {
@@ -3330,7 +3788,14 @@ async fn handle_unified_rpc_json_inner(
         }
         "meta/routing/routes/list" => match parse_routing_routes_list_params(&request.params) {
             Ok(()) => {
-                let routes = runtime.list_runtime_routes().await;
+                // The routing service holds the routes of every mob of the
+                // host: a request is answered the routes of its own mob.
+                let routes: Vec<_> = runtime
+                    .list_runtime_routes()
+                    .await
+                    .into_iter()
+                    .filter(|route| route.mob_id == stored_mob)
+                    .collect();
                 JsonRpcResponse {
                     jsonrpc: JSONRPC_VERSION.to_string(),
                     id: response_id,
@@ -3353,10 +3818,18 @@ async fn handle_unified_rpc_json_inner(
         },
         "meta/routing/routes/add" => {
             let add_result = match parse_routing_route_add_params(&request.params) {
-                Ok(route) => runtime
-                    .add_runtime_route(route)
-                    .await
-                    .map_err(RoutingDeliveryParamsError::RouteMutation),
+                // The route's mob is stated here, in the form a record
+                // names it: the routing service takes it as it is. (The
+                // runtime's own `add_runtime_route` is a Rust host's door.)
+                Ok(mut route) => {
+                    route.mob_id = stored_mob.clone();
+                    runtime
+                        .module_runtime_handle()
+                        .lock()
+                        .await
+                        .add_runtime_route(route)
+                        .map_err(RoutingDeliveryParamsError::RouteMutation)
+                }
                 Err(e) => Err(e),
             };
             match add_result {
@@ -3380,9 +3853,16 @@ async fn handle_unified_rpc_json_inner(
         }
         "meta/routing/routes/delete" => {
             let delete_result = match parse_routing_route_delete_params(&request.params) {
+                // The route of the request's mob under that key: the same
+                // key in another mob is another route and stays.
                 Ok(route_key) => runtime
-                    .delete_runtime_route(&route_key)
+                    .module_runtime_handle()
+                    .lock()
                     .await
+                    .delete_mob_runtime_route(
+                        stored_mob.as_ref().map(meerkat_mob::MobId::as_str),
+                        &route_key,
+                    )
                     .map_err(RoutingDeliveryParamsError::RouteMutation),
                 Err(e) => Err(e),
             };
@@ -3407,10 +3887,16 @@ async fn handle_unified_rpc_json_inner(
         }
         "meta/delivery/send" => {
             let send_result = match parse_delivery_send_params(&request.params) {
-                Ok(send_request) => runtime
-                    .send_delivery(send_request)
-                    .await
-                    .map_err(RoutingDeliveryParamsError::Delivery),
+                Ok(mut send_request) => {
+                    // The delivery is the request's mob's: the host's
+                    // delivery service judges the resolution in that mob
+                    // and records the delivery for it.
+                    send_request.mob_id = stored_mob.clone();
+                    runtime
+                        .send_delivery(send_request)
+                        .await
+                        .map_err(RoutingDeliveryParamsError::Delivery)
+                }
                 Err(e) => Err(e),
             };
             match send_result {
@@ -3419,6 +3905,24 @@ async fn handle_unified_rpc_json_inner(
                     id: response_id,
                     result: Some(serde_json::to_value(record).unwrap_or(Value::Null)),
                     error: None,
+                },
+                // A resolution made for another mob of the host: a refusal
+                // of its own kind that names both mobs. Where the module
+                // runtime names no mob it means the launch mob.
+                Err(RoutingDeliveryParamsError::Delivery(
+                    DeliverySendError::ResolutionOfAnotherMob {
+                        resolution_mob_id,
+                        request_mob_id,
+                    },
+                )) => JsonRpcResponse {
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: response_id,
+                    result: None,
+                    error: Some(resolution_of_another_mob_refusal(
+                        resolution_mob_id.as_ref().map(meerkat_mob::MobId::as_str),
+                        request_mob_id.as_ref().map(meerkat_mob::MobId::as_str),
+                        launch_mob.as_str(),
+                    )),
                 },
                 Err(err) => JsonRpcResponse {
                     jsonrpc: JSONRPC_VERSION.to_string(),
@@ -3433,7 +3937,9 @@ async fn handle_unified_rpc_json_inner(
             }
         }
         "meta/delivery/history" => match parse_delivery_history_params(&request.params) {
-            Ok(history_request) => {
+            Ok(mut history_request) => {
+                // The deliveries of the request's mob, and of no other.
+                history_request.mob_id = stored_mob.clone();
                 let history = runtime.delivery_history(history_request).await;
                 JsonRpcResponse {
                     jsonrpc: JSONRPC_VERSION.to_string(),
@@ -3453,8 +3959,20 @@ async fn handle_unified_rpc_json_inner(
                 }),
             },
         },
+        // The subscription selects in the mob the request names: the
+        // members of a mob of the host other than the launch mob, or, for a
+        // request that names no mob, the launch selection. The mob's
+        // incarnation is asked without loading the mob (`event_mob_of`): a
+        // mob that is not loaded is answered what the buffer still holds
+        // of it and stays not loaded.
         "meta/events/subscribe" => match parse_subscribe_request(&request.params) {
-            Ok(subscribe_request) => match runtime.subscribe_events(subscribe_request).await {
+            Ok(subscribe_request) => match runtime
+                .subscribe_events_of_mob(
+                    subscribe_request,
+                    event_mob_of(runtime, stored_mob.as_ref()).await.as_ref(),
+                )
+                .await
+            {
                 Ok(subscribe_result) => JsonRpcResponse {
                     jsonrpc: JSONRPC_VERSION.to_string(),
                     id: response_id,
@@ -3484,7 +4002,7 @@ async fn handle_unified_rpc_json_inner(
             },
         },
         "meta/query_events" => {
-            let query: EventQuery = if request.params.is_null() {
+            let mut query: EventQuery = if request.params.is_null() {
                 EventQuery::default()
             } else {
                 match serde_json::from_value(request.params.clone()) {
@@ -3504,14 +4022,37 @@ async fn handle_unified_rpc_json_inner(
                     }
                 }
             };
+            // The query selects in the mob the request names: the rows of a
+            // mob of the host other than the launch mob, or, for a request
+            // that names no mob, the rows that name none (the launch
+            // selection). The store is told the mob, and the answer is
+            // selected here as well: a store that does not read the mob
+            // cannot widen a query to another mob's rows. A row of an
+            // earlier mob of the same id names another incarnation and is
+            // not this mob's. The mob's incarnation is asked without
+            // loading the mob (`event_mob_of`): a mob that is not loaded is
+            // answered its rows and stays not loaded, and a mob whose
+            // incarnation no record names yet is answered no row.
+            let event_mob = event_mob_of(runtime, stored_mob.as_ref()).await;
+            query.mob_id = stored_mob.as_ref().map(ToString::to_string);
+            query.mob_incarnation = event_mob.as_ref().and_then(|mob| mob.incarnation);
             match runtime.event_log_store() {
                 Some(store) => match store.query(query).await {
-                    Ok(events) => JsonRpcResponse {
-                        jsonrpc: JSONRPC_VERSION.to_string(),
-                        id: response_id,
-                        result: Some(serde_json::to_value(events).unwrap_or(Value::Null)),
-                        error: None,
-                    },
+                    Ok(mut events) => {
+                        events.retain(|event| {
+                            row_is_of_the_selection(
+                                event.mob_id.as_ref(),
+                                event.mob_incarnation,
+                                event_mob.as_ref(),
+                            )
+                        });
+                        JsonRpcResponse {
+                            jsonrpc: JSONRPC_VERSION.to_string(),
+                            id: response_id,
+                            result: Some(serde_json::to_value(events).unwrap_or(Value::Null)),
+                            error: None,
+                        }
+                    }
                     Err(err) => JsonRpcResponse {
                         jsonrpc: JSONRPC_VERSION.to_string(),
                         id: response_id,
@@ -3625,8 +4166,9 @@ async fn handle_unified_rpc_json_inner(
             },
         },
         "meta/agent_memory/remember" => {
-            let runtime = match identity_ctx.map(|ctx| &*ctx.runtime) {
-                Some(runtime) => runtime,
+            let identity_ctx = request_identity!();
+            let identity_runtime = match identity_ctx.map(|ctx| &*ctx.runtime) {
+                Some(identity_runtime) => identity_runtime,
                 None => {
                     return maybe_error_response(
                         is_notification,
@@ -3636,8 +4178,11 @@ async fn handle_unified_rpc_json_inner(
                     );
                 }
             };
-            match parse_agent_memory_remember_params(&request.params) {
-                Ok(remember_request) => match runtime
+            let params =
+                agent_memory_params_for(for_the_launch_mob, identity_runtime, &request.params)
+                    .await;
+            match parse_agent_memory_remember_params(&params) {
+                Ok(remember_request) => match identity_runtime
                     .remember_agent_memory(
                         &remember_request.realm,
                         &remember_request.identity,
@@ -3671,8 +4216,9 @@ async fn handle_unified_rpc_json_inner(
             }
         }
         "meta/agent_memory/forget" => {
-            let runtime = match identity_ctx.map(|ctx| &*ctx.runtime) {
-                Some(runtime) => runtime,
+            let identity_ctx = request_identity!();
+            let identity_runtime = match identity_ctx.map(|ctx| &*ctx.runtime) {
+                Some(identity_runtime) => identity_runtime,
                 None => {
                     return maybe_error_response(
                         is_notification,
@@ -3682,8 +4228,11 @@ async fn handle_unified_rpc_json_inner(
                     );
                 }
             };
-            match parse_agent_memory_forget_params(&request.params) {
-                Ok(forget_request) => match runtime
+            let params =
+                agent_memory_params_for(for_the_launch_mob, identity_runtime, &request.params)
+                    .await;
+            match parse_agent_memory_forget_params(&params) {
+                Ok(forget_request) => match identity_runtime
                     .forget_agent_memory(
                         &forget_request.realm,
                         &forget_request.identity,
@@ -3717,8 +4266,9 @@ async fn handle_unified_rpc_json_inner(
             }
         }
         "meta/agent_memory/recall" => {
-            let runtime = match identity_ctx.map(|ctx| &*ctx.runtime) {
-                Some(runtime) => runtime,
+            let identity_ctx = request_identity!();
+            let identity_runtime = match identity_ctx.map(|ctx| &*ctx.runtime) {
+                Some(identity_runtime) => identity_runtime,
                 None => {
                     return maybe_error_response(
                         is_notification,
@@ -3728,9 +4278,15 @@ async fn handle_unified_rpc_json_inner(
                     );
                 }
             };
-            match parse_agent_memory_recall_params(&request.params) {
+            let params =
+                agent_memory_params_for(for_the_launch_mob, identity_runtime, &request.params)
+                    .await;
+            match parse_agent_memory_recall_params(&params) {
                 Ok(recall_request) => {
-                    match runtime.recall_agent_memory(recall_request.request).await {
+                    match identity_runtime
+                        .recall_agent_memory(recall_request.request)
+                        .await
+                    {
                         Ok(records) => JsonRpcResponse {
                             jsonrpc: JSONRPC_VERSION.to_string(),
                             id: response_id,
@@ -3758,8 +4314,9 @@ async fn handle_unified_rpc_json_inner(
             }
         }
         "meta/agent_memory/update" => {
-            let runtime = match identity_ctx.map(|ctx| &*ctx.runtime) {
-                Some(runtime) => runtime,
+            let identity_ctx = request_identity!();
+            let identity_runtime = match identity_ctx.map(|ctx| &*ctx.runtime) {
+                Some(identity_runtime) => identity_runtime,
                 None => {
                     return maybe_error_response(
                         is_notification,
@@ -3769,8 +4326,11 @@ async fn handle_unified_rpc_json_inner(
                     );
                 }
             };
-            match parse_agent_memory_update_params(&request.params) {
-                Ok(update_request) => match runtime
+            let params =
+                agent_memory_params_for(for_the_launch_mob, identity_runtime, &request.params)
+                    .await;
+            match parse_agent_memory_update_params(&params) {
+                Ok(update_request) => match identity_runtime
                     .update_agent_memory(
                         &update_request.realm,
                         &update_request.identity,
@@ -3808,8 +4368,9 @@ async fn handle_unified_rpc_json_inner(
             }
         }
         "meta/agent_memory/manifest" => {
-            let runtime = match identity_ctx.map(|ctx| &*ctx.runtime) {
-                Some(runtime) => runtime,
+            let identity_ctx = request_identity!();
+            let identity_runtime = match identity_ctx.map(|ctx| &*ctx.runtime) {
+                Some(identity_runtime) => identity_runtime,
                 None => {
                     return maybe_error_response(
                         is_notification,
@@ -3819,8 +4380,11 @@ async fn handle_unified_rpc_json_inner(
                     );
                 }
             };
-            match parse_agent_memory_manifest_params(&request.params) {
-                Ok(manifest_request) => match runtime
+            let params =
+                agent_memory_params_for(for_the_launch_mob, identity_runtime, &request.params)
+                    .await;
+            match parse_agent_memory_manifest_params(&params) {
+                Ok(manifest_request) => match identity_runtime
                     .manifest_agent_memory(
                         &manifest_request.realm,
                         &manifest_request.identity,
@@ -3890,7 +4454,11 @@ async fn handle_unified_rpc_json_inner(
         }
         "meta/gating/evaluate" => match parse_gating_evaluate_params(&request.params) {
             Ok(gating_request) => {
-                let gating_result = runtime.evaluate_gating_action(gating_request).await;
+                // The gating owner is the host's: the request names the mob
+                // it was made for where that is not the launch mob.
+                let gating_result = runtime
+                    .evaluate_gating_action_of_mob(gating_request, stored_mob.as_ref())
+                    .await;
                 JsonRpcResponse {
                     jsonrpc: JSONRPC_VERSION.to_string(),
                     id: response_id,
@@ -3935,7 +4503,7 @@ async fn handle_unified_rpc_json_inner(
         // The open question sets the runtime's members asked
         // (`crate::ask_user`): the host reads them all.
         "meta/gating/questions" => question_set_methods::gating_questions_response(
-            runtime.mob_runtime().ask_user_slot().decisions().as_ref(),
+            runtime.ask_user_slot().decisions().as_ref(),
             &request.params,
             response_id,
         ),
@@ -3944,12 +4512,12 @@ async fn handle_unified_rpc_json_inner(
         // included, is the gating owner's below.
         "meta/gating/decide"
             if question_set_methods::gating_decide_names_question_set(
-                runtime.mob_runtime(),
+                runtime.ask_user_slot(),
                 &request.params,
             ) =>
         {
             question_set_methods::gating_decide_question_set(
-                runtime.mob_runtime(),
+                runtime.ask_user_slot(),
                 &request.params,
                 response_id,
             )
@@ -4124,6 +4692,8 @@ async fn handle_unified_rpc_json_inner(
         storage_methods::STORAGE_DOCTOR_METHOD => {
             match storage_methods::parse_storage_doctor_params(&request.params) {
                 Ok(Some(params)) => {
+                    // The host's storage summary: a fact of the state
+                    // directory, read without resolving a mob.
                     let result =
                         storage_methods::run_storage_doctor(&params, runtime.resolved_storage())
                             .await;
@@ -4153,8 +4723,22 @@ async fn handle_unified_rpc_json_inner(
             }
         }
         method if MOBPACK_AUTHORING_METHODS.contains(&method) => {
-            handle_unified_mobpack_authoring_rpc(runtime, method, &request.params, response_id)
-                .await
+            // A catalog read answers with the addressed mob's definition, so
+            // it resolves that mob. The other authoring methods act on the
+            // host alone and resolve nothing.
+            let runtime_catalog_state = if mobpack_method_reads_the_runtime_catalog(method) {
+                let mob = request_mob!();
+                Some(mobpack_runtime_catalog_state(&mob).await)
+            } else {
+                None
+            };
+            handle_unified_mobpack_authoring_rpc(
+                runtime,
+                method,
+                &request.params,
+                response_id,
+                runtime_catalog_state,
+            )
         }
         "meta/blob/get" => {
             mob_methods::handle_blob_get(runtime, response_id, &request.params).await
@@ -4163,14 +4747,20 @@ async fn handle_unified_rpc_json_inner(
         // canonical registry. Three separate arms is what let the console plane
         // drift out of sync and ship dead methods in 0.8.21.
         method if mob_methods::is_member_declaration_method(method) => {
-            let handle = runtime.mob_handle();
+            let mob = request_mob!();
+            let identity_ctx = request_identity!();
+            let handle = mob.mob_handle();
             match mob_methods::handle_member_declaration_rpc(
+                // The stdio dispatch answers its host.
+                mob_addressing::MobRefusalDoor::Host,
                 &handle,
                 identity_ctx
                     .map(|ctx| ctx.runtime.runtime())
-                    .or_else(|| runtime.identity_runtime_ref()),
-                runtime.speaks_for_composition(),
-                runtime.mob_runtime().member_auth_binding(),
+                    .or_else(|| mob.identity_runtime_ref()),
+                mob_methods::DeclarationLaunch {
+                    speaks_for_composition: mob.speaks_for_composition(),
+                    member_auth_binding: mob.mob_runtime().member_auth_binding(),
+                },
                 method,
                 response_id.clone(),
                 &request.params,
@@ -4199,15 +4789,33 @@ async fn handle_unified_rpc_json_inner(
         // ONE arm for the scoped tool grant family, from its registry, served
         // with the identity runtime as the capabilities advertise it. The
         // stdio host is the operator: no caller and no access view.
-        method
-            if tool_grant_methods::is_tool_grant_method(method)
-                && (identity_ctx.is_some() || runtime.identity_runtime_ref().is_some()) =>
-        {
+        method if tool_grant_methods::is_tool_grant_method(method) => {
+            let mob = request_mob!();
+            let identity_ctx = request_identity!();
+            // A runtime without an identity runtime does not serve the
+            // family: method not found, as its capabilities say.
+            if identity_ctx.is_none() && mob.identity_runtime_ref().is_none() {
+                let response = JsonRpcResponse {
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: response_id,
+                    result: None,
+                    error: Some(JsonRpcError {
+                        code: -32601,
+                        message: "Method not found".to_string(),
+                        data: None,
+                    }),
+                };
+                return if is_notification {
+                    String::new()
+                } else {
+                    serialize_response(&response)
+                };
+            }
             let surface = tool_grant_methods::ToolGrantSurface {
-                mob: runtime.mob_runtime(),
+                mob: mob.mob_runtime(),
                 identity_runtime: identity_ctx
                     .map(|ctx| ctx.runtime.runtime())
-                    .or_else(|| runtime.identity_runtime_ref()),
+                    .or_else(|| mob.identity_runtime_ref()),
                 caller: None,
                 access: None,
             };
@@ -4237,23 +4845,42 @@ async fn handle_unified_rpc_json_inner(
         // ONE arm for the family of changes and reads of the mob's long-term
         // agents, from its registry, served by a launch that has an
         // identity policy, which attached the family. The stdio host is the
-        // operator, on the host surface `rpc`.
-        method
-            if identity_methods::is_identity_family_method(method)
-                && identity_ctx
-                    .map(|ctx| ctx.runtime.runtime())
-                    .or_else(|| runtime.identity_runtime_ref())
-                    .is_some_and(|identity_runtime| {
-                        identity_runtime.identity_family().is_some()
-                    }) =>
-        {
+        // operator, on the host surface `rpc`. The family is the one of
+        // the mob the request names: its handle and its family are taken
+        // from that one resolved mob.
+        method if identity_methods::is_identity_family_method(method) => {
+            let mob = request_mob!();
+            let identity_ctx = request_identity!();
+            // A launch without an identity policy attached no family:
+            // method not found, as its capabilities say.
+            if identity_ctx
+                .map(|ctx| ctx.runtime.runtime())
+                .or_else(|| mob.identity_runtime_ref())
+                .is_none_or(|identity_runtime| identity_runtime.identity_family().is_none())
+            {
+                let response = JsonRpcResponse {
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: response_id,
+                    result: None,
+                    error: Some(JsonRpcError {
+                        code: -32601,
+                        message: "Method not found".to_string(),
+                        data: None,
+                    }),
+                };
+                return if is_notification {
+                    String::new()
+                } else {
+                    serialize_response(&response)
+                };
+            }
             let family = identity_ctx
                 .map(|ctx| ctx.runtime.runtime())
-                .or_else(|| runtime.identity_runtime_ref())
+                .or_else(|| mob.identity_runtime_ref())
                 .and_then(|identity_runtime| identity_runtime.identity_family());
             let response = match family.as_ref() {
                 Some(family) => {
-                    let handle = runtime.mob_runtime().handle();
+                    let handle = mob.mob_runtime().handle();
                     let surface = identity_methods::IdentityFamilySurface {
                         mob: &handle,
                         family: family.as_ref(),
@@ -4317,13 +4944,15 @@ async fn handle_unified_rpc_json_inner(
             })
         }
         "meta/send_message" => {
+            let mob = request_mob!();
+            let identity_ctx = request_identity!();
             // Pass the identity runtime so bare durable identities resolve
             // through the identity bridge. Every registered identity takes
             // that same path, whatever its status view, so Meta's admission
             // guards and delivery preparation are not bypassed; raw roster
             // rows preserve mob-plane semantics.
             Box::pin(mob_methods::handle_send_message(
-                runtime,
+                &mob,
                 identity_ctx.map(|ctx| ctx.runtime.runtime()),
                 response_id,
                 &request.params,
@@ -4331,12 +4960,14 @@ async fn handle_unified_rpc_json_inner(
             .await
         }
         "meta/find_members" => {
+            let mob = request_mob!();
+            let identity_ctx = request_identity!();
             with_read_deadline(
                 "meta/find_members",
                 "the mob actor roster search and the identity staleness reads",
                 response_id.clone(),
                 mob_methods::handle_find_members(
-                    runtime,
+                    &mob,
                     identity_ctx.map(|ctx| ctx.runtime.runtime()),
                     response_id,
                     &request.params,
@@ -4345,8 +4976,10 @@ async fn handle_unified_rpc_json_inner(
             .await
         }
         "meta/ensure_member" => {
+            let mob = request_mob!();
+            let identity_ctx = request_identity!();
             Box::pin(mob_methods::handle_ensure_member(
-                runtime,
+                &mob,
                 identity_ctx.map(|ctx| ctx.runtime.runtime()),
                 response_id,
                 &request.params,
@@ -4354,12 +4987,14 @@ async fn handle_unified_rpc_json_inner(
             .await
         }
         "meta/list_members" => {
+            let mob = request_mob!();
+            let identity_ctx = request_identity!();
             with_read_deadline(
                 "meta/list_members",
                 "the mob actor roster snapshot and the identity staleness reads",
                 response_id.clone(),
                 mob_methods::handle_list_members(
-                    runtime,
+                    &mob,
                     identity_ctx.map(|ctx| ctx.runtime.runtime()),
                     response_id,
                 ),
@@ -4367,12 +5002,14 @@ async fn handle_unified_rpc_json_inner(
             .await
         }
         "meta/get_member" => {
+            let mob = request_mob!();
+            let identity_ctx = request_identity!();
             with_read_deadline(
                 "meta/get_member",
                 "the mob actor roster read and the identity staleness read",
                 response_id.clone(),
                 mob_methods::handle_get_member(
-                    runtime,
+                    &mob,
                     identity_ctx.map(|ctx| ctx.runtime.runtime()),
                     response_id,
                     &request.params,
@@ -4381,8 +5018,10 @@ async fn handle_unified_rpc_json_inner(
             .await
         }
         "meta/retire_member" => {
+            let mob = request_mob!();
+            let identity_ctx = request_identity!();
             mob_methods::handle_retire_member(
-                runtime,
+                &mob,
                 identity_ctx.map(|ctx| ctx.runtime.runtime()),
                 response_id,
                 &request.params,
@@ -4390,8 +5029,10 @@ async fn handle_unified_rpc_json_inner(
             .await
         }
         "meta/respawn_member" => {
+            let mob = request_mob!();
+            let identity_ctx = request_identity!();
             Box::pin(mob_methods::handle_respawn_member(
-                runtime,
+                &mob,
                 identity_ctx.map(|ctx| ctx.runtime.runtime()),
                 response_id,
                 &request.params,
@@ -4399,8 +5040,10 @@ async fn handle_unified_rpc_json_inner(
             .await
         }
         "meta/reload_member" => {
+            let mob = request_mob!();
+            let identity_ctx = request_identity!();
             Box::pin(mob_methods::handle_reload_member(
-                runtime,
+                &mob,
                 identity_ctx.map(|ctx| ctx.runtime.runtime()),
                 response_id,
                 &request.params,
@@ -4408,25 +5051,37 @@ async fn handle_unified_rpc_json_inner(
             .await
         }
         "meta/member_health" => {
+            let mob = request_mob!();
+            let identity_ctx = request_identity!();
             mob_methods::handle_member_health(
-                runtime,
+                &mob,
                 identity_ctx.map(|ctx| ctx.runtime.runtime()),
                 response_id,
                 &request.params,
             )
             .await
         }
-        "meta/reconcile_edges" => mob_methods::handle_reconcile_edges(runtime, response_id).await,
-        "meta/rediscover" => mob_methods::handle_rediscover(runtime, response_id).await,
+        "meta/reconcile_edges" => {
+            let mob = request_mob!();
+            mob_methods::handle_reconcile_edges(&mob, response_id).await
+        }
+        "meta/rediscover" => {
+            let mob = request_mob!();
+            mob_methods::handle_rediscover(&mob, response_id).await
+        }
         "meta/mob_events/query" => {
-            mob_methods::handle_mob_events_query(runtime, response_id, request.params).await
+            let mob = request_mob!();
+            mob_methods::handle_mob_events_query(&mob, response_id, request.params).await
         }
         "meta/mob_events/subscribe" => {
-            mob_methods::handle_mob_events_subscribe(runtime, response_id, request.params).await
+            let mob = request_mob!();
+            mob_methods::handle_mob_events_subscribe(&mob, response_id, request.params).await
         }
         "meta/cross_mob/wire" => {
+            let mob = request_mob!();
+            let identity_ctx = request_identity_if_any!();
             Box::pin(mob_methods::handle_cross_mob_wire(
-                runtime,
+                &mob,
                 runtime_owner.cloned(),
                 identity_ctx.map(|ctx| ctx.runtime.runtime()),
                 response_id,
@@ -4435,8 +5090,10 @@ async fn handle_unified_rpc_json_inner(
             .await
         }
         "meta/cross_mob/unwire" => {
+            let mob = request_mob!();
+            let identity_ctx = request_identity_if_any!();
             Box::pin(mob_methods::handle_cross_mob_unwire(
-                runtime,
+                &mob,
                 runtime_owner.cloned(),
                 identity_ctx.map(|ctx| ctx.runtime.runtime()),
                 response_id,
@@ -4445,8 +5102,10 @@ async fn handle_unified_rpc_json_inner(
             .await
         }
         "meta/cross_mob/send" => {
+            let mob = request_mob!();
+            let identity_ctx = request_identity_if_any!();
             mob_methods::handle_cross_mob_send(
-                runtime,
+                &mob,
                 runtime_owner.cloned(),
                 identity_ctx.map(|ctx| ctx.runtime.runtime()),
                 response_id,
@@ -4458,11 +5117,14 @@ async fn handle_unified_rpc_json_inner(
             mob_methods::handle_cross_mob_directory(runtime, response_id).await
         }
         "meta/cross_mob/peer_info" => {
-            mob_methods::handle_cross_mob_peer_info(runtime, response_id, &request.params).await
+            let mob = request_mob!();
+            mob_methods::handle_cross_mob_peer_info(&mob, response_id, &request.params).await
         }
         "meta/cross_mob/wire_local" => {
+            let mob = request_mob!();
+            let identity_ctx = request_identity_if_any!();
             mob_methods::handle_cross_mob_wire_local(
-                runtime,
+                &mob,
                 runtime_owner.cloned(),
                 identity_ctx.map(|ctx| ctx.runtime.runtime()),
                 response_id,
@@ -4471,8 +5133,10 @@ async fn handle_unified_rpc_json_inner(
             .await
         }
         "meta/cross_mob/unwire_local" => {
+            let mob = request_mob!();
+            let identity_ctx = request_identity_if_any!();
             mob_methods::handle_cross_mob_unwire_local(
-                runtime,
+                &mob,
                 runtime_owner.cloned(),
                 identity_ctx.map(|ctx| ctx.runtime.runtime()),
                 response_id,
@@ -4482,12 +5146,14 @@ async fn handle_unified_rpc_json_inner(
         }
         "meta/peer_pubkey" => mob_methods::handle_peer_pubkey(runtime, response_id).await,
         "meta/member_status" => {
+            let mob = request_mob!();
+            let identity_ctx = request_identity!();
             with_read_deadline(
                 "meta/member_status",
                 "the mob actor member-status round trip",
                 response_id.clone(),
                 mob_methods::handle_member_status(
-                    runtime,
+                    &mob,
                     identity_ctx.map(|ctx| ctx.runtime.runtime()),
                     response_id,
                     &request.params,
@@ -4496,12 +5162,14 @@ async fn handle_unified_rpc_json_inner(
             .await
         }
         "meta/identity/resolved_tools" => {
+            let mob = request_mob!();
+            let identity_ctx = request_identity!();
             with_read_deadline(
                 "meta/identity/resolved_tools",
                 "the identity status read and the session tool-scope snapshot",
                 response_id.clone(),
                 mob_methods::handle_identity_resolved_tools(
-                    runtime,
+                    &mob,
                     identity_ctx.map(|ctx| ctx.runtime.runtime()),
                     response_id,
                     &request.params,
@@ -4514,12 +5182,14 @@ async fn handle_unified_rpc_json_inner(
         // so it can queue behind a member's in-flight turn exactly the way
         // the operator deployment observed for `resolved_tools`.
         "meta/identity/routing_status" => {
+            let mob = request_mob!();
+            let identity_ctx = request_identity!();
             with_read_deadline(
                 "meta/identity/routing_status",
                 "the identity status read and the session model-routing status",
                 response_id.clone(),
                 mob_methods::handle_identity_routing_status(
-                    runtime,
+                    &mob,
                     identity_ctx.map(|ctx| ctx.runtime.runtime()),
                     response_id,
                     &request.params,
@@ -4533,6 +5203,8 @@ async fn handle_unified_rpc_json_inner(
         // tools are written to its tool record. Idempotent for a member that
         // is already live.
         "meta/identity/warm" => {
+            let mob = request_mob!();
+            let identity_ctx = request_identity!();
             let identity_rt = match identity_ctx {
                 Some(ctx) => ctx.runtime.runtime(),
                 None => return maybe_identity_not_configured(is_notification, response_id),
@@ -4543,8 +5215,7 @@ async fn handle_unified_rpc_json_inner(
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             let target =
-                match resolve_rpc_identity_control_target(runtime, identity_rt, identity_str).await
-                {
+                match resolve_rpc_identity_control_target(&mob, identity_rt, identity_str).await {
                     Ok(target) => target,
                     Err(error) => {
                         return identity_target_error_response(is_notification, response_id, error);
@@ -4561,7 +5232,7 @@ async fn handle_unified_rpc_json_inner(
                 };
             }
             match identity_rt
-                .warm_tracked(&identity, runtime.mob_runtime().session_service().cloned())
+                .warm_tracked(&identity, mob.mob_runtime().session_service().cloned())
                 .await
             {
                 Ok(record) => JsonRpcResponse {
@@ -4580,8 +5251,10 @@ async fn handle_unified_rpc_json_inner(
             }
         }
         "meta/force_cancel_member" => {
+            let mob = request_mob!();
+            let identity_ctx = request_identity!();
             mob_methods::handle_force_cancel_member(
-                runtime,
+                &mob,
                 identity_ctx.map(|ctx| ctx.runtime.runtime()),
                 response_id,
                 &request.params,
@@ -4589,8 +5262,10 @@ async fn handle_unified_rpc_json_inner(
             .await
         }
         "meta/stop_member_run" => {
+            let mob = request_mob!();
+            let identity_ctx = request_identity!();
             mob_methods::handle_stop_member_run(
-                runtime,
+                &mob,
                 identity_ctx.map(|ctx| ctx.runtime.runtime()),
                 response_id,
                 &request.params,
@@ -4598,8 +5273,10 @@ async fn handle_unified_rpc_json_inner(
             .await
         }
         "meta/spawn_helper" => {
+            let mob = request_mob!();
+            let identity_ctx = request_identity!();
             Box::pin(mob_methods::handle_spawn_helper(
-                runtime,
+                &mob,
                 identity_ctx.map(|ctx| ctx.runtime.runtime()),
                 response_id,
                 &request.params,
@@ -4607,8 +5284,10 @@ async fn handle_unified_rpc_json_inner(
             .await
         }
         "meta/fork_helper" => {
+            let mob = request_mob!();
+            let identity_ctx = request_identity!();
             Box::pin(mob_methods::handle_fork_helper(
-                runtime,
+                &mob,
                 identity_ctx.map(|ctx| ctx.runtime.runtime()),
                 response_id,
                 &request.params,
@@ -4616,8 +5295,10 @@ async fn handle_unified_rpc_json_inner(
             .await
         }
         "meta/attach_existing_session" => {
+            let mob = request_mob!();
+            let identity_ctx = request_identity!();
             Box::pin(mob_methods::handle_attach_existing_session(
-                runtime,
+                &mob,
                 identity_ctx.map(|ctx| ctx.runtime.runtime()),
                 response_id,
                 &request.params,
@@ -4625,30 +5306,38 @@ async fn handle_unified_rpc_json_inner(
             .await
         }
         "meta/cancel_flow" => {
-            mob_methods::handle_cancel_flow(runtime, response_id, &request.params).await
+            let mob = request_mob!();
+            mob_methods::handle_cancel_flow(&mob, response_id, &request.params).await
         }
         "meta/flow_status" => {
+            let mob = request_mob!();
             with_read_deadline(
                 "meta/flow_status",
                 "the mob actor flow-status read",
                 response_id.clone(),
-                mob_methods::handle_flow_status(runtime, response_id, &request.params),
+                mob_methods::handle_flow_status(&mob, response_id, &request.params),
             )
             .await
         }
-        "meta/list_flows" => mob_methods::handle_list_flows(runtime, response_id).await,
+        "meta/list_flows" => {
+            let mob = request_mob!();
+            mob_methods::handle_list_flows(&mob, response_id).await
+        }
         "meta/list_runs" => {
+            let mob = request_mob!();
             with_read_deadline(
                 "meta/list_runs",
                 "the mob actor run-ledger read",
                 response_id.clone(),
-                mob_methods::handle_list_runs(runtime, response_id, &request.params),
+                mob_methods::handle_list_runs(&mob, response_id, &request.params),
             )
             .await
         }
         "meta/run_flow" => {
+            let mob = request_mob!();
+            let identity_ctx = request_identity!();
             Box::pin(mob_methods::handle_run_flow(
-                runtime,
+                &mob,
                 identity_ctx.map(|ctx| ctx.runtime.runtime()),
                 response_id,
                 &request.params,
@@ -4656,10 +5345,12 @@ async fn handle_unified_rpc_json_inner(
             .await
         }
         "meta/collect_completed" => {
-            mob_methods::handle_collect_completed(runtime, response_id).await
+            let mob = request_mob!();
+            mob_methods::handle_collect_completed(&mob, response_id).await
         }
         "meta/wait_ready" => {
-            mob_methods::handle_wait_ready(runtime, response_id, &request.params).await
+            let mob = request_mob!();
+            mob_methods::handle_wait_ready(&mob, response_id, &request.params).await
         }
         method
             if matches!(
@@ -4672,10 +5363,13 @@ async fn handle_unified_rpc_json_inner(
                     | "meta/run_labels/delete",
             ) =>
         {
-            mob_methods::handle_label_method(runtime, method, response_id, &request.params).await
+            let mob = request_mob!();
+            mob_methods::handle_label_method(&mob, method, response_id, &request.params).await
         }
         // ----- identity-first methods -----
         "meta/send" => {
+            let mob = request_mob!();
+            let identity_ctx = request_identity!();
             let Some(ctx) = identity_ctx else {
                 return maybe_identity_not_configured(is_notification, response_id);
             };
@@ -4686,8 +5380,7 @@ async fn handle_unified_rpc_json_inner(
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             let target =
-                match resolve_rpc_identity_control_target(runtime, identity_rt, identity_str).await
-                {
+                match resolve_rpc_identity_control_target(&mob, identity_rt, identity_str).await {
                     Ok(target) => target,
                     Err(error) => {
                         return identity_target_error_response(is_notification, response_id, error);
@@ -4881,6 +5574,8 @@ async fn handle_unified_rpc_json_inner(
             }
         }
         "meta/send_status" => {
+            let mob = request_mob!();
+            let identity_ctx = request_identity!();
             let Some(ctx) = identity_ctx else {
                 return maybe_identity_not_configured(is_notification, response_id);
             };
@@ -4893,8 +5588,7 @@ async fn handle_unified_rpc_json_inner(
             // meta/send's own target checks, in its order; the identity's
             // addressability and its hold on the session are the runtime's.
             let target =
-                match resolve_rpc_identity_control_target(runtime, identity_rt, identity_str).await
-                {
+                match resolve_rpc_identity_control_target(&mob, identity_rt, identity_str).await {
                     Ok(target) => target,
                     Err(error) => {
                         return identity_target_error_response(is_notification, response_id, error);
@@ -4962,6 +5656,7 @@ async fn handle_unified_rpc_json_inner(
             }
         }
         "meta/registered_spec" => {
+            let identity_ctx = request_identity!();
             let identity_rt = match identity_ctx {
                 Some(ctx) => ctx.runtime.runtime(),
                 None => return maybe_identity_not_configured(is_notification, response_id),
@@ -5006,6 +5701,8 @@ async fn handle_unified_rpc_json_inner(
             }
         }
         "meta/interact" => {
+            let mob = request_mob!();
+            let identity_ctx = request_identity!();
             let identity_rt = match identity_ctx {
                 Some(ctx) => ctx.runtime.runtime(),
                 None => return maybe_identity_not_configured(is_notification, response_id),
@@ -5016,8 +5713,7 @@ async fn handle_unified_rpc_json_inner(
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             let target =
-                match resolve_rpc_identity_control_target(runtime, identity_rt, identity_str).await
-                {
+                match resolve_rpc_identity_control_target(&mob, identity_rt, identity_str).await {
                     Ok(target) => target,
                     Err(error) => {
                         return identity_target_error_response(is_notification, response_id, error);
@@ -5073,8 +5769,8 @@ async fn handle_unified_rpc_json_inner(
                 // reuse while the first is still in flight is refused, typed,
                 // before anything is delivered.
                 Some(interaction_id) => {
-                    if runtime
-                        .reserve_caller_identity_interaction(
+                    if console_events_of_a_served_mob(&mob)
+                        .reserve_caller_interaction_value(
                             identity.as_str(),
                             runtime_member_id.as_deref(),
                             &interaction_id,
@@ -5109,8 +5805,8 @@ async fn handle_unified_rpc_json_inner(
                 }
                 None => {
                     let interaction_id = meerkat_core::types::SessionId::new().to_string();
-                    if let Err(err) = runtime
-                        .reserve_identity_interaction(
+                    if let Err(err) = console_events_of_a_served_mob(&mob)
+                        .reserve_interaction_value(
                             identity.as_str(),
                             runtime_member_id.as_deref(),
                             &interaction_id,
@@ -5166,11 +5862,16 @@ async fn handle_unified_rpc_json_inner(
                         "interaction_id": interaction_id,
                         "fencing_token": admission.fencing_token.get(),
                         "completion_baseline": completion_cursor_json(admission.completion_baseline),
-                        "stream": {
+                    });
+                    // The console stream of an identity's name is the launch
+                    // mob's: it carries the launch mob's console events. An
+                    // answer for another mob names no stream.
+                    if for_the_launch_mob {
+                        result["stream"] = serde_json::json!({
                             "route": format!("/console/identity/{}/stream", identity.as_str()),
                             "identity": identity.as_str(),
-                        }
-                    });
+                        });
+                    }
                     insert_turn_tracking(&mut result, turn.as_ref());
                     JsonRpcResponse {
                         jsonrpc: JSONRPC_VERSION.to_string(),
@@ -5180,8 +5881,8 @@ async fn handle_unified_rpc_json_inner(
                     }
                 }
                 Err(e) => {
-                    runtime
-                        .record_console_lifecycle(
+                    console_events_of_a_served_mob(&mob)
+                        .record_lifecycle(
                             identity.as_str(),
                             "interaction_failed",
                             serde_json::json!({
@@ -5196,6 +5897,8 @@ async fn handle_unified_rpc_json_inner(
             }
         }
         "meta/dispatch" => {
+            let mob = request_mob!();
+            let identity_ctx = request_identity!();
             let identity_rt = match identity_ctx {
                 Some(ctx) => ctx.runtime.runtime(),
                 None => return maybe_identity_not_configured(is_notification, response_id),
@@ -5206,8 +5909,7 @@ async fn handle_unified_rpc_json_inner(
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             let target =
-                match resolve_rpc_identity_control_target(runtime, identity_rt, identity_str).await
-                {
+                match resolve_rpc_identity_control_target(&mob, identity_rt, identity_str).await {
                     Ok(target) => target,
                     Err(error) => {
                         return identity_target_error_response(is_notification, response_id, error);
@@ -5351,6 +6053,8 @@ async fn handle_unified_rpc_json_inner(
             }
         }
         "meta/recover_delivery" => {
+            let mob = request_mob!();
+            let identity_ctx = request_identity!();
             let identity_rt = match identity_ctx {
                 Some(ctx) => &ctx.runtime,
                 None => return maybe_identity_not_configured(is_notification, response_id),
@@ -5361,8 +6065,7 @@ async fn handle_unified_rpc_json_inner(
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             let target =
-                match resolve_rpc_identity_control_target(runtime, identity_rt, identity_str).await
-                {
+                match resolve_rpc_identity_control_target(&mob, identity_rt, identity_str).await {
                     Ok(target) => target,
                     Err(error) => {
                         return identity_target_error_response(is_notification, response_id, error);
@@ -5433,6 +6136,8 @@ async fn handle_unified_rpc_json_inner(
             }
         }
         "meta/turn_result" | "meta/wait_for_turn" => {
+            let mob = request_mob!();
+            let identity_ctx = request_identity!();
             // `meta/wait_for_turn` is the same read, taken once the ticket
             // settles: the server waits on the ticket registry's change signal
             // (#468), so a caller never polls turn_result. `timeout_ms` is the
@@ -5457,8 +6162,7 @@ async fn handle_unified_rpc_json_inner(
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             let target =
-                match resolve_rpc_identity_control_target(runtime, identity_rt, identity_str).await
-                {
+                match resolve_rpc_identity_control_target(&mob, identity_rt, identity_str).await {
                     Ok(target) => target,
                     Err(error) => {
                         return identity_target_error_response(is_notification, response_id, error);
@@ -5527,6 +6231,8 @@ async fn handle_unified_rpc_json_inner(
             }
         }
         "meta/subscribe" => {
+            let mob = request_mob!();
+            let identity_ctx = request_identity!();
             let identity_rt = match identity_ctx {
                 Some(ctx) => ctx.runtime.runtime(),
                 None => return maybe_identity_not_configured(is_notification, response_id),
@@ -5537,8 +6243,7 @@ async fn handle_unified_rpc_json_inner(
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             let target =
-                match resolve_rpc_identity_control_target(runtime, identity_rt, identity_str).await
-                {
+                match resolve_rpc_identity_control_target(&mob, identity_rt, identity_str).await {
                     Ok(target) => target,
                     Err(error) => {
                         return identity_target_error_response(is_notification, response_id, error);
@@ -5569,6 +6274,7 @@ async fn handle_unified_rpc_json_inner(
             }
         }
         "meta/status_identity_bootstrap" => {
+            let identity_ctx = request_identity!();
             let identity_rt = match identity_ctx {
                 Some(ctx) => ctx.runtime.runtime(),
                 None => return maybe_identity_not_configured(is_notification, response_id),
@@ -5584,6 +6290,8 @@ async fn handle_unified_rpc_json_inner(
             }
         }
         "meta/wait_identity_bootstrap" => {
+            let mob = request_mob!();
+            let identity_ctx = request_identity!();
             let identity_rt = match identity_ctx {
                 Some(ctx) => ctx.runtime.runtime(),
                 None => return maybe_identity_not_configured(is_notification, response_id),
@@ -5645,7 +6353,7 @@ async fn handle_unified_rpc_json_inner(
                 },
             };
             let (status, timed_out, startup_ready) = if target == "startup_ready" {
-                let mob_handle = runtime.mob_handle();
+                let mob_handle = mob.mob_handle();
                 let wait = wait_identity_startup_ready(
                     identity_rt,
                     wait_timeout,
@@ -5691,6 +6399,8 @@ async fn handle_unified_rpc_json_inner(
             }
         }
         "meta/status_identity" => {
+            let mob = request_mob!();
+            let identity_ctx = request_identity!();
             let identity_rt = match identity_ctx {
                 Some(ctx) => ctx.runtime.runtime(),
                 None => return maybe_identity_not_configured(is_notification, response_id),
@@ -5701,8 +6411,7 @@ async fn handle_unified_rpc_json_inner(
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             let target =
-                match resolve_rpc_identity_control_target(runtime, identity_rt, identity_str).await
-                {
+                match resolve_rpc_identity_control_target(&mob, identity_rt, identity_str).await {
                     Ok(target) => target,
                     Err(error) => {
                         return identity_target_error_response(is_notification, response_id, error);
@@ -5750,6 +6459,8 @@ async fn handle_unified_rpc_json_inner(
             }
         }
         "meta/respawn" => {
+            let mob = request_mob!();
+            let identity_ctx = request_identity!();
             let identity_rt = match identity_ctx {
                 Some(ctx) => ctx.runtime.runtime(),
                 None => return maybe_identity_not_configured(is_notification, response_id),
@@ -5760,8 +6471,7 @@ async fn handle_unified_rpc_json_inner(
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             let target =
-                match resolve_rpc_identity_control_target(runtime, identity_rt, identity_str).await
-                {
+                match resolve_rpc_identity_control_target(&mob, identity_rt, identity_str).await {
                     Ok(target) => target,
                     Err(error) => {
                         return identity_target_error_response(is_notification, response_id, error);
@@ -5794,8 +6504,8 @@ async fn handle_unified_rpc_json_inner(
                     let live_respawn_warning: Option<Value> = None;
                     let cleanup_warning: Option<Value> = None;
                     let generation = scope.as_ref().map(|scope| scope.generation().get());
-                    runtime
-                        .record_console_lifecycle(
+                    console_events_of_a_served_mob(&mob)
+                        .record_lifecycle(
                             identity.as_str(),
                             "identity_respawned",
                             serde_json::json!({
@@ -5825,10 +6535,10 @@ async fn handle_unified_rpc_json_inner(
                     if rpc_live_only_fallback_allowed(&target, identity_str)
                         && let Some(live) = target.live.as_ref()
                     {
-                        match Box::pin(respawn_rpc_live_identity(runtime, live, "respawn")).await {
+                        match Box::pin(respawn_rpc_live_identity(&mob, live, "respawn")).await {
                             Ok(result) => {
-                                runtime
-                                    .record_console_lifecycle(
+                                console_events_of_a_served_mob(&mob)
+                                    .record_lifecycle(
                                         live.identity.as_str(),
                                         "identity_respawned",
                                         serde_json::json!({}),
@@ -5856,6 +6566,8 @@ async fn handle_unified_rpc_json_inner(
             }
         }
         "meta/retire" => {
+            let mob = request_mob!();
+            let identity_ctx = request_identity!();
             let identity_rt = match identity_ctx {
                 Some(ctx) => ctx.runtime.runtime(),
                 None => return maybe_identity_not_configured(is_notification, response_id),
@@ -5866,8 +6578,7 @@ async fn handle_unified_rpc_json_inner(
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             let target =
-                match resolve_rpc_identity_control_target(runtime, identity_rt, identity_str).await
-                {
+                match resolve_rpc_identity_control_target(&mob, identity_rt, identity_str).await {
                     Ok(target) => target,
                     Err(error) => {
                         return identity_target_error_response(is_notification, response_id, error);
@@ -5883,7 +6594,7 @@ async fn handle_unified_rpc_json_inner(
                     serialize_response(&response)
                 };
             }
-            let cleanup_handle = runtime.mob_handle();
+            let cleanup_handle = mob.mob_handle();
             let cleanup_identity = identity.clone();
             let include_current = !identity_rt.has_session_bridge();
             let expected_alias = crate::member_comms_id::is_reserved_generated_alias(identity_str)
@@ -5919,8 +6630,8 @@ async fn handle_unified_rpc_json_inner(
                 Ok(cleanup_warning) => {
                     // Core retired the member; Meta holds no fence of
                     // its own to report.
-                    runtime
-                        .record_console_lifecycle(
+                    console_events_of_a_served_mob(&mob)
+                        .record_lifecycle(
                             identity.as_str(),
                             "identity_retired",
                             serde_json::json!({
@@ -5942,10 +6653,10 @@ async fn handle_unified_rpc_json_inner(
                     if rpc_live_only_fallback_allowed(&target, identity_str)
                         && let Some(live) = target.live.as_ref()
                     {
-                        match retire_rpc_live_identity(runtime, live).await {
+                        match retire_rpc_live_identity(&mob, live).await {
                             Ok(()) => {
-                                runtime
-                                    .record_console_lifecycle(
+                                console_events_of_a_served_mob(&mob)
+                                    .record_lifecycle(
                                         live.identity.as_str(),
                                         "identity_retired",
                                         serde_json::json!({}),
@@ -5979,6 +6690,8 @@ async fn handle_unified_rpc_json_inner(
             }
         }
         "meta/reset" => {
+            let mob = request_mob!();
+            let identity_ctx = request_identity!();
             let identity_reset_ctx = match identity_ctx {
                 Some(ctx) => ctx,
                 None => return maybe_identity_not_configured(is_notification, response_id),
@@ -5990,8 +6703,7 @@ async fn handle_unified_rpc_json_inner(
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             let target =
-                match resolve_rpc_identity_control_target(runtime, identity_rt, identity_str).await
-                {
+                match resolve_rpc_identity_control_target(&mob, identity_rt, identity_str).await {
                     Ok(target) => target,
                     Err(error) => {
                         return identity_target_error_response(is_notification, response_id, error);
@@ -6024,11 +6736,10 @@ async fn handle_unified_rpc_json_inner(
                         && let Some(live) = target.live.as_ref()
                     {
                         let response =
-                            match Box::pin(respawn_rpc_live_identity(runtime, live, "reset")).await
-                            {
+                            match Box::pin(respawn_rpc_live_identity(&mob, live, "reset")).await {
                                 Ok(result) => {
-                                    runtime
-                                        .record_console_lifecycle(
+                                    console_events_of_a_served_mob(&mob)
+                                        .record_lifecycle(
                                             live.identity.as_str(),
                                             "identity_reset",
                                             serde_json::json!({}),
@@ -6093,8 +6804,8 @@ async fn handle_unified_rpc_json_inner(
                     // reset_all). Keep the legacy warning field, always null,
                     // for wire compatibility, as respawn does.
                     let cleanup_warning: Option<Value> = None;
-                    runtime
-                        .record_console_lifecycle(
+                    console_events_of_a_served_mob(&mob)
+                        .record_lifecycle(
                             identity.as_str(),
                             "identity_reset",
                             serde_json::json!({
@@ -6120,10 +6831,10 @@ async fn handle_unified_rpc_json_inner(
                     if rpc_live_only_fallback_allowed(&target, identity_str)
                         && let Some(live) = target.live.as_ref()
                     {
-                        match Box::pin(respawn_rpc_live_identity(runtime, live, "reset")).await {
+                        match Box::pin(respawn_rpc_live_identity(&mob, live, "reset")).await {
                             Ok(result) => {
-                                runtime
-                                    .record_console_lifecycle(
+                                console_events_of_a_served_mob(&mob)
+                                    .record_lifecycle(
                                         live.identity.as_str(),
                                         "identity_reset",
                                         serde_json::json!({}),
@@ -6151,6 +6862,8 @@ async fn handle_unified_rpc_json_inner(
             }
         }
         "meta/delete_identity" => {
+            let mob = request_mob!();
+            let identity_ctx = request_identity!();
             let identity_rt = match identity_ctx {
                 Some(ctx) => ctx.runtime.runtime(),
                 None => return maybe_identity_not_configured(is_notification, response_id),
@@ -6161,8 +6874,7 @@ async fn handle_unified_rpc_json_inner(
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             let target =
-                match resolve_rpc_identity_control_target(runtime, identity_rt, identity_str).await
-                {
+                match resolve_rpc_identity_control_target(&mob, identity_rt, identity_str).await {
                     Ok(target) => target,
                     Err(error) => {
                         return identity_target_error_response(is_notification, response_id, error);
@@ -6220,7 +6932,7 @@ async fn handle_unified_rpc_json_inner(
                     };
                 }
             };
-            let cleanup_handle = runtime.mob_handle();
+            let cleanup_handle = mob.mob_handle();
             let cleanup_identity = identity.clone();
             let include_current = !identity_rt.has_session_bridge();
             let expected_alias = crate::member_comms_id::is_reserved_generated_alias(identity_str)
@@ -6254,8 +6966,8 @@ async fn handle_unified_rpc_json_inner(
                 .await;
             match delete_result {
                 Ok(cleanup_warning) => {
-                    runtime
-                        .record_console_lifecycle(
+                    console_events_of_a_served_mob(&mob)
+                        .record_lifecycle(
                             identity.as_str(),
                             "identity_deleted",
                             serde_json::json!({
@@ -6277,6 +6989,8 @@ async fn handle_unified_rpc_json_inner(
             }
         }
         "meta/wait_for_completion" => {
+            let mob = request_mob!();
+            let identity_ctx = request_identity!();
             // Server-side completion wait (#468): resolves when the identity's
             // completion cursor moves past `after` (or, with no `after`,
             // counts one completed turn), woken by the runtime's typed
@@ -6317,8 +7031,7 @@ async fn handle_unified_rpc_json_inner(
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             let target =
-                match resolve_rpc_identity_control_target(runtime, identity_rt, identity_str).await
-                {
+                match resolve_rpc_identity_control_target(&mob, identity_rt, identity_str).await {
                     Ok(target) => target,
                     Err(error) => {
                         return identity_target_error_response(is_notification, response_id, error);
@@ -6385,6 +7098,8 @@ async fn handle_unified_rpc_json_inner(
             }
         }
         "meta/completion_cursor" => {
+            let mob = request_mob!();
+            let identity_ctx = request_identity!();
             // Cursor-only completion read for pollers (#468). It reads the
             // identity's in-memory completion cursor and lifecycle entry and
             // never touches the member session: unlike inspect_identity, it
@@ -6400,8 +7115,7 @@ async fn handle_unified_rpc_json_inner(
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             let target =
-                match resolve_rpc_identity_control_target(runtime, identity_rt, identity_str).await
-                {
+                match resolve_rpc_identity_control_target(&mob, identity_rt, identity_str).await {
                     Ok(target) => target,
                     Err(error) => {
                         return identity_target_error_response(is_notification, response_id, error);
@@ -6451,6 +7165,8 @@ async fn handle_unified_rpc_json_inner(
             }
         }
         "meta/inspect_identity" => {
+            let mob = request_mob!();
+            let identity_ctx = request_identity!();
             let identity_rt = match identity_ctx {
                 Some(ctx) => ctx.runtime.runtime(),
                 None => return maybe_identity_not_configured(is_notification, response_id),
@@ -6461,8 +7177,7 @@ async fn handle_unified_rpc_json_inner(
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             let target =
-                match resolve_rpc_identity_control_target(runtime, identity_rt, identity_str).await
-                {
+                match resolve_rpc_identity_control_target(&mob, identity_rt, identity_str).await {
                     Ok(target) => target,
                     Err(error) => {
                         return identity_target_error_response(is_notification, response_id, error);
@@ -6522,7 +7237,7 @@ async fn handle_unified_rpc_json_inner(
                         JsonRpcResponse {
                             jsonrpc: JSONRPC_VERSION.to_string(),
                             id: response_id,
-                            result: Some(rpc_live_identity_inspect_json(runtime, live).await),
+                            result: Some(rpc_live_identity_inspect_json(&mob, live).await),
                             error: None,
                         }
                     } else {
@@ -6533,12 +7248,14 @@ async fn handle_unified_rpc_json_inner(
             }
         }
         "meta/member_activate_instruction" => {
+            let mob = request_mob!();
+            let identity_ctx = request_identity!();
             let ctx = match identity_ctx {
                 Some(ctx) => ctx,
                 None => return maybe_identity_not_configured(is_notification, response_id),
             };
             Box::pin(operator_methods::handle_member_activate_instruction(
-                runtime,
+                &mob,
                 ctx,
                 &request.params,
                 response_id,
@@ -6546,12 +7263,14 @@ async fn handle_unified_rpc_json_inner(
             .await
         }
         "meta/member_instruction_activations" => {
+            let mob = request_mob!();
+            let identity_ctx = request_identity!();
             let ctx = match identity_ctx {
                 Some(ctx) => ctx,
                 None => return maybe_identity_not_configured(is_notification, response_id),
             };
             Box::pin(operator_methods::handle_member_instruction_activations(
-                runtime,
+                &mob,
                 ctx,
                 &request.params,
                 response_id,
@@ -6561,12 +7280,14 @@ async fn handle_unified_rpc_json_inner(
         // The gateway mob's operator instructions (host verbs, listed with an
         // identity runtime): a member target names a Meta identity.
         "meta/set_instruction" => {
+            let mob = request_mob!();
+            let identity_ctx = request_identity!();
             let ctx = match identity_ctx {
                 Some(ctx) => ctx,
                 None => return maybe_identity_not_configured(is_notification, response_id),
             };
             Box::pin(operator_methods::handle_set_instruction(
-                runtime,
+                &mob,
                 ctx,
                 &request.params,
                 response_id,
@@ -6574,23 +7295,27 @@ async fn handle_unified_rpc_json_inner(
             .await
         }
         "meta/revoke_instruction" => {
+            let mob = request_mob!();
+            let identity_ctx = request_identity!();
             if identity_ctx.is_none() {
                 return maybe_identity_not_configured(is_notification, response_id);
             }
             Box::pin(operator_methods::handle_revoke_instruction(
-                runtime,
+                &mob,
                 &request.params,
                 response_id,
             ))
             .await
         }
         "meta/instruction_status" => {
+            let mob = request_mob!();
+            let identity_ctx = request_identity!();
             let ctx = match identity_ctx {
                 Some(ctx) => ctx,
                 None => return maybe_identity_not_configured(is_notification, response_id),
             };
             Box::pin(operator_methods::handle_instruction_status(
-                runtime,
+                &mob,
                 ctx,
                 &request.params,
                 response_id,
@@ -6598,12 +7323,14 @@ async fn handle_unified_rpc_json_inner(
             .await
         }
         "meta/compact_member" => {
+            let mob = request_mob!();
+            let identity_ctx = request_identity!();
             let ctx = match identity_ctx {
                 Some(ctx) => ctx,
                 None => return maybe_identity_not_configured(is_notification, response_id),
             };
             Box::pin(operator_methods::handle_compact_member(
-                runtime,
+                &mob,
                 ctx,
                 &request.params,
                 response_id,
@@ -6611,12 +7338,14 @@ async fn handle_unified_rpc_json_inner(
             .await
         }
         "meta/bound_member_transcript" => {
+            let mob = request_mob!();
+            let identity_ctx = request_identity!();
             let ctx = match identity_ctx {
                 Some(ctx) => ctx,
                 None => return maybe_identity_not_configured(is_notification, response_id),
             };
             Box::pin(operator_methods::handle_bound_member_transcript(
-                runtime,
+                &mob,
                 ctx,
                 &request.params,
                 response_id,
@@ -6624,12 +7353,14 @@ async fn handle_unified_rpc_json_inner(
             .await
         }
         "meta/prune_member_system_rows" => {
+            let mob = request_mob!();
+            let identity_ctx = request_identity!();
             let ctx = match identity_ctx {
                 Some(ctx) => ctx,
                 None => return maybe_identity_not_configured(is_notification, response_id),
             };
             Box::pin(operator_methods::handle_prune_member_system_rows(
-                runtime,
+                &mob,
                 ctx,
                 &request.params,
                 response_id,
@@ -6637,6 +7368,7 @@ async fn handle_unified_rpc_json_inner(
             .await
         }
         "meta/reconcile_identity" => {
+            let identity_ctx = request_identity!();
             let ctx = match identity_ctx {
                 Some(ctx) => ctx,
                 None => return maybe_identity_not_configured(is_notification, response_id),
@@ -6645,7 +7377,8 @@ async fn handle_unified_rpc_json_inner(
             // so lazy deployments never turn an ordinary reconcile into an
             // eager fleet hydration. The fallback preserves tests/embedders
             // that construct the public RPC context without attaching it.
-            let reconciled = match runtime.refresh_desired_topology().await {
+            let mob = request_mob!();
+            let reconciled = match mob.refresh_desired_topology().await {
                 Ok(Some(result)) => Ok(result),
                 Ok(None) => {
                     let roster_specs = match ctx
@@ -6744,8 +7477,8 @@ async fn handle_unified_rpc_json_inner(
         }
         // A candidate launch calls no loaded module: a module call is opaque
         // and can act, as a tool call can.
-        method if method.contains('/') && !method.starts_with("meta/") => {
-            if !runtime.speaks_for_composition() {
+        method if is_stdio_module_method(method) => {
+            if !speaks_for_composition {
                 return if is_notification {
                     String::new()
                 } else {
@@ -6800,18 +7533,79 @@ async fn handle_unified_rpc_json_inner(
                 },
             }
         }
-        method
-            if method.starts_with("meta/live/")
-                || cfg!(feature = "openai-live") && method == "live/webrtc/answer" =>
-        {
-            match live {
+        method if is_stdio_live_method(method) => {
+            let mob = request_mob!();
+            let identity_ctx = request_identity!();
+            // A raw `session_id` names no mob, and the launch's session
+            // service holds the sessions of every mob of the host. The
+            // session's stored member binding names the member's mob, and
+            // the mob set's records say whether that mob is in the reach of
+            // a mob the host hosts beside the launch mob. Such a session is
+            // refused here as a request that names the hosted mob is,
+            // before the live handler sees it. The launch mob's members,
+            // and the members of the mobs they created, are served as
+            // before.
+            let another_mobs_session = if live.is_some() {
+                let hosted_beside = match mob_addressing::mob_of_a_raw_live_session(
+                    mob.mob_runtime().session_service(),
+                    &launch_mob,
+                    &request.params,
+                )
+                .await
+                {
+                    Ok(None) => Ok(None),
+                    Ok(Some(bound_to)) => {
+                        runtime
+                            .mob_hosting(&meerkat_mob::MobId::from(bound_to))
+                            .await
+                    }
+                    Err(error) => Err(error),
+                };
+                match hosted_beside {
+                    Ok(None) => None,
+                    Ok(Some(hosted_mob)) => {
+                        let mut error = mob_addressing::foreign_mob_target(
+                            hosted_mob.as_str(),
+                            launch_mob.as_str(),
+                        );
+                        error.message = format!(
+                            "mob '{}' is hosted on this gateway, but {method} serves the launch \
+                             mob '{}' only",
+                            hosted_mob.as_str(),
+                            launch_mob.as_str()
+                        );
+                        if let Some(data) = error.data.as_mut().and_then(Value::as_object_mut) {
+                            data.insert("hosted".to_string(), Value::Bool(true));
+                        }
+                        Some(error)
+                    }
+                    // Not decided: not served on a judgement that could not
+                    // be made.
+                    Err(error) => Some(JsonRpcError {
+                        code: -32000,
+                        message: format!("live target resolution failed: {error}"),
+                        data: None,
+                    }),
+                }
+            } else {
+                None
+            };
+            // A gateway with no live handler answers every live method of a
+            // mob it serves with the typed `live_unavailable` refusal.
+            let response = match live {
                 None => crate::live_wiring::live_unavailable_response(response_id),
+                Some(_) if another_mobs_session.is_some() => JsonRpcResponse {
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: response_id,
+                    result: None,
+                    error: another_mobs_session,
+                },
                 Some(live) => {
                     let params = request.params.clone();
                     let member_alias = live_member_alias(&params);
                     let identity_runtime = identity_ctx
                         .map(|context| context.runtime.runtime())
-                        .or_else(|| runtime.identity_runtime_ref());
+                        .or_else(|| mob.identity_runtime_ref());
                     let authority_target = if let Some(alias) = member_alias.as_deref()
                         && let Some(identity_runtime) = identity_runtime
                     {
@@ -6842,11 +7636,18 @@ async fn handle_unified_rpc_json_inner(
                         }
                         Ok(Some(target)) => {
                             let canonical_target_identity = target.durable_identity().to_string();
-                            let handle = runtime.mob_handle();
+                            let handle = mob.mob_handle();
                             let identity_runtime = identity_runtime.cloned();
                             let live = live.clone();
                             let method = method.to_string();
                             let operation_response_id = response_id.clone();
+                            // The tracked operation runs on a task of its
+                            // own: carry the request's delivery slot to it,
+                            // so the custody of the handler's response
+                            // reaches the gateway's writer.
+                            #[cfg(feature = "openai-live")]
+                            let delivery =
+                                crate::live_wiring::CarriedLiveRpcResponseDelivery::current();
                             match crate::identity_first::IdentityRuntime::run_member_alias_targets_operation_tracked(
                             vec![target],
                             move || async move {
@@ -6857,15 +7658,17 @@ async fn handle_unified_rpc_json_inner(
                                     &params,
                                 )
                                 .await?;
-                                Ok(live.dispatch(
+                                let dispatch = live.dispatch(
                                     crate::live_wiring::LiveSurfaceAuthority::host_trusted_stdio(),
                                     session,
                                     Some(canonical_target_identity),
                                     method,
                                     params,
                                     operation_response_id,
-                                )
-                                .await)
+                                );
+                                #[cfg(feature = "openai-live")]
+                                let dispatch = delivery.scope(dispatch);
+                                Ok(dispatch.await)
                             },
                         )
                         .await
@@ -6875,7 +7678,7 @@ async fn handle_unified_rpc_json_inner(
                         }
                         }
                         Ok(None) => {
-                            match resolve_live_target(&runtime.mob_handle(), None, false, &params).await
+                            match resolve_live_target(&mob.mob_handle(), None, false, &params).await
                         {
                             Ok(session) => {
                                 live.dispatch(
@@ -6902,13 +7705,18 @@ async fn handle_unified_rpc_json_inner(
                         }
                     }
                 }
-            }
+            };
+            stdio_live_answer(response).await
         }
         method if crate::mob_announcements::rpc::is_announcement_method(method) => {
             let service = runtime.mob_announcements();
-            let outcome = match crate::mob_announcements::MobId::new(
-                runtime.mob_handle().mob_id().to_string(),
-            ) {
+            // The family is the host's: it resolves the mob a method of its
+            // own names, and a method that names none is for the mob the
+            // request names: the launch mob when the request names none.
+            // The id is the one this dispatch judged, which resolves no mob.
+            let own_mob = crate::mob_announcements::MobId::new(served_mob.to_string())
+                .map_err(|error| JsonRpcError::new(-32000, error.to_string()));
+            let outcome = match own_mob {
                 Ok(own_mob) => {
                     crate::mob_announcements::rpc::handle_announcement_method(
                         service.as_ref(),
@@ -6918,7 +7726,7 @@ async fn handle_unified_rpc_json_inner(
                     )
                     .await
                 }
-                Err(error) => Err(JsonRpcError::new(-32000, error.to_string())),
+                Err(error) => Err(error),
             };
             match outcome {
                 Ok(result) => JsonRpcResponse {
@@ -6935,9 +7743,36 @@ async fn handle_unified_rpc_json_inner(
                 },
             }
         }
+        method if mob_hosting::is_mob_hosting_method(method) => {
+            // The family is the host's: it reads and changes the mobs of
+            // the host's mob set and resolves no mob. A method of it that
+            // acts on one mob reads its own `mob_id`.
+            match mob_hosting::handle_mob_hosting_method(
+                &runtime.mob_resolver(),
+                mob_addressing::MobRefusalDoor::Host,
+                method,
+                &request.params,
+            )
+            .await
+            {
+                Ok(result) => JsonRpcResponse {
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: response_id,
+                    result: Some(result),
+                    error: None,
+                },
+                Err(error) => JsonRpcResponse {
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: response_id,
+                    result: None,
+                    error: Some(error),
+                },
+            }
+        }
         method if workgraph_methods::is_workgraph_method(method) => {
-            let service = runtime.workgraph_service();
-            let admission = runtime.workgraph_admission();
+            let mob = request_mob!();
+            let service = mob.workgraph_service();
+            let admission = mob.workgraph_admission();
             // The stdin surface is host-trusted; no wire principal exists to
             // promote into goal/confirm.
             match workgraph_methods::handle_workgraph_method(
@@ -7060,6 +7895,22 @@ fn rpc_live_identity_alias_visible(
         && !is_implicit_delegate_member(projected_role, labels)
 }
 
+/// Whether the stdio surface shows an identity, judged by its status: the
+/// rule its live aliases follow, asked with the identity's profile and its
+/// declared labels. A declaration does not say which mob an identity is of,
+/// so a declared `source_mob_id` label is left out, as the console's records
+/// of a status leave it out.
+fn rpc_identity_status_visible(status: &crate::identity_first::IdentityStatus) -> bool {
+    let profile = status
+        .profile
+        .as_ref()
+        .map(meerkat_mob::ProfileName::as_str)
+        .unwrap_or_default();
+    let mut labels = status.labels.clone();
+    labels.remove("source_mob_id");
+    rpc_live_identity_alias_visible(profile, &labels)
+}
+
 impl TryFrom<crate::identity_control_target::LiveIdentityMember> for RpcLiveIdentityAlias {
     type Error = String;
 
@@ -7179,12 +8030,7 @@ async fn rpc_stale_generated_alias_error(
     };
     // A stale id names the registered binding only of an identity the
     // stdio surface shows, by the rule its live aliases follow.
-    let profile = status
-        .profile
-        .as_ref()
-        .map(meerkat_mob::ProfileName::as_str)
-        .unwrap_or_default();
-    if !rpc_live_identity_alias_visible(profile, &status.labels) {
+    if !rpc_identity_status_visible(&status) {
         return Some(RpcIdentityTargetError::Invalid(format!(
             "identity hidden by policy: {alias}"
         )));
@@ -7208,12 +8054,12 @@ async fn rpc_stale_generated_alias_error(
 }
 
 async fn resolve_rpc_identity_control_target(
-    runtime: &UnifiedRuntime,
+    mob: &MobEntryRef<'_>,
     identity_rt: &crate::identity_first::IdentityRuntime,
     requested_identity: &str,
 ) -> Result<RpcIdentityControlTarget, RpcIdentityTargetError> {
     resolve_rpc_identity_control_target_with_handle(
-        &runtime.mob_handle(),
+        &mob.mob_handle(),
         identity_rt,
         requested_identity,
     )
@@ -7375,10 +8221,10 @@ fn rpc_live_identity_status_json(alias: &RpcLiveIdentityAlias) -> Value {
 }
 
 async fn rpc_live_identity_inspect_json(
-    runtime: &UnifiedRuntime,
+    mob: &MobEntryRef<'_>,
     alias: &RpcLiveIdentityAlias,
 ) -> Value {
-    let snapshot = runtime
+    let snapshot = mob
         .mob_handle()
         .member_status(&crate::member_comms_id::mob_member_id(
             alias.runtime_member_id.as_str(),
@@ -7411,17 +8257,17 @@ async fn rpc_live_identity_inspect_json(
 }
 
 async fn retire_rpc_live_identity(
-    runtime: &UnifiedRuntime,
+    mob: &MobEntryRef<'_>,
     alias: &RpcLiveIdentityAlias,
 ) -> Result<(), String> {
-    retire_rpc_runtime_member_id(runtime, alias.runtime_member_id.as_str()).await
+    retire_rpc_runtime_member_id(mob, alias.runtime_member_id.as_str()).await
 }
 
 async fn retire_rpc_runtime_member_id(
-    runtime: &UnifiedRuntime,
+    mob: &MobEntryRef<'_>,
     runtime_member_id: &str,
 ) -> Result<(), String> {
-    retire_rpc_runtime_member_id_with_handle(&runtime.mob_handle(), runtime_member_id).await
+    retire_rpc_runtime_member_id_with_handle(&mob.mob_handle(), runtime_member_id).await
 }
 
 async fn retire_rpc_runtime_member_id_with_handle(
@@ -7515,19 +8361,18 @@ async fn retire_rpc_member_ids_with_handle(
 /// no fork of its agent. A respawn that fails answers `-32000`
 /// (`{operation} failed: ...`).
 async fn respawn_rpc_live_identity(
-    runtime: &UnifiedRuntime,
+    mob: &MobEntryRef<'_>,
     alias: &RpcLiveIdentityAlias,
     operation: &str,
 ) -> Result<Value, JsonRpcError> {
     let member_id = crate::member_comms_id::mob_member_id(alias.runtime_member_id.as_str());
     if let Some(refusal) =
-        crate::side_chat::side_chat_restart_refusal(&runtime.mob_handle(), &member_id, operation)
-            .await
+        crate::side_chat::side_chat_restart_refusal(&mob.mob_handle(), &member_id, operation).await
     {
         return Err(refusal);
     }
     let mut result = Box::pin(respawn_rpc_runtime_member_id(
-        runtime,
+        mob,
         alias.runtime_member_id.as_str(),
     ))
     .await
@@ -7541,13 +8386,12 @@ async fn respawn_rpc_live_identity(
 }
 
 async fn respawn_rpc_runtime_member_id(
-    runtime: &UnifiedRuntime,
+    mob: &MobEntryRef<'_>,
     runtime_member_id: &str,
 ) -> Result<Value, String> {
     respawn_rpc_runtime_member_id_with_handle(
-        &runtime.mob_handle(),
-        runtime
-            .mob_runtime()
+        &mob.mob_handle(),
+        mob.mob_runtime()
             .implicit_delegate_retirement_overrides()
             .as_ref(),
         runtime_member_id,
@@ -8469,6 +9313,42 @@ pub(crate) fn agent_memory_rpc_error(
     }
 }
 
+/// The mob a request of the event methods selects in, as the events are
+/// kept: the mob the request names (`stored_mob`, none for the launch mob)
+/// with that mob's incarnation, asked of the runtime by the question that
+/// loads nothing ([`UnifiedRuntime::served_mob_incarnation`]): the one a
+/// loaded mob runs at, or the one the mob set's records keep for a mob
+/// that is not loaded. The events of an earlier mob of the same id were
+/// kept at another incarnation and are not answered. A selection without
+/// an incarnation (no record names it yet) is answered nothing. A request
+/// that names no mob selects the launch selection, whose events are kept
+/// under no mob.
+async fn event_mob_of(
+    runtime: &UnifiedRuntime,
+    stored_mob: Option<&meerkat_mob::MobId>,
+) -> Option<crate::runtime::EventMob> {
+    let mob_id = stored_mob?;
+    Some(crate::runtime::EventMob {
+        mob_id: mob_id.clone(),
+        incarnation: runtime.served_mob_incarnation(mob_id).await,
+    })
+}
+
+/// Whether a row a store answered is of the selection a request of
+/// `meta/query_events` asked: with `mob`, a row that names that mob at
+/// that incarnation; with none, a row that names no mob. A selection that
+/// names a mob and no incarnation is answered no row. `row_mob` and
+/// `row_incarnation` are the row's own members.
+pub(crate) fn row_is_of_the_selection(
+    row_mob: Option<&meerkat_mob::MobId>,
+    row_incarnation: Option<meerkat_core::service::MobIncarnationId>,
+    mob: Option<&crate::runtime::EventMob>,
+) -> bool {
+    mob.is_none_or(|mob| mob.incarnation.is_some())
+        && row_mob == mob.map(|mob| &mob.mob_id)
+        && row_incarnation == mob.and_then(|mob| mob.incarnation)
+}
+
 fn serialize_response(response: &JsonRpcResponse) -> String {
     serde_json::to_string(response).unwrap_or_else(|_| {
         r#"{"jsonrpc":"2.0","id":null,"error":{"code":-32603,"message":"Internal error"}}"#
@@ -8485,6 +9365,32 @@ fn serialize_response(response: &JsonRpcResponse) -> String {
 )]
 mod turn_ticket_rpc_tests;
 
+/// Rows for the addressing id of a request (`mob_id`), over the method
+/// table of both dispatchers and the event stream routes.
+#[cfg(test)]
+mod mob_addressing_tests;
+
+/// Source guard for the handlers below the addressing seam.
+#[cfg(test)]
+mod mob_addressing_guard_tests;
+
+/// Rows of the methods over the mobs of a host (`meta/mobs/*`).
+#[cfg(test)]
+pub(crate) mod mob_hosting_tests;
+
+/// Rows for the delivery methods on a host that serves more than one mob.
+#[cfg(test)]
+mod hosted_delivery_tests;
+
+/// Test-only: the identity-first member fixtures of this module's tests, for
+/// the live rows that drive a stdio live method through the gateway's
+/// delivery-aware dispatch.
+#[cfg(all(test, feature = "openai-live"))]
+pub(crate) use tests::{
+    IdentityFirstLiveMember, identity_first_context_holding_for_test,
+    identity_first_live_member_for_test,
+};
+
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
@@ -8492,9 +9398,9 @@ mod tests {
         CONSOLE_READ_BUDGET, CONSOLE_READ_TIMEOUT_CODE, IdentityMemberReadiness, error_response,
         experimental_live_target_preflight, handle_unified_rpc_json, identity_error_response,
         live_open_execution_identity_preflight, parse_console_read_budget, resolve_live_target,
-        resolve_rpc_identity_control_target, rpc_live_identity_alias_visible,
-        rpc_member_id_matches_durable_identity, rpc_runtime_alias_generation,
-        wait_identity_startup_ready, with_read_deadline,
+        resolve_rpc_identity_control_target, rpc_identity_status_visible,
+        rpc_live_identity_alias_visible, rpc_member_id_matches_durable_identity,
+        rpc_runtime_alias_generation, wait_identity_startup_ready, with_read_deadline,
     };
     use crate::identity_first::contracts::RosterProvider;
     use crate::identity_first::core_test_bridge::{CoreReadsBridge, bind_live, register_live};
@@ -9449,12 +10355,15 @@ mod tests {
         }
     }
 
+    /// Also the bridge of the rows that ask the stdio dispatch for a fresh
+    /// life or a wake of one mob's identity beside another mob's
+    /// (`rpc/mob_addressing_tests.rs`).
     #[derive(Default)]
-    struct RpcResetTestBridge {
+    pub(super) struct RpcResetTestBridge {
         create_calls: std::sync::atomic::AtomicUsize,
         last_create_spec: tokio::sync::Mutex<Option<DurableAgentSpec>>,
         /// The members Core holds: a create or reset commits its binding here.
-        core: CoreTestMembers,
+        pub(super) core: CoreTestMembers,
     }
 
     impl RpcResetTestBridge {
@@ -9702,7 +10611,7 @@ mod tests {
         )
     }
 
-    fn rpc_test_mob_spec(
+    pub(super) fn rpc_test_mob_spec(
         temp_dir: &tempfile::TempDir,
     ) -> Result<MobBootstrapSpec, Box<dyn std::error::Error + Send + Sync>> {
         rpc_test_mob_spec_for(temp_dir, &unique_rpc_test_mob_id())
@@ -10141,6 +11050,387 @@ shell = true
                 .build(),
         )
         .await?)
+    }
+
+    /// A gateway runtime with one identity-first member, for a row that
+    /// drives a stdio live method which names the member: `identity` is
+    /// registered with the identity runtime `identity_ctx` carries and bound
+    /// to its roster row's session, so the live arm of the stdio dispatch
+    /// takes the member's identity authority for the request.
+    #[cfg(feature = "openai-live")]
+    pub(crate) struct IdentityFirstLiveMember {
+        pub(crate) runtime: Arc<UnifiedRuntime>,
+        pub(crate) identity_ctx: IdentityFirstContext,
+        pub(crate) identity: &'static str,
+        _state: tempfile::TempDir,
+    }
+
+    /// [`IdentityFirstLiveMember`] in a mob of its own, under `namespace`.
+    #[cfg(feature = "openai-live")]
+    pub(crate) async fn identity_first_live_member_for_test(
+        namespace: &str,
+    ) -> Result<IdentityFirstLiveMember, Box<dyn std::error::Error + Send + Sync>> {
+        let state = tempfile::tempdir()?;
+        let runtime = reservation_test_runtime(&state, namespace).await?;
+        let identity = "review:live-member";
+        spawn_identity_projection_fixture(
+            &runtime,
+            SpawnMemberSpec::from_wire(
+                "worker".to_string(),
+                identity.to_string(),
+                None,
+                None,
+                None,
+            )
+            .with_labels(BTreeMap::from([(
+                "agent_identity".to_string(),
+                identity.to_string(),
+            )])),
+        )
+        .await?;
+        let session = runtime
+            .mob_handle()
+            .resolve_bridge_session_id(&crate::member_comms_id::mob_member_id(identity))
+            .await
+            .ok_or("the member's roster row has a bridge session")?;
+        let identity_ctx = identity_first_context_holding_for_test(
+            &runtime, namespace, identity, "worker", session,
+        )
+        .await?;
+        Ok(IdentityFirstLiveMember {
+            runtime: Arc::new(runtime),
+            identity_ctx,
+            identity,
+            _state: state,
+        })
+    }
+
+    /// The identity-first context of an identity runtime that holds
+    /// `identity`, a member of `runtime`'s mob under `profile`, live on
+    /// `session`: the live arm of the stdio dispatch runs a request that
+    /// names the member under its identity authority. The context is
+    /// refused if the identity runtime answers no such authority.
+    #[cfg(feature = "openai-live")]
+    pub(crate) async fn identity_first_context_holding_for_test(
+        runtime: &UnifiedRuntime,
+        namespace: &str,
+        identity: &str,
+        profile: &str,
+        session: meerkat_core::types::SessionId,
+    ) -> Result<IdentityFirstContext, Box<dyn std::error::Error + Send + Sync>> {
+        let core_bridge = Arc::new(CoreReadsBridge::default());
+        let identity_runtime = Arc::new(IdentityRuntime::new(IdentityRuntimeConfig {
+            continuity_store: Arc::new(LocalContinuityStore::in_memory()?),
+            lease_provider: Arc::new(LocalLeaseProvider::new()),
+            runtime_instance_id: namespace.to_string(),
+            has_runtime_store: true,
+            durability_policy: DurabilityPolicy::SyncWriteThrough,
+            bridge: Some(core_bridge.clone()),
+            default_timeout: None,
+        }));
+        register_live(
+            &identity_runtime,
+            &core_bridge.core,
+            rpc_durable_spec(identity, profile),
+            1,
+            session,
+        )
+        .await?;
+        if identity_runtime
+            .member_alias_lifecycle_target(identity)
+            .await?
+            .is_none()
+        {
+            return Err("the identity runtime must hold the member".into());
+        }
+        Ok(IdentityFirstContext {
+            runtime: crate::identity_first::PublicIdentityRuntime::new(
+                identity_runtime,
+                runtime.mob_runtime().clone(),
+            ),
+            roster_provider: Arc::new(EmptyRosterProvider),
+            topology_provider: None,
+            customizer: None,
+            agent_memory_provider: None,
+            mob_definition: Some(runtime.mob_handle().definition().clone()),
+            transcript_edit_service: None,
+            compaction_floors: None,
+        })
+    }
+
+    /// An `openai-live` gateway with no live handler answers a stdio
+    /// `live/webrtc/answer`, sent as the SDKs send it, with the typed
+    /// `live_unavailable` refusal every `meta/live/*` method answers there.
+    /// The method is a live method, not a call of a module named `live`.
+    #[cfg(feature = "openai-live")]
+    #[tokio::test]
+    async fn stdio_live_webrtc_answer_without_a_live_handler_answers_live_unavailable()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let temp_dir = tempfile::tempdir()?;
+        let runtime = reservation_test_runtime(&temp_dir, "rpc-live-answer-unavailable").await?;
+        let response: Value = serde_json::from_str(
+            &handle_unified_rpc_json(
+                &runtime,
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "live/webrtc/answer",
+                    "params": {
+                        "identity": "worker-1",
+                        "channel_id": "no-such-channel",
+                        "pending_receipt": "no-such-pending-receipt",
+                        "readiness_receipt": "no-such-readiness-receipt",
+                        "token": "no-such-token",
+                        "offer_sdp": "v=0\r\n",
+                    },
+                })
+                .to_string(),
+                Duration::from_secs(1),
+                None,
+                None,
+            )
+            .await,
+        )?;
+        let _ = runtime.mob_handle().stop().await;
+        assert_eq!(
+            response["error"],
+            json!({
+                "code": crate::live_wiring::LIVE_UNAVAILABLE_CODE,
+                "message": "live sessions are not available on this gateway",
+                "data": { "kind": crate::live_wiring::LIVE_UNAVAILABLE_KIND },
+            }),
+            "a stdio live/webrtc/answer with no live handler must answer live_unavailable: \
+             {response}"
+        );
+        Ok(())
+    }
+
+    /// An `openai-live` gateway with a live handler hands a stdio
+    /// `live/webrtc/answer` to that handler. The handler here has no answer
+    /// transport, so the request ends in the refusal only the live answer
+    /// handler gives.
+    #[cfg(feature = "openai-live")]
+    #[tokio::test]
+    async fn stdio_live_webrtc_answer_reaches_the_live_handler()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let temp_dir = tempfile::tempdir()?;
+        let runtime = reservation_test_runtime(&temp_dir, "rpc-live-answer-handler").await?;
+        let persistence = meerkat::PersistenceBundle::new(
+            Arc::new(meerkat::MemoryStore::new()),
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
+            Arc::new(meerkat_store::MemoryBlobStore::new()),
+        )
+        .expect("live handler fixture persistence");
+        let live_state = tempfile::tempdir()?;
+        let factory = AgentFactory::new(live_state.path()).builtins(false);
+        let mut builder = meerkat::FactoryAgentBuilder::new(factory.clone(), Config::default());
+        builder.default_llm_client = Some(Arc::new(TestClient::default()));
+        let (service, machine) =
+            meerkat::surface::build_runtime_backed_service(builder, 4, persistence)
+                .expect("compose the live handler fixture's service");
+        let service = Arc::new(service);
+        let context = Arc::new(crate::live_wiring::attach_live(
+            Arc::clone(&service),
+            Arc::clone(&machine),
+            &factory,
+            Config::default(),
+            "ws://127.0.0.1/stdio-live-answer".to_string(),
+            None,
+        ));
+        let live = crate::live_wiring::live_rpc_handler(context, Arc::clone(&service), machine);
+        let response: Value = serde_json::from_str(
+            &super::handle_unified_rpc_json_with_live(
+                &runtime,
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "live/webrtc/answer",
+                    "params": {
+                        "channel_id": "no-such-channel",
+                        "token": "no-such-token",
+                        "offer_sdp": "v=0\r\n",
+                    },
+                })
+                .to_string(),
+                Duration::from_secs(5),
+                None,
+                None,
+                Some(&live),
+            )
+            .await,
+        )?;
+        service.shutdown().await;
+        let _ = runtime.mob_handle().stop().await;
+        assert_eq!(
+            response["error"],
+            json!({
+                "code": super::CAPABILITY_UNAVAILABLE_CODE,
+                "message": "experimental live WebRTC answer transport is not available",
+            }),
+            "a stdio live/webrtc/answer must reach the live answer handler: {response}"
+        );
+        Ok(())
+    }
+
+    /// The loaded-module arm of the stdio dispatch still takes every other
+    /// method with a slash outside `meta/`, a name under `live/` that is not
+    /// a live method included: with no such module loaded each answers
+    /// `-32601` naming the module. On a build without `openai-live` that
+    /// includes `live/webrtc/answer`, which is no live method there.
+    #[tokio::test]
+    async fn stdio_module_calls_still_reach_the_loaded_module_arm()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let temp_dir = tempfile::tempdir()?;
+        let runtime = reservation_test_runtime(&temp_dir, "rpc-module-arm").await?;
+        let mut calls = vec![("calendar/list", "calendar"), ("live/status", "live")];
+        if cfg!(not(feature = "openai-live")) {
+            calls.push(("live/webrtc/answer", "live"));
+        }
+        let mut answers = Vec::new();
+        let mut expected = Vec::new();
+        for (method, module) in calls {
+            let response: Value = serde_json::from_str(
+                &handle_unified_rpc_json(
+                    &runtime,
+                    &json!({"jsonrpc": "2.0", "id": 3, "method": method, "params": {}}).to_string(),
+                    Duration::from_secs(1),
+                    None,
+                    None,
+                )
+                .await,
+            )?;
+            answers.push((method, response["error"].clone()));
+            expected.push((
+                method,
+                json!({"code": -32601, "message": format!("Module '{module}' not loaded")}),
+            ));
+        }
+        let _ = runtime.mob_handle().stop().await;
+        assert_eq!(answers, expected);
+        Ok(())
+    }
+
+    /// What a stdio `live/webrtc/answer` answers on a gateway with no live
+    /// handler and no module named `live`, by build. The released gateways
+    /// are built with `openai-live`: there it is a live method and answers
+    /// the typed `live_unavailable` refusal. A build without the feature has
+    /// no such live method and answers as a call of a module named `live`.
+    #[tokio::test]
+    async fn stdio_live_webrtc_answer_answers_by_the_build()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let temp_dir = tempfile::tempdir()?;
+        let runtime = reservation_test_runtime(&temp_dir, "rpc-live-answer-by-build").await?;
+        let response: Value = serde_json::from_str(
+            &handle_unified_rpc_json(
+                &runtime,
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": 4,
+                    "method": "live/webrtc/answer",
+                    "params": {
+                        "channel_id": "no-such-channel",
+                        "token": "no-such-token",
+                        "offer_sdp": "v=0\r\n",
+                    },
+                })
+                .to_string(),
+                Duration::from_secs(1),
+                None,
+                None,
+            )
+            .await,
+        )?;
+        let _ = runtime.mob_handle().stop().await;
+        let expected = if cfg!(feature = "openai-live") {
+            json!({
+                "code": -32050,
+                "message": "live sessions are not available on this gateway",
+                "data": {"kind": "live_unavailable"},
+            })
+        } else {
+            json!({"code": -32601, "message": "Module 'live' not loaded"})
+        };
+        assert_eq!(response["error"], expected, "{response}");
+        Ok(())
+    }
+
+    /// The stdio dispatch gives a method with a slash to one arm only: a
+    /// live method to the live arm, any other method outside `meta/` to the
+    /// loaded-module arm. `live/webrtc/answer` is a live method on an
+    /// `openai-live` build and a module call on a build without it.
+    #[test]
+    fn the_stdio_dispatch_gives_a_live_method_to_the_live_arm_only() {
+        let answer_is_live = cfg!(feature = "openai-live");
+        assert_eq!(
+            super::is_stdio_live_method("live/webrtc/answer"),
+            answer_is_live
+        );
+        assert_eq!(
+            super::is_stdio_module_method("live/webrtc/answer"),
+            !answer_is_live
+        );
+        for method in [
+            "meta/live/open",
+            "meta/live/status",
+            "meta/live/playback_owner/register",
+        ] {
+            assert!(super::is_stdio_live_method(method), "{method}");
+            assert!(!super::is_stdio_module_method(method), "{method}");
+        }
+        for method in [
+            "calendar/list",
+            "live/status",
+            "live/webrtc",
+            "live/webrtc/answer/extra",
+        ] {
+            assert!(super::is_stdio_module_method(method), "{method}");
+            assert!(!super::is_stdio_live_method(method), "{method}");
+        }
+        for method in ["meta/status", "meta/send", "status"] {
+            assert!(!super::is_stdio_module_method(method), "{method}");
+            assert!(!super::is_stdio_live_method(method), "{method}");
+        }
+    }
+
+    /// Source guard: the stdio dispatch decides its loaded-module arm and
+    /// its live arm by the two predicates alone. An inline test of a
+    /// method's slash, or of a live method's name, in the dispatch could
+    /// claim a live method as a module call again.
+    #[test]
+    fn the_stdio_dispatch_guards_its_module_and_live_arms_by_the_predicates() {
+        let source = include_str!("rpc.rs");
+        let start = source
+            .find("\nasync fn handle_unified_rpc_json_inner(")
+            .expect("the stdio dispatch");
+        let rest = &source[start..];
+        // The function ends at its closing brace in the first column.
+        let end = rest.find("\n}\n").expect("the stdio dispatch ends");
+        let dispatch = &rest[..end];
+        assert_eq!(
+            dispatch
+                .matches("method if is_stdio_module_method(method) =>")
+                .count(),
+            1,
+            "the loaded-module arm is guarded by is_stdio_module_method"
+        );
+        assert_eq!(
+            dispatch
+                .matches("method if is_stdio_live_method(method) =>")
+                .count(),
+            1,
+            "the live arm is guarded by is_stdio_live_method"
+        );
+        for inline in [
+            "method.contains('/')",
+            "method.starts_with(\"meta/live/\")",
+            "\"live/webrtc/answer\"",
+        ] {
+            assert!(
+                !dispatch.contains(inline),
+                "the stdio dispatch tests `{inline}` inline; decide it in is_stdio_live_method \
+                 or is_stdio_module_method"
+            );
+        }
     }
 
     /// The console treats frames under `_system` and `__console__` as the
@@ -10777,6 +12067,49 @@ shell = true
             .filter(|method| method.as_str() == Some("meta/schedule/tools"))
             .count();
         assert_eq!(advertised, 1, "{capabilities:#?}");
+        Ok(())
+    }
+
+    /// A gateway that judges the `mob_id` of a request says so: the feature
+    /// capabilities of `meta/capabilities` hold `mob_addressing`, once. A
+    /// client sends the id only to a gateway that lists it. `hosted_mobs` is
+    /// not listed: no method that hosts another mob exists.
+    #[tokio::test]
+    async fn unified_capabilities_list_mob_addressing()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let temp_dir = tempfile::tempdir()?;
+        let runtime =
+            schedule_tools_test_runtime(&temp_dir, "rpc-mob-addressing-capability-test").await?;
+
+        let capabilities: Value = serde_json::from_str(
+            &handle_unified_rpc_json(
+                &runtime,
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "meta/capabilities",
+                })
+                .to_string(),
+                Duration::from_secs(1),
+                None,
+                None,
+            )
+            .await,
+        )?;
+        let _ = runtime.mob_handle().stop().await;
+
+        let names: Vec<&str> = capabilities["result"]["feature_capabilities"]
+            .as_array()
+            .expect("feature capabilities")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        let listed = names
+            .iter()
+            .filter(|name| **name == "mob_addressing")
+            .count();
+        assert_eq!(listed, 1, "{capabilities:#?}");
+        assert!(!names.contains(&"hosted_mobs"), "{capabilities:#?}");
         Ok(())
     }
 
@@ -12895,6 +14228,31 @@ shell = true
         assert!(!rpc_live_identity_alias_visible("delegate", &labels));
     }
 
+    /// A declaration says nothing of the mob an identity is of: an identity
+    /// whose status declares a `source_mob_id` label is judged like one that
+    /// does not, whatever profile or role it declares.
+    #[test]
+    fn an_identity_status_is_shown_without_a_declared_mob() {
+        let status = |labels: Value| -> crate::identity_first::IdentityStatus {
+            serde_json::from_value(json!({
+                "identity": "review:declared",
+                "state": "dormant",
+                "addressability": "addressable",
+                "profile": "delegate",
+                "labels": labels,
+            }))
+            .expect("identity status")
+        };
+        let plain = status(json!({ "team": "review" }));
+        let declared = status(json!({ "team": "review", "source_mob_id": "another-mob" }));
+        assert!(rpc_identity_status_visible(&plain));
+        assert_eq!(
+            rpc_identity_status_visible(&declared),
+            rpc_identity_status_visible(&plain),
+            "the same answer with and without the declared label"
+        );
+    }
+
     #[test]
     fn ambiguous_live_alias_errors_include_structured_data() -> Result<(), serde_json::Error> {
         let response: Value = serde_json::from_str(&error_response(
@@ -12987,10 +14345,13 @@ shell = true
             default_timeout: None,
         });
 
-        let err =
-            resolve_rpc_identity_control_target(&runtime, &identity_rt, "rt:review:singleton:0")
-                .await
-                .expect_err("runtime-id live-only fallback should reject duplicate durable alias");
+        let err = resolve_rpc_identity_control_target(
+            &default_mob(&runtime).await,
+            &identity_rt,
+            "rt:review:singleton:0",
+        )
+        .await
+        .expect_err("runtime-id live-only fallback should reject duplicate durable alias");
         assert!(
             err.to_string()
                 .contains("ambiguous live identity alias review:singleton"),
@@ -13131,11 +14492,6 @@ shell = true
         // transcript service before they resolve; the operator verb harness
         // covers them (operator_verbs_with_preconditions_refuse_a_stale_runtime_id).
         // meta/set_instruction's member target is checked after the loop.
-        let operator_methods = [
-            "meta/member_instruction_activations",
-            "meta/compact_member",
-            "meta/instruction_status",
-        ];
         for method in [
             "meta/status_identity",
             "meta/inspect_identity",
@@ -13189,27 +14545,25 @@ shell = true
                 "{method}: {unknown:#?}"
             );
 
-            // A stale runtime id of an identity the stdio surface hides
-            // answers hidden by policy and names no binding.
-            let hidden = Box::pin(call(method, "rt:review:delegate:0")).await?;
+            // A declaration says nothing of the mob an identity is of: the
+            // stale runtime id of an identity declared with the `delegate`
+            // profile and a `source_mob_id` label answers the typed refusal
+            // of any other identity, not "hidden by policy".
+            let declared = Box::pin(call(method, "rt:review:delegate:0")).await?;
             assert_eq!(
-                (&hidden["error"]["code"], &hidden["error"]["message"]),
                 (
-                    &json!(-32602),
-                    &json!("invalid identity: identity hidden by policy: rt:review:delegate:0")
+                    &declared["error"]["code"],
+                    &declared["error"]["data"]["kind"],
+                    &declared["error"]["data"]["identity"],
+                    &declared["error"]["data"]["registered_runtime_member_id"],
                 ),
-                "{method}: {hidden:#?}"
-            );
-            if !operator_methods.contains(&method) {
-                assert_eq!(
-                    hidden["error"]["data"],
-                    json!({"kind": "identity_hidden_by_policy", "identity": "rt:review:delegate:0"}),
-                    "{method}: {hidden:#?}"
-                );
-            }
-            assert!(
-                !hidden.to_string().contains("rt:review:delegate:1"),
-                "{method} names no binding of a hidden identity: {hidden}"
+                (
+                    &json!(-32000),
+                    &json!("stale_identity_runtime_binding"),
+                    &json!("review:delegate"),
+                    &json!("rt:review:delegate:1"),
+                ),
+                "{method}: {declared:#?}"
             );
         }
 
@@ -13358,8 +14712,12 @@ shell = true
         )
         .await?;
 
-        let target =
-            resolve_rpc_identity_control_target(&runtime, &identity_rt, "review:singleton").await?;
+        let target = resolve_rpc_identity_control_target(
+            &default_mob(&runtime).await,
+            &identity_rt,
+            "review:singleton",
+        )
+        .await?;
         assert_eq!(target.identity.as_str(), "review:singleton");
         assert_eq!(
             target
@@ -13369,9 +14727,12 @@ shell = true
             Some("rt:review:singleton:1")
         );
 
-        let target =
-            resolve_rpc_identity_control_target(&runtime, &identity_rt, "rt:review:singleton:1")
-                .await?;
+        let target = resolve_rpc_identity_control_target(
+            &default_mob(&runtime).await,
+            &identity_rt,
+            "rt:review:singleton:1",
+        )
+        .await?;
         assert_eq!(
             target
                 .live
@@ -13380,9 +14741,12 @@ shell = true
             Some("rt:review:singleton:1")
         );
 
-        let stale_target =
-            resolve_rpc_identity_control_target(&runtime, &identity_rt, "rt:review:singleton:0")
-                .await?;
+        let stale_target = resolve_rpc_identity_control_target(
+            &default_mob(&runtime).await,
+            &identity_rt,
+            "rt:review:singleton:0",
+        )
+        .await?;
         assert_eq!(
             stale_target
                 .live
@@ -13492,9 +14856,12 @@ shell = true
             meerkat_core::types::SessionId::new(),
         )
         .await?;
-        let stale_target =
-            resolve_rpc_identity_control_target(&runtime, &identity_rt, "rt:review:singleton:0")
-                .await?;
+        let stale_target = resolve_rpc_identity_control_target(
+            &default_mob(&runtime).await,
+            &identity_rt,
+            "rt:review:singleton:0",
+        )
+        .await?;
         assert_eq!(
             stale_target
                 .live
@@ -13794,10 +15161,13 @@ shell = true
         .await?;
 
         for requested_identity in ["review:singleton", "rt:review:singleton:0"] {
-            let err =
-                resolve_rpc_identity_control_target(&runtime, &identity_rt, requested_identity)
-                    .await
-                    .expect_err("hidden registered live binding must not resolve");
+            let err = resolve_rpc_identity_control_target(
+                &default_mob(&runtime).await,
+                &identity_rt,
+                requested_identity,
+            )
+            .await
+            .expect_err("hidden registered live binding must not resolve");
             assert!(
                 err.to_string().contains("identity hidden by policy"),
                 "unexpected error for {requested_identity}: {err}"
@@ -13853,10 +15223,13 @@ shell = true
         });
 
         for requested_identity in ["review:singleton", "rt:review:singleton:0"] {
-            let err =
-                resolve_rpc_identity_control_target(&runtime, &identity_rt, requested_identity)
-                    .await
-                    .expect_err("hidden live-only alias must not collapse into unknown identity");
+            let err = resolve_rpc_identity_control_target(
+                &default_mob(&runtime).await,
+                &identity_rt,
+                requested_identity,
+            )
+            .await
+            .expect_err("hidden live-only alias must not collapse into unknown identity");
             assert!(
                 err.to_string().contains("identity hidden by policy"),
                 "unexpected error for {requested_identity}: {err}"
@@ -13970,9 +15343,13 @@ shell = true
         )
         .await?;
 
-        let err = resolve_rpc_identity_control_target(&runtime, &identity_rt, "other:singleton")
-            .await
-            .expect_err("wrong-projected live alias must not resolve as live-only");
+        let err = resolve_rpc_identity_control_target(
+            &default_mob(&runtime).await,
+            &identity_rt,
+            "other:singleton",
+        )
+        .await
+        .expect_err("wrong-projected live alias must not resolve as live-only");
         assert!(
             err.to_string()
                 .contains("identity runtime binding belongs to review:singleton"),
@@ -15889,8 +17266,12 @@ comms = true
         )
         .await?;
 
-        let target =
-            resolve_rpc_identity_control_target(&runtime, &identity_rt, durable_identity).await?;
+        let target = resolve_rpc_identity_control_target(
+            &default_mob(&runtime).await,
+            &identity_rt,
+            durable_identity,
+        )
+        .await?;
         assert!(
             target.was_registered,
             "resolution must capture durable ownership"
@@ -16831,5 +18212,16 @@ comms = true
             "the retired side chat leaves the roster"
         );
         Ok(())
+    }
+
+    /// The default mob of `runtime`, resolved: what a handler below the
+    /// addressing seam takes.
+    async fn default_mob(
+        runtime: &crate::UnifiedRuntime,
+    ) -> crate::unified_runtime::MobEntryRef<'_> {
+        runtime
+            .resolve_mob(None)
+            .await
+            .expect("the default mob resolves")
     }
 }

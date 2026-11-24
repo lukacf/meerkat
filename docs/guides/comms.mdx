@@ -91,7 +91,7 @@ graph TD
     Ensure the `comms` Cargo feature is compiled in (enabled by default in the CLI; opt-in on the `meerkat` facade crate).
   </Step>
   <Step title="Generate identity">
-    Identity is auto-generated on first run. Factory-built sessions use the canonical durable session-comms identity root so a session keeps its keypair across restarts. A standalone `CoreCommsConfig` resolves `identity_dir` relative to the base directory supplied by its host.
+    Identity is auto-generated on first run. With in-process comms, the default, factory-built sessions keep their keypair across restarts in a directory outside the state root and the realm (see [where a session's keys are kept](#where-a-session%E2%80%99s-keys-are-kept)). A standalone `CoreCommsConfig` resolves `identity_dir` relative to the base directory supplied by its host.
   </Step>
   <Step title="Configure trusted peers">
     Let mob wiring, host binding, or the typed pairing protocol install machine-authorized trust. Do not seed `trusted_peers.json` by hand: a non-empty persisted file is rejected at runtime startup because it is a projection, not trust authority. Route by the derived `PeerId`, never by the display name.
@@ -108,7 +108,45 @@ Each agent has an Ed25519 keypair managed by the `Keypair` type (`crates/meerkat
 - **Key generation**: `Keypair::generate()` creates a new random keypair using `OsRng`.
 - **Key persistence**: `Keypair::save(dir)` writes `identity.key` (mode `0600` on Unix) and `identity.pub` to disk. `Keypair::load(dir)` reads them back. `Keypair::load_or_generate(dir)` is the canonical entry point.
 - **Public key format**: `PubKey` is a 32-byte Ed25519 public key. The canonical string format is `ed25519:<base64>` (standard Base64 with padding).
-- **Standalone default identity directory**: `<base-dir>/.rkat/identity/`. Session-scoped factory builds use a durable per-session identity root instead.
+- **Standalone default identity directory**: `<base-dir>/.rkat/identity/`. Session-scoped factory builds use a durable per-session identity root instead (see [where a session's keys are kept](#where-a-session%E2%80%99s-keys-are-kept)).
+
+### Where a session's keys are kept
+
+With in-process comms, the default, a session with comms has its own key pair,
+in a directory named by the session id that holds `identity.key` and
+`identity.pub`. That directory is not in the state root and not in the realm:
+by default it lies under the user's home, and the place depends on the command
+that built the session.
+
+| Command | Session keys under |
+|---------|--------------------|
+| `rkat`, `rkat mob host` | `~/.rkat/session_comms_identity/<session id>/` |
+| `rkat-rpc`, `rkat-rest`, `rkat-mcp` on Linux | `$XDG_STATE_HOME/meerkat/session_comms_identity/<session id>/`, or `~/.local/state/meerkat/session_comms_identity/<session id>/` when `XDG_STATE_HOME` is not set |
+| `rkat-rpc`, `rkat-rest`, `rkat-mcp` on macOS | `~/Library/Application Support/meerkat/session_comms_identity/<session id>/` |
+| `rkat-rpc`, `rkat-rest`, `rkat-mcp` on Windows | `%LOCALAPPDATA%\meerkat\session_comms_identity\<session id>\` |
+
+With `--user-config-root <root>` every one of these commands keeps them under
+`<root>/.rkat/session_comms_identity/<session id>/` instead. A Rust host that
+builds sessions with an `AgentFactory` gets the same places:
+`<user_config_root>/.rkat/session_comms_identity` when the factory has a
+`user_config_root`, else the per-user state directory of the three servers.
+
+With `[comms]` `mode = "tcp"` or `"uds"` there is no directory per session:
+the host has one key pair, in `<realm directory>/.rkat/identity/`, which lies
+inside the realm directory and moves with it. `rkat mob host` has, besides its
+members' session keys, a host identity directory of its own:
+`<state root>/host-identity`, beside the realm directories, unless
+`--identity-dir` or `[mob_host].identity_dir` names another.
+
+A backup or a move of a state root or a realm therefore does not hold the
+session keys of in-process comms: copy the `session_comms_identity` directory
+with it, to the place the command on the new host reads. A copy of a mob
+host's realm directory alone does not hold its host identity directory either.
+Without its session keys a session that is not a mob member is still resumed:
+it gets a new key pair, and so a new `PeerId`, without a word on stderr, and
+peers that trusted the old key do not know the new one. A mob member restored
+without its keys is marked broken, with the reason
+`restored member '<id>' cannot publish its comms endpoint: ...; respawn the member to mint a new endpoint`.
 
 <Accordion title="Envelope signing">
 Every message is wrapped in a signed `Envelope`:
@@ -245,7 +283,7 @@ signed peer codec.
 | `inproc://` | `inproc://agent-name` | In-process peer communication |
 
 <Accordion title="Transport details">
-**UDS transport**: Unix Domain Socket listeners are spawned by `spawn_uds_listener()`. The socket file is created at the configured path (existing files are removed first). Parent directories are created automatically.
+**UDS transport**: Unix Domain Socket listeners are spawned by `spawn_uds_listener()`. The socket file is created at the configured path. A socket file that a listener which has ended left there is removed first. A path that a live listener of another process holds is not taken over: the listener dials an existing socket file first, and when a listener answers the dial, or the dial is refused for permission while a file lies at the path (for example another user's socket), the start fails with an address-in-use error that names the path and the file is left as it is. Parent directories are created automatically.
 
 **TCP transport**: TCP listeners are spawned by `spawn_tcp_listener()`. Accepts connections and processes each in a dedicated tokio task.
 

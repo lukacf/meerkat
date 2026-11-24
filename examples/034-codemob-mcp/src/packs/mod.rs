@@ -228,21 +228,23 @@ mod tests {
         }
 
         assert!(
-            models.iter().any(|model| model == "gpt-5.5"),
-            "the deliberately prior-generation OpenAI role should remain in the pack mix: {models:?}"
+            models.iter().any(|model| model == "gpt-6-astra"),
+            "the OpenAI role mix should include gpt-6-astra: {models:?}"
         );
         assert!(
-            models.iter().any(|model| model == "claude-opus-4-8"),
-            "the Anthropic role mix should include claude-opus-4-8: {models:?}"
+            models.iter().any(|model| model == "claude-opus-5-5"),
+            "the Anthropic role mix should include claude-opus-5-5: {models:?}"
         );
         assert!(
-            !models.iter().any(|model| model == "gpt-5.2"),
-            "advanced packs should not regress to gpt-5.2: {models:?}"
+            models.iter().any(|model| model == "gemini-4-argon"),
+            "the Google role mix should include gemini-4-argon: {models:?}"
         );
-        assert!(
-            !models.iter().any(|model| model == "gpt-5.4"),
-            "advanced packs should not regress to gpt-5.4: {models:?}"
-        );
+        for older in ["gpt-5.", "claude-opus-4", "claude-sonnet-4", "gemini-3.1"] {
+            assert!(
+                !models.iter().any(|model| model.starts_with(older)),
+                "advanced packs should not regress to {older}*: {models:?}"
+            );
+        }
     }
 
     #[test]

@@ -933,6 +933,12 @@ const nativeE2eSystemTests = [
   },
   {
     packageKey: "meerkat-cli",
+    cargoTestTarget: "system_cli_realm_mcp",
+    name: "e2e_system_cli_realm_mcp_review_rule_bazel_test",
+    testName: "integration_real_cli_realm_mcp_review_rule_refuses_above_r1",
+  },
+  {
+    packageKey: "meerkat-cli",
     cargoTestTarget: "system_cli_export_atif",
     name: "e2e_system_cli_export_atif_bazel_test",
     testName: "integration_real_cli_export_atif",
@@ -2532,6 +2538,10 @@ for (const pkg of localPackages.values()) {
         data.push("//crates/meerkat-rest:rkat_rest_bin");
         env.push(`        "CARGO_BIN_EXE_rkat-rest": "$(rootpath //crates/meerkat-rest:rkat_rest_bin)",`);
       }
+      if (key === "meerkat-mob-mcp") {
+        data.push("//crates/meerkat-mob-mcp:rkat_mob_mcp_bin");
+        env.push(`        "CARGO_BIN_EXE_rkat-mob-mcp": "$(rootpath //crates/meerkat-mob-mcp:rkat_mob_mcp_bin)",`);
+      }
       if (key === "xtask") {
         const rustfmt = "@@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin";
         const rustfmtLib = "@@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustc_lib";
@@ -3003,9 +3013,9 @@ for (const pkg of localPackages.values()) {
     const rustfmtLib = "@@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustc_lib";
     const rustfmtLinux = "@@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustfmt_bin";
     const rustfmtLinuxLib = "@@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustc_lib";
-    // The canonical TLC lane runs as twenty-five parts, so each fits a CI job
+    // The canonical TLC lane runs as twenty-eight parts, so each fits a CI job
     // limit and the machine-authority lane runs them in parallel: the
-    // machine-verify sweep plus adaptive witness, and twenty-four hand-written
+    // machine-verify sweep plus adaptive witness, and twenty-seven hand-written
     // audit shards. `make machine-verify` runs all of them (`--part all`).
     // Each part reserves its share of a c3d-standard-30 executor, so the
     // BuildBuddy pool does not pack it with a heavy cargo-equivalent action,
@@ -3085,6 +3095,15 @@ for (const pkg of localPackages.values()) {
         `"TLC_WORKERS": "8",
         "JAVA_TOOL_OPTIONS": "-Xmx16g",`],
       ["machine_verify_audits_y_tlc_test", "audits-y", "8", "24GB",
+        `"TLC_WORKERS": "8",
+        "JAVA_TOOL_OPTIONS": "-Xmx16g",`],
+      ["machine_verify_audits_z_tlc_test", "audits-z", "8", "24GB",
+        `"TLC_WORKERS": "8",
+        "JAVA_TOOL_OPTIONS": "-Xmx16g",`],
+      ["machine_verify_audits_aa_tlc_test", "audits-aa", "8", "24GB",
+        `"TLC_WORKERS": "8",
+        "JAVA_TOOL_OPTIONS": "-Xmx16g",`],
+      ["machine_verify_audits_ab_tlc_test", "audits-ab", "8", "24GB",
         `"TLC_WORKERS": "8",
         "JAVA_TOOL_OPTIONS": "-Xmx16g",`],
     ]) {

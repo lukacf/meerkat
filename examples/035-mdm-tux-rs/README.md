@@ -76,8 +76,9 @@ direct target turns.
 
 When targets register, the kennel adds their comms identities to the hive's
 trusted peer set and wires targets to each other. The hive agent can then use
-the normal comms tools (`peers`, `send_request`, `send_message`) to coordinate
-the fleet.
+the normal comms tools (`peers`, `send_message`, `send_request`) to coordinate
+the fleet. A task goes to a target with `send_message`; `send_request` takes only
+the intents the tool itself lists and has no free-form task intent.
 
 Discovery never claims a target. Releases remain released until an explicit
 `/claim`. Acknowledged leases expire even on a connected control socket;
@@ -171,13 +172,21 @@ The kennel-mode path below is the supported fresh-start demo.
 
 ### Kennel mode (brokered discovery)
 
+The `send_message` dispatch instruction applies to **new hive sessions**. If the
+kennel data directory already contains a hive, the kennel resumes that session
+with its saved prompt; upgrading the binary does not replace it. To try the new
+instruction without changing the old hive, run `kennel_dir=$(mktemp -d "$HOME/mdm-kennel.XXXXXXXX")`
+once and add `--data-dir "$kennel_dir"` to the **Terminal 1** command below.
+Keep that path to resume the new hive later. Leave the old directory intact;
+point `--data-dir` back to it to resume the old hive.
+
 ```bash
 # Terminal 1 - kennel broker and hosted hive agent
 OPENAI_API_KEY=sk-... ./scripts/repo-cargo run \
     --manifest-path examples/035-mdm-tux-rs/Cargo.toml \
     --bin mdm-kennel -- \
     --listen 127.0.0.1:5000 --advertise 127.0.0.1 \
-    --hive-model gpt-5.5 --hive-provider openai
+    --hive-model gpt-6-astra --hive-provider openai
 
 # Terminal 2 - target agent (registers with kennel)
 ANTHROPIC_API_KEY=sk-ant-... ./scripts/repo-cargo run \
@@ -185,7 +194,7 @@ ANTHROPIC_API_KEY=sk-ant-... ./scripts/repo-cargo run \
     --bin mdm-target -- \
     --kennel 127.0.0.1:5000 --advertise 127.0.0.1 \
     --rpc-port 4800 --name my-mac \
-    --model claude-sonnet-4-6 --provider anthropic
+    --model claude-sonnet-5-5 --provider anthropic
 
 # Terminal 3 - TUX controller (discovers targets via kennel)
 ./scripts/repo-cargo run --manifest-path examples/035-mdm-tux-rs/Cargo.toml \
@@ -248,9 +257,9 @@ To run a mixed-provider fleet, set the model/provider environment when starting
 the topology. Opening TUX does not select or recreate the agents' models:
 
 ```bash
-MDM_HIVE_MODEL=gemini-3.1-pro-preview MDM_HIVE_PROVIDER=gemini \
-MDM_TARGET_A_MODEL=gpt-5.5 MDM_TARGET_A_PROVIDER=openai \
-MDM_TARGET_B_MODEL=claude-opus-4-8 MDM_TARGET_B_PROVIDER=anthropic \
+MDM_HIVE_MODEL=gemini-4-argon MDM_HIVE_PROVIDER=gemini \
+MDM_TARGET_A_MODEL=gpt-6-astra MDM_TARGET_A_PROVIDER=openai \
+MDM_TARGET_B_MODEL=claude-opus-5-5 MDM_TARGET_B_PROVIDER=anthropic \
 make docker-smoke
 
 make docker-tux
@@ -265,11 +274,11 @@ inside tmux. The driver currently does not claim `target-a` or `target-b`
 before its direct-target steps, so it is an exploratory harness rather than a
 reliable unattended pass on a fresh topology. Claim the selected target
 manually before those steps, or update the driver, before treating its four
-effects as verified. The intended effects are Hive `send_request` to target-a,
+effects as verified. The intended effects are a Hive `send_message` to target-a,
 direct target-b shell control, target-b to target-a peer delivery, and a
 scheduled target-a wakeup. Unless overridden, the suite uses Hive on
-`gemini-3.1-pro-preview`, target-a on `gpt-5.5`, and target-b on
-`claude-opus-4-8`.
+`gemini-4-argon`, target-a on `gpt-6-astra`, and target-b on
+`claude-opus-5-5`.
 
 `docker-architecture-suite` uses the same provider defaults and credentials but
 runs a longer stress pass through TUX. It verifies target-to-target delegation,
@@ -336,9 +345,9 @@ listed model:
 
 | Env var | Provider | Default model |
 |---------|----------|---------------|
-| `OPENAI_API_KEY` | OpenAI | `gpt-5.5` |
-| `ANTHROPIC_API_KEY` | Anthropic | `claude-sonnet-4-6` |
-| `GEMINI_API_KEY` | Gemini | `gemini-3.1-flash-lite-preview` |
+| `OPENAI_API_KEY` | OpenAI | `gpt-6-astra` |
+| `ANTHROPIC_API_KEY` | Anthropic | `claude-sonnet-5-5` |
+| `GEMINI_API_KEY` | Gemini | `gemini-3.5-flash-lite` |
 
 `mdm-target` does not infer the provider from an explicitly supplied model
 name. Supply both `--model` and `--provider`, or neither. In direct mode this
@@ -346,7 +355,7 @@ selection is currently used only for startup key selection and display, not to
 configure the RPC session runtime.
 
 `mdm-kennel` does not choose its hive model from whichever API key happens to
-be present. It defaults to `gpt-5.5`; use `--hive-model` and optionally
+be present. It defaults to `gpt-6-astra`; use `--hive-model` and optionally
 `--hive-provider` to choose another provider, and supply that provider's API
 key before making a live hive turn.
 

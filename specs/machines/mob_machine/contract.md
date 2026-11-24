@@ -620,6 +620,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ResolveMemberDispatchAdmission`(agent_identity: AgentIdentity, lineage: MemberDispatchAdmissionLineage, host_answer: MemberDispatchAdmissionHostAnswer)
 - `RecordMemberDispatchAdmissionLineage`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId)
 - `RecordMemberInstructionLineage`(agent_identity: AgentIdentity, root_identity: AgentIdentity)
+- `AuthorizeExternalPeerReciprocalTrustRemoval`(key: ExternalPeerKey, agent_identity: AgentIdentity)
 
 ## Signals
 - `ObserveRuntimeReady`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, runtime_epoch_id: Option<RuntimeEpochId>)
@@ -935,6 +936,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `IdentityEnded`(agent_identity: AgentIdentity)
 - `DeclaredRosterSealRefused`
 - `MemberDispatchAdmissionResolved`(lineage: MemberDispatchAdmissionLineage, host_answer: MemberDispatchAdmissionHostAnswer, verdict: MemberDispatchAdmissionVerdict)
+- `ExternalPeerReciprocalTrustRemovalRequested`(key: ExternalPeerKey, edge: ExternalPeerEdge, peer_id: PeerId, epoch: u64)
 
 ## Helpers
 - `identity_reconcile_decision`(intent: IdentityAuthorityCondition, lease: IdentityLeaseCondition, replacement: IdentityReplacementCondition, external_binding_required: Bool, initial_delivery_required: Bool, session_creation_receipt: IdentityReceiptCondition, retirement_receipt: IdentityReceiptCondition, session: IdentitySessionCondition, runtime: IdentityResourceCondition, member: IdentityResourceCondition, external_binding_receipt: IdentityReceiptCondition, external_trust: IdentityExternalTrustCondition, external_ceremony: IdentityExternalCeremonyCondition, initial_delivery_receipt: IdentityReceiptCondition, initial_delivery: IdentityInitialDeliveryCondition, wiring: IdentityResourceCondition) -> `IdentityReconcileDecision`
@@ -9228,6 +9230,26 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `member_endpoint_registered`
 - Emits: `ExternalPeerReciprocalTrustRequested`
 - To: `Running`
+
+### `AuthorizeExternalPeerReciprocalTrustRemovalRunning`
+- From: `Running`
+- On: `AuthorizeExternalPeerReciprocalTrustRemoval`(key, agent_identity)
+- Guards:
+  - `external_peer_key_currently_wired`
+  - `external_peer_key_matches_member`
+  - `member_peer_registered`
+- Emits: `ExternalPeerReciprocalTrustRemovalRequested`
+- To: `Running`
+
+### `AuthorizeExternalPeerReciprocalTrustRemovalStopped`
+- From: `Stopped`
+- On: `AuthorizeExternalPeerReciprocalTrustRemoval`(key, agent_identity)
+- Guards:
+  - `external_peer_key_currently_wired`
+  - `external_peer_key_matches_member`
+  - `member_peer_registered`
+- Emits: `ExternalPeerReciprocalTrustRemovalRequested`
+- To: `Stopped`
 
 ### `RecoverExternalPeerWiringRunning`
 - From: `Running`

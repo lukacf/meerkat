@@ -573,6 +573,12 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         cli.user_config_root.as_deref(),
     );
     host_confinement.log_startup(&host_inputs, &convention_sources);
+    meerkat::HostConfinement::log_unread_project_sections(
+        cli.context_root.as_deref(),
+        &config,
+        &head_config_doc,
+        layout.global_config_path().as_deref(),
+    );
     // The agents' in-process file tools never write the host's inputs, the
     // realm's own documents or the convention sources, in any confinement
     // mode. Without --context-root the tools are rooted in the realm
@@ -947,6 +953,12 @@ async fn serve_stock_governed_jsonl(
         cli.user_config_root.as_deref(),
     );
     host_confinement.log_startup(&host_inputs, &convention_sources);
+    meerkat::HostConfinement::log_unread_project_sections(
+        cli.context_root.as_deref(),
+        &config,
+        head_store.path(),
+        layout.global_config_path().as_deref(),
+    );
     // The fixed governed profile: model, the named callback tools and live
     // MCP attachment only. Skills and schedules are not part of it; every
     // other unsupported setting is refused by the governed setup.

@@ -18,9 +18,17 @@ Numbered packs are intentionally browser-first and can include:
 - `004-mdm-console-pack`
 - `005-access-control-pack`
 
-One example is a host program and not a browser pack:
+Host programs:
 
 - `006-long-term-agents` (Python and TypeScript; no console, no provider key)
+- `007-supervised-python-app` (Python; a long-lived application: work, recovery, restart, a lost gateway; a provider key is optional)
+- `008-typescript-quickstart` (a TypeScript project to copy: one agent, a question, its answer; no console; a provider key for the question)
+- `009-mob-announcements` (Python and TypeScript; no console; a provider key for the steps in which agents run)
+- `010-ask-the-user` (Python and TypeScript; an agent asks a person and goes on with the answer; no console; needs a provider key)
+- `011-cross-gateway-peers` (Python; two local gateways, a signed peer message and reply; requires a provider key)
+- [012-agent-workgraph](012-agent-workgraph/) (Python; a member claims a task and attaches its output as evidence)
+- [TypeScript host runnable](../sdk/typescript/examples/README.md)
+  (a durable source-runner schedule and its callback; no provider key)
 
 ## Prerequisites
 
@@ -110,4 +118,35 @@ builds the gateway unless `META_GATEWAY_BIN` names one):
 
 ```bash
 ./006-long-term-agents/examples.sh
+```
+
+Run the supervised Python application (it runs its steps that need no API
+key, and all of them when `OPENAI_API_KEY` is set; it builds the gateway
+unless `META_GATEWAY_BIN` names one):
+
+```bash
+./007-supervised-python-app/examples.sh
+```
+
+Run the TypeScript quick start (twice on one state directory; with
+`OPENAI_API_KEY` set it also asks the agent a question and checks that the
+second run remembers the first):
+
+```bash
+./008-typescript-quickstart/examples.sh
+```
+
+Run the mob announcements example (Python and TypeScript, twice each on one
+state directory; with `OPENAI_API_KEY` set it also runs the agents):
+
+```bash
+./009-mob-announcements/examples.sh
+```
+
+Run the ask-the-user example (Python and TypeScript; with `OPENAI_API_KEY`
+set the agent asks, the host answers after a restart, and a second question
+is dismissed; without it only the start is checked):
+
+```bash
+./010-ask-the-user/examples.sh
 ```

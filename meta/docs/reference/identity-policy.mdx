@@ -220,7 +220,12 @@ or lapses at its deadline, when its operation answers `refused` with
 `decision_closed` and the change has to be asked again. Until then a change
 held that way can still be decided: start the gateway again with an access
 file whose binding for the approver id lists the stdio operator or a person
-a declared ingress attests.
+a declared ingress attests. In 0.9.15 and 0.9.16 the decision itself is
+taken through the host (`meta/decisions/decide` on its stdio connection), by
+the operator
+or with the host's attestation of a person; the Console shows a held change
+and does not decide it (see
+[Decisions held for a person](/guides/console#decisions-held-for-a-person)).
 
 A person's approval is evidence, never authority over the policy. When an
 approved change is carried out, the policy the launch has then is asked
@@ -316,7 +321,16 @@ and a `get`, a `plan` or a change of it answers `identity_unknown`,
 exactly as a name no agent holds. A create under its name is the one
 thing that differs from a name no agent holds: one namespace holds every
 name, so a taken name cannot be created, and the create is refused
-`name_taken`. In 0.9.15 that refusal comes at once only where the rules
+`name_taken`. Where the host's rules allow the create, it is refused at
+once. Where they hold it for a person, it is refused before anything is
+held when an agent the caller is shown holds the name; the stdio gateway's
+own caller, which is shown everything, is refused the same way under a
+removed agent's name and under a worker member's name. The plan of a
+create that would be held is refused the same way. Any other taken name is
+held like a name no agent holds and refused when the approved create is
+carried out; on the Console that includes a removed agent's name and a
+worker member's name, for every caller.
+In 0.9.15 that refusal comes at once only where the rules
 allow the create: where a rule requires approval for it, the create is held
 first and is refused when the approved change is carried out (see Known
 limitations in the Meta changelog). On the Console there is one exception: when the name is

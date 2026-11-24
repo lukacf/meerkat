@@ -33,6 +33,53 @@ guides give the conditional wording for Connect 0.9.14.
 
 ## [Unreleased]
 
+## [0.9.17] - 2026-11-18
+
+### Breaking
+
+- `meerkat-connect` started without `--state-root`, with `--realm X` or with "new" and a name in its terminal picker: the realm is now looked for under every ancestor's state root, as `rkat` looks for it (see Meerkat's changelog for this release: Breaking, "Where a realm is looked for", and Upgrade, "Before you upgrade, find realms that exist twice"). A realm X that exists under a farther ancestor's root, a home-level root included, is taken from there, where X was made or used in the user-global root; in the picker this happens after "new" and without a word. X under two state roots on the path refuses the start: `resolve selected realm: realm 'X' exists under more than one candidate state root: ...`, exit status 1. A `.rkat` entry on the path that cannot be examined refuses the start before any prompt (`resolve selected realm: ...` or `resolve realm inventory roots: ...`, exit status 1). Application setup, the gateway's stdio binding and the Python and TypeScript toolkits name their state root and are not affected. Before you upgrade, run the finding command of that Upgrade note for the directory you start `meerkat-connect` in. (Read from the source; not run.)
+
+## [0.9.16] - 2026-11-16
+
+### Fixed
+
+- A profile used for agents hosted by Connect's native host may list
+  `ask_user` in `tools.deny`. In 0.9.15 the build of such an agent was
+  refused with the deny
+  (`profile '<name>' denies tool 'ask_user', which is in none of its tool vocabularies`):
+  the native host decides its members' tool surface itself, so they are
+  given no stock `ask_user`, and the deny named a tool no part of their
+  build knew. Meerkat Meta now knows the stock name on every member build
+  (see the Meta changelog), so a profile shared with a Meta gateway, where
+  the deny is the documented way to keep the tool from a member, no longer
+  meets that refusal. What was run: rows on a Meta host that decides its
+  members' tool surface as the native host does (it installs a member
+  registration hook), where a member on a denying profile builds and is
+  not offered the tool. It was not run through Connect's native host. For
+  the native host the rest is read from the source: its registration
+  judges the tools a member's build holds and the ones it offers, and
+  reads neither the build's tool policy nor a profile's deny list, and a
+  deny of a name that no tool of the member has changes neither of those
+  lists, so the host is asked to decide the same surface as without the
+  deny. Its agents are still not offered the tool, with the deny or
+  without it. Affected: 0.9.15 only (0.9.14 has no stock `ask_user`).
+
+- Release tooling: the request that adds a file to a Connect release now
+  states the length of the file. The upload host refuses a request without
+  one ("Bad Content-Length"). The candidate tool of 0.9.10 through 0.9.15
+  sends the earlier request, and so does the release upload tool, which
+  exists since 0.9.15 and uploads through it. An empty file is now refused
+  before any request is made. The installed product is unchanged.
+
+- Package README: the install line is corrected. The README inside the
+  published `@rkat/toolkit` 0.9.15 package says "Install the tagged 0.9.0
+  release" and gives an address in the former standalone repository that
+  does not exist (it answers 404); the Python SDK's `HOME_ASSISTANT.md`
+  gives the same for the wheel. The published `@rkat/toolkit` 0.9.15 package
+  keeps that line; the Python guide is a repository file and is in no
+  published 0.9.15 package. From 0.9.16 both name no fixed release and point
+  to the SDK page; install as that page says.
+
 ## [0.9.15] - 2026-11-15
 
 ### Fixed

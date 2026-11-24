@@ -175,6 +175,20 @@ pub async fn handle_health(id: Option<RpcId>, runtime: &Arc<SessionRuntime>) -> 
 ///   `Degraded` when any session is in that state. Queued work waiting behind
 ///   a live turn is a backlog, not a wedge, and is never counted.
 ///
+/// One further observation is published beside the declared five:
+///
+/// - `session_run_settlement` - registered sessions holding a run whose
+///   terminal commit landed and whose terminal work (the completion receipt
+///   of its inputs, or the publication of its interaction terminals) has
+///   stayed unsettled past the notice bound. Such a session accepts input and
+///   runs none of it. It is read from the session's input rows, so it is
+///   counted whether or not a runtime loop is alive for it. `Degraded` when
+///   any session is in that state. A session that is busy at the moment of
+///   the read is not a failed read: with nothing positively unsettled the
+///   count keeps its last completed reading, so a busy healthy host does not
+///   read degraded for a scrape; only an unreadable session registry
+///   publishes `unreadable:session_run_settlement`.
+///
 /// **Every one of the five may instead answer "I could not look", and every
 /// one of the five reports that as `unreadable:<dimension>` rather than as a
 /// `Measured` rung.** For the session probes the failed read is an unreadable
@@ -279,6 +293,12 @@ async fn runtime_health(runtime: &SessionRuntime) -> meerkat_contracts::RuntimeH
         (
             "session_liveness".to_string(),
             observed_session_population(runtime.parked_queued_input_session_count()),
+        ),
+        // Outside the declared dimensions: published as an extra observation
+        // and rolled up like any other.
+        (
+            "session_run_settlement".to_string(),
+            observed_session_population(runtime.unsettled_run_session_count()),
         ),
     ];
     meerkat::surface::build_runtime_host_health_from_observations(observations)

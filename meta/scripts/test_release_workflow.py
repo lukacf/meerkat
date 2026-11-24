@@ -2272,12 +2272,119 @@ class MetaReleaseJobGraphTests(unittest.TestCase):
                 self.assertNotIn("persist-credentials", checkout)
 
 
+class MetaRegistryReadbackWaitTests(unittest.TestCase):
+    """meta-release.yml: a registry accepts an upload before it serves the
+    version. The job that published the SDK packages ends only when PyPI and
+    npm serve them, and the crate job's readback of every registry keeps the
+    verifier's own wait."""
+
+    WAIT = "Wait until PyPI and npm serve the exact SDK packages"
+    READBACK = "Verify exact packages are public on every registry"
+    TOOLS = "Checkout immutable workflow tools"
+    # The workflow's own copy: the workflow file is always main's, the
+    # checked-out source is the released commit, which can be older than
+    # the verifier's flags.
+    VERIFIER = ('python3 .release-tools/meta/scripts/verify-published-registries.py '
+                '--version "${RELEASE_VERSION}"')
+    SOURCE_COPY = " meta/scripts/verify-published-registries.py"
+
+    def assert_runs_the_workflows_own_verifier(self, job_name: str, step: str):
+        job = job_block(job_name, META_RELEASE_WORKFLOW)
+        steps = [line[len("      - name: "):] for line in job.splitlines()
+                 if line.startswith("      - name: ")]
+        # The tools arrive after every publish step, right before the read.
+        self.assertEqual(steps[-2:], [self.TOOLS, step])
+        tools = step_block(self.TOOLS, job_name, META_RELEASE_WORKFLOW)
+        self.assertEqual(scalar(tools, "ref", "          "), "${{ github.workflow_sha }}")
+        self.assertEqual(scalar(tools, "path", "          "), ".release-tools")
+        self.assertEqual(scalar(tools, "if", "        "),
+                         "needs.resolve_release.outputs.dry_run == 'false'")
+        self.assertNotIn(self.SOURCE_COPY, job)
+
+    def test_the_sdk_job_ends_only_when_pypi_and_npm_serve_the_packages(self):
+        job = job_block("publish_sdk_packages", META_RELEASE_WORKFLOW)
+        steps = [line for line in job.splitlines() if line.startswith("      - name: ")]
+        self.assertEqual(steps[-4:], [
+            "      - name: Publish Python SDK",
+            "      - name: Publish TypeScript SDK",
+            f"      - name: {self.TOOLS}",
+            f"      - name: {self.WAIT}",
+        ])
+        self.assert_runs_the_workflows_own_verifier("publish_sdk_packages", self.WAIT)
+        block = step_block(self.WAIT, "publish_sdk_packages", META_RELEASE_WORKFLOW)
+        condition = scalar(block, "if", "        ")
+        for dry in ("false", "true", ""):
+            with self.subTest(dry=dry):
+                self.assertEqual(
+                    evaluate_condition(condition, needs_resolve_release_outputs_dry_run=dry),
+                    dry == "false",
+                )
+        self.assertIn("          RELEASE_VERSION: ${{ needs.resolve_release.outputs.version }}", block)
+        script = step_script(self.WAIT, "publish_sdk_packages", META_RELEASE_WORKFLOW)
+        self.assertEqual(
+            [line.strip() for line in script.splitlines() if line.strip()],
+            ["set -euo pipefail", f"{self.VERIFIER} \\", "--only-registry PyPI --only-registry npm"],
+        )
+        # A read of public registries: no credential reaches it, and its
+        # failure fails the job.
+        self.assertNotIn("secrets.", block)
+        self.assertNotIn("continue-on-error:", job)
+
+    def test_the_crate_jobs_readback_keeps_every_registry_and_the_verifiers_own_wait(self):
+        script = step_script(self.READBACK, "publish_registries", META_RELEASE_WORKFLOW)
+        self.assertIn(self.VERIFIER, script)
+        self.assert_runs_the_workflows_own_verifier("publish_registries", self.READBACK)
+        for flag in ("--only-registry", "--only-crates", "--attempts", "--deadline-seconds",
+                     "--delay-seconds"):
+            with self.subTest(flag=flag):
+                self.assertNotIn(flag, script)
+        # The crate job runs after a failed SDK job too, so its readback is
+        # what fails the run when a registry never serves.
+        self.assertIn(
+            "(needs.publish_sdk_packages.result == 'success' ||\n"
+            "       needs.publish_sdk_packages.result == 'failure')",
+            job_block("publish_registries", META_RELEASE_WORKFLOW),
+        )
+
+
 # Runs a github-script body as actions/github-script does (an AsyncFunction of
 # require, github, context and core) against a scenario: the ci.yml runs the
-# runs API lists at each poll (the last list stays), Meta CI's runs per event
-# likewise, and each Meta CI run attempt's jobs. A fake clock advances by each
-# poll's sleep, so a gate that never finds what it needs reaches its deadline
-# at once. Usage: node <harness> <script> <scenario.json> <result.json>.
+# runs API lists at each round (the last list stays), Meta CI's runs per event
+# likewise, and each Meta CI run attempt's jobs, served a page at a time.
+#
+# The clock is fake and its timers can be cleared. A timer moves the clock
+# when it FIRES, never when it is set: timers fire in the order of their due
+# times, one at a time, each once everything that was ready has run, and a
+# cleared timer never fires. So a gate that never finds what it needs reaches
+# its deadline at once, and a bound that a read beats costs no time. `sleeps`
+# counts the gate's own timers that fired: a poll's sleep, or a read's bound
+# that no answer beat.
+#
+# An entry of a timeline (and of `job_pages` and `artifact_reads`) is the
+# answer itself, or an object that says how the request behaves:
+#   runs       the runs it answers with (a runs list only; default none)
+#   answer     the response's `data`, verbatim (an answer of any shape)
+#   bytes      the response's `data` as these bytes (base64): a download
+#   error      thrown in place of an answer: status (an HTTP answer of that
+#              status, which the error carries as its `response`; with
+#              `response: false` a bare status with no answer behind it, as
+#              the pinned client gives 500 to every failure that got none),
+#              code, cause_code (a code on the error's cause), message,
+#              type ("TypeError")
+#   after_ms   the answer takes this long, in the clock's own order: a timer
+#              due earlier fires first
+#   stall_ms   the clock moves this far while the answer is on its way and the
+#              answer is handed over before any timer fires: a starved runner
+#   hang       no answer, ever
+# No request of the harness ends on its signal: a request that the gate
+# abandoned still answers, as a client that ignores the signal would have it.
+#
+# `calls` lists every request in order: its round (`poll`), the clock at its
+# start (`at_ms`, from the gate's start), whether it carried a signal
+# (`signal`) and whether that signal was already aborted (`aborted`), and for
+# a jobs page whether the client's own pagination asked for it (`paginated`).
+# A body that never finishes (a request hangs and nothing bounds it) leaves
+# `error` saying so. Usage: node <harness> <script> <scenario.json> <result.json>.
 POLLING_GATE_HARNESS = r"""
 "use strict";
 const fs = require("fs");
@@ -2286,52 +2393,135 @@ const body = fs.readFileSync(scriptPath, "utf8");
 const scenario = JSON.parse(fs.readFileSync(scenarioPath, "utf8"));
 const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor;
 const START = 1000000;
-const clock = { now: START, sleeps: 0 };
+const clock = { now: START, sleeps: 0, round: -1 };
 Date.now = () => clock.now;
-globalThis.setTimeout = (callback, ms, ...args) => {
-  clock.now += Number(ms) || 0;
-  clock.sleeps += 1;
-  setImmediate(() => callback(...args));
-  return 0;
+const timers = new Map();
+let nextTimer = 1;
+let armed = false;
+const arm = () => {
+  if (!armed && timers.size > 0) {
+    armed = true;
+    setImmediate(fire);
+  }
 };
-const at = (timeline) => timeline[Math.min(clock.sleeps, timeline.length - 1)];
-const result = { outputs: {}, failed: null, warnings: [], calls: [], error: null };
+function fire() {
+  armed = false;
+  let next = null;
+  for (const timer of timers.values()) {
+    if (!next || timer.due < next.due) next = timer;
+  }
+  if (!next) return;
+  timers.delete(next.id);
+  clock.now = Math.max(clock.now, next.due);
+  if (next.own) clock.sleeps += 1;
+  next.callback(...next.args);
+  arm();
+}
+const startTimer = (own, callback, ms, args) => {
+  const id = nextTimer;
+  nextTimer += 1;
+  timers.set(id, { id, due: clock.now + (Number(ms) || 0), own, callback, args });
+  arm();
+  return id;
+};
+globalThis.setTimeout = (callback, ms, ...args) => startTimer(true, callback, ms, args);
+globalThis.clearTimeout = (id) => { timers.delete(id); };
+const after = (ms) => new Promise((resolve) => startTimer(false, resolve, ms, []));
+const at = (timeline) => timeline[Math.min(Math.max(clock.round, 0), timeline.length - 1)];
+const result = { outputs: {}, failed: null, warnings: [], infos: [], calls: [], error: null };
 let count = 0;
-const listJobsForWorkflowRunAttempt = async () => {
-  throw new Error("the gate must read jobs through github.paginate");
+const seen = (params, record) => {
+  count += 1;
+  if (count > 100000) throw new Error("no verdict after 100000 API calls");
+  const signal = params && params.request && params.request.signal;
+  result.calls.push({ poll: Math.max(clock.round, 0), at_ms: clock.now - START, signal: Boolean(signal),
+    aborted: Boolean(signal && signal.aborted), ...record });
 };
+const failure = (spec) => {
+  const text = spec.message || (spec.type === "TypeError" ? "boom" : "request failed");
+  const error = spec.type === "TypeError" ? new TypeError(text) : new Error(text);
+  for (const key of ["status", "code"]) {
+    if (key in spec) error[key] = spec[key];
+  }
+  // A status is an HTTP answer, and the error carries that answer, as the
+  // client's does; `response: false` is a status with no answer behind it.
+  if ("status" in spec && spec.response !== false) {
+    error.response = { status: spec.status, headers: {}, data: { message: text } };
+  }
+  if (spec.cause_code) error.cause = { code: spec.cause_code };
+  return error;
+};
+// `entry` is an answer or a behaviour (an object that is not a list).
+const respond = async (entry, answer) => {
+  const behaviour = entry && typeof entry === "object" && !Array.isArray(entry) ? entry : {};
+  if (behaviour.hang) await new Promise(() => {});
+  if (behaviour.after_ms) await after(behaviour.after_ms);
+  if (behaviour.stall_ms) clock.now += behaviour.stall_ms;
+  if (behaviour.error) throw failure(behaviour.error);
+  if ("bytes" in behaviour) return { data: Buffer.from(behaviour.bytes, "base64") };
+  return "answer" in behaviour ? { data: behaviour.answer } : answer(behaviour);
+};
+// How a request of the attestation read behaves: one behaviour for every
+// round, or a list of them by round (the last stays; null answers as usual).
+const artifactRead = (which) => {
+  const behaviour = (scenario.artifact_reads || {})[which];
+  return Array.isArray(behaviour) ? at(behaviour) : behaviour;
+};
+const jobsPage = async (params, paginated) => {
+  const key = `${params.run_id}/${params.attempt_number}`;
+  const page = params.page || 1;
+  const size = params.per_page || 30;
+  seen(params, { jobs_of: key, page, per_page: size, paginated });
+  const all = scenario.jobs[key] || [];
+  return respond(((scenario.job_pages || {})[key] || {})[String(page)], () => ({
+    data: { total_count: all.length, jobs: all.slice((page - 1) * size, page * size).map((job) => ({ ...job })) },
+  }));
+};
+const listJobsForWorkflowRunAttempt = (params) => jobsPage(params, false);
 const github = {
   rest: { actions: {
     listWorkflowRuns: async (params) => {
-      count += 1;
-      if (count > 100000) throw new Error("no verdict after 100000 API calls");
-      result.calls.push({ poll: clock.sleeps, ...params });
+      if (params.workflow_id === "ci.yml") clock.round += 1;
+      const { request, ...sent } = params;
+      seen(params, sent);
       const timeline = params.workflow_id === "ci.yml" ? scenario.ci : (scenario.meta[params.event] || [[]]);
-      return { data: { total_count: 0, workflow_runs: at(timeline).map((run) => ({ ...run })) } };
+      const entry = at(timeline);
+      const runs = (behaviour) => (Array.isArray(entry) ? entry : behaviour.runs || []).map((run) => ({ ...run }));
+      return respond(entry, (behaviour) => ({ data: { total_count: 0, workflow_runs: runs(behaviour) } }));
     },
     listJobsForWorkflowRunAttempt,
     // A ci.yml run's artifacts, each a zip (base64 in the scenario).
     listWorkflowRunArtifacts: async (params) => {
-      result.calls.push({ poll: clock.sleeps, artifacts_of: params.run_id, name: params.name });
+      seen(params, { artifacts_of: params.run_id, name: params.name });
       const artifacts = (scenario.artifacts || [])
         .filter((artifact) => artifact.run_id === params.run_id && artifact.name === params.name)
         .map(({ id, name, expired }) => ({ id, name, expired }));
-      return { data: { total_count: artifacts.length, artifacts } };
+      return respond(artifactRead("list"),
+        () => ({ data: { total_count: artifacts.length, artifacts } }));
     },
     downloadArtifact: async (params) => {
+      seen(params, { download_of: params.artifact_id });
       const artifact = (scenario.artifacts || []).find((candidate) => candidate.id === params.artifact_id);
       if (!artifact) throw new Error(`no artifact ${params.artifact_id}`);
-      return { data: Buffer.from(artifact.zip, "base64") };
+      return respond(artifactRead("download"), () => ({ data: Buffer.from(artifact.zip, "base64") }));
     },
   } },
+  // The client's own pagination: it asks for every page itself, and nothing
+  // of the gate stands between two of its pages. The gate must not use it:
+  // the rows refuse a jobs page that came this way.
   paginate: async (method, params) => {
     if (method !== listJobsForWorkflowRunAttempt) throw new Error("unexpected paginated method");
-    result.calls.push({ poll: clock.sleeps, jobs_of: `${params.run_id}/${params.attempt_number}` });
-    return (scenario.jobs[`${params.run_id}/${params.attempt_number}`] || []).map((job) => ({ ...job }));
+    const jobs = [];
+    for (let page = 1; ; page += 1) {
+      const { data } = await jobsPage({ ...params, page }, true);
+      jobs.push(...data.jobs);
+      if (data.jobs.length < (params.per_page || 30) || jobs.length >= data.total_count) return jobs;
+    }
   },
 };
 const core = {
-  debug: () => {}, info: () => {}, notice: () => {}, error: () => {},
+  debug: () => {}, notice: () => {}, error: () => {},
+  info: (message) => result.infos.push(String(message)),
   warning: (message) => result.warnings.push(String(message)),
   setFailed: (message) => { if (result.failed === null) result.failed = String(message); },
   setOutput: (name, value) => { result.outputs[name] = String(value); },
@@ -2340,6 +2530,19 @@ process.env.RELEASE_SHA = scenario.sha;
 process.env.CI_BYPASS = scenario.bypass;
 process.env.RUNNER_TEMP = scenario.runner_temp;
 process.env.RELEASE_MODE = scenario.mode;
+let finished = false;
+const measure = () => {
+  result.sleeps = clock.sleeps;
+  result.rounds = clock.round + 1;
+  result.elapsed_minutes = (clock.now - START) / 60000;
+};
+process.on("exit", () => {
+  if (!finished) {
+    result.error = "the gate never finished: a request hangs and nothing of the gate ends the wait for it";
+    measure();
+    fs.writeFileSync(resultPath, JSON.stringify(result));
+  }
+});
 (async () => {
   try {
     await new AsyncFunction("require", "github", "context", "core", body)(
@@ -2347,24 +2550,35 @@ process.env.RELEASE_MODE = scenario.mode;
   } catch (error) {
     result.error = String((error && error.stack) || error);
   }
-  result.sleeps = clock.sleeps;
-  result.elapsed_minutes = (clock.now - START) / 60000;
+  measure();
+  // What the gate abandoned may still answer: it is let to, so that a
+  // request it then starts is in `calls`.
+  while (timers.size > 0) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  finished = true;
   fs.writeFileSync(resultPath, JSON.stringify(result));
 })();
 """
 
 
 def run_polling_gate(body, ci, *, meta_push=None, meta_dispatch=None, jobs=None, sha="deadbeef", bypass="false",
-                     attestations=(), reader=False, parent_reader="real", changed=(), mode="promote"):
+                     attestations=(), reader=False, parent_reader="real", changed=(), mode="promote",
+                     job_pages=None, artifact_reads=None):
     """Run the gate in a scratch directory: `reader` gives the job the
     product-scoped evidence reader, both the checkout's own copy of
     scripts/ci-product-evidence.mjs (which must never judge: the release
     commit could edit it) and, as `parent_reader` says, the copy of the
     commit's first parent that the job writes under RUNNER_TEMP ("real";
-    "refusing", a copy whose rule refuses every run; None, a parent without
+    "refusing", a copy whose rule refuses every run; "throwing", a copy whose
+    judge throws on every record; None, a parent without
     the reader), with `changed`, the commit's changed paths (None: unknown).
     `attestations` are the (run id, attempt, record) exact-tree attestations
-    the ci.yml runs left."""
+    the ci.yml runs left. `job_pages` maps a run attempt ("77/1") and a page
+    number ("2") to how that page's request behaves, and `artifact_reads`
+    does the same for the attestation's two requests ("list", "download"),
+    each one behaviour for every round or a list of them by round:
+    see the harness for a behaviour's keys."""
     artifacts = []
     for number, (run_id, attempt, record) in enumerate(attestations, start=1):
         archive = io.BytesIO()
@@ -2376,7 +2590,8 @@ def run_polling_gate(body, ci, *, meta_push=None, meta_dispatch=None, jobs=None,
         runner_temp = tmp / "runner-temp"
         scenario = {"sha": sha, "bypass": bypass, "ci": ci,
                     "meta": {"push": meta_push or [[]], "workflow_dispatch": meta_dispatch or [[]]},
-                    "jobs": jobs or {}, "artifacts": artifacts, "runner_temp": str(runner_temp), "mode": mode}
+                    "jobs": jobs or {}, "artifacts": artifacts, "runner_temp": str(runner_temp), "mode": mode,
+                    "job_pages": job_pages or {}, "artifact_reads": artifact_reads or {}}
         for name, text in (("harness.js", POLLING_GATE_HARNESS), ("gate.js", body),
                            ("scenario.json", json.dumps(scenario))):
             (tmp / name).write_text(text)
@@ -2393,6 +2608,25 @@ def run_polling_gate(body, ci, *, meta_push=None, meta_dispatch=None, jobs=None,
                 (parent / "ci-product-evidence.mjs").write_text(
                     'export * from "./ci-product-evidence-real.mjs";\n'
                     'export function acceptance() { return { accepted: false, reasons: ["this copy refuses"] }; }\n')
+            elif parent_reader == "throwing":
+                # A copy whose judge has a fault of its own: it throws on
+                # every record.
+                shutil.copy(source, parent / "ci-product-evidence-real.mjs")
+                (parent / "ci-product-evidence.mjs").write_text(
+                    'export * from "./ci-product-evidence-real.mjs";\n'
+                    'export function acceptance() { throw new Error("the judge broke"); }\n')
+            elif parent_reader == "failing after the download":
+                # A copy that reads the attestation to the end, download
+                # and all, and then fails with a system's error.
+                shutil.copy(source, parent / "ci-product-evidence-real.mjs")
+                (parent / "ci-product-evidence.mjs").write_text(
+                    'import { attestationOfRun as read } from "./ci-product-evidence-real.mjs";\n'
+                    'export * from "./ci-product-evidence-real.mjs";\n'
+                    'export async function attestationOfRun(github, options) {\n'
+                    '  await read(github, options);\n'
+                    '  throw Object.assign(new Error("ENOSPC: no space left on device, write"),\n'
+                    '    { code: "ENOSPC", errno: -28, syscall: "write" });\n'
+                    '}\n')
         if changed is not None:
             # As the parent-reader step lists them (`git diff --name-status
             # --no-renames`): a bare path here is a modified one.
@@ -2479,21 +2713,55 @@ def run_parent_reader_step(checkout, release_sha, runner_temp):
 class MetaCiGateTests(unittest.TestCase):
     """meta-release.yml's CI gate, its real JavaScript under a fake clock: it
     polls exact-main CI and Meta CI until both are green or 120 minutes
-    elapsed, and a green re-run attempt counts."""
+    elapsed, and a green re-run attempt counts. A read of GitHub that fails
+    in a retried class is no answer and is read again inside the same
+    deadline; no request begins at or after the deadline, and an answer in
+    hand only then gives no credit."""
 
     CI = {"id": 42, "run_attempt": 1, "head_sha": "deadbeef", "head_branch": "main", "event": "push",
           "status": "completed", "conclusion": "success", "html_url": "https://example.invalid/runs/42"}
     META = {"id": 77, "run_attempt": 1, "head_sha": "deadbeef", "head_branch": "main", "event": "push",
             "status": "completed", "conclusion": "success", "html_url": "https://example.invalid/runs/77"}
     JOBS = {"77/1": [{"name": "warm-cache", "conclusion": "success"}, {"name": "meta-checks", "conclusion": "success"}]}
+    MINUTE = 60 * 1000
 
-    def gate(self, ci, *, meta_push=None, **kwargs):
+    def run_gate(self, ci, *, meta_push=None, **kwargs):
+        """The gate's result, whatever it is, after the two checks every row
+        makes of its requests."""
         body = github_script_body("Wait for green exact-main CI and Meta CI at this commit", "require_ci_green",
                                   META_RELEASE_WORKFLOW)
         meta = [[self.META]] if meta_push is None else meta_push
         result = run_polling_gate(body, ci, meta_push=meta, jobs=kwargs.pop("jobs", self.JOBS), **kwargs)
+        self.assert_asks_each_page(result)
+        self.assert_no_request_begins_late(result, 240 if kwargs.get("mode") == "candidate" else 120)
+        return result
+
+    def gate(self, ci, **kwargs):
+        result = self.run_gate(ci, **kwargs)
         self.assertIsNone(result["error"])
         return result
+
+    def assert_asks_each_page(self, result):
+        """The gate asks for each page of a jobs list itself, so that each
+        page passes its start test: the client's own pagination would ask
+        for the later pages with nothing of the gate in between."""
+        self.assertEqual([call for call in result["calls"] if call.get("paginated")], [],
+                         "the gate read a jobs page through the client's own pagination")
+
+    def assert_no_request_begins_late(self, result, deadline_minutes):
+        """No request begins at or after the deadline, none begins for a read
+        that was abandoned at its bound, and every request carries its
+        read's signal."""
+        deadline = deadline_minutes * self.MINUTE
+        for call in result["calls"]:
+            self.assertLess(call["at_ms"], deadline, f"a request began at or after the deadline: {call}")
+            self.assertFalse(call["aborted"], f"a request began for a read that was already abandoned: {call}")
+            self.assertTrue(call["signal"], f"a request carried no signal: {call}")
+
+    @staticmethod
+    def requests(result, **match):
+        """The requests of the result whose record has these values."""
+        return [call for call in result["calls"] if all(call.get(key) == value for key, value in match.items())]
 
     def accepted(self, result, run_id="42", attempt="1"):
         self.assertIsNone(result["failed"])
@@ -2661,6 +2929,565 @@ class MetaCiGateTests(unittest.TestCase):
         result = self.gate([[red]], attestations=((42, 1, self.scoped(connect)),), reader=True,
                            changed=("meta/README.md", "connect/README.md"))
         self.accepted(result)
+
+    # A status here is an HTTP answer that the error carries (the harness
+    # gives it a `response`); with "response": False it is a bare status, as
+    # the pinned client makes of every failure that never got an answer.
+    RETRIED = ({"status": 500}, {"status": 502}, {"status": 503}, {"status": 504},
+               {"code": "ECONNRESET"}, {"code": "ETIMEDOUT"}, {"code": "EAI_AGAIN"},
+               {"cause_code": "ECONNRESET"},
+               {"status": 500, "response": False, "cause_code": "ETIMEDOUT"})
+    NOT_RETRIED = ({"status": 400}, {"status": 401}, {"status": 403}, {"status": 404}, {"status": 422},
+                   {"status": 429}, {"status": 501}, {"message": "boom"}, {"type": "TypeError", "message": "boom"},
+                   {"code": "ENOTFOUND", "message": "boom"},
+                   # The client's own 500 for a failure with no answer and no
+                   # cause: not an HTTP answer, so not retried.
+                   {"status": 500, "response": False, "message": "fetch failed"},
+                   {"status": 502, "response": False},
+                   {"status": 500, "response": False, "cause_code": "ENOTFOUND"},
+                   # The words of a message are never the class.
+                   {"message": "socket hang up"}, {"message": "read ECONNRESET"},
+                   {"status": 500, "response": False, "message": "ETIMEDOUT"})
+    COUNTED = "read(s) of GitHub failed and were not counted."
+    CUT = "The deadline passed during the read of {}; it was not finished."
+
+    def test_a_failed_read_of_a_retried_class_is_no_answer_and_is_read_again(self):
+        """An HTTP answer of a server error and a transport failure whose
+        cause has a named code say nothing about CI: one warning, and the
+        next round reads again."""
+        for error in self.RETRIED:
+            with self.subTest(ci=error):
+                result = self.gate([{"error": error}, [self.CI]])
+                self.accepted(result)
+                self.assertEqual((result["sleeps"], result["rounds"], len(result["warnings"])), (1, 2, 1))
+                self.assertIn("Could not read the exact-main CI runs", result["warnings"][0])
+                self.assertIn("failed read 1, not counted as an answer", result["warnings"][0])
+        result = self.gate([[self.CI]], meta_push=[{"error": {"status": 502}}, [self.META]])
+        self.accepted(result)
+        self.assertEqual((result["sleeps"], len(result["warnings"])), (1, 1))
+        self.assertIn("Could not read the Meta CI runs (HTTP 502", result["warnings"][0])
+
+    def test_reads_that_fail_until_the_deadline_give_no_credit_and_the_expiry_counts_them(self):
+        red = {**self.CI, "conclusion": "failure"}
+        unavailable = {"error": {"status": 502}}
+        for mode, minutes in (("promote", 120), ("candidate", 240)):
+            with self.subTest(mode=mode):
+                result = self.gate([unavailable], mode=mode)
+                self.assertIn(f"has no green exact-main CI after {minutes} minutes (0 run(s) found)", result["failed"])
+                self.assertIn(f"{2 * minutes} {self.COUNTED}", result["failed"])
+                self.assertEqual(result["outputs"], {})
+                self.assertEqual((result["elapsed_minutes"], result["sleeps"]), (minutes, 2 * minutes))
+        # A failed read between two red answers changes nothing.
+        result = self.gate([[red], unavailable, [red]])
+        self.assertIn("has no green exact-main CI after 120 minutes (1 run(s) found)", result["failed"])
+        self.assertIn(f" 1 {self.COUNTED}", result["failed"])
+        self.assertEqual(result["outputs"], {})
+        # Green CI, and Meta CI never readable: its listing, or a jobs page.
+        for case, options in (("the listing", {"meta_push": [unavailable]}),
+                              ("a jobs page", {"job_pages": {"77/1": {"1": unavailable}}})):
+            with self.subTest(meta=case):
+                result = self.gate([[self.CI]], **options)
+                self.assertIn("no green Meta CI run that ran Meta's lanes after 120 minutes (0 run(s) found)",
+                              result["failed"])
+                self.assertIn(f"240 {self.COUNTED}", result["failed"])
+                self.assertEqual((result["outputs"], result["elapsed_minutes"]), ({}, 120))
+
+    def test_any_other_failed_read_fails_the_wait_at_once(self):
+        """The retried classes are a closed list: any other status, a status
+        with no HTTP answer behind it, and an error with no status outside
+        the named codes, ends the wait in the round it happens, with no
+        credit."""
+        for error in self.NOT_RETRIED:
+            for case, options in (("ci", {"ci": [{"error": error}, [self.CI]]}),
+                                  ("meta", {"ci": [[self.CI]], "meta_push": [{"error": error}, [self.META]]}),
+                                  ("jobs", {"ci": [[self.CI]], "job_pages": {"77/1": {"1": {"error": error}}}})):
+                with self.subTest(error=error, read=case):
+                    result = self.run_gate(**options)
+                    self.assertIn(error.get("message", "request failed"), result["error"] or "")
+                    self.assertEqual((result["sleeps"], result["rounds"], result["warnings"], result["outputs"]),
+                                     (0, 1, [], {}))
+
+    def test_an_answer_of_the_wrong_shape_fails_the_wait_at_once(self):
+        """An answer that parses but is not a list of records is a wrong
+        answer, never a failed read and never an empty list."""
+        shapes = ({"total_count": 0}, {"workflow_runs": None}, {"workflow_runs": [None]},
+                  {"workflow_runs": {"0": {}}}, None)
+        for shape in shapes:
+            for what, options in (("the ci.yml run list", {"ci": [{"answer": shape}, [self.CI]]}),
+                                  ("the meta-ci.yml run list",
+                                   {"ci": [[self.CI]], "meta_push": [{"answer": shape}, [self.META]]})):
+                with self.subTest(shape=shape, read=what):
+                    result = self.run_gate(**options)
+                    self.assertIn(f"{what} is not a list of records", result["error"] or "")
+                    self.assertEqual((result["sleeps"], result["warnings"], result["outputs"]), (0, [], {}))
+        for shape in ({"total_count": 2}, {"total_count": 2, "jobs": None}, {"total_count": 2, "jobs": ["meta-checks"]},
+                      None):
+            with self.subTest(jobs=shape):
+                result = self.run_gate([[self.CI]], job_pages={"77/1": {"1": {"answer": shape}}})
+                self.assertIn("a page of the job list of a Meta CI run is not a list of records", result["error"] or "")
+                self.assertEqual((result["sleeps"], result["warnings"], result["outputs"]), (0, [], {}))
+
+    def test_a_read_with_no_answer_is_abandoned_at_its_bound(self):
+        """A read gets 60 seconds, or what is left of the deadline when that
+        is less: with no answer by then it is a failed read, and the wait
+        never outlasts its deadline for it."""
+        pending = {**self.CI, "status": "in_progress", "conclusion": None}
+        result = self.gate([{"hang": True}, [self.CI]])
+        self.accepted(result)
+        self.assertEqual((result["elapsed_minutes"], result["rounds"], len(result["warnings"])), (1.5, 2, 1))
+        self.assertIn("no answer within 60 s", result["warnings"][0])
+        self.assertIn("failed read 1", result["warnings"][0])
+        # No answer ever: a bound and a sleep a round, to the exact deadline.
+        for mode, minutes in (("promote", 120), ("candidate", 240)):
+            with self.subTest(mode=mode):
+                result = self.gate([{"hang": True}], mode=mode)
+                self.assertIn(f"has no green exact-main CI after {minutes} minutes (0 run(s) found)", result["failed"])
+                self.assertIn(f"{minutes * 2 // 3} {self.COUNTED}", result["failed"])
+                self.assertEqual((result["outputs"], result["elapsed_minutes"]), ({}, minutes))
+        result = self.gate([[self.CI]], meta_push=[{"hang": True}])
+        self.assertIn("no green Meta CI run that ran Meta's lanes after 120 minutes", result["failed"])
+        self.assertIn(f"80 {self.COUNTED}", result["failed"])
+        self.assertEqual((result["outputs"], result["elapsed_minutes"]), ({}, 120))
+        # Thirty seconds before the deadline the bound is thirty seconds.
+        result = self.gate([[pending]] * 239 + [{"hang": True}])
+        self.assertIn("has no green exact-main CI after 120 minutes", result["failed"])
+        self.assertIn("no answer within 30 s", result["warnings"][-1])
+        self.assertEqual((result["outputs"], result["elapsed_minutes"], result["rounds"]), ({}, 120, 240))
+
+    def test_an_abandoned_read_starts_no_further_request(self):
+        """The Meta listing answers 75 seconds on, after its read was
+        abandoned at 60: the abandoned read goes no further (no second
+        listing, no jobs page), and the next round reads afresh."""
+        result = self.gate([[self.CI]], meta_push=[{"after_ms": 75 * 1000, "runs": [self.META]}, [self.META]])
+        self.accepted(result)
+        self.assertEqual((result["elapsed_minutes"], len(result["warnings"])), (1.5, 1))
+        self.assertIn("Could not read the Meta CI runs (no answer within its bound: no answer within 60 s)",
+                      result["warnings"][0])
+        self.assertEqual([(call["poll"], call["event"]) for call in self.requests(result, workflow_id="meta-ci.yml")],
+                         [(0, "push"), (1, "push"), (1, "workflow_dispatch")])
+        self.assertEqual([(call["poll"], call["page"]) for call in self.requests(result, jobs_of="77/1")], [(1, 1)])
+
+    def test_a_ci_answer_in_hand_only_after_the_deadline_gives_no_credit(self):
+        """The clock passed the deadline while the CI answer was on its way:
+        green is said, late is said, and the Meta read is not begun."""
+        result = self.gate([{"stall_ms": 241 * self.MINUTE, "runs": [self.CI]}], mode="candidate")
+        self.assertIn("has green exact-main CI, read only after the 240 minute deadline: "
+                      "an answer that arrives late gives no credit", result["failed"])
+        self.assertNotIn(self.COUNTED, result["failed"])
+        self.assertEqual((result["outputs"], result["warnings"]), ({}, []))
+        self.assertEqual(self.requests(result, workflow_id="meta-ci.yml"), [])
+        # The same for a red run that would count: its verdict's last
+        # request answers late.
+        red = {**self.CI, "conclusion": "failure"}
+        connect = {"Main unit tests (connect[console])": "connect"}
+        result = self.gate([[red]], attestations=((42, 1, self.scoped(connect)),), reader=True,
+                           artifact_reads={"download": {"stall_ms": 121 * self.MINUTE}})
+        self.assertIn("has exact-main CI that failed only in rows Meta does not depend on, "
+                      "read only after the 120 minute deadline", result["failed"])
+        self.assertEqual((result["outputs"], result["warnings"]), ({}, []))
+        self.assertEqual(self.requests(result, workflow_id="meta-ci.yml"), [])
+
+    def test_a_meta_answer_in_hand_only_after_the_deadline_gives_no_credit(self):
+        """The last request of the Meta read (its jobs page) answers after
+        the clock passed the deadline: both are green, and late."""
+        result = self.gate([[self.CI]], job_pages={"77/1": {"1": {"stall_ms": 121 * self.MINUTE}}})
+        self.assertIn("has green exact-main CI and green Meta CI, read only after the 120 minute deadline: "
+                      "an answer that arrives late gives no credit", result["failed"])
+        self.assertNotIn(self.COUNTED, result["failed"])
+        self.assertEqual((result["outputs"], result["warnings"]), ({}, []))
+
+    def test_the_deadline_inside_the_meta_read_starts_no_further_request(self):
+        """The first Meta listing answers after the clock passed the
+        deadline: the second listing is not asked for, nothing is counted as
+        a failed read, and the expiry says which read was cut."""
+        result = self.gate([[self.CI]], meta_push=[{"stall_ms": 121 * self.MINUTE, "runs": [self.META]}])
+        self.assertIn("no green Meta CI run that ran Meta's lanes after 120 minutes", result["failed"])
+        self.assertIn(self.CUT.format("the Meta CI runs"), result["failed"])
+        self.assertNotIn(self.COUNTED, result["failed"])
+        self.assertEqual((result["outputs"], result["warnings"]), ({}, []))
+        self.assertEqual([call["event"] for call in self.requests(result, workflow_id="meta-ci.yml")], ["push"])
+        self.assertEqual(self.requests(result, jobs_of="77/1"), [])
+
+    @staticmethod
+    def many_jobs(count, meta_checks=None, conclusion="success"):
+        """`count` jobs of run 77's first attempt, meta-checks at the index
+        `meta_checks` (None: the run has no such job)."""
+        jobs = [{"name": f"lane-{number}", "conclusion": "success"} for number in range(count)]
+        if meta_checks is not None:
+            jobs[meta_checks] = {"name": "meta-checks", "conclusion": conclusion}
+        return {"77/1": jobs}
+
+    def test_the_jobs_of_a_meta_run_are_read_page_by_page_to_the_last(self):
+        """Every page is asked for by the gate itself, a hundred jobs a page,
+        until a short page or the listing's total: meta-checks counts
+        wherever it sits, and what never ran never counts."""
+        for count, at, pages in ((250, 240, [1, 2, 3]), (250, 0, [1, 2, 3]), (200, 199, [1, 2]),
+                                 (100, 99, [1]), (101, 100, [1, 2]), (2, 1, [1])):
+            with self.subTest(jobs=count, meta_checks=at):
+                result = self.gate([[self.CI]], jobs=self.many_jobs(count, at))
+                self.accepted(result)
+                self.assertEqual(result["sleeps"], 0)
+                asked = self.requests(result, jobs_of="77/1")
+                self.assertEqual([call["page"] for call in asked], pages)
+                self.assertEqual({call["per_page"] for call in asked}, {100})
+        for case, jobs in (("no meta-checks on any page", self.many_jobs(250)),
+                           ("meta-checks skipped on the last page", self.many_jobs(250, 240, "skipped"))):
+            with self.subTest(case=case):
+                result = self.gate([[self.CI]], jobs=jobs)
+                self.assertIn("no green Meta CI run that ran Meta's lanes after 120 minutes", result["failed"])
+                self.assertEqual(result["outputs"], {})
+
+    def test_the_deadline_between_two_jobs_pages_stops_the_read(self):
+        """Page 2 answers after the clock passed the deadline: page 3, where
+        meta-checks sits, is not asked for; no credit, no failed read, and
+        the expiry says which read was cut."""
+        result = self.gate([[self.CI]], jobs=self.many_jobs(250, 240),
+                           job_pages={"77/1": {"2": {"stall_ms": 121 * self.MINUTE}}})
+        self.assertIn("no green Meta CI run that ran Meta's lanes after 120 minutes", result["failed"])
+        self.assertIn(self.CUT.format("the Meta CI runs"), result["failed"])
+        self.assertNotIn(self.COUNTED, result["failed"])
+        self.assertEqual((result["outputs"], result["warnings"]), ({}, []))
+        self.assertEqual([call["page"] for call in self.requests(result, jobs_of="77/1")], [1, 2])
+
+    def attested(self, failed=None):
+        """Run 42's first attempt left an attestation whose only red rows are
+        `failed` (default: a Connect row, which is enough for Meta), and the
+        job has the parent's reader."""
+        failed = failed or {"Main unit tests (connect[console])": "connect"}
+        return {"attestations": ((42, 1, self.scoped(failed)),), "reader": True}
+
+    @staticmethod
+    def said(result):
+        """The verdicts on attempts that the gate said (and so kept)."""
+        return [info for info in result["infos"] if "enough for Meta" in info]
+
+    def test_the_deadline_inside_the_attestation_read_is_said_and_caches_no_verdict(self):
+        """The attestation's listing answers after the clock passed the
+        deadline: the download is not asked for, the attempt gets no verdict
+        (none is said and none is kept), and the expiry says which read was
+        cut. A verdict that a completed read gave is said once and kept."""
+        red = {**self.CI, "conclusion": "failure"}
+        result = self.gate([[red]], **self.attested())
+        self.accepted(result)
+        self.assertEqual(len(self.said(result)), 1)
+        self.assertIn("CI attempt 1 (https://example.invalid/runs/42) is enough for Meta", self.said(result)[0])
+        self.assertEqual(len(self.requests(result, download_of=1)), 1)
+        result = self.gate([[red]], artifact_reads={"list": {"stall_ms": 121 * self.MINUTE}}, **self.attested())
+        self.assertIn("has no green exact-main CI after 120 minutes (1 run(s) found)", result["failed"])
+        self.assertIn(self.CUT.format("the attestation of CI attempt 1"), result["failed"])
+        self.assertNotIn(self.COUNTED, result["failed"])
+        self.assertEqual((result["outputs"], result["warnings"], self.said(result)), ({}, [], []))
+        self.assertEqual(len(self.requests(result, artifacts_of=42)), 1)
+        self.assertEqual(self.requests(result, download_of=1), [])
+        # A read that completed: "not enough" (a Core row is red) and "no
+        # attestation" are verdicts, read once in 240 rounds.
+        for case, options, reason in (
+                ("a Core row", self.attested({"Clippy (core)": "core"}), "is not enough for Meta: "),
+                ("no attestation", {"reader": True},
+                 "is not enough for Meta: the attempt has no exact-tree attestation")):
+            with self.subTest(verdict=case):
+                result = self.gate([[red]], **options)
+                self.assertIn("has no green exact-main CI after 120 minutes (1 run(s) found)", result["failed"])
+                self.assertNotIn(self.COUNTED, result["failed"])
+                self.assertEqual((result["outputs"], result["warnings"], result["rounds"]), ({}, [], 240))
+                self.assertEqual(len(self.said(result)), 1)
+                self.assertIn(reason, self.said(result)[0])
+                self.assertEqual(len(self.requests(result, artifacts_of=42)), 1)
+
+    def test_an_attestation_not_readable_at_one_round_is_read_again_and_counts_when_it_is_valid(self):
+        """A failed read of a retried class, or a read abandoned at its
+        bound, is no verdict on the attempt: nothing is said or kept, one
+        warning, and the next round reads the same attempt's attestation
+        again. Valid then, it counts then."""
+        red = {**self.CI, "conclusion": "failure"}
+        unavailable = {"error": {"status": 502, "message": "bad gateway"}}
+        bound = "no answer within its bound: no answer within 60 s"
+        for case, reads, minutes, warned in (
+                ("the listing answers 502", {"list": [unavailable, None]}, 0.5, "HTTP 502: bad gateway"),
+                ("the download answers 503", {"download": [{"error": {"status": 503}}, None]}, 0.5, "HTTP 503"),
+                ("the download fails in transport", {"download": [{"error": {"code": "ECONNRESET"}}, None]}, 0.5,
+                 "ECONNRESET"),
+                ("the listing never answers", {"list": [{"hang": True}, None]}, 1.5, bound),
+                # The abandoned read's listing answers 75 seconds on: that
+                # read asks for no download; the next round's read does.
+                ("the listing answers after its read was abandoned", {"list": [{"after_ms": 75 * 1000}, None]}, 1.5,
+                 bound),
+                ("two rounds fail", {"list": [unavailable, unavailable, None]}, 1, "HTTP 502: bad gateway")):
+            with self.subTest(case=case):
+                result = self.gate([[red]], artifact_reads=reads, **self.attested())
+                self.accepted(result)
+                rounds = result["rounds"]
+                self.assertEqual((result["elapsed_minutes"], rounds), (minutes, 3 if case == "two rounds fail" else 2))
+                # Each failed read warned once; the last warning is the red
+                # run's own, said with its credit.
+                self.assertEqual(len(result["warnings"]), rounds)
+                self.assertIn(f"Could not read the attestation of CI attempt 1 ({warned}", result["warnings"][0])
+                self.assertIn("failed read 1, not counted as an answer", result["warnings"][0])
+                self.assertIn("only in rows Meta does not depend on", result["warnings"][-1])
+                self.assertEqual(len(self.said(result)), 1)
+                self.assertIn("is enough for Meta", self.said(result)[0])
+                self.assertEqual([call["poll"] for call in self.requests(result, artifacts_of=42)], list(range(rounds)))
+                self.assertEqual([call["poll"] for call in self.requests(result, download_of=1)],
+                                 list(range(rounds)) if "download" in reads else [rounds - 1])
+
+    def test_an_attestation_never_readable_gives_no_credit_and_no_verdict(self):
+        """The same attempt's attestation fails in a retried class at every
+        round: it is read at every round, no verdict is ever said or kept,
+        and the expiry at the deadline counts the failed reads. An error
+        that is neither of a retried class nor a verdict on the attempt
+        fails the wait at once: an authorization failure, a 404 of the
+        listing, a status with no answer behind it, an error with no class,
+        a fault of the reader's own code."""
+        red = {**self.CI, "conclusion": "failure"}
+        for case, reads, each_round in (
+                ("the listing answers 502", {"list": {"error": {"status": 502}}}, 30),
+                ("the download answers 504", {"download": {"error": {"status": 504}}}, 30),
+                ("the listing never answers", {"list": {"hang": True}}, 90)):
+            with self.subTest(case=case):
+                result = self.gate([[red]], artifact_reads=reads, **self.attested())
+                rounds = 120 * 60 // each_round
+                self.assertIn("has no green exact-main CI after 120 minutes (1 run(s) found)", result["failed"])
+                self.assertIn(f" {rounds} {self.COUNTED}", result["failed"])
+                self.assertNotIn("The deadline passed during the read", result["failed"])
+                self.assertEqual((result["outputs"], result["elapsed_minutes"], result["rounds"]), ({}, 120, rounds))
+                self.assertEqual((self.said(result), len(result["warnings"])), ([], rounds))
+                self.assertEqual(len(self.requests(result, artifacts_of=42)), rounds)
+        bare = {"status": 500, "response": False, "message": "fetch failed"}
+        for case, reads, message in (
+                ("the listing answers 403", {"list": {"error": {"status": 403, "message": "forbidden"}}}, "forbidden"),
+                ("the listing answers 404", {"list": {"error": {"status": 404, "message": "not found"}}}, "not found"),
+                ("the download answers 403", {"download": {"error": {"status": 403, "message": "forbidden"}}},
+                 "forbidden"),
+                ("the download fails with no class", {"download": {"error": {"message": "boom"}}}, "boom"),
+                ("the listing gets the client's own 500", {"list": {"error": bare}}, "fetch failed"),
+                ("the download gets the client's own 500", {"download": {"error": bare}}, "fetch failed"),
+                # Gone is a verdict only as that artifact's own answer.
+                ("the listing answers 410", {"list": {"error": {"status": 410, "message": "gone"}}}, "gone"),
+                ("the download gets a bare 410",
+                 {"download": {"error": {"status": 410, "response": False, "message": "gone"}}}, "gone"),
+                ("the download carries no data, a fault in the reader", {"download": {"answer": None}}, "TypeError")):
+            with self.subTest(case=case):
+                result = self.run_gate([[red]], artifact_reads=reads, **self.attested())
+                self.assertIn(message, result["error"] or "")
+                # Never a raw error: the attempt is named, and that this is
+                # no verdict on it.
+                self.assertIn("the attestation of CI attempt 1 (https://example.invalid/runs/42): ", result["error"])
+                self.assertIn("That is no verdict on the attempt; the wait ends.", result["error"])
+                self.assertEqual((result["sleeps"], result["rounds"], result["warnings"], result["outputs"]),
+                                 (0, 1, [], {}))
+                self.assertEqual(self.said(result), [])
+
+    def test_a_record_the_reader_cannot_judge_refuses_its_attempt_and_the_wait_goes_on(self):
+        """The download completed, and the record in it is not one the
+        reader can judge: its job list holds what is no job record, its
+        product evidence is no object, or it has none. "Not enough" for
+        that attempt, said once and kept; the wait goes on, and the same
+        run green as attempt 2 is credited when it comes."""
+        red = {**self.CI, "conclusion": "failure"}
+        rerun = {**self.CI, "run_attempt": 2, "status": "in_progress", "conclusion": None}
+        good = self.scoped({"Main unit tests (connect[console])": "connect"})
+        jobs = good["product_evidence"]["jobs"]
+
+        def with_jobs(entries):
+            return {**good, "product_evidence": {**good["product_evidence"], "jobs": entries}}
+
+        shape = "the attempt's attestation is no record the reader can judge "
+        no_job_record = shape + "(an entry of its job list is not a record with a name)"
+        cases = (
+            ("a job list holding null", with_jobs([*jobs, None]), no_job_record),
+            ("a job with no name", with_jobs([*jobs, {"conclusion": "failure", "product": "connect"}]), no_job_record),
+            ("a job that is a word", with_jobs([*jobs, "Clippy"]), no_job_record),
+            ("product evidence that is no object", {**good, "product_evidence": "none"},
+             shape + "(its product_evidence is not an object)"),
+            ("a record that is a list", [good], shape + "(it is not a JSON object)"),
+            # A part missing is the judge's own verdict, as before.
+            ("no product evidence", {key: value for key, value in good.items() if key != "product_evidence"},
+             "no product evidence of version 1"))
+        for case, record, reason in cases:
+            with self.subTest(case=case):
+                result = self.gate([[red], [rerun], [{**self.CI, "run_attempt": 2}]],
+                                   attestations=((42, 1, record),), reader=True)
+                self.accepted(result, attempt="2")
+                self.assertEqual((result["sleeps"], result["warnings"], len(self.said(result))), (2, [], 1))
+                self.assertIn("CI attempt 1 (https://example.invalid/runs/42) is not enough for Meta: ",
+                              self.said(result)[0])
+                self.assertIn(reason, self.said(result)[0])
+        # With no later attempt the negative is kept: read once, to the
+        # ordinary expiry.
+        result = self.gate([[red]], attestations=((42, 1, cases[0][1]),), reader=True)
+        self.assertIn("has no green exact-main CI after 120 minutes (1 run(s) found)", result["failed"])
+        self.assertNotIn(self.COUNTED, result["failed"])
+        self.assertEqual((result["outputs"], result["warnings"], result["rounds"]), ({}, [], 240))
+        self.assertEqual((len(self.said(result)), len(self.requests(result, artifacts_of=42))), (1, 1))
+
+    def test_a_fault_of_the_reader_while_judging_ends_the_wait_by_name(self):
+        """The record has the right shape and the parent's reader throws
+        while judging it: a fault of the reader, not a verdict on the
+        attempt. The wait ends in that round with a message that names the
+        attempt and the reader; nothing is said about the attempt, and the
+        green attempt that would have followed is not waited for."""
+        red = {**self.CI, "conclusion": "failure"}
+        rerun = {**self.CI, "run_attempt": 2, "status": "in_progress", "conclusion": None}
+        result = self.run_gate([[red], [rerun], [{**self.CI, "run_attempt": 2}]], parent_reader="throwing",
+                               **self.attested())
+        self.assertIn("The evidence reader of the release commit's parent failed while judging the attestation of "
+                      "CI attempt 1 (https://example.invalid/runs/42): Error: the judge broke. "
+                      "That is no verdict on the attempt; the wait ends.", result["error"] or "")
+        self.assertEqual((result["sleeps"], result["rounds"], result["warnings"], result["outputs"]), (0, 1, [], {}))
+        self.assertEqual(self.said(result), [])
+
+    @staticmethod
+    def download(data):
+        """A download that answers with these bytes."""
+        return {"bytes": base64.b64encode(data).decode("ascii")}
+
+    @staticmethod
+    def archive(files):
+        """The bytes of a zip archive of these files (name: text)."""
+        data = io.BytesIO()
+        with zipfile.ZipFile(data, "w", zipfile.ZIP_DEFLATED) as bundle:
+            for name, text in files.items():
+                bundle.writestr(name, text)
+        return data.getvalue()
+
+    def test_an_attempt_without_a_usable_attestation_is_refused_for_good_and_the_wait_goes_on(self):
+        """A 404 for the attempt's artifact, or a download that completed
+        and whose own bytes are no valid archive of one attestation.json, is
+        "not enough" for that attempt: said once and kept, for an attempt
+        never changes. The verdict says what is wrong with the bytes. It is
+        no failure of the wait: a later green attempt counts, and so does a
+        later red attempt whose own attestation is enough."""
+        red = {**self.CI, "conclusion": "failure"}
+        rerun = {**self.CI, "run_attempt": 2, "status": "in_progress", "conclusion": None}
+        connect = self.scoped({"Main unit tests (connect[console])": "connect"})
+        whole = self.archive({"attestation.json": json.dumps(connect)})
+        invalid = "the attempt's attestation is no valid archive "
+        for case, download, reason in (
+                ("the artifact answers 404", {"error": {"status": 404, "message": "Not Found"}},
+                 "the attempt's attestation artifact is gone (HTTP 404)"),
+                ("the artifact answers 410", {"error": {"status": 410, "message": "Gone"}},
+                 "the attempt's attestation artifact is gone (HTTP 410)"),
+                # A complete body handed over as text, with no zip end record
+                # in it: whatever was lost in decoding, it was no archive.
+                ("a complete body of text that is no archive",
+                 {"answer": "<html><body>Sign in to continue</body></html>"},
+                 invalid + "(its complete body is text with no zip end record)"),
+                ("bytes that are no archive", self.download(b"these bytes are words and no archive at all"),
+                 invalid + "(it has no zip end record)"),
+                ("an archive cut short", self.download(whole[:len(whole) // 2]),
+                 invalid + "(it has no zip end record)"),
+                ("an archive with another start", self.download(b"junk" + whole[4:]),
+                 invalid + "(it does not start as a zip archive)"),
+                ("an archive without the attestation", self.download(self.archive({"other.json": "{}"})),
+                 invalid + "(it holds no attestation.json)"),
+                ("an attestation that is not JSON", self.download(self.archive({"attestation.json": "no JSON"})),
+                 invalid + "(its attestation.json is not JSON)")):
+            with self.subTest(case=case, later="no other attempt"):
+                result = self.gate([[red]], artifact_reads={"download": download}, **self.attested())
+                self.assertIn("has no green exact-main CI after 120 minutes (1 run(s) found)", result["failed"])
+                self.assertNotIn(self.COUNTED, result["failed"])
+                self.assertEqual((result["outputs"], result["warnings"], result["rounds"]), ({}, [], 240))
+                self.assertEqual(self.said(result),
+                                 [f"CI attempt 1 (https://example.invalid/runs/42) is not enough for Meta: {reason}"])
+                self.assertEqual(len(self.requests(result, artifacts_of=42)), 1)
+                self.assertEqual(len(self.requests(result, download_of=1)), 1)
+            with self.subTest(case=case, later="a green attempt"):
+                result = self.gate([[red], [rerun], [{**self.CI, "run_attempt": 2}]],
+                                   artifact_reads={"download": download}, **self.attested())
+                self.accepted(result, attempt="2")
+                self.assertEqual((result["sleeps"], result["warnings"], len(self.said(result))), (2, [], 1))
+            with self.subTest(case=case, later="a red attempt with an attestation that is enough"):
+                result = self.gate([[red], [rerun], [{**red, "run_attempt": 2}]], reader=True,
+                                   attestations=((42, 1, connect), (42, 2, connect)),
+                                   artifact_reads={"download": [download, None]})
+                self.accepted(result, attempt="2")
+                self.assertEqual(len(result["warnings"]), 1)
+                self.assertIn("only in rows Meta does not depend on", result["warnings"][0])
+                self.assertEqual([("is not" in line, line.split(" ")[2]) for line in self.said(result)],
+                                 [(True, "1"), (False, "2")])
+
+    def test_a_fault_of_the_reader_after_a_good_download_ends_the_wait_by_name(self):
+        """The download completed, its bytes are a good archive, and the
+        parent's reader then fails (here with a system's error, as when a
+        write is refused): nothing in the bytes says they are wrong, so it
+        is a fault of the reader and no verdict on the attempt. The wait
+        ends in that round, by name; the same holds for a download that
+        brought no bytes at all."""
+        red = {**self.CI, "conclusion": "failure"}
+        rerun = {**self.CI, "run_attempt": 2, "status": "in_progress", "conclusion": None}
+        later = [[red], [rerun], [{**self.CI, "run_attempt": 2}]]
+        for case, options, message in (
+                ("a system's error after the download", {"parent_reader": "failing after the download"},
+                 "Error: ENOSPC: no space left on device, write. "),
+                ("a download with no bytes", {"artifact_reads": {"download": {"answer": None}}}, "TypeError"),
+                # Text is no proof by itself: with a zip end record in it, it
+                # may be an archive that lost bytes in decoding; empty, it is
+                # no body.
+                ("a text body that holds a zip end record",
+                 {"artifact_reads": {"download": {"answer": "PK\u0003\u0004 words PK\u0005\u0006" + "\u0000" * 18}}},
+                 "Error: attestation.json is not in the archive. "),
+                ("an empty text body", {"artifact_reads": {"download": {"answer": ""}}},
+                 "Error: not a zip archive. ")):
+            with self.subTest(case=case):
+                result = self.run_gate(later, **options, **self.attested())
+                self.assertIn("The evidence reader of the release commit's parent failed while reading the "
+                              "attestation of CI attempt 1 (https://example.invalid/runs/42): ", result["error"] or "")
+                self.assertIn(message, result["error"])
+                self.assertIn("That is no verdict on the attempt; the wait ends.", result["error"])
+                self.assertEqual((result["sleeps"], result["rounds"], result["warnings"], result["outputs"]),
+                                 (0, 1, [], {}))
+                self.assertEqual((self.said(result), len(self.requests(result, download_of=1))), ([], 1))
+
+    def test_the_last_sleep_is_cut_to_what_is_left_of_the_deadline(self):
+        """Fifteen seconds before the deadline the sleep is fifteen seconds:
+        the wait ends at its deadline, not a poll interval after it, and
+        asks for nothing from then on, whatever would have been there."""
+        pending = {**self.CI, "status": "in_progress", "conclusion": None}
+        # The first answer comes 45 seconds on, so every later round begins
+        # 15 seconds before a multiple of the interval: the 239th at 7185 s.
+        slow_start = {"stall_ms": 45 * 1000, "runs": [pending]}
+        result = self.gate([slow_start] + [[pending]] * 238 + [[self.CI]])
+        self.assertIn("has no green exact-main CI after 120 minutes", result["failed"])
+        self.assertEqual((result["outputs"], result["rounds"], result["elapsed_minutes"]), ({}, 239, 120))
+        self.assertEqual(result["calls"][-1]["at_ms"], 120 * self.MINUTE - 15 * 1000)
+
+    def test_the_deadlines_instant_is_not_read(self):
+        """Evidence that turns green at the very instant of the deadline is
+        not asked for; evidence green one round earlier counts."""
+        pending = {**self.CI, "status": "in_progress", "conclusion": None}
+        result = self.gate([[pending]] * 240 + [[self.CI]])
+        self.assertIn("has no green exact-main CI after 120 minutes", result["failed"])
+        self.assertEqual((result["outputs"], result["rounds"], result["elapsed_minutes"]), ({}, 240, 120))
+        result = self.gate([[pending]] * 239 + [[self.CI]])
+        self.accepted(result)
+        self.assertEqual((result["rounds"], result["elapsed_minutes"]), (240, 119.5))
+
+    def test_the_gates_job_is_cancelled_only_after_its_wait_and_a_margin(self):
+        """The job's own limit is a backstop above the wait's deadline, by
+        the same mode: the wait ends itself first (the rows above), and what
+        the limit ends is a step that a request still holds, never the wait.
+        A job ended so is no evidence: every job that needs this one takes
+        only its success."""
+        job = job_block("require_ci_green", META_RELEASE_WORKFLOW)
+        limit = re.search(r"\n    timeout-minutes: \$\{\{ needs\.resolve_release\.outputs\.mode == 'candidate' "
+                          r"&& (\d+) \|\| (\d+) \}\}\n", job)
+        self.assertIsNotNone(limit, "require_ci_green has no limit of its own by mode")
+        self.assertIn("          RELEASE_MODE: ${{ needs.resolve_release.outputs.mode }}\n", job)
+        body = github_script_body("Wait for green exact-main CI and Meta CI at this commit", "require_ci_green",
+                                  META_RELEASE_WORKFLOW)
+        deadline = re.search(r'const timeoutMinutes = process\.env\.RELEASE_MODE === "candidate" \? (\d+) : (\d+);',
+                             body)
+        self.assertEqual([int(minutes) for minutes in deadline.groups()], [240, 120])
+        self.assertEqual([int(minutes) for minutes in limit.groups()], [240 + 15, 120 + 15])
+        text = META_RELEASE_WORKFLOW.read_text()
+        dependants = [name for name in re.findall(r"^  ([a-z_]+):$", text, re.M)
+                      if re.search(r"\n    needs: \[[^\]]*\brequire_ci_green\b",
+                                   job_block(name, META_RELEASE_WORKFLOW))]
+        self.assertEqual(dependants, ["release_validate", "floor_check", "collect_candidate"])
+        for name in dependants:
+            with self.subTest(job=name):
+                self.assertIn("\n      needs.require_ci_green.result == 'success' &&\n",
+                              job_block(name, META_RELEASE_WORKFLOW))
 
     def test_the_parent_reader_step_writes_the_first_parents_reader_and_the_commits_changes(self):
         """The step before the gate, run verbatim in a scratch history: it

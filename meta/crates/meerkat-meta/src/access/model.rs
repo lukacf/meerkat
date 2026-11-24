@@ -152,11 +152,31 @@ pub(crate) fn private_owner(labels: &BTreeMap<String, String>) -> Option<&str> {
         .filter(|owner| !owner.is_empty())
 }
 
+/// Whether an agent whose labels are `labels` is private to a person other
+/// than the reader whose private-owner key is `reader`: the one comparison
+/// of the private-owner rule, for a caller's view and for a subscriber
+/// alike. An agent private to no one is private to no other person, and a
+/// reader with no key is no agent's person.
+pub(crate) fn private_to_another(labels: &BTreeMap<String, String>, reader: Option<&str>) -> bool {
+    private_owner(labels).is_some_and(|owner| reader != Some(owner))
+}
+
 /// The private owner of a member whose retirement the memory store recorded
 /// as private when no record names the person it was private to (it ended
 /// before this process read who its members belong to): a key no caller's
 /// scope equals, so it is hidden from everyone but the access admins.
 pub(crate) const UNKNOWN_PRIVATE_OWNER: &str = "console-caller:v1:unknown";
+
+/// The private owner the console gives a member of a mob whose creation
+/// record leaves its owner undecided, when the member has no owner of its
+/// own (`crate::private_owners::withhold_from_all_but_admins`): a key no
+/// caller's scope equals. While access control is on, such a member is
+/// hidden from everyone but the access admins, as one private to
+/// [`UNKNOWN_PRIVATE_OWNER`] is. While it is off, the member is shown to the
+/// anonymous caller of a console with no sign-in, who is its operator, and
+/// to no signed-in caller: a console with sign-in and no access
+/// configuration names no admin and keeps what is private per person.
+pub(crate) const UNDECIDED_PRIVATE_OWNER: &str = "console-caller:v1:undecided";
 
 /// The full action vocabulary, in display order.
 pub const ACCESS_ACTIONS: &[&str] = &[
@@ -390,6 +410,15 @@ pub enum AccessEffect {
 ///   unconstrained. A rule with all three
 ///   empty matches every resource, including action checks that have no
 ///   resource at all (e.g. `gating.decide`).
+/// - `mobs`: which of the host's mobs the rule's agents are members of.
+///   Without it an allow rule is the default mob's (the mob the launch
+///   names): it matches no agent of any other mob, so a configuration
+///   written for one mob grants nothing in another. A deny rule without it
+///   matches an agent of every mob, so a deny never stops applying because
+///   another mob appears. With it the rule matches an agent of a listed mob
+///   (by mob id), and `"*"` lists every mob of the host, the default mob
+///   included. An entry that is no mob's id selects no mob. A rule with
+///   `mobs` constrains its resource, so it matches no check without one.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccessRule {
     pub id: String,
@@ -408,12 +437,45 @@ pub struct AccessRule {
     pub roles: Vec<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub match_labels: BTreeMap<String, String>,
+    /// The mobs whose members the rule selects. Empty: the default mob's
+    /// for an allow, every mob's for a deny.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mobs: Vec<String>,
 }
 
 impl AccessRule {
     /// True when the rule constrains the resource in any way.
     pub fn has_resource_selector(&self) -> bool {
-        !self.agents.is_empty() || !self.roles.is_empty() || !self.match_labels.is_empty()
+        !self.agents.is_empty()
+            || !self.roles.is_empty()
+            || !self.match_labels.is_empty()
+            || !self.mobs.is_empty()
+    }
+
+    /// Whether the rule selects the members of the mob `mob`. A rule that
+    /// names no mobs: an allow selects the default mob's members, a deny
+    /// the members of every mob. A rule that names mobs: the mobs it lists
+    /// by id, or every mob with `"*"`.
+    pub(crate) fn selects_mob(&self, mob: &super::engine::AccessResourceMob<'_>) -> bool {
+        if self.mobs.is_empty() {
+            // A deny holds in every mob of the host, so it never stops
+            // applying because another mob appears. An allow grants in
+            // the default mob only.
+            return matches!(self.effect, AccessEffect::Deny) || mob.is_default();
+        }
+        match mob.id() {
+            Some(mob_id) => self
+                .mobs
+                .iter()
+                .any(|candidate| candidate == "*" || candidate == mob_id),
+            // The default mob of a host that does not know its id: the
+            // rule cannot be told to name it or not, so an allow grants
+            // nothing there and a deny holds.
+            None => {
+                matches!(self.effect, AccessEffect::Deny)
+                    || self.mobs.iter().any(|candidate| candidate == "*")
+            }
+        }
     }
 }
 
@@ -1172,5 +1234,54 @@ mod tests {
         let toml_text = "[approvers.\"role:release\"]\nsubjects = [\"carol@x\"]\n";
         let parsed: AccessControlConfig = toml::from_str(toml_text).expect("parse");
         assert_eq!(parsed.approvers["role:release"].subjects, vec!["carol@x"]);
+    }
+
+    /// A rule stored before rules could list mobs has no `mobs`, reads as a
+    /// rule of the default mob, and is written back byte for byte: a
+    /// configuration that names no mob is not rewritten.
+    #[test]
+    fn member_keyed_access_rule_stored_without_mobs_is_the_default_mobs() {
+        let stored = r#"enabled = true
+admins = ["root@example.test"]
+
+[[rules]]
+id = "ops-view"
+effect = "allow"
+groups = ["ops"]
+actions = ["agent.view"]
+agents = ["alice"]
+
+[groups.ops]
+members = ["bob@example.test"]
+"#;
+        let config: AccessControlConfig = toml::from_str(stored).expect("stored config parses");
+        let rule = &config.rules[0];
+        assert!(rule.mobs.is_empty());
+        assert!(rule.selects_mob(&crate::access::AccessResourceMob::default()));
+        assert!(rule.selects_mob(&crate::access::AccessResourceMob::Default(Some("launch"))));
+        assert!(!rule.selects_mob(&crate::access::AccessResourceMob::Other("second")));
+        let written = toml::to_string(&config).expect("config serializes");
+        assert!(
+            !written.contains("mobs"),
+            "a rule of the default mob is written without `mobs`: {written}"
+        );
+        assert_eq!(
+            toml::from_str::<AccessControlConfig>(&written).expect("round trip"),
+            config
+        );
+
+        let with_mobs = stored.replace(
+            "agents = [\"alice\"]",
+            "agents = [\"alice\"]\nmobs = [\"second\"]",
+        );
+        let config: AccessControlConfig = toml::from_str(&with_mobs).expect("mobs parse");
+        assert_eq!(config.rules[0].mobs, vec!["second".to_string()]);
+        validate_access_config(&config).expect("a rule that lists a mob is valid");
+        assert!(config.rules[0].has_resource_selector());
+        let written = toml::to_string(&config).expect("config serializes");
+        assert_eq!(
+            toml::from_str::<AccessControlConfig>(&written).expect("round trip"),
+            config
+        );
     }
 }

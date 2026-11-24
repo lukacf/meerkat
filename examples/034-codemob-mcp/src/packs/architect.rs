@@ -36,7 +36,7 @@ impl Pack for ArchitectPack {
         profiles.insert(
             ProfileName::from("planner"),
             turn_driven_profile(
-                resolve_model(overrides, "planner", "claude-opus-4-8"),
+                resolve_model(overrides, "planner", "claude-opus-5-5"),
                 "planner-skill",
                 "Architecture planner",
                 pp,
@@ -45,7 +45,7 @@ impl Pack for ArchitectPack {
         profiles.insert(
             ProfileName::from("critic"),
             turn_driven_profile(
-                resolve_model(overrides, "critic", "gpt-5.5"),
+                resolve_model(overrides, "critic", "gpt-6-astra"),
                 "critic-skill",
                 "Architecture critic",
                 pp,
@@ -54,7 +54,7 @@ impl Pack for ArchitectPack {
         profiles.insert(
             ProfileName::from("synthesizer"),
             turn_driven_profile(
-                resolve_model(overrides, "synthesizer", "gemini-3.1-pro-preview"),
+                resolve_model(overrides, "synthesizer", "gemini-4-argon"),
                 "synthesizer-skill",
                 "Decision record writer",
                 pp,

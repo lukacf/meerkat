@@ -253,6 +253,52 @@ async fn first_start_race_across_candidate_roots_is_a_typed_refusal() {
     assert_eq!(re_resolved.layout.state_root(), global.as_path());
 }
 
+/// The first start of a new realm below a project writes into the root that
+/// will hold the realm and the user-global root only: an ancestor directory
+/// with its own `.rkat` gets no directory and no file, also when it could
+/// not take one.
+#[cfg(unix)]
+#[tokio::test]
+async fn first_start_below_a_project_writes_nothing_into_an_ancestor_state_root() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let outer = tmp.path().join("outer");
+    let project = outer.join("proj");
+    std::fs::create_dir_all(project.join(".rkat")).expect("mkdir project .rkat");
+    let outer_rkat = outer.join(".rkat");
+    std::fs::create_dir_all(&outer_rkat).expect("mkdir outer .rkat");
+    std::fs::set_permissions(&outer_rkat, std::fs::Permissions::from_mode(0o555))
+        .expect("read-only outer .rkat");
+    let global = tmp.path().join("global");
+    let inputs = meerkat_core::StorageLayoutInputs {
+        invocation_context: project.clone(),
+        explicit_state_root: None,
+        user_config_root: None,
+        default_root: Some(meerkat_core::RealmRootDefault::ProjectLocal),
+        probe_local_candidate: true,
+    };
+    let realm = meerkat_core::RealmConfig {
+        selection: meerkat_core::RealmSelection::Explicit {
+            realm_id: "team".into(),
+        },
+        ..meerkat_core::RealmConfig::default()
+    };
+    let resolved =
+        StorageLayout::resolve_with_global_candidate(inputs, &realm, &global).expect("resolve");
+    let local_root = project.join(".rkat").join("realms");
+    assert_eq!(resolved.layout.state_root(), local_root.as_path());
+
+    let opened = open_realm_persistence_with_layout(resolved.layout, "team", None, None).await;
+    let outer_entries = std::fs::read_dir(&outer_rkat)
+        .expect("read outer .rkat")
+        .count();
+    std::fs::set_permissions(&outer_rkat, std::fs::Permissions::from_mode(0o755))
+        .expect("restore outer .rkat");
+    assert!(opened.is_ok(), "the first start succeeds");
+    assert_eq!(outer_entries, 0, "nothing is written into the ancestor");
+    assert!(local_root.join("team").join("realm_manifest.json").exists());
+}
+
 /// A provider that supplies a durable slot backed by a non-persistent store
 /// WITHOUT declaring it — the exact silent-fallback class the rule exists
 /// to refuse.

@@ -42,6 +42,7 @@ async function scriptedRuntime(replies: Record<string, Reply[]>) {
     consoleConfigPath: null,
     consoleRequireAppAuth: null,
     consoleReadOnly: null,
+    consoleListNestedMobs: null,
     consoleFetchTimeoutMs: null,
     gatingConfigPath: null,
     routingConfigPath: null,

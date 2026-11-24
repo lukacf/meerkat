@@ -4901,9 +4901,10 @@ fn machine_terminal_completion_error(
             //
             // DO NOT DERIVE A CAUSE FROM `last_runtime_apply_failure_cause`
             // HERE the way the `Completed` arm does. That field is run-scoped
-            // only because `RunFailed` assigns it; `RunCancelled` does not
-            // touch it either, so on a cancelled run it is exactly as stale as
-            // `terminal_cause_kind`.
+            // only where `RunFailed` assigned it. `RunCancelled` drops it,
+            // but the other transitions that leave a `Cancelled` outcome do
+            // not write it, so on a cancelled run it can be exactly as stale
+            // as `terminal_cause_kind`.
             Ok(None)
         }
         crate::meerkat_machine::dsl::TurnTerminalOutcome::Failed
@@ -5047,11 +5048,11 @@ fn machine_terminal_completion_error(
             // - [`realize_runtime_loop_terminal_owned`] calls it after a
             //   successful realization of either `OwnedRuntimeLoopTerminalization`
             //   variant. `Failed` fires `RunFailed`. `Cancelled` fires
-            //   `RunCancelled`, which does NOT assign
-            //   `last_runtime_apply_failure_cause` - but it does set
-            //   `terminal_outcome = Cancelled` unconditionally, so that branch
-            //   lands on the `Cancelled` arm above and never here. That arm
-            //   reads neither field, for exactly this reason.
+            //   `RunCancelled`, which drops
+            //   `last_runtime_apply_failure_cause` (a cancelled run has none)
+            //   and sets `terminal_outcome = Cancelled` unconditionally, so
+            //   that branch lands on the `Cancelled` arm above and never
+            //   here. That arm reads neither field.
             // - [`resolve_process_local_failed_run_waiters`] and
             //   [`resolve_machine_terminal_completion_waiters_under_authority`]
             //   are reached only from failed-run resolution sites that are
@@ -5394,12 +5395,17 @@ async fn prepare_turn_state_for_primitive(
 /// Decide what becomes of a failed run's staged contributors, from the typed
 /// apply failure alone.
 ///
-/// Exactly one failure class refuses the release: a run whose consumer never
-/// began executing. There the loop dropped an `apply` whose in-flight fate it
-/// cannot observe, so returning a contributor to its work lane could have the
-/// instruction carried out twice. Every other failure - including every other
-/// teardown reason - is an answer the executor gave, with nothing in flight, so
-/// replay repeats nothing.
+/// Exactly one failure class refuses the release here: a run whose consumer
+/// never began executing. There the loop dropped an `apply` whose in-flight
+/// fate it cannot observe, so returning a contributor to its work lane could
+/// have the instruction carried out twice. Every other failure - including
+/// every other teardown reason - is an answer the executor gave, with nothing
+/// in flight, so replay repeats nothing.
+///
+/// A request the executor refused with nothing applied is not decided here:
+/// the loop hands it over as replayable like every answered failure, and the
+/// failed-run realization ends its contributors when the cause the machine
+/// recorded with `RunFailed` is `RequestRefused`.
 ///
 /// `CoreExecutorTeardownReason` is `#[non_exhaustive]`, so this stays a
 /// `matches!` on the one reason rather than a `match` that would silently
@@ -5568,6 +5574,31 @@ impl Drop for RunSettlementPublication {
 }
 
 impl RuntimeLoopAuthorityBinding {
+    /// Start the boundary work of a durable steer that waits beside the run
+    /// `run_id` this loop has just resumed. `queue_authority` is the loop's
+    /// queue authority, which is the session mutation gate.
+    async fn start_waiting_steer_boundary_work(
+        &self,
+        driver: &crate::meerkat_machine::SharedDriver,
+        run_id: &RunId,
+        queue_authority: &crate::tokio::sync::OwnedMutexGuard<()>,
+    ) {
+        #[cfg(test)]
+        if self.detached_test_gate.is_some() {
+            return;
+        }
+        if let Some(machine) = self.machine.upgrade() {
+            machine
+                .start_waiting_steer_boundary_work(
+                    &self.session_id,
+                    driver,
+                    run_id,
+                    queue_authority,
+                )
+                .await;
+        }
+    }
+
     /// Require a cold reload of this loop's session runtime: nothing the live
     /// runtime realizes is committed until registration reloads it from
     /// durable state.
@@ -9489,6 +9520,15 @@ async fn process_queue(
                         FailedBatchBacklogOutcome::Stopped(should_stop) => return should_stop,
                     }
                 }
+                // A durable steer that was waiting for this run's boundary
+                // when the run stopped running has no work left to register
+                // it there. Start that work under queue authority, before the
+                // resumed run is dispatched.
+                if resumed_run_id.is_some() {
+                    authority_binding
+                        .start_waiting_steer_boundary_work(driver, &run_id, &queue_authority_guard)
+                        .await;
+                }
                 drop(queue_authority_guard);
 
                 let directed_interaction_ids = staged_directed_interaction_ids;
@@ -9822,6 +9862,26 @@ async fn process_queue(
                         // host may drop its completed-tool markers for it.
                         authority_binding.release_ended_run_tool_markers(&run_id);
 
+                        // From here to the end of this run's finalization the
+                        // session starts nothing further, and none of the
+                        // steps is bounded. This reports, in its own task,
+                        // for as long as the run's terminal work stays
+                        // unsettled: while a step below does not return, and
+                        // after this loop left with the work unsettled, which
+                        // is why dropping the handle does not end it. It
+                        // never acts. See `RunSettlementWatchdog`.
+                        let settlement_watchdog = crate::run_progress::RunSettlementWatchdog::spawn(
+                            std::sync::Arc::new(crate::run_progress::LedgerRunSettlement::new(
+                                driver,
+                                run_id.clone(),
+                            )),
+                            authority_binding.session_id.clone(),
+                            run_id.clone(),
+                            input_ids.clone(),
+                            crate::run_progress::Instant::now(),
+                            crate::run_progress::RUN_SETTLEMENT_NOTICE,
+                        );
+
                         // Acknowledge the exact store commit before any
                         // derived compaction projection advances that same
                         // store-owned authority (HeadCanonical intent cleanup
@@ -10005,6 +10065,9 @@ async fn process_queue(
                         )
                         .await;
                         if terminal_publication.is_ok() {
+                            // This loop settled the run's terminal work
+                            // itself: nothing is left to report.
+                            settlement_watchdog.settled();
                             let total_ms = finalization_elapsed_ms();
                             tracing::debug!(
                                 %run_id,
@@ -10012,6 +10075,7 @@ async fn process_queue(
                                 "runtime run terminal receipt persisted"
                             );
                             tracing::info!(
+                                session_id = %authority_binding.session_id,
                                 %run_id,
                                 commit_ms,
                                 receipt_ms = total_ms.saturating_sub(receipt_started_ms),
@@ -15016,6 +15080,76 @@ mod tests {
             failed_run_contributor_disposition(&CoreExecutorError::Internal(
                 "ordinary apply failure".into()
             )),
+            FailedRunContributorDisposition::Replayed
+        );
+    }
+
+    /// A failed apply whose typed reason is the reasoning effort refusal is
+    /// a refused request, whatever kind the executor gave it: the machine's
+    /// cause for it is `RequestRefused`. The same failure without that
+    /// reason, and a failure that carries another typed reason, keep the
+    /// executor's kind. The loop does not decide the refused run's end from
+    /// the error: it hands every answered failure over as replayable, and
+    /// the failed-run realization reads the cause the machine recorded.
+    #[test]
+    fn a_refused_reasoning_effort_level_is_a_refused_request_for_the_machine_only() {
+        use crate::meerkat_machine::FailedRunContributorDisposition;
+        use crate::meerkat_machine::dsl::RuntimeApplyFailureCause;
+        use meerkat_core::lifecycle::core_executor::{
+            CoreApplyFailureCause, CoreApplyFailureCauseKind,
+        };
+
+        let refusal: meerkat_core::ReasoningEffortRefusal =
+            serde_json::from_value(serde_json::json!({
+                "requested": "max", "provider": "anthropic", "model": "claude-opus-4-5",
+                "route": {"backend": "anthropic_api", "api": "messages"},
+                "reason": "unsupported_level", "supported": ["low", "medium", "high"],
+                "facts": "catalog",
+            }))
+            .unwrap();
+        let reason = meerkat_core::event::AgentErrorReason::ReasoningEffortRefused {
+            refusal: Box::new(refusal),
+        };
+        for kind in [
+            CoreApplyFailureCauseKind::RuntimeTurn,
+            CoreApplyFailureCauseKind::ExecutorInternal,
+            CoreApplyFailureCauseKind::Unknown,
+        ] {
+            let refused = CoreApplyFailureCause::new(kind, "refused").with_reason(reason.clone());
+            assert_eq!(
+                RuntimeApplyFailureCause::from(&refused),
+                RuntimeApplyFailureCause::RequestRefused,
+                "{}",
+                kind.as_str()
+            );
+            assert_eq!(
+                failed_run_contributor_disposition(&CoreExecutorError::apply_failed(refused)),
+                FailedRunContributorDisposition::Replayed,
+                "{}",
+                kind.as_str()
+            );
+        }
+
+        let plain = CoreApplyFailureCause::runtime_turn("the turn could not be started");
+        assert_eq!(
+            RuntimeApplyFailureCause::from(&plain),
+            RuntimeApplyFailureCause::RuntimeTurn
+        );
+        assert_eq!(
+            failed_run_contributor_disposition(&CoreExecutorError::apply_failed(plain)),
+            FailedRunContributorDisposition::Replayed
+        );
+        let rate_limited = CoreApplyFailureCause::runtime_turn("another typed reason").with_reason(
+            meerkat_core::event::AgentErrorReason::LlmRateLimited {
+                retry_after_ms: None,
+            },
+        );
+        assert_eq!(
+            RuntimeApplyFailureCause::from(&rate_limited),
+            RuntimeApplyFailureCause::RuntimeTurn
+        );
+        assert_eq!(
+            failed_run_contributor_disposition(&CoreExecutorError::apply_failed(rate_limited)),
             FailedRunContributorDisposition::Replayed
         );
     }

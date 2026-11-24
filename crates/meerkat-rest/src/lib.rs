@@ -26,11 +26,13 @@
     clippy::unnested_or_patterns
 )]
 
+pub mod allowed_origins;
 pub mod auth_endpoints;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod resumed_run_tests;
 mod schedule_host;
+pub mod served_hosts;
 pub mod webhook;
 
 use axum::{
@@ -171,6 +173,12 @@ pub struct AppState {
     pub max_tokens: u32,
     pub rest_host: Cow<'static, str>,
     pub rest_port: u16,
+    /// The origins of the browser pages this server answers
+    /// (`[rest] allowed_origins`, read at startup).
+    pub rest_allowed_origins: allowed_origins::AllowedOrigins,
+    /// The host names this server answers for (`[rest] host` and
+    /// `[rest] served_hosts`, read at startup).
+    pub rest_served_hosts: served_hosts::ServedHosts,
     /// Whether to enable built-in tools (task management, shell)
     pub enable_builtins: bool,
     /// Whether to enable shell tools (requires enable_builtins=true)
@@ -744,7 +752,7 @@ impl AppState {
         // The head document composes with the same ancestors as at start, so
         // a config write cannot cut the realm from their `[confinement]`.
         let base_config_store: Arc<dyn ConfigStore> = Arc::new(
-            FileConfigStore::new(head_config_doc, meerkat_models::canonical())
+            FileConfigStore::new(head_config_doc.clone(), meerkat_models::canonical())
                 .with_realm_chain(realm.clone(), Arc::clone(&realm_config_source)),
         );
         let config_store: Arc<dyn ConfigStore> = Arc::new(meerkat_core::TaggedConfigStore::new(
@@ -820,10 +828,18 @@ impl AppState {
 
         let enable_builtins = config.tools.builtins_enabled;
         let enable_shell = config.tools.shell_enabled;
+        // Whether this host's agents may write a schedule that creates a
+        // session, from the host's own configuration.
+        schedule_service
+            .allow_agent_session_creation(config.tools.agent_schedules_may_create_sessions);
 
         let max_tokens = config.agent.resolved_max_tokens_per_turn();
         let rest_host = Cow::Owned(config.rest.host.clone());
         let rest_port = config.rest.port;
+        let rest_allowed_origins =
+            allowed_origins::AllowedOrigins::new(&config.rest.allowed_origins);
+        let rest_served_hosts =
+            served_hosts::ServedHosts::new(&config.rest.host, &config.rest.served_hosts);
 
         // Shared TokenStore: attach to the factory AND to AppState so the
         // OAuth write-path handlers (auth/login/complete, auth/profile/
@@ -870,6 +886,12 @@ impl AppState {
             bootstrap.context.user_config_root.as_deref(),
         );
         host_confinement.log_startup(&host_inputs, &convention_sources);
+        meerkat::HostConfinement::log_unread_project_sections(
+            conventions_context_root.as_deref(),
+            &config,
+            &head_config_doc,
+            layout.global_config_path().as_deref(),
+        );
         // The agents' in-process file tools never write the host's inputs,
         // the realm's own documents or the convention sources, in any
         // confinement mode. Without --context-root the tools are rooted in
@@ -942,12 +964,16 @@ impl AppState {
         let auth_lease = runtime_adapter.generated_auth_lease_handle();
         #[cfg(feature = "mob")]
         let mob_session_service = session_service.clone();
+        #[cfg(feature = "mob")]
+        let mob_schedule_service = schedule_service.clone();
 
         Ok(Self {
             store_path,
             max_tokens,
             rest_host,
             rest_port,
+            rest_allowed_origins,
+            rest_served_hosts,
             enable_builtins,
             enable_shell,
             project_root: Some(task_project_root),
@@ -998,6 +1024,12 @@ impl AppState {
                     state = state.with_controlling_acceptor(acceptor);
                 }
                 let state = state.into_shared();
+                // The members of these mobs hold the schedule tools installed
+                // over the schedule service: their schedule writes are judged
+                // by the mobs' own wiring.
+                mob_schedule_service.attach_write_judge(Arc::new(
+                    meerkat_mob_mcp::MobScheduleWriteJudge::new(&state),
+                ));
                 // fork_off and council outcomes are submitted durably to the
                 // service's delivery owner, which resolves members and
                 // confirms jobs through this state.
@@ -2933,7 +2965,13 @@ pub fn router(state: AppState) -> Router {
         .route("/sessions/{id}/mcp/remove", post(mcp_remove))
         .route("/sessions/{id}/mcp/reload", post(mcp_reload));
 
-    r.with_state(state)
+    // Every route, and the answers to a path or a method the router does not
+    // know, pass the caller checks: they are layers over the finished router.
+    let origins = state.rest_allowed_origins.clone();
+    let hosts = state.rest_served_hosts.clone();
+    allowed_origins::answering_allowed_origins_only(r.with_state(state), origins).layer(
+        axum::middleware::from_fn_with_state(hosts, served_hosts::refuse_host_not_served),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -4782,6 +4820,12 @@ fn rest_runtime_health(state: &AppState) -> meerkat_contracts::RuntimeHostHealth
                 state.runtime_adapter.parked_queued_input_session_count(),
             ),
         ),
+        // Outside the declared dimensions: published as an extra observation
+        // and rolled up like any other.
+        (
+            "session_run_settlement".to_string(),
+            rest_observed_session_population(state.runtime_adapter.unsettled_run_session_count()),
+        ),
     ])
 }
 
@@ -4870,8 +4914,17 @@ async fn set_config(
         } => (config, expected_generation),
         SetConfigRequest::Direct(config) => (config, None),
     };
+    // The document the write would commit: a marker the request carries in
+    // place of a stored secret value is the stored value here. The request
+    // is committed as it was sent: the write resolves it again under its
+    // own custody.
+    let resolved = state
+        .config_runtime
+        .set_preview(&config)
+        .await
+        .map_err(config_runtime_err_to_api)?;
     validate_config_for_commit_with_roots(
-        &config,
+        &resolved,
         state.context_root.as_deref(),
         state.user_config_root.as_deref(),
     )?;
@@ -9560,7 +9613,10 @@ mod tests {
     use async_trait::async_trait;
     use chrono::{Duration, Utc};
 
+    mod allowed_origins_tests;
     pub(crate) mod committed_reads_tests;
+    mod default_context_root_tests;
+    mod served_hosts_tests;
     use futures::stream;
     use meerkat::{OccurrenceFailureClass, OccurrencePhase, ScheduleId};
     use meerkat_client::{LlmDoneOutcome, LlmError, LlmEvent, LlmRequest};
@@ -13947,6 +14003,601 @@ mod tests {
         assert!(!state.enable_shell);
     }
 
+    /// On the REST host a session's schedule whose target is a session
+    /// created on demand is refused unless the dispatch carries the host's
+    /// own statements about that session, which a turn dispatched here
+    /// carries none of: by a create and by an update of one the host wrote.
+    /// Nothing is written for it. The host's own call, of no session's turn,
+    /// writes one as before.
+    #[tokio::test]
+    async fn a_sessions_schedule_that_creates_a_session_is_refused_on_the_rest_host() {
+        use meerkat_core::AgentToolDispatcher as _;
+
+        let temp = TempDir::new().unwrap();
+        let state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        let tools = ScheduleToolDispatcher::new(state.schedule_service.clone());
+        let writer = meerkat_core::ToolDispatchContext::default()
+            .with_runtime_identity(SessionId::new(), None);
+        let fresh = json!({
+            "name": "a fresh session",
+            "trigger": {
+                "type": "once",
+                "due_at_utc": (Utc::now() + Duration::days(1)).to_rfc3339(),
+            },
+            "target": {
+                "target_kind": "session",
+                "type": "materialize_on_demand_session",
+                "create": { "model": "gpt-5.4" },
+                "action": { "type": "prompt", "prompt": "Run the report." }
+            }
+        });
+        let raw =
+            |args: &Value| serde_json::value::RawValue::from_string(args.to_string()).unwrap();
+        let refused_session_creation =
+            |answer: &Result<meerkat_core::ToolDispatchOutcome, meerkat_core::ToolError>| {
+                matches!(
+                    answer,
+                    Err(meerkat_core::ToolError::PolicyDenied { denial })
+                        if denial.code == "schedule_session_creation_not_allowed"
+                )
+            };
+
+        let args = raw(&fresh);
+        let created = tools
+            .dispatch_with_context(
+                meerkat_core::types::ToolCallView {
+                    id: "a-sessions-write",
+                    name: "meerkat_schedule_create",
+                    args: &args,
+                },
+                &writer,
+            )
+            .await;
+        assert!(
+            refused_session_creation(&created),
+            "a session's schedule that creates a session is refused: {created:?}"
+        );
+        assert!(
+            state.schedule_service.list().await.unwrap().is_empty(),
+            "nothing is stored"
+        );
+
+        let hosts = tools
+            .dispatch(meerkat_core::types::ToolCallView {
+                id: "the-hosts-write",
+                name: "meerkat_schedule_create",
+                args: &args,
+            })
+            .await
+            .expect("the host's own call writes one");
+        let hosts: Value = serde_json::from_str(&hosts.result.text_content()).unwrap();
+        let stored = state.schedule_service.list().await.unwrap();
+        assert_eq!(stored.len(), 1);
+        let args = raw(&json!({ "schedule_id": hosts["schedule_id"], "name": "renamed" }));
+        let updated = tools
+            .dispatch_with_context(
+                meerkat_core::types::ToolCallView {
+                    id: "a-sessions-write",
+                    name: "meerkat_schedule_update",
+                    args: &args,
+                },
+                &writer,
+            )
+            .await;
+        assert!(
+            refused_session_creation(&updated),
+            "a session's update of a schedule that creates a session is refused: {updated:?}"
+        );
+        assert_eq!(
+            state.schedule_service.list().await.unwrap(),
+            stored,
+            "the schedule is as it was"
+        );
+    }
+
+    /// A model whose first request calls `meerkat_schedule_create` for a
+    /// schedule whose target is a session created on demand, and whose later
+    /// requests answer text.
+    struct SessionSchedulingLlmClient {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl LlmClient for SessionSchedulingLlmClient {
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+            Ok(messages.to_vec())
+        }
+
+        fn stream<'a>(
+            &'a self,
+            request: &'a LlmRequest,
+        ) -> Pin<Box<dyn futures::Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>> {
+            let usage = || {
+                Ok(LlmEvent::UsageUpdate {
+                    usage: meerkat_core::TurnUsage::host_declared(
+                        provider_for_successful_rest_test_model(&request.model),
+                        &request.model,
+                        meerkat_core::Usage::default(),
+                    ),
+                })
+            };
+            let events = if self.calls.fetch_add(1, AtomicOrdering::SeqCst) == 0 {
+                vec![
+                    Ok(LlmEvent::ToolCallComplete {
+                        id: "make-a-fresh-session-schedule".into(),
+                        name: "meerkat_schedule_create".into(),
+                        args: json!({
+                            "name": "a fresh session",
+                            "trigger": {
+                                "type": "once",
+                                "due_at_utc": (Utc::now() + Duration::days(1)).to_rfc3339(),
+                            },
+                            "target": {
+                                "target_kind": "session",
+                                "type": "materialize_on_demand_session",
+                                "create": { "model": "gpt-5.4" },
+                                "action": { "type": "prompt", "prompt": "Run the report." }
+                            }
+                        }),
+                        meta: None,
+                    }),
+                    usage(),
+                    Ok(LlmEvent::Done {
+                        outcome: LlmDoneOutcome::success(meerkat_core::StopReason::ToolUse),
+                    }),
+                ]
+            } else {
+                vec![
+                    Ok(LlmEvent::TextDelta {
+                        delta: "ok".to_string(),
+                        meta: None,
+                    }),
+                    usage(),
+                    Ok(LlmEvent::Done {
+                        outcome: LlmDoneOutcome::success(meerkat_core::StopReason::EndTurn),
+                    }),
+                ]
+            };
+            Box::pin(stream::iter(events))
+        }
+
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
+    /// A model that calls the tool its prompt names: a last user message
+    /// holding `CALL <tool> <json arguments>` is answered with that tool
+    /// call, every other request with the text "ok". It keeps no state, so
+    /// it serves a host loaded again over the same directory alike.
+    struct CallScriptLlmClient;
+
+    #[async_trait]
+    impl LlmClient for CallScriptLlmClient {
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+            Ok(messages.to_vec())
+        }
+
+        fn stream<'a>(
+            &'a self,
+            request: &'a LlmRequest,
+        ) -> Pin<Box<dyn futures::Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>> {
+            let usage = Ok(LlmEvent::UsageUpdate {
+                usage: meerkat_core::TurnUsage::host_declared(
+                    provider_for_successful_rest_test_model(&request.model),
+                    &request.model,
+                    meerkat_core::Usage::default(),
+                ),
+            });
+            let asked = match request.messages.last() {
+                Some(meerkat_core::Message::User(user)) => {
+                    let text = user.text_content();
+                    text.find("CALL ").and_then(|at| {
+                        let (name, arguments) = text[at + "CALL ".len()..].split_once(' ')?;
+                        let arguments = serde_json::Deserializer::from_str(arguments)
+                            .into_iter::<Value>()
+                            .next()?
+                            .ok()?;
+                        Some((name.to_string(), arguments))
+                    })
+                }
+                _ => None,
+            };
+            let events = match asked {
+                Some((name, args)) => vec![
+                    Ok(LlmEvent::ToolCallComplete {
+                        id: format!("call_{name}"),
+                        name,
+                        args,
+                        meta: None,
+                    }),
+                    usage,
+                    Ok(LlmEvent::Done {
+                        outcome: LlmDoneOutcome::success(meerkat_core::StopReason::ToolUse),
+                    }),
+                ],
+                None => vec![
+                    Ok(LlmEvent::TextDelta {
+                        delta: "ok".to_string(),
+                        meta: None,
+                    }),
+                    usage,
+                    Ok(LlmEvent::Done {
+                        outcome: LlmDoneOutcome::success(meerkat_core::StopReason::EndTurn),
+                    }),
+                ],
+            };
+            Box::pin(stream::iter(events))
+        }
+
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
+    /// A REST host over `root`, in a realm whose configuration gives the
+    /// reserved `global` realm two OpenAI bindings: `main`, which it selects
+    /// by default, and `second`. The key's source names a variable nothing
+    /// sets: the scripted model resolves no credential.
+    async fn rest_host_with_a_default_binding(root: &std::path::Path) -> AppState {
+        let realm_id = "rest-default-binding-test";
+        let realms_root = root.join("realms");
+        let realm_root = realms_root.join(realm_id);
+        tokio::fs::create_dir_all(&realm_root).await.unwrap();
+        tokio::fs::write(
+            realm_root.join("config.toml"),
+            r#"
+[realm.global]
+default_binding = "main"
+
+[realm.global.backend.openai_primary]
+provider = "openai"
+backend_kind = "openai_api"
+
+[realm.global.auth.openai_key]
+provider = "openai"
+auth_method = "api_key"
+source = { kind = "env", env = "SCHEDULE_ROW_KEY_NOT_SET" }
+
+[realm.global.binding.main]
+backend_profile = "openai_primary"
+auth_profile = "openai_key"
+
+[realm.global.binding.second]
+backend_profile = "openai_primary"
+auth_profile = "openai_key"
+"#,
+        )
+        .await
+        .unwrap();
+        let mut bootstrap = RuntimeBootstrap::default();
+        bootstrap.realm.state_root = Some(realms_root);
+        bootstrap.realm.selection = meerkat_core::RealmSelection::Explicit {
+            realm_id: realm_id.to_string(),
+        };
+        bootstrap.context.context_root = Some(root.to_path_buf());
+        bootstrap.context.user_config_root = Some(root.join("user"));
+        let mut state = AppState::load_from_with_bootstrap(
+            root.to_path_buf(),
+            bootstrap,
+            false,
+            test_credential_store(root),
+        )
+        .await
+        .expect("the host loads");
+        state.llm_client_override = Some(Arc::new(CallScriptLlmClient));
+        state
+    }
+
+    /// One `POST` with a JSON body on `app`: the status and the JSON answer.
+    async fn rest_post(app: &Router, uri: &str, body: Value) -> (StatusCode, Value) {
+        use axum::body::Body;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            app.clone().oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            ),
+        )
+        .await
+        .expect("the route answers")
+        .unwrap();
+        let status = response.status();
+        let answer = response.into_body().collect().await.unwrap().to_bytes();
+        (
+            status,
+            serde_json::from_slice(&answer).unwrap_or(Value::Null),
+        )
+    }
+
+    /// A session on the binding the host selects by default stays a default
+    /// writer across a restart of the host. Its first life writes a schedule
+    /// that creates a session; the host is loaded again over the same
+    /// directory, the session is rebuilt from its stored record, which
+    /// carries that binding, and its change of the schedule is taken as
+    /// before. The binding is named in the first request, since a scripted
+    /// model resolves no credential: the stored record is the one a
+    /// credential resolution leaves. A session that names a binding the
+    /// host does not select by default is refused, and nothing is stored.
+    #[tokio::test]
+    async fn a_rest_session_on_the_hosts_default_binding_schedules_a_session_across_a_restart() {
+        let fresh = |name: &str| {
+            format!(
+                "CALL meerkat_schedule_create {}",
+                json!({
+                    "name": name,
+                    "trigger": {
+                        "type": "once",
+                        "due_at_utc": (Utc::now() + Duration::days(1)).to_rfc3339(),
+                    },
+                    "target": {
+                        "target_kind": "session",
+                        "type": "materialize_on_demand_session",
+                        "create": { "model": "gpt-5.4" },
+                        "action": { "type": "prompt", "prompt": "Run the report." }
+                    }
+                })
+            )
+        };
+        let on = |binding: &str| json!({ "realm": "global", "binding": binding });
+
+        let temp = TempDir::new().unwrap();
+        let first = rest_host_with_a_default_binding(temp.path()).await;
+        let schedules = first.schedule_service.clone();
+        let app = router(first.clone());
+        let (status, created) = rest_post(
+            &app,
+            "/sessions",
+            json!({ "prompt": fresh("first life"), "model": "gpt-5.4", "auth_binding": on("main") }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{created}");
+        let stored = schedules.list().await.unwrap();
+        assert_eq!(
+            stored.len(),
+            1,
+            "a session on the host's default binding schedules a session: {created}"
+        );
+        let session_id = created["session_id"].as_str().expect("the session's id");
+        let schedule_id = stored[0].schedule_id.to_string();
+        drop(app);
+        first.shutdown_schedule_host().await;
+        unregister_runtime_sessions_for_shutdown(&first).await;
+        drop(first);
+
+        let second = rest_host_with_a_default_binding(temp.path()).await;
+        let (status, continued) = rest_post(
+            &router(second.clone()),
+            &format!("/sessions/{session_id}/messages"),
+            json!({
+                "session_id": session_id,
+                "prompt": format!(
+                    "CALL meerkat_schedule_update {}",
+                    json!({ "schedule_id": schedule_id, "name": "after the restart" })
+                ),
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{continued}");
+        let stored = second.schedule_service.list().await.unwrap();
+        assert_eq!(
+            stored
+                .iter()
+                .map(|schedule| schedule.config.name.as_deref())
+                .collect::<Vec<_>>(),
+            [Some("after the restart")],
+            "the session rebuilt from storage changes its schedule as before"
+        );
+
+        let other = TempDir::new().unwrap();
+        let host = rest_host_with_a_default_binding(other.path()).await;
+        let (status, named) = rest_post(
+            &router(host.clone()),
+            "/sessions",
+            json!({ "prompt": fresh("a binding of its own"), "model": "gpt-5.4", "auth_binding": on("second") }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{named}");
+        let stored = host.schedule_service.list().await.unwrap();
+        assert!(
+            stored.is_empty(),
+            "a session that names a binding of its own schedules no session: {stored:?}"
+        );
+    }
+
+    /// Through REST's own door, in process: a host loaded from a realm
+    /// whose configuration is `host_config` takes `POST /sessions` with
+    /// `create` as the request's members beside the prompt, and the
+    /// session's model writes a schedule that creates a session in that
+    /// first turn. Returns the schedules the host holds afterwards, with
+    /// the host's router and the directory it lives in.
+    async fn schedules_after_a_rest_session_schedules_a_session(
+        host_config: &str,
+        create: Value,
+    ) -> (Vec<meerkat::Schedule>, Router, TempDir) {
+        use axum::body::Body;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let temp = TempDir::new().unwrap();
+        let realm_id = "rest-schedule-door-test";
+        let realms_root = temp.path().join("realms");
+        let realm_root = realms_root.join(realm_id);
+        tokio::fs::create_dir_all(&realm_root).await.unwrap();
+        tokio::fs::write(realm_root.join("config.toml"), host_config)
+            .await
+            .unwrap();
+        let mut bootstrap = RuntimeBootstrap::default();
+        bootstrap.realm.state_root = Some(realms_root);
+        bootstrap.realm.selection = meerkat_core::RealmSelection::Explicit {
+            realm_id: realm_id.to_string(),
+        };
+        bootstrap.context.context_root = Some(temp.path().to_path_buf());
+        bootstrap.context.user_config_root = Some(temp.path().join("user"));
+        let mut state = AppState::load_from_with_bootstrap(
+            temp.path().to_path_buf(),
+            bootstrap,
+            false,
+            test_credential_store(temp.path()),
+        )
+        .await
+        .expect("the host loads");
+        state.llm_client_override = Some(Arc::new(SessionSchedulingLlmClient {
+            calls: AtomicUsize::new(0),
+        }));
+        let schedules = state.schedule_service.clone();
+
+        let mut body = json!({ "prompt": "Schedule the report." });
+        for (member, value) in create.as_object().unwrap() {
+            body[member] = value.clone();
+        }
+        let app = router(state);
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            app.clone().oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/sessions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            ),
+        )
+        .await
+        .expect("the create route answers")
+        .unwrap();
+        let status = response.status();
+        let answer = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{body}: {}",
+            String::from_utf8_lossy(&answer)
+        );
+        (schedules.list().await.unwrap(), app, temp)
+    }
+
+    /// One request with no body on `app`: the status and the JSON answer.
+    async fn rest_request(app: &Router, method: &str, uri: &str) -> (StatusCode, Value) {
+        use axum::body::Body;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        (status, serde_json::from_slice(&body).unwrap_or(Value::Null))
+    }
+
+    /// Through REST's own door: whether a session's schedule that creates a
+    /// session is taken follows what THIS host's factory builds, not a
+    /// constant. On a stock host (the shell off) a session created with the
+    /// shell off is the host's default build and writes one, as a session
+    /// created with nothing said does. On a host whose configuration turns
+    /// the built-in tools and the shell on, a session created with nothing
+    /// said, or with the shell on, writes one, and a session created with
+    /// the shell off is under a restriction the created session would not
+    /// be under: its schedule is refused and nothing is stored. The same
+    /// request is taken on a host whose configuration allows it by name.
+    /// The host's own `GET /schedules` shows a stored one with its
+    /// on-demand target, and `DELETE /schedules/{id}` ends it.
+    #[tokio::test]
+    async fn a_rest_session_schedules_a_session_when_built_as_this_host_builds_one() {
+        const STOCK: &str = "";
+        const SHELL_ON: &str = "[tools]\nbuiltins_enabled = true\nshell_enabled = true\n";
+        const SHELL_ON_AND_ALLOWED: &str = "[tools]\nbuiltins_enabled = true\nshell_enabled = true\nagent_schedules_may_create_sessions = true\n";
+        for (case, host_config, create, stored) in [
+            ("a stock host, nothing said", STOCK, json!({}), 1),
+            (
+                "a stock host, the shell off as the host has it",
+                STOCK,
+                json!({ "enable_shell": false }),
+                1,
+            ),
+            (
+                "a host with the shell, nothing said",
+                SHELL_ON,
+                json!({}),
+                1,
+            ),
+            (
+                "a host with the shell, the shell on as the host has it",
+                SHELL_ON,
+                json!({ "enable_builtins": true, "enable_shell": true }),
+                1,
+            ),
+            (
+                "a host with the shell, a session without it",
+                SHELL_ON,
+                json!({ "enable_shell": false }),
+                0,
+            ),
+            (
+                "a host with the shell that allows it, a session without it",
+                SHELL_ON_AND_ALLOWED,
+                json!({ "enable_shell": false }),
+                1,
+            ),
+        ] {
+            let (schedules, app, _host_dir) =
+                schedules_after_a_rest_session_schedules_a_session(host_config, create).await;
+            assert_eq!(schedules.len(), stored, "{case}: {schedules:?}");
+            if stored == 1 && host_config == STOCK {
+                // The host's own door: what an operator lists and deletes.
+                let (status, listed) = rest_request(&app, "GET", "/schedules").await;
+                assert_eq!(status, StatusCode::OK, "{case}: {listed}");
+                let row = &listed["schedules"][0];
+                assert_eq!(
+                    row["target"]["type"], "materialize_on_demand_session",
+                    "the field an operator looks for: {listed}"
+                );
+                let id = row["schedule_id"].as_str().expect("the schedule's id");
+                let (status, deleted) =
+                    rest_request(&app, "DELETE", &format!("/schedules/{id}")).await;
+                assert_eq!(status, StatusCode::OK, "{case}: {deleted}");
+                let (_, listed) = rest_request(&app, "GET", "/schedules").await;
+                assert_eq!(
+                    listed["schedules"].as_array().map(Vec::len),
+                    Some(0),
+                    "the deleted schedule is listed no more: {listed}"
+                );
+            }
+        }
+    }
+
     fn missing_target_schedule_tool_args() -> Value {
         json!({
             "name": "missing-target",
@@ -14378,6 +15029,449 @@ mod tests {
         .await
         .expect_err("patch should reject invalid config");
         assert!(matches!(patch_err, ApiError::BadRequest(_)));
+    }
+
+    /// A write that carries the text a configuration answer shows in place
+    /// of a stored secret value, where the document holds no value it can
+    /// stand for, is refused as a bad request that names the text, and
+    /// nothing is written: by a PUT and by a PATCH.
+    #[tokio::test]
+    async fn test_config_writes_refuse_the_secret_marker_where_no_value_is_stored() {
+        const MARKER: &str = "<redacted>";
+        let temp = TempDir::new().unwrap();
+        let state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        let Json(initial) = get_config(State(state.clone())).await.unwrap();
+        let added = serde_json::json!([{
+            "name": "added",
+            "url": "http://synthetic.invalid/mcp",
+            "headers": {"X-Synthetic": MARKER},
+        }]);
+        let mut config_value = serde_json::to_value(&initial.config).expect("serialize config");
+        config_value["tools"]["mcp_servers"] = added.clone();
+        let with_marker: Config =
+            serde_json::from_value(config_value).expect("deserialize config with the marker");
+
+        let set = set_config(
+            State(state.clone()),
+            Json(SetConfigRequest::Wrapped {
+                config: with_marker,
+                expected_generation: None,
+            }),
+        )
+        .await;
+        let patch = patch_config(
+            State(state.clone()),
+            Json(PatchConfigRequest::Wrapped {
+                patch: serde_json::json!({"tools": {"mcp_servers": added}}),
+                expected_generation: None,
+            }),
+        )
+        .await;
+        for (what, outcome) in [("a PUT", set), ("a PATCH", patch)] {
+            let Err(refused) = outcome else {
+                panic!("{what} with the marker where nothing is stored was accepted");
+            };
+            let ApiError::BadRequest(text) = refused else {
+                panic!("{what} was refused otherwise than as a bad request");
+            };
+            assert!(text.contains(MARKER), "{what}: {text}");
+        }
+        let Json(after) = get_config(State(state)).await.unwrap();
+        assert_eq!(after.generation, initial.generation);
+        assert!(after.config.tools.mcp_servers.is_empty());
+    }
+
+    /// The refusal of a PATCH whose document would no longer load names
+    /// what is wrong and where, and holds no value of the stored document:
+    /// not the line of the document the error sits on (here an auth
+    /// profile's source, stored on one line with its value). A bad request;
+    /// the document keeps its bytes.
+    #[tokio::test]
+    async fn test_config_patch_refused_for_a_document_that_does_not_load_shows_no_stored_value() {
+        let temp = TempDir::new().unwrap();
+        let state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        let document = PathBuf::from(&state.resolved_paths.config_path);
+        let stored = ["synthetic", "stored", "value"].join(" ");
+        let text = format!(
+            "[realm.global.auth.inline]\nprovider = \"openai\"\nauth_method = \"api_key\"\n\
+             source = {{ kind = \"inline_secret\", secret = \"{stored}\" }}\n"
+        );
+        std::fs::create_dir_all(document.parent().unwrap()).unwrap();
+        std::fs::write(&document, &text).unwrap();
+
+        let refused = patch_config(
+            State(state),
+            Json(PatchConfigRequest::Wrapped {
+                patch: serde_json::json!({"realm": {"global": {"auth": {"inline": {
+                    "source": {"kind": "no_such_kind"},
+                }}}}}),
+                expected_generation: None,
+            }),
+        )
+        .await
+        .expect_err("a patch whose document does not load is refused");
+        let ApiError::BadRequest(message) = refused else {
+            panic!("refused otherwise than as a bad request");
+        };
+        assert!(
+            !message.contains(&stored),
+            "the refusal holds a stored value"
+        );
+        assert!(message.contains("line"), "{message}");
+        assert_eq!(std::fs::read_to_string(&document).unwrap(), text);
+    }
+
+    /// A read of a stored document that no longer parses answers an error
+    /// that says what is wrong and where (line and column), and holds no
+    /// value of the document: not the line the error sits on (here the line
+    /// of an auth profile's inline secret, its table no longer closed).
+    #[tokio::test]
+    async fn test_config_read_of_a_document_that_does_not_parse_shows_no_stored_value() {
+        let temp = TempDir::new().unwrap();
+        let state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        let document = PathBuf::from(&state.resolved_paths.config_path);
+        let stored = ["synthetic", "stored", "value"].join(" ");
+        std::fs::create_dir_all(document.parent().unwrap()).unwrap();
+        std::fs::write(
+            &document,
+            format!(
+                "[realm.global.auth.inline]\nprovider = \"openai\"\nauth_method = \"api_key\"\n\
+                 source = {{ kind = \"inline_secret\", secret = \"{stored}\"\n"
+            ),
+        )
+        .unwrap();
+
+        let refused = get_config(State(state))
+            .await
+            .expect_err("a document that does not parse is not answered");
+        let (ApiError::Configuration(message) | ApiError::Internal(message)) = refused else {
+            panic!("answered otherwise than as a configuration or internal error");
+        };
+        assert!(!message.contains(&stored), "the error holds a stored value");
+        assert!(
+            message.contains("line ") && message.contains("column "),
+            "{message}"
+        );
+    }
+
+    /// The text a configuration answer shows in place of a stored secret
+    /// value.
+    const SECRET_MARKER: &str = "<redacted>";
+
+    /// The stored value `n` of the rows below: plain synthetic words, put
+    /// together at run time.
+    fn stored_value(n: u8) -> String {
+        format!("synthetic stored value {n:02}")
+    }
+
+    /// A state whose realm document holds an HTTP MCP server with a stored
+    /// header value, and a provider route whose auth profile holds a stored
+    /// inline secret; with the document's path.
+    async fn state_with_stored_secrets(temp: &TempDir) -> (AppState, PathBuf) {
+        let state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        let document = PathBuf::from(&state.resolved_paths.config_path);
+        std::fs::create_dir_all(document.parent().unwrap()).unwrap();
+        std::fs::write(
+            &document,
+            format!(
+                "[[tools.mcp_servers]]\nname = \"remote\"\nurl = \"http://synthetic.invalid/mcp\"\n\
+                 headers = {{ X-Synthetic = \"{}\" }}\n\n\
+                 [realm.global.backend.main]\nprovider = \"openai\"\n\
+                 backend_kind = \"openai_api\"\nbase_url = \"http://synthetic.invalid/v1\"\n\n\
+                 [realm.global.auth.main]\nprovider = \"openai\"\nauth_method = \"api_key\"\n\
+                 source = {{ kind = \"inline_secret\", secret = \"{}\" }}\n\n\
+                 [realm.global.binding.main]\nbackend_profile = \"main\"\nauth_profile = \"main\"\n",
+                stored_value(1),
+                stored_value(2)
+            ),
+        )
+        .unwrap();
+        (state, document)
+    }
+
+    const HEADER_PLACE: &str = "/tools/mcp_servers/0/headers/X-Synthetic";
+    const SECRET_PLACE: &str = "/realm/global/auth/main/source/secret";
+
+    /// What the stored document holds at the two secret places.
+    async fn stored_secrets(state: &AppState) -> (Value, Value) {
+        let stored =
+            serde_json::to_value(state.config_runtime.get().await.unwrap().config).unwrap();
+        (
+            stored.pointer(HEADER_PLACE).cloned().unwrap_or(Value::Null),
+            stored.pointer(SECRET_PLACE).cloned().unwrap_or(Value::Null),
+        )
+    }
+
+    /// A PATCH of `patch`.
+    async fn patch_of(state: &AppState, patch: Value) -> Result<Json<ConfigEnvelope>, ApiError> {
+        patch_config(
+            State(state.clone()),
+            Json(PatchConfigRequest::Wrapped {
+                patch,
+                expected_generation: None,
+            }),
+        )
+        .await
+    }
+
+    /// A PUT of the document `config`.
+    async fn put_of(state: &AppState, config: Value) -> Result<Json<ConfigEnvelope>, ApiError> {
+        set_config(
+            State(state.clone()),
+            Json(SetConfigRequest::Wrapped {
+                config: serde_json::from_value(config).expect("a config document"),
+                expected_generation: None,
+            }),
+        )
+        .await
+    }
+
+    /// The answers that return the configuration document (GET, and the
+    /// answers to a PATCH and a PUT) show a marker in place of each stored
+    /// secret value; the stored document keeps its values.
+    #[tokio::test]
+    async fn test_config_answers_show_a_marker_in_place_of_stored_secret_values() {
+        let temp = TempDir::new().unwrap();
+        let (state, _document) = state_with_stored_secrets(&temp).await;
+        let kept = (json!(stored_value(1)), json!(stored_value(2)));
+        let mut restated =
+            serde_json::to_value(state.config_runtime.get().await.unwrap().config).unwrap();
+        restated["max_tokens"] = json!(4096);
+        let answers = [
+            ("a GET", get_config(State(state.clone())).await),
+            (
+                "a PATCH",
+                patch_of(&state, json!({"max_tokens": 2048})).await,
+            ),
+            ("a PUT", put_of(&state, restated).await),
+        ];
+        let mut otherwise = Vec::new();
+        for (what, answer) in answers {
+            let Ok(Json(envelope)) = answer else {
+                otherwise.push(format!("{what} was refused"));
+                continue;
+            };
+            let shown = serde_json::to_value(&envelope).unwrap();
+            if shown.to_string().contains("synthetic stored value") {
+                otherwise.push(format!("the answer to {what} holds a stored value"));
+            }
+            for place in [HEADER_PLACE, SECRET_PLACE] {
+                if shown["config"].pointer(place) != Some(&json!(SECRET_MARKER)) {
+                    otherwise.push(format!("the answer to {what} shows no marker at {place}"));
+                }
+            }
+        }
+        assert!(otherwise.is_empty(), "{otherwise:#?}");
+        assert_eq!(stored_secrets(&state).await, kept);
+    }
+
+    /// A write that sends the marker back where an answer showed it keeps
+    /// the stored value of the same place: a PUT of the shown document and
+    /// a PATCH that restates a list with the marker. The marker under
+    /// another entry's name is refused, and the marker text is never
+    /// stored.
+    #[tokio::test]
+    async fn test_config_writes_resolve_the_secret_marker_to_the_stored_value() {
+        let temp = TempDir::new().unwrap();
+        let (state, document) = state_with_stored_secrets(&temp).await;
+        let kept = (json!(stored_value(1)), json!(stored_value(2)));
+        let mut shown =
+            serde_json::to_value(state.config_runtime.get().await.unwrap().config).unwrap();
+        for place in [HEADER_PLACE, SECRET_PLACE] {
+            *shown.pointer_mut(place).unwrap() = json!(SECRET_MARKER);
+        }
+        let server = |name: &str| {
+            json!({"tools": {"mcp_servers": [{
+                "name": name,
+                "url": "http://synthetic.invalid/mcp",
+                "headers": {"X-Synthetic": SECRET_MARKER},
+            }]}})
+        };
+
+        shown["max_tokens"] = json!(4096);
+        let put = put_of(&state, shown).await;
+        assert!(put.is_ok(), "a PUT of the shown document commits");
+        assert_eq!(stored_secrets(&state).await, kept, "after the PUT");
+
+        let patch = patch_of(&state, server("remote")).await;
+        assert!(patch.is_ok(), "a PATCH that restates the list commits");
+        assert_eq!(stored_secrets(&state).await, kept, "after the PATCH");
+
+        let renamed = patch_of(&state, server("renamed")).await;
+        assert!(
+            matches!(&renamed, Err(ApiError::BadRequest(text)) if text.contains(SECRET_MARKER)),
+            "the marker under another name is refused as a bad request"
+        );
+        assert_eq!(stored_secrets(&state).await, kept, "after the refusal");
+        assert!(
+            !std::fs::read_to_string(&document)
+                .unwrap()
+                .contains(SECRET_MARKER),
+            "the document never holds the marker text"
+        );
+    }
+
+    /// A stored inline secret stays with the route it was stored for: a
+    /// write that changes where the secret is sent (the address of the
+    /// backend its binding uses, the binding's backend, the profile's
+    /// provider) is refused unless the same write states the secret as a
+    /// value; the marker does not state it. A credential the host holds
+    /// outside the document is not this rule's. Each case on a state of
+    /// its own.
+    #[tokio::test]
+    async fn test_config_writes_that_move_a_stored_inline_secret_must_state_it() {
+        const OTHER: &str = "http://other.synthetic.invalid/v1";
+        let realm = |section: Value| json!({"realm": {"global": section}});
+        let stated = "a secret the writer states";
+        let mut otherwise = Vec::new();
+        for (what, patch, expect) in [
+            (
+                "the backend's address alone",
+                realm(json!({"backend": {"main": {"base_url": OTHER}}})),
+                None,
+            ),
+            (
+                "the backend's address with the marker for the secret",
+                realm(json!({
+                    "backend": {"main": {"base_url": OTHER}},
+                    "auth": {"main": {"source": {"secret": SECRET_MARKER}}},
+                })),
+                None,
+            ),
+            (
+                "the binding's backend alone",
+                realm(json!({
+                    "backend": {"second": {"provider": "openai", "backend_kind": "openai_api",
+                        "base_url": OTHER}},
+                    "binding": {"main": {"backend_profile": "second"}},
+                })),
+                None,
+            ),
+            (
+                "the backend's address with the secret stated",
+                realm(json!({
+                    "backend": {"main": {"base_url": OTHER}},
+                    "auth": {"main": {"source": {"secret": stated}}},
+                })),
+                Some(json!(stated)),
+            ),
+            (
+                "another key",
+                json!({"max_tokens": 2048}),
+                Some(json!(stored_value(2))),
+            ),
+        ] {
+            let temp = TempDir::new().unwrap();
+            let (state, _document) = state_with_stored_secrets(&temp).await;
+            let before = stored_secrets(&state).await;
+            match (patch_of(&state, patch).await, expect) {
+                (Ok(_), Some(secret)) => {
+                    if stored_secrets(&state).await.1 != secret {
+                        otherwise.push(format!("{what}: the stored secret is not as written"));
+                    }
+                }
+                (Err(ApiError::BadRequest(text)), None) => {
+                    if !(text.contains("the auth profile `main`")
+                        && text.contains("again in the same write"))
+                        || text.contains("synthetic stored value")
+                    {
+                        otherwise.push(format!("{what}: refused otherwise: {text}"));
+                    }
+                    if stored_secrets(&state).await != before {
+                        otherwise.push(format!("{what}: a refused write changed the document"));
+                    }
+                }
+                (Ok(_), None) => otherwise.push(format!("{what}: the write was accepted")),
+                (Err(_), _) => otherwise.push(format!("{what}: refused otherwise")),
+            }
+        }
+
+        // A route whose credential the host holds outside the document.
+        let temp = TempDir::new().unwrap();
+        let (state, document) = state_with_stored_secrets(&temp).await;
+        let text = std::fs::read_to_string(&document).unwrap().replace(
+            &format!(
+                "{{ kind = \"inline_secret\", secret = \"{}\" }}",
+                stored_value(2)
+            ),
+            "{ kind = \"env\", env = \"MEERKAT_REST_ROW_VALUE\" }",
+        );
+        std::fs::write(&document, text).unwrap();
+        if patch_of(
+            &state,
+            realm(json!({"backend": {"main": {"base_url": OTHER}}})),
+        )
+        .await
+        .is_err()
+        {
+            otherwise.push("a route with a credential held outside the document: refused".into());
+        }
+        assert!(otherwise.is_empty(), "{otherwise:#?}");
+    }
+
+    /// A patch that makes an auth profile an inline secret states the
+    /// secret itself: a `secret` key that an earlier form of the profile
+    /// left in the document is not taken up. So two patches that never
+    /// state the secret (another kind for the profile's source with another
+    /// address, then the inline kind again) do not put the stored value in
+    /// force at that address; the second commits when it states a secret.
+    #[tokio::test]
+    async fn test_config_patches_that_make_a_profile_an_inline_secret_must_state_it() {
+        const OTHER: &str = "http://other.synthetic.invalid/v1";
+        const KIND_PLACE: &str = "/realm/global/auth/main/source/kind";
+        let realm = |section: Value| json!({"realm": {"global": section}});
+        let stated = "a secret the writer states";
+        let temp = TempDir::new().unwrap();
+        let (state, _document) = state_with_stored_secrets(&temp).await;
+
+        let first = patch_of(
+            &state,
+            realm(json!({
+                "auth": {"main": {"source": {"kind": "env", "env": "MEERKAT_REST_ROW_VALUE"}}},
+                "backend": {"main": {"base_url": OTHER}},
+            })),
+        )
+        .await;
+        assert!(
+            first.is_ok(),
+            "a patch to a credential the host holds, with another address, commits"
+        );
+
+        let inline_again = realm(json!({"auth": {"main": {"source": {"kind": "inline_secret"}}}}));
+        let second = patch_of(&state, inline_again.clone()).await;
+        assert!(
+            matches!(
+                &second,
+                Err(ApiError::BadRequest(text))
+                    if text.contains("the auth profile `main`")
+                        && text.contains("does not state the secret")
+                        && !text.contains("synthetic stored value")
+            ),
+            "a patch that names the inline kind and no secret is refused as a bad request"
+        );
+        let stored =
+            serde_json::to_value(state.config_runtime.get().await.unwrap().config).unwrap();
+        assert_eq!(
+            stored.pointer(KIND_PLACE),
+            Some(&json!("env")),
+            "the profile is as the first patch left it"
+        );
+
+        let mut with_secret = inline_again;
+        with_secret["realm"]["global"]["auth"]["main"]["source"]["secret"] = json!(stated);
+        assert!(
+            patch_of(&state, with_secret).await.is_ok(),
+            "the same patch with a secret stated commits"
+        );
+        assert_eq!(stored_secrets(&state).await.1, json!(stated));
     }
 
     /// While an admission holds the realm document's fence, a REST config
@@ -17076,6 +18170,7 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
             "session_runtime_loop",
             "session_run_start",
             "session_liveness",
+            "session_run_settlement",
         ] {
             assert_eq!(
                 health["checks"][measured], "ok",
@@ -20225,6 +21320,133 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
             json!(SessionError::RUNTIME_TEARDOWN_IN_PROGRESS_KIND)
         );
         assert_eq!(payload["details"]["retryable"], json!(true));
+    }
+
+    /// A provider sign-in that needs to be renewed (`user_reauth_required`,
+    /// what a Copilot mint returns when its model listing refused the token
+    /// twice) has two answers. A build that meets it answers HTTP 500
+    /// `AGENT_ERROR` with the typed session error's message and no details.
+    /// A running session's turn that meets it answers HTTP 500: a failed
+    /// turn, `TURN_ABANDONED` with the typed turn error, not retryable. The
+    /// `Abandoned` outcome carries the same typed error and this surface
+    /// does not hand it on: it answers `INTERNAL_ERROR` without details
+    /// (JSON-RPC answers the typed error for both outcomes: the rows pin
+    /// that difference between surfaces as it is). None is the 400
+    /// `INVALID_PARAMS` of a refused
+    /// `reasoning_effort` level, and none says `retryable: true`.
+    #[tokio::test]
+    async fn a_sign_in_that_must_be_renewed_answers_500() {
+        let session_id = SessionId::new();
+        let realm = meerkat_core::RealmId::parse("test-realm").expect("valid test realm id");
+        let build_error = SessionError::provider_auth_failure(
+            meerkat_core::service::SessionProviderAuthFailure {
+                kind: meerkat_core::AuthErrorKind::UserReauthRequired,
+                provider: meerkat_core::Provider::OpenAI,
+                realm_id: Some(meerkat_core::RealmId::parse("global").unwrap()),
+                binding_id: Some(meerkat_core::BindingId::parse("copilot_openai").unwrap()),
+            },
+        );
+        let (status, payload) =
+            api_error_status_and_payload(create_session_error_to_api(build_error)).await;
+        println!("REST, a build that needs a new sign-in: {status} {payload}");
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            payload,
+            json!({
+                "error": "provider authentication failed: provider=openai \
+                          kind=user_reauth_required binding=global/copilot_openai",
+                "code": "AGENT_ERROR",
+            })
+        );
+
+        // The turn of a running session: the authentication failure its
+        // provider request's authorization fails with.
+        let agent_error = meerkat_core::AgentError::llm(
+            "openai",
+            meerkat_core::error::LlmFailureReason::AuthError,
+            "Authentication failed: user reauth required",
+        );
+        let turn_error = meerkat_core::TurnErrorMetadata::from_agent_error(&agent_error)
+            .expect("an LLM failure has turn error metadata");
+        let turn_error_json = json!({
+            "kind": "llm_failure",
+            "terminal": true,
+            "outcome": "failed",
+            "detail": "Authentication failed: user reauth required",
+            "provider": "openai",
+            "retryable": false,
+            "reason": {"reason_type": "llm_auth_error"},
+        });
+        assert_eq!(json!(turn_error), turn_error_json);
+        let reason = agent_error.to_string();
+
+        let abandoned = completion_outcome_to_api_result(
+            meerkat_runtime::completion::CompletionOutcome::Abandoned {
+                reason: reason.clone(),
+                error: turn_error.clone(),
+            },
+            &session_id,
+            &realm,
+            false,
+        )
+        .expect_err("an abandoned turn is an API error");
+        let (status, payload) = api_error_status_and_payload(abandoned).await;
+        println!("REST, a turn that needs a new sign-in (abandoned): {status} {payload}");
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            payload,
+            json!({
+                "error": format!("turn abandoned: {reason}"),
+                "code": "INTERNAL_ERROR",
+            })
+        );
+
+        let failed = completion_outcome_to_api_result(
+            meerkat_runtime::completion::CompletionOutcome::AbandonedWithError {
+                reason: reason.clone(),
+                error: turn_error.clone(),
+            },
+            &session_id,
+            &realm,
+            false,
+        )
+        .expect_err("a failed turn is an API error");
+        let (status, payload) = api_error_status_and_payload(failed).await;
+        println!("REST, a turn that needs a new sign-in (failed turn): {status} {payload}");
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            payload,
+            json!({
+                "error": format!("turn abandoned: {reason}"),
+                "code": "TURN_ABANDONED",
+                "details": {"error": turn_error_json},
+            })
+        );
+
+        // The first turn of the request that created the session.
+        let first_turn = completion_outcome_to_api_result(
+            meerkat_runtime::completion::CompletionOutcome::AbandonedWithError {
+                reason,
+                error: turn_error,
+            },
+            &session_id,
+            &realm,
+            true,
+        )
+        .expect_err("a failed first turn is an API error");
+        let (status, payload) = api_error_status_and_payload(first_turn).await;
+        println!(
+            "REST, a created session's first turn that needs a new sign-in: {status} {payload}"
+        );
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(payload["code"], json!("SESSION_CREATED_WITH_TURN_FAILURE"));
+        assert_eq!(
+            payload["details"]["turn_error_code"],
+            json!("TURN_ABANDONED")
+        );
+        assert_eq!(payload["details"]["error"], turn_error_json);
+        assert_eq!(payload["details"]["session_created"], json!(true));
+        assert_eq!(payload["details"]["resumable"], json!(true));
     }
 
     #[test]

@@ -4,7 +4,7 @@ description: "Operational memory assertions plus optional identity-first agent m
 icon: "brain"
 ---
 
-*Mirrored from Meerkat Meta main at [622bcd0a2d9f](https://github.com/lukacf/meerkat/commit/622bcd0a2d9fd9b8336a4b6df4873e94986c4378) on 2026-11-16; Meta version 0.9.15 at that commit.*
+*Mirrored from Meerkat Meta main at [6372543dee87](https://github.com/lukacf/meerkat/commit/6372543dee877e30cf411bacc1317110927dfebc) on 2026-11-24; Meta version 0.9.18 at that commit.*
 
 Meta has two memory-adjacent surfaces, and they serve different latency
 classes:
@@ -169,9 +169,74 @@ Apps write identity-scoped agent memory explicitly through `meta/agent_memory/re
 
 A write made through the stdio gateway or an SDK records the `application` as its author. The same methods on the console record the person who called them: the author is `{"author": "operator", "principal": "<the caller's principal>"}`, the principal `meta/console/whoami` reports (no `principal` for an anonymous caller of an open console), and a quarantine decision made in the console carries its reviewer the same way. A custom provider that does not implement the authored write methods records its own default author.
 
-An agent's own records are identity-scoped rather than session-scoped. A session respawn or identity reset does not delete stored memory; apps that need a record withdrawn from an agent can call `meta/agent_memory/forget` for specific records or use a provider that clears memory as part of the app's identity lifecycle. `forget` removes records from future recall and injection and from the index agents are given, but it cannot remove text already delivered into an active model context; reset the identity after the `forget` when immediate context revocation matters: its respawn keeps the session and its transcript. With the bundled SQLite store, `forget` does not erase a record, and no call does: it marks the record tombstoned, and its title, description, body, tags and provenance stay in the realm's database under `<persistent_state>/agent-memory` and in every copy of it, together with each earlier version the record replaced, any proposal made from it and any copy promoted or derived from it. A person with the memory read grants can still open a forgotten record in the Console's Memory panel. `forget` reaches a record in the named identity's own scope only; for a record in another scope it answers `deleted: false`. To remove agent memory from the store itself, stop the gateway and remove the realm's database under `<persistent_state>/agent-memory` together with every file whose name begins with its name (for the realm `default`: `default.sqlite3`, `default.sqlite3-shm` and `default.sqlite3-wal`; `default.sqlite3.mfence` may be removed or left): a side file left beside a removed database can be replayed into the new one. This removes all agent memory of that realm, every agent's and not one record, and it does not remove text already in a session's history, in an agent's context, or in copies and backups of the store.
+An agent's own records are identity-scoped rather than session-scoped. A session respawn or identity reset does not delete stored memory; apps that need a record withdrawn from an agent can call `meta/agent_memory/forget` for specific records or use a provider that clears memory as part of the app's identity lifecycle. `forget` removes records from future recall and injection and from the index agents are given, but it cannot remove text already delivered into an active model context; reset the identity after the `forget` when immediate context revocation matters: its respawn keeps the session and its transcript. With the bundled SQLite store, `forget` does not erase a record, and no call does: it marks the record tombstoned, and its title, description, body, tags and provenance stay in the realm's database under `<persistent_state>/agent-memory` and in every copy of it, together with each earlier version the record replaced, any proposal made from it and any copy promoted or derived from it. A person with the memory read grants (and `memory.quarantine.review` for a record that was ever quarantined) can still open a forgotten record in the Console's Memory panel and read its body; on a Console without enforced access control, any caller can. Enforced or not, the memory of an agent private to a person is shown to no other person except an access admin named in `admins`. `forget` reaches a record in the named identity's own scope only; for a record in another scope it answers `deleted: false`.
+
+To remove agent memory from the store itself, stop the gateway and remove the realm's database file under `<persistent_state>/agent-memory` together with its SQLite side files, since the `-wal` file can hold record text: for the realm `default`, `default.sqlite3`, `default.sqlite3-shm` and `default.sqlite3-wal` (`default.sqlite3.mfence`, a lock file that holds no text, may be removed or left). The file is named `<realm>.sqlite3`, with the realm's name percent-encoded (the realm `team a/b` has `team%20a%2Fb.sqlite3`); remove only files whose names begin with that whole file name (`default2.sqlite3` is another realm's). A state directory first written by an older Rust embedding may hold the database under `agent-memory-sqlite` instead. A store that once imported markdown memory keeps those files, with their text, in the directory named as the realm beside the database (for the realm `default`, `agent-memory/default/`), one for each agent, named `<agent>.md.imported`, or `<agent>.md.import-failed` for a file that could not be imported; remove that directory as well: a plain `<agent>.md` file left there is imported into the new database when the realm is next opened. This removes all agent memory of that realm, every agent's, every mob's and every person's, and it does not remove text already in a session's history, in an agent's context, or in copies and backups of the store.
 
 **What an agent reads.** A record lives in one scope: an agent's own (identity scope), a mob's, a person's (operator memory, below) or the realm's. An agent is given the text of records in its own identity scope only: the ones recall selects when it is built and on each turn, and the ones its `memory` tool's `recall` returns. When it is built it is also given an index over its identity scope, the scope of every mob it is bound to and the realm scope: a row for a record, with its id, kind, age, title and description, and never its text, as many rows as the index's size limit holds. `rpc_gateway` binds every identity it hosts to its one mob, so the title and description of a mob-scoped record are given to every agent of that gateway as far as that limit holds them, and its text to none. A record reaches mob scope only where the memory steward is enabled (`agent_memory.steward`; it is off unless configured), or through an embedding host's own code. The steward accepts an agent's `propose_to_mob`, creates records there itself when it consolidates, and copies there what it keeps from a retired identity; an operator's decision is awaited only for a quarantined record or a proposal that the steward's verdict sends to the promotion gate, and for a proposal that was tainted when it was made. The steward can also create a record in any agent's identity scope, and no setting limits the scopes it writes to. Nothing in the gateways as shipped writes a realm-scoped record. So agent memory separates the agents of one `rpc_gateway` in the text of their records, but not in the titles and descriptions of mob-scoped records: keep what must stay with one agent out of the title and description of anything proposed to a mob; and where a memory steward runs, it writes records of its own making into the mob's scope and into any agent's. An application that must keep tenants apart therefore runs one gateway for each tenant, each with its own state directory; on a gateway that tenants share, the texts of their agents' records stay apart only while the memory steward is off.
+
+### Agents listed their own memory only
+
+`agent_memory.own_memory_only_profiles` is a list of profile names. An agent it covers is not listed its mob's shared memory: the index it is given when it is built holds the rows of its own identity scope alone. No row of a mob-scoped record and none of a realm-scoped one is listed to it, and the store is asked for neither, so its own rows get the index's whole size limit. The text of records was already its own alone, and stays so.
+
+The list covers:
+
+- an agent whose declared profile is listed, in the launch mob and in a mob hosted beside it that has a profile of the same name;
+- an agent whose declared profile its own mob's definition does not have;
+- an agent that a covered agent created, whatever profile its creation named, followed up through at most eight agents that created each other;
+- an agent whose creation cannot be followed back to the host: its creator is no registered agent of its mob (a temporary helper, an agent that is gone), the mob's record of it cannot be read, or more than eight agents created each other above it.
+
+An agent the host's roster declares, and one a host call or a person in the console created, has nothing above it: it is covered only by its own profile. Who created an agent is read from the mob's own record of the request that created it, and a creator's profile from the mob's registered agents. A name, a label or any other value that an agent or a request can set decides nothing. A Rust host that assembles its own identity runtime gives it its mob's handle (`with_runtime_services`), as the gateways and the runtime builder do: a runtime that was given no mob has no record to read, and with a profile listed every agent it builds is then listed its own memory only.
+
+What the list does not do:
+
+- It is a filter on what an agent is listed, not a boundary between tenants. The paragraph above still holds: an application that must keep tenants apart runs one gateway for each.
+- It limits no write. A covered agent can still propose a record to its mob, and where a memory steward runs, the steward can still write a record of its own making, drawn from the mob's shared records, into a covered agent's own scope.
+- It changes no other reader: a host's `meta/agent_memory/*` calls, the console's Memory panel and the memory steward read as before.
+- It takes effect at an agent's next new session. The index reaches a session once, when the session is first built; a session that already holds an index keeps it across a restart. Reset the identity after adding its profile to the list.
+- A side chat or a fork of an agent starts from that agent's context, with the index text that context holds. It is not built with an index of its own.
+- The names are checked against the launch mob's definition when the gateway starts, and a name it does not have refuses the start (`-32602`). A profile that only a hosted mob has cannot be listed yet.
+
+```json
+{
+  "agent_memory": {
+    "own_memory_only_profiles": ["guest"]
+  }
+}
+```
+
+Python: `agent_memory(own_memory_only_profiles=["guest"])`. TypeScript: `agentMemory({ ownMemoryOnlyProfiles: ["guest"] })`.
+
+### Reading agent memory
+
+`meta/agent_memory/recall` (`recall_agent_memory`, `recallAgentMemory`) is a
+selection, not a listing. It returns at most `max_entries` records (8 by
+default, 64 at most) and takes no cursor, so repeated recalls do not page
+through a store. It reads the named identity's own records, and only the
+active ones: a record that an update replaced, a forgotten record and a
+quarantined record are not returned. With the bundled store the two modes
+select as follows:
+
+| `selection` | What it returns |
+| --- | --- |
+| `contextual` (default) | The records that match a word of the query in their tags, title or body, best match first. The words of the query are those of `query_text` and `query_terms` without common stopwords and without words shorter than three characters. A word is a run of ASCII letters, digits, `-` and `_`, so a query wholly in a non-Latin script leaves no word and returns nothing. A word of five characters or more also matches inside a longer word of the title or body, which counts for less: one such match alone does not select a record. A record that matches no word is left out, however few records there are, and a recall whose query leaves no word (no query, or only stopwords and short words such as `AI`) returns nothing. |
+| `always` | The most recently updated records, newest first, whatever the query. Over more than `max_entries` records it returns the newest `max_entries`, not all of them. |
+
+To enumerate an identity's memory, read its manifest.
+`meta/agent_memory/manifest` (`manifest_agent_memory`,
+`manifestAgentMemory`) with the tier `full` returns every active record of
+the identity in one answer, as metadata only (`id`, `kind`, `title`,
+`description`, `age_days` and, for a ranked record, `rank`) and never a
+body. The default tier, `working_set`, is bounded: the ranked records up to
+`k` (32 by default, 512 at most) and the recent records that are not ranked
+or were changed since they were ranked, at most twice `k` together. None of
+the `meta/agent_memory/*` methods reads one record by its id: a host reads a
+body with a recall.
+
+`meta/agent_memory/update` (`update_agent_memory`, `updateAgentMemory`)
+replaces an active record: the new title, body and tags become a new active
+record with its own id, and the replaced one is no longer recalled or
+listed.
 
 ### Operator memory
 
@@ -198,6 +263,8 @@ durability class and resolution; see
 With the SQLite store (the default), identity-first members whose profile enables memory tools (`memory = true` under `[profiles.<name>.tools]`) get a `memory` tool: `remember`, `update`, `forget`, `recall`, and `propose_to_mob`. Writes carry real agent authorship and always enter at the `agent_observed` trust tier or below — an agent that verified a fact records the verification as a *claim* in provenance (`epistemic: "verified_claim"` plus `verification_evidence`); the trust-tier upgrade is a steward-only reviewed operation. `update` supersedes a record within its own lineage in the agent's own identity scope; cross-identity updates are rejected by the store validator. `propose_to_mob` queues a proposal for mob scope — a steward or operator must commit it. Tool results are an indexing-excluded message class, so confirmations and recall payloads never echo into session semantic memory. Disable the tool with `agent_memory.recorder_tool: false` (default `true` when agent memory is enabled).
 
 A member private to a person (its roster labels carry `console.private_to`: a Console side chat a signed-in person opened, and the members it creates; see [Private side chats](/meta/concepts/access-control#private-side-chats)) keeps its memory to itself. Its `memory` tool writes to its own identity scope, and its `propose_to_mob` is refused: it runs inside no mob, so nothing of its memory reaches a scope its mob shares. The distiller never reads its conversation, and the steward's dreams never cover its identity scope, its proposals or its exit interview, after it retired too. A dream runs only once the record of who the members are private to has been read (it runs in the background from the start), and the store's own record of the private members it retired counts too.
+
+A member that is not a registered agent and is not private to a person keeps its agent memory under its member name: a member created later under the same name continues that memory. Give such members names you do not reuse for unrelated work.
 
 ## Content trust and session taint
 

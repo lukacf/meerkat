@@ -4,7 +4,12 @@ import path from "node:path";
 import YAML from "yaml";
 
 const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..", "..");
-const { parseSseFrames } = await import(path.join(repoRoot, "console", "dist", "index.cjs"));
+// The frame parser comes from the console core, which runs under Node. The
+// built console bundle (console/dist/index.cjs) re-exports it but also holds
+// browser-only code that reads `document` when the file is loaded.
+const { parseSseFrames } = await import(
+  path.join(repoRoot, "packages", "console-core", "src", "network.ts")
+);
 
 type ConsoleFrame = {
   id?: string;
@@ -210,7 +215,7 @@ async function main() {
     activity_feed?: { filter_presets?: Array<{ id?: string }> };
   }>(`${baseUrl}/console/experience`);
 
-  assert.equal(experience.contract_version, "0.5.0");
+  assert.equal(experience.contract_version, "0.6.0");
   assert.ok(Array.isArray(experience.identity_status?.rows));
   assert.ok(Array.isArray(experience.activity_feed?.filter_presets));
   assert.ok(experience.activity_feed!.filter_presets!.some((preset) => preset.id === "watched-only"));

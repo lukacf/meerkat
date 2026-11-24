@@ -118,7 +118,7 @@ export function actionPatternIsKnown(pattern: string, catalog: readonly string[]
 }
 
 export function hasResourceSelector(rule: ConsoleAccessRule): boolean {
-  return Boolean(rule.agents?.length || rule.roles?.length || Object.keys(rule.match_labels ?? {}).length);
+  return Boolean(rule.agents?.length || rule.roles?.length || Object.keys(rule.match_labels ?? {}).length || rule.mobs?.length);
 }
 
 function mentionsMemory(pattern: string): boolean {
@@ -232,6 +232,19 @@ function covers<T>(outer: readonly T[] | undefined, inner: readonly T[] | undefi
   return inner.every((value) => outer.includes(value));
 }
 
+/** Whether a deny rule reaches every mob an allow rule does, as the owner
+ * reads `mobs`: a deny that lists none holds in every mob, "*" is every
+ * mob, and an allow that lists none is the default mob's. The default
+ * mob's id is not known here, so a deny that lists mobs is never taken to
+ * reach an allow of the default mob. */
+function denyCoversMobs(deny: ConsoleAccessRule, allow: ConsoleAccessRule): boolean {
+  const denied = deny.mobs ?? [];
+  if (denied.length === 0 || denied.includes("*")) return true;
+  const allowed = allow.mobs ?? [];
+  if (allowed.length === 0 || allowed.includes("*")) return false;
+  return allowed.every((mob) => denied.includes(mob));
+}
+
 /** Whether a deny rule reaches everyone and everything an allow rule does. */
 function denyCoversScope(deny: ConsoleAccessRule, allow: ConsoleAccessRule): boolean {
   const denyNamesNoOne = !(deny.subjects?.length) && !(deny.groups?.length);
@@ -246,6 +259,7 @@ function denyCoversScope(deny: ConsoleAccessRule, allow: ConsoleAccessRule): boo
       && subjects.every((subject) => (deny.subjects ?? []).includes(subject) || ((deny.subjects ?? []).includes("*") && subject !== ""));
   }
   if (!people) return false;
+  if (!denyCoversMobs(deny, allow)) return false;
   if (!hasResourceSelector(deny)) return true;
   const labels = (rule: ConsoleAccessRule) => Object.entries(rule.match_labels ?? {}).map(([key, value]) => `${key}=${value}`);
   return covers(deny.agents, allow.agents) && covers(deny.roles, allow.roles) && covers(labels(deny), labels(allow));

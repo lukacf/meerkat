@@ -311,11 +311,74 @@ class TestBuilderChain:
 
         assert params["runtime_options"]["console_fetch_timeout_ms"] == 120_000
 
+    def test_max_sessions_sets_runtime_option(self):
+        builder = Meta.builder()
+        result = builder.max_sessions(320)
+        params = MetaRuntime(builder._config)._build_init_params()
+
+        assert result is builder
+        assert builder._config.max_sessions == 320
+        assert params["runtime_options"]["max_sessions"] == 320
+        assert type(params["runtime_options"]["max_sessions"]) is int
+
+    def test_max_sessions_accepts_one(self):
+        b = Meta.builder().max_sessions(1)
+        params = MetaRuntime(b._config)._build_init_params()
+
+        assert params["runtime_options"]["max_sessions"] == 1
+
+    def test_max_sessions_defaults_to_omitted(self):
+        b = Meta.builder()
+        params = MetaRuntime(b._config)._build_init_params()
+
+        assert b._config.max_sessions is None
+        assert "max_sessions" not in params["runtime_options"]
+
+    @pytest.mark.parametrize("value", [0, -1, -16])
+    def test_max_sessions_rejects_non_positive_values(self, value):
+        with pytest.raises(ValueError, match="max_sessions must be a positive integer"):
+            Meta.builder().max_sessions(value)
+
+    @pytest.mark.parametrize("value", [True, False])
+    def test_max_sessions_rejects_booleans(self, value):
+        with pytest.raises(ValueError, match="max_sessions must be a positive integer"):
+            Meta.builder().max_sessions(value)
+
+    @pytest.mark.parametrize("value", [1.5, 16.0, "16", None, [16]])
+    def test_max_sessions_rejects_non_integers(self, value):
+        with pytest.raises(ValueError, match="max_sessions must be a positive integer"):
+            Meta.builder().max_sessions(value)
+
+    def test_max_sessions_refusal_keeps_the_earlier_value(self):
+        b = Meta.builder().max_sessions(32)
+        with pytest.raises(ValueError):
+            b.max_sessions(0)
+        params = MetaRuntime(b._config)._build_init_params()
+
+        assert params["runtime_options"]["max_sessions"] == 32
+
     def test_console_read_only_sets_runtime_option(self):
         b = Meta.builder().console_read_only()
         params = MetaRuntime(b._config)._build_init_params()
 
         assert params["runtime_options"]["console_read_only"] is True
+
+    def test_console_list_nested_mobs_false_sets_runtime_option(self):
+        b = Meta.builder().console_list_nested_mobs(False)
+        params = MetaRuntime(b._config)._build_init_params()
+
+        assert params["runtime_options"]["console_list_nested_mobs"] is False
+
+    def test_console_list_nested_mobs_true_sets_runtime_option(self):
+        b = Meta.builder().console_list_nested_mobs(True)
+        params = MetaRuntime(b._config)._build_init_params()
+
+        assert params["runtime_options"]["console_list_nested_mobs"] is True
+
+    def test_console_list_nested_mobs_defaults_to_omitted(self):
+        params = MetaRuntime(Meta.builder()._config)._build_init_params()
+
+        assert "console_list_nested_mobs" not in params["runtime_options"]
 
     def test_console_auth_defaults_to_omitted(self):
         params = MetaRuntime(Meta.builder()._config)._build_init_params()
@@ -794,6 +857,20 @@ class TestBuilderChain:
         b = Meta.builder().agent_memory(operatorScope="off")
         params = MetaRuntime(b._config)._build_init_params()
         assert params["runtime_options"]["agent_memory"] == {"operator_scope": "off"}
+
+    def test_agent_memory_own_memory_only_profiles_serializes_to_gateway_wire_key(self):
+        b = Meta.builder().agent_memory(own_memory_only_profiles=["guest", "visitor"])
+        params = MetaRuntime(b._config)._build_init_params()
+        assert params["runtime_options"]["agent_memory"] == {
+            "own_memory_only_profiles": ["guest", "visitor"],
+        }
+
+    def test_agent_memory_own_memory_only_profiles_accepts_camel_case(self):
+        b = Meta.builder().agent_memory(ownMemoryOnlyProfiles=("guest",))
+        params = MetaRuntime(b._config)._build_init_params()
+        assert params["runtime_options"]["agent_memory"] == {
+            "own_memory_only_profiles": ["guest"],
+        }
 
     def test_agent_memory_hygienist_keeps_only_disabled_compatibility(self):
         b = Meta.builder().agent_memory(

@@ -1399,6 +1399,12 @@ pub struct MeerkatMcpState {
     /// read paths (create default-model), so an inherited (ancestor-realm) default
     /// model / self-hosted alias resolves like the agent build path.
     realm_config_source: Arc<dyn meerkat_core::RealmConfigSource>,
+    /// The convention roots this server's agent factory layers hooks from
+    /// (its context root, else its project root; and the user root), kept so
+    /// the config tool can compare hooks as a session of the realm runs
+    /// them.
+    hook_context_root: PathBuf,
+    hook_user_root: Option<PathBuf>,
     skill_runtime: Option<Arc<meerkat_core::skills::SkillRuntime>>,
     /// The host's local MCP launch boundary, owned here once for the life of
     /// the state: every router this server builds (fresh creation, a resume
@@ -1656,6 +1662,7 @@ impl MeerkatMcpState {
             .global_config_path()
             .unwrap_or_else(|| realms_root.join("__no_global__").join("config.toml"));
         let fs_realm_config_source = mcp_realm_config_source(&realms_root, global_doc);
+        let head_config_doc = fs_realm_config_source.config_doc_path(&realm_id);
         let mut config = load_config_async(
             &realm_id,
             &realms_root,
@@ -1679,6 +1686,10 @@ impl MeerkatMcpState {
             .unwrap_or_else(|| realm_store_path(&realms_root, &realm_id, manifest.backend));
         let session_store = persistence.session_store();
         let schedule_service = ScheduleService::new(persistence.schedule_store());
+        // Whether this host's agents may write a schedule that creates a
+        // session, from the host's own configuration.
+        schedule_service
+            .allow_agent_session_creation(config.tools.agent_schedules_may_create_sessions);
         let workgraph_service = meerkat::WorkGraphService::with_scope(
             persistence.workgraph_store(),
             realm_id.as_str().to_owned(),
@@ -1689,6 +1700,9 @@ impl MeerkatMcpState {
         let project_root = conventions_context_root
             .clone()
             .unwrap_or_else(|| realm_paths.root.clone());
+        // The roots the factory below layers hooks from.
+        let hook_context_root = project_root.clone();
+        let hook_user_root = bootstrap.context.user_config_root.clone();
         let config_store = tagged_realm_config_store(
             &realms_root,
             &realm_id,
@@ -1735,6 +1749,12 @@ impl MeerkatMcpState {
             bootstrap.context.user_config_root.as_deref(),
         );
         host_confinement.log_startup(&host_inputs, &convention_sources);
+        meerkat::HostConfinement::log_unread_project_sections(
+            conventions_context_root.as_deref(),
+            &config,
+            &head_config_doc,
+            layout.global_config_path().as_deref(),
+        );
         // The factory reads its hooks and skills from the context root, or
         // from its project root when there is none: those are the convention
         // sources its file tools must not write.
@@ -1836,6 +1856,12 @@ impl MeerkatMcpState {
                 state = state.with_controlling_acceptor(acceptor);
             }
             let state = state.into_shared();
+            // The members of these mobs hold the schedule tools installed
+            // over the schedule service: their schedule writes are judged by
+            // the mobs' own wiring.
+            schedule_service.attach_write_judge(Arc::new(
+                meerkat_mob_mcp::MobScheduleWriteJudge::new(&state),
+            ));
             // fork_off and council outcomes are submitted durably to the
             // service's delivery owner, which resolves members and confirms
             // jobs through this state.
@@ -1863,6 +1889,8 @@ impl MeerkatMcpState {
             expose_paths,
             config_runtime,
             realm_config_source,
+            hook_context_root,
+            hook_user_root,
             skill_runtime,
             mcp_stdio_launch_profile,
             mcp_attempt_guards,
@@ -2010,6 +2038,9 @@ impl MeerkatMcpState {
         let store_path =
             realm_store_path(&realms_root, &realm_id, meerkat_store::RealmBackend::Sqlite);
         let project_root = realm_paths.root.clone();
+        // The roots the factory below layers hooks from.
+        let hook_context_root = project_root.clone();
+        let hook_user_root = bootstrap.context.user_config_root.clone();
         let config_store = tagged_realm_config_store(
             &realms_root,
             &realm_id,
@@ -2085,6 +2116,8 @@ impl MeerkatMcpState {
             expose_paths: false,
             config_runtime,
             realm_config_source,
+            hook_context_root,
+            hook_user_root,
             skill_runtime: None,
             mcp_stdio_launch_profile: meerkat_mcp::McpStdioLaunchProfile::trusted_host(),
             mcp_attempt_guards,
@@ -2944,7 +2977,9 @@ fn base_tool_descriptors() -> Vec<BaseToolDescriptor> {
         },
         BaseToolDescriptor {
             name: "meerkat_config",
-            description: "Get or update Meerkat config for this MCP server instance.",
+            description: "Get or update Meerkat config for this MCP server instance. Secret \
+                          values are shown as `<redacted>`; send `<redacted>` back unchanged \
+                          to keep a stored value.",
             input_schema: || meerkat_tools::schema_for::<MeerkatConfigInput>(),
             request_lifecycle: RequestLifecycle::LongRunningObservation,
         },
@@ -3530,9 +3565,190 @@ async fn handle_meerkat_models_catalog(state: &MeerkatMcpState) -> Result<Value,
     serde_json::to_value(&response).map_err(|e| format!("Serialization failed: {e}"))
 }
 
+/// The config document's tables that hold a host's own listener settings:
+/// the address a server binds, the origins and hosts it answers, and how it
+/// admits a peer. `rest` is the REST server's listener, `mob_host` the host
+/// acceptor's and its live WebSocket's, `comms` the comms listeners' with
+/// their transport mode and peer authentication. Every member of these
+/// tables is such a setting, so the rule is on the table's path: a member
+/// this build's schema does not know is judged like the ones it knows.
+const LISTENER_SETTINGS_TABLES: [&str; 3] = ["rest", "mob_host", "comms"];
+
+/// A `meerkat_config` write as the caller sent it.
+enum ConfigToolWrite<'a> {
+    /// `action=set`: the whole document.
+    Set(&'a Value),
+    /// `action=patch`: an RFC 7396 merge patch.
+    Patch(&'a Value),
+}
+
+/// Whether the merge patch `patch`, applied where the committed document
+/// holds `committed`, leaves that value as it is. A patch object is judged
+/// member by member against a committed object; any other patch value
+/// replaces what is there, so it has to equal it. A member the committed
+/// document does not hold is a change even as `null`: the document on disk
+/// may hold a member that this build's schema does not serialize.
+fn merge_patch_restates(committed: Option<&Value>, patch: &Value) -> bool {
+    match (committed, patch) {
+        (Some(Value::Object(committed)), Value::Object(patch)) => patch
+            .iter()
+            .all(|(member, value)| merge_patch_restates(committed.get(member), value)),
+        (Some(committed), patch) => committed == patch,
+        (None, _) => false,
+    }
+}
+
+/// The first listener-settings table that `write`, as sent, would change in
+/// the realm's own committed document. `committed` is that document as
+/// serialized and `default` the default document.
+///
+/// A patch is judged by the members it names under a table. A full replace
+/// is judged by its table as a whole, and a table it does not state takes
+/// the default, as the typed document would; so is a patch that is not an
+/// object, which replaces the document as a whole.
+fn listener_table_changed_by(
+    write: &ConfigToolWrite<'_>,
+    committed: &Value,
+    default: &Value,
+) -> Option<&'static str> {
+    LISTENER_SETTINGS_TABLES.into_iter().find(|table| {
+        let committed_table = committed.get(*table);
+        match write {
+            ConfigToolWrite::Patch(patch) if patch.is_object() => patch
+                .get(*table)
+                .is_some_and(|members| !merge_patch_restates(committed_table, members)),
+            ConfigToolWrite::Set(document) | ConfigToolWrite::Patch(document) => {
+                document.get(*table).or_else(|| default.get(*table)) != committed_table
+            }
+        }
+    })
+}
+
+/// The first listener-settings table two composed configs state differently.
+fn listener_table_composed_differently(
+    before: &Config,
+    after: &Config,
+) -> Result<Option<&'static str>, serde_json::Error> {
+    let before = serde_json::to_value(before)?;
+    let after = serde_json::to_value(after)?;
+    Ok(LISTENER_SETTINGS_TABLES
+        .into_iter()
+        .find(|table| before.get(*table) != after.get(*table)))
+}
+
+/// The typed refusal of a `meerkat_config` write that would change a
+/// host's own listener settings: invalid params with the documented
+/// `confinement_administration_required` data; nothing was written.
+fn listener_settings_refusal(change: &str, table: &str) -> ToolCallError {
+    let message = format!(
+        "Invalid config: {change} `[{table}]`, which holds a host's own listener settings (the \
+         address a server binds, the origins and hosts it answers, how it admits a peer); this \
+         tool does not change them. Set them in the configuration file or through the \
+         operator's commands; nothing was written"
+    );
+    match serde_json::to_value(WireConfigWriteRefusal::ConfinementAdministrationRequired) {
+        Ok(data) => ToolCallError::new(-32602, message, Some(data)),
+        Err(serialize_error) => ToolCallError::new(
+            -32603,
+            format!("failed to serialize config refusal data: {serialize_error}"),
+            None,
+        ),
+    }
+}
+
+/// Refuse a `meerkat_config` write that would change a host's own listener
+/// settings ([`LISTENER_SETTINGS_TABLES`]), judged in two ways against the
+/// committed document:
+///
+/// - on the request as sent, against the realm's own document: a patch that
+///   names a member of such a table with another value than the committed
+///   one, or a full replace whose table differs from the committed one. A
+///   write that carries the tables unchanged passes, and one that restates
+///   a parent's value in the realm's own document does not.
+/// - on what the realm composes along its parent chain, before and after
+///   the write: `rest` and `comms` compose whole and `mob_host` member by
+///   member, so a change of the realm's own parent edge can bring another
+///   realm's table into force without naming a member of it. A write is
+///   refused as well when the chain does not compose before it, or would
+///   not after it.
+///
+/// Returns the generation the write commits at, the one of the document it
+/// was judged against, so a write that lands in between is a generation
+/// conflict and not a commit of an unjudged document. A caller's
+/// `expected_generation` other than that one is a generation conflict here,
+/// before anything is judged. (An edit of the configuration file does not
+/// move the generation.)
+async fn refuse_listener_settings_change(
+    state: &MeerkatMcpState,
+    write: ConfigToolWrite<'_>,
+    expected_generation: Option<u64>,
+) -> Result<Option<u64>, ToolCallError> {
+    let committed = state
+        .config_runtime
+        .get()
+        .await
+        .map_err(map_config_runtime_error)?;
+    if let Some(expected) = expected_generation
+        && expected != committed.generation
+    {
+        return Err(map_config_runtime_error(
+            ConfigRuntimeError::GenerationConflict {
+                expected,
+                current: committed.generation,
+            },
+        ));
+    }
+    let serialize_error = |error: serde_json::Error| {
+        ToolCallError::new(
+            -32603,
+            format!("failed to compare the config's listener settings: {error}"),
+            None,
+        )
+    };
+    let committed_document = serde_json::to_value(&committed.config).map_err(serialize_error)?;
+    let default_document = serde_json::to_value(Config::default()).map_err(serialize_error)?;
+    if let Some(table) = listener_table_changed_by(&write, &committed_document, &default_document) {
+        return Err(listener_settings_refusal("the write would change", table));
+    }
+
+    let candidate = match write {
+        ConfigToolWrite::Set(document) => serde_json::from_value::<Config>(document.clone())
+            .map_err(|e| ToolCallError::invalid_params(format!("Invalid config: {e}")))?,
+        ConfigToolWrite::Patch(patch) => apply_patch_preview(&state.config_runtime, patch).await?,
+    };
+    let reader = meerkat_core::EffectiveConfigReader::new(Arc::clone(&state.realm_config_source));
+    let composed_committed = reader
+        .effective_config_over_head(&state.realm_id, committed.config)
+        .await
+        .map_err(|error| {
+            ToolCallError::internal(format!(
+                "failed to compose the realm's config chain: {error}"
+            ))
+        })?;
+    let composed_candidate = reader
+        .effective_config_over_head(&state.realm_id, candidate)
+        .await
+        .map_err(|error| {
+            ToolCallError::invalid_params(format!(
+                "Invalid config: the document does not compose along the realm's parent chain: \
+                 {error}; nothing was written"
+            ))
+        })?;
+    if let Some(table) =
+        listener_table_composed_differently(&composed_committed, &composed_candidate)
+            .map_err(serialize_error)?
+    {
+        return Err(listener_settings_refusal(
+            "the write would make the realm compose another",
+            table,
+        ));
+    }
+    Ok(Some(committed.generation))
+}
+
 async fn handle_meerkat_config(
     state: &MeerkatMcpState,
-    input: MeerkatConfigInput,
+    mut input: MeerkatConfigInput,
 ) -> Result<Value, ToolCallError> {
     match input.action {
         ConfigAction::Get => {
@@ -3547,10 +3763,29 @@ async fn handle_meerkat_config(
             let config_value = input.config.ok_or_else(|| {
                 ToolCallError::invalid_params("config is required for action=set")
             })?;
+            // A host's own listener settings are not this tool's to change;
+            // the write commits at the generation it was judged at.
+            input.expected_generation = refuse_listener_settings_change(
+                state,
+                ConfigToolWrite::Set(&config_value),
+                input.expected_generation,
+            )
+            .await?;
             let config: Config = serde_json::from_value(config_value.clone())
                 .map_err(|e| ToolCallError::invalid_params(format!("Invalid config: {e}")))?;
             reject_config_payload_defaulting(&config_value, &config)?;
-            validate_config_for_commit(&config)?;
+            // The document the write would commit: a marker the request
+            // carries in place of a stored secret value is the stored value
+            // here, so an entry restated with markers compares as the
+            // stored entry. The request is committed as it was sent: the
+            // write resolves it again under its own custody.
+            let resolved = state
+                .config_runtime
+                .set_preview(&config)
+                .await
+                .map_err(map_config_runtime_error)?;
+            refuse_launching_entries(state, &resolved).await?;
+            validate_config_for_commit(&resolved)?;
             let snapshot = state
                 .config_runtime
                 .set(config, input.expected_generation)
@@ -3562,7 +3797,15 @@ async fn handle_meerkat_config(
             let patch = input.patch.ok_or_else(|| {
                 ToolCallError::invalid_params("patch is required for action=patch")
             })?;
+            // As for a full replace: judged first, on the patch as sent.
+            input.expected_generation = refuse_listener_settings_change(
+                state,
+                ConfigToolWrite::Patch(&patch),
+                input.expected_generation,
+            )
+            .await?;
             let preview = apply_patch_preview(&state.config_runtime, &patch).await?;
+            refuse_launching_entries(state, &preview).await?;
             validate_config_for_commit(&preview)?;
             let snapshot = state
                 .config_runtime
@@ -3574,6 +3817,584 @@ async fn handle_meerkat_config(
     }
 }
 
+/// The kinds of configuration entry that launch a process on the host, or
+/// decide what one runs. This tool does not add one, does not change one and
+/// does not bring one into force through the realm's parent chain: like
+/// `[confinement]`, they are the host's to administer in the document itself
+/// or through its own writers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LaunchingConfigEntry {
+    /// An MCP server with a stdio transport: its command is started when a
+    /// session's MCP servers are applied.
+    McpStdioServer,
+    /// A hook with a command runtime: its command runs at the hook's point.
+    CommandHook,
+    /// A skills repository with a stdio transport: its command is started
+    /// when the skill source is read.
+    StdioSkillsRepository,
+    /// A skills repository with a git transport: `git` fetches its URL, with
+    /// the SSH command its key path gives.
+    GitSkillsRepository,
+    /// `shell.program`: the program the shell tool runs its commands with.
+    ShellProgram,
+    /// `shell.security_mode` and `shell.security_patterns`: the policy the
+    /// shell tool checks a command against before it runs it. Only a looser
+    /// one is refused.
+    ShellCommandPolicy,
+}
+
+impl LaunchingConfigEntry {
+    /// Every kind.
+    #[cfg(test)]
+    const ALL: [Self; 6] = [
+        Self::McpStdioServer,
+        Self::CommandHook,
+        Self::StdioSkillsRepository,
+        Self::GitSkillsRepository,
+        Self::ShellProgram,
+        Self::ShellCommandPolicy,
+    ];
+
+    /// The kind as a refusal names it.
+    const fn describe(self) -> &'static str {
+        match self {
+            Self::McpStdioServer => "a `tools.mcp_servers` entry with a stdio transport",
+            Self::CommandHook => "a `hooks.entries` entry with a command runtime",
+            Self::StdioSkillsRepository => "a `skills.repositories` entry with a stdio transport",
+            Self::GitSkillsRepository => "a `skills.repositories` entry with a git transport",
+            Self::ShellProgram => "a `shell.program`",
+            Self::ShellCommandPolicy => {
+                "a looser shell command policy (`shell.security_mode`, `shell.security_patterns`)"
+            }
+        }
+    }
+}
+
+/// The first launching entry of `candidate` that `committed` does not hold
+/// as the same whole entry (the config store's rule for realm servers: a
+/// kept name with another command, argument, environment value, working
+/// directory, URL, ref or key path is a new entry). An entry that launches
+/// no process (an HTTP server, an HTTP or in-process hook, a filesystem or
+/// HTTP skills repository) is not looked at, and neither is a removal.
+///
+/// The refusal runs it twice: on the realm's own document before and after
+/// the write, and on what the realm composes along its parent chain before
+/// and after it. The shell section is compared only as composed, in
+/// [`changed_composed_shell`]: a realm takes it whole, so its own document
+/// does not say which program it runs.
+///
+/// Every section of the document, every field of the three sections that
+/// hold a launching entry, and every transport and hook runtime is named
+/// here with no rest pattern and no wildcard arm: a new section, field,
+/// transport or runtime does not compile until it is placed as launching or
+/// not.
+fn added_or_changed_launching_entry(
+    committed: &Config,
+    candidate: &Config,
+) -> Result<Option<LaunchingConfigEntry>, serde_json::Error> {
+    use meerkat_core::config::{HookAdapterConfig, HooksConfig, ToolsConfig};
+    use meerkat_core::mcp_config::McpTransportConfig;
+    use meerkat_core::skills_config::{SkillRepoTransport, SkillsConfig};
+
+    let Config {
+        tools,
+        hooks,
+        skills,
+        // Compared as the realm composes it, in `changed_composed_shell`.
+        shell: _,
+        // The config store refuses a write to these on every surface.
+        governance: _,
+        confinement: _,
+        // Credential commands, the one launching entry of this section, are
+        // refused by the config store on every surface.
+        realm: _,
+        // No field of these names a program, an argument, an environment or
+        // a working directory of a launch.
+        agent: _,
+        storage: _,
+        budget: _,
+        retry: _,
+        models: _,
+        max_tokens: _,
+        store: _,
+        comms: _,
+        mob_host: _,
+        compaction: _,
+        limits: _,
+        rest: _,
+        self_hosted: _,
+        provider_tools: _,
+        model_fallback: _,
+        presentation: _,
+    } = candidate;
+    let ToolsConfig {
+        mcp_servers,
+        default_timeout: _,
+        tool_timeouts: _,
+        max_concurrent: _,
+        builtins_enabled: _,
+        shell_enabled: _,
+        comms_enabled: _,
+        mob_enabled: _,
+        schedule_enabled: _,
+        workgraph_enabled: _,
+        // A host's allowance: it names no program, argument, environment or
+        // working directory of a launch, and adds no entry.
+        agent_schedules_may_create_sessions: _,
+    } = tools;
+    let HooksConfig {
+        entries,
+        default_timeout_ms: _,
+        payload_max_bytes: _,
+        background_max_concurrency: _,
+    } = hooks;
+    let SkillsConfig {
+        repositories,
+        enabled: _,
+        max_injection_bytes: _,
+        inventory_threshold: _,
+        health_thresholds: _,
+        identity: _,
+    } = skills;
+
+    for server in mcp_servers {
+        let launches = match &server.transport {
+            McpTransportConfig::Stdio(_) => true,
+            McpTransportConfig::Http(_) => false,
+        };
+        if launches && !committed.tools.mcp_servers.contains(server) {
+            return Ok(Some(LaunchingConfigEntry::McpStdioServer));
+        }
+    }
+    for entry in entries {
+        let launches = match &entry.runtime {
+            HookAdapterConfig::Command(_) => true,
+            HookAdapterConfig::InProcess(_) | HookAdapterConfig::Http(_) => false,
+        };
+        if launches && !committed.hooks.entries.contains(entry) {
+            return Ok(Some(LaunchingConfigEntry::CommandHook));
+        }
+    }
+    // A skills repository has no equality of its own: whole entries are
+    // compared as they serialize.
+    let committed_repositories = committed
+        .skills
+        .repositories
+        .iter()
+        .map(serde_json::to_value)
+        .collect::<Result<Vec<_>, _>>()?;
+    for repository in repositories {
+        let kind = match &repository.transport {
+            SkillRepoTransport::Stdio { .. } => Some(LaunchingConfigEntry::StdioSkillsRepository),
+            SkillRepoTransport::Git { .. } => Some(LaunchingConfigEntry::GitSkillsRepository),
+            SkillRepoTransport::Filesystem { .. } | SkillRepoTransport::Http { .. } => None,
+        };
+        if let Some(kind) = kind
+            && !committed_repositories.contains(&serde_json::to_value(repository)?)
+        {
+            return Ok(Some(kind));
+        }
+    }
+    Ok(None)
+}
+
+/// What a write changes in the shell section a realm composes, when the
+/// change decides what the shell tool runs: another program, or a looser
+/// command policy. A realm takes the section whole (its parent's, or its
+/// own once that differs from the default one), so the realm's own document
+/// cannot answer this: a write of another shell key alone would put the
+/// default program and the default policy (no restriction) in the place of
+/// a parent's.
+/// `committed` and `candidate` are the sections the realm composes along its
+/// parent chain before and after the write. Every field is named with no
+/// rest pattern.
+fn changed_composed_shell(
+    committed: &meerkat_core::config::ShellDefaults,
+    candidate: &meerkat_core::config::ShellDefaults,
+) -> Option<LaunchingConfigEntry> {
+    let meerkat_core::config::ShellDefaults {
+        program,
+        timeout_secs: _,
+        security_mode,
+        security_patterns,
+        max_output_chars: _,
+    } = candidate;
+    if *program != committed.program {
+        return Some(LaunchingConfigEntry::ShellProgram);
+    }
+    loosens_shell_command_policy(committed, *security_mode, security_patterns)
+        .then_some(LaunchingConfigEntry::ShellCommandPolicy)
+}
+
+/// Whether a candidate command policy of the shell tool is looser than the
+/// committed one, as far as the two compare without matching a command.
+/// The committed policy decides, and its mode is matched with no wildcard
+/// arm:
+///
+/// - no restriction: nothing can be loosened;
+/// - an allow list (only a command that matches a pattern runs): looser
+///   unless the candidate is an allow list that holds no pattern the
+///   committed list does not hold;
+/// - a deny list (a command that matches a pattern does not run): with no
+///   pattern it restricts nothing; otherwise looser unless the candidate is
+///   a deny list that holds every committed pattern.
+///
+/// Patterns are compared as exact strings, as sets: a pattern rewritten
+/// into an equivalent one counts as another pattern.
+fn loosens_shell_command_policy(
+    committed: &meerkat_core::config::ShellDefaults,
+    mode: meerkat_core::SecurityMode,
+    patterns: &[String],
+) -> bool {
+    use meerkat_core::SecurityMode;
+    match committed.security_mode {
+        SecurityMode::Unrestricted => false,
+        SecurityMode::AllowList => {
+            mode != SecurityMode::AllowList
+                || patterns
+                    .iter()
+                    .any(|pattern| !committed.security_patterns.contains(pattern))
+        }
+        SecurityMode::DenyList => {
+            !committed.security_patterns.is_empty()
+                && (mode != SecurityMode::DenyList
+                    || committed
+                        .security_patterns
+                        .iter()
+                        .any(|pattern| !patterns.contains(pattern)))
+        }
+    }
+}
+
+/// The kinds of entry that decide where a credential the host supplies is
+/// read from, and where it is sent: a realm's provider routes and the
+/// servers they name. This tool does not add one, does not change one and
+/// does not bring one into force through the realm's parent chain: like a
+/// launching entry, they are the host's to administer in the document
+/// itself or through its own writers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CredentialRouteEntry {
+    /// `realm.<id>.auth.<name>`: where a credential is read from (an
+    /// environment variable of any name, a stored secret, a resolver).
+    AuthProfile,
+    /// `realm.<id>.backend.<name>`: the address requests, and the
+    /// credential with them, are sent to.
+    Backend,
+    /// `realm.<id>.binding.<name>`: which auth profile's credential goes to
+    /// which backend, and for which default model.
+    Binding,
+    /// `realm.<id>.default_binding`: the binding a run that names none
+    /// takes.
+    DefaultBinding,
+    /// `realm.<id>.copilot`: where the account's routes read their token.
+    CopilotAccount,
+    /// `realm.<id>.connector_client.<name>`: the issuer a connector login
+    /// and its refreshes go to.
+    ConnectorClient,
+    /// `self_hosted.servers.<id>`: the address of a server a backend names.
+    SelfHostedServer,
+    /// `self_hosted.models.<alias>`: the server a model's requests go to. A
+    /// model added, or pointed at another server, is refused.
+    SelfHostedModel,
+    /// The server a binding names, through its backend or through its
+    /// default model's entry in `self_hosted.models`: a write that keeps the
+    /// binding and leaves it naming another server, or none, is refused (the
+    /// removal of that model's entry among them).
+    BindingServer,
+}
+
+impl CredentialRouteEntry {
+    /// The kind as a refusal names it.
+    const fn describe(self) -> &'static str {
+        match self {
+            Self::AuthProfile => "an auth profile (`realm.<id>.auth`)",
+            Self::Backend => "a backend (`realm.<id>.backend`)",
+            Self::Binding => "a binding (`realm.<id>.binding`)",
+            Self::DefaultBinding => "a default binding (`realm.<id>.default_binding`)",
+            Self::CopilotAccount => "a Copilot account (`realm.<id>.copilot`)",
+            Self::ConnectorClient => "a connector client (`realm.<id>.connector_client`)",
+            Self::SelfHostedServer => "a self-hosted server (`self_hosted.servers`)",
+            Self::SelfHostedModel => {
+                "a self-hosted model or the server it names (`self_hosted.models`)"
+            }
+            Self::BindingServer => {
+                "the server a binding names (through its backend, or through the entry of \
+                 its default model in `self_hosted.models`)"
+            }
+        }
+    }
+}
+
+/// The first provider route entry of `candidate` that `committed` does not
+/// hold as the same whole entry, in any realm section either states: an
+/// auth profile, a backend, a binding, a set default binding, a Copilot
+/// account, a connector client; or a self-hosted server; or a self-hosted
+/// model that is new or names another server. A removal is not looked at,
+/// with one exception: a binding the write keeps must name the server it
+/// named ([`servers_the_bindings_name`]), so the removal of the model a
+/// binding names its server through is refused.
+/// Whole entries are compared (of a model, the server it names), so a
+/// backend is refused whether or not a binding uses it yet.
+///
+/// The refusal runs it twice, as for launching entries: on the realm's own
+/// document and on what the realm composes along its parent chain.
+///
+/// Every field of a realm section and of the self-hosted section is named
+/// with no rest pattern: a new field does not compile until it is placed.
+fn added_or_changed_credential_route(
+    committed: &Config,
+    candidate: &Config,
+) -> Option<CredentialRouteEntry> {
+    use meerkat_core::config::SelfHostedConfig;
+    use meerkat_core::connection::RealmConfigSection;
+
+    for (realm, section) in &candidate.realm {
+        let RealmConfigSection {
+            backend,
+            auth,
+            binding,
+            default_binding,
+            // An edge brings another realm's routes into the chain, or
+            // takes them out: the composed comparison sees the entries.
+            parent: _,
+            connector_client,
+            copilot,
+        } = section;
+        let held = committed.realm.get(realm);
+        if auth
+            .iter()
+            .any(|(name, entry)| held.and_then(|held| held.auth.get(name)) != Some(entry))
+        {
+            return Some(CredentialRouteEntry::AuthProfile);
+        }
+        if backend
+            .iter()
+            .any(|(name, entry)| held.and_then(|held| held.backend.get(name)) != Some(entry))
+        {
+            return Some(CredentialRouteEntry::Backend);
+        }
+        if binding
+            .iter()
+            .any(|(name, entry)| held.and_then(|held| held.binding.get(name)) != Some(entry))
+        {
+            return Some(CredentialRouteEntry::Binding);
+        }
+        if default_binding.is_some()
+            && held.and_then(|held| held.default_binding.as_ref()) != default_binding.as_ref()
+        {
+            return Some(CredentialRouteEntry::DefaultBinding);
+        }
+        if copilot.is_some() && held.and_then(|held| held.copilot.as_ref()) != copilot.as_ref() {
+            return Some(CredentialRouteEntry::CopilotAccount);
+        }
+        if connector_client.iter().any(|(name, entry)| {
+            held.and_then(|held| held.connector_client.get(name)) != Some(entry)
+        }) {
+            return Some(CredentialRouteEntry::ConnectorClient);
+        }
+    }
+    let SelfHostedConfig {
+        servers,
+        models,
+        // Chooses among the models that exist; the binding is then the one
+        // for that model's server, so nothing crosses through it.
+        default_model: _,
+    } = &candidate.self_hosted;
+    if servers
+        .iter()
+        .any(|(id, server)| committed.self_hosted.servers.get(id) != Some(server))
+    {
+        return Some(CredentialRouteEntry::SelfHostedServer);
+    }
+    // A request goes to the server its model names, with the credential of
+    // the binding for that server, and a binding can name its server
+    // through its default model: so a model added, or pointed at another
+    // server, moves a credential to another declared server. A model's
+    // other fields name no server.
+    if models.iter().any(|(alias, model)| {
+        committed
+            .self_hosted
+            .models
+            .get(alias)
+            .map(|held| &held.server)
+            != Some(&model.server)
+    }) {
+        return Some(CredentialRouteEntry::SelfHostedModel);
+    }
+    // A binding the write keeps must name the server it named. The removal
+    // of the model a binding names its server through leaves it naming
+    // none, and a binding that names none can stand for other declared
+    // servers.
+    let named = servers_the_bindings_name(candidate);
+    servers_the_bindings_name(committed)
+        .into_iter()
+        .any(|(binding, server)| named.get(&binding).is_some_and(|kept| *kept != server))
+        .then_some(CredentialRouteEntry::BindingServer)
+}
+
+/// The server each binding of `config` names, by realm and binding, as Core
+/// answers it ([`meerkat_core::self_hosted_binding_server`]: declared on its
+/// backend, derived from its default model's entry in `self_hosted.models`,
+/// or none). `None` for the bindings of a realm section whose routes do not
+/// load: it then compares unequal to any server a binding named.
+fn servers_the_bindings_name(
+    config: &Config,
+) -> std::collections::BTreeMap<(String, String), Option<meerkat_core::SelfHostedBindingServer>> {
+    let mut named = std::collections::BTreeMap::new();
+    for (realm, section) in &config.realm {
+        let connections = meerkat_core::RealmConnectionSet::from_config(realm, section).ok();
+        for name in section.binding.keys() {
+            let server = connections.as_ref().and_then(|connections| {
+                connections.bindings.get(name).map(|binding| {
+                    meerkat_core::self_hosted_binding_server(config, connections, binding)
+                })
+            });
+            named.insert((realm.clone(), name.clone()), server);
+        }
+    }
+    named
+}
+
+/// Refuse a write that adds an entry that launches a process on the host,
+/// or changes what one runs, or that changes where a credential the host
+/// supplies is read from or sent (a realm's provider routes:
+/// [`added_or_changed_credential_route`]), with the refusal of a write that
+/// would administer `[confinement]`. Nothing is written. Two comparisons,
+/// either refuses:
+///
+/// - the realm's own document holds, after the write, a launching entry or
+///   a route entry it does not hold now as the same whole entry (so a copy
+///   of a parent's entry is not written into the realm either);
+/// - the realm composes, after the write, a launching entry, a shell
+///   program, a looser shell command policy or a route entry that it does
+///   not compose now: a realm composes its parent chain's entries and realm
+///   sections and takes its shell section whole, so a change of its own
+///   parent edge, the removal of an own entry that shadowed a parent's, or
+///   a write of another shell key alone can bring one into force.
+///
+/// The compositions are the ones a session of the realm is built from,
+/// with the hooks as a session layers them (the first entry of an id, then
+/// the convention files of the server's context root and user root): a
+/// command hook that an earlier entry of its id hides is not in force, and
+/// a write that takes the hiding entry away is refused. A write is refused
+/// as well when the realm's chain does not compose before it, or would not
+/// after it: what the realm would run cannot then be compared.
+async fn refuse_launching_entries(
+    state: &MeerkatMcpState,
+    candidate: &Config,
+) -> Result<(), ToolCallError> {
+    let committed = state
+        .config_runtime
+        .get()
+        .await
+        .map_err(map_config_runtime_error)?
+        .config;
+    let serialize_error = |error: serde_json::Error| {
+        ToolCallError::new(
+            -32603,
+            format!("failed to compare the config's launching entries: {error}"),
+            None,
+        )
+    };
+    const LAUNCHES: &str = "an entry that launches a process on the host, or decides what one \
+                            runs, is the host's to administer";
+    const ROUTES: &str = "where a credential the host supplies is read from, and where it is \
+                          sent, is the host's to administer";
+    let own_launching =
+        added_or_changed_launching_entry(&committed, candidate).map_err(serialize_error)?;
+    let (refused, reason) = if let Some(entry) = own_launching {
+        (
+            format!("this tool does not add or change {}", entry.describe()),
+            LAUNCHES,
+        )
+    } else if let Some(entry) = added_or_changed_credential_route(&committed, candidate) {
+        (
+            format!("this tool does not add or change {}", entry.describe()),
+            ROUTES,
+        )
+    } else {
+        let reader =
+            meerkat_core::EffectiveConfigReader::new(Arc::clone(&state.realm_config_source));
+        let mut composed_committed = reader
+            .effective_config_over_head(&state.realm_id, committed)
+            .await
+            .map_err(|error| {
+                ToolCallError::internal(format!(
+                    "failed to compose the realm's config chain: {error}"
+                ))
+            })?;
+        let mut composed_candidate = reader
+            .effective_config_over_head(&state.realm_id, candidate.clone())
+            .await
+            .map_err(|error| {
+                ToolCallError::invalid_params(format!(
+                    "Invalid config: the document does not compose along the realm's parent \
+                     chain: {error}; nothing was written"
+                ))
+            })?;
+        // A session runs the hooks as the agent factory layers them, not
+        // the composed list as it stands: the first entry of an id (a
+        // parent's before the realm's own), then the context root's
+        // convention file, then the user root's. A command hook that an
+        // earlier entry of its id hides is not in force, so the hooks are
+        // compared as layered.
+        for composed in [&mut composed_committed, &mut composed_candidate] {
+            composed.hooks = meerkat::resolve_layered_hooks_config(
+                Some(state.hook_context_root.as_path()),
+                state.hook_user_root.as_deref(),
+                composed,
+            )
+            .await;
+        }
+        let launching =
+            match added_or_changed_launching_entry(&composed_committed, &composed_candidate)
+                .map_err(serialize_error)?
+            {
+                Some(entry) => Some(entry),
+                None => {
+                    changed_composed_shell(&composed_committed.shell, &composed_candidate.shell)
+                }
+            };
+        if let Some(entry) = launching {
+            (
+                format!(
+                    "after this write the realm would compose {} that it does not compose now \
+                     (a realm composes its parent chain's entries, and takes its `[shell]` \
+                     section whole: its own once that differs from the default one), and this \
+                     tool does not bring one into force",
+                    entry.describe()
+                ),
+                LAUNCHES,
+            )
+        } else if let Some(entry) =
+            added_or_changed_credential_route(&composed_committed, &composed_candidate)
+        {
+            (
+                format!(
+                    "after this write the realm would compose {} that it does not compose now \
+                     (a realm composes the realm sections of its parent chain), and this tool \
+                     does not bring one into force",
+                    entry.describe()
+                ),
+                ROUTES,
+            )
+        } else {
+            return Ok(());
+        }
+    };
+    let data = serde_json::to_value(WireConfigWriteRefusal::ConfinementAdministrationRequired)
+        .map_err(serialize_error)?;
+    Err(ToolCallError::new(
+        -32602,
+        format!("{refused}: {reason}; nothing was written"),
+        Some(data),
+    ))
+}
+
+/// The answer of the config tool: the configuration envelope, which shows
+/// a marker in place of every stored secret value
+/// ([`ConfigEnvelope::from_snapshot`]). A write may send the marker back
+/// where the answer showed it.
 fn config_envelope_value(
     snapshot: meerkat_core::ConfigSnapshot,
     expose_paths: bool,
@@ -4652,6 +5473,13 @@ async fn handle_meerkat_run_with_help_tools(
     )>,
 ) -> Result<Value, ToolCallError> {
     validate_public_peer_meta(input.peer_meta.as_ref()).map_err(ToolCallError::invalid_params)?;
+    // The session's top-level labels and application context pass the shared
+    // public metadata rule, as on the JSON-RPC and REST session create.
+    meerkat::surface::validate_public_surface_metadata(
+        input.labels.as_ref(),
+        input.app_context.as_ref(),
+    )
+    .map_err(ToolCallError::invalid_params)?;
     // The level has one home, the build's provider params: both spellings
     // of it must agree before anything is built.
     let build_provider_params = run_build_provider_params(&input)?;
@@ -6064,6 +6892,259 @@ mod tests {
         );
     }
 
+    /// Through the MCP server's own door (`meerkat_run`, on the composition
+    /// `rkat-mcp` starts with: the built-in tools and the shell on): a run
+    /// with nothing said is built as the host builds a session, and its
+    /// model's schedule that creates a session is stored as before. A run
+    /// with the shell off, or with the built-in tools off, is under a
+    /// restriction the created session would not be under: its schedule is
+    /// refused and nothing is stored. The server's own list tool shows the
+    /// stored one with its on-demand target, and its delete tool ends it.
+    #[tokio::test]
+    async fn a_run_created_without_the_shell_schedules_no_session_on_the_mcp_server() {
+        for (case, switches, stored) in [
+            ("a run with nothing said", json!({}), 1),
+            (
+                "a run with the shell off",
+                json!({ "builtin_config": { "enable_shell": false } }),
+                0,
+            ),
+            (
+                "a run with the built-in tools off",
+                json!({ "enable_builtins": false }),
+                0,
+            ),
+        ] {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let client = Arc::new(ToolCallScriptLlmClient::default());
+            let state = MeerkatMcpState::new_with_bootstrap_options_and_llm(
+                RuntimeBootstrap {
+                    realm: meerkat_core::RealmConfig {
+                        selection: RealmSelection::Explicit {
+                            realm_id: "mcp-session-creation-door".to_string(),
+                        },
+                        instance_id: None,
+                        backend_hint: Some("sqlite".to_string()),
+                        state_root: Some(temp.path().to_path_buf()),
+                    },
+                    context: meerkat_core::ContextConfig {
+                        user_config_root: Some(temp.path().join("user")),
+                        ..Default::default()
+                    },
+                },
+                false,
+                Some(Arc::clone(&client) as Arc<dyn meerkat::LlmClient>),
+                None,
+            )
+            .await
+            .expect("MCP realm bootstrap");
+            client.arm_call(
+                "meerkat_schedule_create",
+                json!({
+                    "name": "a fresh session",
+                    "trigger": {
+                        "type": "once",
+                        "due_at_utc":
+                            (chrono::Utc::now() + chrono::Duration::days(1)).to_rfc3339(),
+                    },
+                    "target": {
+                        "target_kind": "session",
+                        "type": "materialize_on_demand_session",
+                        "create": { "model": "claude-sonnet-4-5" },
+                        "action": { "type": "prompt", "prompt": "Run the report." }
+                    }
+                }),
+            );
+            let mut input = json!({
+                "prompt": "Schedule the report.",
+                "model": "claude-sonnet-4-5",
+                "provider": "anthropic",
+            });
+            for (member, value) in switches.as_object().expect("switches are an object") {
+                input[member.as_str()] = value.clone();
+            }
+            Box::pin(handle_tools_call(&state, "meerkat_run", &input))
+                .await
+                .unwrap_or_else(|error| panic!("{case}: meerkat_run: {error:?}"));
+            assert!(
+                client
+                    .requests()
+                    .first()
+                    .is_some_and(|offered| offered.contains("meerkat_schedule_create")),
+                "{case}: the run's model is offered the schedule tools: {:?}",
+                client.requests()
+            );
+            let schedules = state
+                .schedule_service
+                .list()
+                .await
+                .expect("the schedules are read");
+            assert_eq!(schedules.len(), stored, "{case}: {schedules:?}");
+
+            if stored == 1 {
+                // The server's own door: what an operator lists and deletes.
+                let listed = unwrap_payload(
+                    Box::pin(handle_tools_call(
+                        &state,
+                        "meerkat_schedule_list",
+                        &json!({}),
+                    ))
+                    .await
+                    .expect("the server's list tool answers"),
+                );
+                let row = &listed["schedules"][0];
+                assert_eq!(
+                    row["target"]["type"], "materialize_on_demand_session",
+                    "the field an operator looks for: {listed}"
+                );
+                Box::pin(handle_tools_call(
+                    &state,
+                    "meerkat_schedule_delete",
+                    &json!({ "schedule_id": row["schedule_id"] }),
+                ))
+                .await
+                .expect("the server's delete tool answers");
+                assert!(
+                    state
+                        .schedule_service
+                        .list()
+                        .await
+                        .expect("the schedules are read")
+                        .is_empty(),
+                    "the deleted schedule is listed no more"
+                );
+            }
+        }
+    }
+
+    /// On the MCP server a session's schedule whose target is a session
+    /// created on demand is refused unless the dispatch carries the host's
+    /// own statements about that session, which a turn dispatched here
+    /// carries none of: by a create and by an update of one the host wrote.
+    /// Nothing is written for it. The host's own call, of no session's turn,
+    /// writes one as before.
+    #[tokio::test]
+    async fn a_sessions_schedule_that_creates_a_session_is_refused_on_the_mcp_server() {
+        use meerkat_core::AgentToolDispatcher as _;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let state = MeerkatMcpState::new_with_bootstrap_and_test_client(
+            RuntimeBootstrap {
+                realm: meerkat_core::RealmConfig {
+                    selection: RealmSelection::Explicit {
+                        realm_id: "mcp-session-creation".to_string(),
+                    },
+                    instance_id: None,
+                    backend_hint: Some("sqlite".to_string()),
+                    state_root: Some(temp.path().to_path_buf()),
+                },
+                context: meerkat_core::ContextConfig {
+                    user_config_root: Some(temp.path().join("user")),
+                    ..Default::default()
+                },
+            },
+            false,
+        )
+        .await
+        .expect("MCP realm bootstrap");
+        let tools = ScheduleToolDispatcher::new(state.schedule_service.clone());
+        let writer = meerkat_core::ToolDispatchContext::default()
+            .with_runtime_identity(meerkat_core::types::SessionId::new(), None);
+        let fresh = serde_json::json!({
+            "name": "a fresh session",
+            "trigger": {
+                "type": "once",
+                "due_at_utc": (chrono::Utc::now() + chrono::Duration::days(1)).to_rfc3339(),
+            },
+            "target": {
+                "target_kind": "session",
+                "type": "materialize_on_demand_session",
+                "create": { "model": "gpt-5.4" },
+                "action": { "type": "prompt", "prompt": "Run the report." }
+            }
+        });
+        let raw = |args: &serde_json::Value| {
+            serde_json::value::RawValue::from_string(args.to_string()).expect("tool arguments")
+        };
+        let refused_session_creation =
+            |answer: &Result<meerkat_core::ToolDispatchOutcome, meerkat_core::ToolError>| {
+                matches!(
+                    answer,
+                    Err(meerkat_core::ToolError::PolicyDenied { denial })
+                        if denial.code == "schedule_session_creation_not_allowed"
+                )
+            };
+
+        let args = raw(&fresh);
+        let created = tools
+            .dispatch_with_context(
+                meerkat_core::types::ToolCallView {
+                    id: "a-sessions-write",
+                    name: "meerkat_schedule_create",
+                    args: &args,
+                },
+                &writer,
+            )
+            .await;
+        assert!(
+            refused_session_creation(&created),
+            "a session's schedule that creates a session is refused: {created:?}"
+        );
+        assert!(
+            state
+                .schedule_service
+                .list()
+                .await
+                .expect("the schedules are read")
+                .is_empty(),
+            "nothing is stored"
+        );
+
+        let hosts = tools
+            .dispatch(meerkat_core::types::ToolCallView {
+                id: "the-hosts-write",
+                name: "meerkat_schedule_create",
+                args: &args,
+            })
+            .await
+            .expect("the host's own call writes one");
+        let hosts: serde_json::Value =
+            serde_json::from_str(&hosts.result.text_content()).expect("the created schedule");
+        let stored = state
+            .schedule_service
+            .list()
+            .await
+            .expect("the schedules are read");
+        assert_eq!(stored.len(), 1);
+        let args = raw(&serde_json::json!({
+            "schedule_id": hosts["schedule_id"],
+            "name": "renamed",
+        }));
+        let updated = tools
+            .dispatch_with_context(
+                meerkat_core::types::ToolCallView {
+                    id: "a-sessions-write",
+                    name: "meerkat_schedule_update",
+                    args: &args,
+                },
+                &writer,
+            )
+            .await;
+        assert!(
+            refused_session_creation(&updated),
+            "a session's update of a schedule that creates a session is refused: {updated:?}"
+        );
+        assert_eq!(
+            state
+                .schedule_service
+                .list()
+                .await
+                .expect("the schedules are read"),
+            stored,
+            "the schedule is as it was"
+        );
+    }
+
     /// A pre-0.8.37 `[model_fallback] enabled = true` document (no chain)
     /// loads with fallback disabled instead of refusing startup, and loading
     /// never rewrites it.
@@ -6432,18 +7513,28 @@ mod tests {
         assert!(ingress.logical_router(&session).await.is_some());
     }
 
-    /// Records the tool names each model request offers. An armed tool call
+    /// Records the tool names each model request offers and the text of the
+    /// tool result a request carries as its last message. An armed tool call
     /// is asked for by the next request only; every other request answers
     /// `ok`.
     #[derive(Default)]
     struct ToolCallScriptLlmClient {
         tool_names: std::sync::Mutex<Vec<Vec<String>>>,
+        tool_results: std::sync::Mutex<Vec<String>>,
         armed_call: std::sync::Mutex<Option<(String, Value)>>,
     }
 
     impl ToolCallScriptLlmClient {
         fn arm_call(&self, name: &str, args: Value) {
             *self.armed_call.lock().expect("armed call lock") = Some((name.to_string(), args));
+        }
+
+        /// The text of each tool result the model was sent, in order.
+        fn returned_tool_results(&self) -> Vec<String> {
+            self.tool_results
+                .lock()
+                .expect("recorded tool results lock")
+                .clone()
         }
 
         fn requests(&self) -> Vec<std::collections::BTreeSet<String>> {
@@ -6479,6 +7570,14 @@ mod tests {
                         .map(|tool| tool.name.to_string())
                         .collect(),
                 );
+            if let Some(meerkat_core::Message::ToolResults { results, .. }) =
+                request.messages.last()
+            {
+                self.tool_results
+                    .lock()
+                    .expect("recorded tool results lock")
+                    .extend(results.iter().map(meerkat_core::ToolResult::text_content));
+            }
             let usage = LlmEvent::UsageUpdate {
                 usage: meerkat_core::TurnUsage::host_declared(
                     provider_for_successful_mcp_test_model(&request.model),
@@ -7417,6 +8516,230 @@ mod tests {
             "a resumed mob member's guard is scoped to its member"
         );
         assert!(owners.retract(&parsed, &Arc::downgrade(&owner)));
+    }
+
+    /// What a mob says, after "could not be woken: ", of a dormant member
+    /// whose build was refused for its reasoning effort level: the text the
+    /// mob crate's row
+    /// `a_session_keyed_wake_whose_build_is_refused_for_its_level_answers`
+    /// observed, with this member and session.
+    #[cfg(unix)]
+    fn mob_wake_failure_text(session_id: &str) -> String {
+        format!(
+            "member worker-1 failed to restore session {session_id}: failed to restore durable \
+             session '{session_id}': session error: agent error: reasoning effort 'max' is not \
+             supported by anthropic model 'test-anthropic-default' on anthropic_api/messages; \
+             supported: low, medium, high"
+        )
+    }
+
+    /// The owner of a mob member's session whose wake fails the way a mob
+    /// reports a member it could not wake to a session-keyed caller: an
+    /// internal agent error whose text names the cause (a refusal that can
+    /// be retried is answered session busy instead; not this case).
+    #[cfg(unix)]
+    struct FailingSessionOwner;
+
+    #[cfg(unix)]
+    impl meerkat_core::session_owner_wake::SessionOwnerWaker for FailingSessionOwner {
+        fn wake_session_owner(
+            &self,
+            session_id: &meerkat::SessionId,
+        ) -> meerkat_core::session_owner_wake::SessionOwnerWakeFuture {
+            let session_id = session_id.clone();
+            Box::pin(async move {
+                Err(SessionError::Agent(
+                    meerkat_core::error::AgentError::InternalError(format!(
+                        "the member owning session {session_id} could not be woken: {}",
+                        mob_wake_failure_text(&session_id.to_string())
+                    )),
+                ))
+            })
+        }
+    }
+
+    #[cfg(unix)]
+    fn answer_lines(answer: &Result<Value, ToolCallError>) -> String {
+        match answer {
+            Ok(value) => format!("Ok({value})"),
+            Err(error) => format!(
+                "code={} message={:?} data={}",
+                error.code,
+                error.message,
+                error
+                    .data
+                    .as_ref()
+                    .map_or_else(|| "none".to_string(), Value::to_string)
+            ),
+        }
+    }
+
+    /// The session of a mob member that is not live, owned by a mob in this
+    /// process: what `meerkat_resume` answers when it carries a reasoning
+    /// effort level, and what `meerkat_comms_send` answers, for an owner
+    /// whose wake fails and for one whose wake answers ready.
+    ///
+    /// The failing owner's arms are the row's subject: a wake that fails as
+    /// a mob's wake fails for a member whose build is refused for its level.
+    /// The ready owner is scripted and builds nothing, so its arms hold what
+    /// the server does after such a wake (its own resume builds the
+    /// session), not what a real mob's successful wake leaves.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_dormant_members_session_with_a_refused_level_answers() {
+        let member = meerkat_core::MobMemberBinding {
+            mob_id: "mob".into(),
+            role: "worker".into(),
+            member: "worker-1".into(),
+        };
+        let owners = meerkat_core::session_owner_wake::SessionOwnerWakeRegistry::global();
+        let calls = [
+            ("meerkat_resume direct", json!({"reasoning_effort": "high"})),
+            (
+                "meerkat_resume nested",
+                json!({"provider_params": {"reasoning_effort": "high"}}),
+            ),
+            ("meerkat_resume plain", json!({})),
+            ("meerkat_comms_send", json!(null)),
+        ];
+        for wake in ["ready", "fails"] {
+            for (call, level) in &calls {
+                // A fresh state and session for each call.
+                let (state, session_id) = state_with_persisted_session_for(
+                    Arc::new(TestClient::for_provider(Provider::Anthropic)),
+                    Some(member.clone()),
+                )
+                .await;
+                let parsed = meerkat::SessionId::parse(&session_id).expect("valid session id");
+                let owner: Arc<dyn meerkat_core::session_owner_wake::SessionOwnerWaker> =
+                    if wake == "ready" {
+                        Arc::new(HoldingSessionOwner)
+                    } else {
+                        Arc::new(FailingSessionOwner)
+                    };
+                owners.publish(parsed.clone(), Arc::downgrade(&owner));
+                let live_before = state.service.has_live_session(&parsed).await;
+                let answer = if *call == "meerkat_comms_send" {
+                    Box::pin(handle_tools_call(
+                        &state,
+                        "meerkat_comms_send",
+                        &json!({
+                            "session_id": session_id,
+                            "kind": "peer_message",
+                            "to": "550e8400-e29b-41d4-a716-446655440000",
+                            "body": "hi",
+                        }),
+                    ))
+                    .await
+                } else {
+                    let mut input = json!({ "session_id": session_id, "prompt": "level turn" });
+                    for (key, value) in level.as_object().expect("an object") {
+                        input[key.as_str()] = value.clone();
+                    }
+                    Box::pin(handle_tools_call(&state, "meerkat_resume", &input)).await
+                };
+                let live_after = state.service.has_live_session(&parsed).await.ok();
+                println!(
+                    "OBSERVED [owner wake {wake}] {call}: {} (live before: {live_before:?}, \
+                     after: {live_after:?})",
+                    answer_lines(&answer)
+                );
+                assert_eq!(
+                    live_before.ok(),
+                    Some(false),
+                    "{wake}, {call}: the member's session is not live"
+                );
+                let names_a_level = level.as_object().is_some_and(|level| !level.is_empty());
+                match (wake, *call) {
+                    // The three "ready" arms: the scripted owner answers
+                    // ready and builds nothing, so the server's own resume
+                    // builds the member's session. They hold what the server
+                    // answers after a wake that built nothing, and say
+                    // nothing of a mob that builds its member when it wakes
+                    // it: no row covers a real mob's successful wake
+                    // followed by a resume that carries a level.
+                    //
+                    // Here the resume's own build judges the level it
+                    // carries and refuses it typed: the levels of the
+                    // member's route are not known
+                    // (`supported_levels_unknown`).
+                    ("ready", _) if names_a_level => {
+                        let refused = answer.expect_err("the route's levels are not known");
+                        let data = refused.data.clone().unwrap_or_default();
+                        assert_eq!(
+                            (
+                                refused.code,
+                                data["kind"].as_str(),
+                                data["reasoning_effort_refusal"]["requested"].as_str(),
+                                data["reasoning_effort_refusal"]["reason"].as_str(),
+                                data["retryable"].as_bool(),
+                                live_after,
+                            ),
+                            (
+                                -32602,
+                                Some("reasoning_effort_refused"),
+                                Some("high"),
+                                Some("supported_levels_unknown"),
+                                Some(false),
+                                Some(false),
+                            ),
+                            "{call}: (code, kind, requested, reason, retryable, live after): \
+                             {refused:?}"
+                        );
+                    }
+                    // A plain resume after the same scripted wake: the
+                    // server's resume builds the session and runs the turn.
+                    // Like the module's other cold resumes, accept the one
+                    // post-turn failure this harness can raise, the
+                    // peer-ingress refresh.
+                    ("ready", "meerkat_resume plain") => match &answer {
+                        Ok(_) => assert_eq!(
+                            live_after,
+                            Some(true),
+                            "{call}: the resume built the session"
+                        ),
+                        Err(error) => assert!(
+                            error
+                                .message
+                                .contains("failed to update peer ingress context"),
+                            "{call}: the resume reaches its post-completion boundary: {answer:?}"
+                        ),
+                    },
+                    // The scripted owner built nothing, so no comms runtime
+                    // exists: like the two arms above, this one says nothing
+                    // of a mob that builds its member when it wakes it.
+                    ("ready", _) => {
+                        let refused = answer.expect_err("no comms runtime");
+                        let data = refused.data.clone().unwrap_or_default();
+                        assert_eq!(
+                            (refused.code, data["code"].as_str()),
+                            (-32603, Some("session_not_found_or_comms_disabled")),
+                            "{call}: {refused:?}"
+                        );
+                    }
+                    // The wake failed: every call is answered the wake's
+                    // failure, a text with no data, whatever it carries.
+                    _ => {
+                        let refused = answer.expect_err("the owner's wake failed");
+                        assert_eq!(
+                            (refused.code, refused.data.clone(), live_after),
+                            (-32013, None, Some(false)),
+                            "{wake}, {call}: (code, data, live after): {refused:?}"
+                        );
+                        assert_eq!(
+                            refused.message,
+                            format!(
+                                "agent error: Internal error: the member owning session \
+                                 {session_id} could not be woken: {}",
+                                mob_wake_failure_text(&session_id)
+                            ),
+                            "{wake}, {call}"
+                        );
+                    }
+                }
+                assert!(owners.retract(&parsed, &Arc::downgrade(&owner)));
+            }
+        }
     }
 
     /// A standalone resume of a mob member's session that no mob in this
@@ -9407,6 +10730,4380 @@ mod tests {
         );
     }
 
+    /// The committed config envelope (`config`, `generation`, ...), read
+    /// through the `meerkat_config` tool.
+    async fn config_tool_get(state: &MeerkatMcpState) -> Value {
+        let payload = Box::pin(handle_tools_call(
+            state,
+            "meerkat_config",
+            &json!({"action": "get"}),
+        ))
+        .await
+        .expect("config get");
+        let text = payload["content"][0]["text"]
+            .as_str()
+            .expect("config payload text");
+        serde_json::from_str::<Value>(text).expect("config payload json")
+    }
+
+    /// A `meerkat_config` write that would change a host's own listener
+    /// settings is refused as invalid params with the typed refusal, and the
+    /// committed envelope reads as it did before the call.
+    async fn assert_listener_settings_write_refused(state: &MeerkatMcpState, arguments: Value) {
+        let before = config_tool_get(state).await;
+        let refused = Box::pin(handle_tools_call(state, "meerkat_config", &arguments))
+            .await
+            .expect_err("a config tool write cannot change a host's own listener settings");
+        assert_eq!(refused.code, -32602, "{arguments}: {}", refused.message);
+        assert_eq!(
+            refused.data,
+            Some(json!({"type": "confinement_administration_required"})),
+            "{arguments}: {}",
+            refused.message
+        );
+        assert_eq!(
+            config_tool_get(state).await,
+            before,
+            "{arguments}: a refused write commits nothing"
+        );
+    }
+
+    /// A server over realm documents on disk, serving `head`. Returns the
+    /// state and the path of the head realm's document.
+    async fn config_state_over_realm_documents(
+        temp: &tempfile::TempDir,
+        documents: &[(&str, &str)],
+        head: &str,
+    ) -> (MeerkatMcpState, PathBuf) {
+        let realms = temp.path().join("realms");
+        for (realm, text) in documents {
+            let path = meerkat_store::realm_paths_in(&realms, realm).config_path;
+            std::fs::create_dir_all(path.parent().expect("realm dir")).expect("realm dir");
+            std::fs::write(&path, text).expect("realm document");
+        }
+        let mut bootstrap = RuntimeBootstrap::default();
+        bootstrap.realm.selection = RealmSelection::Explicit {
+            realm_id: head.into(),
+        };
+        bootstrap.realm.state_root = Some(realms.clone());
+        bootstrap.context.user_config_root = Some(temp.path().join("user"));
+        let state = MeerkatMcpState::new_with_bootstrap_options_and_llm(
+            bootstrap,
+            false,
+            Some(Arc::new(TestClient::for_provider(Provider::Anthropic))),
+            None,
+        )
+        .await
+        .expect("the head realm serves");
+        let head_document = meerkat_store::realm_paths_in(&realms, head).config_path;
+        (state, head_document)
+    }
+
+    /// A `meerkat_config` patch cannot change the address the REST server
+    /// binds: its host.
+    #[tokio::test]
+    async fn test_config_patch_cannot_change_the_rest_bind_host() {
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let state = MeerkatMcpState::new_with_store(store).await;
+        assert_listener_settings_write_refused(
+            &state,
+            json!({"action": "patch", "patch": {"rest": {"host": "0.0.0.0"}}}),
+        )
+        .await;
+    }
+
+    /// A `meerkat_config` patch cannot change the address the REST server
+    /// binds: its port.
+    #[tokio::test]
+    async fn test_config_patch_cannot_change_the_rest_port() {
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let state = MeerkatMcpState::new_with_store(store).await;
+        assert_listener_settings_write_refused(
+            &state,
+            json!({"action": "patch", "patch": {"rest": {"port": 9090}}}),
+        )
+        .await;
+    }
+
+    /// A `meerkat_config` full replace cannot change the REST server's bind
+    /// host: the document it read back with only that member changed is
+    /// refused.
+    #[tokio::test]
+    async fn test_config_set_cannot_change_the_rest_bind_host() {
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let state = MeerkatMcpState::new_with_store(store).await;
+        let mut config = config_tool_get(&state).await["config"].clone();
+        config["rest"]["host"] = json!("0.0.0.0");
+        assert_listener_settings_write_refused(&state, json!({"action": "set", "config": config}))
+            .await;
+    }
+
+    /// A `meerkat_config` patch cannot add a member under `rest` that this
+    /// build's config schema does not know: the rule is on the path, so the
+    /// realm document on disk keeps its bytes.
+    #[tokio::test]
+    async fn test_config_patch_cannot_add_an_unknown_member_under_rest() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let text = "[realm.solo]\n";
+        let (state, document) =
+            config_state_over_realm_documents(&temp, &[("solo", text)], "solo").await;
+        assert_listener_settings_write_refused(
+            &state,
+            json!({
+                "action": "patch",
+                "patch": {"rest": {"member_this_schema_does_not_know": ["https://example.test"]}}
+            }),
+        )
+        .await;
+        assert_eq!(std::fs::read_to_string(&document).expect("solo"), text);
+    }
+
+    /// A `meerkat_config` patch cannot remove the realm document's `[rest]`
+    /// table (which would put the bind address back to the default).
+    #[tokio::test]
+    async fn test_config_patch_cannot_remove_the_rest_table() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let text = "[realm.solo]\n\n[rest]\nhost = \"127.0.0.1\"\nport = 8111\n";
+        let (state, document) =
+            config_state_over_realm_documents(&temp, &[("solo", text)], "solo").await;
+        assert_eq!(
+            config_tool_get(&state).await["config"]["rest"]["port"],
+            8111
+        );
+        assert_listener_settings_write_refused(
+            &state,
+            json!({"action": "patch", "patch": {"rest": null}}),
+        )
+        .await;
+        assert_eq!(std::fs::read_to_string(&document).expect("solo"), text);
+    }
+
+    /// In a realm whose parent states `[rest]`, a `meerkat_config` write is
+    /// judged against the served realm's own document: it can neither state
+    /// a table of its own nor restate the parent's in the child document.
+    #[tokio::test]
+    async fn test_config_writes_cannot_change_rest_in_a_child_realm() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let team_text = "[realm.team]\nparent = \"org\"\n";
+        let org_text = "[realm.org]\n\n[rest]\nhost = \"127.0.0.1\"\nport = 9000\n";
+        let (state, team_document) = config_state_over_realm_documents(
+            &temp,
+            &[("org", org_text), ("team", team_text)],
+            "team",
+        )
+        .await;
+        for patch in [
+            json!({"rest": {"port": 9001}}),
+            json!({"rest": {"host": "127.0.0.1", "port": 9000}}),
+        ] {
+            assert_listener_settings_write_refused(
+                &state,
+                json!({"action": "patch", "patch": patch}),
+            )
+            .await;
+        }
+        assert_eq!(
+            std::fs::read_to_string(&team_document).expect("team"),
+            team_text
+        );
+    }
+
+    /// A `meerkat_config` write that does not touch listener settings still
+    /// commits: a patch of another key, and a full replace that carries the
+    /// `rest` table as it was read.
+    #[tokio::test]
+    async fn test_config_writes_outside_listener_settings_still_commit() {
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let state = MeerkatMcpState::new_with_store(store).await;
+        let before = config_tool_get(&state).await;
+
+        Box::pin(handle_tools_call(
+            &state,
+            "meerkat_config",
+            &json!({"action": "patch", "patch": {"max_tokens": 2048}}),
+        ))
+        .await
+        .expect("a patch of another key commits");
+        let patched = config_tool_get(&state).await;
+        assert_eq!(patched["config"]["max_tokens"], 2048);
+
+        let mut config = patched["config"].clone();
+        config["max_tokens"] = json!(4096);
+        Box::pin(handle_tools_call(
+            &state,
+            "meerkat_config",
+            &json!({"action": "set", "config": config}),
+        ))
+        .await
+        .expect("a full replace that carries the rest table unchanged commits");
+        let replaced = config_tool_get(&state).await;
+        assert_eq!(replaced["config"]["max_tokens"], 4096);
+        assert_eq!(replaced["config"]["rest"], before["config"]["rest"]);
+    }
+
+    /// A `meerkat_config` patch that restates the committed `rest` table
+    /// unchanged still commits, with the other keys it names.
+    #[tokio::test]
+    async fn test_config_patch_restating_the_committed_rest_table_commits() {
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let state = MeerkatMcpState::new_with_store(store).await;
+        let before = config_tool_get(&state).await;
+        let rest = before["config"]["rest"].clone();
+        assert!(rest.is_object(), "{rest}");
+
+        Box::pin(handle_tools_call(
+            &state,
+            "meerkat_config",
+            &json!({"action": "patch", "patch": {"rest": rest, "max_tokens": 1024}}),
+        ))
+        .await
+        .expect("a patch that restates the committed rest table commits");
+        let after = config_tool_get(&state).await;
+        assert_eq!(after["config"]["max_tokens"], 1024);
+        assert_eq!(after["config"]["rest"], before["config"]["rest"]);
+    }
+
+    /// The config runtime's own write (the door under the operator's
+    /// commands) still changes the REST bind host, and the tool then judges
+    /// against that committed value: a patch that carries it commits.
+    #[tokio::test]
+    async fn test_config_runtime_write_still_changes_the_rest_bind_host() {
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let state = MeerkatMcpState::new_with_store(store).await;
+
+        state
+            .config_runtime
+            .patch(ConfigDelta(json!({"rest": {"host": "0.0.0.0"}})), None)
+            .await
+            .expect("the runtime's own write commits");
+        let committed = config_tool_get(&state).await;
+        assert_eq!(committed["config"]["rest"]["host"], "0.0.0.0");
+
+        Box::pin(handle_tools_call(
+            &state,
+            "meerkat_config",
+            &json!({
+                "action": "patch",
+                "patch": {"rest": {"host": "0.0.0.0"}, "max_tokens": 1024}
+            }),
+        ))
+        .await
+        .expect("a patch that carries the committed bind host commits");
+        let after = config_tool_get(&state).await;
+        assert_eq!(after["config"]["max_tokens"], 1024);
+        assert_eq!(after["config"]["rest"], committed["config"]["rest"]);
+    }
+
+    /// A `meerkat_config` patch cannot change the `mob_host` table: the host
+    /// acceptor's bind address, its pre-auth bounds, its identity directory.
+    #[tokio::test]
+    async fn test_config_patch_cannot_change_the_mob_host_table() {
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let state = MeerkatMcpState::new_with_store(store).await;
+        for patch in [
+            json!({"mob_host": {"listen_tcp": "0.0.0.0:4900"}}),
+            json!({"mob_host": {"max_connections": 100_000}}),
+            json!({"mob_host": {"identity_dir": "/tmp/another-identity"}}),
+        ] {
+            assert_listener_settings_write_refused(
+                &state,
+                json!({"action": "patch", "patch": patch}),
+            )
+            .await;
+        }
+    }
+
+    /// A `meerkat_config` full replace cannot change the `mob_host` table.
+    #[tokio::test]
+    async fn test_config_set_cannot_change_the_mob_host_table() {
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let state = MeerkatMcpState::new_with_store(store).await;
+        let mut config = config_tool_get(&state).await["config"].clone();
+        config["mob_host"]["listen_tcp"] = json!("0.0.0.0:4900");
+        assert_listener_settings_write_refused(&state, json!({"action": "set", "config": config}))
+            .await;
+    }
+
+    /// A `meerkat_config` patch cannot change the `comms` table: whether peer
+    /// traffic is authenticated, the transport mode, and the listeners' bind
+    /// and advertised addresses.
+    #[tokio::test]
+    async fn test_config_patch_cannot_change_the_comms_table() {
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let state = MeerkatMcpState::new_with_store(store).await;
+        for patch in [
+            json!({"comms": {"require_peer_auth": false}}),
+            json!({"comms": {"mode": "tcp", "address": "0.0.0.0:4951"}}),
+            json!({"comms": {"event_address": "0.0.0.0:4950"}}),
+            json!({"comms": {"advertise_address": "example.test:4951"}}),
+            json!({"comms": {"auth": "ed25519"}}),
+        ] {
+            assert_listener_settings_write_refused(
+                &state,
+                json!({"action": "patch", "patch": patch}),
+            )
+            .await;
+        }
+    }
+
+    /// A `meerkat_config` full replace cannot change the `comms` table.
+    #[tokio::test]
+    async fn test_config_set_cannot_change_the_comms_table() {
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let state = MeerkatMcpState::new_with_store(store).await;
+        let mut config = config_tool_get(&state).await["config"].clone();
+        config["comms"]["require_peer_auth"] = json!(false);
+        assert_listener_settings_write_refused(&state, json!({"action": "set", "config": config}))
+            .await;
+    }
+
+    /// A `meerkat_config` patch that restates the committed `mob_host` and
+    /// `comms` tables unchanged (their unset members as `null`) still
+    /// commits, with the other keys it names.
+    #[tokio::test]
+    async fn test_config_patch_restating_the_committed_mob_host_and_comms_tables_commits() {
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let state = MeerkatMcpState::new_with_store(store).await;
+        let before = config_tool_get(&state).await;
+        let mob_host = before["config"]["mob_host"].clone();
+        let comms = before["config"]["comms"].clone();
+        assert!(mob_host.is_object() && comms.is_object(), "{before}");
+
+        Box::pin(handle_tools_call(
+            &state,
+            "meerkat_config",
+            &json!({
+                "action": "patch",
+                "patch": {"mob_host": mob_host, "comms": comms, "max_tokens": 1024}
+            }),
+        ))
+        .await
+        .expect("a patch that restates the committed tables commits");
+        let after = config_tool_get(&state).await;
+        assert_eq!(after["config"]["max_tokens"], 1024);
+        assert_eq!(after["config"]["mob_host"], before["config"]["mob_host"]);
+        assert_eq!(after["config"]["comms"], before["config"]["comms"]);
+    }
+
+    /// A `meerkat_config` write that names no listener key cannot bring
+    /// another realm's `[rest]` into force: a patch that gives the served
+    /// realm a parent whose document states `[rest]` is refused, and the
+    /// realm document keeps its bytes.
+    #[tokio::test]
+    async fn test_config_write_cannot_add_a_parent_edge_that_changes_the_composed_rest_table() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let team_text = "[realm.team]\n";
+        let edge_text = "[realm.edge]\n\n[rest]\nhost = \"0.0.0.0\"\nport = 9000\n";
+        let (state, team_document) = config_state_over_realm_documents(
+            &temp,
+            &[("edge", edge_text), ("team", team_text)],
+            "team",
+        )
+        .await;
+        assert_listener_settings_write_refused(
+            &state,
+            json!({"action": "patch", "patch": {"realm": {"team": {"parent": "edge"}}}}),
+        )
+        .await;
+        assert_eq!(
+            std::fs::read_to_string(&team_document).expect("team"),
+            team_text
+        );
+    }
+
+    /// A `meerkat_config` write cannot cut the served realm from the parent
+    /// whose `[rest]` it composes: a patch that removes the parent edge is
+    /// refused, and the realm document keeps its bytes.
+    #[tokio::test]
+    async fn test_config_write_cannot_drop_a_parent_edge_that_changes_the_composed_rest_table() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let team_text = "[realm.team]\nparent = \"org\"\n";
+        let org_text = "[realm.org]\n\n[rest]\nhost = \"127.0.0.1\"\nport = 9000\n";
+        let (state, team_document) = config_state_over_realm_documents(
+            &temp,
+            &[("org", org_text), ("team", team_text)],
+            "team",
+        )
+        .await;
+        assert_listener_settings_write_refused(
+            &state,
+            json!({"action": "patch", "patch": {"realm": {"team": {"parent": null}}}}),
+        )
+        .await;
+        assert_eq!(
+            std::fs::read_to_string(&team_document).expect("team"),
+            team_text
+        );
+    }
+
+    /// A `meerkat_config` write that gives the served realm a parent whose
+    /// document states no listener settings still commits.
+    #[tokio::test]
+    async fn test_config_write_can_add_a_parent_edge_that_keeps_the_composed_listener_settings() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let team_text = "[realm.team]\n";
+        let plain_text = "[realm.plain]\n\nmax_tokens = 512\n";
+        let (state, team_document) = config_state_over_realm_documents(
+            &temp,
+            &[("plain", plain_text), ("team", team_text)],
+            "team",
+        )
+        .await;
+        Box::pin(handle_tools_call(
+            &state,
+            "meerkat_config",
+            &json!({"action": "patch", "patch": {"realm": {"team": {"parent": "plain"}}}}),
+        ))
+        .await
+        .expect("a parent edge that keeps the composed listener settings commits");
+        let committed = std::fs::read_to_string(&team_document).expect("team");
+        assert!(committed.contains("parent = \"plain\""), "{committed}");
+    }
+
+    /// In a realm whose parent states `[rest]`, the unchanged round trip
+    /// still commits: the document the tool read back, replaced with only
+    /// another key changed.
+    #[tokio::test]
+    async fn test_config_round_trip_commits_in_a_realm_whose_parent_states_rest() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let team_text = "[realm.team]\nparent = \"org\"\n";
+        let org_text = "[realm.org]\n\n[rest]\nhost = \"127.0.0.1\"\nport = 9000\n";
+        let (state, team_document) = config_state_over_realm_documents(
+            &temp,
+            &[("org", org_text), ("team", team_text)],
+            "team",
+        )
+        .await;
+        let before = config_tool_get(&state).await;
+        let mut config = before["config"].clone();
+        config["max_tokens"] = json!(2048);
+
+        Box::pin(handle_tools_call(
+            &state,
+            "meerkat_config",
+            &json!({"action": "set", "config": config}),
+        ))
+        .await
+        .expect("the unchanged round trip commits");
+        let after = config_tool_get(&state).await;
+        assert_eq!(after["config"]["max_tokens"], 2048);
+        assert_eq!(after["config"]["rest"], before["config"]["rest"]);
+        let committed = std::fs::read_to_string(&team_document).expect("team");
+        assert!(committed.contains("parent = \"org\""), "{committed}");
+    }
+
+    /// A `meerkat_config` full replace that omits the `rest` table cannot
+    /// put a committed bind host back to the default: it is refused and the
+    /// committed table stands.
+    #[tokio::test]
+    async fn test_config_set_that_omits_the_rest_table_cannot_reset_it() {
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let state = MeerkatMcpState::new_with_store(store).await;
+        state
+            .config_runtime
+            .patch(ConfigDelta(json!({"rest": {"host": "0.0.0.0"}})), None)
+            .await
+            .expect("the runtime's own write commits");
+        let committed = config_tool_get(&state).await;
+        let mut config = committed["config"].clone();
+        config
+            .as_object_mut()
+            .expect("config object")
+            .remove("rest");
+
+        let refused = Box::pin(handle_tools_call(
+            &state,
+            "meerkat_config",
+            &json!({"action": "set", "config": config}),
+        ))
+        .await
+        .expect_err("a full replace that omits the rest table is refused");
+        assert_eq!(refused.code, -32602, "{}", refused.message);
+        assert_eq!(config_tool_get(&state).await, committed);
+    }
+
+    /// A `meerkat_config` patch that is not a JSON object (it would replace
+    /// the document as a whole) cannot put a committed bind host back to the
+    /// default: it is refused and the committed table stands.
+    #[tokio::test]
+    async fn test_config_patch_that_is_not_an_object_cannot_reset_the_rest_table() {
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let state = MeerkatMcpState::new_with_store(store).await;
+        state
+            .config_runtime
+            .patch(ConfigDelta(json!({"rest": {"host": "0.0.0.0"}})), None)
+            .await
+            .expect("the runtime's own write commits");
+        let committed = config_tool_get(&state).await;
+
+        Box::pin(handle_tools_call(
+            &state,
+            "meerkat_config",
+            &json!({"action": "patch", "patch": []}),
+        ))
+        .await
+        .expect_err("a patch that is not an object is refused");
+        assert_eq!(config_tool_get(&state).await, committed);
+    }
+
+    /// A realm config source that commits a config write of its own, once,
+    /// the first time a composition fetches a document through it: a write
+    /// that lands after a `meerkat_config` write was judged and before it
+    /// commits. (The raw documents keep the trait's default.)
+    struct WriteDuringComposition {
+        inner: Arc<dyn meerkat_core::RealmConfigSource>,
+        runtime: Arc<meerkat_core::ConfigRuntime>,
+        written: AtomicBool,
+    }
+
+    impl WriteDuringComposition {
+        async fn write_once(&self) {
+            if !self.written.swap(true, Ordering::SeqCst) {
+                self.runtime
+                    .patch(ConfigDelta(json!({"max_tokens": 777})), None)
+                    .await
+                    .expect("the write between judgment and commit commits");
+            }
+        }
+    }
+
+    #[async_trait]
+    impl meerkat_core::RealmConfigSource for WriteDuringComposition {
+        async fn config_for_realm(
+            &self,
+            realm: &meerkat_core::connection::RealmId,
+        ) -> Result<Option<Config>, meerkat_core::ConfigError> {
+            self.write_once().await;
+            self.inner.config_for_realm(realm).await
+        }
+
+        async fn config_for_realm_with_warnings(
+            &self,
+            realm: &meerkat_core::connection::RealmId,
+        ) -> Result<Option<(Config, Vec<meerkat_core::ConfigWarning>)>, meerkat_core::ConfigError>
+        {
+            self.write_once().await;
+            self.inner.config_for_realm_with_warnings(realm).await
+        }
+
+        fn composition_lock_path(&self) -> Option<PathBuf> {
+            self.inner.composition_lock_path()
+        }
+    }
+
+    /// A `meerkat_config` write whose caller gave no `expected_generation`
+    /// is pinned to the generation it was judged at: when another write
+    /// commits between the judgment and the commit, the tool's write is
+    /// refused as a generation conflict and the other write stands.
+    #[tokio::test]
+    async fn test_config_write_is_pinned_to_the_generation_it_was_judged_at() {
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let mut state = MeerkatMcpState::new_with_store(store).await;
+        state.realm_config_source = Arc::new(WriteDuringComposition {
+            inner: Arc::clone(&state.realm_config_source),
+            runtime: Arc::clone(&state.config_runtime),
+            written: AtomicBool::new(false),
+        });
+
+        let refused = Box::pin(handle_tools_call(
+            &state,
+            "meerkat_config",
+            &json!({"action": "patch", "patch": {"max_tokens": 2048}}),
+        ))
+        .await
+        .expect_err("a write judged at an older generation does not commit");
+        assert_eq!(refused.code, -32602, "{}", refused.message);
+        assert_eq!(
+            refused.data.as_ref().map(|data| &data["type"]),
+            Some(&json!("generation_conflict")),
+            "{}",
+            refused.message
+        );
+        assert_eq!(config_tool_get(&state).await["config"]["max_tokens"], 777);
+    }
+
+    /// A `meerkat_config` write whose caller gave another generation than
+    /// the judged document's is a generation conflict at the judgment: it
+    /// cannot commit on a document it was not judged against, here the one
+    /// a write between judgment and commit would leave at exactly the
+    /// caller's generation. Nothing is written, by either write.
+    #[tokio::test]
+    async fn test_config_write_at_another_generation_than_the_judged_one_is_a_conflict() {
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let mut state = MeerkatMcpState::new_with_store(store).await;
+        let before = config_tool_get(&state).await;
+        let generation = before["generation"].as_u64().expect("config generation");
+        state.realm_config_source = Arc::new(WriteDuringComposition {
+            inner: Arc::clone(&state.realm_config_source),
+            runtime: Arc::clone(&state.config_runtime),
+            written: AtomicBool::new(false),
+        });
+
+        let refused = Box::pin(handle_tools_call(
+            &state,
+            "meerkat_config",
+            &json!({
+                "action": "patch",
+                "patch": {"max_tokens": 2048},
+                "expected_generation": generation + 1
+            }),
+        ))
+        .await
+        .expect_err("a write at another generation than the judged one does not commit");
+        assert_eq!(refused.code, -32602, "{}", refused.message);
+        assert_eq!(
+            refused.data.as_ref().map(|data| &data["type"]),
+            Some(&json!("generation_conflict")),
+            "{}",
+            refused.message
+        );
+        assert_eq!(config_tool_get(&state).await, before);
+    }
+
+    /// The realm's committed configuration document, as the config runtime
+    /// answers it.
+    async fn committed_config_document(state: &MeerkatMcpState) -> Value {
+        let snapshot = state
+            .config_runtime
+            .get()
+            .await
+            .expect("the committed configuration");
+        serde_json::to_value(snapshot.config).expect("config value")
+    }
+
+    const FIRST_SOURCE: &str = "11111111-1111-4111-8111-111111111111";
+    const SECOND_SOURCE: &str = "22222222-2222-4222-8222-222222222222";
+    const THIRD_SOURCE: &str = "33333333-3333-4333-8333-333333333333";
+
+    fn stdio_server_entry(name: &str, command: &str, args: &[&str]) -> Value {
+        json!({"name": name, "command": command, "args": args})
+    }
+
+    fn http_server_entry(name: &str) -> Value {
+        json!({"name": name, "url": "http://synthetic.invalid/mcp"})
+    }
+
+    fn hook_entry(id: &str, runtime: Value) -> Value {
+        json!({
+            "id": id,
+            "enabled": true,
+            "point": "run_started",
+            "mode": "foreground",
+            "capability": "observe",
+            "priority": 0,
+            "runtime": runtime,
+        })
+    }
+
+    fn command_hook_entry(id: &str, command: &str) -> Value {
+        hook_entry(
+            id,
+            json!({"type": "command", "command": command, "args": []}),
+        )
+    }
+
+    fn stdio_skills_entry(name: &str, source: &str, command: &str) -> Value {
+        json!({"name": name, "source_uuid": source, "type": "stdio", "command": command})
+    }
+
+    fn git_skills_entry(name: &str, source: &str, url: &str, git_ref: &str) -> Value {
+        json!({"name": name, "source_uuid": source, "type": "git", "url": url, "git_ref": git_ref})
+    }
+
+    /// The entries the state below is seeded with.
+    fn seeded_server() -> Value {
+        stdio_server_entry("existing-server", "/synthetic/server", &["serve"])
+    }
+
+    fn seeded_hook() -> Value {
+        command_hook_entry("existing-hook", "/synthetic/hook")
+    }
+
+    fn seeded_stdio_skills() -> Value {
+        stdio_skills_entry("existing-stdio-skills", FIRST_SOURCE, "/synthetic/skills")
+    }
+
+    fn seeded_git_skills() -> Value {
+        git_skills_entry(
+            "existing-git-skills",
+            SECOND_SOURCE,
+            "https://synthetic.invalid/skills.git",
+            "main",
+        )
+    }
+
+    /// A state whose realm document already holds one entry of each kind
+    /// that launches a process, and a shell program, all written by the
+    /// host's own writer.
+    async fn state_with_launching_entries() -> MeerkatMcpState {
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let state = MeerkatMcpState::new_with_store(store).await;
+        state
+            .config_runtime
+            .patch(
+                ConfigDelta(json!({
+                    "tools": {"mcp_servers": [seeded_server()]},
+                    "hooks": {"entries": [seeded_hook()]},
+                    "skills": {"repositories": [seeded_stdio_skills(), seeded_git_skills()]},
+                    "shell": {"program": "/synthetic/shell"},
+                })),
+                None,
+            )
+            .await
+            .expect("the host's own writer adds the entries");
+        state
+    }
+
+    /// A merge patch that sets the value at `pointer` (a `/section/key`
+    /// path) and nothing else.
+    fn patch_at(pointer: &str, value: Value) -> Value {
+        pointer
+            .rsplit('/')
+            .filter(|key| !key.is_empty())
+            .fold(value, |inner, key| json!({ key: inner }))
+    }
+
+    /// Each case of `cases` on a state of its own: the config tool must
+    /// refuse the write as host administration and leave the committed
+    /// document and its generation as they were. Every case that is not so
+    /// is reported, not only the first.
+    async fn assert_launching_writes_refused(cases: Vec<(String, Value)>) {
+        assert_writes_refused_after(None, cases).await;
+    }
+
+    /// A state like the one above whose document the host's own writer has
+    /// then patched with `host_patch`.
+    async fn state_after_host_patch(host_patch: Option<&Value>) -> MeerkatMcpState {
+        let state = state_with_launching_entries().await;
+        if let Some(patch) = host_patch {
+            state
+                .config_runtime
+                .patch(ConfigDelta(patch.clone()), None)
+                .await
+                .expect("the host's own writer patches the document");
+        }
+        state
+    }
+
+    /// As `assert_launching_writes_refused`, each case on a state the host's
+    /// own writer has patched with `host_patch` first.
+    async fn assert_writes_refused_after(host_patch: Option<&Value>, cases: Vec<(String, Value)>) {
+        let mut not_refused = Vec::new();
+        for (what, arguments) in cases {
+            let state = state_after_host_patch(host_patch).await;
+            let generation = config_generation(&state).await;
+            let document = committed_config_document(&state).await;
+            match Box::pin(handle_tools_call(&state, "meerkat_config", &arguments)).await {
+                Ok(_) => not_refused.push(format!("{what}: the write was accepted")),
+                Err(refused) => {
+                    if refused.code != -32602
+                        || refused.data
+                            != Some(json!({"type": "confinement_administration_required"}))
+                    {
+                        not_refused.push(format!(
+                            "{what}: refused otherwise: {} {} {:?}",
+                            refused.code, refused.message, refused.data
+                        ));
+                    }
+                    assert_eq!(config_generation(&state).await, generation, "{what}");
+                    assert_eq!(committed_config_document(&state).await, document, "{what}");
+                }
+            }
+        }
+        assert!(
+            not_refused.is_empty(),
+            "the config tool did not refuse: {not_refused:#?}"
+        );
+    }
+
+    /// The writes that add `added` to the list at `pointer`: a patch that
+    /// restates the list with it, and a set of the whole document that
+    /// patch would write (the complete typed document a set requires).
+    async fn writes_that_add(what: &str, pointer: &str, added: Value) -> Vec<(String, Value)> {
+        let state = state_with_launching_entries().await;
+        let document = committed_config_document(&state).await;
+        let mut entries = document
+            .pointer(pointer)
+            .and_then(Value::as_array)
+            .unwrap_or_else(|| panic!("the document's {pointer}"))
+            .clone();
+        entries.push(added);
+        let patch = patch_at(pointer, json!(entries));
+        let replaced = state
+            .config_runtime
+            .patch_preview(&ConfigDelta(patch.clone()))
+            .await
+            .expect("the document the patch would write");
+        vec![
+            (
+                format!("a patch adds {what}"),
+                json!({"action": "patch", "patch": patch}),
+            ),
+            (
+                format!("a set adds {what}"),
+                json!({"action": "set", "config": replaced}),
+            ),
+        ]
+    }
+
+    /// A patch that sets the value at `pointer` to `value`.
+    fn patch_case(what: &str, pointer: &str, value: Value) -> (String, Value) {
+        (
+            format!("a patch changes {what}"),
+            json!({"action": "patch", "patch": patch_at(pointer, value)}),
+        )
+    }
+
+    /// The config tool adds no MCP server with a stdio transport and does
+    /// not change what one runs: a kept name with another command, argument
+    /// or environment value is a new entry. Refused as host administration,
+    /// nothing written.
+    #[tokio::test]
+    async fn test_config_writes_cannot_add_or_change_a_stdio_mcp_server() {
+        let mut cases = writes_that_add(
+            "a stdio MCP server",
+            "/tools/mcp_servers",
+            stdio_server_entry("added-server", "/synthetic/added", &[]),
+        )
+        .await;
+        let mut with_env = seeded_server();
+        with_env["env"] = json!({"SYNTHETIC": "1"});
+        cases.extend([
+            patch_case(
+                "a server's command",
+                "/tools/mcp_servers",
+                json!([stdio_server_entry(
+                    "existing-server",
+                    "/synthetic/other",
+                    &["serve"]
+                )]),
+            ),
+            patch_case(
+                "a server's arguments",
+                "/tools/mcp_servers",
+                json!([stdio_server_entry(
+                    "existing-server",
+                    "/synthetic/server",
+                    &["serve", "--more"]
+                )]),
+            ),
+            patch_case(
+                "a server's environment",
+                "/tools/mcp_servers",
+                json!([with_env]),
+            ),
+            (
+                "a set changes a server's command".to_string(),
+                json!({"action": "set", "config": set_document_with(
+                    "/tools/mcp_servers/0/command",
+                    json!("/synthetic/other"),
+                ).await}),
+            ),
+        ]);
+        assert_launching_writes_refused(cases).await;
+
+        // A kept name whose transport goes from HTTP to stdio is a new entry.
+        let with_http_server = json!({"tools": {"mcp_servers": [
+            seeded_server(),
+            http_server_entry("existing-http-server"),
+        ]}});
+        assert_writes_refused_after(
+            Some(&with_http_server),
+            vec![patch_case(
+                "an HTTP server into a stdio server of the same name",
+                "/tools/mcp_servers",
+                json!([
+                    seeded_server(),
+                    stdio_server_entry("existing-http-server", "/synthetic/added", &[]),
+                ]),
+            )],
+        )
+        .await;
+    }
+
+    /// The committed document of the seeded state with the value at
+    /// `pointer` (which must exist) replaced: the complete typed document a
+    /// set requires, changed in one place.
+    async fn set_document_with(pointer: &str, value: Value) -> Value {
+        let mut document = committed_config_document(&state_with_launching_entries().await).await;
+        *document
+            .pointer_mut(pointer)
+            .unwrap_or_else(|| panic!("the document's {pointer}")) = value;
+        document
+    }
+
+    /// The config tool adds no hook with a command runtime and does not
+    /// change the command of one.
+    #[tokio::test]
+    async fn test_config_writes_cannot_add_or_change_a_command_hook() {
+        let mut cases = writes_that_add(
+            "a command hook",
+            "/hooks/entries",
+            command_hook_entry("added-hook", "/synthetic/added"),
+        )
+        .await;
+        cases.push(patch_case(
+            "a hook's command",
+            "/hooks/entries",
+            json!([command_hook_entry("existing-hook", "/synthetic/other")]),
+        ));
+        cases.push((
+            "a set changes a hook's command".to_string(),
+            json!({"action": "set", "config": set_document_with(
+                "/hooks/entries/0/runtime/command",
+                json!("/synthetic/other"),
+            ).await}),
+        ));
+        assert_launching_writes_refused(cases).await;
+    }
+
+    /// The config tool adds no skills repository with a stdio transport and
+    /// does not change the command or the working directory of one.
+    #[tokio::test]
+    async fn test_config_writes_cannot_add_or_change_a_stdio_skills_repository() {
+        let mut cases = writes_that_add(
+            "a stdio skills repository",
+            "/skills/repositories",
+            stdio_skills_entry("added-stdio-skills", THIRD_SOURCE, "/synthetic/added"),
+        )
+        .await;
+        let mut with_cwd = seeded_stdio_skills();
+        with_cwd["cwd"] = json!("/synthetic/elsewhere");
+        cases.extend([
+            patch_case(
+                "a stdio skills repository's command",
+                "/skills/repositories",
+                json!([
+                    stdio_skills_entry("existing-stdio-skills", FIRST_SOURCE, "/synthetic/other"),
+                    seeded_git_skills(),
+                ]),
+            ),
+            patch_case(
+                "a stdio skills repository's working directory",
+                "/skills/repositories",
+                json!([with_cwd, seeded_git_skills()]),
+            ),
+        ]);
+        assert_launching_writes_refused(cases).await;
+    }
+
+    /// The config tool adds no skills repository with a git transport and
+    /// does not change the URL, the ref or the key path of one.
+    #[tokio::test]
+    async fn test_config_writes_cannot_add_or_change_a_git_skills_repository() {
+        let mut cases = writes_that_add(
+            "a git skills repository",
+            "/skills/repositories",
+            git_skills_entry(
+                "added-git-skills",
+                THIRD_SOURCE,
+                "https://synthetic.invalid/added.git",
+                "main",
+            ),
+        )
+        .await;
+        let mut with_key = seeded_git_skills();
+        with_key["auth"] = json!({"scheme": "ssh-key", "path": "/synthetic/key"});
+        cases.extend([
+            patch_case(
+                "a git skills repository's URL",
+                "/skills/repositories",
+                json!([
+                    seeded_stdio_skills(),
+                    git_skills_entry(
+                        "existing-git-skills",
+                        SECOND_SOURCE,
+                        "https://synthetic.invalid/other.git",
+                        "main",
+                    ),
+                ]),
+            ),
+            patch_case(
+                "a git skills repository's ref",
+                "/skills/repositories",
+                json!([
+                    seeded_stdio_skills(),
+                    git_skills_entry(
+                        "existing-git-skills",
+                        SECOND_SOURCE,
+                        "https://synthetic.invalid/skills.git",
+                        "other",
+                    ),
+                ]),
+            ),
+            patch_case(
+                "a git skills repository's key path",
+                "/skills/repositories",
+                json!([seeded_stdio_skills(), with_key]),
+            ),
+            (
+                "a set changes a git skills repository's ref".to_string(),
+                json!({"action": "set", "config": set_document_with(
+                    "/skills/repositories/1/git_ref",
+                    json!("other"),
+                ).await}),
+            ),
+        ]);
+        assert_launching_writes_refused(cases).await;
+    }
+
+    /// A write that adds a launching entry and is invalid besides is refused
+    /// as host administration, not as an invalid document: the refusal comes
+    /// before the document is validated.
+    #[tokio::test]
+    async fn test_config_writes_refuse_a_launching_entry_before_they_validate_the_document() {
+        // The writes that add the server (the set's document is the
+        // complete typed one), each with a value the validation refuses.
+        let mut cases = writes_that_add(
+            "a stdio MCP server and an invalid value",
+            "/tools/mcp_servers",
+            stdio_server_entry("added-server", "/synthetic/added", &[]),
+        )
+        .await;
+        for (_, arguments) in &mut cases {
+            let document = if arguments["action"] == "patch" {
+                "patch"
+            } else {
+                "config"
+            };
+            arguments[document]["max_tokens"] = json!(0);
+        }
+        assert_launching_writes_refused(cases).await;
+    }
+
+    /// A state that serves the realm `team`, whose parent realm `org` holds
+    /// `org_sections` in its own document. The directory lives as long as
+    /// the state is used.
+    async fn state_for_child_realm(org_sections: &str) -> (tempfile::TempDir, MeerkatMcpState) {
+        state_for_team_realm("", &[("org", org_sections)]).await
+    }
+
+    /// A state that serves the realm `team`, a child of `org`, whose own
+    /// document holds `team_sections`; `realms` are the other realms of the
+    /// state root (`org` among them), each with the sections of its own
+    /// document. The directory lives as long as the state is used.
+    async fn state_for_team_realm(
+        team_sections: &str,
+        realms: &[(&str, &str)],
+    ) -> (tempfile::TempDir, MeerkatMcpState) {
+        state_for_team_realm_in_context(team_sections, realms, None).await
+    }
+
+    /// As `state_for_team_realm`; with `context_file`, the server is given
+    /// a context root (`<directory>/context`) whose convention file holds
+    /// that text.
+    async fn state_for_team_realm_in_context(
+        team_sections: &str,
+        realms: &[(&str, &str)],
+        context_file: Option<&str>,
+    ) -> (tempfile::TempDir, MeerkatMcpState) {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join("realms");
+        let mut documents = vec![(
+            "team".to_string(),
+            format!("[realm.team]\nparent = \"org\"\n\n{team_sections}"),
+        )];
+        for (realm, sections) in realms {
+            documents.push((
+                (*realm).to_string(),
+                format!("[realm.{realm}]\n\n{sections}"),
+            ));
+        }
+        for (realm, text) in &documents {
+            let path = meerkat_store::realm_paths_in(&root, realm).config_path;
+            std::fs::create_dir_all(path.parent().expect("realm dir")).expect("realm dir");
+            std::fs::write(&path, text).expect("realm document");
+        }
+        let mut bootstrap = RuntimeBootstrap::default();
+        bootstrap.realm.selection = RealmSelection::Explicit {
+            realm_id: "team".into(),
+        };
+        bootstrap.realm.state_root = Some(root);
+        bootstrap.context.user_config_root = Some(temp.path().join("user"));
+        if let Some(text) = context_file {
+            let context = temp.path().join("context");
+            std::fs::create_dir_all(context.join(".rkat")).expect("context dir");
+            std::fs::write(context.join(".rkat").join("config.toml"), text)
+                .expect("context convention file");
+            bootstrap.context.context_root = Some(context);
+        }
+        let state = MeerkatMcpState::new_with_bootstrap_options_and_llm(
+            bootstrap,
+            false,
+            Some(Arc::new(TestClient::for_provider(Provider::Anthropic))),
+            None,
+        )
+        .await
+        .expect("the team realm serves");
+        (temp, state)
+    }
+
+    /// The sections of a realm document that holds one stdio MCP server.
+    fn stdio_server_sections(name: &str, command: &str) -> String {
+        format!("[[tools.mcp_servers]]\nname = \"{name}\"\ncommand = \"{command}\"\n")
+    }
+
+    /// The stdio MCP servers the served realm composes along its parent
+    /// chain, as `name command`.
+    async fn composed_stdio_servers(state: &MeerkatMcpState) -> Vec<String> {
+        let head = state
+            .config_runtime
+            .get()
+            .await
+            .expect("the realm's own document")
+            .config;
+        meerkat_core::EffectiveConfigReader::new(Arc::clone(&state.realm_config_source))
+            .effective_config_over_head(&state.realm_id, head)
+            .await
+            .expect("the realm's chain composes")
+            .tools
+            .mcp_servers
+            .iter()
+            .filter_map(|server| match &server.transport {
+                meerkat_core::mcp_config::McpTransportConfig::Stdio(stdio) => {
+                    Some(format!("{} {}", server.name, stdio.command))
+                }
+                meerkat_core::mcp_config::McpTransportConfig::Http(_) => None,
+            })
+            .collect()
+    }
+
+    /// One write through the config tool on a state of its own, which must
+    /// be refused as host administration with nothing written; `composed`
+    /// are the stdio servers the realm must compose before and after.
+    /// Answers what went otherwise, if anything.
+    async fn refused_in_team_realm(
+        what: &str,
+        team_sections: &str,
+        realms: &[(&str, &str)],
+        arguments: Value,
+        composed: &[&str],
+    ) -> Option<String> {
+        let (_realms, state) = state_for_team_realm(team_sections, realms).await;
+        assert_eq!(composed_stdio_servers(&state).await, composed, "{what}");
+        let generation = config_generation(&state).await;
+        let document = committed_config_document(&state).await;
+        match Box::pin(handle_tools_call(&state, "meerkat_config", &arguments)).await {
+            Ok(_) => Some(format!(
+                "{what}: the write was accepted and the realm composes the stdio servers {:?}",
+                composed_stdio_servers(&state).await
+            )),
+            Err(refused) => {
+                assert_eq!(config_generation(&state).await, generation, "{what}");
+                assert_eq!(committed_config_document(&state).await, document, "{what}");
+                assert_eq!(composed_stdio_servers(&state).await, composed, "{what}");
+                (refused.code != -32602
+                    || refused.data != Some(json!({"type": "confinement_administration_required"})))
+                .then(|| {
+                    format!(
+                        "{what}: refused otherwise: {} {} {:?}",
+                        refused.code, refused.message, refused.data
+                    )
+                })
+            }
+        }
+    }
+
+    /// The config tool does not bring into force, in the realm it serves, a
+    /// launching entry the realm does not compose now. A realm composes its
+    /// parent chain's entries, so its own document is not the whole answer:
+    /// a patch of the realm's parent edge to a realm that holds a stdio
+    /// server, and the removal of an own server that shadowed a parent's of
+    /// the same name, are refused as host administration, nothing written.
+    /// And a copy of a parent's entry is not written into the realm's own
+    /// document. Each case on a state of its own.
+    #[tokio::test]
+    async fn test_config_writes_cannot_bring_a_launching_entry_into_force_through_the_chain() {
+        let other = stdio_server_sections("other-server", "/synthetic/other-server");
+        let parent = stdio_server_sections("shared", "/synthetic/parent-server");
+        let own = stdio_server_sections("shared", "/synthetic/own-server");
+        let mut not_refused = Vec::new();
+        not_refused.extend(
+            refused_in_team_realm(
+                "a patch of the parent edge to a realm that holds a stdio server",
+                "",
+                &[("org", ""), ("other", other.as_str())],
+                json!({"action": "patch", "patch": {"realm": {"team": {"parent": "other"}}}}),
+                &[],
+            )
+            .await,
+        );
+        not_refused.extend(
+            refused_in_team_realm(
+                "a patch that removes an own server that shadowed a parent's",
+                &own,
+                &[("org", parent.as_str())],
+                json!({"action": "patch", "patch": {"tools": {"mcp_servers": []}}}),
+                &["shared /synthetic/own-server"],
+            )
+            .await,
+        );
+        not_refused.extend(
+            refused_in_team_realm(
+                "a patch that copies a parent's server into the realm's own document",
+                "",
+                &[("org", parent.as_str())],
+                json!({"action": "patch", "patch": {"tools": {"mcp_servers": [
+                    stdio_server_entry("shared", "/synthetic/parent-server", &[]),
+                ]}}}),
+                &["shared /synthetic/parent-server"],
+            )
+            .await,
+        );
+        // A skills repository composes by its source id: an own entry with
+        // a parent's source id takes the parent's place.
+        let parent_skills = stdio_skills_sections("/synthetic/parent-skills");
+        for (what, entry) in [
+            (
+                "a patch that gives a stdio skills repository a parent's source id",
+                stdio_skills_entry("own-skills", FIRST_SOURCE, "/synthetic/own-skills"),
+            ),
+            (
+                "a patch that gives a git skills repository a parent's source id",
+                git_skills_entry(
+                    "own-skills",
+                    FIRST_SOURCE,
+                    "https://synthetic.invalid/own.git",
+                    "main",
+                ),
+            ),
+        ] {
+            not_refused.extend(
+                refused_in_team_realm(
+                    what,
+                    "",
+                    &[("org", parent_skills.as_str())],
+                    json!({"action": "patch", "patch": {"skills": {"repositories": [entry]}}}),
+                    &[],
+                )
+                .await,
+            );
+        }
+        assert!(
+            not_refused.is_empty(),
+            "the config tool did not refuse: {not_refused:#?}"
+        );
+    }
+
+    /// The sections of a realm document that holds one stdio skills
+    /// repository, with the first source id.
+    fn stdio_skills_sections(command: &str) -> String {
+        format!(
+            "[[skills.repositories]]\nname = \"parent-skills\"\nsource_uuid = \"{FIRST_SOURCE}\"\n\
+             type = \"stdio\"\ncommand = \"{command}\"\n"
+        )
+    }
+
+    /// An own skills repository that launches nothing and carries a
+    /// parent's source id takes the place of the parent's stdio repository:
+    /// a removal by effect, which commits; the realm then composes no
+    /// skills repository that launches a process.
+    #[tokio::test]
+    async fn test_config_writes_can_put_a_non_launching_skills_repository_in_a_parents_place() {
+        let parent_skills = stdio_skills_sections("/synthetic/parent-skills");
+        let (_realms, state) = state_for_team_realm("", &[("org", parent_skills.as_str())]).await;
+        let launching = |repositories: &[meerkat_core::skills_config::SkillRepositoryConfig]| {
+            repositories
+                .iter()
+                .filter(|repository| {
+                    matches!(
+                        repository.transport,
+                        meerkat_core::skills_config::SkillRepoTransport::Stdio { .. }
+                            | meerkat_core::skills_config::SkillRepoTransport::Git { .. }
+                    )
+                })
+                .count()
+        };
+        assert_eq!(
+            launching(&composed_config(&state).await.skills.repositories),
+            1
+        );
+        let generation = config_generation(&state).await;
+        Box::pin(handle_tools_call(
+            &state,
+            "meerkat_config",
+            &json!({"action": "patch", "patch": {"skills": {"repositories": [{
+                "name": "own-skills",
+                "source_uuid": FIRST_SOURCE,
+                "type": "filesystem",
+                "path": "/synthetic/skills",
+            }]}}}),
+        ))
+        .await
+        .expect("an entry that launches nothing commits in a parent's place");
+        assert!(config_generation(&state).await > generation);
+        assert_eq!(
+            launching(&composed_config(&state).await.skills.repositories),
+            0
+        );
+    }
+
+    /// What the served realm composes along its parent chain: what a
+    /// session of the realm is built from.
+    async fn composed_config(state: &MeerkatMcpState) -> Config {
+        let head = state
+            .config_runtime
+            .get()
+            .await
+            .expect("the realm's own document")
+            .config;
+        meerkat_core::EffectiveConfigReader::new(Arc::clone(&state.realm_config_source))
+            .effective_config_over_head(&state.realm_id, head)
+            .await
+            .expect("the realm's chain composes")
+    }
+
+    /// A patch of the realm's parent edge that brings no launching entry
+    /// into force commits: to a realm whose document holds none.
+    #[tokio::test]
+    async fn test_config_writes_can_change_the_parent_edge_to_a_realm_that_launches_nothing() {
+        let (_realms, state) = state_for_team_realm("", &[("org", ""), ("plain", "")]).await;
+        let generation = config_generation(&state).await;
+        Box::pin(handle_tools_call(
+            &state,
+            "meerkat_config",
+            &json!({"action": "patch", "patch": {"realm": {"team": {"parent": "plain"}}}}),
+        ))
+        .await
+        .expect("a parent edge to a realm that launches nothing commits");
+        assert!(config_generation(&state).await > generation);
+        assert_eq!(
+            committed_config_document(&state).await["realm"]["team"]["parent"],
+            json!("plain")
+        );
+        assert!(composed_stdio_servers(&state).await.is_empty());
+    }
+
+    /// A write after which the realm's chain would not compose (here its
+    /// own parent edge names the realm itself) is refused and nothing is
+    /// written: what the realm would run cannot be compared.
+    #[tokio::test]
+    async fn test_config_writes_whose_chain_does_not_compose_are_refused() {
+        let (_realms, state) = state_for_team_realm("", &[("org", "")]).await;
+        let generation = config_generation(&state).await;
+        let document = committed_config_document(&state).await;
+        let refused = Box::pin(handle_tools_call(
+            &state,
+            "meerkat_config",
+            &json!({"action": "patch", "patch": {"realm": {"team": {"parent": "team"}}}}),
+        ))
+        .await
+        .expect_err("a document whose chain does not compose is refused");
+        assert_eq!(refused.code, -32602, "{}", refused.message);
+        assert_eq!(config_generation(&state).await, generation);
+        assert_eq!(committed_config_document(&state).await, document);
+    }
+
+    /// A write is refused while the realm's committed chain does not
+    /// compose (here the parent's document no longer parses): what the
+    /// realm runs cannot be compared, so nothing is written, also for a key
+    /// that launches nothing.
+    #[tokio::test]
+    async fn test_config_writes_are_refused_while_the_realm_chain_does_not_compose() {
+        let (realms, state) = state_for_team_realm("", &[("org", "")]).await;
+        let generation = config_generation(&state).await;
+        let document = committed_config_document(&state).await;
+        let org = meerkat_store::realm_paths_in(&realms.path().join("realms"), "org").config_path;
+        std::fs::write(&org, "this is [not a realm document").expect("the parent's document");
+        let refused = Box::pin(handle_tools_call(
+            &state,
+            "meerkat_config",
+            &json!({"action": "patch", "patch": {"max_tokens": 2048}}),
+        ))
+        .await
+        .expect_err("a write is refused while the chain does not compose");
+        assert_eq!(refused.code, -32603, "{}", refused.message);
+        assert_eq!(config_generation(&state).await, generation);
+        assert_eq!(committed_config_document(&state).await, document);
+    }
+
+    /// The sections of a realm document, or of a convention file, that hold
+    /// one hook of `id` with `runtime` (an inline table).
+    fn hook_sections(id: &str, runtime: &str) -> String {
+        format!(
+            "[[hooks.entries]]\nid = \"{id}\"\nenabled = true\npoint = \"run_started\"\n\
+             mode = \"foreground\"\ncapability = \"observe\"\npriority = 0\nruntime = {runtime}\n"
+        )
+    }
+
+    const HTTP_HOOK_RUNTIME: &str = "{ type = \"http\", url = \"http://synthetic.invalid/hook\" }";
+
+    fn command_hook_runtime(command: &str) -> String {
+        format!("{{ type = \"command\", command = \"{command}\" }}")
+    }
+
+    /// The commands of the command hooks a session of the served realm
+    /// runs: the realm's composed hooks as the agent factory layers them
+    /// (the first entry of an id, then the context root's convention file,
+    /// then the user root's).
+    async fn session_hook_commands(
+        realms: &tempfile::TempDir,
+        state: &MeerkatMcpState,
+    ) -> Vec<String> {
+        let context = realms.path().join("context");
+        let user = realms.path().join("user");
+        let composed = composed_config(state).await;
+        meerkat::resolve_layered_hooks_config(
+            context.is_dir().then_some(context.as_path()),
+            Some(user.as_path()),
+            &composed,
+        )
+        .await
+        .entries
+        .iter()
+        .filter_map(|entry| match &entry.runtime {
+            meerkat_core::config::HookAdapterConfig::Command(command) => {
+                Some(command.command.clone())
+            }
+            meerkat_core::config::HookAdapterConfig::InProcess(_)
+            | meerkat_core::config::HookAdapterConfig::Http(_) => None,
+        })
+        .collect()
+    }
+
+    /// A session runs the first hook of an id: the realm's composed entries
+    /// in order (a parent's before its own), then the context root's
+    /// convention file, then the user root's. So a command hook can be
+    /// held by the realm, or by a file, and hidden by an earlier entry of
+    /// its id; the config tool does not bring it into force: a parent edge
+    /// away from the parent whose entry hid it, and the removal of the own
+    /// entry that hid a file's, are refused as host administration, nothing
+    /// written, and a session runs no command hook as before. Each case on
+    /// a state of its own.
+    #[tokio::test]
+    async fn test_config_writes_cannot_bring_a_hidden_command_hook_into_force() {
+        let hiding = hook_sections("shared-hook", HTTP_HOOK_RUNTIME);
+        let hidden = hook_sections(
+            "shared-hook",
+            &command_hook_runtime("/synthetic/hidden-hook"),
+        );
+        let mut not_refused = Vec::new();
+        for (what, team_sections, realms, context_file, patch) in [
+            (
+                "a patch of the parent edge away from a parent whose hook hid an own command hook",
+                hidden.as_str(),
+                vec![("org", hiding.as_str()), ("plain", "")],
+                None,
+                json!({"realm": {"team": {"parent": "plain"}}}),
+            ),
+            (
+                "a patch that removes an own hook that hid a command hook of the context file",
+                hiding.as_str(),
+                vec![("org", "")],
+                Some(hidden.as_str()),
+                json!({"hooks": {"entries": []}}),
+            ),
+        ] {
+            let (directory, state) =
+                state_for_team_realm_in_context(team_sections, &realms, context_file).await;
+            assert!(
+                session_hook_commands(&directory, &state).await.is_empty(),
+                "{what}: the command hook is hidden"
+            );
+            let generation = config_generation(&state).await;
+            let document = committed_config_document(&state).await;
+            let arguments = json!({"action": "patch", "patch": patch});
+            match Box::pin(handle_tools_call(&state, "meerkat_config", &arguments)).await {
+                Ok(_) => not_refused.push(format!(
+                    "{what}: the write was accepted and a session runs the command hooks {:?}",
+                    session_hook_commands(&directory, &state).await
+                )),
+                Err(refused) => {
+                    if refused.code != -32602
+                        || refused.data
+                            != Some(json!({"type": "confinement_administration_required"}))
+                    {
+                        not_refused.push(format!(
+                            "{what}: refused otherwise: {} {} {:?}",
+                            refused.code, refused.message, refused.data
+                        ));
+                    }
+                    assert_eq!(config_generation(&state).await, generation, "{what}");
+                    assert_eq!(committed_config_document(&state).await, document, "{what}");
+                    assert!(
+                        session_hook_commands(&directory, &state).await.is_empty(),
+                        "{what}"
+                    );
+                }
+            }
+        }
+        assert!(
+            not_refused.is_empty(),
+            "the config tool did not refuse: {not_refused:#?}"
+        );
+    }
+
+    /// In one document that holds two hooks of one id a session runs the
+    /// first: the config tool does not remove the first, nor put the second
+    /// before it, when the second is a command hook.
+    #[tokio::test]
+    async fn test_config_writes_cannot_unhide_the_second_of_two_hooks_of_one_id() {
+        let hiding = hook_entry(
+            "twice",
+            json!({"type": "http", "url": "http://synthetic.invalid/hook"}),
+        );
+        let hidden = command_hook_entry("twice", "/synthetic/second");
+        let host_patch = json!({"hooks": {"entries": [
+            seeded_hook(),
+            hiding.clone(),
+            hidden.clone(),
+        ]}});
+        assert_writes_refused_after(
+            Some(&host_patch),
+            vec![
+                patch_case(
+                    "the hooks, with the first of two of an id removed",
+                    "/hooks/entries",
+                    json!([seeded_hook(), hidden.clone()]),
+                ),
+                patch_case(
+                    "the hooks, with the two of an id in the other order",
+                    "/hooks/entries",
+                    json!([seeded_hook(), hidden, hiding]),
+                ),
+            ],
+        )
+        .await;
+    }
+
+    /// The removal of a hook that hides nothing commits, also where the
+    /// context root's convention file holds a command hook of another id:
+    /// a session runs that one before and after.
+    #[tokio::test]
+    async fn test_config_writes_can_remove_a_hook_that_hides_nothing() {
+        let own = hook_sections("own-hook", HTTP_HOOK_RUNTIME);
+        let file = hook_sections("file-hook", &command_hook_runtime("/synthetic/file-hook"));
+        let (directory, state) =
+            state_for_team_realm_in_context(&own, &[("org", "")], Some(&file)).await;
+        assert_eq!(
+            session_hook_commands(&directory, &state).await,
+            ["/synthetic/file-hook"]
+        );
+        let generation = config_generation(&state).await;
+        Box::pin(handle_tools_call(
+            &state,
+            "meerkat_config",
+            &json!({"action": "patch", "patch": {"hooks": {"entries": []}}}),
+        ))
+        .await
+        .expect("the removal of a hook that hides nothing commits");
+        assert!(config_generation(&state).await > generation);
+        assert_eq!(
+            session_hook_commands(&directory, &state).await,
+            ["/synthetic/file-hook"]
+        );
+    }
+
+    /// The sections of the document of `realm` that state one provider
+    /// route: a backend with an address, an auth profile that reads a
+    /// variable (no row resolves it: no row here starts a run), and a
+    /// binding of the two.
+    fn route_sections(realm: &str) -> String {
+        format!(
+            "[realm.{realm}.backend.main]\nprovider = \"openai\"\nbackend_kind = \"openai_api\"\n\
+             base_url = \"http://synthetic.invalid/v1\"\n\n\
+             [realm.{realm}.auth.main]\nprovider = \"openai\"\nauth_method = \"api_key\"\n\
+             source = {{ kind = \"env\", env = \"MEERKAT_CONFIG_TOOL_ROW_VALUE\" }}\n\n\
+             [realm.{realm}.binding.main]\nbackend_profile = \"main\"\nauth_profile = \"main\"\n"
+        )
+    }
+
+    /// A patch through the tool that sets `value` at `pointer` under the
+    /// served realm's own section.
+    fn team_section_patch(pointer: &str, value: Value) -> Value {
+        json!({"action": "patch", "patch": {"realm": {"team": patch_at(pointer, value)}}})
+    }
+
+    /// Where a credential the host supplies is read from, and where it is
+    /// sent, is the host's to administer. In a realm that states a provider
+    /// route the config tool does not change the address of the backend a
+    /// binding uses, the source of its auth profile, the binding, or the
+    /// realm's default binding, does not add a route beside it, a Copilot
+    /// account, a connector client or a self-hosted server, and does not
+    /// take a parent edge to a realm that states a route. Refused as host
+    /// administration, nothing written. Each case on a state of its own.
+    #[tokio::test]
+    async fn test_config_writes_cannot_change_where_a_host_credential_goes() {
+        let own = route_sections("team");
+        let other = route_sections("other");
+        let realms = [("org", ""), ("other", other.as_str())];
+        let set_arguments = {
+            let (_directory, state) = state_for_team_realm(&own, &realms).await;
+            let mut document = committed_config_document(&state).await;
+            document["realm"]["team"]["backend"]["main"]["base_url"] =
+                json!("http://other.synthetic.invalid/v1");
+            json!({"action": "set", "config": document})
+        };
+        let mut not_refused = Vec::new();
+        for (what, arguments) in [
+            (
+                "a patch of the address of a backend a binding uses",
+                team_section_patch(
+                    "/backend/main/base_url",
+                    json!("http://other.synthetic.invalid/v1"),
+                ),
+            ),
+            (
+                "a set of the address of a backend a binding uses",
+                set_arguments,
+            ),
+            (
+                "a patch of the source of an auth profile",
+                team_section_patch(
+                    "/auth/main/source",
+                    json!({"kind": "env", "env": "MEERKAT_CONFIG_TOOL_OTHER_VALUE"}),
+                ),
+            ),
+            (
+                "a patch that points the binding at another backend",
+                json!({"action": "patch", "patch": {"realm": {"team": {
+                    "backend": {"second": {"provider": "openai", "backend_kind": "openai_api"}},
+                    "binding": {"main": {"backend_profile": "second"}},
+                }}}}),
+            ),
+            (
+                "a patch that adds a binding",
+                team_section_patch(
+                    "/binding/second",
+                    json!({"backend_profile": "main", "auth_profile": "main"}),
+                ),
+            ),
+            (
+                "a patch that adds an auth profile",
+                team_section_patch(
+                    "/auth/second",
+                    json!({
+                        "provider": "openai",
+                        "auth_method": "api_key",
+                        "source": {"kind": "env", "env": "MEERKAT_CONFIG_TOOL_OTHER_VALUE"},
+                    }),
+                ),
+            ),
+            (
+                "a patch that adds a backend",
+                team_section_patch(
+                    "/backend/second",
+                    json!({
+                        "provider": "openai",
+                        "backend_kind": "openai_api",
+                        "base_url": "http://other.synthetic.invalid/v1",
+                    }),
+                ),
+            ),
+            (
+                "a patch that sets the realm's default binding",
+                team_section_patch("/default_binding", json!("main")),
+            ),
+            (
+                "a patch that sets a Copilot account",
+                team_section_patch(
+                    "/copilot",
+                    json!({"source": {"kind": "env", "env": "MEERKAT_CONFIG_TOOL_OTHER_VALUE"}}),
+                ),
+            ),
+            (
+                "a patch that adds a connector client",
+                team_section_patch(
+                    "/connector_client/second",
+                    json!({"issuer": "https://synthetic.invalid", "client": "synthetic-client"}),
+                ),
+            ),
+            (
+                "a patch that adds a self-hosted server",
+                json!({"action": "patch", "patch": {"self_hosted": {"servers": {"box": {
+                    "base_url": "http://other.synthetic.invalid/v1",
+                }}}}}),
+            ),
+            (
+                "a patch of the parent edge to a realm that states a route",
+                team_section_patch("/parent", json!("other")),
+            ),
+        ] {
+            not_refused.extend(refused_in_team_realm(what, &own, &realms, arguments, &[]).await);
+        }
+        assert!(
+            not_refused.is_empty(),
+            "the config tool did not refuse: {not_refused:#?}"
+        );
+    }
+
+    /// What the config tool still takes in a realm that states a provider
+    /// route: a patch of another key, a patch that restates the route, the
+    /// removal of the realm's default binding, and the removal of the
+    /// binding, its auth profile and its backend. Each case on a state of
+    /// its own.
+    #[tokio::test]
+    async fn test_config_writes_that_keep_or_remove_a_provider_route_still_commit() {
+        let own = format!("default_binding = \"main\"\n\n{}", route_sections("team"));
+        let mut not_committed = Vec::new();
+        for (what, arguments) in [
+            (
+                "a patch of another key",
+                json!({"action": "patch", "patch": {"max_tokens": 2048}}),
+            ),
+            (
+                "a patch that restates the route",
+                json!({"action": "patch", "patch": {"realm": {"team": {
+                    "backend": {"main": {
+                        "provider": "openai",
+                        "backend_kind": "openai_api",
+                        "base_url": "http://synthetic.invalid/v1",
+                    }},
+                    "auth": {"main": {
+                        "provider": "openai",
+                        "auth_method": "api_key",
+                        "source": {"kind": "env", "env": "MEERKAT_CONFIG_TOOL_ROW_VALUE"},
+                    }},
+                    "binding": {"main": {"backend_profile": "main", "auth_profile": "main"}},
+                    "default_binding": "main",
+                }}}}),
+            ),
+            (
+                "a patch that removes the default binding",
+                team_section_patch("/default_binding", Value::Null),
+            ),
+            (
+                "a patch that removes the route",
+                json!({"action": "patch", "patch": {"realm": {"team": {
+                    "default_binding": null,
+                    "binding": {"main": null},
+                    "auth": {"main": null},
+                    "backend": {"main": null},
+                }}}}),
+            ),
+        ] {
+            let (_directory, state) = state_for_team_realm(&own, &[("org", "")]).await;
+            let generation = config_generation(&state).await;
+            match Box::pin(handle_tools_call(&state, "meerkat_config", &arguments)).await {
+                Ok(_) => {
+                    if config_generation(&state).await <= generation {
+                        not_committed.push(format!("{what}: nothing was committed"));
+                    }
+                }
+                Err(refused) => not_committed.push(format!(
+                    "{what}: refused: {} {:?}",
+                    refused.message, refused.data
+                )),
+            }
+        }
+        assert!(
+            not_committed.is_empty(),
+            "the config tool did not take: {not_committed:#?}"
+        );
+    }
+
+    /// The sections of a realm document that state two self-hosted servers
+    /// and one model on the first.
+    const SELF_HOSTED_SECTIONS: &str = "[self_hosted.servers.box]\n\
+        base_url = \"http://box.synthetic.invalid/v1\"\n\n\
+        [self_hosted.servers.gateway]\n\
+        base_url = \"http://gateway.synthetic.invalid/v1\"\n\n\
+        [self_hosted.models.local]\n\
+        server = \"box\"\nremote_model = \"local-model\"\ndisplay_name = \"Local\"\n\
+        family = \"synthetic\"\ntier = \"supported\"\n";
+
+    /// The sections above with a route of the served realm whose binding
+    /// names its server through its default model (the form of documents
+    /// written before a backend could state its server).
+    fn self_hosted_route_sections() -> String {
+        format!(
+            "{SELF_HOSTED_SECTIONS}\n\
+             [realm.team.backend.box]\nprovider = \"self_hosted\"\n\
+             backend_kind = \"self_hosted\"\n\n\
+             [realm.team.auth.box]\nprovider = \"self_hosted\"\nauth_method = \"static_bearer\"\n\
+             source = {{ kind = \"env\", env = \"MEERKAT_CONFIG_TOOL_ROW_VALUE\" }}\n\n\
+             [realm.team.binding.box]\nbackend_profile = \"box\"\nauth_profile = \"box\"\n\
+             default_model = \"local\"\n"
+        )
+    }
+
+    /// A self-hosted request goes to the server its model names, with the
+    /// credential of the binding for that server, and a binding can name
+    /// its server through its default model. So the server of a model is
+    /// part of where a credential goes: the config tool does not point an
+    /// existing model at another server and does not add a model. And the
+    /// removal of an own server entry that stood in front of a parent's of
+    /// the same id brings the parent's address into force: refused as well.
+    /// Each case on a state of its own.
+    #[tokio::test]
+    async fn test_config_writes_cannot_change_the_server_a_self_hosted_model_names() {
+        let own = self_hosted_route_sections();
+        let mut not_refused = Vec::new();
+        for (what, patch) in [
+            (
+                "a patch that points a model at another server",
+                json!({"self_hosted": {"models": {"local": {"server": "gateway"}}}}),
+            ),
+            (
+                "a patch that adds a model on another server",
+                json!({"self_hosted": {"models": {"second": {
+                    "server": "gateway",
+                    "remote_model": "second-model",
+                    "display_name": "Second",
+                    "family": "synthetic",
+                    "tier": "supported",
+                }}, "default_model": "local"}}),
+            ),
+        ] {
+            not_refused.extend(
+                refused_in_team_realm(
+                    what,
+                    &own,
+                    &[("org", "")],
+                    json!({"action": "patch", "patch": patch}),
+                    &[],
+                )
+                .await,
+            );
+        }
+        // An own server entry in front of a parent's of the same id.
+        let parent =
+            "[self_hosted.servers.box]\nbase_url = \"http://parent.synthetic.invalid/v1\"\n";
+        not_refused.extend(
+            refused_in_team_realm(
+                "a patch that removes an own server entry in front of a parent's",
+                "[self_hosted.servers.box]\nbase_url = \"http://box.synthetic.invalid/v1\"\n",
+                &[("org", parent)],
+                json!({"action": "patch", "patch": {"self_hosted": {"servers": {"box": null}}}}),
+                &[],
+            )
+            .await,
+        );
+        assert!(
+            not_refused.is_empty(),
+            "the config tool did not refuse: {not_refused:#?}"
+        );
+    }
+
+    /// What the config tool still takes of a self-hosted model: a field
+    /// that names no server (here its display name).
+    #[tokio::test]
+    async fn test_config_writes_that_keep_a_self_hosted_models_server_still_commit() {
+        let own = self_hosted_route_sections();
+        let (_directory, state) = state_for_team_realm(&own, &[("org", "")]).await;
+        let generation = config_generation(&state).await;
+        Box::pin(handle_tools_call(
+            &state,
+            "meerkat_config",
+            &json!({"action": "patch", "patch": {"self_hosted": {"models": {"local": {
+                "display_name": "Local, renamed",
+            }}}}}),
+        ))
+        .await
+        .expect("a patch of a model's display name commits");
+        assert!(config_generation(&state).await > generation);
+        let document = committed_config_document(&state).await;
+        assert_eq!(
+            document["self_hosted"]["models"]["local"]["server"],
+            json!("box")
+        );
+        assert_eq!(
+            document["self_hosted"]["models"]["local"]["display_name"],
+            json!("Local, renamed")
+        );
+    }
+
+    /// The server the served realm's binding `box` names in what the realm
+    /// composes, as Core answers it: declared on its backend, derived from
+    /// its default model, or none.
+    async fn server_the_binding_names(state: &MeerkatMcpState) -> String {
+        let composed = composed_config(state).await;
+        let section = composed
+            .realm
+            .get("team")
+            .expect("the served realm's section");
+        let connections = meerkat_core::RealmConnectionSet::from_config("team", section)
+            .expect("the served realm's routes");
+        let binding = connections.bindings.get("box").expect("the binding");
+        format!(
+            "{:?}",
+            meerkat_core::self_hosted_binding_server(&composed, &connections, binding)
+        )
+    }
+
+    /// A binding can name its server through its default model's entry.
+    /// The removal of that entry leaves the binding naming no server, and a
+    /// binding that names none can stand for other declared servers: so the
+    /// config tool does not remove it. Refused as host administration,
+    /// nothing written; the binding names its server as before.
+    #[tokio::test]
+    async fn test_config_writes_cannot_change_the_server_a_binding_names() {
+        let own = self_hosted_route_sections();
+        let (_directory, state) = state_for_team_realm(&own, &[("org", "")]).await;
+        let named = server_the_binding_names(&state).await;
+        assert_eq!(named, "DerivedFromDefaultModel { server: \"box\" }");
+        let generation = config_generation(&state).await;
+        let document = committed_config_document(&state).await;
+        match Box::pin(handle_tools_call(
+            &state,
+            "meerkat_config",
+            &json!({"action": "patch", "patch": {"self_hosted": {"models": {"local": null}}}}),
+        ))
+        .await
+        {
+            Ok(_) => panic!(
+                "the removal of the model was accepted and the binding names {}",
+                server_the_binding_names(&state).await
+            ),
+            Err(refused) => {
+                assert_eq!(refused.code, -32602, "{}", refused.message);
+                assert_eq!(
+                    refused.data,
+                    Some(json!({"type": "confinement_administration_required"})),
+                    "{}",
+                    refused.message
+                );
+            }
+        }
+        assert_eq!(config_generation(&state).await, generation);
+        assert_eq!(committed_config_document(&state).await, document);
+        assert_eq!(server_the_binding_names(&state).await, named);
+    }
+
+    /// The removal of a model that no binding names its server through
+    /// commits, and the binding names its server as before.
+    #[tokio::test]
+    async fn test_config_writes_can_remove_a_model_no_binding_names_its_server_through() {
+        let own = format!(
+            "[self_hosted]\ndefault_model = \"local\"\n\n{}\n\
+             [self_hosted.models.spare]\nserver = \"box\"\nremote_model = \"spare-model\"\n\
+             display_name = \"Spare\"\nfamily = \"synthetic\"\ntier = \"supported\"\n",
+            self_hosted_route_sections()
+        );
+        let (_directory, state) = state_for_team_realm(&own, &[("org", "")]).await;
+        let named = server_the_binding_names(&state).await;
+        assert_eq!(named, "DerivedFromDefaultModel { server: \"box\" }");
+        let generation = config_generation(&state).await;
+        Box::pin(handle_tools_call(
+            &state,
+            "meerkat_config",
+            &json!({"action": "patch", "patch": {"self_hosted": {"models": {"spare": null}}}}),
+        ))
+        .await
+        .expect("the removal of a model no binding names its server through commits");
+        assert!(config_generation(&state).await > generation);
+        assert!(
+            committed_config_document(&state).await["self_hosted"]["models"]
+                .get("spare")
+                .is_none()
+        );
+        assert_eq!(server_the_binding_names(&state).await, named);
+    }
+
+    /// The shell section the served realm composes along its parent chain:
+    /// what a session of the realm runs its shell tool with.
+    async fn composed_shell(state: &MeerkatMcpState) -> meerkat_core::config::ShellDefaults {
+        let head = state
+            .config_runtime
+            .get()
+            .await
+            .expect("the realm's own document")
+            .config;
+        meerkat_core::EffectiveConfigReader::new(Arc::clone(&state.realm_config_source))
+            .effective_config_over_head(&state.realm_id, head)
+            .await
+            .expect("the realm's chain composes")
+            .shell
+    }
+
+    const PARENT_SHELL: &str = "/synthetic/parent-shell";
+
+    /// A realm composes its shell section whole: its parent's, until its own
+    /// differs from the default one, then its own. So in a realm whose
+    /// parent names the shell program, a write of another shell key alone
+    /// would put the default program in the parent's place: the config tool
+    /// refuses it as host administration and the realm composes the
+    /// parent's program as before. Each case on a state of its own.
+    #[tokio::test]
+    async fn test_config_writes_cannot_change_the_shell_program_a_realm_composes() {
+        let org_sections = format!("[shell]\nprogram = \"{PARENT_SHELL}\"\n");
+        let mut not_refused = Vec::new();
+        for what in [
+            "a patch of the shell tool's timeout",
+            "a patch of the shell tool's output cap",
+            "a set of the shell tool's timeout",
+        ] {
+            let (_realms, state) = state_for_child_realm(&org_sections).await;
+            assert_eq!(composed_shell(&state).await.program, PARENT_SHELL, "{what}");
+            let generation = config_generation(&state).await;
+            let arguments = match what {
+                "a patch of the shell tool's timeout" => {
+                    json!({"action": "patch", "patch": {"shell": {"timeout_secs": 60}}})
+                }
+                "a patch of the shell tool's output cap" => {
+                    json!({"action": "patch", "patch": {"shell": {"max_output_chars": 1000}}})
+                }
+                _ => {
+                    let mut document = committed_config_document(&state).await;
+                    document["shell"]["timeout_secs"] = json!(60);
+                    json!({"action": "set", "config": document})
+                }
+            };
+            match Box::pin(handle_tools_call(&state, "meerkat_config", &arguments)).await {
+                Ok(_) => not_refused.push(format!(
+                    "{what}: the write was accepted and the realm composes the program {:?}",
+                    composed_shell(&state).await.program
+                )),
+                Err(refused) => {
+                    if refused.code != -32602
+                        || refused.data
+                            != Some(json!({"type": "confinement_administration_required"}))
+                    {
+                        not_refused.push(format!(
+                            "{what}: refused otherwise: {} {} {:?}",
+                            refused.code, refused.message, refused.data
+                        ));
+                    }
+                    assert_eq!(config_generation(&state).await, generation, "{what}");
+                    assert_eq!(composed_shell(&state).await.program, PARENT_SHELL, "{what}");
+                }
+            }
+        }
+        assert!(
+            not_refused.is_empty(),
+            "the config tool did not refuse: {not_refused:#?}"
+        );
+    }
+
+    /// What the config tool still takes in a realm whose parent names the
+    /// shell program: a patch of another section, a patch that states the
+    /// default program (the realm's own section stays the default one, so
+    /// the parent's still composes), and a patch of another shell key that
+    /// states the parent's program with it. The realm composes the parent's
+    /// program after each. Each case on a state of its own.
+    #[tokio::test]
+    async fn test_config_writes_that_keep_the_composed_shell_program_still_commit() {
+        let org_sections = format!("[shell]\nprogram = \"{PARENT_SHELL}\"\n");
+        let default_program = meerkat_core::config::ShellDefaults::default().program;
+        let mut not_committed = Vec::new();
+        for (what, patch, timeout_secs) in [
+            (
+                "a patch of another section",
+                json!({"max_tokens": 2048}),
+                None,
+            ),
+            (
+                "a patch that states the default program",
+                json!({"shell": {"program": default_program}}),
+                None,
+            ),
+            (
+                "a patch of the timeout that states the parent's program",
+                json!({"shell": {"program": PARENT_SHELL, "timeout_secs": 60}}),
+                Some(60),
+            ),
+        ] {
+            let (_realms, state) = state_for_child_realm(&org_sections).await;
+            let before = composed_shell(&state).await;
+            let generation = config_generation(&state).await;
+            let arguments = json!({"action": "patch", "patch": patch});
+            match Box::pin(handle_tools_call(&state, "meerkat_config", &arguments)).await {
+                Ok(_) => {
+                    let after = composed_shell(&state).await;
+                    if config_generation(&state).await <= generation
+                        || after.program != PARENT_SHELL
+                        || after.timeout_secs != timeout_secs.unwrap_or(before.timeout_secs)
+                    {
+                        not_committed.push(format!(
+                            "{what}: committed as program {:?}, timeout {}",
+                            after.program, after.timeout_secs
+                        ));
+                    }
+                }
+                Err(refused) => not_committed.push(format!(
+                    "{what}: refused: {} {:?}",
+                    refused.message, refused.data
+                )),
+            }
+        }
+        assert!(
+            not_committed.is_empty(),
+            "the config tool did not take: {not_committed:#?}"
+        );
+    }
+
+    /// A host patch that commits a command policy for the shell tool.
+    fn shell_command_policy(mode: &str, patterns: &[&str]) -> Value {
+        json!({"shell": {"security_mode": mode, "security_patterns": patterns}})
+    }
+
+    /// The document a state holds after `host_patch`, with `/shell/<key>`
+    /// set to `value`: the complete typed document a set requires.
+    async fn document_with_shell_key(host_patch: &Value, key: &str, value: Value) -> Value {
+        let mut document =
+            committed_config_document(&state_after_host_patch(Some(host_patch)).await).await;
+        document["shell"][key] = value;
+        document
+    }
+
+    /// The config tool does not loosen the command policy the shell tool
+    /// checks its commands against. Under an allow list it takes no other
+    /// mode (named, or the default in place of the committed one) and no
+    /// pattern the committed list does not hold, by a patch or by a set;
+    /// refused as host administration, nothing written.
+    #[tokio::test]
+    async fn test_config_writes_cannot_loosen_an_allow_list_of_shell_commands() {
+        let allow = shell_command_policy("allow_list", &["git *", "ls *"]);
+        let allow_set =
+            document_with_shell_key(&allow, "security_mode", json!("unrestricted")).await;
+        assert_writes_refused_after(
+            Some(&allow),
+            vec![
+                patch_case(
+                    "an allow list into no restriction",
+                    "/shell/security_mode",
+                    json!("unrestricted"),
+                ),
+                patch_case(
+                    "an allow list into a deny list",
+                    "/shell/security_mode",
+                    json!("deny_list"),
+                ),
+                patch_case(
+                    "an allow list's mode, back to the default",
+                    "/shell/security_mode",
+                    Value::Null,
+                ),
+                patch_case(
+                    "an allow list, with a pattern added",
+                    "/shell/security_patterns",
+                    json!(["git *", "ls *", "rm *"]),
+                ),
+                patch_case(
+                    "an allow list, with a pattern replaced",
+                    "/shell/security_patterns",
+                    json!(["git *", "cat *"]),
+                ),
+                (
+                    "a set changes an allow list into no restriction".to_string(),
+                    json!({"action": "set", "config": allow_set}),
+                ),
+            ],
+        )
+        .await;
+    }
+
+    /// Under a deny list with patterns the config tool takes no other mode
+    /// and leaves no committed pattern out, by a patch or by a set; refused
+    /// as host administration, nothing written.
+    #[tokio::test]
+    async fn test_config_writes_cannot_loosen_a_deny_list_of_shell_commands() {
+        let deny = shell_command_policy("deny_list", &["rm *", "curl *"]);
+        let deny_set = document_with_shell_key(&deny, "security_patterns", json!(["rm *"])).await;
+        assert_writes_refused_after(
+            Some(&deny),
+            vec![
+                patch_case(
+                    "a deny list, with a pattern left out",
+                    "/shell/security_patterns",
+                    json!(["rm *"]),
+                ),
+                patch_case(
+                    "a deny list, with every pattern left out",
+                    "/shell/security_patterns",
+                    json!([]),
+                ),
+                patch_case(
+                    "a deny list into no restriction",
+                    "/shell/security_mode",
+                    json!("unrestricted"),
+                ),
+                patch_case(
+                    "a deny list into an allow list",
+                    "/shell/security_mode",
+                    json!("allow_list"),
+                ),
+                (
+                    "a set leaves a deny list's pattern out".to_string(),
+                    json!({"action": "set", "config": deny_set}),
+                ),
+            ],
+        )
+        .await;
+    }
+
+    /// What the config tool still takes of the shell tool's command policy:
+    /// a restated policy, an allow list with fewer patterns, a deny list
+    /// with more (or the same in another order), and any policy where the
+    /// committed one restricts nothing (no restriction, or a deny list with
+    /// no pattern). Each case on a state of its own.
+    #[tokio::test]
+    async fn test_config_writes_that_tighten_the_shell_command_policy_still_commit() {
+        fn policy_patch(mode: &str, patterns: &[&str]) -> Value {
+            json!({"action": "patch", "patch": shell_command_policy(mode, patterns)})
+        }
+        let allow = shell_command_policy("allow_list", &["git *", "ls *"]);
+        let deny = shell_command_policy("deny_list", &["rm *", "curl *"]);
+        let empty_deny = shell_command_policy("deny_list", &[]);
+        let allow_set = document_with_shell_key(&allow, "security_patterns", json!(["ls *"])).await;
+        let mut not_committed = Vec::new();
+        for (what, host_patch, arguments) in [
+            (
+                "a patch restates an allow list",
+                Some(&allow),
+                policy_patch("allow_list", &["git *", "ls *"]),
+            ),
+            (
+                "a patch leaves an allow list's pattern out",
+                Some(&allow),
+                policy_patch("allow_list", &["git *"]),
+            ),
+            (
+                "a patch leaves every pattern of an allow list out",
+                Some(&allow),
+                policy_patch("allow_list", &[]),
+            ),
+            (
+                "a set leaves an allow list's pattern out",
+                Some(&allow),
+                json!({"action": "set", "config": allow_set}),
+            ),
+            (
+                "a patch restates a deny list",
+                Some(&deny),
+                policy_patch("deny_list", &["rm *", "curl *"]),
+            ),
+            (
+                "a patch restates a deny list in another order",
+                Some(&deny),
+                policy_patch("deny_list", &["curl *", "rm *"]),
+            ),
+            (
+                "a patch adds a pattern to a deny list",
+                Some(&deny),
+                policy_patch("deny_list", &["rm *", "curl *", "wget *"]),
+            ),
+            (
+                "a patch changes no restriction into a deny list",
+                None,
+                policy_patch("deny_list", &["rm *"]),
+            ),
+            (
+                "a patch changes no restriction into an allow list",
+                None,
+                policy_patch("allow_list", &["git *"]),
+            ),
+            (
+                "a patch changes a deny list with no pattern into no restriction",
+                Some(&empty_deny),
+                policy_patch("unrestricted", &[]),
+            ),
+            (
+                "a patch changes a deny list with no pattern into an allow list",
+                Some(&empty_deny),
+                policy_patch("allow_list", &["git *"]),
+            ),
+        ] {
+            let state = state_after_host_patch(host_patch).await;
+            let generation = config_generation(&state).await;
+            match Box::pin(handle_tools_call(&state, "meerkat_config", &arguments)).await {
+                Ok(_) => {
+                    if config_generation(&state).await <= generation {
+                        not_committed.push(format!("{what}: nothing was committed"));
+                    }
+                }
+                Err(refused) => not_committed.push(format!(
+                    "{what}: refused: {} {:?}",
+                    refused.message, refused.data
+                )),
+            }
+        }
+        assert!(
+            not_committed.is_empty(),
+            "the config tool did not take: {not_committed:#?}"
+        );
+    }
+
+    const PARENT_POLICY: &str =
+        "[shell]\nsecurity_mode = \"allow_list\"\nsecurity_patterns = [\"git *\"]\n";
+
+    /// The command policy the served realm composes, as `mode patterns`.
+    async fn composed_command_policy(state: &MeerkatMcpState) -> String {
+        let shell = composed_shell(state).await;
+        format!("{:?} {:?}", shell.security_mode, shell.security_patterns)
+    }
+
+    /// A realm takes its shell section whole, so in a realm whose parent
+    /// states an allow list a write of another shell key alone would put
+    /// the default policy (no restriction) in the parent's place, and so
+    /// would a parent edge to a realm that states none: the config tool
+    /// refuses both as host administration and the realm composes the
+    /// parent's policy as before. Each case on a state of its own.
+    #[tokio::test]
+    async fn test_config_writes_cannot_loosen_the_shell_command_policy_a_realm_composes() {
+        let mut not_refused = Vec::new();
+        for (what, patch) in [
+            (
+                "a patch of the shell tool's timeout",
+                json!({"shell": {"timeout_secs": 60}}),
+            ),
+            (
+                "a patch of the timeout that states the parent's mode with another pattern",
+                json!({"shell": {
+                    "timeout_secs": 60,
+                    "security_mode": "allow_list",
+                    "security_patterns": ["git *", "rm *"],
+                }}),
+            ),
+            (
+                "a patch of the parent edge to a realm that states no policy",
+                json!({"realm": {"team": {"parent": "open"}}}),
+            ),
+        ] {
+            let (_realms, state) =
+                state_for_team_realm("", &[("org", PARENT_POLICY), ("open", "")]).await;
+            let policy = composed_command_policy(&state).await;
+            assert_eq!(policy, "AllowList [\"git *\"]", "{what}");
+            let generation = config_generation(&state).await;
+            let arguments = json!({"action": "patch", "patch": patch});
+            match Box::pin(handle_tools_call(&state, "meerkat_config", &arguments)).await {
+                Ok(_) => not_refused.push(format!(
+                    "{what}: the write was accepted and the realm composes the policy {}",
+                    composed_command_policy(&state).await
+                )),
+                Err(refused) => {
+                    if refused.code != -32602
+                        || refused.data
+                            != Some(json!({"type": "confinement_administration_required"}))
+                    {
+                        not_refused.push(format!(
+                            "{what}: refused otherwise: {} {} {:?}",
+                            refused.code, refused.message, refused.data
+                        ));
+                    }
+                    assert_eq!(config_generation(&state).await, generation, "{what}");
+                    assert_eq!(composed_command_policy(&state).await, policy, "{what}");
+                }
+            }
+        }
+        assert!(
+            not_refused.is_empty(),
+            "the config tool did not refuse: {not_refused:#?}"
+        );
+    }
+
+    /// In a realm whose parent states an allow list, a patch of another
+    /// shell key that states the parent's policy with it commits, and the
+    /// realm composes the parent's policy after it.
+    #[tokio::test]
+    async fn test_config_writes_that_keep_the_composed_shell_command_policy_still_commit() {
+        let (_realms, state) = state_for_child_realm(PARENT_POLICY).await;
+        let policy = composed_command_policy(&state).await;
+        let generation = config_generation(&state).await;
+        Box::pin(handle_tools_call(
+            &state,
+            "meerkat_config",
+            &json!({"action": "patch", "patch": {"shell": {
+                "timeout_secs": 60,
+                "security_mode": "allow_list",
+                "security_patterns": ["git *"],
+            }}}),
+        ))
+        .await
+        .expect("a patch that states the parent's policy with the timeout commits");
+        assert!(config_generation(&state).await > generation);
+        assert_eq!(composed_command_policy(&state).await, policy);
+        assert_eq!(composed_shell(&state).await.timeout_secs, 60);
+    }
+
+    /// The config tool does not change the program the shell tool runs its
+    /// commands with: another program, or the default in place of the
+    /// committed one, by a patch or by a set.
+    #[tokio::test]
+    async fn test_config_writes_cannot_change_the_shell_program() {
+        let mut other_program =
+            committed_config_document(&state_with_launching_entries().await).await;
+        other_program["shell"]["program"] = json!("/synthetic/other-shell");
+        assert_launching_writes_refused(vec![
+            patch_case(
+                "the shell tool's program",
+                "/shell/program",
+                json!("/synthetic/other-shell"),
+            ),
+            patch_case(
+                "the shell tool's program, back to the default",
+                "/shell/program",
+                Value::Null,
+            ),
+            (
+                "a set changes the shell tool's program".to_string(),
+                json!({"action": "set", "config": other_program}),
+            ),
+        ])
+        .await;
+    }
+
+    /// What the config tool still takes: a read, a patch of another key,
+    /// a patch and a set that restate the existing entries unchanged, an
+    /// entry that launches no process (an HTTP server, an HTTP hook, a
+    /// filesystem skills repository), another shell setting, and removals.
+    #[tokio::test]
+    async fn test_config_writes_that_launch_nothing_still_commit() {
+        let state = state_with_launching_entries().await;
+        let mut generation = config_generation(&state).await;
+        let mut restated = committed_config_document(&state).await;
+        restated["max_tokens"] = json!(4096);
+        let repositories = json!([seeded_stdio_skills(), seeded_git_skills()]);
+        for (what, arguments) in [
+            (
+                "a patch of another key",
+                json!({"action": "patch", "patch": {"max_tokens": 2048}}),
+            ),
+            (
+                "a patch that restates the existing entries",
+                json!({"action": "patch", "patch": {
+                    "tools": {"mcp_servers": [seeded_server()]},
+                    "hooks": {"entries": [seeded_hook()]},
+                    "skills": {"repositories": repositories},
+                    "shell": {"program": "/synthetic/shell"},
+                }}),
+            ),
+            (
+                "a set that restates the existing entries",
+                json!({"action": "set", "config": restated}),
+            ),
+            (
+                "a patch that adds an HTTP server",
+                json!({"action": "patch", "patch": {"tools": {"mcp_servers": [
+                    seeded_server(),
+                    http_server_entry("added-http-server"),
+                ]}}}),
+            ),
+            (
+                "a patch that adds an HTTP hook",
+                json!({"action": "patch", "patch": {"hooks": {"entries": [
+                    seeded_hook(),
+                    hook_entry(
+                        "added-http-hook",
+                        json!({"type": "http", "url": "http://synthetic.invalid/hook"}),
+                    ),
+                ]}}}),
+            ),
+            (
+                "a patch that adds a filesystem skills repository",
+                json!({"action": "patch", "patch": {"skills": {"repositories": [
+                    seeded_stdio_skills(),
+                    seeded_git_skills(),
+                    {
+                        "name": "added-filesystem-skills",
+                        "source_uuid": THIRD_SOURCE,
+                        "type": "filesystem",
+                        "path": "/synthetic/skills",
+                    },
+                ]}}}),
+            ),
+            (
+                "a patch of the shell tool's timeout",
+                json!({"action": "patch", "patch": {"shell": {"timeout_secs": 60}}}),
+            ),
+            (
+                "a patch that removes the servers",
+                json!({"action": "patch", "patch": {"tools": {"mcp_servers": []}}}),
+            ),
+            (
+                "a patch that removes the hooks",
+                json!({"action": "patch", "patch": {"hooks": {"entries": []}}}),
+            ),
+            (
+                "a patch that removes the skills repositories",
+                json!({"action": "patch", "patch": {"skills": {"repositories": []}}}),
+            ),
+        ] {
+            if let Err(refused) =
+                Box::pin(handle_tools_call(&state, "meerkat_config", &arguments)).await
+            {
+                panic!("{what}: {} {:?}", refused.message, refused.data);
+            }
+            let committed = config_generation(&state).await;
+            assert!(committed > generation, "{what}: the write commits");
+            generation = committed;
+        }
+        Box::pin(handle_tools_call(
+            &state,
+            "meerkat_config",
+            &json!({"action": "get"}),
+        ))
+        .await
+        .expect("a read");
+        let document = committed_config_document(&state).await;
+        for pointer in [
+            "/tools/mcp_servers",
+            "/hooks/entries",
+            "/skills/repositories",
+        ] {
+            assert!(
+                document
+                    .pointer(pointer)
+                    .and_then(Value::as_array)
+                    .is_none_or(Vec::is_empty),
+                "{pointer} is empty after its removal: {document}"
+            );
+        }
+        assert_eq!(document["shell"]["program"], json!("/synthetic/shell"));
+        assert_eq!(document["shell"]["timeout_secs"], json!(60));
+    }
+
+    /// The words every stored value of the fixture below starts with.
+    const STORED_VALUE_WORDS: &str = "synthetic stored value";
+
+    /// The stored value of the fixture's place `n`: plain synthetic words,
+    /// put together at run time.
+    fn stored_value(n: u8) -> String {
+        format!("{STORED_VALUE_WORDS} {n:02}")
+    }
+
+    const FOURTH_SOURCE: &str = "44444444-4444-4444-8444-444444444444";
+
+    /// The sections of the `team` realm's document that hold a value at
+    /// every secret-bearing place of the document: an auth profile's inline
+    /// source and a credential command's environment; the environment of a
+    /// stdio MCP server and the headers of two HTTP ones; the environment
+    /// of a command hook and the headers of an HTTP one; the environment of
+    /// a stdio skills repository, the bearer token and the header value of
+    /// two HTTP ones and the token of a git one.
+    fn secret_sections() -> String {
+        let value = stored_value;
+        let hook = |id: &str, runtime: String| {
+            format!(
+                "[[hooks.entries]]\nid = \"{id}\"\nenabled = true\npoint = \"run_started\"\n\
+                 mode = \"foreground\"\ncapability = \"observe\"\npriority = 0\n\
+                 runtime = {runtime}\n\n"
+            )
+        };
+        let repository = |name: &str, source: &str, transport: String| {
+            format!(
+                "[[skills.repositories]]\nname = \"{name}\"\nsource_uuid = \"{source}\"\n\
+                 {transport}\n\n"
+            )
+        };
+        [
+            format!(
+                "[realm.team.auth.inline]\nprovider = \"openai\"\nauth_method = \"api_key\"\n\
+                 source = {{ kind = \"inline_secret\", secret = \"{}\" }}\n\n",
+                value(1)
+            ),
+            format!(
+                "[realm.team.auth.minted]\nprovider = \"openai\"\nauth_method = \"api_key\"\n\
+                 source = {{ kind = \"command\", program = \"/synthetic/credential\", \
+                 env = {{ SYNTHETIC_SEED = \"{}\" }} }}\n\n",
+                value(2)
+            ),
+            format!(
+                "[[tools.mcp_servers]]\nname = \"stdio-server\"\ncommand = \"/synthetic/server\"\n\
+                 env = {{ SYNTHETIC_SERVER = \"{}\" }}\n\n",
+                value(3)
+            ),
+            format!(
+                "[[tools.mcp_servers]]\nname = \"http-server\"\n\
+                 url = \"http://synthetic.invalid/mcp\"\n\
+                 headers = {{ X-Synthetic = \"{}\" }}\n\n",
+                value(4)
+            ),
+            format!(
+                "[[tools.mcp_servers]]\nname = \"http-server-two\"\n\
+                 url = \"http://two.synthetic.invalid/mcp\"\n\
+                 headers = {{ X-Synthetic = \"{}\" }}\n\n",
+                value(11)
+            ),
+            hook(
+                "command-hook",
+                format!(
+                    "{{ type = \"command\", command = \"/synthetic/hook\", \
+                     env = {{ SYNTHETIC_HOOK = \"{}\" }} }}",
+                    value(5)
+                ),
+            ),
+            hook(
+                "http-hook",
+                format!(
+                    "{{ type = \"http\", url = \"http://synthetic.invalid/hook\", \
+                     headers = {{ X-Synthetic = \"{}\" }} }}",
+                    value(6)
+                ),
+            ),
+            repository(
+                "stdio-skills",
+                FIRST_SOURCE,
+                format!(
+                    "type = \"stdio\"\ncommand = \"/synthetic/skills\"\n\
+                     env = {{ SYNTHETIC_SKILLS = \"{}\" }}",
+                    value(7)
+                ),
+            ),
+            repository(
+                "bearer-skills",
+                SECOND_SOURCE,
+                format!(
+                    "type = \"http\"\nurl = \"http://synthetic.invalid/skills\"\n\
+                     auth = {{ scheme = \"bearer\", token = \"{}\" }}",
+                    value(8)
+                ),
+            ),
+            repository(
+                "header-skills",
+                THIRD_SOURCE,
+                format!(
+                    "type = \"http\"\nurl = \"http://two.synthetic.invalid/skills\"\n\
+                     auth = {{ scheme = \"header\", name = \"X-Synthetic\", value = \"{}\" }}",
+                    value(9)
+                ),
+            ),
+            repository(
+                "git-skills",
+                FOURTH_SOURCE,
+                format!(
+                    "type = \"git\"\nurl = \"https://synthetic.invalid/skills.git\"\n\
+                     auth = {{ scheme = \"token\", token = \"{}\" }}",
+                    value(10)
+                ),
+            ),
+        ]
+        .concat()
+    }
+
+    /// Where each value of the fixture sits in the document, with the
+    /// value.
+    fn stored_places() -> Vec<(&'static str, String)> {
+        vec![
+            ("/realm/team/auth/inline/source/secret", stored_value(1)),
+            (
+                "/realm/team/auth/minted/source/env/SYNTHETIC_SEED",
+                stored_value(2),
+            ),
+            ("/tools/mcp_servers/0/env/SYNTHETIC_SERVER", stored_value(3)),
+            ("/tools/mcp_servers/1/headers/X-Synthetic", stored_value(4)),
+            ("/tools/mcp_servers/2/headers/X-Synthetic", stored_value(11)),
+            (
+                "/hooks/entries/0/runtime/env/SYNTHETIC_HOOK",
+                stored_value(5),
+            ),
+            (
+                "/hooks/entries/1/runtime/headers/X-Synthetic",
+                stored_value(6),
+            ),
+            (
+                "/skills/repositories/0/env/SYNTHETIC_SKILLS",
+                stored_value(7),
+            ),
+            ("/skills/repositories/1/auth/token", stored_value(8)),
+            ("/skills/repositories/2/auth/value", stored_value(9)),
+            ("/skills/repositories/3/auth/token", stored_value(10)),
+        ]
+    }
+
+    /// A state that serves the realm `team`, whose own document is the
+    /// fixture above. The directory lives as long as the state is used.
+    async fn state_with_stored_values() -> (tempfile::TempDir, MeerkatMcpState) {
+        state_for_team_realm(&secret_sections(), &[("org", "")]).await
+    }
+
+    /// The fixture's committed document as the config runtime reads it:
+    /// with every stored value.
+    async fn document_with_stored_values() -> Value {
+        let (_directory, state) = state_with_stored_values().await;
+        let document = committed_config_document(&state).await;
+        for (pointer, value) in stored_places() {
+            assert_eq!(
+                document.pointer(pointer),
+                Some(&json!(value)),
+                "the fixture holds its value at {pointer}"
+            );
+        }
+        document
+    }
+
+    /// The places of the fixture, other than those under `except`, at which
+    /// `document` does not hold its stored value.
+    fn places_without_their_stored_value(document: &Value, except: &[&str]) -> Vec<String> {
+        stored_places()
+            .into_iter()
+            .filter(|(pointer, _)| !except.iter().any(|except| pointer.starts_with(except)))
+            .filter(|(pointer, value)| document.pointer(pointer) != Some(&json!(value)))
+            .map(|(pointer, _)| format!("{pointer} holds {:?}", document.pointer(pointer)))
+            .collect()
+    }
+
+    /// The patch that restates the list at `pointer` of `document` after
+    /// `change` has been applied to the list.
+    fn list_patch(document: &Value, pointer: &str, change: impl FnOnce(&mut Vec<Value>)) -> Value {
+        let mut entries = document
+            .pointer(pointer)
+            .and_then(Value::as_array)
+            .unwrap_or_else(|| panic!("the document's {pointer}"))
+            .clone();
+        change(&mut entries);
+        json!({"action": "patch", "patch": patch_at(pointer, json!(entries))})
+    }
+
+    /// The set of the whole document that `patch` (the arguments of a patch
+    /// through the tool) would write on the fixture: the patch merged onto
+    /// the stored document as it is written, a marker included (the
+    /// runtime's own preview would resolve or refuse it).
+    async fn set_twin(patch: &Value) -> Value {
+        let (_directory, state) = state_with_stored_values().await;
+        let stored = state
+            .config_runtime
+            .get()
+            .await
+            .expect("the stored document")
+            .config;
+        let replaced = meerkat_core::apply_config_patch_preview(&stored, patch["patch"].clone())
+            .expect("the document the patch would write");
+        json!({"action": "set", "config": replaced})
+    }
+
+    const OTHER_ADDRESS: &str = "http://other.synthetic.invalid/";
+
+    /// A stored secret value stays with the address it was stored for. A
+    /// write that changes the URL of an HTTP MCP server, an HTTP hook or an
+    /// HTTP skills repository that holds stored header values or a stored
+    /// token, and states no secret value for the entry, commits and keeps
+    /// none of them: no stored value stands under the entry, in the stored
+    /// document and in the tool's answer, and the entry goes to the new
+    /// address without one until a value is set again. Every other entry
+    /// keeps its values. By a patch and by a set. Each case on a state of
+    /// its own.
+    #[tokio::test]
+    async fn test_config_writes_that_change_an_address_and_state_no_secret_value_keep_none() {
+        let document = document_with_stored_values().await;
+        let server = list_patch(&document, "/tools/mcp_servers", |servers| {
+            servers[1] = json!({"name": "http-server", "url": OTHER_ADDRESS});
+        });
+        let server_by_set = set_twin(&server).await;
+        let mut otherwise = Vec::new();
+        for (what, entry, url, arguments) in [
+            (
+                "a patch of an HTTP MCP server's URL",
+                "/tools/mcp_servers/1",
+                "/url",
+                server,
+            ),
+            (
+                "a set of an HTTP MCP server's URL",
+                "/tools/mcp_servers/1",
+                "/url",
+                server_by_set,
+            ),
+            (
+                "a patch of an HTTP hook's URL",
+                "/hooks/entries/1",
+                "/runtime/url",
+                list_patch(&document, "/hooks/entries", |hooks| {
+                    hooks[1] =
+                        hook_entry("http-hook", json!({"type": "http", "url": OTHER_ADDRESS}));
+                }),
+            ),
+            (
+                "a patch of the URL of an HTTP skills repository with a bearer token",
+                "/skills/repositories/1",
+                "/url",
+                list_patch(&document, "/skills/repositories", |repositories| {
+                    repositories[1] = json!({
+                        "name": "bearer-skills",
+                        "source_uuid": SECOND_SOURCE,
+                        "type": "http",
+                        "url": OTHER_ADDRESS,
+                    });
+                }),
+            ),
+            (
+                "a patch of the URL of an HTTP skills repository with a header value",
+                "/skills/repositories/2",
+                "/url",
+                list_patch(&document, "/skills/repositories", |repositories| {
+                    repositories[2] = json!({
+                        "name": "header-skills",
+                        "source_uuid": THIRD_SOURCE,
+                        "type": "http",
+                        "url": OTHER_ADDRESS,
+                    });
+                }),
+            ),
+        ] {
+            let (_directory, state) = state_with_stored_values().await;
+            assert!(
+                document
+                    .pointer(entry)
+                    .is_some_and(|stored| stored.to_string().contains(STORED_VALUE_WORDS)),
+                "{what}: the fixture's {entry} holds a stored value"
+            );
+            let answer =
+                match Box::pin(handle_tools_call(&state, "meerkat_config", &arguments)).await {
+                    Ok(payload) => serde_json::from_str::<Value>(
+                        payload["content"][0]["text"]
+                            .as_str()
+                            .expect("config payload text"),
+                    )
+                    .expect("config payload json"),
+                    Err(refused) => {
+                        otherwise.push(format!(
+                            "{what}: refused: {} {:?}",
+                            refused.message, refused.data
+                        ));
+                        continue;
+                    }
+                };
+            let written = committed_config_document(&state).await;
+            for (shown_by, shown) in [
+                ("the stored document", &written),
+                ("the tool's answer", &answer["config"]),
+            ] {
+                let Some(moved) = shown.pointer(entry) else {
+                    otherwise.push(format!("{what}: {shown_by} holds no {entry}"));
+                    continue;
+                };
+                if moved.pointer(url) != Some(&json!(OTHER_ADDRESS)) {
+                    otherwise.push(format!("{what}: {shown_by} does not hold the new address"));
+                }
+                if moved.to_string().contains(STORED_VALUE_WORDS) {
+                    otherwise.push(format!(
+                        "{what}: {shown_by} holds a stored value under the entry"
+                    ));
+                }
+            }
+            otherwise.extend(
+                places_without_their_stored_value(&written, &[entry])
+                    .into_iter()
+                    .map(|place| format!("{what}: {place}")),
+            );
+        }
+        assert!(
+            otherwise.is_empty(),
+            "a write that changes an address and states no secret value did otherwise: \
+             {otherwise:#?}"
+        );
+    }
+
+    /// A write that changes an HTTP entry's URL and states the entry's
+    /// secret values itself commits, with the stored value restated or
+    /// with another one. Each case on a state of its own.
+    #[tokio::test]
+    async fn test_config_writes_that_state_the_secret_values_for_another_address_still_commit() {
+        let document = document_with_stored_values().await;
+        let stated = "a value the writer states";
+        let mut not_committed = Vec::new();
+        for (what, arguments, pointer, value) in [
+            (
+                "an HTTP MCP server's URL with its header value restated",
+                list_patch(&document, "/tools/mcp_servers", |servers| {
+                    servers[1]["url"] = json!(OTHER_ADDRESS);
+                }),
+                "/tools/mcp_servers/1/headers/X-Synthetic",
+                stored_value(4),
+            ),
+            (
+                "an HTTP hook's URL with another header value",
+                list_patch(&document, "/hooks/entries", |hooks| {
+                    hooks[1]["runtime"]["url"] = json!(OTHER_ADDRESS);
+                    hooks[1]["runtime"]["headers"]["X-Synthetic"] = json!(stated);
+                }),
+                "/hooks/entries/1/runtime/headers/X-Synthetic",
+                stated.to_string(),
+            ),
+            (
+                "an HTTP skills repository's URL with another token",
+                list_patch(&document, "/skills/repositories", |repositories| {
+                    repositories[1]["url"] = json!(OTHER_ADDRESS);
+                    repositories[1]["auth"]["token"] = json!(stated);
+                }),
+                "/skills/repositories/1/auth/token",
+                stated.to_string(),
+            ),
+        ] {
+            let (_directory, state) = state_with_stored_values().await;
+            match Box::pin(handle_tools_call(&state, "meerkat_config", &arguments)).await {
+                Ok(_) => {
+                    let written = committed_config_document(&state).await;
+                    if written.pointer(pointer) != Some(&json!(value)) {
+                        not_committed.push(format!("{what}: the stated value was not written"));
+                    }
+                }
+                Err(refused) => not_committed.push(format!(
+                    "{what}: refused: {} {:?}",
+                    refused.message, refused.data
+                )),
+            }
+        }
+        assert!(
+            not_committed.is_empty(),
+            "the config tool did not take: {not_committed:#?}"
+        );
+    }
+
+    /// A write that leaves an entry's address as stored is not this rule's:
+    /// a patch of another key keeps every stored secret value; an entry
+    /// restated at its address with another setting keeps the values it
+    /// restates; an entry restated at its address without its headers
+    /// loses them (a writer may remove a secret value); an entry removed,
+    /// and an entry written under another name at another address, commit.
+    /// Each case on a state of its own.
+    #[tokio::test]
+    async fn test_config_writes_that_keep_an_entrys_address_are_not_refused_for_its_secret_values()
+    {
+        let document = document_with_stored_values().await;
+        let mut otherwise = Vec::new();
+        for (what, arguments, changed) in [
+            (
+                "a patch of another key",
+                json!({"action": "patch", "patch": {"max_tokens": 2048}}),
+                None,
+            ),
+            (
+                "an HTTP MCP server restated with another connect timeout",
+                list_patch(&document, "/tools/mcp_servers", |servers| {
+                    servers[1]["connect_timeout_secs"] = json!(30);
+                }),
+                None,
+            ),
+            (
+                "an HTTP MCP server restated at its address without its headers",
+                list_patch(&document, "/tools/mcp_servers", |servers| {
+                    servers[1] =
+                        json!({"name": "http-server", "url": "http://synthetic.invalid/mcp"});
+                }),
+                Some("/tools/mcp_servers/1"),
+            ),
+            (
+                "an HTTP hook removed",
+                list_patch(&document, "/hooks/entries", |hooks| {
+                    hooks.remove(1);
+                }),
+                Some("/hooks/entries/1"),
+            ),
+            (
+                "an HTTP MCP server written under another name at another address",
+                list_patch(&document, "/tools/mcp_servers", |servers| {
+                    servers[1] = json!({"name": "renamed-server", "url": OTHER_ADDRESS});
+                }),
+                Some("/tools/mcp_servers/1"),
+            ),
+        ] {
+            let (_directory, state) = state_with_stored_values().await;
+            let generation = config_generation(&state).await;
+            match Box::pin(handle_tools_call(&state, "meerkat_config", &arguments)).await {
+                Ok(_) => {
+                    if config_generation(&state).await <= generation {
+                        otherwise.push(format!("{what}: nothing was committed"));
+                    }
+                    let written = committed_config_document(&state).await;
+                    let except: Vec<&str> = changed.into_iter().collect();
+                    otherwise.extend(
+                        places_without_their_stored_value(&written, &except)
+                            .into_iter()
+                            .map(|place| format!("{what}: {place}")),
+                    );
+                    if let Some(changed) = changed
+                        && written
+                            .pointer(changed)
+                            .is_some_and(|entry| entry.to_string().contains(STORED_VALUE_WORDS))
+                    {
+                        otherwise.push(format!("{what}: {changed} still holds a stored value"));
+                    }
+                }
+                Err(refused) => otherwise.push(format!(
+                    "{what}: refused: {} {:?}",
+                    refused.message, refused.data
+                )),
+            }
+        }
+        assert!(
+            otherwise.is_empty(),
+            "the config tool did otherwise: {otherwise:#?}"
+        );
+    }
+
+    /// A provider route whose credential the host holds outside the
+    /// document (an auth profile that reads a variable, or one that reads
+    /// the credential store) is the host's to administer like any other:
+    /// the config tool does not change the address of its backend. Refused
+    /// as host administration, nothing written. Each case on a state of
+    /// its own.
+    #[tokio::test]
+    async fn test_config_writes_cannot_change_the_route_of_a_credential_the_host_holds() {
+        let mut not_refused = Vec::new();
+        for (held_in, source) in [
+            (
+                "a variable",
+                "{ kind = \"env\", env = \"MEERKAT_CONFIG_TOOL_ROW_VALUE\" }",
+            ),
+            ("the credential store", "{ kind = \"managed_store\" }"),
+        ] {
+            let own = format!(
+                "[realm.team.backend.main]\nprovider = \"openai\"\nbackend_kind = \"openai_api\"\n\
+                 base_url = \"http://synthetic.invalid/v1\"\n\n\
+                 [realm.team.auth.main]\nprovider = \"openai\"\nauth_method = \"api_key\"\n\
+                 source = {source}\n\n\
+                 [realm.team.binding.main]\nbackend_profile = \"main\"\nauth_profile = \"main\"\n"
+            );
+            not_refused.extend(
+                refused_in_team_realm(
+                    &format!(
+                        "a patch of the address of a backend whose credential is in {held_in}"
+                    ),
+                    &own,
+                    &[("org", "")],
+                    team_section_patch(
+                        "/backend/main/base_url",
+                        json!("http://other.synthetic.invalid/v1"),
+                    ),
+                    &[],
+                )
+                .await,
+            );
+        }
+        assert!(
+            not_refused.is_empty(),
+            "the config tool did not refuse: {not_refused:#?}"
+        );
+    }
+
+    /// The marker a configuration answer shows in place of a stored secret
+    /// value, spelled out here: the documentation names this text.
+    const SECRET_MARKER: &str = "<redacted>";
+
+    const FIFTH_SOURCE: &str = "55555555-5555-4555-8555-555555555555";
+
+    /// `document` with the marker at every place of the fixture: the
+    /// document a configuration answer shows.
+    fn with_markers(mut document: Value) -> Value {
+        for (pointer, _) in stored_places() {
+            *document
+                .pointer_mut(pointer)
+                .unwrap_or_else(|| panic!("the document's {pointer}")) = json!(SECRET_MARKER);
+        }
+        document
+    }
+
+    /// One call of the config tool: the answer's text and the answer.
+    async fn config_tool_answer(
+        state: &MeerkatMcpState,
+        arguments: &Value,
+    ) -> Result<(String, Value), ToolCallError> {
+        let payload = Box::pin(handle_tools_call(state, "meerkat_config", arguments)).await?;
+        let text = payload["content"][0]["text"]
+            .as_str()
+            .expect("config payload text")
+            .to_string();
+        let answer = serde_json::from_str::<Value>(&text).expect("config payload json");
+        Ok((text, answer))
+    }
+
+    /// What an answer of the config tool shows otherwise than a marker in
+    /// place of each stored value of the fixture: a stored value anywhere
+    /// in its text, or a place of the fixture that does not hold the marker.
+    fn shown_otherwise_than_as_markers(what: &str, text: &str, answer: &Value) -> Vec<String> {
+        let mut otherwise = Vec::new();
+        if text.contains(STORED_VALUE_WORDS) {
+            otherwise.push(format!("{what}: the answer's text holds a stored value"));
+        }
+        for (pointer, _) in stored_places() {
+            if answer["config"].pointer(pointer) != Some(&json!(SECRET_MARKER)) {
+                otherwise.push(format!("{what}: {pointer} does not show the marker"));
+            }
+        }
+        otherwise
+    }
+
+    /// An answer of the config tool that returns the configuration document
+    /// shows a marker in place of each stored secret value: an auth
+    /// profile's inline secret, a credential command's environment values,
+    /// the environment and header values of MCP servers and hooks, and a
+    /// skills repository's environment values, tokens and header value. The
+    /// names stay, and so does what is not a secret value (an argument
+    /// list, a URL). That holds for the answer to a `get` and for the
+    /// answers after a `patch` and a `set`; the stored document keeps its
+    /// values.
+    #[tokio::test]
+    async fn test_config_answers_show_a_marker_in_place_of_stored_secret_values() {
+        let (_directory, state) = state_with_stored_values().await;
+        let mut restated = document_with_stored_values().await;
+        restated["max_tokens"] = json!(4096);
+        let mut otherwise = Vec::new();
+        for (what, arguments) in [
+            ("the answer to a get", json!({"action": "get"})),
+            (
+                "the answer after a patch",
+                json!({"action": "patch", "patch": {"max_tokens": 2048}}),
+            ),
+            (
+                "the answer after a set",
+                json!({"action": "set", "config": restated}),
+            ),
+        ] {
+            match config_tool_answer(&state, &arguments).await {
+                Ok((text, answer)) => {
+                    otherwise.extend(shown_otherwise_than_as_markers(what, &text, &answer));
+                    // The names of a value map stay in the answer.
+                    for pointer in [
+                        "/tools/mcp_servers/0/env",
+                        "/tools/mcp_servers/1/headers",
+                        "/hooks/entries/0/runtime/env",
+                        "/skills/repositories/0/env",
+                        "/realm/team/auth/minted/source/env",
+                    ] {
+                        assert_eq!(
+                            answer["config"]
+                                .pointer(pointer)
+                                .and_then(Value::as_object)
+                                .map(serde_json::Map::len),
+                            Some(1),
+                            "{what}: {pointer} keeps its name"
+                        );
+                    }
+                    // What is not a secret value is shown as written.
+                    for (pointer, written) in [
+                        ("/tools/mcp_servers/0/command", "/synthetic/server"),
+                        ("/tools/mcp_servers/1/url", "http://synthetic.invalid/mcp"),
+                        (
+                            "/realm/team/auth/minted/source/program",
+                            "/synthetic/credential",
+                        ),
+                        ("/skills/repositories/2/auth/name", "X-Synthetic"),
+                    ] {
+                        assert_eq!(
+                            answer["config"].pointer(pointer),
+                            Some(&json!(written)),
+                            "{what}: {pointer}"
+                        );
+                    }
+                }
+                Err(refused) => otherwise.push(format!(
+                    "{what}: refused: {} {:?}",
+                    refused.message, refused.data
+                )),
+            }
+            let lost =
+                places_without_their_stored_value(&committed_config_document(&state).await, &[]);
+            assert!(
+                lost.is_empty(),
+                "{what}: the stored document keeps its values: {lost:#?}"
+            );
+        }
+        assert!(
+            otherwise.is_empty(),
+            "the config tool's answers show stored values: {otherwise:#?}"
+        );
+    }
+
+    /// How a write that carries the marker must be refused.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum MarkerRefusal {
+        /// As a write that is invalid for its marker: the refusal names the
+        /// marker.
+        NamesTheMarker,
+        /// By this rule or by another one of the tool.
+        Any,
+    }
+
+    /// One write through the config tool on `state`, which must be refused
+    /// as invalid params with nothing written, in a text that holds each
+    /// of `says` and no stored value. Answers what went otherwise, if
+    /// anything.
+    async fn marker_write_refused_on(
+        state: &MeerkatMcpState,
+        what: &str,
+        arguments: &Value,
+        refusal: MarkerRefusal,
+        says: &[&str],
+    ) -> Option<String> {
+        let generation = config_generation(state).await;
+        let document = committed_config_document(state).await;
+        match Box::pin(handle_tools_call(state, "meerkat_config", arguments)).await {
+            Ok(_) => {
+                let written = committed_config_document(state).await.to_string();
+                Some(format!(
+                    "{what}: the write was accepted (the stored document holds the marker text: \
+                     {})",
+                    written.contains(SECRET_MARKER)
+                ))
+            }
+            Err(refused) => {
+                assert_eq!(config_generation(state).await, generation, "{what}");
+                assert_eq!(committed_config_document(state).await, document, "{what}");
+                assert!(
+                    !refused.message.contains(STORED_VALUE_WORDS),
+                    "{what}: a refusal names no value"
+                );
+                (refused.code != -32602
+                    || (refusal == MarkerRefusal::NamesTheMarker
+                        && !(refused.message.contains(SECRET_MARKER)
+                            && says.iter().all(|says| refused.message.contains(says)))))
+                .then(|| {
+                    format!(
+                        "{what}: refused otherwise: {} {} {:?}",
+                        refused.code, refused.message, refused.data
+                    )
+                })
+            }
+        }
+    }
+
+    /// As above, on a state of its own that holds the fixture.
+    async fn marker_write_refused(
+        what: &str,
+        arguments: &Value,
+        refusal: MarkerRefusal,
+    ) -> Option<String> {
+        let (_directory, state) = state_with_stored_values().await;
+        marker_write_refused_on(&state, what, arguments, refusal, &[]).await
+    }
+
+    fn http_server_with_marker(name: &str, url: &str) -> Value {
+        json!({"name": name, "url": url, "headers": {"X-Synthetic": SECRET_MARKER}})
+    }
+
+    fn http_hook_with_marker(id: &str, url: &str) -> Value {
+        hook_entry(
+            id,
+            json!({"type": "http", "url": url, "headers": {"X-Synthetic": SECRET_MARKER}}),
+        )
+    }
+
+    fn bearer_skills_with_marker(name: &str, source: &str, url: &str) -> Value {
+        json!({
+            "name": name,
+            "source_uuid": source,
+            "type": "http",
+            "url": url,
+            "auth": {"scheme": "bearer", "token": SECRET_MARKER},
+        })
+    }
+
+    fn header_skills_with_marker(name: &str, source: &str, url: &str) -> Value {
+        json!({
+            "name": name,
+            "source_uuid": source,
+            "type": "http",
+            "url": url,
+            "auth": {"scheme": "header", "name": "X-Synthetic", "value": SECRET_MARKER},
+        })
+    }
+
+    /// The marker stands for a value the document already holds at the same
+    /// place. A write that carries it where nothing is stored (an added
+    /// entry, a new name inside an entry's value map, another setting's
+    /// whole value) is refused as invalid, and the marker text is never
+    /// stored as a value: by a patch and by a set. Each case on a state of
+    /// its own.
+    #[tokio::test]
+    async fn test_config_writes_refuse_a_marker_where_no_value_is_stored() {
+        let document = document_with_stored_values().await;
+        let added_server = list_patch(&document, "/tools/mcp_servers", |servers| {
+            servers.push(http_server_with_marker(
+                "added-server",
+                "http://added.synthetic.invalid/mcp",
+            ));
+        });
+        let added_server_by_set = set_twin(&added_server).await;
+        let added_header = list_patch(&document, "/tools/mcp_servers", |servers| {
+            servers[1]["headers"]["X-Added"] = json!(SECRET_MARKER);
+        });
+        let added_header_by_set = set_twin(&added_header).await;
+        let mut not_refused = Vec::new();
+        for (what, arguments) in [
+            ("a patch adds an HTTP MCP server", added_server),
+            ("a set adds an HTTP MCP server", added_server_by_set),
+            (
+                "a patch adds a header name to an HTTP MCP server",
+                added_header,
+            ),
+            (
+                "a set adds a header name to an HTTP MCP server",
+                added_header_by_set,
+            ),
+            (
+                "a patch adds an HTTP hook",
+                list_patch(&document, "/hooks/entries", |hooks| {
+                    hooks.push(http_hook_with_marker(
+                        "added-hook",
+                        "http://added.synthetic.invalid/hook",
+                    ));
+                }),
+            ),
+            (
+                "a patch adds an HTTP skills repository with a bearer token",
+                list_patch(&document, "/skills/repositories", |repositories| {
+                    repositories.push(bearer_skills_with_marker(
+                        "added-skills",
+                        FIFTH_SOURCE,
+                        "http://added.synthetic.invalid/skills",
+                    ));
+                }),
+            ),
+            (
+                "a patch adds an HTTP skills repository with a header value",
+                list_patch(&document, "/skills/repositories", |repositories| {
+                    repositories.push(header_skills_with_marker(
+                        "added-skills",
+                        FIFTH_SOURCE,
+                        "http://added.synthetic.invalid/skills",
+                    ));
+                }),
+            ),
+            (
+                "a patch gives an HTTP skills repository another kind of credential",
+                list_patch(&document, "/skills/repositories", |repositories| {
+                    repositories[1] = header_skills_with_marker(
+                        "bearer-skills",
+                        SECOND_SOURCE,
+                        "http://synthetic.invalid/skills",
+                    );
+                }),
+            ),
+            (
+                "a patch writes the marker text as another setting's value",
+                json!({"action": "patch", "patch": {"agent": {"system_prompt": SECRET_MARKER}}}),
+            ),
+        ] {
+            not_refused.extend(
+                marker_write_refused(what, &arguments, MarkerRefusal::NamesTheMarker).await,
+            );
+        }
+        assert!(
+            not_refused.is_empty(),
+            "the config tool did not refuse a marker where nothing is stored: {not_refused:#?}"
+        );
+    }
+
+    /// A marker in an entry that the tool does not add or change anyway (an
+    /// entry that launches a process, an auth profile, an entry written as
+    /// another kind that launches a process) is refused as well, by either
+    /// rule, and nothing is written.
+    #[tokio::test]
+    async fn test_config_writes_refuse_a_marker_in_an_entry_the_tool_does_not_add() {
+        let document = document_with_stored_values().await;
+        let mut not_refused = Vec::new();
+        for (what, arguments) in [
+            (
+                "a patch adds an environment name to a stdio MCP server",
+                list_patch(&document, "/tools/mcp_servers", |servers| {
+                    servers[0]["env"]["SYNTHETIC_ADDED"] = json!(SECRET_MARKER);
+                }),
+            ),
+            (
+                "a patch adds a stdio MCP server",
+                list_patch(&document, "/tools/mcp_servers", |servers| {
+                    let mut added = stdio_server_entry("added-server", "/synthetic/added", &[]);
+                    added["env"] = json!({"SYNTHETIC_ADDED": SECRET_MARKER});
+                    servers.push(added);
+                }),
+            ),
+            (
+                "a patch adds an auth profile with an inline source",
+                team_section_patch(
+                    "/auth/added",
+                    json!({
+                        "provider": "openai",
+                        "auth_method": "api_key",
+                        "source": {"kind": "inline_secret", "secret": SECRET_MARKER},
+                    }),
+                ),
+            ),
+            (
+                "a patch adds an environment name to a credential command",
+                team_section_patch(
+                    "/auth/minted/source/env/SYNTHETIC_ADDED",
+                    json!(SECRET_MARKER),
+                ),
+            ),
+            (
+                "an HTTP MCP server written as a stdio one of its name",
+                list_patch(&document, "/tools/mcp_servers", |servers| {
+                    let mut stdio = stdio_server_entry("http-server", "/synthetic/added", &[]);
+                    stdio["env"] = json!({"X-Synthetic": SECRET_MARKER});
+                    servers[1] = stdio;
+                }),
+            ),
+            (
+                "an HTTP hook written as a command hook of its id",
+                list_patch(&document, "/hooks/entries", |hooks| {
+                    hooks[1] = hook_entry(
+                        "http-hook",
+                        json!({"type": "command", "command": "/synthetic/added",
+                            "env": {"X-Synthetic": SECRET_MARKER}}),
+                    );
+                }),
+            ),
+            (
+                "an HTTP skills repository written as a git one of its source id",
+                list_patch(&document, "/skills/repositories", |repositories| {
+                    repositories[1] = json!({
+                        "name": "bearer-skills",
+                        "source_uuid": SECOND_SOURCE,
+                        "type": "git",
+                        "url": "http://synthetic.invalid/skills",
+                        "auth": {"scheme": "token", "token": SECRET_MARKER},
+                    });
+                }),
+            ),
+        ] {
+            not_refused.extend(marker_write_refused(what, &arguments, MarkerRefusal::Any).await);
+        }
+        assert!(
+            not_refused.is_empty(),
+            "the config tool did not refuse: {not_refused:#?}"
+        );
+    }
+
+    /// Inside a list the marker stands only for the stored value of the
+    /// same entry: the one stored entry that carries the written entry's
+    /// own key (an MCP server's name, a hook's id, a skills repository's
+    /// source id with its name). An entry written under another key, two
+    /// entries written under one key and entries written under each
+    /// other's keys are refused when they carry the marker: no entry ever
+    /// gets another entry's value. Each case on a state of its own.
+    #[tokio::test]
+    async fn test_config_writes_bind_a_marker_only_to_the_entry_of_its_own_key() {
+        const FIRST_URL: &str = "http://synthetic.invalid/mcp";
+        const SECOND_URL: &str = "http://two.synthetic.invalid/mcp";
+        const HOOK_URL: &str = "http://synthetic.invalid/hook";
+        const SKILLS_URL: &str = "http://synthetic.invalid/skills";
+        let document = document_with_stored_values().await;
+        let mut not_refused = Vec::new();
+        for (what, arguments) in [
+            (
+                "an HTTP MCP server written under another name",
+                list_patch(&document, "/tools/mcp_servers", |servers| {
+                    servers[1] = http_server_with_marker("renamed-server", FIRST_URL);
+                }),
+            ),
+            (
+                "two HTTP MCP servers written under each other's names",
+                list_patch(&document, "/tools/mcp_servers", |servers| {
+                    servers[1] = http_server_with_marker("http-server", SECOND_URL);
+                    servers[2] = http_server_with_marker("http-server-two", FIRST_URL);
+                }),
+            ),
+            (
+                "an HTTP MCP server written twice under its name",
+                list_patch(&document, "/tools/mcp_servers", |servers| {
+                    servers[1] = http_server_with_marker("http-server", FIRST_URL);
+                    servers.push(http_server_with_marker("http-server", FIRST_URL));
+                }),
+            ),
+            (
+                "an HTTP MCP server written under the name of another stored one",
+                list_patch(&document, "/tools/mcp_servers", |servers| {
+                    servers.remove(2);
+                    servers[1] = http_server_with_marker("http-server-two", FIRST_URL);
+                }),
+            ),
+            (
+                "an HTTP hook written under another id",
+                list_patch(&document, "/hooks/entries", |hooks| {
+                    hooks[1] = http_hook_with_marker("renamed-hook", HOOK_URL);
+                }),
+            ),
+            (
+                "an HTTP hook written twice under its id",
+                list_patch(&document, "/hooks/entries", |hooks| {
+                    let hook = http_hook_with_marker("http-hook", HOOK_URL);
+                    hooks[1] = hook.clone();
+                    hooks.push(hook);
+                }),
+            ),
+            (
+                "an HTTP skills repository written under another source id and name",
+                list_patch(&document, "/skills/repositories", |repositories| {
+                    repositories[1] =
+                        bearer_skills_with_marker("renamed-skills", FIFTH_SOURCE, SKILLS_URL);
+                }),
+            ),
+            (
+                "an HTTP skills repository written under another source id",
+                list_patch(&document, "/skills/repositories", |repositories| {
+                    repositories[1] =
+                        bearer_skills_with_marker("bearer-skills", FIFTH_SOURCE, SKILLS_URL);
+                }),
+            ),
+            (
+                "an HTTP skills repository written under another name",
+                list_patch(&document, "/skills/repositories", |repositories| {
+                    repositories[1] =
+                        bearer_skills_with_marker("renamed-skills", SECOND_SOURCE, SKILLS_URL);
+                }),
+            ),
+        ] {
+            not_refused.extend(
+                marker_write_refused(what, &arguments, MarkerRefusal::NamesTheMarker).await,
+            );
+        }
+        assert!(
+            not_refused.is_empty(),
+            "the config tool bound a marker to another entry: {not_refused:#?}"
+        );
+    }
+
+    /// A key that several stored entries share is no entry's own: a marker
+    /// under it is refused, and the refusal says why. Two stored HTTP MCP
+    /// servers of one name; and two stored HTTP hooks written without an
+    /// id, which both take the id `hook`. Each case on a state of its own.
+    #[tokio::test]
+    async fn test_config_writes_refuse_a_marker_under_a_key_that_stored_entries_share() {
+        let twin = |url: &str, n: u8| {
+            format!(
+                "[[tools.mcp_servers]]\nname = \"twin\"\nurl = \"{url}\"\n\
+                 headers = {{ X-Synthetic = \"{}\" }}\n\n",
+                stored_value(n)
+            )
+        };
+        let hook = |url: &str, n: u8| {
+            format!(
+                "[[hooks.entries]]\npoint = \"run_started\"\nmode = \"foreground\"\n\
+                 capability = \"observe\"\npriority = 0\n\
+                 runtime = {{ type = \"http\", url = \"{url}\", \
+                 headers = {{ X-Synthetic = \"{}\" }} }}\n\n",
+                stored_value(n)
+            )
+        };
+        let sections = [
+            twin("http://synthetic.invalid/mcp", 1),
+            twin("http://two.synthetic.invalid/mcp", 2),
+            hook("http://synthetic.invalid/hook", 3),
+            hook("http://two.synthetic.invalid/hook", 4),
+        ]
+        .concat();
+        let mut not_refused = Vec::new();
+        for (what, list, places, says) in [
+            (
+                "two stored HTTP MCP servers of one name",
+                "/tools/mcp_servers",
+                ["/0/headers/X-Synthetic", "/1/headers/X-Synthetic"],
+                "twin",
+            ),
+            (
+                "two stored HTTP hooks without an id",
+                "/hooks/entries",
+                [
+                    "/0/runtime/headers/X-Synthetic",
+                    "/1/runtime/headers/X-Synthetic",
+                ],
+                "without an id",
+            ),
+        ] {
+            let (_directory, state) = state_for_team_realm(&sections, &[("org", "")]).await;
+            let document = committed_config_document(&state).await;
+            let mut entries = document.pointer(list).expect("the stored list").clone();
+            for place in places {
+                let value = entries.pointer_mut(place).expect("a stored value");
+                assert!(
+                    value
+                        .as_str()
+                        .is_some_and(|value| value.starts_with(STORED_VALUE_WORDS)),
+                    "{what}: the fixture holds a value at {place}"
+                );
+                *value = json!(SECRET_MARKER);
+            }
+            let arguments = json!({"action": "patch", "patch": patch_at(list, entries)});
+            not_refused.extend(
+                marker_write_refused_on(
+                    &state,
+                    what,
+                    &arguments,
+                    MarkerRefusal::NamesTheMarker,
+                    &[says],
+                )
+                .await,
+            );
+        }
+        assert!(
+            not_refused.is_empty(),
+            "the config tool bound a marker under a shared key: {not_refused:#?}"
+        );
+    }
+
+    /// The entries of the list at `pointer` of `document`, by the value of
+    /// each entry's `key`.
+    fn entries_by_key(document: &Value, pointer: &str, key: &str) -> BTreeMap<String, Value> {
+        document
+            .pointer(pointer)
+            .and_then(Value::as_array)
+            .unwrap_or_else(|| panic!("the document's {pointer}"))
+            .iter()
+            .map(|entry| {
+                (
+                    entry[key].as_str().expect("an entry's key").to_string(),
+                    entry.clone(),
+                )
+            })
+            .collect()
+    }
+
+    /// A list written in another order resolves each marker by its entry's
+    /// own key, never by position: the write commits, every entry is the
+    /// stored entry of its key with every stored value as before, and the
+    /// list is stored in the written order. For the three lists at once.
+    #[tokio::test]
+    async fn test_config_writes_resolve_a_marker_by_the_entrys_key_in_another_order() {
+        const LISTS: [(&str, &str); 3] = [
+            ("/tools/mcp_servers", "name"),
+            ("/hooks/entries", "id"),
+            ("/skills/repositories", "source_uuid"),
+        ];
+        let (_directory, state) = state_with_stored_values().await;
+        let before = committed_config_document(&state).await;
+        let shown = with_markers(before.clone());
+        let reversed = |pointer: &str| {
+            let mut entries = shown
+                .pointer(pointer)
+                .and_then(Value::as_array)
+                .expect("a list")
+                .clone();
+            entries.reverse();
+            json!(entries)
+        };
+        let patch = json!({
+            "tools": {"mcp_servers": reversed("/tools/mcp_servers")},
+            "hooks": {"entries": reversed("/hooks/entries")},
+            "skills": {"repositories": reversed("/skills/repositories")},
+        });
+        let outcome = config_tool_answer(&state, &json!({"action": "patch", "patch": patch})).await;
+        let after = committed_config_document(&state).await;
+        assert!(
+            !after.to_string().contains(SECRET_MARKER),
+            "the stored document holds the marker text after the lists were written in another \
+             order"
+        );
+        if let Err(refused) = &outcome {
+            panic!(
+                "lists written in another order with markers were refused: {} {:?}",
+                refused.message, refused.data
+            );
+        }
+        for (pointer, key) in LISTS {
+            assert_eq!(
+                entries_by_key(&after, pointer, key),
+                entries_by_key(&before, pointer, key),
+                "{pointer}: each entry is the stored entry of its {key}"
+            );
+            let order = |document: &Value| -> Vec<Value> {
+                document
+                    .pointer(pointer)
+                    .and_then(Value::as_array)
+                    .expect("a list")
+                    .iter()
+                    .map(|entry| entry[key].clone())
+                    .collect()
+            };
+            let mut written = order(&before);
+            written.reverse();
+            assert_eq!(order(&after), written, "{pointer} is in the written order");
+        }
+    }
+
+    /// A write that restates the entries as an answer shows them, with the
+    /// marker in place of each stored value, changes none of them: the
+    /// marker is resolved to the stored value before the entries are
+    /// compared, so the write commits, by a patch and by a set, and the
+    /// stored document keeps every value. The answer shows markers again.
+    #[tokio::test]
+    async fn test_config_writes_that_restate_entries_with_markers_still_commit() {
+        let shown = with_markers(document_with_stored_values().await);
+        let patch = json!({"action": "patch", "patch": {
+            "max_tokens": 2048,
+            "tools": {"mcp_servers": shown["tools"]["mcp_servers"]},
+            "hooks": {"entries": shown["hooks"]["entries"]},
+            "skills": {"repositories": shown["skills"]["repositories"]},
+            "realm": {"team": {"auth": shown["realm"]["team"]["auth"]}},
+        }});
+        let mut set = shown.clone();
+        set["max_tokens"] = json!(4096);
+        let set = json!({"action": "set", "config": set});
+        let mut not_committed = Vec::new();
+        for (what, arguments, max_tokens) in [
+            (
+                "a patch that restates the entries with markers",
+                patch,
+                2048,
+            ),
+            ("a set of the document with markers", set, 4096),
+        ] {
+            let (_directory, state) = state_with_stored_values().await;
+            let generation = config_generation(&state).await;
+            match config_tool_answer(&state, &arguments).await {
+                Ok((text, answer)) => {
+                    if config_generation(&state).await <= generation {
+                        not_committed.push(format!("{what}: nothing was committed"));
+                    }
+                    not_committed.extend(shown_otherwise_than_as_markers(what, &text, &answer));
+                    assert_eq!(
+                        committed_config_document(&state).await["max_tokens"],
+                        json!(max_tokens),
+                        "{what}"
+                    );
+                }
+                Err(refused) => not_committed.push(format!(
+                    "{what}: refused: {} {:?}",
+                    refused.message, refused.data
+                )),
+            }
+            let lost =
+                places_without_their_stored_value(&committed_config_document(&state).await, &[]);
+            assert!(
+                lost.is_empty(),
+                "{what}: the stored document keeps its values: {lost:#?}"
+            );
+        }
+        assert!(
+            not_committed.is_empty(),
+            "the config tool did not take a write that restates the entries with markers: \
+             {not_committed:#?}"
+        );
+    }
+
+    /// The marker does not loosen the tool's rule for entries that launch a
+    /// process: an entry restated with markers and changed besides is
+    /// still refused as host administration, with nothing written (the
+    /// entry is compared whole after the marker is resolved).
+    #[tokio::test]
+    async fn test_config_writes_that_change_a_launching_entry_with_markers_are_refused() {
+        let shown = with_markers(document_with_stored_values().await);
+        let cases = vec![
+            patch_case("a stdio MCP server's arguments", "/tools/mcp_servers", {
+                let mut servers = shown["tools"]["mcp_servers"].clone();
+                servers[0]["args"] = json!(["--more"]);
+                servers
+            }),
+            patch_case(
+                "a stdio MCP server's connect timeout",
+                "/tools/mcp_servers",
+                {
+                    let mut servers = shown["tools"]["mcp_servers"].clone();
+                    servers[0]["connect_timeout_secs"] = json!(30);
+                    servers
+                },
+            ),
+            patch_case("a command hook's command", "/hooks/entries", {
+                let mut hooks = shown["hooks"]["entries"].clone();
+                hooks[0]["runtime"]["command"] = json!("/synthetic/other");
+                hooks
+            }),
+            patch_case(
+                "a stdio skills repository's arguments",
+                "/skills/repositories",
+                {
+                    let mut repositories = shown["skills"]["repositories"].clone();
+                    repositories[0]["args"] = json!(["--more"]);
+                    repositories
+                },
+            ),
+            patch_case("a git skills repository's ref", "/skills/repositories", {
+                let mut repositories = shown["skills"]["repositories"].clone();
+                repositories[3]["git_ref"] = json!("other");
+                repositories
+            }),
+        ];
+        let mut not_refused = Vec::new();
+        for (what, arguments) in cases {
+            let (_directory, state) = state_with_stored_values().await;
+            let generation = config_generation(&state).await;
+            let document = committed_config_document(&state).await;
+            match Box::pin(handle_tools_call(&state, "meerkat_config", &arguments)).await {
+                Ok(_) => not_refused.push(format!("{what}: the write was accepted")),
+                Err(refused) => {
+                    assert_eq!(config_generation(&state).await, generation, "{what}");
+                    assert_eq!(committed_config_document(&state).await, document, "{what}");
+                    if refused.code != -32602
+                        || refused.data
+                            != Some(json!({"type": "confinement_administration_required"}))
+                    {
+                        not_refused.push(format!(
+                            "{what}: refused otherwise: {} {} {:?}",
+                            refused.code, refused.message, refused.data
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(
+            not_refused.is_empty(),
+            "the config tool did not refuse a changed launching entry: {not_refused:#?}"
+        );
+    }
+
+    /// The marker stands for a stored value only in an entry that still
+    /// goes to the stored address. A write that keeps an entry's key,
+    /// changes its URL and carries the marker in the entry's headers or
+    /// token is refused, with nothing written: for an HTTP MCP server, an
+    /// HTTP hook and an HTTP skills repository. The refusal names the
+    /// entry and says to send the secret values again in the same write.
+    /// Each case on a state of its own.
+    #[tokio::test]
+    async fn test_config_writes_refuse_a_marker_in_an_entry_that_goes_to_another_address() {
+        let document = document_with_stored_values().await;
+        let server = list_patch(&document, "/tools/mcp_servers", |servers| {
+            servers[1] = http_server_with_marker("http-server", OTHER_ADDRESS);
+        });
+        let server_by_set = set_twin(&server).await;
+        let mut not_refused = Vec::new();
+        for (what, entry, arguments) in [
+            ("a patch of an HTTP MCP server's URL", "http-server", server),
+            (
+                "a set of an HTTP MCP server's URL",
+                "http-server",
+                server_by_set,
+            ),
+            (
+                "a patch of an HTTP hook's URL",
+                "http-hook",
+                list_patch(&document, "/hooks/entries", |hooks| {
+                    hooks[1] = http_hook_with_marker("http-hook", OTHER_ADDRESS);
+                }),
+            ),
+            (
+                "a patch of the URL of an HTTP skills repository with a bearer token",
+                "bearer-skills",
+                list_patch(&document, "/skills/repositories", |repositories| {
+                    repositories[1] =
+                        bearer_skills_with_marker("bearer-skills", SECOND_SOURCE, OTHER_ADDRESS);
+                }),
+            ),
+            (
+                "a patch of the URL of an HTTP skills repository with a header value",
+                "header-skills",
+                list_patch(&document, "/skills/repositories", |repositories| {
+                    repositories[2] =
+                        header_skills_with_marker("header-skills", THIRD_SOURCE, OTHER_ADDRESS);
+                }),
+            ),
+        ] {
+            let (_directory, state) = state_with_stored_values().await;
+            not_refused.extend(
+                marker_write_refused_on(
+                    &state,
+                    what,
+                    &arguments,
+                    MarkerRefusal::NamesTheMarker,
+                    &[entry, "again in the same write"],
+                )
+                .await,
+            );
+        }
+        assert!(
+            not_refused.is_empty(),
+            "the config tool resolved a marker for another address: {not_refused:#?}"
+        );
+    }
+
+    /// The refusal of a patch whose document would no longer load names
+    /// what is wrong and where, and holds no value: neither the line of
+    /// the stored document the error sits on, nor the unexpected value
+    /// itself (the kind of the value and what was expected stay). A patch
+    /// of an auth profile's inline source to an unknown kind; a patch that
+    /// adds a member of the wrong type to a credential command's
+    /// environment (both stored on one line with a secret value); and a
+    /// patch that writes a string where a table, and where a number, is
+    /// expected. Refused as invalid params, nothing written. Each case on
+    /// a state of its own.
+    #[tokio::test]
+    async fn test_config_writes_refused_for_a_document_that_does_not_load_show_no_stored_value() {
+        const WRITTEN: &str = "a written value 77";
+        let mut otherwise = Vec::new();
+        for (what, arguments, says) in [
+            (
+                "an unknown kind of source beside an inline secret",
+                team_section_patch("/auth/inline/source/kind", json!(WRITTEN)),
+                "unknown variant, expected",
+            ),
+            (
+                "a number in a credential command's environment",
+                team_section_patch("/auth/minted/source/env/SYNTHETIC_ADDED", json!(5)),
+                "invalid type: integer, expected",
+            ),
+            (
+                "a string where a source is expected",
+                team_section_patch("/auth/inline/source", json!(WRITTEN)),
+                "invalid type: string, expected",
+            ),
+            (
+                "a string where a number is expected",
+                team_section_patch("/auth/minted/source/timeout_ms", json!(WRITTEN)),
+                "invalid type: string, expected",
+            ),
+        ] {
+            let (_directory, state) = state_with_stored_values().await;
+            let generation = config_generation(&state).await;
+            let document = committed_config_document(&state).await;
+            match Box::pin(handle_tools_call(&state, "meerkat_config", &arguments)).await {
+                Ok(_) => otherwise.push(format!("{what}: the write was accepted")),
+                Err(refused) => {
+                    assert_eq!(config_generation(&state).await, generation, "{what}");
+                    assert_eq!(committed_config_document(&state).await, document, "{what}");
+                    if refused.code != -32602 {
+                        otherwise.push(format!(
+                            "{what}: refused otherwise: {} {:?}",
+                            refused.code, refused.data
+                        ));
+                    }
+                    if refused.message.contains(STORED_VALUE_WORDS) {
+                        otherwise.push(format!("{what}: the refusal holds a stored value"));
+                    } else if refused.message.contains("written value") {
+                        otherwise.push(format!("{what}: the refusal holds the unexpected value"));
+                    } else if !(refused.message.contains("line ")
+                        && refused.message.contains("column ")
+                        && refused.message.contains(says))
+                    {
+                        otherwise.push(format!(
+                            "{what}: the refusal does not say where and what (`{says}`): {}",
+                            refused.message
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(
+            otherwise.is_empty(),
+            "the refusal of a patch whose document does not load did otherwise: {otherwise:#?}"
+        );
+    }
+
+    /// An answer about a stored document that no longer parses says what
+    /// is wrong and where (line and column), and holds no value of the
+    /// document: neither the line the error sits on nor the unexpected
+    /// value itself. The realm's document is broken on the line that holds
+    /// an inline secret: text after the closed table; the secret's string
+    /// where the source's table is expected; the secret's string as the
+    /// kind of source. The config tool's `get`, the capabilities tool and
+    /// the models catalog tool each answer such an error. The name of an
+    /// unknown key is still named.
+    #[tokio::test]
+    async fn test_answers_about_a_stored_document_that_does_not_parse_show_no_stored_value() {
+        let (directory, state) = state_with_stored_values().await;
+        let path =
+            meerkat_store::realm_paths_in(&directory.path().join("realms"), "team").config_path;
+        let text = std::fs::read_to_string(&path).expect("the realm's document");
+        let secret = stored_value(1);
+        let whole = format!("source = {{ kind = \"inline_secret\", secret = \"{secret}\" }}");
+        assert!(text.contains(&whole), "the fixture's inline secret line");
+        let mut otherwise = Vec::new();
+        for (what, broken, says) in [
+            (
+                "text after the closed table",
+                text.replace(&whole, &format!("{whole} }}")),
+                "",
+            ),
+            (
+                "a string where the source is expected",
+                text.replace(&whole, &format!("source = \"{secret}\"")),
+                "invalid type: string, expected",
+            ),
+            (
+                "a string as the kind of source",
+                text.replace(&whole, &format!("source = {{ kind = \"{secret}\" }}")),
+                "unknown variant, expected",
+            ),
+            (
+                "an unknown key",
+                format!("{text}\n[self_hosted.servers.local]\nbearer_token_env = \"NAME\"\n"),
+                "bearer_token_env",
+            ),
+        ] {
+            assert_ne!(broken, text, "{what}");
+            std::fs::write(&path, broken).expect("the broken document");
+            for (tool, arguments) in [
+                ("meerkat_config", json!({"action": "get"})),
+                ("meerkat_capabilities", json!({})),
+                ("meerkat_models_catalog", json!({})),
+            ] {
+                match Box::pin(handle_tools_call(&state, tool, &arguments)).await {
+                    Ok(_) => otherwise.push(format!(
+                        "{what}: {tool} answered a document that does not parse"
+                    )),
+                    Err(refused) => {
+                        if refused.message.contains(STORED_VALUE_WORDS) {
+                            otherwise
+                                .push(format!("{what}: {tool}: the error holds a stored value"));
+                        } else if !(refused.message.contains("line ")
+                            && refused.message.contains("column ")
+                            && refused.message.contains(says))
+                        {
+                            otherwise.push(format!(
+                                "{what}: {tool}: the error does not say where and what \
+                                 (`{says}`): {}",
+                                refused.message
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            otherwise.is_empty(),
+            "an answer about a stored document that does not parse did otherwise: {otherwise:#?}"
+        );
+    }
+
+    /// Which configuration entries feed a kind of process the host launches.
+    enum LaunchFeed {
+        /// Entries the config tool refuses to add or change.
+        ConfigTool(&'static [LaunchingConfigEntry]),
+        /// Entries the config store refuses on every surface.
+        ConfigStore,
+        /// No entry of the configuration document: a fixed program the host
+        /// starts for its own operator.
+        NotTheDocument,
+    }
+
+    /// The confined launch kinds. The match has no wildcard arm: a new kind
+    /// does not compile until it is placed.
+    fn confined_launch_feed(kind: meerkat_core::ConfinementLaunchKind) -> LaunchFeed {
+        match kind {
+            meerkat_core::ConfinementLaunchKind::Shell => LaunchFeed::ConfigTool(&[
+                LaunchingConfigEntry::ShellProgram,
+                LaunchingConfigEntry::ShellCommandPolicy,
+            ]),
+            meerkat_core::ConfinementLaunchKind::CommandHooks => {
+                LaunchFeed::ConfigTool(&[LaunchingConfigEntry::CommandHook])
+            }
+            meerkat_core::ConfinementLaunchKind::McpStdio => LaunchFeed::ConfigTool(&[
+                LaunchingConfigEntry::McpStdioServer,
+                LaunchingConfigEntry::StdioSkillsRepository,
+            ]),
+        }
+    }
+
+    /// The host launch exemptions (a non-exhaustive type: one this table
+    /// does not know answers `None`, which the row below refuses).
+    fn exempt_launch_feed(exemption: meerkat_core::HostLaunchExemption) -> Option<LaunchFeed> {
+        match exemption {
+            meerkat_core::HostLaunchExemption::GitSkillSource => Some(LaunchFeed::ConfigTool(&[
+                LaunchingConfigEntry::GitSkillsRepository,
+            ])),
+            // An auth profile's credential command.
+            meerkat_core::HostLaunchExemption::CredentialHelper => Some(LaunchFeed::ConfigStore),
+            // The platform's browser opener at a login the operator starts,
+            // the terminal's own `stty`, and `wasm-pack` under `rkat doctor`.
+            meerkat_core::HostLaunchExemption::BrowserOpener
+            | meerkat_core::HostLaunchExemption::TerminalControl
+            | meerkat_core::HostLaunchExemption::DeveloperBuildTooling => {
+                Some(LaunchFeed::NotTheDocument)
+            }
+            _ => None,
+        }
+    }
+
+    /// Every kind of process the host launches is placed against the config
+    /// tool's refusal: its configuration entries are refused by the tool,
+    /// refused by the config store, or it is fed by no entry of the
+    /// document. A launch in shipped code carries one of these kinds (the
+    /// workspace's launch lint and its launch site inventory), so a new kind
+    /// of launch reaches this row; and every launching entry the tool
+    /// refuses is the feed of exactly one kind.
+    #[test]
+    fn test_every_launch_kind_is_placed_against_the_config_tool_refusal() {
+        let mut refused = Vec::new();
+        let feeds = meerkat_core::ConfinementLaunchKind::ALL
+            .into_iter()
+            .map(confined_launch_feed)
+            .chain(
+                meerkat_core::HostLaunchExemption::ALL
+                    .into_iter()
+                    .map(|exemption| {
+                        exempt_launch_feed(exemption).unwrap_or_else(|| {
+                            panic!(
+                                "{exemption:?} launches a process and is not placed against \
+                                 the config tool's refusal"
+                            )
+                        })
+                    }),
+            );
+        for feed in feeds {
+            match feed {
+                LaunchFeed::ConfigTool(entries) => refused.extend_from_slice(entries),
+                LaunchFeed::ConfigStore | LaunchFeed::NotTheDocument => {}
+            }
+        }
+        for entry in LaunchingConfigEntry::ALL {
+            assert_eq!(
+                refused.iter().filter(|fed| **fed == entry).count(),
+                1,
+                "{entry:?} is the feed of exactly one launch kind"
+            );
+        }
+        assert_eq!(refused.len(), LaunchingConfigEntry::ALL.len());
+    }
+
+    /// The fields of the sections the refusal passes over, each named with
+    /// no rest pattern: a new field of any of them does not compile until
+    /// someone has read whether it names a program, an argument, an
+    /// environment or a working directory of a launch. (The three sections
+    /// that hold a launching entry, and the shell section, are destructured
+    /// in the refusal itself;
+    /// `[governance]`, `[confinement]` and the realm sections' credential
+    /// commands are the config store's refusals.)
+    #[allow(clippy::too_many_lines)]
+    fn census_of_the_sections_that_launch_nothing(config: Config) {
+        use meerkat_core::config::{
+            AgentConfig, BudgetConfig, CommsRuntimeConfig, CompactionRuntimeConfig,
+            HtmlPresentationConfig, HtmlTemplateConfig, LimitsConfig, MobHostConfig, ModelDefaults,
+            ModelFallbackConfig, PresentationConfig, ProviderToolsConfig, RestServerConfig,
+            RetryConfig, SelfHostedConfig, SelfHostedServerConfig, StorageConfig, StoreConfig,
+        };
+        // Prompts, a prompt file read as text, a model and its parameters.
+        let AgentConfig {
+            system_prompt: _,
+            system_prompt_file: _,
+            tool_instructions: _,
+            model: _,
+            max_tokens_per_turn: _,
+            temperature: _,
+            budget_warning_threshold: _,
+            max_turns: _,
+            provider_params: _,
+            provider_native_tools: _,
+            output_schema: _,
+            structured_output_retries: _,
+            extraction_prompt: _,
+        } = config.agent;
+        // Where state is kept. `directory` is deprecated and read by no
+        // surface; it is named here so the census stays whole until the
+        // field is removed.
+        #[allow(deprecated)]
+        let StorageConfig {
+            hosting: _,
+            directory: _,
+        } = config.storage;
+        let StoreConfig {
+            sessions_path: _,
+            tasks_path: _,
+            database_dir: _,
+        } = config.store;
+        // Numbers and durations.
+        let BudgetConfig {
+            max_tokens: _,
+            max_duration: _,
+            max_tool_calls: _,
+        } = config.budget;
+        let RetryConfig {
+            max_retries: _,
+            initial_delay: _,
+            max_delay: _,
+            multiplier: _,
+            call_timeout_override: _,
+            stream_inactivity_timeout_override: _,
+        } = config.retry;
+        let LimitsConfig {
+            budget: _,
+            max_sessions: _,
+            max_duration: _,
+            max_turn_duration: _,
+            max_tool_calls: _,
+        } = config.limits;
+        let CompactionRuntimeConfig {
+            auto_compact_threshold: _,
+            auto_compact_threshold_explicit: _,
+            max_request_bytes: _,
+            recent_turn_budget: _,
+            max_summary_tokens: _,
+            min_turns_between_compactions: _,
+            history_retained_rewrites: _,
+        } = config.compaction;
+        // Model names and capabilities.
+        let ModelDefaults {
+            anthropic: _,
+            openai: _,
+            gemini: _,
+            custom: _,
+        } = config.models;
+        let ModelFallbackConfig {
+            enabled: _,
+            chain: _,
+            policy: _,
+        } = config.model_fallback;
+        let ProviderToolsConfig {
+            anthropic: _,
+            openai: _,
+            gemini: _,
+        } = config.provider_tools;
+        // Addresses the host calls: no program.
+        let SelfHostedConfig {
+            servers,
+            models: _,
+            default_model: _,
+        } = config.self_hosted;
+        for (_, server) in servers {
+            let SelfHostedServerConfig {
+                transport: _,
+                base_url: _,
+                api_style: _,
+            } = server;
+        }
+        // Listeners, addresses and identity paths.
+        let CommsRuntimeConfig {
+            mode: _,
+            address: _,
+            advertise_address: _,
+            auth: _,
+            require_peer_auth: _,
+            event_address: _,
+            pairing_password: _,
+        } = config.comms;
+        let RestServerConfig {
+            host: _,
+            port: _,
+            allowed_origins: _,
+            served_hosts: _,
+        } = config.rest;
+        let MobHostConfig {
+            realm: _,
+            listen_tcp: _,
+            advertise_tcp: _,
+            live_ws: _,
+            live_ws_advertise: _,
+            identity_dir: _,
+            descriptor_out: _,
+            max_connections: _,
+            read_deadline_ms: _,
+            pairing_rate: _,
+            live_buffer_events: _,
+            pairing_password: _,
+        } = config.mob_host;
+        // Template text, or a template path read as text.
+        let PresentationConfig { html } = config.presentation;
+        let HtmlPresentationConfig {
+            default_template: _,
+            templates,
+        } = html;
+        for (_, template) in templates {
+            let HtmlTemplateConfig { path: _, body: _ } = template;
+        }
+    }
+
+    /// The census above is a compile-time check; this keeps it built.
+    #[test]
+    fn test_the_sections_the_config_tool_passes_over_are_read_field_by_field() {
+        census_of_the_sections_that_launch_nothing(Config::default());
+    }
+
+    /// The entries the refusal judges to launch nothing (an HTTP server, an
+    /// in-process or HTTP hook, a filesystem or HTTP skills repository),
+    /// each with its fields beside the transport or the runtime and its
+    /// payload named with no rest pattern: a new field of one of them, or a
+    /// new way for an HTTP skills repository to authenticate, does not
+    /// compile until someone has read whether it names a program, an
+    /// argument, an environment or a working directory of a launch. (A
+    /// launching entry is compared whole, so its own payload needs no
+    /// census; the fields beside it are the same ones named here.)
+    fn census_of_the_entries_that_launch_nothing(
+        server: meerkat_core::mcp_config::McpServerConfig,
+        hook: meerkat_core::config::HookEntryConfig,
+        repository: meerkat_core::skills_config::SkillRepositoryConfig,
+    ) -> [&'static str; 3] {
+        use meerkat_core::config::{
+            HookAdapterConfig, HookEntryConfig, HookInProcessRuntimeConfig, HttpRuntimeConfig,
+        };
+        use meerkat_core::mcp_config::{McpHttpConfig, McpServerConfig, McpTransportConfig};
+        use meerkat_core::skills_config::{
+            HttpSkillRepoAuth, SkillRepoTransport, SkillRepositoryConfig,
+        };
+        // A name, a connect timeout, the names its tools are exposed under,
+        // the host's access ceiling, a connector credential binding and an
+        // account declaration.
+        let McpServerConfig {
+            name: _,
+            transport,
+            connect_timeout_secs: _,
+            tool_names: _,
+            access: _,
+            connector: _,
+            account: _,
+        } = server;
+        let server = match transport {
+            // An address, request headers, the wire transport and the
+            // account an OAuth login is held to.
+            McpTransportConfig::Http(McpHttpConfig {
+                url: _,
+                headers: _,
+                transport: _,
+                oauth_account: _,
+                oauth_account_selection: _,
+            }) => "launches nothing",
+            McpTransportConfig::Stdio(_) => "compared whole by the refusal",
+        };
+        // An id, a switch, the point and the mode it runs at, what it may
+        // decide, an order, a timeout and the model operations it governs.
+        let HookEntryConfig {
+            id: _,
+            enabled: _,
+            point: _,
+            mode: _,
+            capability: _,
+            priority: _,
+            timeout_ms: _,
+            model_operations: _,
+            runtime,
+        } = hook;
+        let hook = match runtime {
+            // The id of a handler registered in the host's own code.
+            HookAdapterConfig::InProcess(HookInProcessRuntimeConfig { handler: _ }) => {
+                "launches nothing: a registered handler"
+            }
+            // An address, a method and request headers.
+            HookAdapterConfig::Http(HttpRuntimeConfig {
+                url: _,
+                method: _,
+                headers: _,
+            }) => "launches nothing: a request",
+            HookAdapterConfig::Command(_) => "compared whole by the refusal",
+        };
+        // A display name and the source's stable id.
+        let SkillRepositoryConfig {
+            name: _,
+            source_uuid: _,
+            transport,
+        } = repository;
+        let repository = match transport {
+            // A directory read as skill documents.
+            SkillRepoTransport::Filesystem { path: _ } => "launches nothing: a directory",
+            // An address, a credential sent with the request, two durations.
+            SkillRepoTransport::Http {
+                url: _,
+                auth,
+                refresh_seconds: _,
+                timeout_seconds: _,
+            } => match auth {
+                None => "launches nothing: a request",
+                Some(HttpSkillRepoAuth::Bearer { token: _ }) => {
+                    "launches nothing: a request with a bearer token"
+                }
+                Some(HttpSkillRepoAuth::Header { name: _, value: _ }) => {
+                    "launches nothing: a request with a header credential"
+                }
+            },
+            SkillRepoTransport::Stdio { .. } | SkillRepoTransport::Git { .. } => {
+                "compared whole by the refusal"
+            }
+        };
+        [server, hook, repository]
+    }
+
+    /// The census above is a compile-time check; this keeps it built, on one
+    /// entry of each kind that launches nothing.
+    #[test]
+    fn test_the_entries_the_config_tool_passes_over_are_read_field_by_field() {
+        let placed = census_of_the_entries_that_launch_nothing(
+            serde_json::from_value(http_server_entry("http-server")).expect("an HTTP server"),
+            serde_json::from_value(hook_entry(
+                "http-hook",
+                json!({"type": "http", "url": "http://synthetic.invalid/hook"}),
+            ))
+            .expect("an HTTP hook"),
+            serde_json::from_value(json!({
+                "name": "filesystem-skills",
+                "source_uuid": FIRST_SOURCE,
+                "type": "filesystem",
+                "path": "/synthetic/skills",
+            }))
+            .expect("a filesystem skills repository"),
+        );
+        assert!(
+            placed
+                .iter()
+                .all(|placed| placed.starts_with("launches nothing")),
+            "{placed:?}"
+        );
+    }
+
     /// A requirement no platform backend enforces (descendant termination),
     /// so a server that installs it refuses every confined launch on any OS.
     const UNENFORCEABLE_CONFINEMENT: &str = r#"[confinement.all]
@@ -10994,6 +16691,169 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
             stored.is_empty(),
             "a run refused for its level stores no session: {} stored",
             stored.len()
+        );
+    }
+
+    // Caller labels and application context on `meerkat_run`. A session's
+    // top-level `labels` and `app_context` pass the shared metadata rule of
+    // `meerkat_core::surface_metadata`, as on the JSON-RPC and REST session
+    // create: a key Meerkat reserves for its own runtime facts is invalid
+    // params with the rule's message, and no session is created.
+
+    async fn run_metadata_state() -> (MeerkatMcpState, Arc<dyn SessionStore>) {
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let state = MeerkatMcpState::new_with_store_options_and_llm(
+            Arc::clone(&store),
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
+            None,
+            Some(Arc::new(TestClient::for_provider(Provider::Anthropic))),
+        )
+        .await;
+        (state, store)
+    }
+
+    /// The labels `meerkat_read` shows for the session a run result names.
+    async fn run_session_labels(state: &MeerkatMcpState, run_payload: &Value) -> Value {
+        let session_id = run_payload["session_id"]
+            .as_str()
+            .expect("run result names its session");
+        let read = Box::pin(handle_tools_call(
+            state,
+            "meerkat_read",
+            &json!({ "session_id": session_id }),
+        ))
+        .await
+        .expect("read the run's session");
+        unwrap_payload(read)["state"]["labels"].clone()
+    }
+
+    fn run_metadata_with_key(key: &str) -> Value {
+        let mut metadata = serde_json::Map::new();
+        metadata.insert("org".to_string(), json!("acme"));
+        metadata.insert(key.to_string(), json!("caller-value"));
+        Value::Object(metadata)
+    }
+
+    /// Each `(member, key, message)` case is a `meerkat_run` whose `member`
+    /// (`labels` or `app_context`) carries `key`: every one is refused as
+    /// invalid params with exactly `message`, and afterwards no session is
+    /// listed or stored.
+    async fn assert_run_metadata_refused(cases: Vec<(&str, &str, String)>) {
+        let (state, store) = run_metadata_state().await;
+        let mut wrong = Vec::new();
+        for (member, key, message) in cases {
+            let mut input = json!({
+                "prompt": "Reply briefly.",
+                "model": "claude-opus-4-8",
+                "provider": "anthropic",
+                "enable_builtins": false
+            });
+            input[member] = run_metadata_with_key(key);
+            match Box::pin(handle_tools_call(&state, "meerkat_run", &input)).await {
+                Err(err) if err.code == -32602 && err.message == message => {}
+                Err(err) => wrong.push(format!(
+                    "{member} key '{key}': answered {} '{}', wanted -32602 '{message}'",
+                    err.code, err.message
+                )),
+                Ok(result) => {
+                    let labels = run_session_labels(&state, &unwrap_payload(result)).await;
+                    wrong.push(format!(
+                        "{member} key '{key}': the run was accepted (wanted -32602 '{message}'); its session's labels read {labels}"
+                    ));
+                }
+            }
+        }
+        let listed = Box::pin(handle_tools_call(&state, "meerkat_sessions", &json!({})))
+            .await
+            .expect("sessions list call should succeed");
+        let listed = unwrap_payload(listed);
+        assert!(
+            wrong.is_empty(),
+            "runs with a reserved key were not refused as the rule answers:\n{}",
+            wrong.join("\n")
+        );
+        assert_eq!(
+            listed["sessions"],
+            json!([]),
+            "a refused run leaves no session listed"
+        );
+        let stored = store
+            .list(meerkat::SessionFilter::default())
+            .await
+            .expect("list the stored sessions");
+        assert!(
+            stored.is_empty(),
+            "a refused run stores no session: {} stored",
+            stored.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_meerkat_run_refuses_reserved_label_keys_and_creates_no_session() {
+        // The four mob discovery names, the Meerkat namespace, and the forms
+        // the rule covers beyond them: another letter case, the bare token.
+        let cases = [
+            "mob_id",
+            "role",
+            "meerkat_id",
+            "agent_identity",
+            "meerkat.runtime_id",
+            "Role",
+            "MOB_ID",
+            "meerkat",
+        ]
+        .into_iter()
+        .map(|key| {
+            (
+                "labels",
+                key,
+                format!("metadata label key '{key}' is reserved for Meerkat-owned runtime facts"),
+            )
+        })
+        .collect();
+        assert_run_metadata_refused(cases).await;
+    }
+
+    #[tokio::test]
+    async fn test_meerkat_run_refuses_reserved_app_context_keys_and_creates_no_session() {
+        let cases = ["meerkat.runtime_id", "MEERKAT.runtime_id", "meerkat"]
+            .into_iter()
+            .map(|key| {
+                (
+                    "app_context",
+                    key,
+                    format!("app_context key '{key}' is reserved for Meerkat-owned runtime facts"),
+                )
+            })
+            .collect();
+        assert_run_metadata_refused(cases).await;
+    }
+
+    /// Ordinary labels and application context are taken as before: the run
+    /// completes and its session is listed under the caller's labels. The
+    /// mob discovery names are reserved as label keys only, so an
+    /// application context may use them as top-level keys.
+    #[tokio::test]
+    async fn test_meerkat_run_keeps_ordinary_labels_and_app_context() {
+        let (state, _store) = run_metadata_state().await;
+        let result = Box::pin(handle_tools_call(
+            &state,
+            "meerkat_run",
+            &json!({
+                "prompt": "Reply briefly.",
+                "model": "claude-opus-4-8",
+                "provider": "anthropic",
+                "enable_builtins": false,
+                "labels": {"org": "acme", "tier": "gold"},
+                "app_context": {"client_ref": {"view": "compact"}, "role": "reviewer"}
+            }),
+        ))
+        .await
+        .unwrap_or_else(|err| panic!("a run with ordinary labels completes: {}", err.message));
+        assert_eq!(
+            run_session_labels(&state, &unwrap_payload(result)).await,
+            json!({"org": "acme", "tier": "gold"}),
+            "the session carries the caller's labels"
         );
     }
 
@@ -12628,6 +18488,271 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
         );
     }
 
+    /// The realm profile tools take the public profile input and
+    /// `auth_binding`: any other profile field is an argument error naming
+    /// the field, and nothing is stored or changed.
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn test_public_mcp_server_profile_tools_take_the_public_profile_input() {
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let state = MeerkatMcpState::new_with_store(store).await;
+        let with = |key: &str, value: Value| {
+            let mut profile = json!({ "model": "claude-sonnet-4-6", "tools": { "comms": true } });
+            if key == "auth_binding" {
+                profile[key] = value;
+            } else {
+                profile["tools"][key] = value;
+            }
+            profile
+        };
+        let outside = [
+            ("mcp_servers", json!([])),
+            ("rust_bundles", json!(["internal-only"])),
+        ];
+
+        let bound = Box::pin(handle_tools_call(
+            &state,
+            "meerkat_mob_profile_create",
+            &json!({
+                "name": "bound",
+                "profile": with("auth_binding", json!({ "realm": "global", "binding": "some-binding" })),
+            }),
+        ))
+        .await
+        .expect("a profile naming a binding is stored");
+        assert_eq!(unwrap_tool_payload_json(bound)["revision"], 1);
+
+        for (field, value) in &outside {
+            let err = Box::pin(handle_tools_call(
+                &state,
+                "meerkat_mob_profile_create",
+                &json!({ "name": "worker", "profile": with(field, value.clone()) }),
+            ))
+            .await
+            .expect_err("a profile field outside the public input is refused");
+            assert_eq!(err.code, -32602, "{field}: {}", err.message);
+            assert!(err.message.contains(field), "{field}: {}", err.message);
+        }
+        let absent = Box::pin(handle_tools_call(
+            &state,
+            "meerkat_mob_profile_get",
+            &json!({ "name": "worker" }),
+        ))
+        .await
+        .expect("profile get should succeed");
+        assert_eq!(unwrap_tool_payload_json(absent)["not_found"], true);
+
+        let created = Box::pin(handle_tools_call(
+            &state,
+            "meerkat_mob_profile_create",
+            &json!({ "name": "worker", "profile": with("comms", json!(true)) }),
+        ))
+        .await
+        .expect("a public profile is stored");
+        assert_eq!(unwrap_tool_payload_json(created)["revision"], 1);
+
+        for (field, value) in &outside {
+            let err = Box::pin(handle_tools_call(
+                &state,
+                "meerkat_mob_profile_update",
+                &json!({
+                    "name": "worker",
+                    "profile": with(field, value.clone()),
+                    "expected_revision": 1,
+                }),
+            ))
+            .await
+            .expect_err("a profile field outside the public input is refused");
+            assert_eq!(err.code, -32602, "{field}: {}", err.message);
+            assert!(err.message.contains(field), "{field}: {}", err.message);
+        }
+        let kept = Box::pin(handle_tools_call(
+            &state,
+            "meerkat_mob_profile_get",
+            &json!({ "name": "worker" }),
+        ))
+        .await
+        .expect("profile get should succeed");
+        assert_eq!(unwrap_tool_payload_json(kept)["revision"], 1);
+    }
+
+    /// The unified server's `tools/call` answers a reserved label or context
+    /// key on the two public mob spawn tools as invalid params with the
+    /// shared metadata rule's message, and the mob seats nobody; ordinary
+    /// labels and context are taken and stored.
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn test_public_mcp_server_spawn_tools_refuse_reserved_metadata_keys() {
+        async fn create_mob(state: &MeerkatMcpState, mob_id: &str) {
+            Box::pin(handle_tools_call(
+                state,
+                "meerkat_mob_create",
+                &json!({
+                    "definition": {
+                        "id": mob_id,
+                        "profiles": {
+                            "worker": { "model": "claude-sonnet-4-6", "tools": {"comms": true} }
+                        }
+                    }
+                }),
+            ))
+            .await
+            .expect("typed mob create should succeed");
+        }
+        fn with_key(key: &str) -> Value {
+            let mut metadata = serde_json::Map::new();
+            metadata.insert("org".to_string(), json!("acme"));
+            metadata.insert(key.to_string(), json!("caller-value"));
+            Value::Object(metadata)
+        }
+        // `meerkat_mob_spawn_many` gets an entry with no labels and no
+        // context first, then the entry that carries them.
+        fn arguments(tool: &str, mob_id: &str, labels: Value, context: Value) -> Value {
+            if tool == "meerkat_mob_spawn" {
+                json!({
+                    "mob_id": mob_id,
+                    "profile": "worker",
+                    "agent_identity": "w-labelled",
+                    "runtime_mode": "turn_driven",
+                    "labels": labels,
+                    "context": context,
+                })
+            } else {
+                json!({
+                    "mob_id": mob_id,
+                    "specs": [
+                        {
+                            "profile": "worker",
+                            "agent_identity": "w-plain",
+                            "runtime_mode": "turn_driven",
+                        },
+                        {
+                            "profile": "worker",
+                            "agent_identity": "w-labelled",
+                            "runtime_mode": "turn_driven",
+                            "labels": labels,
+                            "context": context,
+                        },
+                    ],
+                })
+            }
+        }
+
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let state = MeerkatMcpState::new_with_store(store).await;
+
+        let mut cases = Vec::new();
+        for tool in ["meerkat_mob_spawn", "meerkat_mob_spawn_many"] {
+            for key in [
+                "mob_id",
+                "role",
+                "meerkat_id",
+                "agent_identity",
+                "meerkat.runtime_id",
+                "Role",
+            ] {
+                cases.push((
+                    tool,
+                    with_key(key),
+                    Value::Null,
+                    format!(
+                        "metadata label key '{key}' is reserved for Meerkat-owned runtime facts"
+                    ),
+                ));
+            }
+            cases.push((
+                tool,
+                Value::Null,
+                with_key("meerkat.runtime_id"),
+                "app_context key 'meerkat.runtime_id' is reserved for Meerkat-owned runtime facts"
+                    .to_string(),
+            ));
+        }
+        let mut wrong = Vec::new();
+        for (case, (tool, labels, context, message)) in cases.into_iter().enumerate() {
+            let mob = format!("spawn-metadata-{case}");
+            create_mob(&state, &mob).await;
+            let outcome = Box::pin(handle_tools_call(
+                &state,
+                tool,
+                &arguments(tool, &mob, labels, context),
+            ))
+            .await;
+            let seated: Vec<String> = state
+                .mob_state
+                .mob_list_members(&meerkat_mob::MobId::from(mob.as_str()))
+                .await
+                .expect("list the mob's members")
+                .into_iter()
+                .map(|member| {
+                    format!(
+                        "'{}' with roster labels {:?}",
+                        member.agent_identity, member.labels
+                    )
+                })
+                .collect();
+            match outcome {
+                Err(err) if err.code == -32602 && err.message == message && seated.is_empty() => {}
+                Err(err) => wrong.push(format!(
+                    "{tool} answered {} '{}' (wanted -32602 '{message}'); seated: [{}]",
+                    err.code,
+                    err.message,
+                    seated.join(", ")
+                )),
+                Ok(_) => wrong.push(format!(
+                    "{tool} accepted the call (wanted -32602 '{message}'); seated: [{}]",
+                    seated.join(", ")
+                )),
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "calls with a reserved key were not refused as the rule answers:\n{}",
+            wrong.join("\n")
+        );
+
+        for tool in ["meerkat_mob_spawn", "meerkat_mob_spawn_many"] {
+            let mob = format!(
+                "spawn-metadata-plain-{}",
+                if tool == "meerkat_mob_spawn" {
+                    "one"
+                } else {
+                    "many"
+                }
+            );
+            create_mob(&state, &mob).await;
+            Box::pin(handle_tools_call(
+                &state,
+                tool,
+                &arguments(
+                    tool,
+                    &mob,
+                    json!({"org": "acme", "tier": "gold"}),
+                    json!({"client_ref": {"view": "compact"}, "role": "reviewer"}),
+                ),
+            ))
+            .await
+            .unwrap_or_else(|err| panic!("{tool} takes ordinary labels: {}", err.message));
+            let members = state
+                .mob_state
+                .mob_list_members(&meerkat_mob::MobId::from(mob.as_str()))
+                .await
+                .expect("list the mob's members");
+            let labelled = members
+                .iter()
+                .find(|member| member.agent_identity.as_str() == "w-labelled")
+                .unwrap_or_else(|| panic!("{tool} seats the labelled member"));
+            assert_eq!(
+                labelled.labels,
+                BTreeMap::from([
+                    ("org".to_string(), "acme".to_string()),
+                    ("tier".to_string(), "gold".to_string()),
+                ]),
+                "{tool}: roster labels"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn test_mcp_handlers_sessions_read_list_interrupt_archive() {
         let (state, session_id) = state_with_persisted_session().await;
@@ -13667,5 +19792,216 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
                 assert!(!target.exists(), "{case}: {path} was written");
             }
         }
+    }
+
+    /// Whether `name`, an entry at a realm's root, is one the server
+    /// declares to its agents' file tools: a listed entry, or a side file
+    /// of a listed file (the file's name followed by `-` or `.`, or the
+    /// file's name without its extension followed by `.` and ending in
+    /// `.lock`).
+    fn declared_realm_entry(
+        listed: &[std::path::PathBuf],
+        realm: &std::path::Path,
+        name: &str,
+    ) -> bool {
+        listed
+            .iter()
+            .filter(|entry| entry.parent() == Some(realm))
+            .filter_map(|entry| entry.file_name()?.to_str())
+            .any(|declared| {
+                if name == declared {
+                    return true;
+                }
+                let Some(stem) = declared
+                    .rfind('.')
+                    .filter(|index| *index > 0)
+                    .map(|index| &declared[..index])
+                else {
+                    return false;
+                };
+                name.strip_prefix(declared)
+                    .is_some_and(|rest| rest.starts_with(['-', '.']))
+                    || (name.ends_with(".lock")
+                        && name
+                            .strip_prefix(stem)
+                            .is_some_and(|rest| rest.starts_with('.')))
+            })
+    }
+
+    /// Started without a context root, the server roots its agents' file
+    /// tools in the realm directory. A session uses the realm (it loads an
+    /// ordinary file into the blob store and writes one), the host takes a
+    /// config write, and the file tools are asked to write and to read
+    /// every entry the server declares for the realm, a file under each
+    /// declared directory and side files of declared files. Every such call
+    /// is refused, nothing is planted, and every entry the realm then holds
+    /// at its root is declared.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_file_tools_refuse_every_declared_entry_of_the_served_realm() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let base = temp.path().canonicalize().expect("canonical tempdir");
+        let realms = base.join("realms");
+        let realm_paths = meerkat_store::realm_paths_in(&realms, "file-tools-census");
+        let realm_dir = realm_paths.root.clone();
+        std::fs::create_dir_all(&realm_dir).expect("realm dir");
+        std::fs::write(&realm_paths.config_path, "[realm.file-tools-census]\n")
+            .expect("realm document");
+        std::fs::write(realm_dir.join("seed.txt"), "seed\n").expect("an ordinary file");
+        let mut bootstrap = RuntimeBootstrap::default();
+        bootstrap.realm.selection = RealmSelection::Explicit {
+            realm_id: "file-tools-census".into(),
+        };
+        bootstrap.realm.state_root = Some(realms.clone());
+        bootstrap.context.user_config_root = Some(base.join("user"));
+        let llm = Arc::new(ToolCallScriptLlmClient::default());
+        let state = MeerkatMcpState::new_with_bootstrap_options_and_llm(
+            bootstrap,
+            false,
+            Some(Arc::clone(&llm) as Arc<dyn meerkat::LlmClient>),
+            None,
+        )
+        .await
+        .expect("the server starts");
+
+        // One run in which the model makes one tool call; the text of the
+        // result it was sent.
+        let call = |name: &'static str, args: Value| {
+            let llm = Arc::clone(&llm);
+            let state = &state;
+            async move {
+                let before = llm.returned_tool_results().len();
+                llm.arm_call(name, args);
+                let run_input: MeerkatRunInput = serde_json::from_value(json!({
+                    "prompt": "Use the file tools.",
+                    "model": "claude-sonnet-4-5",
+                    "provider": "anthropic",
+                    "enable_workgraph": false,
+                }))
+                .expect("run input");
+                Box::pin(handle_meerkat_run(state, run_input, None, None))
+                    .await
+                    .expect("meerkat_run succeeds");
+                let results = llm.returned_tool_results();
+                assert_eq!(results.len(), before + 1, "{name}: one tool result");
+                results[before].clone()
+            }
+        };
+        let add = |path: &str| {
+            json!({
+                "patch": format!(
+                    "*** Begin Patch\n*** Add File: {path}\n+written by the model\n*** End Patch"
+                )
+            })
+        };
+
+        // The realm is used before anything is asked of it.
+        let loaded = call("blob_load_file", json!({ "path": "seed.txt" })).await;
+        assert!(
+            !loaded.contains("engine's own directory"),
+            "the ordinary file was loaded: {loaded}"
+        );
+        call("apply_patch", add("out.txt")).await;
+        assert_eq!(
+            std::fs::read_to_string(realm_dir.join("out.txt")).expect("the ordinary file"),
+            "written by the model\n"
+        );
+        let config_write: MeerkatConfigInput = serde_json::from_value(json!({
+            "action": "patch",
+            "patch": { "max_tokens": 2048 },
+        }))
+        .expect("config input");
+        handle_meerkat_config(&state, config_write)
+            .await
+            .expect("the host takes a config write");
+
+        // Each declared entry by its own name when it is a file, and a file
+        // under it when it is a directory; then side files of declared
+        // files.
+        let mut targets: Vec<String> = meerkat::HostConfinement::realm_documents(&realm_dir)
+            .iter()
+            .map(|entry| {
+                let name = entry
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .expect("a declared entry's name");
+                if name.rfind('.').is_some_and(|index| index > 0) {
+                    name.to_owned()
+                } else {
+                    format!("{name}/planted.txt")
+                }
+            })
+            .collect();
+        targets.extend(
+            [
+                "sessions.sqlite3-wal",
+                "sessions.sqlite3.planted",
+                "approvals.json.planted",
+                "config_state.planted.lock",
+                "admission.lock",
+                "realm.mfence",
+            ]
+            .map(str::to_owned),
+        );
+        for target in &targets {
+            let written = call("apply_patch", add(target)).await;
+            assert!(
+                written.contains("engine's own directory")
+                    && written.contains("do not write there"),
+                "a write of {target} was refused: {written}"
+            );
+            let read = call(
+                "blob_load_file",
+                json!({ "path": target, "media_type": "text/plain" }),
+            )
+            .await;
+            assert!(
+                read.contains("engine's own directory") && read.contains("do not read there"),
+                "a read of {target} was refused: {read}"
+            );
+        }
+        for planted in [
+            "sessions.sqlite3.planted",
+            "approvals.json.planted",
+            "config_state.planted.lock",
+        ] {
+            assert!(!realm_dir.join(planted).exists(), "{planted} was written");
+        }
+        for target in targets
+            .iter()
+            .filter(|target| target.ends_with("/planted.txt"))
+        {
+            assert!(!realm_dir.join(target).exists(), "{target} was written");
+        }
+
+        let listed = meerkat::HostConfinement::realm_documents(&realm_dir);
+        let mut entries: Vec<String> = std::fs::read_dir(&realm_dir)
+            .expect("the realm directory")
+            .map(|entry| {
+                entry
+                    .expect("a realm entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        entries.sort();
+        for used in ["blobs", "config_state.json"] {
+            assert!(
+                entries.iter().any(|name| name == used),
+                "the realm was used before it was listed ({used}): {entries:?}"
+            );
+        }
+        // The two ordinary files are the agent's own, and the engine
+        // directory is refused without any declaration.
+        let undeclared: Vec<&String> = entries
+            .iter()
+            .filter(|name| !matches!(name.as_str(), "seed.txt" | "out.txt" | ".rkat"))
+            .filter(|name| !declared_realm_entry(&listed, &realm_dir, name))
+            .collect();
+        assert!(
+            undeclared.is_empty(),
+            "entries of the served realm the server does not declare: {undeclared:?} (all: {entries:?})"
+        );
     }
 }

@@ -8,7 +8,10 @@
 //!   one decision of kind `identity.<action>` (`identity.create`,
 //!   `identity.update`, `identity.archive`, `identity.unarchive`,
 //!   `identity.remove`, `identity.adopt`) under the subject key
-//!   `{mob id}/{operation id}`. Its body is the normalized request, its
+//!   `{mob id}/{operation id}` (for a mob a host serves beside its launch
+//!   mob, `{mob id}@{incarnation}/{operation id}`: a held change of an
+//!   earlier mob of an id is none of a later one's). Its body is the
+//!   normalized request, its
 //!   request digest the request's own ([`IdentityRequest::request_digest`]),
 //!   and its rendering the canonical text of the request
 //!   ([`render_held_v1`]): the host's consequence lines and what the mob
@@ -121,8 +124,9 @@ pub const REQUESTER_TRUST_DOMAIN_PREFIX: &str = "meta-mob-";
 pub const SUBJECT_WIDENED_REFUSAL: &str = "subject_widened";
 
 /// The body of a held change's decision: the mob it changes and the
-/// normalized request. A body member this version does not know makes the
-/// body unreadable here, and nothing carries it out.
+/// normalized request, and, for a mob a host serves beside its launch mob,
+/// which mob of that id it is. A body member this version does not know
+/// makes the body unreadable here, and nothing carries it out.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HeldIdentityChange {
@@ -130,11 +134,26 @@ pub struct HeldIdentityChange {
     pub format: String,
     /// The mob the change is of.
     pub mob_id: String,
+    /// The incarnation of the mob the change is of, as the holder of a mob
+    /// a host serves beside its launch mob writes it: the one minted when
+    /// that mob was created, the same over an unload, a load and a restart,
+    /// and another one for a mob created later under the id. The record
+    /// itself so says which mob of an id a change was held for. The launch
+    /// mob's holder writes none, and its body is as it always was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mob_incarnation: Option<String>,
     /// The normalized request.
     pub request: IdentityRequest,
 }
 
 impl HeldIdentityChange {
+    /// Whether this body says the change is of the incarnation
+    /// `incarnation` of its mob. A body that names no incarnation is of
+    /// none.
+    pub fn is_of_incarnation(&self, incarnation: &str) -> bool {
+        self.mob_incarnation.as_deref() == Some(incarnation)
+    }
+
     /// The change `decision` holds, when it is one this version reads: a
     /// decision of an `identity.*` kind, of this body format, whose request
     /// is the one its descriptor binds.
@@ -233,6 +252,39 @@ pub trait HeldChangeHost: Send + Sync {
         let _ = (mob, name);
         Ok(None)
     }
+}
+
+/// The holder of a mob's held changes, as the one driver of a host finds
+/// it when it carries a decision out or tells its end.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum HeldFamily {
+    /// The host runs the mob now and its family holds changes: the whole
+    /// holder of that mob (its rules, its reads, its executor, its notice
+    /// route).
+    Here(Box<IdentityDecisions>),
+    /// The host has the mob and does not run it now, or runs it with no
+    /// family that holds changes, or has no record of a mob of the id at
+    /// all (a store it does not see, a mob an earlier process destroyed):
+    /// a held change of it is left for a later pass, and nothing of it is
+    /// told meanwhile.
+    Away,
+    /// The host destroyed the mob, by its mob set's own record of that
+    /// destroy, and hosts no mob under the id since: nothing of it is
+    /// carried out, and a notice it owes has no one to reach. Absence
+    /// alone is never this.
+    Gone,
+}
+
+/// The holders of the held changes of every mob one host serves. A host
+/// has one driver of the `identity.*` decision kinds; a held change names
+/// its mob, and the driver carries it out through that mob's own holder.
+/// Nothing is loaded for the question and nothing is kept of the answer.
+#[async_trait]
+pub trait HeldChangeFamilies: Send + Sync {
+    /// The holder of the held changes of the mob `mob_id`, as the host
+    /// stands now.
+    async fn of(&self, mob_id: &str) -> HeldFamily;
 }
 
 /// The notice a decision that ended owes its requester.
@@ -345,12 +397,16 @@ impl IdentityDecisionNotices for NoRequesterNotices {
     }
 }
 
+/// What a notice route asks for the identity runtime of the mob a notice
+/// names: `None` while the host does not run that mob.
+type NoticeRuntime = dyn Fn(&str) -> Option<PublicIdentityRuntime> + Send + Sync;
+
 /// Notices to requesting agents, as a keyed send to the agent's own name:
 /// the key is the decision, so a notice asked for twice is delivered once.
 /// The send starts a turn of an idle agent: it asked, and is told. A host
 /// surface and a person have no route here and are owed no notice.
 pub struct KeyedSendNotices {
-    runtime: Box<dyn Fn() -> Option<PublicIdentityRuntime> + Send + Sync>,
+    runtime: Box<NoticeRuntime>,
 }
 
 impl std::fmt::Debug for KeyedSendNotices {
@@ -362,9 +418,24 @@ impl std::fmt::Debug for KeyedSendNotices {
 impl KeyedSendNotices {
     /// Notices sent through the identity runtime `runtime` answers when a
     /// notice is delivered (`UnifiedRuntime::identity_runtime`). It is asked
-    /// per delivery and never kept, so the notices keep no mob loaded.
+    /// per delivery and never kept, so the notices keep no mob loaded. The
+    /// route is one mob's: a notice of a change of another mob than the
+    /// answered runtime's is delivered to nobody.
     pub fn new(
         runtime: impl Fn() -> Option<PublicIdentityRuntime> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            runtime: Box::new(move |_mob_id| runtime()),
+        }
+    }
+
+    /// Notices of the changes of every mob a host serves: `runtime` is
+    /// asked, per delivery, for the identity runtime of the mob the notice
+    /// names, and answers `None` while the host does not run that mob (the
+    /// notice is asked again at a later pass). Nothing is kept of the
+    /// answer, and no mob is loaded for it.
+    pub fn per_mob(
+        runtime: impl Fn(&str) -> Option<PublicIdentityRuntime> + Send + Sync + 'static,
     ) -> Self {
         Self {
             runtime: Box::new(runtime),
@@ -399,7 +470,12 @@ impl IdentityDecisionNotices for KeyedSendNotices {
             return failed("the requester is not an agent name");
         };
         // No identity runtime now: asked again at a later pass.
-        let runtime = (self.runtime)()?;
+        let runtime = (self.runtime)(&notice.mob_id)?;
+        // The route answers one mob's runtime: an agent of another mob is
+        // never told of a change it did not ask for.
+        if runtime.owner().handle().mob_id().as_str() != notice.mob_id {
+            return failed("the notice is of a change of another mob than its route's");
+        }
         let content = meerkat_core::ContentInput::Text(notice.text());
         let key = Self::key_of(&notice.decision_id);
         match runtime.send_keyed(&identity, None, &content, &key).await {
@@ -441,6 +517,15 @@ pub struct IdentityDecisions {
     consequences: Option<Arc<dyn HostConsequences>>,
     notices: Arc<dyn IdentityDecisionNotices>,
     clock: Arc<dyn DecisionClock>,
+    /// Whether this holder files a held change under its mob's
+    /// incarnation: the holder of a mob a host serves beside its launch
+    /// mob. See [`Self::subject_key`].
+    filed_by_incarnation: bool,
+    /// The holders of the host's mobs, on the holder whose executors the
+    /// host's one driver runs: a held change is carried out through the
+    /// holder of its own mob. Without them this holder carries out the
+    /// changes of its own mob alone.
+    families: Option<Arc<dyn HeldChangeFamilies>>,
 }
 
 impl std::fmt::Debug for IdentityDecisions {
@@ -489,22 +574,18 @@ fn unlisted(error: &DecisionError) -> IdentityRefusal {
     )
 }
 
-/// The subject key of the decision that holds `operation_id` in `mob_id`.
-fn subject_key(
-    mob_id: &str,
-    operation_id: &OperationId,
-) -> Result<DecisionSubjectKey, IdentityRefusal> {
-    DecisionSubjectKey::new(format!("{mob_id}/{operation_id}")).map_err(|_| malformed("request_id"))
-}
+/// The reference a decision ends refused with when it was filed for an
+/// earlier mob of its mob's id: the mob the host runs under the id now is
+/// not the one the change was asked and approved for.
+pub const MOB_REPLACED_REFUSAL: &str = "mob_replaced";
 
 impl Binding {
     fn of(
-        mob: &MobHandle,
+        subject_key: DecisionSubjectKey,
         operation_id: &OperationId,
         request: &IdentityRequest,
     ) -> Result<Self, IdentityRefusal> {
         let kind = DecisionKind::new(request.decision_kind()).map_err(|_| malformed("request"))?;
-        let subject_key = subject_key(mob.mob_id().as_str(), operation_id)?;
         let decision_id = DecisionId::derive(&kind, &subject_key);
         let digest = request.request_digest().map_err(|_| malformed("request"))?;
         Ok(Self {
@@ -616,9 +697,12 @@ fn closed_refusal(row: &StoredDecision) -> IdentityRefusal {
                 .map_or("refused", DecisionReference::as_str);
             match execution_refusal_kind(token) {
                 Some(kind) => IdentityRefusal::new(kind),
+                // A decision ends this way only for a refusal the same
+                // request cannot outlive (a refusal it can is released and
+                // tried again), so the detail names the refusal and does
+                // not say to ask again: the refusal is not retryable.
                 None => IdentityRefusal::new(closed()).with_detail(format!(
-                    "The approved change was refused when it was carried out ({token}): ask \
-                     again."
+                    "The approved change was refused when it was carried out ({token})."
                 )),
             }
         }
@@ -653,7 +737,74 @@ impl IdentityDecisions {
             consequences: None,
             notices: Arc::new(NoRequesterNotices),
             clock: Arc::new(SystemDecisionClock),
+            filed_by_incarnation: false,
+            families: None,
         }
+    }
+
+    /// This holder as the holder of a mob a host serves beside its launch
+    /// mob: it files a held change under the mob's incarnation
+    /// ([`Self::subject_key`]).
+    #[must_use]
+    pub(crate) fn filed_by_incarnation(mut self) -> Self {
+        self.filed_by_incarnation = true;
+        self
+    }
+
+    /// This holder as the one whose executors a host's one driver runs,
+    /// over the holders of every mob the host serves: a held change is
+    /// carried out, and its end told, through the holder of its own mob
+    /// ([`HeldChangeFamilies`]).
+    #[must_use]
+    pub fn with_families(mut self, families: Arc<dyn HeldChangeFamilies>) -> Self {
+        self.families = Some(families);
+        self
+    }
+
+    /// The subject key this holder files the decision of `operation_id` in
+    /// `mob` under. The launch mob's holder files it under
+    /// `{mob id}/{operation id}`. The holder of a mob a host serves beside
+    /// its launch mob files it under
+    /// `{mob id}@{incarnation}/{operation id}`: the incarnation is minted
+    /// when a mob is created and kept by its store, so it is the same over
+    /// an unload, a load and a restart, and another one for a mob created
+    /// later under the same id. A held change of an earlier mob of an id is
+    /// therefore no decision of a later one: it is not found as its
+    /// operation, and is not carried out in it.
+    fn subject_key(
+        &self,
+        mob: &MobHandle,
+        operation_id: &OperationId,
+    ) -> Result<DecisionSubjectKey, IdentityRefusal> {
+        let mob_id = mob.mob_id();
+        let key = if self.filed_by_incarnation {
+            format!("{mob_id}@{}/{operation_id}", mob.incarnation())
+        } else {
+            format!("{mob_id}/{operation_id}")
+        };
+        DecisionSubjectKey::new(key).map_err(|_| malformed("request_id"))
+    }
+
+    /// Whether `row` is a decision this holder filed for `mob` as it runs
+    /// now: its id is the one this holder derives for its kind, its
+    /// operation and `mob`, and, for the holder of a mob a host serves
+    /// beside its launch mob, its body names the incarnation of `mob`. A
+    /// decision filed for an earlier mob of the id is not, and neither is
+    /// one whose body names no incarnation (a body written before the body
+    /// carried it): the record does not say it is of this mob, so it is of
+    /// none this holder answers for.
+    fn filed_for(&self, mob: &MobHandle, row: &StoredDecision) -> bool {
+        let Some(operation_id) = OperationId::from_recorded(row.descriptor.operation_id.as_str())
+        else {
+            return false;
+        };
+        let filed_under_its_key = self
+            .subject_key(mob, &operation_id)
+            .is_ok_and(|key| DecisionId::derive(&row.descriptor.kind, &key) == row.decision_id);
+        filed_under_its_key
+            && (!self.filed_by_incarnation
+                || HeldIdentityChange::of(row)
+                    .is_ok_and(|held| held.is_of_incarnation(&mob.incarnation().to_string())))
     }
 
     /// This holder, asking `consequences` for the host's lines when a change
@@ -697,7 +848,7 @@ impl IdentityDecisions {
         if !self.decisions.is_available() {
             return Ok(None);
         }
-        let subject_key = subject_key(mob.mob_id().as_str(), operation_id)?;
+        let subject_key = self.subject_key(mob, operation_id)?;
         for kind in IDENTITY_DECISION_KINDS {
             let kind = DecisionKind::new(kind).map_err(|_| malformed("request"))?;
             if let Some(row) = self.read(&DecisionId::derive(&kind, &subject_key))? {
@@ -794,6 +945,11 @@ impl IdentityDecisions {
                         continue;
                     };
                     if held.mob_id != mob_id.as_str() {
+                        continue;
+                    }
+                    // A decision filed for an earlier mob of the id keeps
+                    // nothing open in this one.
+                    if !self.filed_for(mob, row) {
                         continue;
                     }
                     let Some(operation_id) =
@@ -972,7 +1128,7 @@ impl IdentityDecisions {
             );
         }
         let request = &normalized.request;
-        let binding = Binding::of(mob, operation_id, request)?;
+        let binding = Binding::of(self.subject_key(mob, operation_id)?, operation_id, request)?;
         // One operation id names one change: a decision that holds it, of
         // whichever kind, answers it, and another request under it is
         // refused.
@@ -985,6 +1141,9 @@ impl IdentityDecisions {
         let body = serde_json::to_value(HeldIdentityChange {
             format: HELD_CHANGE_FORMAT.to_owned(),
             mob_id,
+            mob_incarnation: self
+                .filed_by_incarnation
+                .then(|| mob.incarnation().to_string()),
             request: request.clone(),
         })
         .map_err(|_| malformed("request"))?;
@@ -1195,12 +1354,12 @@ impl IdentityDecisionExecutor {
         }
     }
 
-    /// The held change of `decision`, its operation and its mob, when this
-    /// host runs the mob now.
-    fn held(
+    /// The held change of `decision`, its operation, and where its mob
+    /// stands on this host now.
+    async fn held(
         &self,
         decision: &StoredDecision,
-    ) -> Result<(HeldIdentityChange, OperationId, Option<MobHandle>), String> {
+    ) -> Result<(HeldIdentityChange, OperationId, HeldMob), String> {
         let body = HeldIdentityChange::of(decision)?;
         let operation_id = OperationId::from_recorded(decision.descriptor.operation_id.as_str())
             .ok_or_else(|| {
@@ -1209,9 +1368,42 @@ impl IdentityDecisionExecutor {
                     decision.decision_id
                 )
             })?;
-        let mob = self.decisions.host.mob(&body.mob_id);
+        let mob = self.mob_of(&body.mob_id).await;
         Ok((body, operation_id, mob))
     }
+
+    /// Where the mob `mob_id` a held change names stands on this host now:
+    /// with the holder of that mob's held changes and the mob's handle when
+    /// the host runs it. The mob is the one the host's family wrote into
+    /// the held body when it held the change; nothing a requester or a
+    /// decider wrote chooses it.
+    async fn mob_of(&self, mob_id: &str) -> HeldMob {
+        let holder = match &self.decisions.families {
+            // The holder of one mob: it answers for its own mob alone.
+            None => self.decisions.clone(),
+            Some(families) => match families.of(mob_id).await {
+                HeldFamily::Here(holder) => *holder,
+                HeldFamily::Away => return HeldMob::Away,
+                HeldFamily::Gone => return HeldMob::Gone,
+            },
+        };
+        match holder.host.mob(mob_id) {
+            Some(mob) => HeldMob::Here(Box::new((holder, mob))),
+            None => HeldMob::Away,
+        }
+    }
+}
+
+/// Where the mob of a held change stands when its decision is carried out
+/// or its end is told.
+enum HeldMob {
+    /// The host runs the mob: the holder of its held changes, and its
+    /// handle.
+    Here(Box<(IdentityDecisions, MobHandle)>),
+    /// The host does not run the mob now: asked again at a later pass.
+    Away,
+    /// The host has no mob of the id any more.
+    Gone,
 }
 
 #[async_trait]
@@ -1239,19 +1431,27 @@ impl DecisionExecutor for IdentityDecisionExecutor {
         ) {
             return Self::refused("not_a_human_decision");
         }
-        let (body, operation_id, mob) = match self.held(decision) {
+        let (body, operation_id, mob) = match self.held(decision).await {
             Ok(held) => held,
             Err(reason) => {
                 tracing::warn!(%reason, "a held change of agents cannot be read");
                 return Self::refused("unreadable_request");
             }
         };
-        let Some(mob) = mob else {
+        // A mob the host does not run now, and a mob that is gone: nothing
+        // is carried out, and the decision ends at its deadline.
+        let HeldMob::Here(here) = mob else {
             return DecisionExecution::Released;
         };
+        let (holder, mob) = *here;
+        // The mob the host runs under the id now is the one the change was
+        // held for, or the change is carried out in none.
+        if !holder.filed_for(&mob, decision) {
+            return Self::refused(MOB_REPLACED_REFUSAL);
+        }
         // What the person was shown, made again from what stands now: any
         // difference ends the decision.
-        let configured = match self.decisions.rendered(&mob, &body.request).await {
+        let configured = match holder.rendered(&mob, &body.request).await {
             Ok((rendering, configured)) => {
                 if rendering.subject_digest().as_str() != descriptor.subject_digest.as_str() {
                     return Self::refused(SUBJECT_WIDENED_REFUSAL);
@@ -1269,7 +1469,7 @@ impl DecisionExecutor for IdentityDecisionExecutor {
             &body.request,
         )
         .of_configured_target(configured);
-        match self.decisions.executor.commit(commit).await {
+        match holder.executor.commit(commit).await {
             Ok(committed) => match &committed.outcome {
                 IdentityOutcome::Done { .. } | IdentityOutcome::PendingPreparation { .. } => {
                     DecisionExecution::Committed
@@ -1301,12 +1501,19 @@ impl DecisionExecutor for IdentityDecisionExecutor {
     ) -> Result<bool, DecisionExecutorRecordUnavailable> {
         let (body, operation_id, mob) = self
             .held(decision)
+            .await
             .map_err(DecisionExecutorRecordUnavailable)?;
-        let Some(mob) = mob else {
+        let HeldMob::Here(here) = mob else {
             return Err(DecisionExecutorRecordUnavailable(
                 "this host does not run the mob of the held change now".to_owned(),
             ));
         };
+        let (holder, mob) = *here;
+        // A change held for an earlier mob of the id was never committed
+        // in this one, whatever this mob's receipts say of the operation.
+        if !holder.filed_for(&mob, decision) {
+            return Ok(false);
+        }
         // Only a receipt of the held request is this decision's commit:
         // another request the requester asked under the same request id
         // may have committed, and that is not the change a person approved.
@@ -1319,15 +1526,43 @@ impl DecisionExecutor for IdentityDecisionExecutor {
         &self,
         decision: &StoredDecision,
     ) -> Option<ApprovalConsentDeliveryState> {
-        let (body, operation_id, mob) = match self.held(decision) {
+        if matches!(
+            decision.state.phase,
+            DecisionPhase::Open | DecisionPhase::Approved
+        ) {
+            return None;
+        }
+        let failed = |reason: &str| {
+            Some(ApprovalConsentDeliveryState::Failed {
+                reason: reason.to_owned(),
+            })
+        };
+        let (body, operation_id, mob) = match self.held(decision).await {
             Ok(held) => held,
             Err(reason) => return Some(ApprovalConsentDeliveryState::Failed { reason }),
         };
+        // The requester is an agent of the mob the change was held for, and
+        // is told through that mob's own holder alone. A mob that is gone
+        // has nobody to tell, and a later mob of the id has no agent that
+        // asked: neither is told. A mob the host does not run now is not
+        // told now: no notice is made, and no route is asked, until the
+        // mob is there and the decision is seen to be filed for it. A mob
+        // that never returns is never told; its notice stays owed.
+        let (holder, mob) = match mob {
+            HeldMob::Gone => return failed("the mob of the change is gone"),
+            HeldMob::Away => return None,
+            HeldMob::Here(here) => {
+                let (holder, mob) = *here;
+                if !holder.filed_for(&mob, decision) {
+                    return failed("the mob of the change was replaced");
+                }
+                (holder, mob)
+            }
+        };
         let outcome = match decision.state.phase {
-            DecisionPhase::Open | DecisionPhase::Approved => return None,
             // A change that was carried out is told with what Core
             // committed; a receipt that cannot be read now is asked again.
-            DecisionPhase::Executed => committed_outcome(&mob?, &operation_id).await.ok()??,
+            DecisionPhase::Executed => committed_outcome(&mob, &operation_id).await.ok()??,
             _ => IdentityOutcome::Refused(closed_refusal(decision)),
         };
         let notice = IdentityDecisionNotice {
@@ -1345,12 +1580,159 @@ impl DecisionExecutor for IdentityDecisionExecutor {
             requester: body.request.requester,
             outcome,
         };
-        self.decisions.notices.deliver(&notice).await
+        // Told through the route of the change's own mob.
+        holder.notices.deliver(&notice).await
     }
 
     /// A held change's execution leaves nothing outside the decision store
-    /// to undo: what it commits is Core's, under the operation. No outcome.
+    /// to undo: what it commits is Core's, under the operation. What the
+    /// host's one driver does here is end the changes of this kind that
+    /// are still held for a mob the host no longer has: a change whose mob
+    /// the host destroyed (its mob set's record says so), and one filed
+    /// for an earlier mob of an id the host runs a later mob under, is
+    /// withdrawn as the host, since nobody is left to carry it out. A mob
+    /// the host has and does not run now keeps its held changes, and so
+    /// does a mob the host has no record of: a store this launch does not
+    /// see and a mob an earlier process destroyed are not known to be
+    /// gone, and their changes end at their deadlines. The holder of one
+    /// mob (a host of one mob) ends nothing here. No outcome: the
+    /// withdrawals are the decision service's own records, and a pass is
+    /// asked for after them.
     async fn sweep(&self) -> Vec<(DecisionId, DecisionPassOutcome)> {
+        if self.decisions.families.is_none() || !self.decisions.decisions.is_available() {
+            return Vec::new();
+        }
+        let owner = self.decisions.decisions.owner();
+        let filter = DecisionListFilter::default()
+            .with_phase(DecisionPhase::Open)
+            .with_kind(self.kind.clone());
+        let mut open = Vec::new();
+        let mut after: Option<String> = None;
+        loop {
+            let page = match owner.list(&filter, after.as_deref(), DECISION_PAGE_MAX) {
+                Ok(page) => page,
+                Err(error) => {
+                    tracing::warn!(%error, "the held changes of agents could not be listed");
+                    return Vec::new();
+                }
+            };
+            open.extend(
+                page.decisions
+                    .into_iter()
+                    .filter(|row| row.state.phase == DecisionPhase::Open),
+            );
+            match page.next_after {
+                // A store that names the same row again has no more.
+                Some(next) if after.as_ref() != Some(&next) => after = Some(next),
+                _ => break,
+            }
+        }
+        let mut withdrawn = 0_usize;
+        for row in open {
+            let Ok(body) = HeldIdentityChange::of(&row) else {
+                continue;
+            };
+            let left_behind = match self.mob_of(&body.mob_id).await {
+                HeldMob::Gone => true,
+                HeldMob::Here(here) => {
+                    let (holder, mob) = *here;
+                    !holder.filed_for(&mob, &row)
+                }
+                HeldMob::Away => false,
+            };
+            if !left_behind {
+                continue;
+            }
+            match owner.withdraw(&row.decision_id, &DecisionWithdrawer::Host) {
+                Ok(_) => withdrawn += 1,
+                // Decided, expired or withdrawn since the listing.
+                Err(DecisionError::Refused {
+                    refusal: DecisionRefusal::NotOpen | DecisionRefusal::Expired,
+                    ..
+                }) => {}
+                Err(error) => tracing::warn!(
+                    decision_id = %row.decision_id,
+                    %error,
+                    "a held change of a mob the host no longer has could not be withdrawn"
+                ),
+            }
+        }
+        if withdrawn > 0 {
+            tracing::info!(
+                kind = %self.kind,
+                withdrawn,
+                "held changes of mobs the host no longer has were withdrawn"
+            );
+            // The withdrawn decisions owe their notices: a pass delivers
+            // them, or records that nobody is left to tell.
+            self.decisions.decisions.notify_work();
+        }
         Vec::new()
     }
+}
+
+/// Withdraw, as the host, the held changes that are still open and whose
+/// body names the mob `mob_id`: what a host does before it creates a mob
+/// under the id, when whatever is still held under it was asked for an
+/// earlier mob. It reads the decision rows alone: no mob is read or
+/// loaded. A change a person already approved is not open and is left: it
+/// is carried out in no later mob of the id and ends at its deadline. A
+/// launch that keeps no decisions, and a candidate launch, withdraw
+/// nothing. Answers how many it withdrew.
+///
+/// # Errors
+/// A listing or a withdrawal the decision store could not make, in words
+/// for the host's log: some may be left, and asking again withdraws them.
+pub(crate) fn withdraw_open_held_changes_of(
+    decisions: &RuntimeDecisions,
+    mob_id: &str,
+) -> Result<usize, String> {
+    if !decisions.is_available() || decisions.is_candidate() {
+        return Ok(0);
+    }
+    let owner = decisions.owner();
+    let filter = DecisionListFilter::default().with_phase(DecisionPhase::Open);
+    let mut open = Vec::new();
+    let mut after: Option<String> = None;
+    loop {
+        let page = owner
+            .list(&filter, after.as_deref(), DECISION_PAGE_MAX)
+            .map_err(|error| format!("the open decisions could not be listed: {error}"))?;
+        for row in &page.decisions {
+            if row.state.phase != DecisionPhase::Open {
+                continue;
+            }
+            let Ok(held) = HeldIdentityChange::of(row) else {
+                continue;
+            };
+            if held.mob_id == mob_id {
+                open.push(row.decision_id.clone());
+            }
+        }
+        match page.next_after {
+            // A store that names the same row again has no more.
+            Some(next) if after.as_ref() != Some(&next) => after = Some(next),
+            _ => break,
+        }
+    }
+    let mut withdrawn = 0;
+    for decision_id in open {
+        match owner.withdraw(&decision_id, &DecisionWithdrawer::Host) {
+            Ok(_) => withdrawn += 1,
+            // Decided, expired or withdrawn since the listing: not open.
+            Err(DecisionError::Refused {
+                refusal: DecisionRefusal::NotOpen | DecisionRefusal::Expired,
+                ..
+            }) => {}
+            Err(error) => {
+                return Err(format!(
+                    "the held change {decision_id} could not be withdrawn: {error}"
+                ));
+            }
+        }
+    }
+    if withdrawn > 0 {
+        decisions.notify_work();
+    }
+    Ok(withdrawn)
 }

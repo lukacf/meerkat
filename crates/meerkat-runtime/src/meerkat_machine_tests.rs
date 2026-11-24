@@ -16823,6 +16823,8 @@ async fn until_changed_switch_turn_refuses_a_second_request_while_one_is_pending
                 approval_reason: None,
                 realtime_detach_allowed: false,
                 target_carries_transcript: true,
+                target_reasoning_effort: Some(mm_dsl::TargetReasoningEffortVerdict::NoHeldEffort),
+                inspected_current_identity: None,
             },
             "RequestSwitchTurn(approved request under a denied id)",
         )
@@ -17453,6 +17455,8 @@ async fn until_changed_switch_turn_refused_retry_of_a_pending_request_records_no
                 approval_reason: None,
                 realtime_detach_allowed: false,
                 target_carries_transcript: false,
+                target_reasoning_effort: None,
+                inspected_current_identity: None,
             },
             "RequestSwitchTurn(retry onto a target that cannot carry the transcript)",
         )
@@ -17642,6 +17646,8 @@ async fn finite_switch_turn_reusing_a_pending_until_changed_id_records_no_denial
                 approval_reason: None,
                 realtime_detach_allowed: false,
                 target_carries_transcript: false,
+                target_reasoning_effort: None,
+                inspected_current_identity: None,
             },
             "RequestSwitchTurn(finite request onto a target that cannot carry the transcript)",
         )
@@ -17940,6 +17946,8 @@ async fn finite_switch_turn_retry_of_a_denied_request_stays_denied() {
                 approval_reason: None,
                 realtime_detach_allowed: false,
                 target_carries_transcript: true,
+                target_reasoning_effort: Some(mm_dsl::TargetReasoningEffortVerdict::NoHeldEffort),
+                inspected_current_identity: None,
             },
             "RequestSwitchTurn(finite request under a denied id)",
         )
@@ -30212,8 +30220,8 @@ fn interrupt_yielding_peer_input(
 
 /// A request-only Steer that takes the exact live-boundary path: an ordinary
 /// continuation carrying a typed notice append. A peer steer joins the running
-/// run through the durable path, one per boundary, so the exact-boundary
-/// tests drive this input instead.
+/// run through the durable path (every waiting one at the next boundary), so
+/// the exact-boundary tests drive this input instead.
 fn interrupt_yielding_request_only_input(body: &str) -> (Input, InputId) {
     let mut continuation = crate::input::ContinuationInput::detached_background_op_completed();
     continuation.header.durability = crate::input::InputDurability::Durable;
@@ -42727,6 +42735,95 @@ async fn a_never_started_resumed_run_consumes_the_inputs_its_rounds_applied() {
         ]
     );
     assert_cold_registration_neither_resumes_nor_requeues(run).await;
+}
+
+/// A run whose request was refused ends its inputs exactly as a run that
+/// never began executing does: the same realization, so the same durable
+/// rows. Each input's stored terminal record is the same byte for byte (the
+/// staged input never executed, the one a committed round applied consumed),
+/// and neither run leaves an input in a lane or bound to the run. The
+/// refused run's end is not the caller's choice: the caller hands the
+/// failure over as replayable, and the realization reads the cause the
+/// machine recorded for the failed run. The same failure without the
+/// refusal is replayed.
+#[tokio::test]
+async fn a_refused_run_stores_for_its_inputs_what_a_never_started_run_stores() {
+    use crate::meerkat_machine::FailedRunContributorDisposition;
+
+    let refusal: meerkat_core::ReasoningEffortRefusal = serde_json::from_value(serde_json::json!({
+        "requested": "max", "provider": "anthropic", "model": "claude-opus-4-5",
+        "route": {"backend": "anthropic_api", "api": "messages"},
+        "reason": "unsupported_level", "supported": ["low", "medium", "high"],
+        "facts": "catalog",
+    }))
+    .expect("a reasoning effort refusal");
+    let refused = CoreApplyFailureCause::runtime_turn(refusal.to_string()).with_reason(
+        meerkat_core::event::AgentErrorReason::ReasoningEffortRefused {
+            refusal: Box::new(refusal.clone()),
+        },
+    );
+    let mut stored = Vec::new();
+    for (failure, disposition) in [
+        (
+            CoreApplyFailureCause::executor_stopped(),
+            FailedRunContributorDisposition::Terminalized,
+        ),
+        (refused, FailedRunContributorDisposition::Replayed),
+    ] {
+        let run = resumed_run_with_applied_inputs(1, 1, false).await;
+        fail_runtime_loop_run(&run.driver, run.run_id.clone(), failure, disposition)
+            .await
+            .expect("the run ends its inputs");
+        let records: Vec<(crate::input_state::InputLifecycleState, Vec<u8>)> =
+            ended_run_input_outcomes(&run)
+                .await
+                .into_iter()
+                .map(|(phase, terminal)| {
+                    (
+                        phase,
+                        serde_json::to_vec(&terminal).expect("a terminal record serializes"),
+                    )
+                })
+                .collect();
+        stored.push(records);
+        assert_cold_registration_neither_resumes_nor_requeues(run).await;
+    }
+    assert_eq!(
+        stored[0], stored[1],
+        "(phase, stored terminal record) of each input: a never-started run, a refused run"
+    );
+    assert_eq!(
+        stored[1]
+            .iter()
+            .map(|(phase, terminal)| (*phase, String::from_utf8_lossy(terminal).into_owned()))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                crate::input_state::InputLifecycleState::Consumed,
+                r#"{"outcome_type":"consumed"}"#.to_string(),
+            ),
+            (
+                crate::input_state::InputLifecycleState::Abandoned,
+                r#"{"outcome_type":"abandoned","reason":"never_executed"}"#.to_string(),
+            ),
+        ],
+        "the refused run's inputs: the one a committed round applied, the staged one"
+    );
+
+    // The control: the same failure without the refusal is replayed.
+    let run = resumed_run_with_applied_inputs(1, 1, false).await;
+    fail_runtime_loop_run(
+        &run.driver,
+        run.run_id.clone(),
+        CoreApplyFailureCause::runtime_turn(refusal.to_string()),
+        FailedRunContributorDisposition::Replayed,
+    )
+    .await
+    .expect("the failed run is replayed");
+    assert!(
+        run.driver.lock().await.has_queued_input_in_any_lane(),
+        "a failed run that was not refused returns its inputs to a lane"
+    );
 }
 
 /// A durable Steer that would join a resumed run at its model boundary.
@@ -61688,6 +61785,389 @@ async fn parked_queued_input_session_count_sees_the_five_day_wedge_shape() {
     .await;
 }
 
+/// A clock reading past the run settlement notice, for the census reads of
+/// the rows below: the rows stay as the runtime wrote them, and only the
+/// reader's clock moves.
+fn past_run_settlement_notice() -> chrono::DateTime<chrono::Utc> {
+    chrono::Utc::now()
+        + chrono::Duration::from_std(crate::run_progress::RUN_SETTLEMENT_NOTICE)
+            .expect("the notice fits a chrono duration")
+        + chrono::Duration::seconds(1)
+}
+
+/// Poll the run settlement census at `now` until it publishes `expected`,
+/// admitting only `None` (a transient unreadable ledger) on the way; any
+/// other count is a wrong reading and fails immediately.
+async fn run_settlement_census_settles_at(
+    machine: &Arc<MeerkatMachine>,
+    now: impl Fn() -> chrono::DateTime<chrono::Utc>,
+    expected: usize,
+    claim: &str,
+) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match machine
+                .unsettled_run_session_count_at(crate::run_progress::RUN_SETTLEMENT_NOTICE, now())
+            {
+                Some(count) if count == expected => break,
+                Some(count) => {
+                    panic!("census read {count} while exactly {expected} was true: {claim}")
+                }
+                None => tokio::task::yield_now().await,
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("census never settled at {expected}: {claim}"));
+}
+
+/// A registered persistent session with a blocking executor, its runtime loop
+/// armed to pause between its next run's terminal commit and the steps that
+/// settle the run's terminal work, with one prompt run up to that pause.
+struct HeldAfterTerminalCommit {
+    machine: Arc<MeerkatMachine>,
+    session_id: SessionId,
+    apply_started: Arc<Notify>,
+    apply_release: Arc<Notify>,
+    release: crate::tokio::sync::oneshot::Sender<()>,
+    completion_handle: crate::completion::CompletionHandle,
+    /// [`run_settlement_watchers`] before the run was accepted.
+    watchers_before: usize,
+}
+
+/// How many weak handles stand on the session's driver. A run settlement
+/// watchdog holds exactly one from the run's terminal commit until it ends,
+/// so the difference to the count before the run is the number of watchdogs
+/// alive for the session.
+async fn run_settlement_watchers(machine: &Arc<MeerkatMachine>, session_id: &SessionId) -> usize {
+    let sessions = machine.sessions.read().await;
+    Arc::weak_count(
+        &sessions
+            .get(session_id)
+            .expect("registered session entry")
+            .driver,
+    )
+}
+
+async fn hold_a_run_after_its_terminal_commit() -> HeldAfterTerminalCommit {
+    let machine = persistent_health_probe_machine();
+    let session_id = SessionId::new();
+    let apply_started = Arc::new(Notify::new());
+    let apply_release = Arc::new(Notify::new());
+    machine
+        .prepare_bindings(session_id.clone())
+        .await
+        .expect("bindings should prepare");
+    machine
+        .ensure_session_with_executor(
+            session_id.clone(),
+            Box::new(HealthProbeBlockingExecutor {
+                apply_started: Arc::clone(&apply_started),
+                apply_release: Arc::clone(&apply_release),
+            }),
+        )
+        .await
+        .expect("runtime executor registration should succeed");
+    run_settlement_census_settles_at(
+        &machine,
+        past_run_settlement_notice,
+        0,
+        "a session that committed no run owes no settlement",
+    )
+    .await;
+
+    let watchers_before = run_settlement_watchers(&machine, &session_id).await;
+    let (entered, release) =
+        machine.arm_runtime_loop_before_boundary_acknowledgement_test_hook(session_id.clone());
+    let (accept_outcome, completion_handle) = machine
+        .accept_input_with_completion(&session_id, make_prompt("run settlement census"))
+        .await
+        .expect("input should be accepted");
+    assert!(matches!(accept_outcome, AcceptOutcome::Accepted { .. }));
+    tokio::time::timeout(Duration::from_secs(5), apply_started.notified())
+        .await
+        .expect("the accepted input should reach executor apply");
+    apply_release.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), entered)
+        .await
+        .expect("the run should commit")
+        .expect("the armed pause should be reached");
+
+    // The watchdog of the run is alive from its terminal commit.
+    assert_eq!(
+        run_settlement_watchers(&machine, &session_id).await,
+        watchers_before + 1,
+        "the terminal commit starts exactly one run settlement watchdog"
+    );
+
+    HeldAfterTerminalCommit {
+        machine,
+        session_id,
+        apply_started,
+        apply_release,
+        release,
+        completion_handle: completion_handle
+            .expect("accepted input should register a completion waiter"),
+        watchers_before,
+    }
+}
+
+/// The `session_run_settlement` census while a runtime loop stands between a
+/// run's terminal commit and the settlement of its terminal work. Every
+/// earlier dimension reads this session as healthy: its registration is
+/// `Active`, its loop is alive, no run is staged and nothing is queued. The
+/// census reads it from the input rows: nothing inside the notice, one
+/// session past it, and nothing again once the loop settles the work.
+#[tokio::test]
+async fn unsettled_run_session_count_sees_a_committed_run_whose_loop_stands() {
+    let held = hold_a_run_after_its_terminal_commit().await;
+    let machine = &held.machine;
+
+    run_settlement_census_settles_at(
+        machine,
+        chrono::Utc::now,
+        0,
+        "a run committed a moment ago is inside the notice",
+    )
+    .await;
+    assert_ne!(
+        machine.unsettled_run_session_count(),
+        Some(1),
+        "the production clock reads a run committed a moment ago as inside the notice"
+    );
+    run_settlement_census_settles_at(
+        machine,
+        past_run_settlement_notice,
+        1,
+        "a committed run whose terminal work stays unsettled past the notice is counted \
+         while its loop stands",
+    )
+    .await;
+    let unsettled = machine
+        .unsettled_run_at(
+            &held.session_id,
+            crate::run_progress::RUN_SETTLEMENT_NOTICE,
+            past_run_settlement_notice(),
+        )
+        .expect("the per-session read names the unsettled run");
+    assert!(unsettled.unsettled_for >= crate::run_progress::RUN_SETTLEMENT_NOTICE);
+    assert_eq!(
+        machine.unsettled_run(&held.session_id),
+        None,
+        "the production clock reads a run committed a moment ago as inside the notice"
+    );
+
+    // A read that cannot take the session's driver establishes nothing, and
+    // a lock miss alone is never published as a failed read: the census
+    // answers with its last completed reading, the per-session read with
+    // nothing.
+    {
+        let sessions = machine.sessions.read().await;
+        let entry = sessions
+            .get(&held.session_id)
+            .expect("registered session entry");
+        let driver_held = entry.driver.lock().await;
+        assert_eq!(
+            machine.unsettled_run_session_count_at(
+                crate::run_progress::RUN_SETTLEMENT_NOTICE,
+                past_run_settlement_notice(),
+            ),
+            Some(1),
+            "a lock miss with nothing read keeps the last completed reading"
+        );
+        assert_eq!(
+            machine.unsettled_run_at(
+                &held.session_id,
+                crate::run_progress::RUN_SETTLEMENT_NOTICE,
+                past_run_settlement_notice(),
+            ),
+            None
+        );
+        drop(driver_held);
+    }
+
+    held.release
+        .send(())
+        .expect("the paused loop should still wait for its release");
+    tokio::time::timeout(Duration::from_secs(5), held.completion_handle.wait())
+        .await
+        .expect("completion waiter should resolve")
+        .expect("the noop turn should complete");
+    run_settlement_census_settles_at(
+        machine,
+        past_run_settlement_notice,
+        0,
+        "a run whose terminal work the loop settled owes nothing, however old its rows",
+    )
+    .await;
+    // The same miss on a healthy session: the last completed reading is
+    // zero, and that is what a busy healthy host publishes, not a failed
+    // read.
+    {
+        let sessions = machine.sessions.read().await;
+        let entry = sessions
+            .get(&held.session_id)
+            .expect("registered session entry");
+        let driver_held = entry.driver.lock().await;
+        assert_eq!(
+            machine.unsettled_run_session_count_at(
+                crate::run_progress::RUN_SETTLEMENT_NOTICE,
+                past_run_settlement_notice(),
+            ),
+            Some(0),
+            "a lock miss on a healthy session is not a failed read"
+        );
+        drop(driver_held);
+    }
+    assert_eq!(
+        machine.unsettled_run_at(
+            &held.session_id,
+            crate::run_progress::RUN_SETTLEMENT_NOTICE,
+            past_run_settlement_notice(),
+        ),
+        None
+    );
+    // The loop settled the work itself, so it ended the run's watchdog: its
+    // weak handle on the session's driver is gone.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while run_settlement_watchers(machine, &held.session_id).await != held.watchers_before {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the loop should end the watchdog of a run it settled");
+}
+
+/// The `session_run_settlement` census after a runtime loop LEFT with a
+/// committed run's terminal work unsettled: the finalizing write was refused,
+/// the loop logged and returned, and the registration was kept. No loop is
+/// alive to report anything, and the session accepts input it never runs.
+/// The census still counts it, because it reads the input rows and not the
+/// loop.
+#[tokio::test]
+async fn unsettled_run_session_count_sees_a_committed_run_whose_loop_left() {
+    let held = hold_a_run_after_its_terminal_commit().await;
+    let machine = &held.machine;
+
+    // Make the live rows differ from the stored ones, so the finalizing
+    // write's exact compare is refused at every try.
+    {
+        let sessions = machine.sessions.read().await;
+        let entry = sessions
+            .get(&held.session_id)
+            .expect("registered session entry");
+        let mut driver = entry.driver.lock().await;
+        let owners = driver.ledger().pending_terminal_owner_ids();
+        assert!(
+            !owners.is_empty(),
+            "the terminal commit must leave a row that owns the run's unsettled work"
+        );
+        for input_id in owners {
+            let mut state = driver
+                .ledger()
+                .get(&input_id)
+                .expect("an indexed owner has a ledger row")
+                .clone();
+            state.recovery_count += 1;
+            driver.insert_input_state_for_test(state);
+        }
+    }
+    held.release
+        .send(())
+        .expect("the paused loop should still wait for its release");
+
+    // The loop leaves.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let left = {
+                let sessions = machine.sessions.read().await;
+                let entry = sessions
+                    .get(&held.session_id)
+                    .expect("the registration is kept");
+                match &entry.attachment_slot {
+                    RuntimeLoopAttachmentSlot::Pending(attachment)
+                    | RuntimeLoopAttachmentSlot::Attached(attachment) => {
+                        attachment.loop_handle.is_finished()
+                    }
+                    RuntimeLoopAttachmentSlot::Empty => true,
+                }
+            };
+            if left {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the runtime loop should leave once its finalizing write is refused");
+
+    run_settlement_census_settles_at(
+        machine,
+        chrono::Utc::now,
+        0,
+        "a run committed a moment ago is inside the notice",
+    )
+    .await;
+    run_settlement_census_settles_at(
+        machine,
+        past_run_settlement_notice,
+        1,
+        "a committed run whose terminal work stays unsettled past the notice is counted \
+         with no loop alive",
+    )
+    .await;
+    let unsettled = machine
+        .unsettled_run_at(
+            &held.session_id,
+            crate::run_progress::RUN_SETTLEMENT_NOTICE,
+            past_run_settlement_notice(),
+        )
+        .expect("the per-session read names the unsettled run with no loop alive");
+    assert!(unsettled.unsettled_for >= crate::run_progress::RUN_SETTLEMENT_NOTICE);
+
+    // The run's watchdog outlives the loop that left: it is what keeps
+    // reporting the session, the run and its inputs once a minute.
+    assert_eq!(
+        run_settlement_watchers(machine, &held.session_id).await,
+        held.watchers_before + 1,
+        "the watchdog of a run whose loop left with its work unsettled is still alive"
+    );
+
+    // The session still accepts input, and runs none of it.
+    let (accept_outcome, _later_completion) = machine
+        .accept_input_with_completion(&held.session_id, make_prompt("after the loop left"))
+        .await
+        .expect("a session whose loop left still accepts input");
+    assert!(matches!(accept_outcome, AcceptOutcome::Accepted { .. }));
+    held.apply_release.notify_one();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), held.apply_started.notified())
+            .await
+            .is_err(),
+        "no loop is alive to run the later input"
+    );
+    run_settlement_census_settles_at(
+        machine,
+        past_run_settlement_notice,
+        1,
+        "the unsettled run stays counted for as long as its rows stand",
+    )
+    .await;
+    // The kept registration of a loop that is gone is what the runtime loop
+    // dimension counts: the two dimensions read this session together.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match machine.dead_runtime_loop_session_count() {
+                Some(1) => break,
+                Some(count) => panic!("the loop that left is one dead loop, read {count}"),
+                None => tokio::task::yield_now().await,
+            }
+        }
+    })
+    .await
+    .expect("the runtime loop dimension should count the loop that left");
+}
+
 /// The loop-side arming pin for `session_run_start`: a real turn through the
 /// real runtime loop must arm the session's staged-run window, because the
 /// census reads nothing else. Every other census assertion arms the window by
@@ -65847,5 +66327,1214 @@ async fn a_retire_over_a_pending_attachment_still_stops_the_recovered_inputs() {
         }),
         "a retire over a pending attachment stops the recovered prompt: {:?}",
         row.state.history
+    );
+}
+
+// ---------------------------------------------------------------------------
+// A switch whose target is looked at for the reasoning effort level the
+// session holds
+// ---------------------------------------------------------------------------
+
+use mm_dsl::TargetReasoningEffortVerdict as EffortVerdict;
+
+const EVERY_EFFORT_VERDICT: [EffortVerdict; 5] = [
+    EffortVerdict::NoHeldEffort,
+    EffortVerdict::HeldEffortAccepted,
+    EffortVerdict::LegacyUnverified,
+    EffortVerdict::Refused,
+    EffortVerdict::LevelsUnreadable,
+];
+
+/// Whether the routing machine admits a target on this evidence. The arms
+/// name the refusing value, so a verdict added later would be admitted by
+/// them: this match has no wildcard, and a new verdict does not compile
+/// here until somebody says which side it is on.
+fn effort_verdict_admits(verdict: EffortVerdict) -> bool {
+    match verdict {
+        EffortVerdict::NoHeldEffort
+        | EffortVerdict::HeldEffortAccepted
+        | EffortVerdict::LegacyUnverified
+        // Unreadable levels are not a refusal: the switch goes on as it
+        // did before the level was judged.
+        | EffortVerdict::LevelsUnreadable => true,
+        EffortVerdict::Refused => false,
+    }
+}
+
+/// One switch request as the machine reads it.
+#[derive(Clone)]
+struct SwitchRow {
+    finite: bool,
+    request_id: &'static str,
+    requires_approval: bool,
+    approval_available: bool,
+    approval_denied: bool,
+    carries: bool,
+    verdict: Option<EffortVerdict>,
+    inspected: Option<mm_dsl::SessionLlmIdentity>,
+}
+
+impl SwitchRow {
+    /// A request that needs no approval, onto a target that carries the
+    /// transcript, with no identity witness.
+    fn plain(finite: bool, verdict: Option<EffortVerdict>) -> Self {
+        Self {
+            finite,
+            request_id: "row",
+            requires_approval: false,
+            approval_available: true,
+            approval_denied: false,
+            carries: true,
+            verdict,
+            inspected: None,
+        }
+    }
+
+    fn input(&self) -> mm_dsl::MeerkatMachineInput {
+        let approval_reason = self
+            .approval_denied
+            .then_some(mm_dsl::RoutingSwitchApprovalReason::CrossProvider);
+        if self.finite {
+            mm_dsl::MeerkatMachineInput::RequestFiniteSwitchTurn {
+                request_id: self.request_id.to_string(),
+                target_model: "target".to_string(),
+                turns: 1,
+                target_realtime_capable: false,
+                requires_approval: self.requires_approval,
+                approval_available: self.approval_available,
+                approval_denied: self.approval_denied,
+                approval_reason,
+                realtime_detach_allowed: false,
+                target_carries_transcript: self.carries,
+                target_reasoning_effort: self.verdict,
+                inspected_current_identity: self.inspected.clone(),
+            }
+        } else {
+            mm_dsl::MeerkatMachineInput::RequestUntilChangedSwitchTurn {
+                request_id: self.request_id.to_string(),
+                target_model: "target".to_string(),
+                target_realtime_capable: false,
+                requires_approval: self.requires_approval,
+                approval_available: self.approval_available,
+                approval_denied: self.approval_denied,
+                approval_reason,
+                realtime_detach_allowed: false,
+                target_carries_transcript: self.carries,
+                target_reasoning_effort: self.verdict,
+                inspected_current_identity: self.inspected.clone(),
+            }
+        }
+    }
+}
+
+async fn routing_machine_with_a_baseline() -> (MeerkatMachine, SessionId) {
+    let machine = MeerkatMachine::ephemeral();
+    let session_id = SessionId::new();
+    machine
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
+    <MeerkatMachine as SessionServiceRuntimeExt>::configure_model_routing_baseline(
+        &machine,
+        &session_id,
+        model("baseline"),
+        false,
+    )
+    .await
+    .expect("configure the routing baseline");
+    (machine, session_id)
+}
+
+/// The evidence a switch request carries decides it, for both durations: a
+/// target that carries the transcript is staged on each of the three
+/// admitting values, denied for its capability on a refusal, and matches no
+/// arm without evidence. A target that cannot carry the transcript is
+/// denied for that, whatever the evidence: nobody looked at it.
+#[tokio::test]
+async fn switch_turn_effort_evidence_decides_a_target_that_carries_the_transcript() {
+    for finite in [true, false] {
+        for verdict in EVERY_EFFORT_VERDICT.map(Some).into_iter().chain([None]) {
+            let (machine, session_id) = routing_machine_with_a_baseline().await;
+            let applied = machine
+                .apply_session_dsl_input(
+                    &session_id,
+                    SwitchRow::plain(finite, verdict).input(),
+                    "RequestSwitchTurn(evidence row)",
+                )
+                .await;
+            let state = machine
+                .session_dsl_state(&session_id)
+                .await
+                .expect("read the session state");
+            let context = format!("finite={finite} verdict={verdict:?}: {applied:?}");
+            match verdict {
+                Some(verdict) if effort_verdict_admits(verdict) => {
+                    assert!(applied.is_ok(), "{context}");
+                    assert_eq!(
+                        state.model_routing_pending_switch_request_id.as_deref(),
+                        Some("row"),
+                        "{context}"
+                    );
+                    assert!(state.model_routing_switch_denials.is_empty(), "{context}");
+                }
+                Some(_) => {
+                    assert!(applied.is_ok(), "{context}");
+                    assert_eq!(
+                        state.model_routing_pending_switch_request_id, None,
+                        "{context}"
+                    );
+                    assert_eq!(
+                        state.model_routing_switch_denials.get("row").copied(),
+                        Some(mm_dsl::RoutingDenialReason::CapabilityPolicy),
+                        "{context}"
+                    );
+                    assert_eq!(
+                        state.model_routing_switch_terminal.get("row").copied(),
+                        Some(mm_dsl::RoutingSwitchTurnTerminal::Denied),
+                        "{context}"
+                    );
+                    assert!(state.model_routing_approval_phases.is_empty(), "{context}");
+                }
+                None => {
+                    assert!(
+                        applied.is_err(),
+                        "absent evidence admits nothing: {context}"
+                    );
+                    assert_eq!(
+                        state.model_routing_pending_switch_request_id, None,
+                        "{context}"
+                    );
+                    assert!(state.model_routing_switch_denials.is_empty(), "{context}");
+                    assert!(state.model_routing_switch_terminal.is_empty(), "{context}");
+                }
+            }
+        }
+
+        for verdict in [None, Some(EffortVerdict::NoHeldEffort)] {
+            let (machine, session_id) = routing_machine_with_a_baseline().await;
+            machine
+                .apply_session_dsl_input(
+                    &session_id,
+                    SwitchRow {
+                        carries: false,
+                        ..SwitchRow::plain(finite, verdict)
+                    }
+                    .input(),
+                    "RequestSwitchTurn(target cannot carry the transcript)",
+                )
+                .await
+                .expect("a target that cannot carry the transcript is denied");
+            let state = machine
+                .session_dsl_state(&session_id)
+                .await
+                .expect("read the session state");
+            assert_eq!(
+                state.model_routing_switch_denials.get("row").copied(),
+                Some(mm_dsl::RoutingDenialReason::CapabilityPolicy)
+            );
+            assert_eq!(state.model_routing_pending_switch_request_id, None);
+        }
+    }
+}
+
+/// A target that refuses the level is denied for its capability before an
+/// approval is asked for, recorded or refused and before a conflict with
+/// another switch is looked at: neither makes the target accept the level.
+/// On admitting evidence each of those requests meets its own refusal,
+/// which shows the row reaches those arms.
+#[tokio::test]
+async fn a_target_that_refuses_the_level_is_denied_before_approval_and_conflict() {
+    use mm_dsl::RoutingDenialReason as Reason;
+    // (case, finite, requires approval, approval available, approval
+    // denied, another switch is pending, the refusal on admitting evidence)
+    let cases = [
+        (
+            "finite, approval unavailable",
+            true,
+            true,
+            false,
+            false,
+            false,
+            Reason::ApprovalRequiredButUnavailable,
+        ),
+        (
+            "finite, approval denied",
+            true,
+            true,
+            true,
+            true,
+            false,
+            Reason::DeniedDuringApproval,
+        ),
+        (
+            "finite, another switch pending",
+            true,
+            false,
+            true,
+            false,
+            true,
+            Reason::ScopedOverrideConflict,
+        ),
+        (
+            "until-changed, approval unavailable",
+            false,
+            true,
+            false,
+            false,
+            false,
+            Reason::ApprovalRequiredButUnavailable,
+        ),
+        (
+            "until-changed, approval denied",
+            false,
+            true,
+            true,
+            true,
+            false,
+            Reason::DeniedDuringApproval,
+        ),
+        (
+            "until-changed, another switch pending",
+            false,
+            false,
+            true,
+            false,
+            true,
+            Reason::ScopedOverrideConflict,
+        ),
+    ];
+    for (case, finite, requires_approval, approval_available, approval_denied, other, own) in cases
+    {
+        for (verdict, expected) in [
+            (EffortVerdict::HeldEffortAccepted, own),
+            (EffortVerdict::Refused, Reason::CapabilityPolicy),
+        ] {
+            let (machine, session_id) = routing_machine_with_a_baseline().await;
+            if other {
+                machine
+                    .apply_session_dsl_input(
+                        &session_id,
+                        SwitchRow {
+                            request_id: "other",
+                            ..SwitchRow::plain(true, Some(EffortVerdict::NoHeldEffort))
+                        }
+                        .input(),
+                        "RequestSwitchTurn(another request, staged)",
+                    )
+                    .await
+                    .expect("another request is staged");
+            }
+            machine
+                .apply_session_dsl_input(
+                    &session_id,
+                    SwitchRow {
+                        requires_approval,
+                        approval_available,
+                        approval_denied,
+                        ..SwitchRow::plain(finite, Some(verdict))
+                    }
+                    .input(),
+                    "RequestSwitchTurn(precedence row)",
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{case}, {verdict:?}: {error}"));
+            let state = machine
+                .session_dsl_state(&session_id)
+                .await
+                .expect("read the session state");
+            assert_eq!(
+                state.model_routing_switch_denials.get("row").copied(),
+                Some(expected),
+                "{case}, {verdict:?}"
+            );
+            assert_eq!(
+                state.model_routing_pending_switch_request_id.as_deref(),
+                other.then_some("other"),
+                "{case}, {verdict:?}: the denial stages nothing and replaces nothing"
+            );
+            let approval_recorded = state.model_routing_approval_phases.contains_key("row")
+                || state
+                    .model_routing_switch_approval_reasons
+                    .contains_key("row");
+            assert_eq!(
+                approval_recorded,
+                approval_denied && verdict != EffortVerdict::Refused,
+                "{case}, {verdict:?}: no approval is recorded for a target that refuses the level"
+            );
+        }
+    }
+}
+
+fn session_identity_holding(
+    level: Option<meerkat_core::model_profile::capabilities::EffortLevel>,
+) -> meerkat_core::SessionLlmIdentity {
+    meerkat_core::SessionLlmIdentity {
+        model: "baseline".to_string(),
+        provider: meerkat_core::Provider::OpenAI,
+        self_hosted_server_id: None,
+        provider_params: level.map(|level| {
+            meerkat_core::lifecycle::run_primitive::ProviderParamsOverride {
+                reasoning_effort: Some(level),
+                ..Default::default()
+            }
+        }),
+        auth_binding: None,
+    }
+}
+
+/// Evidence names the session identity it was taken on, and is read only
+/// while the session still holds that identity. Evidence taken on another
+/// identity decides nothing in any arm: no request is staged, none is
+/// denied (a refusal included), and nothing is recorded. The same request
+/// on the identity the session holds is decided.
+#[tokio::test]
+async fn evidence_taken_on_another_identity_decides_nothing() {
+    use meerkat_core::model_profile::capabilities::EffortLevel;
+
+    let held = session_identity_holding(None);
+    let another = session_identity_holding(Some(EffortLevel::High));
+    // (case, the request, whether it is denied on the identity it names)
+    let rows = |finite: bool| {
+        [
+            (
+                "admitted, no level",
+                SwitchRow::plain(finite, Some(EffortVerdict::NoHeldEffort)),
+                false,
+            ),
+            (
+                "admitted, level accepted",
+                SwitchRow::plain(finite, Some(EffortVerdict::HeldEffortAccepted)),
+                false,
+            ),
+            (
+                "level refused",
+                SwitchRow::plain(finite, Some(EffortVerdict::Refused)),
+                true,
+            ),
+            (
+                "transcript not carried",
+                SwitchRow {
+                    carries: false,
+                    ..SwitchRow::plain(finite, None)
+                },
+                true,
+            ),
+            (
+                "approval unavailable",
+                SwitchRow {
+                    requires_approval: true,
+                    approval_available: false,
+                    ..SwitchRow::plain(finite, Some(EffortVerdict::NoHeldEffort))
+                },
+                true,
+            ),
+        ]
+    };
+    for finite in [true, false] {
+        for (case, row, denied) in rows(finite) {
+            let (machine, session_id) = routing_machine_with_a_baseline().await;
+            {
+                let _mutation_guard = machine
+                    .lock_current_durability_ready_session_mutation_gate(&session_id)
+                    .await
+                    .expect("take the session's mutation gate");
+                machine
+                    .cache_hydrated_session_llm_state(
+                        &session_id,
+                        &HydratedSessionLlmState {
+                            current_identity: held.clone(),
+                            current_visibility_state: Default::default(),
+                            current_capability_surface: Some(test_llm_capability_surface(true)),
+                            capability_surface_status: SessionLlmCapabilitySurfaceStatus::Resolved,
+                            base_tool_names: BTreeSet::new(),
+                        },
+                    )
+                    .await
+                    .expect("the machine holds the session's identity");
+            }
+            let context = format!("finite={finite}, {case}");
+
+            let stale = machine
+                .apply_session_dsl_input(
+                    &session_id,
+                    SwitchRow {
+                        inspected: Some(mm_dsl::SessionLlmIdentity::from_domain(&another)),
+                        ..row.clone()
+                    }
+                    .input(),
+                    "RequestSwitchTurn(evidence taken on another identity)",
+                )
+                .await;
+            assert!(stale.is_err(), "{context}: {stale:?}");
+            let state = machine
+                .session_dsl_state(&session_id)
+                .await
+                .expect("read the session state");
+            assert_eq!(
+                state.model_routing_pending_switch_request_id, None,
+                "{context}"
+            );
+            assert!(state.model_routing_switch_denials.is_empty(), "{context}");
+            assert!(state.model_routing_switch_terminal.is_empty(), "{context}");
+            assert_eq!(
+                state.current_session_llm_identity,
+                Some(mm_dsl::SessionLlmIdentity::from_domain(&held)),
+                "{context}"
+            );
+
+            machine
+                .apply_session_dsl_input(
+                    &session_id,
+                    SwitchRow {
+                        inspected: Some(mm_dsl::SessionLlmIdentity::from_domain(&held)),
+                        ..row
+                    }
+                    .input(),
+                    "RequestSwitchTurn(evidence taken on the held identity)",
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{context}: {error}"));
+            let state = machine
+                .session_dsl_state(&session_id)
+                .await
+                .expect("read the session state");
+            assert_eq!(
+                state.model_routing_switch_denials.contains_key("row"),
+                denied,
+                "{context}"
+            );
+            assert_eq!(
+                state.model_routing_pending_switch_request_id.is_some(),
+                !denied,
+                "{context}"
+            );
+        }
+    }
+
+    // A session whose identity the machine does not hold has nothing a
+    // witness can equal.
+    let (machine, session_id) = routing_machine_with_a_baseline().await;
+    let unknown = machine
+        .apply_session_dsl_input(
+            &session_id,
+            SwitchRow {
+                inspected: Some(mm_dsl::SessionLlmIdentity::from_domain(&another)),
+                ..SwitchRow::plain(true, Some(EffortVerdict::NoHeldEffort))
+            }
+            .input(),
+            "RequestSwitchTurn(a witness, and no identity held)",
+        )
+        .await;
+    assert!(unknown.is_err(), "{unknown:?}");
+}
+
+/// A request with the pending switch's id is never denied, a refusal of the
+/// level included: the denial would answer the retry that finishes the
+/// switch as denied, and the switch would stay pending. Such a request
+/// matches no arm and records nothing, and the pending switch still
+/// completes.
+#[tokio::test]
+async fn a_refusal_under_the_pending_switchs_id_records_nothing_and_the_switch_still_completes() {
+    for finite_retry in [true, false] {
+        let (machine, session_id) = routing_machine_with_a_baseline().await;
+        machine
+            .apply_session_dsl_input(
+                &session_id,
+                SwitchRow::plain(false, Some(EffortVerdict::HeldEffortAccepted)).input(),
+                "RequestSwitchTurn(until-changed, staged)",
+            )
+            .await
+            .expect("the until-changed request is staged");
+
+        let refused = machine
+            .apply_session_dsl_input(
+                &session_id,
+                SwitchRow::plain(finite_retry, Some(EffortVerdict::Refused)).input(),
+                "RequestSwitchTurn(the pending id, level refused)",
+            )
+            .await;
+        assert!(refused.is_err(), "finite_retry={finite_retry}: {refused:?}");
+        let state = machine
+            .session_dsl_state(&session_id)
+            .await
+            .expect("read the session state");
+        assert_eq!(
+            state.model_routing_pending_switch_request_id.as_deref(),
+            Some("row")
+        );
+        assert!(state.model_routing_switch_denials.is_empty());
+        assert!(state.model_routing_switch_terminal.is_empty());
+
+        machine
+            .apply_session_dsl_input(
+                &session_id,
+                mm_dsl::MeerkatMachineInput::CompleteUntilChangedSwitchTurnReconfigure {
+                    request_id: "row".to_string(),
+                },
+                "CompleteUntilChangedSwitchTurnReconfigure",
+            )
+            .await
+            .expect("the pending switch completes");
+        let state = machine
+            .session_dsl_state(&session_id)
+            .await
+            .expect("read the session state");
+        assert_eq!(state.model_routing_pending_switch_request_id, None);
+        assert_eq!(
+            state.model_routing_switch_terminal.get("row").copied(),
+            Some(mm_dsl::RoutingSwitchTurnTerminal::PersistentReconfigureApplied)
+        );
+        assert!(state.model_routing_switch_denials.is_empty());
+    }
+}
+
+/// What a host's judge answers, scripted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScriptedLevelJudge {
+    Accepts,
+    RefusesTheLevel,
+    CannotReadTheLevelsNow,
+    FailsUntyped,
+}
+
+/// A reconfigure host that implements only the older hooks: a judge and a
+/// preflight, both recorded. Its resolution keeps the session's provider
+/// params, the level among them, as a model-only change does. Once
+/// `unreachable` is set every call about the session or the target fails.
+#[derive(Clone)]
+struct OlderHooksSwitchHost {
+    base: TestLlmReconfigureHost,
+    judge: Arc<std::sync::Mutex<ScriptedLevelJudge>>,
+    unreachable: Arc<std::sync::atomic::AtomicBool>,
+    calls: Arc<std::sync::Mutex<Vec<&'static str>>>,
+}
+
+impl OlderHooksSwitchHost {
+    fn holding(level: Option<meerkat_core::model_profile::capabilities::EffortLevel>) -> Self {
+        let current = session_identity_holding(level);
+        Self {
+            base: TestLlmReconfigureHost {
+                current_identity: Arc::new(std::sync::Mutex::new(current.clone())),
+                current_visibility_state: Arc::new(std::sync::Mutex::new(Default::default())),
+                target_identity: current,
+                current_capability_surface: Some(test_llm_capability_surface(true)),
+                target_capability_surface: test_llm_capability_surface(true),
+                base_tool_names: BTreeSet::new(),
+                fail_persist: false,
+            },
+            judge: Arc::new(std::sync::Mutex::new(ScriptedLevelJudge::Accepts)),
+            unreachable: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            calls: Arc::new(std::sync::Mutex::new(Vec::new())),
+        }
+    }
+
+    fn script_judge(&self, judge: ScriptedLevelJudge) {
+        *self
+            .judge
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = judge;
+    }
+
+    fn calls(&self) -> Vec<&'static str> {
+        self.calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn count(&self, wanted: &str) -> usize {
+        self.calls().iter().filter(|call| **call == wanted).count()
+    }
+
+    fn enter(&self, call: &'static str) -> Result<(), RuntimeDriverError> {
+        self.calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(call);
+        if self.unreachable.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(RuntimeDriverError::Internal(format!(
+                "the host cannot be reached ({call})"
+            )));
+        }
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl SessionLlmReconfigureHost for OlderHooksSwitchHost {
+    async fn hydrate_session_llm_state(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<HydratedSessionLlmState, RuntimeDriverError> {
+        self.enter("hydrate")?;
+        self.base.hydrate_session_llm_state(session_id).await
+    }
+
+    async fn resolve_target_session_llm_identity(
+        &self,
+        request: &SessionLlmReconfigureRequest,
+        current_identity: &meerkat_core::SessionLlmIdentity,
+    ) -> Result<crate::ResolvedSessionLlmReconfigure, RuntimeDriverError> {
+        self.enter("resolve")?;
+        Ok(crate::ResolvedSessionLlmReconfigure {
+            target_identity: meerkat_core::SessionLlmIdentity {
+                model: request
+                    .model
+                    .clone()
+                    .unwrap_or_else(|| current_identity.model.clone()),
+                ..current_identity.clone()
+            },
+            target_capability_surface: self.base.target_capability_surface.clone(),
+        })
+    }
+
+    async fn judge_requested_target_session_llm_identity(
+        &self,
+        _session_id: &SessionId,
+        target_identity: &meerkat_core::SessionLlmIdentity,
+    ) -> Result<(), RuntimeDriverError> {
+        self.enter("judge")?;
+        let judge = *self
+            .judge
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match judge {
+            ScriptedLevelJudge::Accepts => Ok(()),
+            ScriptedLevelJudge::RefusesTheLevel => {
+                let refusal: meerkat_core::ReasoningEffortRefusal =
+                    serde_json::from_value(serde_json::json!({
+                        "requested": "high", "provider": "openai",
+                        "model": target_identity.model, "route": null,
+                        "reason": "unsupported_level", "supported": ["low"],
+                        "facts": "account",
+                    }))
+                    .expect("a refusal is read from its wire form");
+                Err(RuntimeDriverError::ReasoningEffortRefused(Box::new(
+                    refusal,
+                )))
+            }
+            ScriptedLevelJudge::CannotReadTheLevelsNow => {
+                let refusal: meerkat_core::ReasoningEffortRefusal =
+                    serde_json::from_value(serde_json::json!({
+                        "requested": "high", "provider": "openai",
+                        "model": target_identity.model, "route": null,
+                        "reason": "supported_levels_unavailable", "supported": null,
+                        "facts": null,
+                    }))
+                    .expect("a refusal is read from its wire form");
+                Err(RuntimeDriverError::ReasoningEffortRefused(Box::new(
+                    refusal,
+                )))
+            }
+            ScriptedLevelJudge::FailsUntyped => Err(RuntimeDriverError::Internal(
+                "the judge's backend is unreachable".to_string(),
+            )),
+        }
+    }
+
+    async fn preflight_target_session_llm_identity(
+        &self,
+        _session_id: &SessionId,
+        _target_identity: &meerkat_core::SessionLlmIdentity,
+    ) -> Result<(), RuntimeDriverError> {
+        self.enter("preflight")
+    }
+
+    async fn apply_live_session_llm_identity(
+        &self,
+        session_id: &SessionId,
+        identity: &meerkat_core::SessionLlmIdentity,
+        capability_surface: Option<&SessionLlmCapabilitySurface>,
+    ) -> Result<(), RuntimeDriverError> {
+        self.enter("apply")?;
+        self.base
+            .apply_live_session_llm_identity(session_id, identity, capability_surface)
+            .await
+    }
+
+    async fn apply_live_session_tool_visibility_state(
+        &self,
+        session_id: &SessionId,
+        visibility_state: Option<meerkat_core::SessionToolVisibilityState>,
+    ) -> Result<(), RuntimeDriverError> {
+        self.base
+            .apply_live_session_tool_visibility_state(session_id, visibility_state)
+            .await
+    }
+
+    async fn persist_live_session(&self, session_id: &SessionId) -> Result<(), RuntimeDriverError> {
+        self.base.persist_live_session(session_id).await
+    }
+
+    async fn discard_live_session(&self, session_id: &SessionId) -> Result<(), RuntimeDriverError> {
+        self.base.discard_live_session(session_id).await
+    }
+}
+
+async fn routing_adapter_with(host: &OlderHooksSwitchHost) -> (Arc<MeerkatMachine>, SessionId) {
+    let (machine, session_id) = routing_machine_with_a_baseline().await;
+    machine.set_session_llm_reconfigure_host(Arc::new(host.clone()));
+    (Arc::new(machine), session_id)
+}
+
+fn direct_switch_request(finite: bool, n: u128) -> SwitchTurnRequest {
+    if finite {
+        finite_switch_request(
+            n,
+            "persistent-target",
+            meerkat_core::image_generation::FiniteScopedTurnDuration::OneTurn,
+        )
+    } else {
+        until_changed_switch_request(n)
+    }
+}
+
+/// A direct switch request of a session that holds a level, onto a target
+/// the host's judge refuses for that level: the request ends Denied for the
+/// target's capability, for both durations, and stages nothing. Its retry
+/// is answered with the recorded denial before the host is asked anything:
+/// a host that cannot be reached by then changes neither the answer nor the
+/// count of its calls.
+#[tokio::test]
+async fn a_direct_switch_request_onto_a_target_that_refuses_the_held_level_is_denied() {
+    use meerkat_core::image_generation::{SwitchTurnControlResult, SwitchTurnDenialReason};
+    use meerkat_core::model_profile::capabilities::EffortLevel;
+
+    for (finite, n) in [(true, 9101), (false, 9102)] {
+        let host = OlderHooksSwitchHost::holding(Some(EffortLevel::High));
+        host.script_judge(ScriptedLevelJudge::RefusesTheLevel);
+        let (adapter, session_id) = routing_adapter_with(&host).await;
+        let key = uuid(n).to_string();
+
+        let denied = <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+            &adapter,
+            &session_id,
+            direct_switch_request(finite, n),
+        )
+        .await
+        .expect("a refused level is an answer, not a failure");
+        assert!(
+            matches!(
+                denied,
+                SwitchTurnControlResult::Denied {
+                    reason: SwitchTurnDenialReason::CapabilityPolicy,
+                    ..
+                }
+            ),
+            "finite={finite}: {denied:?}"
+        );
+        let state = adapter
+            .session_dsl_state(&session_id)
+            .await
+            .expect("read the session state");
+        assert_eq!(state.model_routing_pending_switch_request_id, None);
+        assert_eq!(
+            state.model_routing_switch_denials.get(&key).copied(),
+            Some(mm_dsl::RoutingDenialReason::CapabilityPolicy)
+        );
+        assert_eq!(host.count("judge"), 1, "{:?}", host.calls());
+        assert_eq!(
+            host.count("preflight"),
+            0,
+            "a refused target is not proven buildable: {:?}",
+            host.calls()
+        );
+        assert_eq!(host.count("apply"), 0);
+
+        host.unreachable
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let calls_before = host.calls();
+        let retried = <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+            &adapter,
+            &session_id,
+            direct_switch_request(finite, n),
+        )
+        .await
+        .expect("the retry of a denied request is answered");
+        assert!(
+            matches!(
+                retried,
+                SwitchTurnControlResult::Denied {
+                    reason: SwitchTurnDenialReason::CapabilityPolicy,
+                    ..
+                }
+            ),
+            "finite={finite}: {retried:?}"
+        );
+        assert_eq!(
+            host.calls(),
+            calls_before,
+            "a recorded denial is answered before the host is asked anything"
+        );
+    }
+}
+
+/// A target that cannot be looked at is not a target that refuses the
+/// level: the request fails with the host's own words, stages nothing and
+/// records no denial, for both durations, so the same request can be made
+/// again and is admitted once the host answers. That holds for a host whose
+/// check fails and for one that cannot read the target's levels now: on
+/// this road, where a caller can ask again, unreadable levels admit nothing.
+#[tokio::test]
+async fn a_direct_switch_request_whose_target_cannot_be_looked_at_fails_and_records_nothing() {
+    use meerkat_core::image_generation::SwitchTurnControlResult;
+    use meerkat_core::model_profile::capabilities::EffortLevel;
+
+    for (finite, n, judge, words) in [
+        (
+            true,
+            9111,
+            ScriptedLevelJudge::FailsUntyped,
+            "the judge's backend is unreachable",
+        ),
+        (
+            false,
+            9112,
+            ScriptedLevelJudge::FailsUntyped,
+            "the judge's backend is unreachable",
+        ),
+        (
+            true,
+            9113,
+            ScriptedLevelJudge::CannotReadTheLevelsNow,
+            "the account's model list is not loaded",
+        ),
+        (
+            false,
+            9114,
+            ScriptedLevelJudge::CannotReadTheLevelsNow,
+            "the account's model list is not loaded",
+        ),
+    ] {
+        let host = OlderHooksSwitchHost::holding(Some(EffortLevel::High));
+        host.script_judge(judge);
+        let (adapter, session_id) = routing_adapter_with(&host).await;
+
+        let error = <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+            &adapter,
+            &session_id,
+            direct_switch_request(finite, n),
+        )
+        .await
+        .expect_err("a target that cannot be looked at fails the request");
+        assert!(
+            matches!(
+                &error,
+                RuntimeDriverError::Internal(message) if message.contains(words)
+            ),
+            "finite={finite}, {judge:?}: {error:?}"
+        );
+        // Unreadable levels are handed back only once the target is proven
+        // buildable; a failed check ends the look before the preflight.
+        let preflights = usize::from(judge == ScriptedLevelJudge::CannotReadTheLevelsNow);
+        assert_eq!(host.count("preflight"), preflights, "{:?}", host.calls());
+        let state = adapter
+            .session_dsl_state(&session_id)
+            .await
+            .expect("read the session state");
+        assert_eq!(state.model_routing_pending_switch_request_id, None);
+        assert!(state.model_routing_switch_denials.is_empty());
+        assert!(state.model_routing_switch_terminal.is_empty());
+
+        if finite {
+            host.script_judge(ScriptedLevelJudge::Accepts);
+            let admitted = <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+                &adapter,
+                &session_id,
+                direct_switch_request(finite, n),
+            )
+            .await
+            .expect("the same request is admitted once the host answers");
+            assert!(
+                matches!(admitted, SwitchTurnControlResult::Applied { .. }),
+                "{admitted:?}"
+            );
+            assert_eq!(
+                adapter
+                    .session_dsl_state(&session_id)
+                    .await
+                    .expect("read the session state")
+                    .model_routing_pending_switch_request_id,
+                Some(uuid(n).to_string())
+            );
+            assert_eq!(
+                host.count("preflight"),
+                preflights + 1,
+                "{:?}",
+                host.calls()
+            );
+        }
+    }
+}
+
+/// A session that holds no level is admitted as before: the host is asked
+/// nothing about the target (no resolution, no judge, no preflight).
+#[tokio::test]
+async fn a_direct_finite_request_of_a_session_without_a_level_asks_nothing_about_the_target() {
+    use meerkat_core::image_generation::SwitchTurnControlResult;
+
+    let host = OlderHooksSwitchHost::holding(None);
+    host.script_judge(ScriptedLevelJudge::RefusesTheLevel);
+    let (adapter, session_id) = routing_adapter_with(&host).await;
+
+    let admitted = <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+        &adapter,
+        &session_id,
+        direct_switch_request(true, 9121),
+    )
+    .await
+    .expect("a session without a level is admitted");
+    assert!(
+        matches!(admitted, SwitchTurnControlResult::Applied { .. }),
+        "{admitted:?}"
+    );
+    for call in ["resolve", "judge", "preflight"] {
+        assert_eq!(host.count(call), 0, "{call}: {:?}", host.calls());
+    }
+}
+
+/// A runtime without a reconfigure host admits a finite request as before,
+/// and a request for a session it does not hold is still refused as not
+/// found.
+#[tokio::test]
+async fn a_hostless_finite_request_keeps_its_admission_and_an_absent_session_is_not_found() {
+    use meerkat_core::image_generation::SwitchTurnControlResult;
+
+    let (machine, session_id) = routing_machine_with_a_baseline().await;
+    let admitted = <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+        &machine,
+        &session_id,
+        direct_switch_request(true, 9131),
+    )
+    .await
+    .expect("a hostless finite request is admitted");
+    assert!(
+        matches!(admitted, SwitchTurnControlResult::Applied { .. }),
+        "{admitted:?}"
+    );
+
+    let absent = <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+        &machine,
+        &SessionId::new(),
+        direct_switch_request(true, 9132),
+    )
+    .await
+    .expect_err("an absent session is refused");
+    assert!(
+        matches!(absent, RuntimeDriverError::NotFound { .. }),
+        "{absent:?}"
+    );
+}
+
+/// With a reconfigure host too, a request for a session the machine does
+/// not hold is refused as not found, for both durations, before the host is
+/// asked anything.
+#[tokio::test]
+async fn a_host_backed_request_for_an_absent_session_is_not_found() {
+    use meerkat_core::model_profile::capabilities::EffortLevel;
+
+    for (finite, n) in [(true, 9151), (false, 9152)] {
+        let host = OlderHooksSwitchHost::holding(Some(EffortLevel::High));
+        let machine = MeerkatMachine::ephemeral();
+        machine.set_session_llm_reconfigure_host(Arc::new(host.clone()));
+        let absent = <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+            &machine,
+            &SessionId::new(),
+            direct_switch_request(finite, n),
+        )
+        .await
+        .expect_err("an absent session is refused");
+        assert!(
+            matches!(absent, RuntimeDriverError::NotFound { .. }),
+            "finite={finite}: {absent:?}"
+        );
+        assert!(host.calls().is_empty(), "{:?}", host.calls());
+    }
+}
+
+/// A reconfigure host whose turn-finalization boundary a row can hold, and
+/// whose session takes a level while a request waits for it.
+#[derive(Clone)]
+struct BoundaryHeldSwitchHost {
+    inner: OlderHooksSwitchHost,
+    boundary: Arc<tokio::sync::Mutex<()>>,
+    waiting: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait::async_trait]
+impl SessionLlmReconfigureHost for BoundaryHeldSwitchHost {
+    async fn acquire_turn_finalization_boundary(
+        &self,
+        _session_id: &SessionId,
+    ) -> Result<
+        Box<dyn meerkat_core::lifecycle::CoreExecutorTurnFinalizationGuard>,
+        RuntimeDriverError,
+    > {
+        self.waiting.notify_one();
+        Ok(Box::new(Arc::clone(&self.boundary).lock_owned().await))
+    }
+
+    async fn hydrate_session_llm_state(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<HydratedSessionLlmState, RuntimeDriverError> {
+        self.inner.hydrate_session_llm_state(session_id).await
+    }
+
+    async fn resolve_target_session_llm_identity(
+        &self,
+        request: &SessionLlmReconfigureRequest,
+        current_identity: &meerkat_core::SessionLlmIdentity,
+    ) -> Result<crate::ResolvedSessionLlmReconfigure, RuntimeDriverError> {
+        self.inner
+            .resolve_target_session_llm_identity(request, current_identity)
+            .await
+    }
+
+    async fn judge_requested_target_session_llm_identity(
+        &self,
+        session_id: &SessionId,
+        target_identity: &meerkat_core::SessionLlmIdentity,
+    ) -> Result<(), RuntimeDriverError> {
+        self.inner
+            .judge_requested_target_session_llm_identity(session_id, target_identity)
+            .await
+    }
+
+    async fn preflight_target_session_llm_identity(
+        &self,
+        session_id: &SessionId,
+        target_identity: &meerkat_core::SessionLlmIdentity,
+    ) -> Result<(), RuntimeDriverError> {
+        self.inner
+            .preflight_target_session_llm_identity(session_id, target_identity)
+            .await
+    }
+
+    async fn apply_live_session_llm_identity(
+        &self,
+        session_id: &SessionId,
+        identity: &meerkat_core::SessionLlmIdentity,
+        capability_surface: Option<&SessionLlmCapabilitySurface>,
+    ) -> Result<(), RuntimeDriverError> {
+        self.inner
+            .apply_live_session_llm_identity(session_id, identity, capability_surface)
+            .await
+    }
+
+    async fn apply_live_session_tool_visibility_state(
+        &self,
+        session_id: &SessionId,
+        visibility_state: Option<meerkat_core::SessionToolVisibilityState>,
+    ) -> Result<(), RuntimeDriverError> {
+        self.inner
+            .apply_live_session_tool_visibility_state(session_id, visibility_state)
+            .await
+    }
+
+    async fn persist_live_session(&self, session_id: &SessionId) -> Result<(), RuntimeDriverError> {
+        self.inner.persist_live_session(session_id).await
+    }
+
+    async fn discard_live_session(&self, session_id: &SessionId) -> Result<(), RuntimeDriverError> {
+        self.inner.discard_live_session(session_id).await
+    }
+}
+
+/// A finite request of a session whose identity the machine does not hold
+/// yet waits for the host's turn-finalization boundary and reads the
+/// identity under it. A wait that is dropped stages nothing and has read
+/// nothing. The level the session holds when the boundary is free is the
+/// one the target is judged for: here the session takes a level the target
+/// refuses while the request waits, and the request ends Denied.
+#[tokio::test]
+async fn a_finite_request_of_a_session_whose_identity_is_not_held_waits_for_the_turn_boundary() {
+    use meerkat_core::image_generation::{SwitchTurnControlResult, SwitchTurnDenialReason};
+    use meerkat_core::model_profile::capabilities::EffortLevel;
+
+    let inner = OlderHooksSwitchHost::holding(None);
+    inner.script_judge(ScriptedLevelJudge::RefusesTheLevel);
+    let host = BoundaryHeldSwitchHost {
+        inner: inner.clone(),
+        boundary: Arc::new(tokio::sync::Mutex::new(())),
+        waiting: Arc::new(tokio::sync::Notify::new()),
+    };
+    let (machine, session_id) = routing_machine_with_a_baseline().await;
+    machine.set_session_llm_reconfigure_host(Arc::new(host.clone()));
+    let adapter = Arc::new(machine);
+    let held = Arc::clone(&host.boundary).lock_owned().await;
+    let request = |n: u128| {
+        let adapter = Arc::clone(&adapter);
+        let session_id = session_id.clone();
+        tokio::spawn(async move {
+            <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+                &adapter,
+                &session_id,
+                direct_switch_request(true, n),
+            )
+            .await
+        })
+    };
+
+    // A request whose wait is dropped.
+    let dropped = request(9141);
+    tokio::time::timeout(Duration::from_secs(5), host.waiting.notified())
+        .await
+        .expect("the request reaches the turn boundary");
+    dropped.abort();
+    assert!(
+        dropped
+            .await
+            .expect_err("the request was dropped")
+            .is_cancelled()
+    );
+    assert_eq!(inner.count("hydrate"), 0, "{:?}", inner.calls());
+    let state = adapter
+        .session_dsl_state(&session_id)
+        .await
+        .expect("read the session state");
+    assert_eq!(state.model_routing_pending_switch_request_id, None);
+    assert!(state.model_routing_switch_denials.is_empty());
+    assert_eq!(state.current_session_llm_identity, None);
+
+    // A request that waits; the session takes a level meanwhile.
+    let waiting = request(9142);
+    tokio::time::timeout(Duration::from_secs(5), host.waiting.notified())
+        .await
+        .expect("the request reaches the turn boundary");
+    assert_eq!(inner.count("hydrate"), 0, "{:?}", inner.calls());
+    *inner
+        .base
+        .current_identity
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+        session_identity_holding(Some(EffortLevel::High));
+    drop(held);
+    let answered = tokio::time::timeout(Duration::from_secs(5), waiting)
+        .await
+        .expect("the request ends once the boundary is free")
+        .expect("the request task ends")
+        .expect("a refused level is an answer");
+    assert!(
+        matches!(
+            answered,
+            SwitchTurnControlResult::Denied {
+                reason: SwitchTurnDenialReason::CapabilityPolicy,
+                ..
+            }
+        ),
+        "the level the session holds under the boundary is the one judged: {answered:?}"
+    );
+    assert_eq!(inner.count("hydrate"), 1, "{:?}", inner.calls());
+    assert_eq!(inner.count("judge"), 1, "{:?}", inner.calls());
+    assert_eq!(
+        adapter
+            .session_dsl_state(&session_id)
+            .await
+            .expect("read the session state")
+            .current_session_llm_identity,
+        Some(mm_dsl::SessionLlmIdentity::from_domain(
+            &session_identity_holding(Some(EffortLevel::High))
+        ))
     );
 }

@@ -464,6 +464,24 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RequestUntilChangedSwitchTurnTranscriptUnsupportedRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `RequestFiniteSwitchTurnReasoningEffortRefusedIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequestFiniteSwitchTurnReasoningEffortRefusedAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequestFiniteSwitchTurnReasoningEffortRefusedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequestUntilChangedSwitchTurnReasoningEffortRefusedIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequestUntilChangedSwitchTurnReasoningEffortRefusedAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequestUntilChangedSwitchTurnReasoningEffortRefusedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RequestFiniteSwitchTurnApprovalUnavailableIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -1625,6 +1643,24 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ResolveRuntimeCompletionResultRuntimeApplyFailedStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `ResolveRuntimeCompletionResultRuntimeApplyRefusedInitializing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveRuntimeCompletionResultRuntimeApplyRefusedIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveRuntimeCompletionResultRuntimeApplyRefusedAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveRuntimeCompletionResultRuntimeApplyRefusedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveRuntimeCompletionResultRuntimeApplyRefusedRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveRuntimeCompletionResultRuntimeApplyRefusedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionResultMachineFailedInitializing`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -2367,6 +2403,24 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ClassifyRecoveredInputDurabilityDiscardEphemeralStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierInitializing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingInitializing`
@@ -3606,6 +3660,21 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `DeferInputBehindBacklogAlreadyArchivedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `DeferInputBehindBacklogEndedWithRefusedRunIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `DeferInputBehindBacklogEndedWithRefusedRunAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `DeferInputBehindBacklogEndedWithRefusedRunRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `DeferInputBehindBacklogEndedWithRefusedRunRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `DeferInputBehindBacklogEndedWithRefusedRunStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `StageForRunIdle`
@@ -8199,6 +8268,24 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ResolveAbandonedCompletionResultRuntimeApplyFailedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveAbandonedCompletionResultRuntimeApplyRefusedInitializing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveAbandonedCompletionResultRuntimeApplyRefusedIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveAbandonedCompletionResultRuntimeApplyRefusedAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveAbandonedCompletionResultRuntimeApplyRefusedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveAbandonedCompletionResultRuntimeApplyRefusedRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveAbandonedCompletionResultRuntimeApplyRefusedStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ResolveCheckpointCompletionResultSucceededInitializing`

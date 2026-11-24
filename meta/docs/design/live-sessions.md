@@ -233,6 +233,40 @@ commits the final transcript and projects its Live provenance to that machine.
 The pre-build and after-create decorators forward this hook and the Live
 bridge eligibility, snapshot, and operation hooks to the owning service.
 
+### A member's disposal while its call is open
+
+Meerkat's runtime drops no session that still owns a live channel unless the
+host it runs in can close that channel: it asks the machine's member live
+host to close the channel and then checks that the channel is gone.
+`live_wiring::attach_live` installs that host on the runtime machine, so
+every Meta live composition has it: the builder's `live(...)` and
+`console_voice(...)`, and the gateways' `runtime_options.live` and
+`runtime_options.console_voice`.
+
+What a teardown does to an open call:
+
+- A member retired, a mob destroyed and a runtime stopped while a member is
+  in a call close the call first and then dispose of the member's session.
+  The close is the channel's own generated close on the shared live host,
+  the one `meta/live/close` runs, with the reason a caller's close states
+  (`client_requested`); a disposal has no reason of its own.
+- The provider's session ends with the channel. The voice path is free: the
+  arbiter asks the machine whether its holder's channel is still active and
+  releases a holder whose channel is gone.
+- The runtime bounds the close (15 seconds). A close that fails or does not
+  finish in that time fails the disposal, which reports it; nothing is
+  dropped with a channel still open.
+
+The installed host is a cleanup, not a member live plane. It serves a close
+of the named channel, whoever asks, and nothing else: an open, an open under
+an execution identity, a status read, a control verb and the explicit close
+are answered "no live transport", as a runtime with no member live host
+answers them. The runtime's supervisor bridge calls the same close for a
+member that a mob on another host placed on this one; a Meta host takes no
+placed members, so on it the disposal is that close's only caller. Serving
+the other verbs on a Meta host would be a new capability with an access
+question of its own.
+
 ### HTTP request fencing
 
 Both gateway HTTP apps install a console request controller; without the above

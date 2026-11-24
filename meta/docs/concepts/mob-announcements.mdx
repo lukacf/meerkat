@@ -30,6 +30,19 @@ to another person, and its subscriptions and deliveries, from a caller who
 is not its owner: they are answered as ones that do not exist (see
 [Access control](/concepts/access-control#private-side-chats)).
 
+Every mob a request names is judged:
+a mob other than the launch mob that a request names, in its `mob_id` or in
+a member, a role selector, `mobs`, an audience grant or a declaration, must
+be one the caller may address (see
+[Access control](/concepts/access-control)), or the request is answered
+`foreign_mob_target` like an id no mob has, and a member of such a mob,
+with every record of one, is answered as a member private to another
+person is. A record that caller is shown names no such mob: a
+subscription, a role template and an announcement are shown without the
+entries of such a mob, an escalation about a source of such a mob is not
+listed, and a role template that selects the members of such a mob is
+answered as an id nobody holds.
+
 From 0.9.15 a gateway with mob announcements logs one WARN line at every
 start, under the target
 `meerkat_meta::mob_announcements::private_member_subscriptions`, while live

@@ -55,6 +55,490 @@ Meerkat is pre-1.0, and patch releases can carry declared breaking changes.
 - `rkat storage doctor` reports no new problems.
 - An SDK `connect()` succeeds.
 
+## Upgrading to 0.9.18
+
+This section is for systems running 0.9.17. The full list of changes is in
+the CHANGELOG under `## [0.9.18]`.
+
+### Gemini provider default: Argon to Neon
+
+Core's Gemini session-model resolver now selects `gemini-4-neon` instead of
+`gemini-4-argon` when no explicit model or applicable configured/binding default
+is supplied. Both require a paid Gemini API tier. For these sessions, retain
+Argon with `--model gemini-4-argon` or `[models] gemini = "gemini-4-argon"`.
+Explicit model selections, configured/binding defaults and existing sessions'
+recorded models keep their precedence. Hydrogen remains recommended and
+selectable; `gemini-3.1-pro-preview` remains at the supported catalog tier.
+
+An unset thinking level sends no thinking override. For a session moving from
+Argon to Neon, Google's documented default therefore changes from `medium` to
+`high`; Meerkat does not explicitly send `high`. To retain medium thinking in
+that session, keep Argon or set `--reasoning-effort medium` (or the corresponding
+`reasoning_effort` parameter). An unsupported turn reasoning preference, such
+as `xhigh`, is recorded as not applied and preserves the existing request level
+or provider default. This is separate from strict `reasoning_effort` validation.
+
+Two other consumers use the catalog default:
+
+- Browser bootstrap with a Gemini key and no explicit model or configured
+  Gemini model now selects Neon when Gemini is the highest-priority configured
+  provider. An existing configured Gemini model remains in effect.
+- When the fallback web-search helper uses Gemini, it now selects Neon directly
+  from the catalog. It does not use the main session's explicit model,
+  `[models] gemini` override or binding default. Pinning the session to Argon
+  therefore does not retain Argon for this helper. The helper supplies no
+  thinking override, so Google's documented Neon default is `high`.
+
+With no provider, model, binding or configured default, the global catalog
+fallback remains `gpt-6-astra`. Image-generation defaults are unchanged.
+The existing Google Code Assist and Copilot Gemini login defaults remain
+`gemini-3.8-flash`; catalog support does not establish access on those routes.
+Forge's local setup preset still selects `gemini-3.1-pro-preview`, and its
+separately pinned installer catalog is unchanged. This Core catalog/resolver
+change does not establish Neon availability in that installer.
+
+### A custom `gemini-4-neon` entry
+
+The 0.9.18 catalog includes `gemini-4-neon`. Model IDs must be unique across
+built-in, custom and self-hosted entries. Remove any custom
+`[models.gemini-4-neon]` entry from realm/project configurations and mob
+definitions before upgrading, or validation refuses the duplicate ID.
+The built-in row supports `low`, `medium` and `high`; Google's `xhigh` level
+is not yet expressible by Meerkat's Gemini tag. Neon requires a paid Gemini
+API tier. Its provider default is separate from the global and image defaults.
+See [Providers](/concepts/providers) for the synchronous limits. If rolling
+back to 0.9.17, restore the custom entry where you still select Neon; that
+release has no built-in Neon row.
+
+### Steers join the next model request
+
+A change of timing, with no type, wire or schema change. It concerns hosts
+that send more than one `steer` input into a running turn.
+
+Do not rely on a model decision between consecutive eligible steers. In
+0.9.17 one durable steer joined a running turn per model boundary, so steers
+that waited together reached the model one request apart. Now, at a
+boundary where a durable steer has registered its claim, the eligible prefix
+of the durable steers that wait in the steer lane joins, in admission order,
+and the next model request is the first to carry them. An acknowledged
+admission is not inclusion in a request. No setting keeps one steer per
+model boundary.
+
+If distinct decisions matter, match the earlier steer to a model decision
+before you send the next one. Its `boundary_append_applied` names the
+`input_id` and the `run_id` of the turn that applied it, and that run's next
+successful `turn_completed` says the model has answered a request that
+carried it. The match is by stream order: `turn_completed` carries no run id
+and no success flag, so take the next one on the session's stream after the
+applied event and before that run ends (`run_completed` or `run_failed`).
+The applied event alone is neither a response nor the durable
+consumption of the input. The next steer then joins a later boundary, or the
+follow-up turn when the run ends first. An earlier steer that itself takes
+the follow-up turn publishes no `boundary_append_applied`: read its
+`last_run_id` with `session/input_status` and take that run's first
+successful `turn_completed`.
+
+When that `turn_completed` does not come (the call failed, the run discarded
+what it applied, or the run reached its terminal or was replayed without
+it), do not wait without a limit and do not resend the steer on your own.
+Reconcile with `session/input_status` (the input's state and its
+`last_run_id`), `boundary_appends_discarded` and retained history.
+
+A steer admitted after a request's input is fixed waits for the next
+boundary, even when its admission was acknowledged before the request was
+composed or sent. A caller cannot tell the two instants apart, so an
+admission acknowledged before the request left does not mean the steer is in
+that request.
+
+Each input keeps its own input id. A successful in-turn application that the
+run retains is exactly once per input: its transcript rows, its delivery
+witness and its `boundary_append_applied`. Several of those events can now
+precede one model request, so match a delivery by `input_id`, not by one
+event or one new transcript row per request. Later requests carry the rows as
+transcript history, which is not another delivery.
+
+A steer withdrawn with `session/recall_input` (or
+`MeerkatMachine::recall_queued_input`) before it joins a run joins no
+request and gets no row from then on, and the steers behind it are not
+delayed. The recall withdraws the queued delivery; it does not undo what a
+model saw of the steer in an earlier turn that applied it and returned it to
+the queue. After the join a recall answers `not_queued` while the run holds
+the steer, and `already_terminal` once the input has ended.
+
+A durable steer that was admitted and still waits when its session is loaded
+again from the store joins the resumed run's next model request when that
+run resumes, once, with the steers that waited beside it in admission order.
+A durable steer admitted after the load and before their work has begun
+joins that request behind them.
+It does not wait for a follow-up turn. With no run to resume it starts the
+next run as its own input. The limits are in
+[Durable steer](/reference/session-contracts#durable-steer).
+
+Unchanged: no model request in flight is cancelled; steers still waiting when
+the run ends take the follow-up turn in arrival order; an input that only a
+fresh turn applies, and a directed delivery, never join a running turn. The
+contract and its two cutoffs are in
+[Durable steer](/reference/session-contracts#durable-steer).
+
+### Meta 0.9.18
+
+The full list is in `meta/CHANGELOG.md` under `## [0.9.18]`.
+
+- Console: the console the stock gateways serve now lists the mobs nested
+  under the gateway's own mob (the mobs its agents create with the mob
+  tools) with their members.
+  Through 0.9.17 it hid every member of every such mob. After the upgrade
+  those members are listed, and can be inspected, read and sent to, by
+  every caller the access rules let see them: every caller of a console
+  with no access configuration (a member private to a person stays
+  private to that person), an access admin, and under a configuration any
+  caller a rule allows. A nested member is decided as an agent of its
+  own: by its identity `<mob id>/<name>`, its role in its mob, its labels
+  (`source_mob_id` names its mob) and its spawn ancestors. So an allow
+  rule that matches by role, by label, by `"*"` or on the member that
+  spawned it now also shows the nested members it matches, and a deny
+  rule hides them the same way. **Do:** before the upgrade, read the
+  allow rules that match by role, by label or by `"*"`; to grant one
+  nested mob's members alone, select them with `match_labels = {
+  source_mob_id = "<mob id>" }`, a label only the console writes. To
+  keep nested mobs hidden as in 0.9.17, launch `rpc_gateway` with
+  `runtime_options.console_list_nested_mobs = false` (Python
+  `.console_list_nested_mobs(False)`, TypeScript
+  `.consoleListNestedMobs(false)`), or `meta_gateway` with the
+  `meta/init` param `console_list_nested_mobs: false` or the environment
+  variable `META_CONSOLE_LIST_NESTED_MOBS=false`. A Rust host that builds
+  the stock console itself passes
+  `stock_console_visibility_policy(NestedMobListing::Hidden)`; the
+  Upgrade section of `meta/CHANGELOG.md` names each call.
+- Spawns into a mob an agent created: Meta refuses a spawn while it cannot
+  say for certain who that mob is private to. The caller (an agent's spawn
+  tool, an SDK or RPC spawn, a schedule delivery) gets the spawn's wiring
+  error. When nothing says for certain who the agent that
+  created the mob is private to (its own mob did not restore and is
+  quarantined, say), the error reads `who mob '<id>' is private to is not
+  known: nothing says for certain who the member that created it is private
+  to (its mob cannot be read here, or that mob's records no longer name the
+  member); the spawn can be made again once they do`. It clears when Meta
+  can read that agent's mob again and its records name the agent, with no
+  restart: Meta then reads the created mob again by itself, and a spawn
+  made after that read is seated. A spawn Meta refuses with `who mob
+  '<id>' is private to is not known yet (the private-owner record is
+  still being read); retry the spawn` is made again. **Do:** bring the mob
+  of the agent that created the mob back (`meta/status` lists a mob that
+  did not restore), then make the spawn again, and once more if it is
+  still refused.
+  When the mob of the agent that created it will not be hosted again,
+  destroy the created mob and create it again.
+- The upgrade relabels no member: a member of a mob an agent created keeps
+  the `console.private_to` label it was seated with, or none, and the
+  label is decided only for spawns made after the upgrade. Where the agent
+  that created a mob carries the label and a member of the mob does not,
+  the Console lists that member to the mob's owner and the access admins
+  only: a member of a mob that is private to a person is that person's on
+  the Console, whatever its own row says. **Do:** to have a member's label
+  decided anew, retire it and have it spawned again, or destroy the mob
+  and have it created again.
+
+## Upgrading to 0.9.17
+
+This section is for systems running 0.9.16. The full list of changes is in
+the CHANGELOG under `## [0.9.17]`; read its Breaking and Upgrade notes
+sections before you upgrade.
+
+### What was sent to a session that an earlier release had stopped
+
+This is for a host on which, before the upgrade, a session stopped running
+after a response to a peer request that carried no result. From 0.9.17
+such a response no longer stops the session (see Fixed in the CHANGELOG
+under `## [0.9.17]`, the entry that begins "Peer requests: a response to a
+peer request without a result no longer stops the requester"). What was
+sent to such a session while it was stopped:
+
+- At the first start on 0.9.17, an input that was queued behind the stop is
+  ended as abandoned and is not run, however soon after the stop that start
+  comes. Any start on 0.9.15 and 0.9.16 did the same. New work runs.
+- One exception was seen: a message that a Meta gateway took with an
+  idempotency key (`meta/send` with `idempotency_key`) is run at that
+  start, once. Sending it again under the same key makes no second input
+  and answers the session id and the input id.
+- No log line and no event reports an abandoned input to a host. A program
+  that embeds Meerkat and waits on the input in the same process is given
+  its end (read from the source).
+- Where the caller holds the input's id, its status can be asked:
+  JSON-RPC `session/input_status`, or `meta/send_status` on a Meta gateway,
+  reads `abandoned`, without a reason. A `meta/send` without a key answers
+  no input id.
+
+(Shown by runs on the published 0.9.15 and 0.9.16 and on a candidate build
+of 0.9.17.)
+
+**Do:** after the first start on 0.9.17, send again what was sent to such a
+session while it was stopped. A `meta/send` that carried an idempotency key
+need not be sent again; if you do repeat it, use the same key, not a new
+one: the repeat makes no second input and answers the ids, with which its
+status can be asked.
+
+### A catalog model you had defined yourself: `gpt-6.2-astra`, `gpt-6.2-sol`
+
+Model IDs are unique across the catalog, `[models.<id>]` entries and
+self-hosted models, and 0.9.17 adds `gpt-6.2-astra` and `gpt-6.2-sol` to the
+catalog. A realm or project configuration, or a mob definition, that has
+`[models."gpt-6.2-astra"]` or `[models."gpt-6.2-sol"]` (quoted, as the ids
+contain dots) is refused with
+`model id '<id>' must be unique across built-in, custom, and self-hosted entries`:
+a configuration by configuration validation, a mob definition when one of
+its members is built. You have such an entry if you ran one of the models
+before the catalog listed it. (Read from the source, not run on 0.9.17. On
+the published 0.9.16, in one run each: `gpt-6.2-sol` ran with such an
+entry, and `rkat config patch` refused an entry for an id its catalog
+lists, `gpt-6.1-sol`, with this message.)
+
+**Do:** remove the entry. The catalog row then serves the model with its own
+limits and reasoning effort levels (see [Providers](/concepts/providers)).
+After going back to 0.9.16 the catalog has no such row again: there
+`--model gpt-6.2-sol` is refused (`cannot infer provider from model
+'gpt-6.2-sol'`, or, with the provider named, `model 'openai:gpt-6.2-sol' is
+absent from the effective model registry`) until the entry is back (run on
+the published 0.9.16).
+
+## Upgrading to 0.9.16
+
+This section is for systems running 0.9.15. The full list of changes is in
+the CHANGELOG under `## [0.9.16]`.
+
+Meerkat 0.9.16 is Core 0.9.16, Meta 0.9.16 and Connect 0.9.16, built from one
+commit. What asks something of a 0.9.15 user, or tells them something, is in
+the subsections below.
+
+0.9.16 has no migration of stored state and, with one exception, no adoption
+step. The release notes name none, and no changed source line of the release
+touches a store schema, a store, journal or format version, or a migration (by
+a search of the changed lines of Core, Meta and Connect; not by loading state
+that a 0.9.15 binary wrote). One such load was made, of a persistent
+`meta_gateway`'s state, and it found the one step this section asks of an
+operator before a gateway starts: see the first item under Meta 0.9.16. Of the
+one machine that changes the notes say: "No input, effect, state field or
+outcome value of the machine changes, the machine's version stays `1`". Of the
+question sets a 0.9.15 store holds: "Every call 0.9.15 held keeps its key and
+its decision id byte for byte, so the question sets of a 0.9.15 store are
+found, listed, answered and settled as before, and nothing is migrated."
+
+### Rust hosts: two enums gain variants
+
+`meerkat-runtime`, `meerkat-machine-schema` and `meerkat-machine-kernels`:
+`RuntimeApplyFailureCause` gains `RequestRefused`, appended last, and the
+kernel's `generated::meerkat::TransitionId` gains seventeen variants,
+appended last. No wire form changes. "Every enum named here is exhaustive,
+so a downstream exhaustive match needs the new arms, or a wildcard arm." The
+CHANGELOG lists the variants under Breaking.
+
+**Do:** a Rust host that matches either enum exhaustively adds the arms, or
+a wildcard arm.
+
+### `rkat-mcp` and `rkat-mob-mcp`: the profile tools refuse host-only fields
+
+`meerkat_mob_profile_create` and `meerkat_mob_profile_update` "refuse a
+profile that carries `tools.mcp_servers`, `tools.rust_bundles`,
+`tools.bundles` or any key other than those of the public profile input and
+`auth_binding` (JSON-RPC error `-32602`, invalid params; the message names
+the field)". Nothing is stored, and on an update the stored profile is
+unchanged. Through 0.9.15 the tools accepted a profile in its raw form, and
+a caller of them, which can be a model, could store an MCP server or a
+bundle in a profile; on `rkat-mcp`, when a mob's role named the profile, a
+stored stdio server was started as a process on the host at the member's
+spawn (see Security in the CHANGELOG). The host methods `mob/profile/create`
+and `mob/profile/update` are unchanged.
+
+**Do:**
+
+- A client that set these fields through the tools uses the host methods
+  instead.
+- Profiles stored before the upgrade keep such fields. "Read each realm
+  profile back through the profile tools (with its revision) and update it
+  with exactly what was read: the stored profile then holds no server and
+  no bundle."
+- That step also removes a stored `auth_binding` (the tools have taken one
+  since 0.9.11), which the read-back does not show: "a profile that is
+  meant to carry one needs it sent again in the same update. The same holds
+  for every later update through the tools."
+- "Respawn every member of the roles that use the profile."
+
+### `rkat-mcp` and `rkat-mob-mcp`: the spawn tools and `meerkat_run` refuse reserved keys
+
+`meerkat_mob_spawn`, `meerkat_mob_spawn_many` and `meerkat_run` "refuse a
+reserved key in `labels` or in the context with JSON-RPC error `-32602` and
+no `data`". The message names the key. "The reserved label keys are
+`mob_id`, `role`, `meerkat_id`, `agent_identity` and those under `meerkat.`;
+in a context, the keys of the `meerkat` namespace." The spawn tools refuse
+such a key and spawn nothing, a batch whole, and `meerkat_run` refuses one
+and creates no session. A Rust embedder that composes the raw mob
+dispatcher now meets the same rule, as invalid arguments.
+
+**Do:** a client that sent such a key stops sending it.
+
+### Handing `rkat-mcp` to a model
+
+The release notes give this advice: "An MCP client that
+lets a model call this server's tools should not offer it the following
+tools, unless that model may start processes on the host and change the
+server's configuration: `meerkat_mob_profile_create`,
+`meerkat_mob_profile_update`, `meerkat_mob_create`, `meerkat_mob_spawn`,
+`meerkat_mob_spawn_many`, `meerkat_mob_respawn`, `meerkat_mob_member_send`,
+`meerkat_config`, `meerkat_schedule_create`, `meerkat_schedule_update`. The
+server has no setting of its own that withholds a tool; the filter is the
+client's. This list is what is known at this release."
+
+**Do:** filter those tools in the MCP client, and start the server with the
+confinement flags (`--confinement workspace`; see
+[OS process confinement](/concepts/configuration#os-process-confinement)):
+they apply to every process the server launches, and where the platform
+cannot enforce them the launch is refused.
+
+### The shell job tools answer only for the calling session's jobs
+
+`shell_job_status` and `shell_job_cancel` looked a background job up by its
+id alone, and a realm's job store is shared by all its sessions, mob members
+included (0.8.8 through 0.9.15). "From this release both tools answer only
+for the shell jobs and monitors that the calling session started. Any other
+id is answered exactly as an id that does not exist."
+
+To know: "A member's new session does not reach the jobs its earlier
+session started: they are not cancelled, and their ids are answered as
+unknown. A fork does not reach its source's jobs. A monitor that the host
+started is answered as unknown to a member whose build carries another
+realm tag."
+
+**Do:** a workflow in which one session reads or cancels a job that another
+session started no longer works: the session that started a job reads and
+cancels it. The jobs a member started before a respawn or a reset are out
+of its reach.
+
+### Meta 0.9.16
+
+Meta 0.9.16 pins Core `=0.9.16`. The full list is in `meta/CHANGELOG.md`
+under `## [0.9.16]`.
+
+- **A persistent `meta_gateway` on its built-in default definition does not
+  start after the upgrade until its definition is given as a file.** This is a
+  `meta_gateway` launched with `persistent_sessions: true` in a workspace that
+  has neither `config/mob.toml` nor a definition file. The built-in default
+  definition's mob id is derived from, among other things, the gateway's
+  version, so the 0.9.16 gateway computes another id than the one recorded in
+  the state directory and refuses to start on it. What you see: the gateway
+  exits with code 1 and answers `meta/init` with
+  `{"error":{"code":-32603,"message":"failed to bootstrap local runtime"},"id":null,"jsonrpc":"2.0"}`;
+  the reason is only in the gateway's log:
+  `the supplied mob definition diverges from the canonical definition in this storage, in: id`.
+  Nothing is lost, and the 0.9.15 gateway still starts on that state. **Do:**
+  copy the `definition` object from
+  `<state directory>/event_log.sqlite3.composition.json` (by default the state
+  directory is `<workspace>/state`) into a new file
+  `<workspace>/definition.json`, then start the 0.9.16 gateway: it starts on
+  the recorded mob, with its members and their sessions. You can do this
+  before the upgrade or after the first refused start. This is not new in
+  0.9.16: it holds for every upgrade of such a gateway since Meta 0.9.9, and
+  on such a gateway the same refusal follows from moving the workspace or
+  changing a file under its `config/`, `skills/`, `hooks/` or `mcp/`
+  directories; with the definition given as a file the id no longer depends on
+  any of these. The stdio gateway (`rpc_gateway`, which the SDKs start) is not
+  affected. (Shown by runs: state written by the published 0.9.15 gateway on
+  its built-in default definition was refused by the 0.9.16 release candidate,
+  and served by it after the copy, with the member and its session as they
+  were; the published 0.9.15 gateway refused a moved copy of its own workspace
+  in the same way, and the definition file cured that as well. That it holds
+  since 0.9.9, that a changed file under those directories has the same effect
+  and that the stdio gateway is not affected: read from the source.)
+- **A name hidden from the caller answers as a name no agent holds.** A
+  request that names an agent the caller may not see because it is private
+  to another person now gets, on each of these doors, "the answer the same
+  door gives for a name no agent holds": `meta/agent_memory/remember`,
+  `meta/schedule/create`, `POST /console/send`,
+  `POST /console/send/recover`, the host's send precheck
+  (`ConsoleSendPrecheck::check`), a Console schedule's fire, and the Console
+  RPC methods that take their member under `name` or `role_targets`. "No
+  answer for a name no agent holds changed". **Do:** "a client that matched
+  the old answer must match the new one"; the Meta changelog lists each old
+  and new answer under Breaking.
+- **The Console's access save methods refuse an unknown key.**
+  `meta/access/set`, `meta/access/rules/upsert` and `meta/access/groups/set`
+  "refuse a request that holds a key the access configuration does not
+  define, in the configuration itself, in a group, in a rule or in an
+  approver, with `-32602`", and nothing is applied or saved. "Through 0.9.15
+  the key was dropped and the rest applied." **Do:** a client of these
+  methods sends only keys the access configuration defines.
+- **Check the access file of a gateway that has one.** The loader of the
+  file still drops a key it does not know and applies the rest of its
+  table, in 0.9.16 as before: a deny rule whose `effect` was misspelt was
+  loaded as an allow rule, and a rule whose only selector was misspelt
+  applied to every agent. **Do:** signed in to the Console as a person
+  listed in the file's `admins`, call `meta/access/get` and read
+  `result.config` rule by rule against the file; the Meta changelog gives
+  the call, the keys the configuration defines and what to compare, under
+  Known limitations ("The access file's loader still drops an unknown
+  key").
+- **An agent's spawn tools refuse the label `agent_identity`.** "An agent's
+  `mob_spawn_member`, `delegate` and `fork_off` refuse a call that supplies
+  the label `agent_identity`, in its own `labels` or in a `specs` or
+  `members` entry, as invalid arguments." **Do:** instructions or tool
+  wrappers that had an agent set that label stop setting it.
+- **Reload open Console pages after the upgrade.** "A Console page that was
+  opened before the gateway was upgraded keeps running the earlier front
+  end until it is reloaded." An earlier front end cannot answer an agent's
+  questions (`ask_user`). "An application that mounts the Console package
+  builds it from the source of its gateway's release." **Do:** reload every
+  open Console page, and rebuild a mounted Console package.
+- **The refusal of a mob definition update names its revisions in another
+  order.** The refusal that `declare_spec_update` (`declareSpecUpdate`, the
+  Rust `spec_update_ceremony`) gets for its revision now reads
+  `the canonical definition for mob <id> is at revision <stored>, not the expected revision <expected>; this declaration did not change it; declare again with the current revision`.
+  **Do:** "A host that read the stored
+  revision out of the old sentence must read it anew: both revisions are
+  still in it as numbers, but the stored revision now comes first and the
+  expected one second. The error's type, its code (`-32014`) and its fields
+  are unchanged." See
+  [One-shot mob definition update](https://docs.rkat.ai/meta/reference/configuration#one-shot-mob-definition-update).
+- **To know: `name_taken` and the order of agents.** A create under a taken
+  name is now refused before it is held for a person, where the caller is
+  shown what holds the name. "A create refused before a hold (new in
+  0.9.16) counts the agents as the request lists them, so a host that reads
+  `agents[i]` gets name order from a create the rules allow and request
+  order from a create refused before a hold."
+- **To know: a module named `live`.** "On a build with `openai-live`, a loaded
+  module named `live` no longer receives this one method name":
+  `live/webrtc/answer` now reaches the gateway's live handler.
+- **To know: `ask_user` under `tools.grant_gated`.** A profile that lists
+  `ask_user` under `tools.grant_gated` and also restricts tools (`tools.deny`
+  or `tools.read_only`), used for a member that is given no stock `ask_user`,
+  "is refused at the member's build as before, now with the grant gate's
+  refusal `tool_not_mounted`" where 0.9.15 answered `unknown_tool` (read from
+  the source, not run).
+- **To know: the subject key of a question set.** An `ask_user` call with a
+  very long tool-call id is now held. "In `meta/decisions/list` and
+  `meta/decisions/get` the `subject_key` of such a set is a 122-byte key that
+  names the run and a digest instead of the agent and the call id"; the same
+  holds for Core's `decision/list` and `decision/get`.
+
+### Connect 0.9.16
+
+A profile used for agents hosted by Connect's native host may list
+`ask_user` in `tools.deny`. In 0.9.15 the build of such an agent was refused
+with the deny (`profile '<name>' denies tool 'ask_user', which is in none
+of its tool vocabularies`). From 0.9.16 the deny is accepted; those agents
+are still not offered the tool, with the deny or without it. Nothing to do:
+a profile shared with a Meta gateway keeps its deny.
+
+### Rolling back to 0.9.15
+
+From the release notes: "an input that 0.9.16 ended as never executed
+because its turn was refused for its reasoning-effort level is read by
+0.9.15 as the abandoned outcome 0.9.15 itself writes for a run that never
+began executing. Nothing is refused. Where a Meta notice names the reason,
+it says 'without running' where 0.9.15 would have said 'stopped'." A
+question set that 0.9.16 held for an `ask_user` call with a very long
+tool-call id is still listed and answerable on 0.9.15, and a replay of that
+call is refused there, as every such call is in 0.9.15 (read from 0.9.15's
+reader code, not run). The notes name no other rollback step.
+
 ## Upgrading to 0.9.15
 
 This section is for systems running 0.9.14 or 0.9.13. A system on 0.9.12 or
@@ -1718,7 +2202,9 @@ What no step removes (beside the event replay above):
   0.9.14 cannot read: it is refused when a session is created, or before
   the turn's input is stored, on a live session and on a stored one; a
   turn judged only at its start is refused there, and its stored input
-  ends as abandoned with the reason `stopped` (confirmed by a run).
+  ends as abandoned: in 0.9.15 with the reason `stopped` (confirmed by a
+  run), from 0.9.16 with the reason `never_executed` (confirmed by tests
+  of the runtime, on both of its drivers). 0.9.14 reads both values.
   The record is another case: a turn is admitted, and its request is then
   refused, before anything is sent to the model, because the session
   holds a level that its model does not support. The shape that was run:
@@ -5056,7 +5542,9 @@ mode with leading zeros (`'0755'`; unquoted it reads as `755.0`).
   by exactly one follow-up turn. 0.9.3 showed peer and text-only prompt
   steers to one model request and never stored them. History now holds their
   rows, `boundary_append_applied` reports them, and each incoming comms
-  notice publishes one `peer_content_ingested`.
+  notice publishes one `peer_content_ingested`. From 0.9.18 the eligible
+  steers waiting at a boundary with a registered claim join it together: see
+  [Steers join the next model request](#steers-join-the-next-model-request).
 - **Replies name what they answer:** the model's peer message notice gains a
   `Delivery ID: <id>` line and, for a reply, an `In reply to: <id>` line.
   `reply_to_peer` can answer a message that joined the running turn.

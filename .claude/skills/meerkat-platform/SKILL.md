@@ -64,7 +64,7 @@ CLI filesystem defaults:
 
 - `context_root` controls workspace identity and project files (`.rkat/mcp.toml`, `.rkat/skills`, AGENTS/CLAUDE discovery, etc.).
 - `state_root` is the parent directory containing realm directories.
-- Without overrides, CLI uses `context_root = CWD` and walks upward to the nearest ancestor containing `.rkat`. A realm that already exists is used where it lies (`<project-root>/.rkat/realms` or the user-global data root; both is a split-brain refusal); a new realm goes to `<project-root>/.rkat/realms`, falling back to `<context_root>/.rkat/realms` outside a project.
+- Without overrides, CLI uses `context_root = CWD` and walks upward to the nearest ancestor containing `.rkat`. A realm that already exists is used where it lies (`<project-root>/.rkat/realms`, a farther ancestor's `.rkat/realms`, or the user-global data root; more than one is a split-brain refusal naming both realm directories and the two ways out); a new realm goes to `<project-root>/.rkat/realms`, falling back to `<context_root>/.rkat/realms` outside a project.
 - `--context-root` changes the derived `ws-...` realm id and the starting point for project-root discovery; contexts inside the same project can therefore share a state root unless `--state-root` is supplied.
 - `--state-root` changes storage location only; it does not change the realm id.
 
@@ -409,9 +409,11 @@ surface, not the old live-adapter/docs-refresh snapshot:
     EOF (with `--tcp`, connections drain first).
 - Default hosted text selections are OpenAI `gpt-6-astra` (backend availability
   remains independent; Azure, Copilot, and custom support are not implied),
-  Anthropic `claude-opus-5-5`, and Gemini `gemini-4-argon` (default; paid
+  Anthropic `claude-opus-5-5`, and Gemini `gemini-4-neon` (default; paid
   Gemini API tiers only; `gemini-4-hydrogen`, in the catalog from 0.9.15, is
   Google's fast Gemini 4 model and is also on the free tier;
+  `gemini-4-neon` has low/medium/high
+  thinking (provider default high; Meerkat does not yet send xhigh);
   `gemini-3.8-flash` is the recommended Flash model,
   the free-tier choice, and the `rkat auth login google` / Copilot Gemini route
   default).
@@ -467,7 +469,7 @@ surface, not the old live-adapter/docs-refresh snapshot:
   clients reporting a monotonic raw-event count through
   `stream_activity_count()`; `"disabled"` opts out. An explicit window applies
   to every model; omitted, each call uses the current model's own window
-  (`gemini-4-carbon`, `gemini-4-argon` and `gemini-4-hydrogen` 900s,
+  (`gemini-4-carbon`, `gemini-4-argon`, `gemini-4-hydrogen` and `gemini-4-neon` 900s,
   `gpt-5.5-pro` 7200s, a
   self-hosted model's
   `stream_inactivity_timeout_secs`), else 300s. Stalls surface as retryable
@@ -1249,13 +1251,13 @@ tools.
 
 ```toml
 # Default: three providers + Copilot backend; no persistent realm/comms/MCP/skills/memory/live activation
-meerkat = "=0.9.15"
+meerkat = "=0.9.18"
 
 # Single provider, minimal
-meerkat = { version = "=0.9.15", default-features = false, features = ["anthropic"] }
+meerkat = { version = "=0.9.18", default-features = false, features = ["anthropic"] }
 
 # Add persistence + memory + comms + live channels
-meerkat = { version = "=0.9.15", features = [
+meerkat = { version = "=0.9.18", features = [
     "jsonl-store", "session-store", "session-compaction",
     "memory-store-session", "comms", "mcp", "skills",
     "openai-realtime", "live", "live-webrtc"
@@ -1286,7 +1288,7 @@ surfaces. The default `rkat` feature set includes `memory-store` and
 builds:
 
 ```bash
-cargo install rkat --version "=0.9.15" --no-default-features --features "anthropic,openai,session-store,mcp"
+cargo install rkat --version "=0.9.18" --no-default-features --features "anthropic,openai,session-store,mcp"
 ```
 
 Disabled features return typed errors (e.g. `SessionError::PersistenceDisabled`) — no panics.
@@ -1394,8 +1396,8 @@ stream_inactivity_timeout = "120s"       # explicit window, every model
 
 The window is resolved for each model call, so a model switch or fallback
 uses the new model's window. The catalog sets one where a provider documents
-long silent responses (`gemini-4-carbon`, `gemini-4-argon` and
-`gemini-4-hydrogen` 900s,
+long silent responses (`gemini-4-carbon`, `gemini-4-argon`,
+`gemini-4-hydrogen` and `gemini-4-neon` 900s,
 `gpt-5.5-pro` 7200s); a
 self-hosted model can set `stream_inactivity_timeout_secs` in
 `[self_hosted.models.<id>]` (at least 60, for a long prefill, for example).
@@ -1441,7 +1443,7 @@ Prompts and tool results support multimodal content (text, images, and video). T
 
 **Video support:** Inline video is Gemini-only. Supported media types: `video/mp4`, `video/webm`, `video/quicktime`. Non-Gemini providers degrade replayed video to `[video: media_type]` text placeholders. Video in tool results is rejected at all providers. Ingress validation rejects video input for non-Gemini models at RPC, REST, and session boundaries.
 
-**view_image builtin tool:** Reads images from disk (PNG/JPEG/GIF/WebP/SVG), returns base64 `ContentBlock::Image`. Paths are limited to the project root (a path check, not OS confinement). 5 MB limit. Hidden when the model's profile cannot take image tool results (`ModelProfile.image_tool_results`); re-evaluated when the model changes.
+**view_image builtin tool:** Reads images from disk (PNG/JPEG/GIF/WebP), returns base64 `ContentBlock::Image`. A file whose content is none of these formats is refused; the block's media type is the one the content shows. Paths are limited to the project root (a path check, not OS confinement). 5 MB limit. Hidden when the model's profile cannot take image tool results (`ModelProfile.image_tool_results`); re-evaluated when the model changes.
 
 **generate_image builtin tool:** Session-owned assistant image generation. The model calls one stable tool with universal fields (`prompt`, `provider`, `model`, `size`, `quality`, `format`, `count`, reference/source images) plus provider-owned `provider_params`. These are Meerkat tool fields, not raw provider request JSON; for OpenAI, `format` lowers to provider-side `output_format`. Provider crates own image model profiles, advanced provider parameters, and backend selection. For normal OpenAI generate/edit requests, prefer top-level `intent` and omit hosted-tool-only `provider_params.action`. Generated images are stored in the blob store; user-facing surfaces fetch blob payload/bytes by blob id via `rkat blob get <BLOB-ID>`, JSON-RPC `blob/get`, or SDK `get_blob` / `getBlob`.
 

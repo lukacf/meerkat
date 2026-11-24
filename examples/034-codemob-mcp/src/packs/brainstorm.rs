@@ -38,25 +38,25 @@ impl Pack for BrainstormPack {
                 "ideator_a",
                 "ideator-a-skill",
                 "Practical ideator",
-                "gemini-3.1-pro-preview",
+                "gemini-4-argon",
             ),
             (
                 "ideator_b",
                 "ideator-b-skill",
                 "Creative ideator",
-                "gpt-5.5",
+                "gpt-6-astra",
             ),
             (
                 "ideator_c",
                 "ideator-c-skill",
                 "Contrarian ideator",
-                "gemini-3.1-flash-lite-preview",
+                "gemini-3.5-flash-lite",
             ),
             (
                 "synthesizer",
                 "synthesizer-skill",
                 "Idea synthesizer",
-                "claude-opus-4-8",
+                "claude-opus-5-5",
             ),
         ];
 

@@ -45,15 +45,21 @@
 mod controller;
 mod engine;
 mod model;
+#[cfg(test)]
+mod nested_member_tests;
+pub(crate) mod unknown_keys;
 
 pub use controller::{
     AccessController, AccessPublicationAlreadyJoined, AccessView, AgentResourceAttributes,
 };
 pub(crate) use controller::{
     AccessDecisionFence, AccessEditError, AccessEditPrecondition, AccessMutation,
-    CapturedLineageLink, LiveAccessView, MAX_LINEAGE_DEPTH, PrivateOwnerRecordReader,
+    CapturedLineageLink, HeldAccessView, LiveAccessView, MAX_LINEAGE_DEPTH, NameSeatingsHandOver,
+    NestedMobRef, PrivateOwnerRecordReader,
 };
-pub use engine::{AccessDecision, AccessPrincipal, AccessResource, evaluate_access};
+pub use engine::{
+    AccessDecision, AccessPrincipal, AccessResource, AccessResourceMob, evaluate_access,
+};
 pub(crate) use model::is_ingress_name;
 pub use model::{
     ACCESS_ACTIONS, ACTION_ACCESS_ADMIN, ACTION_AGENT_IDENTITY_CREATE,
@@ -73,4 +79,6 @@ pub use model::{
     OPERATOR_INGRESS, PRIVATE_TO_LABEL, normalize_access_config_for_memory_actions,
     normalize_access_config_for_schedule_actions, validate_access_config,
 };
-pub(crate) use model::{UNKNOWN_PRIVATE_OWNER, private_owner};
+pub(crate) use model::{
+    UNDECIDED_PRIVATE_OWNER, UNKNOWN_PRIVATE_OWNER, private_owner, private_to_another,
+};

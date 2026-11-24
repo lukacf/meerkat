@@ -747,7 +747,9 @@ pub fn peer_response_terminal_input(
             status: response_terminal_status_from_wire(status),
         }),
         content: ContentInput::Text(String::new()),
-        payload: Some(result),
+        // A result that is JSON null is no payload: a stored JSON null reads
+        // back as absent.
+        payload: (!result.is_null()).then_some(result),
         handling_mode: None,
         // Bridge-projected terminal responses carry no comms envelope, so no
         // sender declaration exists.
@@ -3810,6 +3812,40 @@ mod tests {
             panic!("peer input round-trips as peer input");
         };
         assert_eq!(peer.directed_interaction_id, None);
+    }
+
+    /// A terminal response whose result is JSON null is admitted without a
+    /// payload, and the admitted input reads back as it was written; a
+    /// result that is not null is carried as the payload.
+    #[test]
+    fn a_terminal_response_with_a_null_result_carries_no_payload() {
+        let terminal = |result: serde_json::Value| {
+            peer_response_terminal_input(
+                meerkat_core::comms::PeerId::from_uuid(uuid::Uuid::new_v4()),
+                None,
+                meerkat_core::PeerCorrelationId::from_uuid(uuid::Uuid::new_v4()),
+                meerkat_contracts::PeerResponseTerminalStatusWire::Completed,
+                result,
+            )
+        };
+
+        let input = terminal(serde_json::Value::Null);
+        let Input::Peer(peer) = &input else {
+            panic!("a terminal response is a peer input");
+        };
+        assert_eq!(peer.payload, None);
+        let stored = serde_json::to_vec(&input).unwrap();
+        let reread: Input = serde_json::from_slice(&stored).unwrap();
+        assert_eq!(
+            serde_json::to_vec(&reread).unwrap(),
+            stored,
+            "the admitted input reads back as it was written"
+        );
+
+        let Input::Peer(peer) = terminal(serde_json::json!({"ok": true})) else {
+            panic!("a terminal response is a peer input");
+        };
+        assert_eq!(peer.payload, Some(serde_json::json!({"ok": true})));
     }
 
     #[test]

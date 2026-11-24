@@ -17,7 +17,8 @@
  */
 
 import { existsSync, lstatSync } from "node:fs";
-import type { SessionAgentBuilder, ErrorCallback } from "./agent-builder.js";
+import type { SessionAgentBuilder, ErrorCallback, ScheduleFireHandler } from "./agent-builder.js";
+import { GatewayStartupCleanupError, isRpcError } from "./errors.js";
 import {
   validateAuthBindingRef,
   validateNativeRealm,
@@ -58,6 +59,7 @@ const AGENT_MEMORY_KEYS = new Set([
   "contentTrust",
   "selector",
   "operatorScope",
+  "ownMemoryOnlyProfiles",
   "distiller",
   "steward",
   "hygienist",
@@ -150,11 +152,17 @@ export interface MetaBuilderConfig {
   allowRemote: boolean | null;
   consoleRequireAppAuth: boolean | null;
   consoleReadOnly: boolean | null;
+  /** `runtime_options.console_list_nested_mobs`; `null` sends nothing. */
+  consoleListNestedMobs: boolean | null;
   consoleFetchTimeoutMs: number | null;
   demoLlm: boolean;
   memberCommsAddress: string | null;
   gatingConfigPath: string | null;
   routingConfigPath: string | null;
+  /** Named deterministic schedule targets; an empty or absent list sends nothing. */
+  hostRunnables?: string[];
+  /** Host-local handlers copied into each runtime before its initial connect. */
+  scheduleFireHandlers?: ReadonlyMap<string, ScheduleFireHandler>;
   workgraphEnabled: boolean | string | null;
   /** `runtime_options.mob_announcements`, sent as given; absent or `null` sends nothing. */
   mobAnnouncements?: Record<string, unknown> | null;
@@ -216,11 +224,13 @@ function defaultConfig(): MetaBuilderConfig {
     allowRemote: null,
     consoleRequireAppAuth: null,
     consoleReadOnly: null,
+    consoleListNestedMobs: null,
     consoleFetchTimeoutMs: null,
     demoLlm: false,
     memberCommsAddress: null,
     gatingConfigPath: null,
     routingConfigPath: null,
+    hostRunnables: [],
     workgraphEnabled: null,
     forkInstructionPolicy: null,
     memberRestore: null,
@@ -261,6 +271,16 @@ function defaultConfig(): MetaBuilderConfig {
 export class MetaBuilder {
   /** @internal */
   readonly _config: MetaBuilderConfig = defaultConfig();
+
+  /**
+   * The files `_applyConventionDefaults` applied: the config field each one
+   * filled, its path, and what it configures.
+   */
+  private readonly _conventionApplied: Array<{
+    option: "consoleConfigPath" | "accessConfigPath" | "gatingConfigPath" | "routingConfigPath";
+    path: string;
+    what: string;
+  }> = [];
 
   mob(configPath: string): this {
     this._config.mobConfigPath = configPath;
@@ -558,6 +578,20 @@ export class MetaBuilder {
   }
 
   /**
+   * Set whether the console lists the mobs nested under the gateway's mob.
+   *
+   * Emitted as `runtime_options.console_list_nested_mobs`. The gateway
+   * default lists them: the mobs a member of that mob created, and the mobs
+   * made under those at any depth, with their members, to the callers the
+   * access rules allow. Pass `false` to hide every nested mob and its
+   * members on every console read, as releases before the listing did.
+   */
+  consoleListNestedMobs(listed: boolean): this {
+    this._config.consoleListNestedMobs = listed;
+    return this;
+  }
+
+  /**
    * Bind the gateway HTTP listener to `HOST:PORT`.
    *
    * Emitted as `runtime_options.http_listen`. The default is `127.0.0.1:0`:
@@ -712,6 +746,47 @@ export class MetaBuilder {
 
   routing(configPath: string): this {
     this._config.routingConfigPath = configPath;
+    return this;
+  }
+
+  /**
+   * Declare deterministic (non-LLM) schedule targets, replacing the list.
+   * Sent as `runtime_options.host_runnables`. A durable schedule targeting
+   * `{target_kind: "host_runnable", runnable: "name"}` calls the handler
+   * registered with `onScheduleFire`. Requires a persistent
+   * gateway with its schedule host running. The gateway validates duplicate
+   * and reserved names.
+   */
+  hostRunnables(names: readonly string[]): this {
+    const declared = [...names];
+    for (const name of declared) {
+      if (typeof name !== "string" || !name.trim()) {
+        throw new TypeError("host runnable names must be non-empty strings");
+      }
+    }
+    this._config.hostRunnables = declared;
+    return this;
+  }
+
+  /**
+   * Register or replace a host-local schedule handler before `build()`
+   * connects. Each runtime gets its own handler map; later registrations on
+   * this builder do not change an existing runtime. Declare gateway targets
+   * separately with `hostRunnables`, in either order before `build()`, which
+   * refuses handlers for undeclared names before starting the gateway.
+   * Use this when stored schedules may fire
+   * during startup; `MetaRuntime.onScheduleFire` can replace a handler later.
+   */
+  onScheduleFire(name: string, handler: ScheduleFireHandler): this {
+    if (typeof name !== "string" || !name.trim()) {
+      throw new TypeError("runnable name must be a non-empty string");
+    }
+    if (typeof handler !== "function") {
+      throw new TypeError("handler must be callable");
+    }
+    const handlers = new Map(this._config.scheduleFireHandlers);
+    handlers.set(name, handler);
+    this._config.scheduleFireHandlers = handlers;
     return this;
   }
 
@@ -874,6 +949,17 @@ export class MetaBuilder {
        */
       selector?: "off";
       operatorScope?: "off" | "provisional";
+      /**
+       * Distinct profile names of the launch mob. An agent of a listed
+       * profile, an agent it created (and so on up the agents that created
+       * each other), and an agent whose profile its own mob does not define,
+       * is listed the records of its own memory only in the memory index of
+       * its build: none of its mob's shared records and none of the realm's.
+       * A filter on what an agent is listed, not a boundary between tenants;
+       * it takes effect at an agent's next new session. The gateway refuses
+       * the start when a listed name is no profile of the launch mob.
+       */
+      ownMemoryOnlyProfiles?: string[];
       distiller?: boolean | {
         enabled?: boolean;
         runsPerHour?: number;
@@ -970,6 +1056,11 @@ export class MetaBuilder {
     }
     if (config.operatorScope !== undefined) {
       wire.operator_scope = config.operatorScope;
+    }
+    if (config.ownMemoryOnlyProfiles !== undefined) {
+      // Forwarded as given: the gateway checks the names against the launch
+      // mob's definition and refuses the start on one it lacks.
+      wire.own_memory_only_profiles = [...config.ownMemoryOnlyProfiles];
     }
     if (config.distiller !== undefined) {
       if (typeof config.distiller === "boolean") {
@@ -1213,10 +1304,40 @@ export class MetaBuilder {
     this._applyConventionDefaults();
     // Dynamic import to break circular dep (runtime imports from builder config type)
     const { MetaRuntime } = await import("./runtime.js");
-    return MetaRuntime._create(this._config);
+    try {
+      return await MetaRuntime._create(this._config);
+    } catch (failure) {
+      this._sayConventionFilesOfARefusedStart(failure);
+      throw failure;
+    }
+  }
+
+  /**
+   * Say once which files this builder applied by convention, when the
+   * gateway refused the start: the program named none of them, so the
+   * refusal alone does not say where a refused file came from.
+   */
+  private _sayConventionFilesOfARefusedStart(failure: unknown): void {
+    const refusal = failure instanceof GatewayStartupCleanupError ? failure.startupError : failure;
+    const applied = this._conventionApplied
+      .filter(({ option, path }) => this._config[option] === path)
+      .map(({ path, what }) => `${path} (${what})`);
+    if (applied.length > 0 && isRpcError(refusal)) {
+      console.warn(
+        "[meta] the gateway refused this start. The builder applied these files by " +
+          "convention, from the working directory, because no builder method named one: " +
+          applied.join(", "),
+      );
+    }
   }
 
   private _validateConfig(): void {
+    const declaredRunnables = new Set(this._config.hostRunnables ?? []);
+    for (const name of this._config.scheduleFireHandlers?.keys() ?? []) {
+      if (!declaredRunnables.has(name)) {
+        throw new Error(`host runnable handler is not declared: ${JSON.stringify(name)}`);
+      }
+    }
     if (this._config.preparedApplication && this._config.mobConfigPath) {
       throw new Error("preparedApplication() and mob() are mutually exclusive");
     }
@@ -1247,6 +1368,7 @@ export class MetaBuilder {
       const candidate = "config/console.toml";
       if (existsSync(candidate)) {
         this._config.consoleConfigPath = candidate;
+        this._conventionApplied.push({ option: "consoleConfigPath", path: candidate, what: "console" });
       }
     }
 
@@ -1254,6 +1376,11 @@ export class MetaBuilder {
       const candidate = "config/access.toml";
       if (entryPresent(candidate)) {
         this._config.accessConfigPath = candidate;
+        this._conventionApplied.push({
+          option: "accessConfigPath",
+          path: candidate,
+          what: "access control",
+        });
       }
     }
 
@@ -1261,6 +1388,7 @@ export class MetaBuilder {
       const candidate = "config/gating.toml";
       if (entryPresent(candidate)) {
         this._config.gatingConfigPath = candidate;
+        this._conventionApplied.push({ option: "gatingConfigPath", path: candidate, what: "gating" });
       }
     }
 
@@ -1268,6 +1396,7 @@ export class MetaBuilder {
       const candidate = "deployment/routing.toml";
       if (existsSync(candidate)) {
         this._config.routingConfigPath = candidate;
+        this._conventionApplied.push({ option: "routingConfigPath", path: candidate, what: "routing" });
       }
     }
 

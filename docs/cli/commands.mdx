@@ -63,6 +63,9 @@ and derive a stable workspace realm id from that path. For project-local state,
 `StorageLayout` walks upward to the nearest ancestor containing a `.rkat`
 entry and stores realms under `<project-root>/.rkat/realms/<realm>/`. When no
 ancestor contains `.rkat`, the context root is the project root fallback.
+A realm that already exists under a farther ancestor's `.rkat/realms` is used
+where it lies; a realm found under more than one root is refused, and the
+refusal names both realm directories and the two ways out.
 `--context-root` changes the derived workspace identity and the starting point
 for that ancestor search; it does not necessarily change the project root when
 both contexts are inside the same project. `--state-root` bypasses discovery
@@ -475,6 +478,21 @@ one grant per target: an installed MCP server and its raw operations
 catalog (`--catalog`), or the agent's controller (`--controller` with one or
 more `--route <key>`; a controller grant has no expiry). A new grant
 supersedes only its target's previous one.
+
+In a governed realm `rkat` attaches a configured MCP server only when it is
+the realm's own installation (`rkat mcp add --scope realm`) with an operation
+ceiling (`--allow-operation`). A server from `mcp.toml`, one the realm
+inherits from a parent, and an installation without a ceiling are refused
+before the server is started (`attachment authority is unavailable`), and
+their tools are not offered. Install the server with its ceiling first, then
+grant it (`realm grant --mcp`): a grant for a server that is not one of the
+realm's own installations is refused. Both steps work when the realm is
+already governed.
+
+In a script, check the exit code of each `rkat realm` command: after a failed
+`realm govern` the realm may not be governed, and the commands that follow
+then run against an ordinary realm.
+
 `realm revoke-grant` revokes the grant selected for one target and exits
 successfully only when it is revoked. Use the global `--as-agent` to run as a
 granted agent. `realm govern`, `grant` and `revoke-grant` take the realm's
@@ -491,6 +509,8 @@ rkat config patch [<FILE>] [--json <JSON>] [--expected-generation <N>]
 ```
 
 The positional argument is always a file path; inline payloads use `--json` (or `--toml` for `set`).
+
+`rkat config get` shows `<redacted>` in place of each stored secret value, in every format; the realm's document file holds the values. A document written back with `<redacted>` in a place keeps the value stored there (see [Secret values in config answers](/concepts/configuration#secret-values-in-config-answers)).
 
 Examples:
 
@@ -610,6 +630,14 @@ This prints the effective runtime model registry for the active realm, including
 rkat doctor
 ```
 
+The first line is the realm's config document: `ok config <path>`, or
+`warn config missing config at <path>` when the realm has none yet. A
+`warn config` line also names a project `.rkat/config.toml` whose
+`[confinement]` or `[governance]` table is not what is in effect, with where
+the section is read from (see
+[config files](/cli/configuration#config-files)); that line is a warning
+only and does not change `doctor`'s verdict.
+
 For self-hosted setups, `doctor` checks the normalized `/v1/models` endpoint for each configured server and warns when configured aliases are missing from the returned model list.
 
 For Gemma 4, prefer `chat_completions` in your server config unless you have validated a specific `responses` path for your serving stack.
@@ -632,11 +660,13 @@ rkat storage doctor [--json] [--root PATH]...
 Read-only and safe against a live realm: takes no leases, never changes
 logical database content, and never creates a database or directory. SQLite
 may create or update the `-wal`/`-shm` sidecars needed for a coherent WAL read.
-Sweeps the invocation-context-local
-(`<context-root>/.rkat/realms`) and user-global roots by default. Ordinary
-runtime resolution first walks to the nearest ancestor containing `.rkat`, so
-run the storage verb from that project root (or pass `--root`) to inspect the
-same local candidate;
+With no root given, `storage doctor` reads the roots ordinary runtime
+resolution probes: the `.rkat/realms` of the context root and of every
+ancestor that has a `.rkat` directory, and the user-global root. A realm
+present under more than one of them is reported with both directories.
+`storage migrate` and `storage prune` act on the invocation-context-local
+(`<context-root>/.rkat/realms`) and user-global roots by default, and on an
+ancestor's root only when `--root` names it;
 any explicit root (`--state-root` or repeatable `--root`) restricts the
 sweep to exactly those roots. `--realm` focuses the sweep on one realm.
 Reports per-root realm inventory, schema-ledger state per database,
@@ -790,7 +820,14 @@ rkat mcp get filesystem --scope project
 ```
 
 Omit `--scope` on `list` or `get` to search all configured scopes, the realm
-included.
+included. An `mcp.toml` server that names an environment variable that is not
+set is listed with nothing expanded and marked unresolved with the field and
+the variable's name (`--json`: the entry as written, with an `unresolved`
+object holding `field` and `variable`); the other servers are unaffected.
+
+The text forms of `list` and `get` mask every env and header value and show a
+URL without its userinfo and query. `--json` prints the values as the server
+is given them.
 
 HTTP OAuth is discovered when connecting, not stored in `.rkat/mcp.toml`.
 Interactive login requires an account selection on the server entry: its
@@ -996,4 +1033,7 @@ Shows status for compiled/runtime capabilities.
 rkat init
 ```
 
-Creates `.rkat/config.toml` from the global template.
+Creates `.rkat/config.toml` as a copy of the user document
+(`~/.rkat/config.toml`, created from the template when missing). A run reads
+only the hook entries of that file; every other setting of a project goes in
+its realm document (see [config files](/cli/configuration#config-files)).

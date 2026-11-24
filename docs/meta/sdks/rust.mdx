@@ -4,7 +4,7 @@ description: "Use Meta as a Rust library: bootstrap runtimes, route module calls
 icon: "code"
 ---
 
-*Mirrored from Meerkat Meta main at [622bcd0a2d9f](https://github.com/lukacf/meerkat/commit/622bcd0a2d9fd9b8336a4b6df4873e94986c4378) on 2026-11-16; Meta version 0.9.15 at that commit.*
+*Mirrored from Meerkat Meta main at [6372543dee87](https://github.com/lukacf/meerkat/commit/6372543dee877e30cf411bacc1317110927dfebc) on 2026-11-24; Meta version 0.9.18 at that commit.*
 
 The Rust crate `meerkat-meta` is the primary interface for Meta. All other interfaces (JSON-RPC, SDKs, console) are built on top of it.
 
@@ -12,7 +12,7 @@ The Rust crate `meerkat-meta` is the primary interface for Meta. All other inter
 
 ```toml Cargo.toml
 [dependencies]
-meerkat-meta = "0.9.15"
+meerkat-meta = "0.9.18"
 tokio = { version = "1", features = ["full"] }
 serde_json = "1"
 ```
@@ -165,8 +165,10 @@ markdown files from the same agent-memory directory. Markdown is not a live
 provider. To supply another storage or retrieval authority, pass any
 `Arc<dyn AgentMemoryProvider>` with `.agent_memory(provider, config)`.
 
-Rust callers can write, read, and delete durable records through the unified
-runtime:
+Rust callers can write, read, and forget durable records through the unified
+runtime. A forget withdraws a record from the agent; with the bundled store
+it is not an erasure (see
+[`meta/agent_memory/forget`](/meta/api/rpc#meta%2Fagent_memory%2Fforget)):
 
 ```rust
 use meerkat_meta::{AgentMemoryRecallRequest, AgentMemorySelection, NewAgentMemory};
@@ -356,7 +358,12 @@ agent customizer (`.agent_customizer(...)` in Python, `.agentCustomizer(...)`
 in TypeScript), wrapped by agent memory when that is configured. The answer is
 the customizer of every identity member build: the roster bootstrap's and the
 later ones, such as a reset's fresh session. The default keeps the composed
-customizer, and a gateway without a roster provider never asks.
+customizer, and a gateway without a roster provider never asks. A gateway
+whose init registers a customizer callback, that keeps no agent memory and
+that hosts mobs beside its launch mob asks once more each time such a mob is
+loaded, with the SDK's customizer made for that mob, and never for a mob that
+is not loaded; a host's hook must therefore be safe to call more than once,
+and must build its answer from the customizer that call is given.
 
 A wrapper delegates `after_create` as well as `customize_build`. The gateway
 calls them at these points:
@@ -461,6 +468,33 @@ process.
 `AgentCustomizer::after_create` has a no-op default, so a wrapper that
 overrides only `customize_build` silently drops the SDK's `after_create`
 callback.
+
+The three callbacks that build a member name the member's mob as `mob_id`,
+a string at the top level of their params: `customize_build` beside
+`scope_id`, `after_create` beside `identity`, and the topology provider's
+`compute_edges` beside `target_identities`. `customize_build` reads the mob
+from the build's own context (`context.runtime_services.mob_handle()`, the
+mob whose identity runtime issued the build). For an agent in the gateway's
+launch mob, `customize_build` and `after_create` identify that mob. The
+gateway requests `compute_edges` only for the launch mob. The contexts of
+the other two carry no runtime
+services, so a bridge names the mob of the services it is given
+(`GatewayAgentCustomizer::with_runtime_services`,
+`GatewayTopologyProvider::with_runtime_services`; one bridge serves one
+mob's identity runtime), and none when it is given none. `mob_id` is left
+out, never null and never empty, when there is no mob handle, and it sits
+beside the context objects, whose members are unchanged. A mob whose id is
+the empty text names no mob: its callbacks are refused before the host is
+asked. A wrapper reads the mob from the context's runtime services. The
+Python and TypeScript SDKs keep the tool handlers a customizer registers per
+mob and member name and give the mob to the customizer as `context.mob_id`
+and `context.mobId`; an earlier SDK ignores the member and
+keeps the handlers per member name. `customize_build` also names the mob's
+incarnation, `mob_incarnation` beside `mob_id` (the text of
+`MobHandle::incarnation()`, present exactly when `mob_id` is): every build of
+one mob names the same one, and a mob created under the id of a destroyed mob
+names another, at which the SDKs release the handlers they kept under that
+mob id.
 
 The hook can wrap the composed customizer, but it cannot add one. Whether a
 customizer is composed is settled before the hook runs, because the registry

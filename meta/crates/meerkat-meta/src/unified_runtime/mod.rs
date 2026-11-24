@@ -11,7 +11,7 @@ use futures::stream::{BoxStream, SelectAll, StreamExt};
 use meerkat_core::comms::EventStream;
 use meerkat_core::event::{AgentEvent, agent_event_type};
 use meerkat_mob::{
-    AgentIdentity, AgentRuntimeId, AttributedEvent, FenceToken, MobError, MobHandle,
+    AgentIdentity, AgentRuntimeId, AttributedEvent, FenceToken, MobError, MobHandle, MobId,
     MobMemberStatus, MobState, ProfileName, SpawnMemberSpec,
 };
 use serde_json::json;
@@ -19,7 +19,24 @@ use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::task::JoinHandle;
 
 pub(crate) use self::console_events::ConsoleEventStore;
+/// The stored-host fixture of the rows for mobs that are not loaded, for the
+/// rows of the doors that serve such mobs.
+#[cfg(test)]
+#[allow(unused_imports)]
+pub(crate) use self::mob_entries::lazy_start_tests::{Known, StoredHost, asleep, known};
+#[allow(unused_imports)]
+pub(crate) use self::mob_entries::{
+    DestroyedMobMemory, HostedMobListing, HostedMobPhase, OtherMobsServed,
+};
+#[allow(unused_imports)]
+pub(crate) use self::mob_entry::{
+    IdentityRequestServices, MobEntryRef, MobResolveError, MobResolver, ResolvedMob,
+};
 use self::mob_events::MobEventsStore;
+#[allow(unused_imports)]
+pub(crate) use self::mob_identity_plane::{
+    ComposedMobIdentity, HostMobIdentityComposer, IdentityPlaneStanding, MobIdentityNotComposed,
+};
 use crate::console_aggregator::{ConsoleLogStore, InMemoryConsoleLogStore};
 use crate::mob_handle_runtime::{MobBootstrapSpec, MobRuntime, MobRuntimeError};
 use crate::runtime::{
@@ -36,6 +53,8 @@ mod bootstrap_completion_tests;
 pub mod builder;
 pub mod continuity_mirror;
 pub mod continuity_mirror_bigquery;
+#[cfg(test)]
+pub(crate) mod default_mob_methods_tests;
 /// Completes an application from a held identity bootstrap's held members,
 /// with the pass's [`crate::identity_first::HeldCompletion`]; see
 /// [`UnifiedRuntime::bootstrap_installed_identity_first_context_held_until`].
@@ -59,6 +78,8 @@ mod held_identity_add_tests;
 mod held_identity_race_tests;
 #[cfg(test)]
 pub(crate) mod held_identity_test_support;
+#[cfg(test)]
+mod hosted_delivery_identity_tests;
 pub mod http;
 #[cfg(test)]
 mod identity_install_phase_tests;
@@ -72,12 +93,55 @@ mod lifecycle_effect_restart_tests;
 #[cfg(test)]
 mod lifecycle_projection_off_tests;
 pub mod live_compose;
+#[cfg(all(test, feature = "openai-live"))]
+mod live_raw_session_tests;
+#[cfg(test)]
+mod mob_ask_user_tests;
+mod mob_console_log;
+#[cfg(test)]
+mod mob_console_log_tests;
+#[cfg(test)]
+mod mob_door_access_tests;
+mod mob_entries;
+#[cfg(test)]
+mod mob_entries_tests;
+mod mob_entry;
 pub mod mob_events;
+#[cfg(test)]
+mod mob_identity_family_tests;
+mod mob_identity_plane;
+#[cfg(test)]
+mod mob_identity_plane_tests;
+#[cfg(test)]
+mod mob_memory_engines_tests;
+#[cfg(test)]
+mod mob_memory_firewall_tests;
+#[cfg(test)]
+mod mob_memory_launch_admission_tests;
+#[cfg(test)]
+mod mob_memory_own_memory_only_tests;
+#[cfg(test)]
+pub(crate) mod mob_memory_release_tests;
+#[cfg(test)]
+mod mob_memory_tests;
 pub mod mob_ops;
+#[cfg(test)]
+mod mob_schedules_tests;
+#[cfg(test)]
+pub(crate) mod mob_set_reads_tests;
 pub(crate) mod mob_stop;
+mod mob_topology;
+#[cfg(test)]
+mod mob_topology_tests;
+#[cfg(test)]
+mod mob_topology_unload_tests;
+#[cfg(test)]
+mod mob_workgraph_tests;
 pub mod module_ops;
 #[cfg(test)]
 mod retired_member_hook_tests;
+#[cfg(test)]
+mod second_mob_member_guards_tests;
 #[cfg(test)]
 mod shutdown_settlement_tests;
 pub mod types;
@@ -311,14 +375,23 @@ pub struct UnifiedRuntime {
 
 /// The runtime state of a [`UnifiedRuntime`]. Not constructed or held on its
 /// own outside this module; it is public only as the `Deref` target.
+///
+/// It holds what is one per process, and the entry of the mob its launch
+/// names (`mob_entry::MobEntry`) with what is bound to that mob.
 #[doc(hidden)]
 pub struct UnifiedRuntimeCore {
     #[cfg(feature = "extension-state")]
     extension_authority: Option<Arc<crate::extension_state::NativeAuthorityRegistry>>,
     // Immutable after construction — &self access
-    /// Observer-side mob runtime: every internal holder (tasks, routers,
-    /// bridges, tool state) is non-owning.
-    mob_runtime: MobRuntime,
+    /// The default mob's entry: the mob the launch names, which answers for
+    /// a caller that names no mob. It is built with this state and lives as
+    /// long as it.
+    default_mob: mob_entry::MobEntry,
+    /// The entries of the mobs the launch's mob set built for the host
+    /// beside the default mob and manages now (`mob_entries`). Which mobs
+    /// those are is the set's to say; the table holds none before a host
+    /// builds such a mob.
+    other_mobs: Arc<mob_entries::MobEntries>,
     /// Set when an explicit shutdown has run to its end; the drop path then
     /// has nothing to hand over.
     teardown_settled: AtomicBool,
@@ -335,32 +408,16 @@ pub struct UnifiedRuntimeCore {
     post_reconcile_hook: Option<PostReconcileHook>,
     error_hook: SharedErrorHook,
     drain_timeout: Duration,
-    discovery: Option<Box<dyn Discovery>>,
-    edge_discovery: Option<Arc<dyn EdgeDiscovery>>,
 
     // Fine-grained interior mutability
     module_runtime: Arc<tokio::sync::Mutex<MetaRuntimeHandle>>,
-    managed_dynamic_edges: Arc<tokio::sync::RwLock<BTreeSet<(String, String)>>>,
     shutting_down: AtomicBool,
-    /// This runtime's part of the link table between mobs of this process
-    /// (`cross_mob_routes`), set by the start-time read, which runs once
-    /// per runtime. Only the runtime that created a part closes it.
-    cross_mob_routes: std::sync::OnceLock<Arc<cross_mob_routes::CrossMobWakeRoutes>>,
     /// The runtime's close begins under this gate, serialized against a
     /// running publication of its bootstrap completion.
     close_gate: Arc<bootstrap_completion::RuntimeCloseGate>,
-    /// The one-use bootstrap completion, between its mint and its take.
-    bootstrap_completion: std::sync::Mutex<bootstrap_completion::CompletionSlot>,
     mob_event_ingress: tokio::sync::Mutex<Option<MobEventIngress>>,
-    bootstrap_edges_report: tokio::sync::RwLock<Option<UnifiedRuntimeReconcileEdgesReport>>,
     /// Optional observer for bootstrap phase transitions (set once).
     bootstrap_phase_observer: std::sync::OnceLock<UnifiedRuntimeBootstrapPhaseObserver>,
-    /// Set only for an identity-first resume of a persistent log, where the
-    /// mob is deliberately left `Stopped` until continuity is registered.
-    /// While this is `Some`, the runtime is NOT ready: the mob cannot spawn
-    /// and bootstrap edge reconciliation has been deferred.
-    pending_mob_activation:
-        tokio::sync::Mutex<Option<crate::mob_handle_runtime::PendingMobActivation>>,
     event_log: Option<event_log::EventLogHandle>,
     console_log_store: Arc<dyn ConsoleLogStore>,
     console_projection: std::sync::OnceLock<crate::console_aggregator::MetaConsoleAggregator>,
@@ -373,36 +430,7 @@ pub struct UnifiedRuntimeCore {
     /// [`UnifiedRuntime::compose_live`] after the runtime is shared.
     live_composition: tokio::sync::OnceCell<live_compose::LiveComposition>,
     console_events: ConsoleEventStore,
-    mob_events: MobEventsStore,
-    mob_events_subscriber_task: tokio::sync::Mutex<Option<JoinHandle<()>>>,
-    /// Actor-loop liveness probe: a periodic O(1) round trip through the
-    /// serialized mob command loop that pages (`ErrorEvent::ActorLoopStalled`)
-    /// when the loop stops draining. Observation only — aborted first during
-    /// shutdown so the intentional actor stop cannot fire a false page.
-    actor_loop_probe_task: tokio::sync::Mutex<Option<JoinHandle<()>>>,
-    /// The continuity mirror the builder installed. Shutdown stops it, with a
-    /// last round, before the mob quiesces; dropping the runtime aborts it.
-    continuity_mirror: tokio::sync::Mutex<Option<continuity_mirror::ContinuityMirror>>,
-    /// The probe's published verdict (live / stalled / terminated), shared
-    /// with the identity-first delivery path so a send issued while a stall
-    /// is open fails fast naming the `stall_id` instead of waiting the whole
-    /// admission budget behind the wedged command.
-    actor_loop_health: Arc<crate::actor_loop_health::ActorLoopHealth>,
     implicit_delegate_retirement_task: tokio::sync::Mutex<Option<JoinHandle<()>>>,
-    /// Late-bound identity authority observed by the already-running idle
-    /// retirement sweeper. Gateways attach identity-first after base runtime
-    /// bootstrap, so capturing `identity_runtime()` when the task starts would
-    /// permanently capture `None`.
-    implicit_delegate_identity_runtime:
-        Arc<std::sync::RwLock<Option<Arc<crate::identity_first::IdentityRuntime>>>>,
-    /// Woken (an epoch bump) whenever Core's binding of an identity changes
-    /// in the installed identity runtime; the identity health monitor's typed
-    /// wake for attaching a member that just went live.
-    identity_binding_wake: tokio::sync::watch::Sender<u64>,
-    /// Per-session sequence through which the identity health monitor and
-    /// the completion-cursor drain credited run completions, shared so each
-    /// completion is credited exactly once.
-    identity_completion_ledger: Arc<HealthCompletionLedger>,
     agent_memory_observer_task:
         tokio::sync::Mutex<Option<crate::memory::taint::TaintObserverGuard>>,
     agent_memory_steward_task: tokio::sync::Mutex<Option<JoinHandle<()>>>,
@@ -448,14 +476,6 @@ pub struct UnifiedRuntimeCore {
     /// joined before the control listener and mob authority shut down.
     remote_host_reconnect_task: tokio::sync::Mutex<Option<JoinHandle<()>>>,
 
-    // Identity-first session bridge
-    session_bridge: Option<Arc<dyn crate::identity_first::bridge::SessionBridge>>,
-    identity_first_context: Option<Arc<crate::identity_first::IdentityFirstRuntimeContext>>,
-    /// The member build wiring [`UnifiedRuntime::bootstrap`] installed on a
-    /// mob whose spec brought no build preparer, bound at the identity
-    /// bootstrap (`gateway_wiring::MemberBuildWiring::bind_at_identity_bootstrap`).
-    bootstrap_member_build_wiring: Option<crate::gateway_wiring::MemberBuildWiring>,
-
     // Optional ABAC enforcement shared by the console/SSE surfaces.
     access_controller: Option<crate::access::AccessController>,
 
@@ -478,11 +498,6 @@ pub struct UnifiedRuntimeCore {
     // process could not carry. Off by default.
     explicit_provider_credentials: bool,
 
-    // Optional product-level topology authority. The controller always
-    // exists so query can remain available, but its policy defaults to
-    // disabled and mutation methods are then absent/denied.
-    topology_controller: crate::topology_control::TopologyController,
-
     // Optional panel-capable store handle backing the console Memory
     // panel's read-only RPCs (§9.3). Any provider advertising
     // `MemoryPanelStore` serves it (M4 de-weld). Interior-mutable so
@@ -498,26 +513,6 @@ pub struct UnifiedRuntimeCore {
     /// it neither serves nor advertises the methods.
     realm_mcp_administration:
         std::sync::OnceLock<crate::rpc::realm_mcp_methods::RealmMcpAdministration>,
-    // Realm-scoped WorkGraph service backing the `meta/workgraph/*` RPC
-    // group and the console experience section. Seeded from the bootstrap
-    // spec and deliberately FIXED from then on: the admission guards
-    // (cross-process sidecar + agent tool-plane slots) freeze at
-    // `MobRuntime::bootstrap`, so a service wired in later would run
-    // guard-degraded. The spec (`MobBootstrapSpec::with_workgraph_service`
-    // plus admission slot/sidecar) is the only blessed wiring.
-    workgraph_service: Option<meerkat::WorkGraphService>,
-    /// Runtime-owned lossy wake fan-out. It exists exactly when the
-    /// authoritative WorkGraph service exists and is never an authority of
-    /// its own.
-    workgraph_fact_hub: Option<crate::workgraph_events::WorkGraphFactHub>,
-    /// Sole WorkGraph cursor tail feeding `workgraph_fact_hub`. It waits on a
-    /// subscriber notification without reading the store while idle.
-    workgraph_fact_tail_task: tokio::sync::Mutex<WorkGraphFactTailTask>,
-    /// Identity-first console gateways: the mutable desired-identity roster
-    /// that `meta/ensure_member` extends at runtime (ask K0). Set by the
-    /// host beside `attach_identity_first_context`.
-    console_identity_roster:
-        std::sync::RwLock<Option<Arc<crate::identity_first::MutableRosterProvider>>>,
     /// Mob announcements: attached once by the host after boot, absent
     /// until then and in every host that did not enable them.
     mob_announcements: crate::mob_announcements::AnnouncementSlot,
@@ -573,7 +568,6 @@ enum MobEventIngress {
 struct MobEventForwarder {
     event_rx: Receiver<ForwardedMemberEvent>,
     task: JoinHandle<()>,
-    identity_stream_health_task: JoinHandle<()>,
 }
 
 /// A forwarded member event: the wire-facing unified envelope plus a
@@ -584,6 +578,15 @@ struct MobEventForwarder {
 struct ForwardedMemberEvent {
     envelope: EventEnvelope<UnifiedEvent>,
     alert: Option<ErrorEvent>,
+    /// Which request of the event methods is answered this event. The
+    /// envelope itself names no mob: its bytes are what a client reads.
+    selection: EventSelection,
+    /// The incarnation of the mob whose member's stream the event came
+    /// from, as the stream was attached: an event of a mob that a later
+    /// mob of the same id replaced keeps the earlier mob's. None for an
+    /// event that came from no member stream of a mob the forwarder holds
+    /// (a test's ingress), and unread for an event of the launch selection.
+    mob_incarnation: Option<meerkat_core::service::MobIncarnationId>,
 }
 
 /// Provider-free input to the real runtime drain for composition tests.
@@ -600,6 +603,8 @@ impl TestConsoleEventIngress {
             .send(ForwardedMemberEvent {
                 envelope,
                 alert: None,
+                selection: EventSelection::Launch,
+                mob_incarnation: None,
             })
             .await
             .map_err(|_| "test console ingress is closed")
@@ -614,8 +619,73 @@ impl WorkGraphFactTailTask {
     }
 }
 
+/// The hub of the WorkGraph facts of a mob whose WorkGraph service is
+/// `service`, and the one task that feeds it from that service's realm: one
+/// hub and one tail for the mob's entry, the launch mob's and any other
+/// mob's of the host alike. A mob without a service has neither. The tail
+/// idles until the hub has a subscriber, and ends when its holder takes or
+/// drops it.
+fn workgraph_fact_hub_and_tail(
+    service: Option<&meerkat::WorkGraphService>,
+) -> (
+    Option<crate::workgraph_events::WorkGraphFactHub>,
+    WorkGraphFactTailTask,
+) {
+    // The tail is a task: an entry made outside a runtime has no hub, as it
+    // has none of its other tasks.
+    let Some(service) = service.filter(|_| tokio::runtime::Handle::try_current().is_ok()) else {
+        return (None, WorkGraphFactTailTask(None));
+    };
+    let hub = crate::workgraph_events::WorkGraphFactHub::new();
+    let task = crate::workgraph_events::spawn_workgraph_fact_tail(
+        service.clone(),
+        hub.clone(),
+        crate::workgraph_events::WorkGraphFactTailOptions::default(),
+    );
+    (Some(hub), WorkGraphFactTailTask(Some(task)))
+}
+
+/// Whose topology controller the default mob of a launch ends up with. The
+/// table of the other mobs' entries is told that controller once, when it
+/// is final, and builds every other mob's controller from it.
+#[derive(Clone, Copy)]
+enum LaunchTopology {
+    /// The one the bootstrap builds from its topology configuration.
+    OfTheBootstrap,
+    /// The one the builder builds and installs after the bootstrap.
+    OfTheBuilder,
+}
+
+impl UnifiedRuntimeCore {
+    /// The default mob's entry: the mob the launch names, which answers for
+    /// a caller that names no mob.
+    fn default_mob(&self) -> &mob_entry::MobEntry {
+        &self.default_mob
+    }
+
+    /// The default mob's entry, for the composition steps that run while the
+    /// runtime is still exclusively owned.
+    fn default_mob_mut(&mut self) -> &mut mob_entry::MobEntry {
+        &mut self.default_mob
+    }
+
+    /// The table of the entries of the mobs this host serves beside its
+    /// default mob.
+    fn other_mobs(&self) -> &Arc<mob_entries::MobEntries> {
+        &self.other_mobs
+    }
+}
+
 impl UnifiedRuntime {
     fn assemble(core: UnifiedRuntimeCore, public_owner: MobRuntime) -> Self {
+        // The table of the other mobs' entries removes what the console log
+        // keeps under a mob's id before a mob is created under it, and it
+        // asks the log the runtime holds. Every construction of a runtime
+        // passes here, so the table is told the log this state holds
+        // whichever way the state was put together: the library builder
+        // puts its own log into the state after the bootstrap made one.
+        core.other_mobs()
+            .console_log_store_set(Arc::clone(&core.console_log_store));
         Self {
             core: Arc::new(core),
             public_owner: Some(public_owner),
@@ -729,7 +799,12 @@ struct RetainedTeardown {
 
 impl RetainedTeardown {
     async fn run(self) {
-        let mut closed = self.core.mob_runtime.handle().admission_closed();
+        let mut closed = self
+            .core
+            .default_mob()
+            .mob_runtime
+            .handle()
+            .admission_closed();
         let reason = loop {
             if let Some(reason) = *closed.borrow_and_update() {
                 break Some(reason);
@@ -820,6 +895,7 @@ impl UnifiedRuntime {
         mob_runtime: MobRuntime,
         module_runtime: MetaRuntimeHandle,
         persistent_metadata: Arc<dyn PersistentMetadataStore>,
+        other_mobs: Arc<mob_entries::MobEntries>,
     ) -> Self {
         // The given runtime is the mob's public owner and stays with the
         // returned value; everything built below holds the observer side.
@@ -830,17 +906,22 @@ impl UnifiedRuntime {
         // matching mob/run labels at projection time.
         let metadata_table = Arc::new(RuntimeMetadataTable::new());
         let mob_events_store = MobEventsStore::new().with_metadata_table(metadata_table.clone());
-        let identity_runtime_authority = Arc::new(std::sync::RwLock::new(None));
+        // The mob's one identity plane: the entry holds the wrapper's.
+        let identity_plane = mob_runtime.identity_plane().clone();
         let identity_binding_wake = tokio::sync::watch::channel(0_u64).0;
         let identity_completion_ledger = Arc::new(HealthCompletionLedger::default());
-        let mob_event_ingress = Some(Self::create_event_ingress(
+        // The forwarder of member events is the process's; the monitor of
+        // the identity streams watches this mob's plane and is its entry's.
+        let (mob_event_ingress, identity_stream_health_task) = Self::create_event_ingress(
             mob_runtime.handle(),
             mob_runtime.agent_mob_mcp_state(),
             mob_events_store.clone(),
-            Arc::clone(&identity_runtime_authority),
+            identity_plane.clone(),
             Arc::clone(&identity_completion_ledger),
             identity_binding_wake.subscribe(),
-        ));
+            Arc::downgrade(&other_mobs),
+        );
+        let mob_event_ingress = Some(mob_event_ingress);
         let mob_events_task = Self::spawn_mob_events_subscriber(
             mob_runtime.handle(),
             mob_events_store.clone(),
@@ -860,6 +941,9 @@ impl UnifiedRuntime {
             Arc::clone(&actor_loop_health),
         );
         let console_events = ConsoleEventStore::new();
+        // The stores know their launch mob: asked for it by its id they
+        // answer the launch mob's own store, never a second one.
+        console_events.bind_launch_mob(mob_runtime.handle().mob_id());
         if let Some(binary) = mob_runtime.binary_blob_store() {
             // The session store's own adapter: content-addressed image ids
             // match the ones persisted history carries.
@@ -870,22 +954,13 @@ impl UnifiedRuntime {
         // Agent-tool spawns (mob_spawn_member/delegate) project their members
         // into this runtime's console event store so spawned workers are
         // visible in the console without embedder-side workarounds.
-        mob_runtime.install_console_spawn_sink(crate::console_spawn::ConsoleSpawnSink::new(
+        mob_runtime.install_console_spawn_sink(crate::console_spawn::ConsoleSpawnSink::for_mob(
             console_events.clone(),
+            mob_runtime.handle().mob_id().as_str(),
         ));
         let workgraph_service = mob_runtime.workgraph_service();
         let (workgraph_fact_hub, workgraph_fact_tail_task) =
-            if let Some(service) = workgraph_service.clone() {
-                let hub = crate::workgraph_events::WorkGraphFactHub::new();
-                let task = crate::workgraph_events::spawn_workgraph_fact_tail(
-                    service,
-                    hub.clone(),
-                    crate::workgraph_events::WorkGraphFactTailOptions::default(),
-                );
-                (Some(hub), Some(task))
-            } else {
-                (None, None)
-            };
+            workgraph_fact_hub_and_tail(workgraph_service.as_ref());
         let definition_edge_discovery =
             edge_reconcile::DefinitionWiringEdgeDiscovery::from_definition(
                 mob_runtime.handle().definition(),
@@ -900,9 +975,73 @@ impl UnifiedRuntime {
         let console_attention =
             crate::console_replies::ConsoleAttention::over(Arc::clone(&persistent_metadata))
                 .map(Arc::new);
+        // The table of the other mobs' entries builds each entry from the
+        // launch's shared services, which exist from here on. It is given
+        // the host's module runtime too: what that keeps under a mob's id is
+        // released when a mob is created under the id.
+        let console_log_store: Arc<dyn ConsoleLogStore> = Arc::new(InMemoryConsoleLogStore::new());
+        let module_runtime = Arc::new(tokio::sync::Mutex::new(module_runtime));
+        other_mobs.bind_host(mob_entries::HostOfEntries {
+            launch_mob: mob_runtime.clone(),
+            persistent_metadata: Arc::clone(&persistent_metadata),
+            metadata_table: Arc::clone(&metadata_table),
+            error_hook: Arc::clone(&error_hook),
+            console_events: console_events.clone(),
+            console_projection: mob_console_log::ConsoleProjectionSlot::default(),
+            console_log: mob_console_log::HostConsoleLog::new(Arc::clone(&console_log_store)),
+            module_runtime: Arc::downgrade(&module_runtime),
+            gating_state_writer: std::sync::OnceLock::new(),
+        });
         Self::assemble(
             UnifiedRuntimeCore {
-                mob_runtime,
+                other_mobs,
+                default_mob: mob_entry::MobEntry {
+                    mob_runtime,
+                    bootstrap_completion: std::sync::Mutex::new(
+                        bootstrap_completion::CompletionSlot::Pending,
+                    ),
+                    bootstrap_edges_report: tokio::sync::RwLock::new(None),
+                    pending_mob_activation: tokio::sync::Mutex::new(None),
+                    bootstrap_member_build_wiring: None,
+                    // Default the edge policy to the definition's declared wiring
+                    // (auto_wire_orchestrator / role_wiring): upstream applies those
+                    // rules only at spawn time and only from the non-orchestrator
+                    // side, so bring-up order and restarts leave declared crews
+                    // unwired (a downstream app, 2026-07-09). With the default installed,
+                    // `reconcile_edges` converges the roster onto the declaration;
+                    // embedder-supplied policies (builder) override it.
+                    edge_discovery: definition_edge_discovery,
+                    managed_dynamic_edges: Arc::new(tokio::sync::RwLock::new(BTreeSet::new())),
+                    cross_mob_routes: std::sync::OnceLock::new(),
+                    mob_events_subscriber_task: tokio::sync::Mutex::new(mob_events_task),
+                    actor_loop_probe_task: tokio::sync::Mutex::new(actor_loop_probe_task),
+                    actor_loop_health,
+                    topology_controller: crate::topology_control::TopologyController::default(),
+                    workgraph_service,
+                    workgraph_fact_hub,
+                    workgraph_fact_tail_task: tokio::sync::Mutex::new(workgraph_fact_tail_task),
+                    identity_plane,
+                    identity_binding_wake,
+                    identity_completion_ledger,
+                    session_bridge: None,
+                    identity_first_context: Arc::default(),
+                    console_identity_roster: Arc::new(std::sync::RwLock::new(None)),
+                    discovery: None,
+                    mob_events: mob_events_store,
+                    continuity_mirror: tokio::sync::Mutex::new(None),
+                    identity_stream_health_task: tokio::sync::Mutex::new(Some(
+                        identity_stream_health_task,
+                    )),
+                    identity_request_services: std::sync::RwLock::new(None),
+                    served_memory: std::sync::Mutex::new(None),
+                    identity_composition: tokio::sync::Mutex::new(()),
+                    #[cfg(test)]
+                    memory_refusals: std::sync::Mutex::new(Vec::new()),
+                    memory_refusal_logged: std::sync::Mutex::new(None),
+                    #[cfg(test)]
+                    memory_refusal_lines: std::sync::Mutex::new(Vec::new()),
+                    console_log: mob_console_log::EntryConsoleEvents::default(),
+                },
                 #[cfg(feature = "extension-state")]
                 extension_authority: None,
                 teardown_settled: AtomicBool::new(false),
@@ -912,42 +1051,18 @@ impl UnifiedRuntime {
                 post_reconcile_hook: None,
                 error_hook,
                 drain_timeout: DEFAULT_DRAIN_TIMEOUT,
-                discovery: None,
-                // Default the edge policy to the definition's declared wiring
-                // (auto_wire_orchestrator / role_wiring): upstream applies those
-                // rules only at spawn time and only from the non-orchestrator
-                // side, so bring-up order and restarts leave declared crews
-                // unwired (a downstream app, 2026-07-09). With the default installed,
-                // `reconcile_edges` converges the roster onto the declaration;
-                // embedder-supplied policies (builder) override it.
-                edge_discovery: definition_edge_discovery,
-                module_runtime: Arc::new(tokio::sync::Mutex::new(module_runtime)),
-                managed_dynamic_edges: Arc::new(tokio::sync::RwLock::new(BTreeSet::new())),
+                module_runtime,
                 shutting_down: AtomicBool::new(false),
-                cross_mob_routes: std::sync::OnceLock::new(),
                 close_gate: bootstrap_completion::RuntimeCloseGate::new(),
-                bootstrap_completion: std::sync::Mutex::new(
-                    bootstrap_completion::CompletionSlot::Pending,
-                ),
                 mob_event_ingress: tokio::sync::Mutex::new(mob_event_ingress),
-                bootstrap_edges_report: tokio::sync::RwLock::new(None),
                 bootstrap_phase_observer: std::sync::OnceLock::new(),
-                pending_mob_activation: tokio::sync::Mutex::new(None),
                 event_log: None,
-                console_log_store: Arc::new(InMemoryConsoleLogStore::new()),
+                console_log_store,
                 console_projection: std::sync::OnceLock::new(),
                 live_plan: None,
                 live_composition: tokio::sync::OnceCell::new(),
                 console_events,
-                mob_events: mob_events_store,
-                mob_events_subscriber_task: tokio::sync::Mutex::new(mob_events_task),
-                actor_loop_probe_task: tokio::sync::Mutex::new(actor_loop_probe_task),
-                continuity_mirror: tokio::sync::Mutex::new(None),
-                actor_loop_health,
                 implicit_delegate_retirement_task: tokio::sync::Mutex::new(None),
-                implicit_delegate_identity_runtime: identity_runtime_authority,
-                identity_binding_wake,
-                identity_completion_ledger,
                 agent_memory_observer_task: tokio::sync::Mutex::new(None),
                 agent_memory_steward_task: tokio::sync::Mutex::new(None),
                 contact_directory: None,
@@ -959,25 +1074,15 @@ impl UnifiedRuntime {
                 remote_host_lifecycle: std::sync::RwLock::new(None),
                 remote_host_lifecycle_error: std::sync::RwLock::new(None),
                 remote_host_reconnect_task: tokio::sync::Mutex::new(None),
-                session_bridge: None,
-                identity_first_context: None,
-                bootstrap_member_build_wiring: None,
                 access_controller: None,
                 durable_decisions: crate::durable_decisions::RuntimeDecisions::unavailable(),
                 console_session_fences: crate::auth::session_fence::ConsoleSessionFences::detached(
                 ),
                 flow_editor_host_deploy: false,
                 explicit_provider_credentials: false,
-                topology_controller: crate::topology_control::TopologyController::default(),
                 memory_panel_store: std::sync::RwLock::new(None),
                 job_health_projection: Arc::new(std::sync::RwLock::new(None)),
                 realm_mcp_administration: std::sync::OnceLock::new(),
-                workgraph_service,
-                workgraph_fact_hub,
-                workgraph_fact_tail_task: tokio::sync::Mutex::new(WorkGraphFactTailTask(
-                    workgraph_fact_tail_task,
-                )),
-                console_identity_roster: std::sync::RwLock::new(None),
                 mob_announcements: Default::default(),
                 keyed_inject_slot: crate::runtime::keyed_inject::pending_keyed_inject_slot(),
                 console_governed_ingress: Default::default(),
@@ -1056,7 +1161,7 @@ impl UnifiedRuntime {
     /// delivery path (fail fast while a stall is open) and by
     /// `meta/member_health`.
     pub fn actor_loop_health(&self) -> &Arc<crate::actor_loop_health::ActorLoopHealth> {
-        &self.actor_loop_health
+        &self.default_mob().actor_loop_health
     }
 
     pub async fn bootstrap(
@@ -1141,6 +1246,64 @@ impl UnifiedRuntime {
         persistent_metadata: Arc<dyn PersistentMetadataStore>,
         topology: crate::topology_control::TopologyBootstrapConfig,
     ) -> Result<Self, UnifiedRuntimeBootstrapError> {
+        crate::boxed_future::boxed(|| {
+            Self::bootstrap_with_launch_topology(
+                mob_spec,
+                module_config,
+                module_agent_events,
+                timeout,
+                options,
+                persistent_metadata,
+                topology,
+                LaunchTopology::OfTheBootstrap,
+            )
+        })
+        .await
+    }
+
+    /// [`Self::bootstrap_with_options`] for the builder. The builder builds
+    /// the topology controller of its launch itself, after this returns,
+    /// and tells the table of the other mobs' entries then
+    /// (`MobEntries::bind_launch_topology`); until it does, the table
+    /// builds no entry.
+    async fn bootstrap_for_the_builder(
+        mob_spec: MobBootstrapSpec,
+        module_config: MetaConfig,
+        module_agent_events: Vec<EventEnvelope<UnifiedEvent>>,
+        timeout: Duration,
+        options: RuntimeOptions,
+        persistent_metadata: Arc<dyn PersistentMetadataStore>,
+    ) -> Result<Self, UnifiedRuntimeBootstrapError> {
+        crate::boxed_future::boxed(|| {
+            Self::bootstrap_with_launch_topology(
+                mob_spec,
+                module_config,
+                module_agent_events,
+                timeout,
+                options,
+                persistent_metadata,
+                crate::topology_control::TopologyBootstrapConfig::default(),
+                LaunchTopology::OfTheBuilder,
+            )
+        })
+        .await
+    }
+
+    /// The bootstrap behind [`Self::bootstrap_with_options_and_topology`]
+    /// and the builder's: `launch_topology` says whose topology controller
+    /// the launch's default mob ends up with, the one built here from
+    /// `topology` or one the builder installs afterwards.
+    #[allow(clippy::too_many_arguments)]
+    async fn bootstrap_with_launch_topology(
+        mob_spec: MobBootstrapSpec,
+        module_config: MetaConfig,
+        module_agent_events: Vec<EventEnvelope<UnifiedEvent>>,
+        timeout: Duration,
+        options: RuntimeOptions,
+        persistent_metadata: Arc<dyn PersistentMetadataStore>,
+        topology: crate::topology_control::TopologyBootstrapConfig,
+        launch_topology: LaunchTopology,
+    ) -> Result<Self, UnifiedRuntimeBootstrapError> {
         let mut mob_spec = mob_spec;
         let topology_authority = mob_spec.definition.id.to_string();
         let topology_controller = match topology.state_path {
@@ -1187,6 +1350,15 @@ impl UnifiedRuntime {
             Some(wiring) => wiring.install(mob_spec),
             None => mob_spec,
         };
+        // The launch's composition asks this runtime's table of entries for
+        // the member wiring of every mob its mob set builds for the host
+        // beside the default mob. It is installed before the mob set exists:
+        // the set's first verb can already build such a mob.
+        let other_mobs = mob_entries::MobEntries::new();
+        let mob_spec =
+            mob_spec
+                .with_host_mob_entry_wiring(Arc::clone(&other_mobs)
+                    as Arc<dyn crate::mob_handle_runtime::HostMobEntryWiring>);
         // `prepare`, not `bootstrap`: an identity-first resume of a persistent
         // log must stay Stopped until its continuity owners are registered,
         // because the lift is what triggers session revival.
@@ -1203,17 +1375,26 @@ impl UnifiedRuntime {
         match module_start_result {
             Ok(Ok(module_runtime)) => {
                 let mut runtime = crate::boxed_future::boxed(|| {
-                    Self::from_parts(mob_runtime, module_runtime, persistent_metadata)
+                    Self::from_parts(mob_runtime, module_runtime, persistent_metadata, other_mobs)
                 })
                 .await;
-                runtime.topology_controller = topology_controller;
-                runtime.bootstrap_member_build_wiring = bootstrap_member_build_wiring;
+                let mob = runtime.default_mob_mut();
+                mob.topology_controller = topology_controller;
+                mob.bootstrap_member_build_wiring = bootstrap_member_build_wiring;
+                if matches!(launch_topology, LaunchTopology::OfTheBootstrap) {
+                    // The controller of the launch is final: every other mob
+                    // of the host gets its own from it.
+                    runtime
+                        .other_mobs()
+                        .bind_launch_topology(&runtime.default_mob().topology_controller)
+                        .await;
+                }
                 // Configuration-only; dispatches nothing into the mob.
                 runtime
                     .configure_implicit_delegate_retirement(&runtime_options)
                     .await;
                 let staged = pending_mob_activation.is_some();
-                *runtime.pending_mob_activation.lock().await = pending_mob_activation;
+                *runtime.default_mob().pending_mob_activation.lock().await = pending_mob_activation;
                 if staged {
                     // DEFERRED, not skipped. Reconciliation here would take the
                     // non-identity authority path (no identity context exists
@@ -1282,13 +1463,14 @@ impl UnifiedRuntime {
     /// since) is seated from its record now, once. A later call asks for
     /// nothing again.
     pub async fn activate_without_identity_context(&mut self) -> Result<(), MobRuntimeError> {
-        if self.identity_first_context.is_some() {
+        if self.default_mob().identity_first_context.get().is_some() {
             return Err(MobRuntimeError::InvalidConfig(
                 "cannot activate without identity authority after an identity context is installed"
                     .to_string(),
             ));
         }
         if self
+            .default_mob()
             .bootstrap_member_build_wiring
             .as_ref()
             .is_some_and(crate::gateway_wiring::MemberBuildWiring::is_declared)
@@ -1307,10 +1489,16 @@ impl UnifiedRuntime {
         // an agent created at run time is built from its record, as it is
         // on a composition that never had a customizer.
         let decided_without_customizer = self
+            .default_mob()
             .bootstrap_member_build_wiring
             .as_ref()
             .is_some_and(crate::gateway_wiring::MemberBuildWiring::decide_without_customizer);
-        let pending = self.pending_mob_activation.lock().await.take();
+        let pending = self
+            .default_mob()
+            .pending_mob_activation
+            .lock()
+            .await
+            .take();
         if let Some(pending) = pending {
             self.report_bootstrap_phase(UnifiedRuntimeBootstrapPhase::Activate);
             if let Err(error) = pending.activate().await {
@@ -1329,6 +1517,7 @@ impl UnifiedRuntime {
             // stays owed its seat, and Core's next start, or the next
             // change of the mob's identities, seats it.
             let still_owed = self
+                .default_mob()
                 .mob_runtime
                 .handle()
                 .seat_owed_store_owned_identities()
@@ -1366,12 +1555,12 @@ impl UnifiedRuntime {
     /// One rule, shared by the immediate path and the deferred identity-first
     /// path, so the two cannot drift on WHEN reconciliation is owed.
     async fn reconcile_bootstrap_edges_if_configured(&self) {
-        if self.edge_discovery.is_some()
-            || self.topology_controller.revision().await > 0
-            || self.topology_controller.has_pending().await
+        if self.default_mob().edge_discovery.is_some()
+            || self.default_mob().topology_controller.revision().await > 0
+            || self.default_mob().topology_controller.has_pending().await
         {
             let report = self.reconcile_edges().await;
-            *self.bootstrap_edges_report.write().await = Some(report);
+            *self.default_mob().bootstrap_edges_report.write().await = Some(report);
         }
     }
 
@@ -1380,7 +1569,7 @@ impl UnifiedRuntime {
     /// Inspect after `build()` to detect incomplete startup topology.
     /// Returns `None` if no edge discovery was configured.
     pub async fn bootstrap_edges_report(&self) -> Option<UnifiedRuntimeReconcileEdgesReport> {
-        self.bootstrap_edges_report.read().await.clone()
+        self.default_mob().bootstrap_edges_report().await
     }
 
     /// Register an error hook after construction. Useful when the runtime
@@ -1413,10 +1602,7 @@ impl UnifiedRuntime {
     /// sink captures the current runtime handle so sync emitters
     /// (store/taint/guard code) can fire-and-forget.
     pub fn memory_event_sink(&self) -> Arc<dyn crate::memory::events::MemoryEventSink> {
-        Arc::new(ConsoleMemoryEventSink {
-            store: self.console_events(),
-            handle: tokio::runtime::Handle::current(),
-        })
+        console_memory_event_sink(self.console_events())
     }
 
     /// Register an observer for gating pending-entry resolutions
@@ -1432,15 +1618,25 @@ impl UnifiedRuntime {
             .register_gating_resolution_observer(observer);
     }
 
+    /// Test builds only: how many gating-resolution observers are
+    /// registered with this runtime.
+    #[cfg(test)]
+    pub(crate) async fn gating_resolution_observers_in_tests(&self) -> usize {
+        self.module_runtime
+            .lock()
+            .await
+            .gating_resolution_observers_in_tests()
+    }
+
     /// Internal accessor used by console-facing RPC routers to share the
     /// in-memory structural mob events store without holding a full
     /// runtime reference.
     pub(crate) fn mob_events_store(&self) -> MobEventsStore {
-        self.mob_events.clone()
+        self.default_mob().mob_events.clone()
     }
 
     pub fn binary_blob_store(&self) -> Option<Arc<dyn crate::blob_store::BinaryBlobStore>> {
-        self.mob_runtime.binary_blob_store()
+        self.default_mob().mob_runtime.binary_blob_store()
     }
 
     /// Publish the latest rebuildable detached-job observability projection.
@@ -1548,12 +1744,7 @@ impl UnifiedRuntime {
     /// The session bridge for identity-first operations, if configured, as
     /// an exported view carrying the mob's public owner (D67).
     pub fn session_bridge(&self) -> Option<crate::identity_first::PublicSessionBridge> {
-        self.session_bridge.as_ref().map(|bridge| {
-            crate::identity_first::PublicSessionBridge::new(
-                Arc::clone(bridge),
-                self.mob_runtime().clone(),
-            )
-        })
+        self.default_mob().public_session_bridge(self.mob_runtime())
     }
 
     /// The identity-first context as an exported view carrying the mob's
@@ -1561,23 +1752,15 @@ impl UnifiedRuntime {
     pub fn identity_first_context(
         &self,
     ) -> Option<crate::identity_first::PublicIdentityFirstContext> {
-        self.identity_first_context.as_ref().map(|context| {
-            crate::identity_first::PublicIdentityFirstContext::new(
-                Arc::clone(context),
-                self.mob_runtime().clone(),
-            )
-        })
+        self.default_mob()
+            .public_identity_first_context(self.mob_runtime())
     }
 
     /// The identity runtime as an exported view carrying the mob's public
     /// owner (D67).
     pub fn identity_runtime(&self) -> Option<crate::identity_first::PublicIdentityRuntime> {
-        self.identity_first_context.as_ref().map(|context| {
-            crate::identity_first::PublicIdentityRuntime::new(
-                Arc::clone(&context.runtime),
-                self.mob_runtime().clone(),
-            )
-        })
+        self.default_mob()
+            .public_identity_runtime(self.mob_runtime())
     }
 
     /// The composition's own (non-owning) identity runtime, for its internal
@@ -1585,7 +1768,7 @@ impl UnifiedRuntime {
     pub(crate) fn identity_runtime_ref(
         &self,
     ) -> Option<&Arc<crate::identity_first::IdentityRuntime>> {
-        self.identity_first_context.as_ref().map(|ctx| &ctx.runtime)
+        self.default_mob().identity_runtime_ref()
     }
 
     pub async fn remember_agent_memory(
@@ -1786,7 +1969,7 @@ impl UnifiedRuntime {
         let terminal = Arc::new(crate::identity_first::held_bootstrap::HeldTerminal::new(
             deadline,
         ));
-        let Some(context) = self.identity_first_context.clone() else {
+        let Some(context) = self.default_mob().identity_first_context.get().cloned() else {
             return Err(crate::identity_first::IdentityRuntimeError::Internal(
                 "no identity-first context is installed to bootstrap".to_string(),
             ));
@@ -1799,7 +1982,12 @@ impl UnifiedRuntime {
         // The ruled activation order is unchanged (see the unheld path): a
         // held setup runs it first in its tracked operation. The bootstrap
         // edges are reconciled after the roster pass, as on the unheld path.
-        let pending = self.pending_mob_activation.get_mut().take();
+        let pending = self
+            .default_mob()
+            .pending_mob_activation
+            .lock()
+            .await
+            .take();
         let reconcile_after_roster = pending.is_some();
         let prelude = match pending {
             Some(pending) => Some(held_setup_prelude(
@@ -1865,7 +2053,7 @@ impl UnifiedRuntime {
         roster: &[crate::identity_first::DurableAgentSpec],
     ) -> Result<crate::identity_first::RestoreFlowResult, crate::identity_first::IdentityRuntimeError>
     {
-        let Some(context) = self.identity_first_context.clone() else {
+        let Some(context) = self.default_mob().identity_first_context.get().cloned() else {
             return Err(crate::identity_first::IdentityRuntimeError::Internal(
                 "no identity-first context is installed to bootstrap".to_string(),
             ));
@@ -1880,7 +2068,12 @@ impl UnifiedRuntime {
         // Core asks the mob's member build preparer before each member it
         // builds, and a member built before the identity runtime is composed
         // is held until the roster pass publishes its tools.
-        let pending = self.pending_mob_activation.lock().await.take();
+        let pending = self
+            .default_mob()
+            .pending_mob_activation
+            .lock()
+            .await
+            .take();
         // The bootstrap edges are reconciled once the roster pass has seated
         // the roster, in every bootstrap mode: every mode seats each roster
         // identity, the lazy modes included, and Core wires a Dormant member
@@ -1934,11 +2127,14 @@ impl UnifiedRuntime {
         &self,
         context: &crate::identity_first::IdentityFirstRuntimeContext,
     ) -> Result<(), crate::identity_first::IdentityRuntimeError> {
-        let Some(wiring) = self.bootstrap_member_build_wiring.as_ref() else {
+        let Some(wiring) = self.default_mob().bootstrap_member_build_wiring.as_ref() else {
             return Ok(());
         };
         wiring
-            .bind_at_identity_bootstrap(context, self.mob_runtime.session_service().cloned())
+            .bind_at_identity_bootstrap(
+                context,
+                self.default_mob().mob_runtime.session_service().cloned(),
+            )
             .await
             .map_err(crate::identity_first::IdentityRuntimeError::Internal)
     }
@@ -1953,49 +2149,52 @@ impl UnifiedRuntime {
         // while a stall is open fails fast instead of queueing behind it.
         context
             .runtime
-            .install_actor_loop_health(Arc::clone(&self.actor_loop_health));
-        self.mob_runtime
+            .install_actor_loop_health(Arc::clone(&self.default_mob().actor_loop_health));
+        // The mob has one identity runtime slot, the plane its wrapper and
+        // its entry both hold: this one write attaches the authority for
+        // every holder.
+        self.default_mob()
+            .mob_runtime
             .install_identity_runtime_authority(Arc::clone(&context.runtime));
         // A respawned or delivery-repaired identity member keeps its
         // idle-retire opt-in: the continuity rebind carries it to the new
         // session.
-        if let Some(overrides) = self.mob_runtime.implicit_delegate_retirement_overrides() {
+        if let Some(overrides) = self
+            .default_mob()
+            .mob_runtime
+            .implicit_delegate_retirement_overrides()
+        {
             context.runtime.install_session_rotation_observer(Arc::new(
                 crate::mob_handle_runtime::IdleRetireRotationObserver::new(
                     overrides,
-                    self.mob_runtime.handle().mob_id().to_string(),
+                    self.default_mob().mob_runtime.handle().mob_id().to_string(),
                 ),
             ));
         }
-        *self
-            .implicit_delegate_identity_runtime
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            Some(Arc::clone(&context.runtime));
         // Let completion-cursor reads credit the completions a member's actor
         // already published but the health monitor has not credited yet,
         // replayed from meerkat's retained session events. Installed before
         // the binding observer, so the monitor's first binding-woken attach
         // already knows it may replay.
-        if let Some(session_service) = self.mob_runtime.session_service().cloned() {
+        if let Some(session_service) = self.default_mob().mob_runtime.session_service().cloned() {
             context
                 .runtime
                 .install_pending_completion_drain(Arc::new(ReplayedCompletionDrain {
                     session_service,
-                    ledger: Arc::clone(&self.identity_completion_ledger),
+                    ledger: Arc::clone(&self.default_mob().identity_completion_ledger),
                 }));
         }
         // After the authority is visible: the install itself wakes the
         // monitor once, for bindings that predate it.
         context
             .runtime
-            .install_member_binding_observer(self.identity_binding_wake.clone());
+            .install_member_binding_observer(self.default_mob().identity_binding_wake.clone());
         // The family of changes and reads of the mob's long-term agents is
         // attached with the identity authority: its reads are served from
         // here on, and its changes once the launch attaches its identity
         // policy. It builds one value and starts nothing.
         self.attach_identity_reads(&context.runtime);
-        self.identity_first_context = Some(context);
+        self.default_mob().identity_first_context.install(context);
         // The members' questions are served from here on, whatever the
         // launch's identity policy (`crate::ask_user`).
         self.serve_ask_user();
@@ -2008,66 +2207,23 @@ impl UnifiedRuntime {
         &self,
         runtime: &Arc<crate::identity_first::IdentityRuntime>,
     ) {
-        let identity_runtime = Arc::downgrade(runtime);
-        self.mob_runtime
-            .handle()
-            .install_flow_target_provisioner(Arc::new(move || {
-                let identity_runtime = identity_runtime.clone();
-                Box::pin(async move {
-                    let runtime = identity_runtime.upgrade().ok_or_else(|| {
-                        MobError::Internal(
-                            "identity-first flow provisioner is no longer available".to_string(),
-                        )
-                    })?;
-                    // The barrier makes every registered identity a member of
-                    // Core's mob before the flow run id is minted, and
-                    // materializes none: each step's delivery reaches a
-                    // Dormant member through Core's own wake. Only an
-                    // identity Core does not hold yet is seated, in one step.
-                    tracing::info!(
-                        cause = "flow_target_provisioning",
-                        "identity-first flow barrier is seating every registered identity Core \
-                         does not hold yet; nothing is materialized"
-                    );
-                    let started = std::time::Instant::now();
-                    let outcome = runtime
-                        .materialize_all_required_for_entered_flow()
-                        .await
-                        .map(|records| records.len())
-                        .map_err(|error| {
-                            MobError::Internal(format!(
-                                "identity-first flow membership failed: {error}"
-                            ))
-                        });
-                    match &outcome {
-                        Ok(members) => tracing::info!(
-                            members = *members,
-                            elapsed_ms = started.elapsed().as_millis() as u64,
-                            cause = "flow_target_provisioning",
-                            "identity-first flow barrier complete"
-                        ),
-                        Err(error) => tracing::warn!(
-                            elapsed_ms = started.elapsed().as_millis() as u64,
-                            cause = "flow_target_provisioning",
-                            %error,
-                            "identity-first flow barrier failed"
-                        ),
-                    }
-                    outcome.map(|_| ())
-                })
-            }));
+        mob_identity_plane::install_flow_target_provisioner(
+            &self.default_mob().mob_runtime.handle(),
+            runtime,
+        );
     }
 
+    /// Ask the identity context's roster again and reconcile the desired
+    /// topology; `None` when no identity context is installed. This is the
+    /// default mob's form of the operation: it asks the identity context
+    /// of the mob the launch names.
     pub async fn refresh_desired_topology(
         &self,
     ) -> Result<
         Option<crate::identity_first::RestoreFlowResult>,
         crate::identity_first::IdentityRuntimeError,
     > {
-        match self.identity_first_context.as_ref() {
-            Some(ctx) => ctx.refresh_desired_topology_tracked().await.map(Some),
-            None => Ok(None),
-        }
+        self.default_mob_resolved().refresh_desired_topology().await
     }
 
     /// Make every identity-first identity a member of Core's mob before
@@ -2093,8 +2249,14 @@ impl UnifiedRuntime {
     }
 
     /// Install the shared access controller. Console routers built after
-    /// this call enforce (and live-serve) the ABAC configuration.
+    /// this call enforce (and live-serve) the ABAC configuration. A mob
+    /// created under an id is known to the controller by nothing it held
+    /// of an earlier mob of that id.
     pub fn set_access_controller(&mut self, controller: crate::access::AccessController) {
+        controller.bind_default_mob(&crate::member_key::DefaultMob::new(
+            self.default_mob().mob_id().clone(),
+        ));
+        self.other_mobs().keep_access_controller(&controller);
         self.access_controller = Some(controller);
     }
 
@@ -2175,6 +2337,7 @@ impl UnifiedRuntime {
         roster: Arc<crate::identity_first::MutableRosterProvider>,
     ) {
         *self
+            .default_mob()
             .console_identity_roster
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(roster);
@@ -2183,10 +2346,7 @@ impl UnifiedRuntime {
     pub fn console_identity_roster(
         &self,
     ) -> Option<Arc<crate::identity_first::MutableRosterProvider>> {
-        self.console_identity_roster
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
+        self.default_mob().console_identity_roster()
     }
 
     /// Attach the mob announcement owner. Once per runtime: `false` when one
@@ -2263,7 +2423,7 @@ impl UnifiedRuntime {
     /// `with_workgraph_admission_slot`/`with_workgraph_admission_sidecar`)
     /// or the stock spec constructors, which do all three.
     pub fn workgraph_service(&self) -> Option<meerkat::WorkGraphService> {
-        self.workgraph_service.clone()
+        self.default_mob().workgraph_service.clone()
     }
 
     /// Report of the bootstrap-time migration of member-bound attention
@@ -2271,14 +2431,14 @@ impl UnifiedRuntime {
     pub fn workgraph_realm_migration(
         &self,
     ) -> Option<std::sync::Arc<crate::workgraph_realm::WorkGraphRealmMigrationReport>> {
-        self.mob_runtime.workgraph_realm_migration()
+        self.default_mob().mob_runtime.workgraph_realm_migration()
     }
 
     /// Clone the runtime's lossy WorkGraph fact hub when WorkGraph is
     /// configured. Every subscriber must begin with a durable pull; the hub
     /// has no replay or state authority.
     pub fn workgraph_fact_hub(&self) -> Option<crate::workgraph_events::WorkGraphFactHub> {
-        self.workgraph_fact_hub.clone()
+        self.default_mob().workgraph_fact_hub.clone()
     }
 
     /// Composition-time storage durability resolution (H1/H2) carried from
@@ -2286,18 +2446,7 @@ impl UnifiedRuntime {
     /// `meta/capabilities`. `None` when the spec was composed externally
     /// without a declaration.
     pub fn resolved_storage(&self) -> Option<crate::storage_health::ResolvedStorageSummary> {
-        self.mob_runtime.resolved_storage()
-    }
-
-    /// The runtime-wide admission authority serializing the workgraph
-    /// duplicate-binding guards' check-then-act windows (RPC arms + agent
-    /// tool plane). Lives on the mob runtime so console routers (which
-    /// capture the mob runtime by value) and the unified stdin dispatch
-    /// reach the SAME instance, frozen at bootstrap alongside the service.
-    pub(crate) fn workgraph_admission(
-        &self,
-    ) -> std::sync::Arc<crate::workgraph_admission::WorkGraphAdmission> {
-        self.mob_runtime.workgraph_admission()
+        self.default_mob().mob_runtime.resolved_storage()
     }
 
     /// Install the trusted host's governance of Console sends
@@ -2363,7 +2512,7 @@ impl UnifiedRuntime {
     /// is installed, whatever the launch's identity policy; a later call
     /// replaces what an earlier one armed.
     pub(crate) fn serve_ask_user(&self) {
-        if self.identity_first_context.is_none() {
+        if self.default_mob().identity_first_context.get().is_none() {
             return;
         }
         let surface = crate::ask_user::AskUserSurface::new(
@@ -2376,23 +2525,32 @@ impl UnifiedRuntime {
             // The composition's own handle of its mob: a back-edge, never
             // its public owner.
             Arc::new(crate::ask_user::MemberKeyedNotices::new(
-                self.mob_runtime.clone(),
+                self.default_mob().mob_runtime.clone(),
             )),
             crate::durable_decisions::DecisionExecutorDriver::DEFAULT_TICK,
             surface.held_signal(),
         );
-        self.mob_runtime.ask_user_slot().fill(surface);
+        self.default_mob().mob_runtime.ask_user_slot().fill(surface);
         *self
             .ask_user_driver
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = driver;
     }
 
+    /// The slot the members' `ask_user` tool reads (`crate::ask_user`), and
+    /// through it the durable decisions the host's question sets are held
+    /// in. It is the process's, one for every mob the host serves, and is
+    /// read through the default mob's wrapper only because the wrapper
+    /// carries the process's part: reading it resolves and loads no mob.
+    pub(crate) fn ask_user_slot(&self) -> &crate::ask_user::AskUserSlot {
+        self.default_mob().mob_runtime.ask_user_slot()
+    }
+
     /// Stop serving the members' questions: their calls answer that no
     /// person can be asked, and the executor's driver stops. What it left
     /// owed is settled by the next process's first pass.
     pub(crate) fn stop_ask_user(&self) {
-        self.mob_runtime.ask_user_slot().clear();
+        self.default_mob().mob_runtime.ask_user_slot().clear();
         self.ask_user_driver
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -2430,31 +2588,25 @@ impl UnifiedRuntime {
 
     /// Optional topology control-plane policy and durable intent store.
     pub fn topology_controller(&self) -> &crate::topology_control::TopologyController {
-        &self.topology_controller
+        &self.default_mob().topology_controller
     }
 
     /// Cloneable topology seam for HTTP/RPC routers.
     pub fn topology_runtime_handle(&self) -> crate::topology_control::TopologyRuntimeHandle {
-        crate::topology_control::TopologyRuntimeHandle::new(
-            self.mob_handle(),
-            self.edge_discovery.clone(),
-            Arc::clone(&self.managed_dynamic_edges),
-            self.topology_controller.clone(),
-            // An export: the handle goes to routers and the host.
-            self.identity_first_context(),
-            // A candidate launch's handle rewires nothing.
-            !self.speaks_for_composition(),
-        )
+        self.default_mob()
+            .topology_runtime_handle(self.mob_runtime())
     }
 
     /// Replace the topology policy at runtime. Existing additions and
     /// suppression tombstones remain authoritative; disabling hides/denies
-    /// mutation rather than silently discarding desired state.
+    /// mutation rather than silently discarding desired state. The policy
+    /// is the host's: the change reaches every mob the host serves, the
+    /// mobs beside its default mob included.
     pub fn set_topology_control_policy(
         &self,
         policy: crate::topology_control::TopologyControlPolicy,
     ) -> Result<(), crate::topology_control::TopologyControlError> {
-        self.topology_controller.set_policy(policy)
+        self.default_mob().topology_controller.set_policy(policy)
     }
 
     /// Return the persistent metadata adapter — used by the
@@ -2562,8 +2714,15 @@ impl UnifiedRuntime {
     }
 
     pub fn set_console_log_store(&mut self, store: Arc<dyn ConsoleLogStore>) {
+        // The table of the other mobs' entries removes what the log keeps
+        // under a mob's id before a mob is created under it: it asks the
+        // store the runtime holds now.
+        self.other_mobs().console_log_store_set(Arc::clone(&store));
         self.console_log_store = store;
         if let Some(projection) = self.console_projection.take() {
+            // The registrations of the other mobs' console events with the
+            // replaced projection end with it; the next one gets them again.
+            self.other_mobs().console_projection_replaced();
             projection.unregister_runtime("default");
         }
         // The console schedules' send path holds the replaced projection;
@@ -2587,8 +2746,7 @@ impl UnifiedRuntime {
         &self,
         query: &EventQuery,
     ) -> Result<Vec<MobStructuralEventEnvelope>, mob_events::MobEventsQueryError> {
-        let events = self.mob_runtime.handle().events();
-        mob_events::query_ledger_with_filter(&events, &self.mob_events, query).await
+        self.default_mob().query_mob_events(query).await
     }
 
     /// Subscribe to live structural mob events. Returns a broadcast
@@ -2598,9 +2756,14 @@ impl UnifiedRuntime {
     pub fn subscribe_mob_events(
         &self,
     ) -> tokio::sync::broadcast::Receiver<MobStructuralEventEnvelope> {
-        self.mob_events.subscribe()
+        self.default_mob().mob_events.subscribe()
     }
 
+    /// Record a lifecycle event of the launch mob's identity `identity` in
+    /// the host's console events. Test builds only: a request door records
+    /// in the console events of the mob a request names
+    /// ([`ConsoleEventStore::of_mob`]).
+    #[cfg(test)]
     pub(crate) async fn record_console_lifecycle(
         &self,
         identity: &str,
@@ -2612,6 +2775,11 @@ impl UnifiedRuntime {
             .await;
     }
 
+    /// Reserve an interaction of the launch mob's identity `identity` in
+    /// the host's console events. Every key of that store is an identity
+    /// name, and an identity is a name inside one mob: the console events of
+    /// any other mob are a store of their own
+    /// (`ConsoleEventStore::of_mob`), which this does not reach.
     pub async fn reserve_identity_interaction(
         &self,
         identity: &str,
@@ -2625,33 +2793,37 @@ impl UnifiedRuntime {
             .await
     }
 
-    /// Reserve a caller-supplied interaction id for `meta/interact`,
-    /// refusing one still in flight for the identity (see
-    /// [`console_events::InteractionIdInFlight`]).
-    pub(crate) async fn reserve_caller_identity_interaction(
-        &self,
-        identity: &str,
-        runtime_member_id: Option<&str>,
-        interaction_id: &str,
-        origin: &str,
-        content: serde_json::Value,
-    ) -> Result<(), console_events::InteractionIdInFlight> {
-        self.console_events
-            .reserve_caller_interaction_value(
-                identity,
-                runtime_member_id,
-                interaction_id,
-                origin,
-                content,
-            )
-            .await
-    }
-
+    /// Project `event` into the launch mob's console events, as the drain
+    /// does for an event of the launch selection.
+    #[cfg(test)]
     pub(crate) async fn project_console_event_from_unified(
         &self,
         event: &EventEnvelope<UnifiedEvent>,
     ) {
         self.console_events.project_unified_event(event).await;
+    }
+
+    /// The console events a forwarded member event is projected into, by
+    /// the event selection it belongs to: the launch mob's for the launch
+    /// selection, as on a host of one mob; for an event of a mob of the
+    /// host other than the launch mob, that mob's own, as the host holds
+    /// the mob now and only when the event came from that very mob
+    /// (`incarnation`; see `mob_entries`); none for an event of a mob below
+    /// such a mob, which no console registration speaks for. So an agent's
+    /// run in one mob is never read as the run of an agent of the same
+    /// name in another.
+    pub(crate) fn console_events_of_selection(
+        &self,
+        selection: &EventSelection,
+        incarnation: Option<meerkat_core::service::MobIncarnationId>,
+    ) -> Option<ConsoleEventStore> {
+        match (selection.second_host_mob(), selection.row_mob()) {
+            (Some(mob_id), _) => self
+                .other_mobs()
+                .console_events_of_event(mob_id, incarnation),
+            (None, Some(_below_a_second_mob)) => None,
+            (None, None) => Some(self.console_events.clone()),
+        }
     }
 
     /// Fire an error event to the registered hook, if any.
@@ -2669,16 +2841,18 @@ impl UnifiedRuntime {
         Arc::new(move |event| fire_error_hook(&slot, event))
     }
 
+    /// The forwarder of member events, which is the process's, and the
+    /// monitor of `identity_plane`'s identity streams, which is that mob's:
+    /// its entry holds the monitor's task.
     fn create_event_ingress(
         mob_handle: MobHandle,
         agent_mob_mcp_state: Option<Arc<meerkat_mob_mcp::MobMcpState>>,
         mob_events: MobEventsStore,
-        identity_runtime: Arc<
-            std::sync::RwLock<Option<Arc<crate::identity_first::IdentityRuntime>>>,
-        >,
+        identity_plane: crate::mob_handle_runtime::MobIdentityPlane,
         completion_ledger: Arc<HealthCompletionLedger>,
         identity_binding_changes: tokio::sync::watch::Receiver<u64>,
-    ) -> MobEventIngress {
+        hosted_mobs: std::sync::Weak<mob_entries::MobEntries>,
+    ) -> (MobEventIngress, JoinHandle<()>) {
         // Keep forwarding bounded to avoid unbounded memory growth under sustained ingress.
         let (event_tx, event_rx) = tokio::sync::mpsc::channel(256);
         // Identity lifecycle repair must remain live even when an embedding
@@ -2689,7 +2863,7 @@ impl UnifiedRuntime {
         let identity_stream_health_task = tokio::spawn(run_identity_stream_health_monitor(
             mob_handle.clone(),
             agent_mob_mcp_state.clone(),
-            identity_runtime,
+            identity_plane,
             completion_ledger,
             identity_binding_changes,
         ));
@@ -2698,12 +2872,12 @@ impl UnifiedRuntime {
             agent_mob_mcp_state,
             event_tx,
             mob_events,
+            hosted_mobs,
         ));
-        MobEventIngress::Forwarder(MobEventForwarder {
-            event_rx,
-            task,
+        (
+            MobEventIngress::Forwarder(MobEventForwarder { event_rx, task }),
             identity_stream_health_task,
-        })
+        )
     }
 
     /// Test seam: replace the live ingress with a caller-owned channel so
@@ -2718,14 +2892,21 @@ impl UnifiedRuntime {
             .replace(MobEventIngress::Forwarder(MobEventForwarder {
                 event_rx,
                 task: tokio::spawn(async {}),
-                identity_stream_health_task: tokio::spawn(async {}),
             }));
+        let replaced_health = self
+            .default_mob()
+            .identity_stream_health_task
+            .lock()
+            .await
+            .replace(tokio::spawn(async {}));
         if let Some(MobEventIngress::Forwarder(forwarder)) = replaced {
             forwarder.task.abort();
-            forwarder.identity_stream_health_task.abort();
-            // Settle the aborted tasks' drops before the test takes over.
+            // Settle the aborted task's drop before the test takes over.
             let _ = forwarder.task.await;
-            let _ = forwarder.identity_stream_health_task.await;
+        }
+        if let Some(health_task) = replaced_health {
+            health_task.abort();
+            let _ = health_task.await;
         }
         event_tx
     }
@@ -2764,8 +2945,384 @@ type TaggedAgentEvent = (
     Option<meerkat_core::comms::SessionEventEpoch>,
 );
 
+/// The event selection a forwarded member event belongs to: which request
+/// of `meta/events/subscribe` and `meta/query_events` is answered it.
+///
+/// A request that names no mob is answered the launch selection; a request
+/// that names a mob of the host other than the launch mob is answered that
+/// mob's own members' events. A host of one mob has the launch selection
+/// only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum EventSelection {
+    /// The launch mob's own events and the events of every mob below it (a
+    /// mob its member created, and a mob a member of such a mob created),
+    /// as on a host of one mob.
+    Launch,
+    /// The events of the members of a mob of the host other than the launch
+    /// mob: a mob a request can name.
+    HostMob(MobId),
+    /// The events of a mob below such a mob: a mob its member created, and
+    /// every mob below that one. They are answered to no request: not to
+    /// one that names no mob (they are not the launch mob's), and not to
+    /// one that names the mob of the host above them (a named mob selects
+    /// its own members). So are the events of a member-created mob that
+    /// cannot be read as a mob below the launch mob, on a host that serves
+    /// another mob: one whose creation record cannot be read, and one whose
+    /// creating mob is gone and was never read. The id is the mob's own.
+    Unselected(MobId),
+}
+
+/// What a pass of the member event forwarder knows of one mob, for the
+/// selection of that mob's events: a mob the pass followed, or a mob the
+/// set knows and has not loaded (it has no events now; the mobs below it
+/// are read through it).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FollowedMob {
+    pub(crate) mob_id: MobId,
+    /// Whether a request can name the mob as a mob of the host other than
+    /// the launch mob.
+    pub(crate) served: bool,
+    pub(crate) created_by: CreatedBy,
+}
+
+impl FollowedMob {
+    /// The mobs of `dormant` (the mobs a set knows and has not loaded) that
+    /// a pass did not follow, each with the mob of the member that created
+    /// it as `dormant_creation` (what the set's records keep of their
+    /// creation) says: `Ok(None)` for a mob no member created, and an
+    /// error for a mob whose creation the set has not read. The launch mob
+    /// is left out.
+    pub(crate) fn not_loaded(
+        launch: &MobId,
+        followed: &[FollowedMob],
+        dormant: &[MobId],
+        dormant_creation: &BTreeMap<MobId, meerkat_mob::MobProvenance>,
+    ) -> Vec<(MobId, Result<Option<MobId>, ()>)> {
+        dormant
+            .iter()
+            .filter(|mob_id| {
+                *mob_id != launch && !followed.iter().any(|mob| &mob.mob_id == *mob_id)
+            })
+            .map(|mob_id| {
+                let creating_mob = match dormant_creation.get(mob_id) {
+                    Some(provenance) => {
+                        CreatedBy::creating_mob(provenance).map(Option::<&MobId>::cloned)
+                    }
+                    None => Err(()),
+                };
+                (mob_id.clone(), creating_mob)
+            })
+            .collect()
+    }
+
+    /// The mobs on the lines of the followed mobs whose creation the set
+    /// has not read: for each followed mob a member created, the first mob
+    /// above it, from mob to creating mob through the mobs of `dormant`
+    /// (the mobs a set knows and has not loaded) as `dormant_creation`
+    /// names them, that `dormant_creation` has no record of. A line ends at
+    /// the launch mob, at a mob the pass followed (it has a line of its
+    /// own), at a mob no member created and at a mob the set does not know
+    /// as not loaded. Each mob is named once, and nothing off a followed
+    /// mob's line is named: these are the records a pass asks the set to
+    /// read, one level of every line at a time.
+    pub(crate) fn unread_on_the_lines(
+        launch: &MobId,
+        followed: &[FollowedMob],
+        dormant: &[MobId],
+        dormant_creation: &BTreeMap<MobId, meerkat_mob::MobProvenance>,
+    ) -> Vec<MobId> {
+        let mut unread: Vec<MobId> = Vec::new();
+        for mob in followed {
+            let CreatedBy::MemberOf {
+                mob_id: creating_mob,
+                ..
+            } = &mob.created_by
+            else {
+                continue;
+            };
+            let mut above = creating_mob;
+            // A line is no longer than the mobs the set knows: records that
+            // name each other in a ring end here.
+            for _ in 0..=dormant.len() {
+                if above == launch
+                    || followed.iter().any(|mob| &mob.mob_id == above)
+                    || !dormant.contains(above)
+                {
+                    break;
+                }
+                let Some(provenance) = dormant_creation.get(above) else {
+                    if !unread.contains(above) {
+                        unread.push(above.clone());
+                    }
+                    break;
+                };
+                // A line also ends at a record of a kind that is not named:
+                // nothing above it can be read.
+                let Ok(Some(next)) = CreatedBy::creating_mob(provenance) else {
+                    break;
+                };
+                above = next;
+            }
+        }
+        unread
+    }
+}
+
+/// Who created a mob the forwarder follows, as its creation record says:
+/// the mob set records the direct parent of a mob a member created and no
+/// further ancestor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CreatedBy {
+    /// The host, a session that is no member's, or a record from before a
+    /// create recorded its creator.
+    NoMember,
+    /// A member of the mob `mob_id`; `served` says whether a request can
+    /// name that mob as a mob of the host other than the launch mob.
+    MemberOf { mob_id: MobId, served: bool },
+    /// The creation record could not be read.
+    Unread,
+}
+
+impl CreatedBy {
+    /// The mob of the member that created a mob whose creation record is
+    /// `provenance`, and `Ok(None)` for a mob no member created. This is
+    /// the one place the event forwarder tells a mob a member created (a
+    /// create for a member's session, or a member's own create) from a mob
+    /// no member created: one the host created, one a session created that
+    /// no roster named, one more than one roster named, and one whose
+    /// creation was never recorded. The record names the direct parent and
+    /// no further ancestor.
+    ///
+    /// The kinds of a creation grow with later builds. A record of a kind
+    /// this classifier does not name is an error: it is read as a record
+    /// that could not be read, so its mob is of no selection, and never as
+    /// "no member created".
+    pub(crate) fn creating_mob(
+        provenance: &meerkat_mob::MobProvenance,
+    ) -> Result<Option<&MobId>, ()> {
+        match provenance {
+            meerkat_mob::MobProvenance::Member { parent_mob_id, .. }
+            | meerkat_mob::MobProvenance::OperatorMember { parent_mob_id, .. } => {
+                Ok(Some(parent_mob_id))
+            }
+            meerkat_mob::MobProvenance::Host => Ok(None),
+            another if mob_entries::another_created(another) => Ok(None),
+            _ => Err(()),
+        }
+    }
+
+    /// How a pass reads a mob no member created that the host's table did
+    /// not answer for as a mob it serves. `a_request_can_name_it` is what
+    /// the table said, `None` when it could not say (the mob set's list or
+    /// the mob's creation record could not be read): such a mob is read as
+    /// one whose creation could not be read, so it is of no selection and
+    /// not the launch's.
+    pub(crate) fn by_no_member(a_request_can_name_it: Option<bool>) -> Self {
+        match a_request_can_name_it {
+            Some(_) => Self::NoMember,
+            None => Self::Unread,
+        }
+    }
+
+    /// How a pass reads a mob a member of `creating_mob` created.
+    /// `a_request_can_name_it` is what the host's table said of the
+    /// creating mob (no for the launch mob), `None` when it could not say:
+    /// the creating mob is then taken for one a request can name, so the
+    /// mob is of no selection and not the launch's.
+    pub(crate) fn by_a_member_of(creating_mob: MobId, a_request_can_name_it: Option<bool>) -> Self {
+        Self::MemberOf {
+            mob_id: creating_mob,
+            served: a_request_can_name_it.unwrap_or(true),
+        }
+    }
+}
+
+impl EventSelection {
+    /// The mob of the host other than the launch mob whose members' event
+    /// this is; `None` for every other event.
+    pub(crate) fn second_host_mob(&self) -> Option<&MobId> {
+        match self {
+            Self::HostMob(mob_id) => Some(mob_id),
+            Self::Launch | Self::Unselected(_) => None,
+        }
+    }
+
+    /// The mob an event log row of this event names: the event's own mob
+    /// when the event is not of the launch selection, so that no query of
+    /// the launch selection is answered it. `None` for the launch
+    /// selection, whose rows name no mob, as on a host of one mob.
+    pub(crate) fn row_mob(&self) -> Option<&MobId> {
+        match self {
+            Self::HostMob(mob_id) | Self::Unselected(mob_id) => Some(mob_id),
+            Self::Launch => None,
+        }
+    }
+
+    /// Whether a pass has nothing to read: the table lists no mob beside
+    /// the launch mob, and nothing but launch selections is kept of the
+    /// mobs earlier passes read. Every event is then of the launch
+    /// selection, as on a host of one mob. A host that served another mob
+    /// keeps reading while it keeps a mob that is not of the launch
+    /// selection: a mob below a destroyed mob of the host stays in no
+    /// selection.
+    pub(crate) fn a_pass_reads_nothing(
+        another_mob_is_listed: bool,
+        kept: &HashMap<String, EventSelection>,
+    ) -> bool {
+        !another_mob_is_listed && kept.values().all(|selection| *selection == Self::Launch)
+    }
+
+    /// Whether the host lists a mob beside the launch mob, for
+    /// [`Self::a_pass_reads_nothing`]. `read` is what the table said,
+    /// `None` when it does not know (the mob set's inventory could not be
+    /// read, or the set knows a mob it has not loaded and has not read):
+    /// that is not taken for "none", so the pass reads and what it cannot
+    /// read is of no selection.
+    pub(crate) fn another_mob_is_listed(read: Option<bool>) -> bool {
+        read.unwrap_or(true)
+    }
+
+    /// Whether a request can name a mob the set has not loaded, by what
+    /// the set's record keeps of its creation: yes for a mob the host
+    /// created, while the table answers requests; no for a mob another
+    /// created (a member, a session, a caller several rosters named, a
+    /// creation that was never recorded); `None` while the record is not
+    /// read, and for a record of a kind this classifier does not name (the
+    /// kinds grow with later builds): such a mob may be the host's. No
+    /// store is opened for the answer.
+    pub(crate) fn named_by_the_records(
+        creation: Option<&meerkat_mob::MobProvenance>,
+        the_table_answers: bool,
+    ) -> Option<bool> {
+        match creation {
+            Some(meerkat_mob::MobProvenance::Host) => Some(the_table_answers),
+            Some(another) if mob_entries::another_created(another) => Some(false),
+            Some(_) | None => None,
+        }
+    }
+
+    /// The selection of a mob no pass read. While the passes read it is no
+    /// selection: what is not known is never the launch's. While the last
+    /// pass knew that the host lists no other mob and keeps nothing of one,
+    /// every event is the launch selection, as on a host of one mob.
+    pub(crate) fn of_a_mob_no_pass_read(the_passes_read: bool, mob_id: &str) -> Self {
+        if the_passes_read {
+            Self::Unselected(MobId::from(mob_id))
+        } else {
+            Self::Launch
+        }
+    }
+
+    /// Whether a mob a pass meets on a closing table, where nothing can be
+    /// read, is of no selection. For selections no pass has decided for
+    /// yet: always, whatever the table says of the host (they know nothing
+    /// of it, and what the table knows starts anew at a start). Else: on a
+    /// host that ever held another mob, unless the last pass that decided
+    /// followed the mob (it keeps what that pass knew of it).
+    pub(crate) fn first_met_on_a_closing_table_is_unselected(
+        a_pass_decided: bool,
+        hosted_another_mob: bool,
+        followed_at_the_last_pass: bool,
+    ) -> bool {
+        !a_pass_decided || (hosted_another_mob && !followed_at_the_last_pass)
+    }
+
+    /// The selection of the events of each mob one pass followed, on a
+    /// host that serves, or served, a mob beside the launch mob `launch`:
+    ///
+    /// - a mob a request can name is its own selection;
+    /// - a mob a member created is what the mob of that member is: of the
+    ///   launch selection below the launch mob, and of no selection below
+    ///   a mob a request can name. The rule is applied until nothing
+    ///   changes, so it reaches every mob below, however deep;
+    /// - a member-created mob whose creating mob the pass did not follow is
+    ///   what `earlier` passes read of that mob, and of no selection when
+    ///   none read it as the launch selection (after a restart nothing was
+    ///   read yet);
+    /// - a mob whose creation record could not be read is of no selection;
+    /// - every other mob (one no member created) is of the launch
+    ///   selection.
+    ///
+    /// The launch mob itself is in no answer: its events are the launch
+    /// selection always.
+    pub(crate) fn of_a_pass(
+        launch: &MobId,
+        followed: &[FollowedMob],
+        earlier: &HashMap<String, EventSelection>,
+    ) -> HashMap<String, EventSelection> {
+        let followed_ids: HashSet<&str> = followed.iter().map(|mob| mob.mob_id.as_str()).collect();
+        let mut read: HashMap<String, EventSelection> = HashMap::new();
+        // The mobs whose selection is their creating mob's, which is not
+        // read yet: each with that mob's id.
+        let mut waiting: Vec<(&MobId, &MobId)> = Vec::new();
+        for mob in followed {
+            if &mob.mob_id == launch {
+                continue;
+            }
+            let selection = if mob.served {
+                Self::HostMob(mob.mob_id.clone())
+            } else {
+                match &mob.created_by {
+                    CreatedBy::NoMember => Self::Launch,
+                    CreatedBy::Unread => Self::Unselected(mob.mob_id.clone()),
+                    CreatedBy::MemberOf { mob_id, .. } if mob_id == launch => Self::Launch,
+                    CreatedBy::MemberOf { served: true, .. } => {
+                        Self::Unselected(mob.mob_id.clone())
+                    }
+                    CreatedBy::MemberOf { mob_id, .. } => {
+                        waiting.push((&mob.mob_id, mob_id));
+                        continue;
+                    }
+                }
+            };
+            read.insert(mob.mob_id.to_string(), selection);
+        }
+        loop {
+            let waited = waiting.len();
+            waiting.retain(|(mob_id, creating_mob)| {
+                let of_the_launch_selection = match read.get(creating_mob.as_str()) {
+                    Some(selection) => *selection == Self::Launch,
+                    // Followed by this pass and not read yet: wait for it.
+                    None if followed_ids.contains(creating_mob.as_str()) => return true,
+                    // Not followed: what an earlier pass read of it, and
+                    // not the launch selection when none did.
+                    None => earlier.get(creating_mob.as_str()) == Some(&Self::Launch),
+                };
+                let selection = if of_the_launch_selection {
+                    Self::Launch
+                } else {
+                    Self::Unselected((*mob_id).clone())
+                };
+                read.insert(mob_id.to_string(), selection);
+                false
+            });
+            if waiting.len() == waited {
+                break;
+            }
+        }
+        // Creation records that name each other in a ring cannot be: such
+        // mobs are below no mob that was read, so they are of no selection.
+        for (mob_id, _) in waiting {
+            read.insert(mob_id.to_string(), Self::Unselected(mob_id.clone()));
+        }
+        read
+    }
+}
+
+/// The mob a member's event stream is of: its id, and the incarnation of
+/// the mob the stream was attached to. A stream belongs to one mob for its
+/// whole life, so an event that is still on its way when a later mob takes
+/// the id is the earlier mob's. `incarnation` is none for a stream attached
+/// without its mob's handle, as a test's is.
+#[derive(Clone, Debug)]
+struct StreamMob {
+    mob_id: String,
+    incarnation: Option<meerkat_core::service::MobIncarnationId>,
+}
+
 enum ForwardedAgentEvent {
-    Event(Box<TaggedAgentEvent>),
+    /// One event of a member's stream, with the mob the stream is of.
+    Event(Box<TaggedAgentEvent>, StreamMob),
     /// The stream ended. Carries the key it was tracked under at that moment
     /// and its attachment generation, so a superseded stream ending cannot
     /// untrack the stream that replaced it under the same key.
@@ -2778,6 +3335,9 @@ enum ForwardedAgentEvent {
         key: TrackedAgentEventStream,
         session_id: meerkat_core::types::SessionId,
         generation: u64,
+        /// The incarnation of the mob the stream was attached to, as its
+        /// events carry it: the marker is that mob's.
+        mob_incarnation: Option<meerkat_core::service::MobIncarnationId>,
     },
 }
 
@@ -2830,6 +3390,10 @@ fn predecessor_stream_gap_event(
             },
         },
         alert: None,
+        // The forwarder sets the selection and the incarnation of the
+        // stream's mob.
+        selection: EventSelection::Launch,
+        mob_incarnation: None,
     }
 }
 
@@ -2915,6 +3479,21 @@ impl MemberStreamOwner {
 }
 
 impl AttachedStreams {
+    /// The mobs that have a stream attached: those of the current bindings
+    /// and those of the streams whose binding left the roster while they
+    /// are still open.
+    fn mobs_with_a_stream(&self) -> HashSet<String> {
+        self.current
+            .keys()
+            .map(|key| key.mob_id.clone())
+            .chain(
+                self.departed
+                    .values()
+                    .map(|departed| departed.owner.mob_id.clone()),
+            )
+            .collect()
+    }
+
     /// Record a stream's close. Returns whether it was the attachment
     /// serving `key`: a superseded stream (re-keyed away, or a departed
     /// predecessor) closing never untracks what serves the key now.
@@ -3108,6 +3687,10 @@ struct StreamAttribution {
     key: TrackedAgentEventStream,
     role: ProfileName,
     durable_identity: Option<Arc<str>>,
+    /// The incarnation of the mob the stream was attached to. It stays
+    /// when a rebinding re-keys the stream: the stream is still that
+    /// mob's.
+    mob_incarnation: Option<meerkat_core::service::MobIncarnationId>,
 }
 
 impl StreamAttribution {
@@ -3117,6 +3700,7 @@ impl StreamAttribution {
             key,
             role,
             durable_identity,
+            mob_incarnation: None,
         }
     }
 }
@@ -3163,24 +3747,34 @@ fn attach_member_event_stream(
     let mapped = stream
         .map(move |envelope| {
             let attribution = lock_attribution(&events);
-            ForwardedAgentEvent::Event(Box::new((
-                attribution.key.runtime_id.clone(),
-                attribution.key.fence_token,
-                attribution.role.clone(),
-                envelope,
-                attribution.durable_identity.clone(),
-                epoch,
-            )))
+            ForwardedAgentEvent::Event(
+                Box::new((
+                    attribution.key.runtime_id.clone(),
+                    attribution.key.fence_token,
+                    attribution.role.clone(),
+                    envelope,
+                    attribution.durable_identity.clone(),
+                    epoch,
+                )),
+                StreamMob {
+                    mob_id: attribution.key.mob_id.clone(),
+                    incarnation: attribution.mob_incarnation,
+                },
+            )
         })
         .chain(
             futures::stream::once(async move {
-                let key = lock_attribution(&closing).key.clone();
+                let (key, mob_incarnation) = {
+                    let attribution = lock_attribution(&closing);
+                    (attribution.key.clone(), attribution.mob_incarnation)
+                };
                 let abandoned = match session_id {
                     Some(session_id) if cut_off.is_aborted() => {
                         Some(ForwardedAgentEvent::Abandoned {
                             key: key.clone(),
                             session_id,
                             generation,
+                            mob_incarnation,
                         })
                     }
                     _ => None,
@@ -3449,27 +4043,20 @@ fn mob_is_stopping_or_stopped(handle: &MobHandle) -> bool {
         )
 }
 
+/// Whether a member of `mob_id` whose identity is `durable_identity` is a
+/// member of the identity runtime `identity_plane` holds. A plane answers
+/// for its own mob only: a member of any other mob is not one of its
+/// members, whatever identity it resolves to.
 async fn identity_member_registered(
-    primary_mob_id: &str,
     mob_id: &str,
     durable_identity: Option<&str>,
-    identity_runtime: Option<
-        &Arc<std::sync::RwLock<Option<Arc<crate::identity_first::IdentityRuntime>>>>,
-    >,
+    identity_plane: Option<&crate::mob_handle_runtime::MobIdentityPlane>,
 ) -> bool {
-    if mob_id != primary_mob_id {
-        return false;
-    }
-    let (Some(durable_identity), Some(identity_runtime)) = (durable_identity, identity_runtime)
-    else {
+    let (Some(durable_identity), Some(identity_plane)) = (durable_identity, identity_plane) else {
         return false;
     };
-    let authority = identity_runtime
-        .read()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone();
     let (Some(authority), Ok(identity)) = (
-        authority,
+        identity_plane.attached_for(mob_id),
         crate::identity_first::AgentIdentity::parse(durable_identity),
     ) else {
         return false;
@@ -3710,22 +4297,15 @@ async fn record_identity_turn_completion(
 }
 
 fn note_identity_stream_closed(
-    primary_mob_id: &str,
     tracked_key: &TrackedAgentEventStream,
-    identity_runtime: &Arc<std::sync::RwLock<Option<Arc<crate::identity_first::IdentityRuntime>>>>,
+    identity_plane: &crate::mob_handle_runtime::MobIdentityPlane,
     detail: &str,
 ) {
-    if tracked_key.mob_id != primary_mob_id {
-        return;
-    }
     let Some(durable_identity) = tracked_key.durable_identity.as_deref() else {
         return;
     };
-    let authority = identity_runtime
-        .read()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone();
-    let Some(authority) = authority else {
+    // The stream of another mob's member is not this plane's to note.
+    let Some(authority) = identity_plane.attached_for(&tracked_key.mob_id) else {
         return;
     };
     let identity = match crate::identity_first::AgentIdentity::parse(durable_identity) {
@@ -3746,16 +4326,513 @@ fn note_identity_stream_closed(
     authority.note_member_stream_closed(&identity, detail);
 }
 
+/// What a pass reads of one mob it follows before it asks the mob set
+/// anything: the mob, what the host's table said of it (whether a request
+/// can name it; `None`: the table could not say), and the mob of the
+/// member that created it, read from the handle the pass holds (`Ok(None)`:
+/// no member created it; an error: its creation record could not be read).
+struct ReadOfAHandle {
+    mob_id: MobId,
+    a_request_can_name_it: Option<bool>,
+    creating_mob: Result<Option<MobId>, ()>,
+}
+
+/// How many levels of the followed mobs' lines one pass asks the set to
+/// read: no line of mobs is longer.
+const LONGEST_LINE_A_PASS_READS: usize = 16;
+
+/// The event selection of each mob whose member streams the forwarder
+/// follows, read at each of its passes over the mob set.
+///
+/// A host whose table serves no other mob, and served none while this
+/// forwarder ran, keeps nothing here and reads nothing of any mob: every
+/// event is of the launch selection. Once another mob is served, each pass
+/// reads every mob it followed anew ([`EventSelection::of_a_pass`]), so a
+/// mob created under an id an earlier mob had is read as itself. Of the
+/// mobs a pass no longer follows it keeps those that are not of the launch
+/// selection, for the forwarder's life (an event that arrives after its
+/// mob left the set, from a stream that closes behind a destroy or an
+/// unload, is still that mob's), and those a followed mob names as its
+/// creating mob. A pass that runs once the runtime's shutdown has begun
+/// reads nothing: the table answers no request then, the selections stand
+/// as the last pass read them, and a mob first followed then is of no
+/// selection on a host that ever held another mob. A shutdown that begins
+/// while a pass is under way is the same to that pass: it writes nothing
+/// before its end, looks at the table's close again there, and if the
+/// close began it drops what it read.
+///
+/// One rule holds through all of it: what a pass cannot read is of no
+/// selection, never the launch's. The shortcut "every event is the launch
+/// selection" is taken only when the table says that the host lists no
+/// other mob; while that is not known (the set's inventory could not be
+/// read, or it knows a mob it has not loaded and has not read) the pass
+/// reads. A mob the table could not confirm is not "a mob no request can
+/// name", and a mob no pass read is not the launch's while the passes
+/// read.
+///
+/// After a restart the set has read none of its stored mobs yet. A pass
+/// asks it for the record of each creating mob a followed mob's line
+/// needs ([`FollowedMob::unread_on_the_lines`]): one open of that mob's
+/// store, no load and no actor, and the set's record keeps the answer.
+/// It asks up the line and no further: at most one open for each mob on
+/// the lines of the mobs it follows that the set has not read, each mob
+/// once. A record that cannot be read keeps the mobs below it of no
+/// selection; it is logged once and not asked again.
+struct EventSelections {
+    /// The runtime's table of the mobs it serves beside the launch mob.
+    hosted_mobs: std::sync::Weak<mob_entries::MobEntries>,
+    by_mob: HashMap<String, EventSelection>,
+    /// The forwarder's own mob, as the passes named it: its events are the
+    /// launch selection always, and no pass keeps it among the mobs it
+    /// read.
+    launch: Option<String>,
+    /// Whether the last pass that decided read the mobs it followed. While
+    /// it did, a mob no pass read is of no selection; while the last pass
+    /// knew that the host lists no other mob and keeps nothing of one,
+    /// every event is the launch selection, as on a host of one mob.
+    reads: bool,
+    /// Whether a pass has decided yet (it found nothing to read, or it
+    /// read). Until one has, these selections know nothing of the host,
+    /// and what the table knows of the host's other mobs starts anew at a
+    /// start: on a closing table every mob they meet is of no selection,
+    /// whatever the table says. The cost: on a host of one mob whose
+    /// shutdown begins before the first decided pass, the events that the
+    /// mobs its members created emit in that shutdown are of no selection.
+    decided: bool,
+    /// The mobs the last pass that decided followed: on a closing table
+    /// they keep what that pass knew, and any other mob is met for the
+    /// first time.
+    followed_at_the_last_pass: HashSet<String>,
+    /// The mobs that have a member stream attached now, as the forwarder
+    /// said before the pass ([`Self::note_streams`]): what is kept of such
+    /// a mob is not dropped while an event of it can still come.
+    with_a_stream: HashSet<String>,
+    /// The mobs that are not loaded whose creation record the set could
+    /// not read when a pass asked for it: said once in the log, and not
+    /// asked again.
+    not_readable: BTreeSet<MobId>,
+    /// Who created each mob the last pass followed, read from its creation
+    /// record once for each incarnation of the mob: the record never
+    /// changes while the mob lives, and a mob created under the id again
+    /// is another incarnation.
+    creators: HashMap<String, (meerkat_core::service::MobIncarnationId, Option<MobId>)>,
+    /// Test seam: what the next pass runs once, after it found the table
+    /// not closing and before it asks the table anything.
+    #[cfg(test)]
+    after_the_first_look: Option<Box<dyn FnOnce() + Send>>,
+}
+
+impl EventSelections {
+    fn new(hosted_mobs: std::sync::Weak<mob_entries::MobEntries>) -> Self {
+        Self {
+            hosted_mobs,
+            by_mob: HashMap::new(),
+            launch: None,
+            reads: false,
+            decided: false,
+            followed_at_the_last_pass: HashSet::new(),
+            with_a_stream: HashSet::new(),
+            not_readable: BTreeSet::new(),
+            creators: HashMap::new(),
+            #[cfg(test)]
+            after_the_first_look: None,
+        }
+    }
+
+    /// The mobs that have a member stream attached now. The forwarder says
+    /// it before each pass; a pass keeps what it knows of such a mob after
+    /// the mob left the set, so that an event that is still on its way is
+    /// filed as the events before it.
+    fn note_streams(&mut self, with_a_stream: HashSet<String>) {
+        self.with_a_stream = with_a_stream;
+    }
+
+    /// Read the selection of each mob of a pass: `launch` is the forwarder's
+    /// own mob, `handles` the mobs the pass followed and `set` the mob set
+    /// they are of. Nothing is loaded: the table is asked which of the
+    /// loaded mobs it serves, a creation record is read from a handle the
+    /// pass holds, and the set is asked for what its records keep of the
+    /// mobs that are not loaded, so that a creating mob that is merely not
+    /// loaded does not cut the line from a mob to the mob above it. The
+    /// one store a pass has opened is that of a mob on a followed mob's
+    /// line whose creation the set has not read, asked for by name.
+    async fn read(
+        &mut self,
+        launch: &MobHandle,
+        handles: &[MobHandle],
+        set: Option<&meerkat_mob_mcp::MobMcpState>,
+    ) {
+        let Some(hosted_mobs) = self.hosted_mobs.upgrade() else {
+            return;
+        };
+        self.launch
+            .get_or_insert_with(|| launch.mob_id().to_string());
+        // A table that is closing answers no request, and a pass that read
+        // it would take every mob of the host for a mob no request can
+        // name: what the last pass read stands, to the last event of a
+        // shutdown.
+        if hosted_mobs.is_closing() {
+            self.stand_on_a_closing_table(&hosted_mobs, launch.mob_id(), handles);
+            return;
+        }
+        #[cfg(test)]
+        if let Some(begin) = self.after_the_first_look.take() {
+            begin();
+        }
+        // One question first: a host that serves no other mob, and holds
+        // nothing of one it served, reads no creation record at all. The
+        // table must SAY that it lists no other mob: while that is not
+        // known the pass reads.
+        if EventSelection::a_pass_reads_nothing(
+            EventSelection::another_mob_is_listed(hosted_mobs.lists_another_mob().await),
+            &self.by_mob,
+        ) {
+            // The shutdown may have begun since the pass looked: "no other
+            // mob is listed" is then a closing table's answer, and nothing
+            // is cleared on it.
+            if hosted_mobs.is_closing() {
+                self.stand_on_a_closing_table(&hosted_mobs, launch.mob_id(), handles);
+                return;
+            }
+            self.followed_at_the_last_pass = handles
+                .iter()
+                .map(|handle| handle.mob_id().to_string())
+                .collect();
+            self.by_mob.clear();
+            self.creators.clear();
+            self.reads = false;
+            self.decided = true;
+            return;
+        }
+        // What the set's records keep of the mobs it has not loaded. No
+        // store is opened for this reading.
+        let mut records = match set {
+            Some(set) => set.mob_inventory().await.ok(),
+            None => None,
+        };
+        // Each followed mob with what the table says of it (`None`: it
+        // could not say) and the mob of the member that created it, read
+        // from the handle the pass holds.
+        let mut of_the_handles: Vec<ReadOfAHandle> = Vec::with_capacity(handles.len());
+        for handle in handles {
+            let mob_id = handle.mob_id();
+            if mob_id == launch.mob_id() {
+                continue;
+            }
+            let a_request_can_name_it = hosted_mobs.serves_read(mob_id).await;
+            let creating_mob = if a_request_can_name_it == Some(true) {
+                Ok(None)
+            } else {
+                self.creating_mob_of(handle).await
+            };
+            of_the_handles.push(ReadOfAHandle {
+                mob_id: mob_id.clone(),
+                a_request_can_name_it,
+                creating_mob,
+            });
+        }
+        // A creating mob a followed mob's line needs and the set has not
+        // read is asked for, by name: that one store is opened once, and
+        // the set's record keeps what it says. One level of every line at
+        // a time, and never past a line's length. This is the only place a
+        // pass has a store opened.
+        if let (Some(set), Some(inventory)) = (set, records.as_mut()) {
+            let lines: Vec<FollowedMob> = of_the_handles
+                .iter()
+                .map(|read| FollowedMob {
+                    mob_id: read.mob_id.clone(),
+                    served: false,
+                    created_by: match &read.creating_mob {
+                        Ok(Some(creating_mob)) => CreatedBy::MemberOf {
+                            mob_id: creating_mob.clone(),
+                            served: false,
+                        },
+                        Ok(None) => CreatedBy::NoMember,
+                        Err(()) => CreatedBy::Unread,
+                    },
+                })
+                .collect();
+            // Each mob is asked once in a pass.
+            let mut asked: BTreeSet<MobId> = BTreeSet::new();
+            for _ in 0..LONGEST_LINE_A_PASS_READS {
+                let to_ask: Vec<MobId> = FollowedMob::unread_on_the_lines(
+                    launch.mob_id(),
+                    &lines,
+                    &inventory.dormant,
+                    &inventory.dormant_creation,
+                )
+                .into_iter()
+                .filter(|mob_id| !self.not_readable.contains(mob_id) && !asked.contains(mob_id))
+                .collect();
+                if to_ask.is_empty() {
+                    break;
+                }
+                for mob_id in to_ask {
+                    match set.unloaded_mob_creation(&mob_id).await {
+                        Ok(Some(_)) => {}
+                        // The set's answer: the record cannot be read.
+                        Ok(None) => {
+                            tracing::warn!(
+                                mob_id = %mob_id,
+                                "meta agent event forwarder: the creation record of a mob that \
+                                 is not loaded cannot be read; the events of the mobs below it \
+                                 are of no selection"
+                            );
+                            self.not_readable.insert(mob_id.clone());
+                        }
+                        // The set did not take the question: the next pass
+                        // asks again, and until then the mobs below are of
+                        // no selection.
+                        Err(error) => {
+                            tracing::warn!(
+                                mob_id = %mob_id,
+                                %error,
+                                "meta agent event forwarder: the creation record of a mob that \
+                                 is not loaded was not read; the next pass asks again"
+                            );
+                        }
+                    }
+                    asked.insert(mob_id);
+                }
+                let Ok(read_again) = set.mob_inventory().await else {
+                    break;
+                };
+                *inventory = read_again;
+            }
+        }
+        let the_table_answers = hosted_mobs.answers_requests();
+        let mut followed: Vec<FollowedMob> = Vec::with_capacity(of_the_handles.len());
+        for ReadOfAHandle {
+            mob_id,
+            a_request_can_name_it,
+            creating_mob,
+        } in of_the_handles
+        {
+            let served = a_request_can_name_it == Some(true);
+            let created_by = match creating_mob {
+                _ if served => CreatedBy::NoMember,
+                Ok(Some(creating_mob)) => {
+                    let a_request_can_name_it = Self::a_request_can_name(
+                        &hosted_mobs,
+                        records.as_ref(),
+                        launch.mob_id(),
+                        &creating_mob,
+                        the_table_answers,
+                    )
+                    .await;
+                    CreatedBy::by_a_member_of(creating_mob, a_request_can_name_it)
+                }
+                Ok(None) => CreatedBy::by_no_member(a_request_can_name_it),
+                Err(()) => CreatedBy::Unread,
+            };
+            followed.push(FollowedMob {
+                mob_id,
+                served,
+                created_by,
+            });
+        }
+        // The mobs the set knows and has not loaded, as its records keep
+        // their creation: none is loaded and no store is opened for them.
+        if let Some(inventory) = records.as_ref() {
+            let not_loaded = FollowedMob::not_loaded(
+                launch.mob_id(),
+                &followed,
+                &inventory.dormant,
+                &inventory.dormant_creation,
+            );
+            for (mob_id, creating_mob) in not_loaded {
+                let a_request_can_name_it = EventSelection::named_by_the_records(
+                    inventory.dormant_creation.get(&mob_id),
+                    the_table_answers,
+                );
+                let served = a_request_can_name_it == Some(true);
+                let created_by = match creating_mob {
+                    _ if served => CreatedBy::NoMember,
+                    Ok(Some(creating_mob)) => {
+                        let a_request_can_name_it = Self::a_request_can_name(
+                            &hosted_mobs,
+                            Some(inventory),
+                            launch.mob_id(),
+                            &creating_mob,
+                            the_table_answers,
+                        )
+                        .await;
+                        CreatedBy::by_a_member_of(creating_mob, a_request_can_name_it)
+                    }
+                    Ok(None) => CreatedBy::by_no_member(a_request_can_name_it),
+                    Err(()) => CreatedBy::Unread,
+                };
+                followed.push(FollowedMob {
+                    mob_id,
+                    served,
+                    created_by,
+                });
+            }
+        }
+        // The shutdown may have begun while the pass read: every answer of
+        // the table since then is a closing table's. The flag goes one
+        // way, so one look here, with no wait between it and the writes,
+        // says whether any answer was one: if so the pass drops what it
+        // read and stands as one that began after the shutdown did.
+        if hosted_mobs.is_closing() {
+            self.stand_on_a_closing_table(&hosted_mobs, launch.mob_id(), handles);
+            return;
+        }
+        self.reads = true;
+        self.decided = true;
+        self.followed_at_the_last_pass = handles
+            .iter()
+            .map(|handle| handle.mob_id().to_string())
+            .collect();
+        let read = EventSelection::of_a_pass(launch.mob_id(), &followed, &self.by_mob);
+        let named_as_creating_mob: HashSet<&str> = followed
+            .iter()
+            .filter_map(|mob| match &mob.created_by {
+                CreatedBy::MemberOf { mob_id, .. } => Some(mob_id.as_str()),
+                CreatedBy::NoMember | CreatedBy::Unread => None,
+            })
+            .collect();
+        // A launch selection is kept while its mob still has a stream
+        // attached: an event of a mob that left the set can still come,
+        // and a mob no pass read is of no selection while the passes read.
+        let with_a_stream = &self.with_a_stream;
+        self.by_mob.retain(|mob_id, selection| {
+            *selection != EventSelection::Launch
+                || named_as_creating_mob.contains(mob_id.as_str())
+                || with_a_stream.contains(mob_id)
+        });
+        self.by_mob.extend(read);
+        self.creators
+            .retain(|mob_id, _| followed.iter().any(|mob| mob.mob_id.as_str() == mob_id));
+    }
+
+    /// A pass on a table that is closing: nothing can be read, and what the
+    /// last pass that decided read stands. Where no pass has decided yet,
+    /// every mob this pass meets is of no selection. Else a mob it meets for
+    /// the first time is of no selection on a host that ever held another mob,
+    /// whether or not anything is kept of other mobs; what is kept under
+    /// its own id (a mob that was not loaded at the last pass) stands. A
+    /// mob the last pass followed keeps what that pass knew of it.
+    fn stand_on_a_closing_table(
+        &mut self,
+        hosted_mobs: &mob_entries::MobEntries,
+        launch: &MobId,
+        handles: &[MobHandle],
+    ) {
+        let hosted_another_mob = hosted_mobs.hosted_another_mob();
+        for handle in handles {
+            let mob_id = handle.mob_id();
+            if mob_id != launch
+                && EventSelection::first_met_on_a_closing_table_is_unselected(
+                    self.decided,
+                    hosted_another_mob,
+                    self.followed_at_the_last_pass.contains(mob_id.as_str()),
+                )
+            {
+                self.by_mob
+                    .entry(mob_id.to_string())
+                    .or_insert_with(|| EventSelection::Unselected(mob_id.clone()));
+            }
+        }
+    }
+
+    /// Whether a request can name `mob` as a mob of the host other than the
+    /// launch mob, asked without opening a store: no for the launch mob;
+    /// for a mob the set has not loaded, what its record says
+    /// ([`EventSelection::named_by_the_records`]); for any other mob, what
+    /// the table says. `None`: not known.
+    async fn a_request_can_name(
+        hosted_mobs: &mob_entries::MobEntries,
+        records: Option<&meerkat_mob_mcp::MobInventory>,
+        launch: &MobId,
+        mob: &MobId,
+        the_table_answers: bool,
+    ) -> Option<bool> {
+        if mob == launch {
+            return Some(false);
+        }
+        if let Some(records) = records
+            && records.dormant.contains(mob)
+        {
+            return EventSelection::named_by_the_records(
+                records.dormant_creation.get(mob),
+                the_table_answers,
+            );
+        }
+        hosted_mobs.serves_read(mob).await
+    }
+
+    /// The mob of the member that created `handle`'s mob, `None` for a mob
+    /// no member created, and an error when its creation record cannot be
+    /// read (the next pass reads it again).
+    async fn creating_mob_of(&mut self, handle: &MobHandle) -> Result<Option<MobId>, ()> {
+        let incarnation = handle.incarnation();
+        if let Some((read_of, creating_mob)) = self.creators.get(handle.mob_id().as_str())
+            && *read_of == incarnation
+        {
+            return Ok(creating_mob.clone());
+        }
+        let creating_mob = match handle.provenance().await {
+            Ok(provenance) => CreatedBy::creating_mob(&provenance)?.cloned(),
+            Err(_) => return Err(()),
+        };
+        self.creators.insert(
+            handle.mob_id().to_string(),
+            (incarnation, creating_mob.clone()),
+        );
+        Ok(creating_mob)
+    }
+
+    /// The selection of an event of the mob `mob_id`: the launch selection
+    /// for the forwarder's own mob, what the passes read of any other mob,
+    /// and for a mob no pass read what
+    /// [`EventSelection::of_a_mob_no_pass_read`] says.
+    fn of(&self, mob_id: &str) -> EventSelection {
+        if self.launch.as_deref() == Some(mob_id) {
+            return EventSelection::Launch;
+        }
+        self.by_mob
+            .get(mob_id)
+            .cloned()
+            .unwrap_or_else(|| EventSelection::of_a_mob_no_pass_read(self.reads, mob_id))
+    }
+
+    /// The forwarded marker of a stream the reconciler cut off
+    /// ([`ForwardedAgentEvent::Abandoned`]), filed as the events of its
+    /// stream are: with its mob's selection and at the incarnation of the
+    /// mob the stream was attached to. `None` for any other forwarded
+    /// event.
+    fn gap_marker_of(&self, forwarded: ForwardedAgentEvent) -> Option<ForwardedMemberEvent> {
+        let ForwardedAgentEvent::Abandoned {
+            key,
+            session_id,
+            generation,
+            mob_incarnation,
+        } = forwarded
+        else {
+            return None;
+        };
+        let mut gap = predecessor_stream_gap_event(&key, &session_id, generation);
+        gap.selection = self.of(&key.mob_id);
+        gap.mob_incarnation = mob_incarnation;
+        Some(gap)
+    }
+}
+
 async fn run_resilient_mob_agent_event_forwarder(
     handle: MobHandle,
     agent_mob_mcp_state: Option<Arc<meerkat_mob_mcp::MobMcpState>>,
     event_tx: Sender<ForwardedMemberEvent>,
     mob_events: MobEventsStore,
+    hosted_mobs: std::sync::Weak<mob_entries::MobEntries>,
 ) {
     let mut streams: SelectAll<TaggedAgentEventStream> = SelectAll::new();
     let mut tracked = AttachedStreams::default();
     let mut subscribe_failures: HashMap<TrackedAgentEventStream, SubscribeBackoff> = HashMap::new();
     let mut cadence = ReconcileCadence::new(&agent_mob_mcp_state);
+    // Read after each pass, before the next event is taken: a stream's
+    // events are selected as its mob's from its first event on.
+    let mut selections = EventSelections::new(hosted_mobs);
 
     let handles = Box::pin(reconcile_agent_event_streams(
         &handle,
@@ -3766,6 +4843,10 @@ async fn run_resilient_mob_agent_event_forwarder(
         None,
     ))
     .await;
+    selections.note_streams(tracked.mobs_with_a_stream());
+    selections
+        .read(&handle, &handles, agent_mob_mcp_state.as_deref())
+        .await;
     cadence.rebind(&handles);
     // Only the watchers outlive the pass. A child mob handle kept for the
     // forwarder's life would keep that child's database observer alive, and
@@ -3776,7 +4857,7 @@ async fn run_resilient_mob_agent_event_forwarder(
         tokio::select! {
             Some(forwarded) = streams.next() => {
                 match forwarded {
-                    ForwardedAgentEvent::Event(event) => {
+                    ForwardedAgentEvent::Event(event, stream_mob) => {
                         let (source, source_fence_token, role, envelope, _durable_identity, _epoch) = *event;
                         let attributed_event = AttributedEvent {
                             source,
@@ -3790,19 +4871,18 @@ async fn run_resilient_mob_agent_event_forwarder(
                         // symmetric with the structural `MobEvent` subscriber and lets
                         // future code add attribution without touching this shape.
                         let _ = mob_events.project_attributed_event(&attributed_event).await;
-                        if event_tx
-                            .send(forwarded_member_event(attributed_event))
-                            .await
-                            .is_err()
-                        {
+                        let mut forwarded = forwarded_member_event_of(
+                            attributed_event,
+                            selections.of(&stream_mob.mob_id),
+                        );
+                        forwarded.mob_incarnation = stream_mob.incarnation;
+                        if event_tx.send(forwarded).await.is_err() {
                             break;
                         }
                     }
-                    ForwardedAgentEvent::Abandoned { key, session_id, generation } => {
-                        if event_tx
-                            .send(predecessor_stream_gap_event(&key, &session_id, generation))
-                            .await
-                            .is_err()
+                    cut_off @ ForwardedAgentEvent::Abandoned { .. } => {
+                        if let Some(gap) = selections.gap_marker_of(cut_off)
+                            && event_tx.send(gap).await.is_err()
                         {
                             break;
                         }
@@ -3815,12 +4895,16 @@ async fn run_resilient_mob_agent_event_forwarder(
                         // member may still be live (stream lag/teardown race),
                         // and no machine transition is guaranteed to follow.
                         let handles = Box::pin(reconcile_agent_event_streams(&handle, &agent_mob_mcp_state, &mut tracked, &mut subscribe_failures, &mut streams, None)).await;
+                        selections.note_streams(tracked.mobs_with_a_stream());
+                        selections.read(&handle, &handles, agent_mob_mcp_state.as_deref()).await;
                         cadence.rebind(&handles);
                     }
                 }
             }
             () = cadence.wait(earliest_reconcile_deadline(&subscribe_failures, &tracked)) => {
                 let handles = Box::pin(reconcile_agent_event_streams(&handle, &agent_mob_mcp_state, &mut tracked, &mut subscribe_failures, &mut streams, None)).await;
+                selections.note_streams(tracked.mobs_with_a_stream());
+                selections.read(&handle, &handles, agent_mob_mcp_state.as_deref()).await;
                 cadence.rebind(&handles);
             }
         }
@@ -3833,7 +4917,7 @@ async fn run_resilient_mob_agent_event_forwarder(
 async fn run_identity_stream_health_monitor(
     handle: MobHandle,
     agent_mob_mcp_state: Option<Arc<meerkat_mob_mcp::MobMcpState>>,
-    identity_runtime: Arc<std::sync::RwLock<Option<Arc<crate::identity_first::IdentityRuntime>>>>,
+    identity_plane: crate::mob_handle_runtime::MobIdentityPlane,
     completion_ledger: Arc<HealthCompletionLedger>,
     binding_changes: tokio::sync::watch::Receiver<u64>,
 ) {
@@ -3855,7 +4939,7 @@ async fn run_identity_stream_health_monitor(
         &mut tracked,
         &mut subscribe_failures,
         &mut streams,
-        Some(&identity_runtime),
+        Some(&identity_plane),
     ))
     .await;
     cadence.rebind(&handles);
@@ -3866,10 +4950,10 @@ async fn run_identity_stream_health_monitor(
         tokio::select! {
             Some(forwarded) = streams.next() => {
                 match forwarded {
-                    ForwardedAgentEvent::Event(event) => {
+                    ForwardedAgentEvent::Event(event, _) => {
                         let (_, _, _, envelope, durable_identity, epoch) = *event;
                         let _credited = record_identity_turn_completion(
-                            &identity_runtime,
+                            identity_plane.slot(),
                             &completion_ledger,
                             durable_identity.as_deref(),
                             epoch,
@@ -3885,9 +4969,8 @@ async fn run_identity_stream_health_monitor(
                             subscribe_failures.remove(&tracked_key);
                         }
                         note_identity_stream_closed(
-                            handle.mob_id().as_str(),
                             &tracked_key,
-                            &identity_runtime,
+                            &identity_plane,
                             "live agent event stream closed permanently",
                         );
                         // Re-attach promptly after a closure; the attach must
@@ -3898,7 +4981,7 @@ async fn run_identity_stream_health_monitor(
                             &mut tracked,
                             &mut subscribe_failures,
                             &mut streams,
-                            Some(&identity_runtime),
+                            Some(&identity_plane),
                         )).await;
                         cadence.rebind(&handles);
                     }
@@ -3911,7 +4994,7 @@ async fn run_identity_stream_health_monitor(
                     &mut tracked,
                     &mut subscribe_failures,
                     &mut streams,
-                    Some(&identity_runtime),
+                    Some(&identity_plane),
                 )).await;
                 cadence.rebind(&handles);
             }
@@ -3927,9 +5010,7 @@ async fn reconcile_agent_event_streams(
     tracked: &mut AttachedStreams,
     subscribe_failures: &mut HashMap<TrackedAgentEventStream, SubscribeBackoff>,
     streams: &mut SelectAll<TaggedAgentEventStream>,
-    identity_runtime: Option<
-        &Arc<std::sync::RwLock<Option<Arc<crate::identity_first::IdentityRuntime>>>>,
-    >,
+    identity_plane: Option<&crate::mob_handle_runtime::MobIdentityPlane>,
 ) -> Vec<MobHandle> {
     let primary_mob_id = handle.mob_id().to_string();
     let mut handles = vec![handle.clone()];
@@ -3964,16 +5045,12 @@ async fn reconcile_agent_event_streams(
                 &entry.labels,
             )
             .map(std::borrow::Cow::into_owned);
-            let identity_registered = identity_member_registered(
-                &primary_mob_id,
-                &mob_id,
-                durable_identity.as_deref(),
-                identity_runtime,
-            )
-            .await;
+            let identity_registered =
+                identity_member_registered(&mob_id, durable_identity.as_deref(), identity_plane)
+                    .await;
             // The health monitor serves the identity runtime's members only.
             // Avoid duplicating every ordinary/child-mob event stream.
-            if identity_runtime.is_some() && !identity_registered {
+            if identity_plane.is_some() && !identity_registered {
                 continue;
             }
             current.insert(TrackedAgentEventStream {
@@ -3997,7 +5074,7 @@ async fn reconcile_agent_event_streams(
         .cloned()
         .collect();
     for tracked_key in departed {
-        tracked.depart(&tracked_key, identity_runtime.is_some());
+        tracked.depart(&tracked_key, identity_plane.is_some());
     }
     // Drop backoff bookkeeping for members that have left the roster so the
     // map can't grow without bound across the runtime's lifetime.
@@ -4008,7 +5085,7 @@ async fn reconcile_agent_event_streams(
     // health monitor keeps its ordinary untracked streams. Both replay each
     // actor's retained events from the first, so a run that started before
     // the attach is still read from `RunStarted`.
-    let console = identity_runtime.is_none();
+    let console = identity_plane.is_none();
 
     for handle in &handles {
         let mob_id = handle.mob_id().to_string();
@@ -4024,14 +5101,10 @@ async fn reconcile_agent_event_streams(
                 &entry.labels,
             )
             .map(std::borrow::Cow::into_owned);
-            let identity_registered = identity_member_registered(
-                &primary_mob_id,
-                &mob_id,
-                durable_identity.as_deref(),
-                identity_runtime,
-            )
-            .await;
-            if identity_runtime.is_some() && !identity_registered {
+            let identity_registered =
+                identity_member_registered(&mob_id, durable_identity.as_deref(), identity_plane)
+                    .await;
+            if identity_plane.is_some() && !identity_registered {
                 // An identity member the runtime has not registered yet is
                 // attached by the binding wake's pass.
                 continue;
@@ -4118,8 +5191,14 @@ async fn reconcile_agent_event_streams(
                 && let Some(DepartedStream { attachment, .. }) =
                     tracked.departed.remove(&generation)
             {
-                *lock_attribution(&attachment.attribution) =
-                    StreamAttribution::new(tracked_key.clone(), entry.role.clone());
+                {
+                    let mut attribution = lock_attribution(&attachment.attribution);
+                    let mob_incarnation = attribution.mob_incarnation;
+                    *attribution = StreamAttribution {
+                        mob_incarnation,
+                        ..StreamAttribution::new(tracked_key.clone(), entry.role.clone())
+                    };
+                }
                 subscribe_failures.remove(&tracked_key);
                 tracked.current.insert(tracked_key, attachment);
                 continue;
@@ -4164,10 +5243,9 @@ async fn reconcile_agent_event_streams(
             // drain credits what happened before its attach; without one a
             // replayed completion could satisfy a baseline read before it.
             let replay = console
-                || identity_runtime.is_some_and(|slot| {
-                    slot.read()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .as_ref()
+                || identity_plane.is_some_and(|plane| {
+                    plane
+                        .attached()
                         .is_some_and(|runtime| runtime.has_pending_completion_drain())
                 });
             let subscription =
@@ -4198,6 +5276,8 @@ async fn reconcile_agent_event_streams(
                         epoch,
                         forwarded,
                     );
+                    lock_attribution(&attachment.attribution).mob_incarnation =
+                        Some(handle.incarnation());
                     tracked.current.insert(tracked_key, attachment);
                 }
                 Err(error) => {
@@ -4207,7 +5287,7 @@ async fn reconcile_agent_event_streams(
                     // member with no retry and nothing above debug until the
                     // mob runs again; identity repair does not count it.
                     if mob_is_stopping_or_stopped(handle) {
-                        if identity_runtime.is_none() {
+                        if identity_plane.is_none() {
                             tracing::debug!(
                                 mob_id = %mob_id,
                                 identity = %identity,
@@ -4243,7 +5323,7 @@ async fn reconcile_agent_event_streams(
                     // The identity health monitor runs this pass too: a
                     // member it cannot watch is logged like one the console
                     // forwarder cannot.
-                    let watcher = if identity_runtime.is_some() {
+                    let watcher = if identity_plane.is_some() {
                         "identity_health_monitor"
                     } else {
                         "console_forwarder"
@@ -4270,12 +5350,11 @@ async fn reconcile_agent_event_streams(
                         Some(now + subscribe_backoff_delay(backoff.consecutive_failures));
                     backoff.consecutive_failures = backoff.consecutive_failures.saturating_add(1);
                     if backoff.consecutive_failures == PERMANENT_STREAM_FAILURE_THRESHOLD
-                        && let Some(identity_runtime) = identity_runtime
+                        && let Some(identity_plane) = identity_plane
                     {
                         note_identity_stream_closed(
-                            &primary_mob_id,
                             &lost_key,
-                            identity_runtime,
+                            identity_plane,
                             "live agent event stream remained unavailable after bounded retries",
                         );
                     }
@@ -4404,13 +5483,42 @@ async fn subscribe_agent_events_for_console_forwarder(
 ///
 /// Exits when the upstream `event_rx` closes (machine destroyed) or
 /// when subscription setup fails after a stale-cursor fallback.
-pub(crate) async fn run_mob_events_subscription(
+///
+/// The creates the private-owner record admitted so far are noted here,
+/// when the task is made and before it runs: `handle` is the mob that
+/// holds its id now, and a row this task shows after a create was admitted
+/// under that id is an earlier mob's
+/// ([`crate::private_owners::PrivateOwners::observe_mob_event_since`]).
+pub(crate) fn run_mob_events_subscription(
     handle: MobHandle,
     store: MobEventsStore,
     persistent_metadata: Arc<dyn PersistentMetadataStore>,
     idle_retire_overrides: Option<crate::mob_handle_runtime::ImplicitDelegateRetirementOverrides>,
     private_owners: crate::private_owners::PrivateOwners,
     speaks_for_composition: bool,
+) -> impl std::future::Future<Output = ()> + Send {
+    let admitted_at_start = private_owners.creates_admitted();
+    run_mob_events_subscription_since(
+        handle,
+        store,
+        persistent_metadata,
+        idle_retire_overrides,
+        private_owners,
+        speaks_for_composition,
+        admitted_at_start,
+    )
+}
+
+/// [`run_mob_events_subscription`], with the creates noted when the task
+/// was made.
+async fn run_mob_events_subscription_since(
+    handle: MobHandle,
+    store: MobEventsStore,
+    persistent_metadata: Arc<dyn PersistentMetadataStore>,
+    idle_retire_overrides: Option<crate::mob_handle_runtime::ImplicitDelegateRetirementOverrides>,
+    private_owners: crate::private_owners::PrivateOwners,
+    speaks_for_composition: bool,
+    admitted_at_start: crate::private_owners::CreatesAdmitted,
 ) {
     let mob_id = handle.mob_id().as_str().to_string();
     let resume_cursor = match persistent_metadata.get_subscription_cursor(&mob_id).await {
@@ -4490,7 +5598,9 @@ pub(crate) async fn run_mob_events_subscription(
         // held for the composition's follower, before the cursor moves past
         // the event: a durable cursor shows the event again after a stop in
         // between.
-        let held = private_owners.observe_mob_event(&handle, &event).await;
+        let held = private_owners
+            .observe_mob_event_since(&handle, &event, &admitted_at_start)
+            .await;
         if held && !speaks_for_composition && !cursor_kept_for_a_held_end {
             cursor_kept_for_a_held_end = true;
             tracing::info!(
@@ -4788,7 +5898,17 @@ async fn run_actor_loop_probe<P, F>(
 
 /// Project a forwarded member event for the drain: the wire envelope plus
 /// any drain-side alert extracted while the member event is still typed.
+/// The event is of the launch selection ([`forwarded_member_event_of`]).
+#[cfg(test)]
 fn forwarded_member_event(attributed: AttributedEvent) -> ForwardedMemberEvent {
+    forwarded_member_event_of(attributed, EventSelection::Launch)
+}
+
+/// [`forwarded_member_event`] for an event of the selection `selection`.
+fn forwarded_member_event_of(
+    attributed: AttributedEvent,
+    selection: EventSelection,
+) -> ForwardedMemberEvent {
     let compaction_rejection = compaction_rejection_alert(&attributed);
     let failed_run_pages = run_failure_pages(&attributed.envelope.payload);
     let envelope = attributed_event_to_unified(attributed);
@@ -4797,7 +5917,12 @@ fn forwarded_member_event(attributed: AttributedEvent) -> ForwardedMemberEvent {
         None if failed_run_pages => host_loop_crash_alert(&envelope),
         None => None,
     };
-    ForwardedMemberEvent { envelope, alert }
+    ForwardedMemberEvent {
+        envelope,
+        alert,
+        selection,
+        mob_incarnation: None,
+    }
 }
 
 /// Whether a member event is a run failure that pages as `HostLoopCrash`: a
@@ -4924,6 +6049,19 @@ fn attributed_event_to_unified(attributed: AttributedEvent) -> EventEnvelope<Uni
     }
 }
 
+/// A memory-event sink that files in `events`: the host's console events
+/// for the launch mob's memory ([`UnifiedRuntime::memory_event_sink`]), a
+/// hosted mob's own console events for that mob's memory. Must be called
+/// from async context: the sink captures the current runtime handle.
+pub(crate) fn console_memory_event_sink(
+    events: ConsoleEventStore,
+) -> Arc<dyn crate::memory::events::MemoryEventSink> {
+    Arc::new(ConsoleMemoryEventSink {
+        store: events,
+        handle: tokio::runtime::Handle::current(),
+    })
+}
+
 /// Projects [`crate::memory::events::MemoryTimelineEvent`]s onto the
 /// console timeline. Sync fire-and-forget: the async append is spawned on
 /// the captured runtime handle, so emitters inside mutexes or blocking
@@ -4973,6 +6111,15 @@ mod tests {
 
     use super::*;
     use meerkat_mob::ids::Generation;
+
+    /// The identity plane of `handle`'s mob over `slot`, the slot a test
+    /// attaches its identity runtime to.
+    fn identity_plane_of(
+        handle: &MobHandle,
+        slot: &Arc<std::sync::RwLock<Option<Arc<crate::identity_first::IdentityRuntime>>>>,
+    ) -> crate::mob_handle_runtime::MobIdentityPlane {
+        crate::mob_handle_runtime::MobIdentityPlane::new(handle.mob_id().clone(), Arc::clone(slot))
+    }
 
     /// The identity a test member's stream is keyed by, read from its
     /// label: the members these tests seat all carry it.
@@ -6477,6 +7624,8 @@ mod tests {
             notify_orchestrator_on_resume: true,
             default_llm_client: Some(Arc::new(meerkat_client::TestClient::default())),
         });
+        // A row of this fixture makes a child mob by a host's create, in
+        // the place of an agent's.
         let mob_runtime = MobRuntime::bootstrap(spec)
             .await
             .expect("bootstrap mob runtime");
@@ -6567,6 +7716,7 @@ mod tests {
             mob_runtime,
             module_runtime,
             Arc::new(InMemoryMetadataStore::new()),
+            mob_entries::MobEntries::new(),
         )
         .await;
 
@@ -6703,7 +7853,7 @@ mod tests {
             .await
             .expect("attached stream yields")
             .expect("attached stream open");
-        let ForwardedAgentEvent::Event(event) = first else {
+        let ForwardedAgentEvent::Event(event, _) = first else {
             panic!("attached stream closed before yielding the first run");
         };
         let (_, _, _, envelope, _, _) = *event;
@@ -6785,7 +7935,7 @@ mod tests {
             .await
             .expect("re-keyed stream yields")
             .expect("re-keyed stream open");
-        let ForwardedAgentEvent::Event(event) = first else {
+        let ForwardedAgentEvent::Event(event, _) = first else {
             panic!("re-keyed stream closed");
         };
         let (runtime_id, fence_token, _, envelope, _, _) = *event;
@@ -7544,7 +8694,7 @@ mod tests {
         let _ingress = boot.runtime.install_test_event_ingress().await;
         let identity_runtime = boot.identity_runtime.clone();
         let runtime = boot.activate().await;
-        let ledger = Arc::clone(&runtime.identity_completion_ledger);
+        let ledger = Arc::clone(&runtime.default_mob().identity_completion_ledger);
         let identity =
             crate::identity_first::AgentIdentity::parse(RESTART_MEMBER).expect("identity");
         assert_eq!(
@@ -7568,7 +8718,7 @@ mod tests {
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             while let Some(forwarded) = streams.next().await {
-                if let ForwardedAgentEvent::Event(event) = forwarded {
+                if let ForwardedAgentEvent::Event(event, _) = forwarded {
                     let (_, _, _, envelope, durable_identity, epoch) = *event;
                     let _credited = record_identity_turn_completion(
                         &slot,
@@ -7762,7 +8912,7 @@ mod tests {
             &mut tracked,
             &mut failures,
             &mut streams,
-            Some(&slot),
+            Some(&identity_plane_of(&handle, &slot)),
         ))
         .await;
         assert!(!tracked.current.is_empty(), "the monitor attached");
@@ -7838,7 +8988,7 @@ mod tests {
             &mut tracked,
             &mut failures,
             &mut streams,
-            Some(&slot),
+            Some(&identity_plane_of(&handle, &slot)),
         ))
         .await;
         let (key, attachment) = tracked
@@ -7857,7 +9007,7 @@ mod tests {
             &mut tracked,
             &mut failures,
             &mut streams,
-            Some(&slot),
+            Some(&identity_plane_of(&handle, &slot)),
         ))
         .await;
         assert!(
@@ -7922,7 +9072,7 @@ mod tests {
             &mut tracked,
             &mut failures,
             &mut streams,
-            Some(&slot),
+            Some(&identity_plane_of(&handle, &slot)),
         ))
         .await;
         assert!(!tracked.current.is_empty(), "the monitor attached");
@@ -7971,7 +9121,7 @@ mod tests {
         let monitor = tokio::spawn(run_identity_stream_health_monitor(
             runtime.mob_handle(),
             None,
-            Arc::clone(&slot),
+            identity_plane_of(&runtime.mob_handle(), &slot),
             ledger,
             binding_changes,
         ));
@@ -8450,7 +9600,7 @@ mod tests {
                 &mut tracked,
                 &mut failures,
                 &mut streams,
-                Some(&slot),
+                Some(&identity_plane_of(&handle, &slot)),
             )))
             .await;
         *FAIL_MEMBER_EVENT_SUBSCRIPTIONS_OF_MOB
@@ -8628,7 +9778,7 @@ mod tests {
             let mut finished = false;
             while !finished {
                 match self.next().await {
-                    ForwardedAgentEvent::Event(event) => {
+                    ForwardedAgentEvent::Event(event, _) => {
                         let (source, source_fence_token, role, envelope, _, _) = *event;
                         finished = done(&envelope.payload);
                         steps.push(ForwarderStep::Event(Box::new(envelope.clone())));
@@ -8650,6 +9800,7 @@ mod tests {
                         key,
                         session_id,
                         generation,
+                        ..
                     } => {
                         steps.push(ForwarderStep::Abandoned { generation });
                         ingress
@@ -9536,7 +10687,7 @@ mod tests {
         max_consecutive_stalls: u32,
         outcomes: Vec<meerkat_mob::MobError>,
     ) {
-        let mut slot = runtime.pending_mob_activation.lock().await;
+        let mut slot = runtime.default_mob().pending_mob_activation.lock().await;
         let pending = slot
             .as_mut()
             .expect("restarting a Stopped persistent mob stages an activation");
@@ -9603,7 +10754,12 @@ mod tests {
         let temp = tempfile::tempdir().expect("temp dir");
         let (boot, _) = restart_before_activation("activation-never-consumed", &temp).await;
         assert!(
-            boot.runtime.pending_mob_activation.lock().await.is_some(),
+            boot.runtime
+                .default_mob()
+                .pending_mob_activation
+                .lock()
+                .await
+                .is_some(),
             "the restart staged an activation"
         );
         let closed = boot.runtime.mob_handle().observer().admission_closed();
@@ -10742,7 +11898,12 @@ mod tests {
             "the failed activation never lifted the mob"
         );
         assert!(
-            runtime.pending_mob_activation.lock().await.is_none(),
+            runtime
+                .default_mob()
+                .pending_mob_activation
+                .lock()
+                .await
+                .is_none(),
             "the obligation was consumed, not re-staged"
         );
     }
@@ -11144,7 +12305,7 @@ mod tests {
         forwarder
             .reconcile(&mob_runtime.handle(), &Some(state))
             .await;
-        let ForwardedAgentEvent::Event(event) = forwarder.next().await else {
+        let ForwardedAgentEvent::Event(event, _) = forwarder.next().await else {
             panic!("the child stream yields its first run");
         };
         let (runtime_id, _, _, envelope, _, _) = *event;
@@ -11206,6 +12367,7 @@ mod tests {
             mob_runtime,
             module_runtime,
             Arc::new(InMemoryMetadataStore::new()),
+            mob_entries::MobEntries::new(),
         )
         .await;
         let ingress = runtime.install_test_event_ingress().await;
@@ -11488,5 +12650,171 @@ mod tests {
         };
         assert!(!tracked.close(&closed_key, closed));
         assert!(!tracked.predecessor_draining(&owner, Some(&new_session), now));
+    }
+
+    /// The marker of a cut-off stream is filed with the mob its stream was
+    /// attached to, as the stream's events are: it is kept at that mob's
+    /// incarnation, whatever mob the forwarder's last pass followed under
+    /// the id. A mob created under the id of the stream's mob is not
+    /// answered the earlier mob's marker, and a marker whose mob no pass
+    /// follows any more is still its mob's.
+    #[tokio::test]
+    async fn a_cut_off_streams_marker_is_filed_with_the_mob_its_stream_was_attached_to() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let raw = Arc::new(meerkat::build_ephemeral_service(
+            meerkat::AgentFactory::new(dir.path()),
+            meerkat::Config::default(),
+            16,
+        )) as Arc<dyn meerkat_mob::MobSessionService>;
+        let request = meerkat_core::service::CreateSessionRequest {
+            model: "gpt-5.5".to_string(),
+            prompt: meerkat_core::ContentInput::Text("probe".to_string()),
+            system_prompt: meerkat_core::config::SystemPromptOverride::Inherit,
+            max_tokens: None,
+            event_tx: None,
+            initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+            deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
+            build: Some(meerkat_core::service::SessionBuildOptions {
+                llm_client_override: Some(meerkat::encode_llm_client_override_for_service(
+                    Arc::new(meerkat_client::TestClient::default()),
+                )),
+                ..Default::default()
+            }),
+            labels: None,
+            injected_context: Vec::new(),
+        };
+        let session = raw
+            .create_session(request)
+            .await
+            .expect("deferred create")
+            .session_id;
+        let actor = raw
+            .subscribe_agent_session_events_from(
+                &session,
+                meerkat_core::comms::SessionEventCursor::Live,
+            )
+            .await
+            .expect("subscribe")
+            .actor
+            .expect("the ephemeral service names its actor");
+        let mob_id = MobId::from("a-mob-id-used-again");
+        let of_the_earlier_mob = meerkat_core::service::MobIncarnationId::mint();
+        let key = TrackedAgentEventStream {
+            mob_id: mob_id.to_string(),
+            durable_identity: None,
+            member_identity: AgentIdentity::from("worker"),
+            runtime_id: AgentRuntimeId::new(AgentIdentity::from("worker"), Generation::new(0)),
+            fence_token: FenceToken::new(1),
+        };
+        let mut streams: SelectAll<TaggedAgentEventStream> = SelectAll::new();
+        let attachment = attach_member_event_stream(
+            &mut streams,
+            key,
+            ProfileName::from("worker"),
+            Box::pin(futures::stream::pending()),
+            Some(actor),
+            None,
+            None,
+        );
+        lock_attribution(&attachment.attribution).mob_incarnation = Some(of_the_earlier_mob);
+        attachment.abort.abort();
+        let cut_off = streams
+            .next()
+            .await
+            .expect("the cut-off stream reports its gap");
+        assert!(
+            matches!(cut_off, ForwardedAgentEvent::Abandoned { .. }),
+            "the cut-off stream reports its gap first"
+        );
+
+        // The mob of the id is a mob a request can name; what the passes
+        // read of its incarnation is not the marker's to take.
+        let mut selections = EventSelections::new(std::sync::Weak::new());
+        selections
+            .by_mob
+            .insert(mob_id.to_string(), EventSelection::HostMob(mob_id.clone()));
+        let marker = selections
+            .gap_marker_of(cut_off)
+            .expect("the marker of the cut-off stream");
+        assert_eq!(marker.selection, EventSelection::HostMob(mob_id));
+        assert_eq!(
+            marker.mob_incarnation,
+            Some(of_the_earlier_mob),
+            "the marker of a cut-off stream is not filed with the mob its stream was attached to"
+        );
+    }
+
+    /// The identity runtime attached to a mob serves that mob's members
+    /// only: a member of another mob that carries a registered identity's
+    /// label is not one of its members, and neither is a member without the
+    /// label, with a label it has not registered, or of a mob with no
+    /// identity runtime attached.
+    #[tokio::test]
+    async fn a_member_of_another_mob_is_not_a_member_of_this_mob_s_identity_runtime() {
+        let identity_runtime = Arc::new(crate::identity_first::IdentityRuntime::new(
+            crate::identity_first::IdentityRuntimeConfig {
+                continuity_store: Arc::new(
+                    crate::identity_first::LocalContinuityStore::in_memory()
+                        .expect("continuity store"),
+                ),
+                lease_provider: Arc::new(crate::identity_first::LocalLeaseProvider::new()),
+                runtime_instance_id: "identity-plane".to_string(),
+                has_runtime_store: true,
+                durability_policy: crate::identity_first::DurabilityPolicy::SyncWriteThrough,
+                bridge: None,
+                default_timeout: None,
+            },
+        ));
+        identity_runtime
+            .register(crate::identity_first::DurableAgentSpec {
+                identity: crate::identity_first::AgentIdentity::parse("domain:planner")
+                    .expect("identity"),
+                profile: meerkat_mob::ProfileName::from("general"),
+                addressability: crate::identity_first::AgentAddressability::Addressable,
+                display_name: None,
+                labels: BTreeMap::new(),
+                context: None,
+                additional_instructions: Vec::new(),
+                initial_message: None,
+                runtime_mode_override: None,
+                backend: None,
+                binding: None,
+                placement: None,
+            })
+            .await
+            .expect("the identity registers");
+        // The identity plane of the mob "launch-mob".
+        let attached = crate::mob_handle_runtime::MobIdentityPlane::new(
+            "launch-mob",
+            Arc::new(std::sync::RwLock::new(Some(identity_runtime))),
+        );
+        let detached = crate::mob_handle_runtime::MobIdentityPlane::detached("launch-mob");
+
+        assert!(
+            identity_member_registered("launch-mob", Some("domain:planner"), Some(&attached)).await
+        );
+        assert!(
+            !identity_member_registered("another-mob", Some("domain:planner"), Some(&attached))
+                .await,
+            "another mob's member"
+        );
+        assert!(
+            !identity_member_registered("launch-mob", Some("domain:stranger"), Some(&attached))
+                .await,
+            "an identity the runtime has not registered"
+        );
+        assert!(
+            !identity_member_registered("launch-mob", None, Some(&attached)).await,
+            "a member without the label"
+        );
+        assert!(
+            !identity_member_registered("launch-mob", Some("domain:planner"), Some(&detached))
+                .await,
+            "no identity runtime attached"
+        );
+        assert!(
+            !identity_member_registered("launch-mob", Some("domain:planner"), None).await,
+            "no identity plane"
+        );
     }
 }

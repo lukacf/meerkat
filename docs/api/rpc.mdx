@@ -41,6 +41,13 @@ The RPC surface is fully runtime-backed:
     `rkat-rpc --tcp` is a JSON-RPC host transport. It is not the signed
     Meerkat peer/comms channel used by remote agents or external mob members;
     use `rkat run --comms-listen-tcp ...` for that.
+
+    The listener speaks JSON lines only. A connection whose first line is an
+    HTTP request line (a method, a target and an HTTP version) is closed on
+    that line: nothing the request carries is read or run, and the server
+    logs a warning with the peer's address. Only the first line is read this
+    way; a later line that is not JSON is answered with a parse error, as
+    before.
   </Step>
   <Step title="Send the handshake">
     ```json
@@ -126,7 +133,7 @@ of this full catalog.
 | `jobs/health` | Jobs | — | `JobsHealthResult` | Read realm-scoped detached-job health, owed outbox deliveries, and undrained runtime deliveries |
 | `jobs/subscribe` | Jobs | `JobsSubscribeParams` | `JobsSubscribeResult` | Add a durable record, notification, or event delivery subscription |
 | `jobs/unsubscribe` | Jobs | `JobsUnsubscribeParams` | `JobsUnsubscribeResult` | Remove a durable delivery subscription |
-| `monitors/start` | Jobs | `MonitorsStartParams` | `MonitorsStartResult` | Start a high-trust durable script monitor with explicit restart and output contracts |
+| `monitors/start` | Jobs | `MonitorsStartParams` | `MonitorsStartResult` | Start a durable script monitor with explicit restart and output contracts |
 | `meta/jobs/heartbeat` | Host jobs | `MetaJobHeartbeatParams` | `MetaJobMutationResult` | Renew the exact committed attempt lease |
 | `meta/jobs/progress` | Host jobs | `MetaJobProgressParams` | `MetaJobMutationResult` | Commit progress under exact attempt/fence authority |
 | `meta/jobs/checkpoint` | Host jobs | `MetaJobCheckpointParams` | `MetaJobMutationResult` | Commit a restart checkpoint under exact attempt/fence authority |
@@ -317,6 +324,21 @@ operation carrier: `output`, `tokens_used`, `agent_identity`, `member_ref`,
 required, while `retirement_error` reports post-result cleanup debt when
 present.
 
+`mob/profile/create` and `mob/profile/update` are a host's own caller's
+methods and accept the stored profile form: beyond the fields of
+`MobProfileInput`, which their parameter schemas describe, a profile may
+carry `auth_binding`, `tools.mcp_servers` and `tools.rust_bundles`, and its
+`tools.bundles` is stored as sent. Members spawned from that realm profile
+build on the binding, start the servers and mount the bundles of
+`tools.rust_bundles` and `tools.bundles` that the host registered for child
+mobs. A profile read back (`mob/profile/get`, `mob/profile/list`, and the
+answers of create and update) shows none of these four fields. The agent
+profile tools take `MobProfileInput` only and refuse all four on a realm
+profile; the MCP profile tools take `MobProfileInput` and `auth_binding`, and
+refuse the other three. An update through either replaces the stored profile
+whole, so it removes from a profile a host stored every one of these fields
+that the update does not send.
+
 <Note>
 Every `Schedule` result is one flattened public object. Configuration fields
 including `planning_horizon_days`, `planning_horizon_occurrences`, `labels`,
@@ -383,6 +405,15 @@ The session liveness check covers queued work parked on an active executor with
 no run in flight, including repeated staging churn. `session_run_start` covers
 a current staged run that is overdue to begin. Neither claims to measure a run
 that began and then stopped producing progress.
+
+The host also measures `session_run_settlement`: `degraded` while a registered
+session holds a run whose terminal commit landed and whose completion has
+stayed unsettled for a minute, whether or not its runtime loop is still alive.
+Such a session accepts input and runs none of it. The host logs an error that
+names the session, the run and its inputs once a minute for as long as it
+lasts, and a mob logs an error that names the member when the member's status
+is read. A session that is busy at the moment of a health read is not a failed
+read: the check then keeps its last complete reading.
 
 ## Protocol
 
@@ -636,9 +667,9 @@ Handshake. Returns server capabilities.
   "result": {
     "server_info": {
       "name": "meerkat-rpc",
-      "version": "0.9.15"
+      "version": "0.9.18"
     },
-    "contract_version": "0.9.15",
+    "contract_version": "0.9.18",
     "methods": [
       "initialize", "initialized",
       "session/create", "session/list", "session/read",
@@ -968,7 +999,7 @@ Trajectory Interchange Format) v1.7 trajectory document.
   "params": {
     "session_id": "01936f8a-7b2c-7000-8000-000000000001",
     "agent_name": "meerkat",
-    "agent_version": "0.9.15",
+    "agent_version": "0.9.18",
     "model_name": "claude-opus-5"
   }
 }
@@ -2528,7 +2559,7 @@ cancellation request, `jobs/retry` asks the generated job machine to schedule a
 retry at `retry_due_at_ms`, and subscribe/unsubscribe manage durable
 record/notification/event delivery.
 
-`monitors/start` is the explicit high-trust script-monitor entry point. It
+`monitors/start` is the host's script-monitor entry point. It
 requires `session_id`, a caller-stable `submission_key`, `command`, positive
 `timeout_secs`, `restart_class`, and `delivery`. The default output protocol is
 `framed_jsonl`; `lines` is also supported. Agent-authored monitors cannot claim
@@ -3890,6 +3921,10 @@ Send one typed input chunk. Image input is available only when
 for the next text, audio, or explicitly committed response. Every image must
 carry a caller-stable, session-scoped `idempotency_key`.
 
+Send no input before the channel reports `ready`: input sent earlier is
+refused and is not held for later. See
+[Wait for ready before the first input](/guides/realtime#wait-for-ready-before-the-first-input).
+
 The JSON-RPC JSONL transport accepts frames up to 64 MiB, excluding the
 trailing newline. Direct live WebSocket frames are a different input path:
 they support JSON text chunks and negotiated raw PCM audio only, with a 2 MiB
@@ -4132,7 +4167,7 @@ Return the curated model catalog with provider profiles, capability metadata, an
   "jsonrpc": "2.0",
   "id": 17,
   "result": {
-    "contract_version": {"major": 0, "minor": 9, "patch": 15},
+    "contract_version": {"major": 0, "minor": 9, "patch": 18},
     "providers": [
       {
         "provider": "anthropic",
@@ -4196,7 +4231,7 @@ synthesized with that status.
   "jsonrpc": "2.0",
   "id": 8,
   "result": {
-    "contract_version": {"major": 0, "minor": 9, "patch": 15},
+    "contract_version": {"major": 0, "minor": 9, "patch": 18},
     "capabilities": [
       {
         "id": "sessions",
@@ -4863,6 +4898,21 @@ route accepts, or the source cannot be read now. A conflict also names
 model list is not loaded): the same request can succeed later with no change.
 Meerkat does not retry a refused level for the caller.
 
+For an automated caller, retry the unchanged request later only if `error.data`
+has `kind: "reasoning_effort_refused"`, `reasoning_effort_refusal.reason` is
+`"supported_levels_unavailable"`, and `retryable` is the boolean `true`.
+If the reason is unrecognized or any of these fields is missing or malformed,
+surface the original error instead of retrying.
+
+`retryable` says the level may be accepted later, not that the refused request
+left nothing: a `session/create` refused inside its first turn, after its
+session was built, keeps that session and its transcript, and the answer
+names no session, so the same create sent again makes a second session.
+
+Do not infer the decision
+from the message or from `supported`: both unreadable and unstated levels
+give `null`, while an empty list means the model or route accepts no level.
+
 The answer is the same wherever the level is refused, with two exceptions:
 a schedule's `create` spec and its prompt action refuse the key itself, with
 the schedule's invalid-params answer and no typed refusal data (see
@@ -4902,12 +4952,21 @@ that holds no level, are busy there, where the table below queues them);
 with no turn running it rebuilds the session (see [REST](/api/rest) and
 [MCP](/api/mcp)).
 
-A level is judged again when its turn starts. A `turn/start` refused
-there, after its input was stored, is a failed start: its stored input ends
-as abandoned with the reason `stopped`, not with the refusal, the session's
-live runtime is retired, and the other requests queued on that session end
-without a run (see Known limitations in the changelog; a later release is
-planned to change this). What can still be refused at its start: a
+A level is judged again when its turn starts. From 0.9.16 a `turn/start`
+refused there, after its input was stored, ends alone while the session is
+live: it is answered the typed refusal, its stored input ends as abandoned
+with the reason `never_executed`, the session's live runtime stays, and the
+other requests queued on that session run. In 0.9.15 such a refused turn
+was a failed start: its stored input ended as abandoned with the reason
+`stopped`, the session's live runtime was retired, and the other requests
+queued on that session ended without a run. When the session is not live at
+the refusal (the level is refused by the session's build), the session's
+runtime registration is retired as after a failed start and the other
+requests queued on that session end without a run (see Known limitations
+in the changelog); so it is for a refused turn whose answer is resolved
+after a restart, or while another run's result is the one the session's
+runtime holds open. What can
+still be refused at its start: a
 deferred create's
 first turn; a turn on a stored session that is not live whose level cannot
 be judged yet (`supported_levels_unavailable`); a request sent without

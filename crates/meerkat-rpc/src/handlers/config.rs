@@ -214,6 +214,23 @@ fn store_write_error_response(id: Option<RpcId>, err: meerkat_core::ConfigError)
     }
 }
 
+/// The refusal of a write that carries the secret marker on a server with
+/// no config runtime. Such a server's writes go to its store as they are
+/// sent: nothing there puts the stored value back in the marker's place,
+/// so the marker text would be stored as the value.
+fn marker_without_runtime_response(id: Option<RpcId>) -> RpcResponse {
+    RpcResponse::error(
+        id,
+        error::INVALID_PARAMS,
+        format!(
+            "this write carries the marker `{}` in place of a secret value, and this server \
+             resolves no marker (it has no config runtime). Send the value itself. Nothing \
+             was written.",
+            meerkat_core::CONFIG_SECRET_MARKER
+        ),
+    )
+}
+
 fn snapshot_from_store(config: Config, config_store: &Arc<dyn ConfigStore>) -> ConfigSnapshot {
     ConfigSnapshot {
         config,
@@ -343,11 +360,24 @@ pub async fn handle_set(
         }
     };
 
-    if let Err(response) = validate_config_for_runtime(id.clone(), &config, runtime) {
+    // The document the write would commit: a marker the request carries in
+    // place of a stored secret value is the stored value here, so the
+    // checks below and the registry see what the write stores. The request
+    // is committed as it was sent: the write resolves it again under its
+    // own custody.
+    let resolved = match &config_runtime {
+        Some(config_runtime) => match config_runtime.set_preview(&config).await {
+            Ok(resolved) => resolved,
+            Err(e) => return runtime_error_to_response(id, e),
+        },
+        None => config.clone(),
+    };
+
+    if let Err(response) = validate_config_for_runtime(id.clone(), &resolved, runtime) {
         return response;
     }
 
-    let registry = match build_registry_for_runtime(id.clone(), &config, runtime) {
+    let registry = match build_registry_for_runtime(id.clone(), &resolved, runtime) {
         Ok(registry) => registry,
         Err(response) => return response,
     };
@@ -415,6 +445,13 @@ pub async fn handle_set(
                 error::INVALID_PARAMS,
                 "expected_generation requires config runtime".to_string(),
             );
+        }
+        match serde_json::to_value(&config) {
+            Ok(document) if meerkat_core::config_secrets::holds_secret_marker(&document) => {
+                return marker_without_runtime_response(id);
+            }
+            Ok(_) => {}
+            Err(e) => return RpcResponse::error(id, error::INTERNAL_ERROR, e.to_string()),
         }
         // R3-2-4 (P2): capture prior config BEFORE commit. Same gate
         // as the runtime branch above.
@@ -549,6 +586,9 @@ pub async fn handle_patch(
                 error::INVALID_PARAMS,
                 "expected_generation requires config runtime".to_string(),
             );
+        }
+        if meerkat_core::config_secrets::holds_secret_marker(&patch) {
+            return marker_without_runtime_response(id);
         }
         let current = match config_store.get().await {
             Ok(config) => config,

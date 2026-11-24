@@ -575,12 +575,15 @@ impl meerkat_mob::DurableResumeGate for WorkGraphResumeGate {
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     use meerkat::{
-        AttentionProjectionRequest, ClaimWorkItemRequest, CloseWorkItemRequest,
-        DisabledWorkGraphStore, GoalAttentionTarget, GoalCreateRequest, MemoryWorkGraphStore,
-        WorkItemId, WorkNamespace, WorkOwner,
+        AttentionListRequest, AttentionProjectionRequest, ClaimWorkItemRequest,
+        CloseWorkItemRequest, DisabledWorkGraphStore, GoalAttentionTarget, GoalCreateRequest,
+        MemoryWorkGraphStore, ReleaseWorkItemRequest, WorkAttentionBinding, WorkEdge,
+        WorkGraphEvent, WorkGraphEventFilter, WorkGraphStore, WorkGraphStoreKind, WorkItemId,
+        WorkNamespace, WorkOwner,
     };
 
     use super::*;
@@ -1306,6 +1309,438 @@ mod tests {
             gate.check_worker(next.resuming(Some(&projection))).await,
             ResumeCheck::Continue,
             "another run of the worker is decided afresh"
+        );
+    }
+
+    /// The memory store behind a list of the open items that can be made
+    /// slow: from a chosen `list_items` call on, each list waits a set time
+    /// before it reads. Nothing fails. It counts the writes it passes on, so
+    /// a row can assert that the gate wrote nothing.
+    struct SlowListStore {
+        inner: Arc<MemoryWorkGraphStore>,
+        /// The first slow `list_items` call, counted from 1; 0 for none.
+        slow_from_call: AtomicUsize,
+        slow_for: Mutex<Duration>,
+        list_calls: AtomicUsize,
+        writes: AtomicUsize,
+        /// Signalled each time a slow list starts to wait.
+        stalled: tokio::sync::Notify,
+    }
+
+    impl SlowListStore {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                inner: Arc::new(MemoryWorkGraphStore::new()),
+                slow_from_call: AtomicUsize::new(0),
+                slow_for: Mutex::new(Duration::ZERO),
+                list_calls: AtomicUsize::new(0),
+                writes: AtomicUsize::new(0),
+                stalled: tokio::sync::Notify::new(),
+            })
+        }
+
+        /// The service a gate reads this store through.
+        fn service(self: &Arc<Self>) -> WorkGraphService {
+            let store: Arc<dyn WorkGraphStore> = self.clone();
+            WorkGraphService::with_scope(store, mob_realm(), WorkNamespace::default())
+        }
+
+        /// The same items through the memory store itself: a row's setup,
+        /// and its reads of what the gate left.
+        fn direct(&self) -> WorkGraphService {
+            let store: Arc<dyn WorkGraphStore> = self.inner.clone();
+            WorkGraphService::with_scope(store, mob_realm(), WorkNamespace::default())
+        }
+
+        /// From the `call`th list made after this on, each list of the items
+        /// waits `wait` before it reads.
+        fn slow_from(&self, call: usize, wait: Duration) {
+            self.list_calls.store(0, Ordering::SeqCst);
+            *self.slow_for.lock().unwrap() = wait;
+            self.slow_from_call.store(call, Ordering::SeqCst);
+        }
+
+        fn fast_again(&self) {
+            self.slow_from_call.store(0, Ordering::SeqCst);
+        }
+
+        /// The lists of the items made since the last [`Self::slow_from`].
+        fn lists(&self) -> usize {
+            self.list_calls.load(Ordering::SeqCst)
+        }
+
+        /// The writes that went through this store, the gate's only way in.
+        fn writes(&self) -> usize {
+            self.writes.load(Ordering::SeqCst)
+        }
+
+        /// The newest event of the gate's namespace: every write appends one.
+        async fn ledger_mark(&self) -> Option<i64> {
+            self.inner
+                .latest_event_seq(WorkGraphEventFilter {
+                    realm_id: Some(mob_realm()),
+                    namespace: Some(WorkNamespace::default()),
+                    all_namespaces: false,
+                    after_seq: None,
+                    limit: None,
+                })
+                .await
+                .expect("read the ledger")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl WorkGraphStore for SlowListStore {
+        fn kind(&self) -> WorkGraphStoreKind {
+            self.inner.kind()
+        }
+
+        async fn get_store_time_utc(&self) -> Result<DateTime<Utc>, WorkGraphError> {
+            self.inner.get_store_time_utc().await
+        }
+
+        async fn insert_item(
+            &self,
+            item: WorkItem,
+            event: WorkGraphEvent,
+        ) -> Result<WorkItem, WorkGraphError> {
+            self.writes.fetch_add(1, Ordering::SeqCst);
+            self.inner.insert_item(item, event).await
+        }
+
+        async fn update_item_cas(
+            &self,
+            item: WorkItem,
+            expected_previous_revision: u64,
+            event: WorkGraphEvent,
+        ) -> Result<WorkItem, WorkGraphError> {
+            self.writes.fetch_add(1, Ordering::SeqCst);
+            self.inner
+                .update_item_cas(item, expected_previous_revision, event)
+                .await
+        }
+
+        async fn update_item_and_attention_cas(
+            &self,
+            item: WorkItem,
+            expected_previous_revision: u64,
+            item_event: WorkGraphEvent,
+            attention_updates: Vec<(WorkAttentionBinding, u64, WorkGraphEvent)>,
+        ) -> Result<WorkItem, WorkGraphError> {
+            self.writes.fetch_add(1, Ordering::SeqCst);
+            self.inner
+                .update_item_and_attention_cas(
+                    item,
+                    expected_previous_revision,
+                    item_event,
+                    attention_updates,
+                )
+                .await
+        }
+
+        async fn get_item(
+            &self,
+            realm_id: &str,
+            namespace: &WorkNamespace,
+            id: &WorkItemId,
+        ) -> Result<Option<WorkItem>, WorkGraphError> {
+            self.inner.get_item(realm_id, namespace, id).await
+        }
+
+        async fn list_items(
+            &self,
+            filter: WorkItemFilter,
+        ) -> Result<Vec<WorkItem>, WorkGraphError> {
+            let call = self.list_calls.fetch_add(1, Ordering::SeqCst) + 1;
+            let slow_from = self.slow_from_call.load(Ordering::SeqCst);
+            if slow_from != 0 && call >= slow_from {
+                let wait = *self.slow_for.lock().unwrap();
+                self.stalled.notify_one();
+                tokio::time::sleep(wait).await;
+            }
+            self.inner.list_items(filter).await
+        }
+
+        async fn list_attention_matching_bounded(
+            &self,
+            filter: AttentionListRequest,
+            observed_at: DateTime<Utc>,
+            limit: usize,
+        ) -> Result<Vec<WorkAttentionBinding>, WorkGraphError> {
+            self.inner
+                .list_attention_matching_bounded(filter, observed_at, limit)
+                .await
+        }
+
+        async fn insert_edge(
+            &self,
+            edge: WorkEdge,
+            event: WorkGraphEvent,
+        ) -> Result<WorkEdge, WorkGraphError> {
+            self.writes.fetch_add(1, Ordering::SeqCst);
+            self.inner.insert_edge(edge, event).await
+        }
+
+        async fn list_edges(
+            &self,
+            realm_id: &str,
+            namespace: &WorkNamespace,
+        ) -> Result<Vec<WorkEdge>, WorkGraphError> {
+            self.inner.list_edges(realm_id, namespace).await
+        }
+
+        async fn list_events(
+            &self,
+            filter: WorkGraphEventFilter,
+        ) -> Result<Vec<WorkGraphEvent>, WorkGraphError> {
+            self.inner.list_events(filter).await
+        }
+
+        async fn latest_event_seq(
+            &self,
+            filter: WorkGraphEventFilter,
+        ) -> Result<Option<i64>, WorkGraphError> {
+            self.inner.latest_event_seq(filter).await
+        }
+    }
+
+    /// Meerkat's request for a resume of [`WORKER`] with no attention
+    /// projection.
+    fn plain_resume_request() -> meerkat_mob::DurableResumeRequest {
+        meerkat_mob::DurableResumeRequest::new(
+            meerkat_mob::MobId::from(MOB),
+            meerkat_mob::AgentIdentity::from(WORKER),
+            meerkat_mob::ProfileName::from("worker"),
+            SessionId::new(),
+            RunId::new(),
+            vec![meerkat_core::lifecycle::InputId::new()],
+        )
+    }
+
+    /// One list of the open items that takes longer than the gate allows its
+    /// claim scan. Asked the way Meerkat asks (one attempt, cut at
+    /// `RESUMED_RUN_ADMISSION_ATTEMPT_TIMEOUT`), the gate answers before that
+    /// cut: unavailable, with a reason that names the list, the pages it had
+    /// read and how long it waited. It wrote nothing, and the same run asked
+    /// again once the list answers is decided as ever.
+    #[tokio::test(start_paused = true)]
+    async fn a_claim_scan_slower_than_its_budget_answers_unavailable_and_says_why() {
+        use meerkat_mob::DurableResumeGate as _;
+
+        let store = SlowListStore::new();
+        let direct = store.direct();
+        let item = plain_item(&direct).await;
+        let claimed = claim(&direct, &item, member_key(WORKER), in_an_hour()).await;
+        let ledger = store.ledger_mark().await;
+        let gate = WorkGraphResumeGate::new(store.service());
+        let request = plain_resume_request();
+
+        store.slow_from(1, Duration::from_secs(45));
+        let asked = tokio::time::Instant::now();
+        let answer = tokio::time::timeout(
+            meerkat_runtime::RESUMED_RUN_ADMISSION_ATTEMPT_TIMEOUT,
+            gate.check(&request),
+        )
+        .await;
+        let waited = asked.elapsed();
+        let reason = match answer {
+            Ok(meerkat_mob::DurableResumeVerdict::Unavailable { reason }) => reason,
+            other => panic!(
+                "the gate answers unavailable itself, before Meerkat cuts the attempt: {other:?}"
+            ),
+        };
+        for part in [
+            "open work item list".to_string(),
+            format!("realm '{}'", mob_realm()),
+            format!("namespace '{}'", WorkNamespace::default()),
+            "0 page(s)".to_string(),
+            format!("read in {} ms", waited.as_millis()),
+        ] {
+            assert!(
+                reason.contains(&part),
+                "the reason holds \"{part}\": {reason}"
+            );
+        }
+        assert_eq!(store.writes(), 0, "a cut scan wrote nothing");
+        assert_eq!(
+            store.ledger_mark().await,
+            ledger,
+            "the ledger gained no event"
+        );
+        let after = direct
+            .get(None, None, item.id.clone())
+            .await
+            .expect("read the item");
+        assert_eq!(after.revision, claimed.revision, "the item is as it was");
+        assert_eq!(after.claim, claimed.claim, "the claim is as it was");
+
+        store.fast_again();
+        let again = gate.check(&request).await;
+        assert!(
+            matches!(again, meerkat_mob::DurableResumeVerdict::Continue),
+            "the same run, asked again over a list that answers, continues: {again:?}"
+        );
+    }
+
+    /// The control of the rows around it: a list that answers in time, at
+    /// once or slowly, is read to its end and decides as before. A live claim
+    /// keeps the run; a lapsed one supersedes it, and its expiry is written
+    /// through the same store (so the rows' write count is a live reading).
+    #[tokio::test]
+    async fn a_claim_scan_that_ends_in_time_decides_as_before() {
+        let store = SlowListStore::new();
+        let direct = store.direct();
+        let live = plain_item(&direct).await;
+        claim(&direct, &live, member_key(WORKER), in_an_hour()).await;
+        let gate = WorkGraphResumeGate::new(store.service());
+        let worker = Worker::named(WORKER);
+
+        assert_eq!(
+            gate.check_worker(worker.resuming(None)).await,
+            ResumeCheck::Continue,
+            "a list that answers at once"
+        );
+
+        // A slow list that still ends inside an attempt: a quarter of
+        // Meerkat's attempt timeout.
+        let slow = meerkat_runtime::RESUMED_RUN_ADMISSION_ATTEMPT_TIMEOUT / 4;
+        tokio::time::pause();
+        store.slow_from(1, slow);
+        let asked = tokio::time::Instant::now();
+        assert_eq!(
+            gate.check_worker(worker.resuming(None)).await,
+            ResumeCheck::Continue,
+            "a slow list that ends in time"
+        );
+        assert!(asked.elapsed() >= slow, "the list was waited for");
+        tokio::time::resume();
+        store.fast_again();
+        assert_eq!(store.writes(), 0, "a run that continues writes nothing");
+
+        let lapsing = plain_item(&direct).await;
+        claim(&direct, &lapsing, member_key(WORKER), lapsing_soon()).await;
+        let_the_lease_lapse().await;
+        let check = gate.check_worker(worker.resuming(None)).await;
+        assert!(superseded_reason(&check).contains("lapsed"), "{check:?}");
+        assert_eq!(
+            store.writes(),
+            1,
+            "the lapsed claim's expiry went through this store"
+        );
+    }
+
+    /// A scan cut after its first page answers unavailable, whatever that
+    /// page held. Here it held the worker's live claim, which is released
+    /// while the second page is awaited: the sighting is older than the item,
+    /// and a verdict drawn from it would let the run continue on work the
+    /// worker no longer holds.
+    #[tokio::test(start_paused = true)]
+    async fn a_cut_claim_scan_never_continues_on_a_claim_it_sighted_earlier() {
+        let store = SlowListStore::new();
+        let direct = store.direct();
+        // A full page of older open items puts one item on a second page.
+        for _ in 0..CLAIM_SCAN_PAGE {
+            plain_item(&direct).await;
+        }
+        let item = plain_item(&direct).await;
+        let claimed = claim(&direct, &item, member_key(WORKER), in_an_hour()).await;
+        let gate = WorkGraphResumeGate::new(store.service());
+        let worker = Worker::named(WORKER);
+
+        store.slow_from(2, Duration::from_secs(45));
+        let (check, ()) = tokio::join!(gate.check_worker(worker.resuming(None)), async {
+            store.stalled.notified().await;
+            direct
+                .release(ReleaseWorkItemRequest {
+                    id: claimed.id.clone(),
+                    realm_id: None,
+                    namespace: None,
+                    expected_revision: claimed.revision,
+                })
+                .await
+                .expect("release the claim");
+        });
+        assert_eq!(store.lists(), 2, "the scan was on its second page");
+        assert!(
+            matches!(&check, ResumeCheck::Unavailable(reason) if reason.contains("1 page(s)")),
+            "a cut scan draws no verdict from the page it read: {check:?}"
+        );
+        assert_eq!(store.writes(), 0, "a cut scan wrote nothing");
+    }
+
+    /// As above, with the worker's lapsed claim on the first page: a cut scan
+    /// answers no superseded verdict, writes no expiry and remembers nothing
+    /// for the run, so the same run asked again over a list that answers is
+    /// decided then.
+    #[tokio::test]
+    async fn a_cut_claim_scan_never_supersedes_and_writes_nothing() {
+        let store = SlowListStore::new();
+        let direct = store.direct();
+        for _ in 0..CLAIM_SCAN_PAGE {
+            plain_item(&direct).await;
+        }
+        let item = plain_item(&direct).await;
+        let claimed = claim(&direct, &item, member_key(WORKER), lapsing_soon()).await;
+        let_the_lease_lapse().await;
+        let ledger = store.ledger_mark().await;
+        let gate = WorkGraphResumeGate::new(store.service());
+        let worker = Worker::named(WORKER);
+
+        tokio::time::pause();
+        store.slow_from(2, Duration::from_secs(45));
+        let check = gate.check_worker(worker.resuming(None)).await;
+        assert_eq!(store.lists(), 2, "the scan was on its second page");
+        assert!(
+            matches!(&check, ResumeCheck::Unavailable(reason) if reason.contains("1 page(s)")),
+            "a cut scan draws no verdict from the page it read: {check:?}"
+        );
+        assert_eq!(store.writes(), 0, "a cut scan wrote nothing");
+        assert_eq!(
+            store.ledger_mark().await,
+            ledger,
+            "the ledger gained no event"
+        );
+        let after = direct
+            .get(None, None, item.id.clone())
+            .await
+            .expect("read the item");
+        assert_eq!(after.revision, claimed.revision, "the item is as it was");
+        assert_eq!(after.claim, claimed.claim, "the lapsed claim is unobserved");
+
+        store.fast_again();
+        let again = gate.check_worker(worker.resuming(None)).await;
+        assert!(
+            superseded_reason(&again).contains("lapsed"),
+            "nothing was remembered for the run: it is decided now: {again:?}"
+        );
+        assert_eq!(store.writes(), 1, "and the expiry is written now");
+    }
+
+    /// The scan's budget is Meerkat's attempt timeout less a margin: against
+    /// a list that does not answer, the gate's own answer comes after more
+    /// than half of an attempt and before its end.
+    #[tokio::test(start_paused = true)]
+    async fn the_claim_scan_ends_inside_meerkats_attempt_timeout() {
+        let attempt = meerkat_runtime::RESUMED_RUN_ADMISSION_ATTEMPT_TIMEOUT;
+        let store = SlowListStore::new();
+        let gate = WorkGraphResumeGate::new(store.service());
+        let worker = Worker::named(WORKER);
+
+        store.slow_from(1, attempt * 100);
+        let asked = tokio::time::Instant::now();
+        let check = gate.check_worker(worker.resuming(None)).await;
+        let waited = asked.elapsed();
+        assert!(
+            matches!(check, ResumeCheck::Unavailable(_)),
+            "the gate ends its scan itself: {check:?}"
+        );
+        assert!(
+            waited < attempt,
+            "the gate answers before Meerkat cuts the attempt: waited {waited:?} of {attempt:?}"
+        );
+        assert!(
+            waited > attempt / 2,
+            "most of an attempt is left to the read: waited {waited:?} of {attempt:?}"
         );
     }
 

@@ -66,7 +66,7 @@ returns.
 python3 examples/036-realtime-audio-py/main.py --help
 python3 examples/036-realtime-audio-py/main.py --text-probe
 python3 examples/036-realtime-audio-py/main.py --input-device 1 --output-device 2
-python3 examples/036-realtime-audio-py/main.py --helper-model gpt-6-astra
+python3 examples/036-realtime-audio-py/main.py --helper-model gpt-6.2-astra
 python3 examples/036-realtime-audio-py/main.py --realm live-demo
 ```
 

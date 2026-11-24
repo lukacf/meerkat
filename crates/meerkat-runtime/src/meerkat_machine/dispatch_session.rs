@@ -1627,6 +1627,7 @@ impl MeerkatMachine {
         agent_binding: super::SessionAgentBinding,
         tool_surface_gate: meerkat_core::ToolSurfaceGateSlot,
         mcp_observation: meerkat_core::McpObservationSlot,
+        pending_boundary_admissions: meerkat_core::PendingBoundaryAdmissions,
     ) -> Result<meerkat_core::SessionRuntimeBindings, RuntimeDriverError> {
         let compaction_runtime_epoch_id = dsl::RuntimeEpochId::from_domain(&epoch_id);
         let tool_grants = self.session_tool_grants(&session_id);
@@ -1661,9 +1662,10 @@ impl MeerkatMachine {
             ops_lifecycle as Arc<dyn meerkat_core::OpsLifecycleRegistry>,
             cursor_state,
             generated_visibility_owner,
-            Arc::new(crate::handles::RuntimeTurnStateHandle::new(Arc::clone(
-                &shared_handle_authority,
-            ))),
+            Arc::new(
+                crate::handles::RuntimeTurnStateHandle::new(Arc::clone(&shared_handle_authority))
+                    .with_pending_boundary_admissions(pending_boundary_admissions),
+            ),
             Arc::new(crate::handles::RuntimeCommsDrainHandle::new(Arc::clone(
                 &shared_handle_authority,
             ))),
@@ -1746,6 +1748,7 @@ impl MeerkatMachine {
             agent_binding,
             tool_surface_gate,
             mcp_observation,
+            pending_boundary_admissions,
         ) = {
             let sessions = self.sessions.read().await;
             let entry = sessions
@@ -1786,6 +1789,9 @@ impl MeerkatMachine {
                 entry.agent_binding.clone(),
                 entry.tool_surface_gate.clone(),
                 entry.mcp_observation.clone(),
+                // The registration's own announcements, kept with its
+                // mutation gate: admissions under that gate announce there.
+                entry.mutation_gate.pending_boundary_admissions().clone(),
             )
         };
         if let Some(cached) = cached {
@@ -1809,6 +1815,7 @@ impl MeerkatMachine {
             agent_binding,
             tool_surface_gate,
             mcp_observation,
+            pending_boundary_admissions,
         )?;
         let canonical = candidate
             .__clone_with_runtime_authority(Arc::new(()) as Arc<dyn std::any::Any + Send + Sync>);

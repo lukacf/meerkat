@@ -240,6 +240,7 @@ async fn assistant_identity_survives_policy_storage_reopen_and_nested_update()
     assert!(outcome.frame.payload.get("message").is_none());
     let updated = update_frame_status_and_emit(
         &aggregator.inner,
+        None,
         &outcome.frame.id,
         ConsoleFrameStatus::Completed,
     )
@@ -425,6 +426,7 @@ fn history_page(
 
 fn observed_live_frame(session: &str, event: &str, id: &str) -> NewConsoleFrame {
     NewConsoleFrame {
+        mob_id: None,
         id: None,
         dedupe_key: format!("live:{session}:{event}:{id}"),
         timestamp_ms: 1,

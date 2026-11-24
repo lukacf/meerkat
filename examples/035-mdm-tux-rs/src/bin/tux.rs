@@ -2412,9 +2412,8 @@ fn handle_key(
                 _ => {}
             }
 
-            let body = std::mem::take(&mut app.input);
-
             if is_slash {
+                let body = std::mem::take(&mut app.input);
                 handle_slash_command(app, &body, rpc_tx, claims, kennel_tx);
                 return;
             }
@@ -2455,17 +2454,7 @@ fn handle_key(
                     }
                 }
 
-                let target_id = app.targets[idx].target_id.clone();
-                let session_id = app.targets[idx].session_id.clone().unwrap_or_default();
-                let model = app.pending_model.take();
-                app.targets[idx].push_user_turn(&body);
-                app.targets[idx].phase = TargetPhase::Running;
-                let _ = rpc_tx.send(RpcCommand::StartTurn {
-                    target_id,
-                    session_id,
-                    prompt: body,
-                    model,
-                });
+                submit_bound_draft(app, idx, rpc_tx);
             }
             // Hive mode: dispatch to the "hive" target via RPC (same as Direct)
             else if app.mode == Mode::Hive {
@@ -2490,17 +2479,7 @@ fn handle_key(
                             .push_notice("error", "hive has no session; waiting for connection");
                         return;
                     }
-                    let target_id = hive.target_id.clone();
-                    let session_id = hive.session_id.clone().unwrap_or_default();
-                    let model = app.pending_model.take();
-                    app.targets[hive_idx].push_user_turn(&body);
-                    app.targets[hive_idx].phase = TargetPhase::Running;
-                    let _ = rpc_tx.send(RpcCommand::StartTurn {
-                        target_id,
-                        session_id,
-                        prompt: body,
-                        model,
-                    });
+                    submit_bound_draft(app, hive_idx, rpc_tx);
                 } else {
                     if let Some(t) = app.targets.get_mut(0) {
                         t.push_notice("error", "hive not available (kennel mode required)")
@@ -2515,6 +2494,28 @@ fn handle_key(
         KeyCode::Esc => app.quit = true,
         _ => {}
     }
+}
+
+// Local dispatch, not a server-side admission receipt.
+fn submit_bound_draft(app: &mut App, idx: usize, rpc_tx: &mpsc::UnboundedSender<RpcCommand>) {
+    let target = &mut app.targets[idx];
+    let Some(session_id) = target.session_id.clone() else {
+        return;
+    };
+    let cmd = RpcCommand::StartTurn {
+        target_id: target.target_id.clone(),
+        session_id,
+        prompt: app.input.clone(),
+        model: app.pending_model.clone(),
+    };
+    if rpc_tx.send(cmd).is_err() {
+        target.push_notice("error", "RPC worker unavailable; draft not sent");
+        return;
+    }
+    target.push_user_turn(&app.input);
+    target.phase = TargetPhase::Running;
+    app.pending_model = None;
+    app.input.clear();
 }
 
 fn handle_slash_command(
@@ -3224,6 +3225,106 @@ mod tests {
         let (events, _) = mpsc::unbounded_channel();
         let client = RpcClient::connect(&addr, events).await.unwrap();
         (client, server)
+    }
+
+    #[test]
+    fn peer_run_start_between_typing_and_enter_preserves_unsent_draft() {
+        for mode in [Mode::Direct, Mode::Hive] {
+            let mut app = app();
+            app.mode = mode;
+            app.selected = usize::from(app.mode == Mode::Direct); // Hive mode ignores selection
+            app.targets[0].phase = TargetPhase::Idle;
+            app.targets[1].phase = TargetPhase::Idle;
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            for ch in "keep this draft".chars() {
+                handle_key(
+                    &mut app,
+                    KeyCode::Char(ch),
+                    KeyModifiers::NONE,
+                    &tx,
+                    None,
+                    None,
+                );
+            }
+            handle_stream_event(
+                &mut app.targets[1],
+                &serde_json::json!({"event":{"payload":{"type":"run_started"}}}),
+            );
+            assert!(app.targets[1].phase == TargetPhase::Running);
+            handle_key(
+                &mut app,
+                KeyCode::Enter,
+                KeyModifiers::NONE,
+                &tx,
+                None,
+                None,
+            );
+            assert_eq!(app.input, "keep this draft");
+            assert!(
+                app.targets[1]
+                    .history
+                    .iter()
+                    .any(|line| line.contains("wait for completion or /interrupt"))
+            );
+            assert!(matches!(
+                rx.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn ordinary_draft_survives_refusals_and_dispatches_once_after_claim() {
+        let mut app = app();
+        app.mode = Mode::Direct;
+        app.input = "original draft".into();
+        app.pending_model = Some("test-model".into());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let enter =
+            |app: &mut App| handle_key(app, KeyCode::Enter, KeyModifiers::NONE, &tx, None, None);
+        let (client, server) = stream_client_fixture().await;
+        for stage in 0..3 {
+            if stage == 1 {
+                app.targets[0].phase = TargetPhase::Idle;
+            } // unbound
+            if stage == 2 {
+                // bound but unclaimed
+                app.targets[0].session_id = Some("s".into());
+                app.targets[0].stream_binding = Some(client.bind_session("s").await.unwrap());
+            }
+            enter(&mut app);
+            assert_eq!(app.input, "original draft");
+            assert_eq!(app.pending_model.as_deref(), Some("test-model"));
+            assert!(matches!(
+                rx.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+            ));
+        }
+        app.target_states
+            .insert("t".into(), KennelUiState::ClaimedByMe);
+        let (closed, dead_rx) = mpsc::unbounded_channel();
+        drop(dead_rx);
+        handle_key(
+            &mut app,
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+            &closed,
+            None,
+            None,
+        );
+        assert_eq!(app.input, "original draft");
+        enter(&mut app);
+        enter(&mut app); // empty draft must not dispatch twice
+        assert!(app.input.is_empty() && app.pending_model.is_none());
+        assert!(
+            matches!(rx.try_recv(), Ok(RpcCommand::StartTurn {target_id,session_id,prompt,model}) if target_id == "t" && session_id == "s" && prompt == "original draft" && model.as_deref() == Some("test-model"))
+        );
+        assert!(matches!(
+            rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        client.close().await;
+        server.await.unwrap();
     }
 
     #[test]

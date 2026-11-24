@@ -2694,6 +2694,28 @@ fn open_existing_read_connection(path: &Path) -> Result<Connection, MobStoreErro
     Ok(conn)
 }
 
+/// Test-support seam: write, at `path`, a mob store as the last release
+/// before creation records wrote it: that release's schema, which has no
+/// table for creation records, under its ledger version, and no event. A
+/// read-only read of it migrates nothing, so it stays as written.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn seed_store_that_predates_creation_records_for_test(path: &Path) -> Result<(), MobError> {
+    let mut conn = Connection::open(path).map_err(se)?;
+    let tx = conn.transaction().map_err(se)?;
+    build_released_0_9_3_mob_schema(&tx).map_err(se)?;
+    tx.execute_batch(
+        "CREATE TABLE meerkat_schema (
+             domain TEXT PRIMARY KEY,
+             version INTEGER NOT NULL
+         );
+         INSERT INTO meerkat_schema VALUES ('mob', 11);",
+    )
+    .map_err(se)?;
+    tx.commit().map_err(se)?;
+    Ok(())
+}
+
 /// The mob most of [`seed_identity_census_rows_for_test`]'s rows belong to.
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
@@ -3131,6 +3153,12 @@ fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 fn latest_event_cursor_sync(path: &Path) -> Result<u64, MobStoreError> {
     let conn = open_existing_read_connection(path)?;
+    latest_event_cursor_from_connection(&conn)
+}
+
+/// The journal's latest cursor as `conn` sees it: 0 for a journal that
+/// holds no event.
+fn latest_event_cursor_from_connection(conn: &Connection) -> Result<u64, MobStoreError> {
     let cursor: Option<i64> = conn
         .query_row("SELECT MAX(cursor) FROM mob_events", [], |row| row.get(0))
         .optional()
@@ -5181,6 +5209,114 @@ fn read_definition_journal_at_sync(
     Ok(read_mob_store_file(path, query_member_binding_events)?)
 }
 
+/// Read one page of the journal of the persistent mob store at `path`, with
+/// no running mob, for [`crate::MobStorage::read_stored_events`]: the mob
+/// the journal belongs to, the events whose cursor is greater than
+/// `after_cursor`, in cursor order, at most `limit` of them, and the
+/// journal's latest cursor.
+pub(crate) async fn read_stored_events_at(
+    path: PathBuf,
+    after_cursor: u64,
+    limit: usize,
+) -> Result<(Option<MobId>, Vec<MobEvent>, u64), crate::MobStoredEventsReadError> {
+    tokio::task::spawn_blocking(move || read_stored_events_at_sync(&path, after_cursor, limit))
+        .await
+        .map_err(|error| MobStoreError::Internal(format!("sqlite task join failed: {error}")))?
+}
+
+fn read_stored_events_at_sync(
+    path: &Path,
+    after_cursor: u64,
+    limit: usize,
+) -> Result<(Option<MobId>, Vec<MobEvent>, u64), crate::MobStoredEventsReadError> {
+    Ok(read_mob_store_file(path, |snapshot| {
+        // The page and the latest cursor are read in the one read
+        // transaction, so the cursor is the journal's when the page was
+        // read: the store's own poll and its latest cursor, on this
+        // snapshot.
+        let events = poll_events_from_connection(snapshot, after_cursor, limit)?;
+        let latest_cursor = latest_event_cursor_from_connection(snapshot)?;
+        // Whose journal it is, whatever the page holds: the mob its first
+        // event names. It is read from the journal, which every schema
+        // this read accepts has, and not from the creation record's table:
+        // a store an earlier release wrote has none, and nothing is
+        // migrated here.
+        let mob_id = journal_mob_from_connection(snapshot)?;
+        Ok((mob_id, events, latest_cursor))
+    })?)
+}
+
+/// The mob the journal `conn` sees belongs to: the mob its first event
+/// names. `None` for a journal that holds no event.
+fn journal_mob_from_connection(conn: &Connection) -> Result<Option<MobId>, MobStoreError> {
+    let first: Option<Vec<u8>> = conn
+        .query_row(
+            "SELECT event_json FROM mob_events ORDER BY cursor LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(se)?;
+    first
+        .map(|bytes| {
+            decode_stored_mob_event(&bytes)
+                .map(|event| event.mob_id)
+                .map_err(|error| MobStoreError::Serialization(error.to_string()))
+        })
+        .transpose()
+}
+
+/// Read the creation record of the persistent mob store at `path`, with no
+/// running mob, for [`crate::MobStorage::read_stored_creator`]: open it
+/// read-only (a missing file is never created), check its schema without
+/// migrating it, and read the record in one read transaction. A store an
+/// earlier release wrote, whose schema holds no creation record yet, answers
+/// [`StoredCreationRecord::PredatesRecords`]: nothing is migrated here.
+pub(crate) async fn read_stored_creation_at(
+    path: PathBuf,
+) -> Result<StoredCreationRecord, crate::MobStoredCreationReadError> {
+    tokio::task::spawn_blocking(move || read_stored_creation_at_sync(&path))
+        .await
+        .map_err(|error| MobStoreError::Internal(format!("sqlite task join failed: {error}")))?
+}
+
+/// What [`read_stored_creation_at`] found in a store file. The two empty
+/// answers are different facts: a store that keeps creation records and
+/// holds none has no mob; a store that predates them may hold a mob whose
+/// creator is recorded nowhere.
+pub(crate) enum StoredCreationRecord {
+    /// The store's creation record, finalized or not.
+    Record(MobCreationRecord),
+    /// The store keeps creation records and holds none.
+    NoRecord,
+    /// An earlier release wrote the store: its schema has no table for
+    /// creation records.
+    PredatesRecords,
+}
+
+fn read_stored_creation_at_sync(
+    path: &Path,
+) -> Result<StoredCreationRecord, crate::MobStoredCreationReadError> {
+    Ok(read_mob_store_file(path, |snapshot| {
+        // The creation record's table came with a later schema than the
+        // oldest one this read accepts: a store that has none holds no
+        // record this read can answer.
+        let has_record_table: bool = snapshot
+            .query_row(
+                "SELECT EXISTS (SELECT 1 FROM sqlite_master
+                 WHERE type = 'table' AND name = 'mob_runtime_incarnations')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(se)?;
+        if !has_record_table {
+            return Ok(StoredCreationRecord::PredatesRecords);
+        }
+        Ok(read_creation_record(snapshot)?
+            .map_or(StoredCreationRecord::NoRecord, StoredCreationRecord::Record))
+    })?)
+}
+
 /// Why a read-only read of a persistent mob store by its path refused or
 /// failed: the cases each path reader's typed error names.
 enum MobStoreFileReadFault {
@@ -5199,6 +5335,30 @@ impl From<MobStoreError> for MobStoreFileReadFault {
 }
 
 impl From<MobStoreFileReadFault> for crate::MobDefinitionSnapshotReadError {
+    fn from(fault: MobStoreFileReadFault) -> Self {
+        match fault {
+            MobStoreFileReadFault::Missing { path } => Self::StoreMissing { path },
+            MobStoreFileReadFault::ForeignSchema { path, detail } => {
+                Self::ForeignSchema { path, detail }
+            }
+            MobStoreFileReadFault::Read(error) => Self::Read(error),
+        }
+    }
+}
+
+impl From<MobStoreFileReadFault> for crate::MobStoredEventsReadError {
+    fn from(fault: MobStoreFileReadFault) -> Self {
+        match fault {
+            MobStoreFileReadFault::Missing { path } => Self::StoreMissing { path },
+            MobStoreFileReadFault::ForeignSchema { path, detail } => {
+                Self::ForeignSchema { path, detail }
+            }
+            MobStoreFileReadFault::Read(error) => Self::Read(error),
+        }
+    }
+}
+
+impl From<MobStoreFileReadFault> for crate::MobStoredCreationReadError {
     fn from(fault: MobStoreFileReadFault) -> Self {
         match fault {
             MobStoreFileReadFault::Missing { path } => Self::StoreMissing { path },
@@ -14784,6 +14944,472 @@ mod tests {
         assert!(!table_exists(&path, "mob_runtime_callback_claim_verifiers"));
     }
 
+    /// A mob store at `path` whose journal holds `count` events: the mob's
+    /// creation, then completions. The storage is answered open.
+    async fn storage_with_journal(path: &Path, count: usize) -> crate::MobStorage {
+        let definition = sample_definition();
+        let storage = crate::MobStorage::persistent(path).unwrap();
+        for at in 0..count {
+            storage
+                .events
+                .append(NewMobEvent {
+                    mob_id: definition.id.clone(),
+                    timestamp: None,
+                    kind: if at == 0 {
+                        MobEventKind::MobCreated {
+                            definition: Box::new(definition.clone()),
+                        }
+                    } else {
+                        MobEventKind::MobCompleted
+                    },
+                })
+                .await
+                .unwrap();
+        }
+        storage
+    }
+
+    fn cursors_of(events: &[MobEvent]) -> Vec<u64> {
+        events.iter().map(|event| event.cursor).collect()
+    }
+
+    /// Row: the stored events read pages a journal in cursor order. A page
+    /// holds the events after the cursor asked, at most the limit, as the
+    /// store's own poll answers them, and every page carries the journal's
+    /// latest cursor. A cursor at the end or past it, and a limit of zero,
+    /// answer an empty page.
+    #[tokio::test]
+    async fn the_stored_events_read_pages_a_journal_in_cursor_order() {
+        let (_dir, path) = temp_db_path();
+        let storage = storage_with_journal(&path, 5).await;
+        let all = storage.events.replay_all().await.unwrap();
+        assert_eq!(all.len(), 5);
+        let latest = all[4].cursor;
+        drop(storage);
+        let as_json = |events: &[MobEvent]| serde_json::to_value(events).unwrap();
+
+        let first = crate::MobStorage::read_stored_events(&path, 0, 2)
+            .await
+            .expect("read the first page");
+        assert_eq!(
+            cursors_of(first.events()),
+            cursors_of(&all[..2]),
+            "the first page holds the first two events, in cursor order"
+        );
+        assert_eq!(
+            as_json(first.events()),
+            as_json(&all[..2]),
+            "a page holds the stored events themselves"
+        );
+        assert_eq!(
+            first.latest_cursor(),
+            latest,
+            "a page that is not the last one carries the journal's latest cursor"
+        );
+
+        let rest = crate::MobStorage::read_stored_events(&path, all[1].cursor, 10)
+            .await
+            .expect("read the rest");
+        assert_eq!(
+            as_json(rest.events()),
+            as_json(&all[2..]),
+            "the next page starts after the cursor asked"
+        );
+        assert_eq!(rest.latest_cursor(), latest);
+
+        for (after_cursor, limit, what) in [
+            (latest, 10, "a cursor at the end"),
+            (latest + 100, 10, "a cursor past the end"),
+            (0, 0, "a limit of zero"),
+        ] {
+            let page = crate::MobStorage::read_stored_events(&path, after_cursor, limit)
+                .await
+                .expect("read an empty page");
+            assert!(
+                page.events().is_empty(),
+                "{what} answers no event: {:?}",
+                cursors_of(page.events())
+            );
+            assert_eq!(
+                page.latest_cursor(),
+                latest,
+                "{what} still answers the journal's latest cursor"
+            );
+        }
+    }
+
+    /// Row: the stored events read names the mob its journal belongs to on
+    /// every page, whatever the page holds: the mob the journal's first
+    /// event names. A page past the end and a page of limit zero name it
+    /// too; a journal that holds no event names none.
+    #[tokio::test]
+    async fn the_stored_events_read_names_the_journals_mob() {
+        let (_dir, path) = temp_db_path();
+        let storage = storage_with_journal(&path, 3).await;
+        let latest = storage.events.latest_cursor().await.unwrap();
+        drop(storage);
+        let mob_id = sample_definition().id;
+
+        for (after_cursor, limit, what) in [
+            (0, 10, "the whole journal"),
+            (1, 1, "a page in the middle"),
+            (latest, 10, "a page past the end"),
+            (0, 0, "a page of limit zero"),
+        ] {
+            let page = crate::MobStorage::read_stored_events(&path, after_cursor, limit)
+                .await
+                .expect("read a page");
+            assert_eq!(
+                page.mob_id(),
+                Some(&mob_id),
+                "{what} names the journal's mob"
+            );
+        }
+
+        let (_empty_dir, empty) = temp_db_path();
+        drop(open_connection(&empty).unwrap());
+        let page = crate::MobStorage::read_stored_events(&empty, 0, 10)
+            .await
+            .expect("read a store that holds no event");
+        assert_eq!(
+            page.mob_id(),
+            None,
+            "a journal that holds no event names no mob"
+        );
+    }
+
+    /// Row: the stored creator read answers who created the mob a store's
+    /// unfinalized creation record names, for that mob only. It answers
+    /// nothing for another mob id, for a finalized record (a finished
+    /// destroy whose files are not removed), for a store with no record and
+    /// for a store an earlier release wrote, which it does not migrate; the
+    /// mob of such a store reads `Unrecorded` once this build resumed it. A
+    /// missing store is refused typed and not created. No read writes the
+    /// store file.
+    #[tokio::test]
+    async fn the_stored_creator_read_answers_the_unfinalized_record_of_the_mob_asked_and_writes_nothing()
+     {
+        let (dir, path) = temp_db_path();
+        let definition = sample_definition();
+        let creator = crate::MobProvenance::OperatorSession {
+            session_id: meerkat_core::SessionId::new(),
+        };
+        let storage = crate::MobStorage::persistent(&path).unwrap();
+        storage
+            .events
+            .append_creation(
+                NewMobEvent {
+                    mob_id: definition.id.clone(),
+                    timestamp: None,
+                    kind: MobEventKind::MobCreated {
+                        definition: Box::new(definition.clone()),
+                    },
+                },
+                meerkat_core::service::MobIncarnationId::mint(),
+                &creator,
+            )
+            .await
+            .unwrap();
+        drop(storage);
+
+        let before = file_facts(&path);
+        assert_eq!(
+            crate::MobStorage::read_stored_creator(&path, &definition.id)
+                .await
+                .expect("read the record"),
+            Some(creator.clone()),
+            "the record's mob reads who created it"
+        );
+        assert_eq!(
+            crate::MobStorage::read_stored_creator(&path, &MobId::from("another-mob"))
+                .await
+                .expect("read the record"),
+            None,
+            "a record that names another mob proves nothing for the id asked"
+        );
+        assert_eq!(file_facts(&path), before, "the read wrote nothing");
+
+        // The destroy's event clear finalizes the record; the file stays.
+        let storage = crate::MobStorage::persistent(&path).unwrap();
+        storage.events.clear().await.unwrap();
+        drop(storage);
+        let before = file_facts(&path);
+        assert_eq!(
+            crate::MobStorage::read_stored_creator(&path, &definition.id)
+                .await
+                .expect("read the finalized record"),
+            None,
+            "a finalized record proves nothing"
+        );
+        assert_eq!(file_facts(&path), before, "the read wrote nothing");
+
+        // A store that holds no record.
+        let empty = dir.path().join("empty.db");
+        drop(crate::MobStorage::persistent(&empty).unwrap());
+        assert_eq!(
+            crate::MobStorage::read_stored_creator(&empty, &definition.id)
+                .await
+                .expect("read the empty store"),
+            None
+        );
+
+        // A store an earlier release wrote: no creation record table yet,
+        // and the read does not migrate it.
+        let earlier = dir.path().join("earlier-release.db");
+        seed_released_predecessor(&earlier, 11, build_released_0_9_3_mob_schema);
+        let before = file_facts(&earlier);
+        assert_eq!(
+            crate::MobStorage::read_stored_creator(&earlier, &definition.id)
+                .await
+                .expect("read the earlier release's store"),
+            None,
+            "a store with no creation record table proves nothing"
+        );
+        assert_eq!(file_facts(&earlier), before, "the store was not migrated");
+        assert_eq!(ledger_version(&earlier), 11);
+
+        // That store once this build opened it and resumed its mob: the open
+        // migrates it, and resume assigns the mob a record whose creator is
+        // not known. The read answers that, and no creator.
+        let storage = crate::MobStorage::persistent(&earlier).unwrap();
+        storage
+            .events
+            .append(NewMobEvent {
+                mob_id: definition.id.clone(),
+                timestamp: None,
+                kind: MobEventKind::MobCreated {
+                    definition: Box::new(definition.clone()),
+                },
+            })
+            .await
+            .unwrap();
+        storage
+            .events
+            .assign_legacy_incarnation(
+                &definition.id,
+                meerkat_core::service::MobIncarnationId::mint(),
+            )
+            .await
+            .unwrap();
+        drop(storage);
+        assert_eq!(
+            crate::MobStorage::read_stored_creator(&earlier, &definition.id)
+                .await
+                .expect("read the assigned record"),
+            Some(crate::MobProvenance::Unrecorded),
+            "a mob created before creation records existed has no recorded creator"
+        );
+
+        let missing = dir.path().join("missing.db");
+        let refused = crate::MobStorage::read_stored_creator(&missing, &definition.id).await;
+        assert!(
+            matches!(
+                &refused,
+                Err(crate::MobStoredCreationReadError::StoreMissing { path }) if path == &missing
+            ),
+            "a missing store is refused typed: {refused:?}"
+        );
+        assert!(!missing.exists(), "the read never creates a store");
+    }
+
+    /// Row: the stored events read refuses a missing store and creates
+    /// none, and refuses a file that is not a mob store this build reads
+    /// (not SQLite, no mob schema, a mob schema from a newer build, an older
+    /// mob schema this build does not accept) and leaves it as it was, each
+    /// typed; a mob store that holds no event answers an empty page.
+    #[tokio::test]
+    async fn the_stored_events_read_refuses_missing_and_foreign_stores_and_creates_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing.db");
+        let refused = crate::MobStorage::read_stored_events(&missing, 0, 10).await;
+        assert!(
+            matches!(
+                &refused,
+                Err(crate::MobStoredEventsReadError::StoreMissing { path })
+                    if path == &missing
+            ),
+            "a missing store is refused typed: {refused:?}"
+        );
+        assert!(!missing.exists(), "the read never creates a store");
+
+        let not_sqlite = dir.path().join("not-sqlite.db");
+        std::fs::write(&not_sqlite, b"this file is not a SQLite database").unwrap();
+        let no_mob_schema = dir.path().join("no-mob-schema.db");
+        Connection::open(&no_mob_schema)
+            .unwrap()
+            .execute_batch("CREATE TABLE unrelated (value INTEGER);")
+            .unwrap();
+        let ledger_only = |path: &Path, version: i64| {
+            let conn = Connection::open(path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE meerkat_schema (
+                     domain TEXT PRIMARY KEY,
+                     version INTEGER NOT NULL
+                 );",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO meerkat_schema VALUES ('mob', ?1)",
+                params![version],
+            )
+            .unwrap();
+        };
+        let future_schema = dir.path().join("future-schema.db");
+        ledger_only(&future_schema, 9999);
+        // Version 2 is an older mob schema no build accepts as it is.
+        assert!(!MOB_DOMAIN.allowed_existing_versions.contains(&2));
+        let older_schema = dir.path().join("older-schema.db");
+        ledger_only(&older_schema, 2);
+        for path in [&not_sqlite, &no_mob_schema, &future_schema, &older_schema] {
+            let before = file_facts(path);
+            let refused = crate::MobStorage::read_stored_events(path, 0, 10).await;
+            assert!(
+                matches!(
+                    &refused,
+                    Err(crate::MobStoredEventsReadError::ForeignSchema {
+                        path: refused_path,
+                        ..
+                    }) if refused_path == path
+                ),
+                "{} is refused as a foreign schema: {refused:?}",
+                path.display()
+            );
+            assert_eq!(
+                file_facts(path),
+                before,
+                "{} is left as it was",
+                path.display()
+            );
+        }
+
+        let empty = dir.path().join("empty.db");
+        drop(open_connection(&empty).unwrap());
+        let page = crate::MobStorage::read_stored_events(&empty, 0, 10)
+            .await
+            .expect("read a store that holds no event");
+        assert!(page.events().is_empty());
+        assert_eq!(
+            page.latest_cursor(),
+            0,
+            "a journal that holds no event has the latest cursor 0"
+        );
+    }
+
+    /// Row: the stored events read answers the journal of a store an
+    /// earlier release wrote (mob schema 10), a predecessor that opening the
+    /// store would migrate, from that release's journal table, and neither
+    /// migrates nor otherwise writes the file. The journal row is one this
+    /// build writes: no migration since that release rewrites a journal row.
+    #[tokio::test]
+    async fn the_stored_events_read_reads_a_released_v10_store_without_migrating_it() {
+        let (_dir, path) = temp_db_path();
+        seed_released_predecessor(&path, 10, build_released_0_9_2_mob_schema);
+        let (_written_dir, written) = temp_db_path();
+        let storage = storage_with_journal(&written, 1).await;
+        drop(storage);
+        let (cursor, mob_id, event_json) = Connection::open(&written)
+            .unwrap()
+            .query_row(
+                "SELECT cursor, mob_id, event_json FROM mob_events",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Vec<u8>>(2)?,
+                    ))
+                },
+            )
+            .unwrap();
+        Connection::open(&path)
+            .unwrap()
+            .execute(
+                "INSERT INTO mob_events (cursor, mob_id, event_json) VALUES (?1, ?2, ?3)",
+                params![cursor, mob_id, event_json],
+            )
+            .unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        let page = crate::MobStorage::read_stored_events(&path, 0, 10)
+            .await
+            .expect("read a released v10 store");
+
+        assert_eq!(
+            page.events()
+                .iter()
+                .map(|event| (
+                    i64::try_from(event.cursor).unwrap(),
+                    event.mob_id.to_string()
+                ))
+                .collect::<Vec<_>>(),
+            vec![(cursor, mob_id.clone())],
+            "the page holds the journal's one event"
+        );
+        assert!(matches!(
+            page.events()[0].kind,
+            MobEventKind::MobCreated { .. }
+        ));
+        assert_eq!(i64::try_from(page.latest_cursor()).unwrap(), cursor);
+        assert_eq!(
+            page.mob_id().map(ToString::to_string),
+            Some(mob_id),
+            "the page names the journal's mob, read from that release's journal table"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(ledger_version(&path), 10);
+        assert!(!table_exists(&path, "mob_runtime_callback_claim_verifiers"));
+    }
+
+    /// Row: the stored events read reads a store its mob writes. With the
+    /// store open for writing, a page holds what was committed when it was
+    /// read; an event appended after it is on the next page, and the store
+    /// goes on appending.
+    #[tokio::test]
+    async fn the_stored_events_read_reads_a_store_that_is_open_for_writing() {
+        let (_dir, path) = temp_db_path();
+        let storage = storage_with_journal(&path, 2).await;
+        let committed = storage.events.replay_all().await.unwrap();
+
+        let page = crate::MobStorage::read_stored_events(&path, 0, 10)
+            .await
+            .expect("read beside the open store");
+        assert_eq!(
+            cursors_of(page.events()),
+            cursors_of(&committed),
+            "the page holds what was committed"
+        );
+        assert_eq!(page.latest_cursor(), committed[1].cursor);
+
+        let definition = sample_definition();
+        let appended = storage
+            .events
+            .append(NewMobEvent {
+                mob_id: definition.id.clone(),
+                timestamp: None,
+                kind: MobEventKind::MobCompleted,
+            })
+            .await
+            .expect("the store appends after the read");
+        let next = crate::MobStorage::read_stored_events(&path, page.latest_cursor(), 10)
+            .await
+            .expect("read the next page");
+        assert_eq!(
+            cursors_of(next.events()),
+            vec![appended.cursor],
+            "an event appended after a page is on the next one"
+        );
+        assert_eq!(next.latest_cursor(), appended.cursor);
+        storage
+            .events
+            .append(NewMobEvent {
+                mob_id: definition.id,
+                timestamp: None,
+                kind: MobEventKind::MobCompleted,
+            })
+            .await
+            .expect("the store goes on appending");
+    }
+
     /// A created identity entry's row (schema version 2) and every row of a
     /// later schema are the created identity scan's, never the intent
     /// readers': the intent scan and the intent list read the host-adopted
@@ -15533,6 +16159,53 @@ mod tests {
 
         let replayed = store.replay_all().await.unwrap();
         assert_eq!(replayed.len(), 1);
+    }
+
+    /// A seat row's seat record survives the SQLite store whole across a
+    /// reopen, with members of the record this build does not know kept as
+    /// stored.
+    #[tokio::test]
+    async fn test_sqlite_event_store_keeps_a_seat_record_whole() {
+        use crate::event::{MemberRef, MemberSpawnedEvent};
+        use crate::ids::{AgentIdentity, AgentRuntimeId, FenceToken, Generation, ProfileName};
+        let (_dir, path) = temp_db_path();
+        let identity = AgentIdentity::from("worker");
+        let record: crate::runtime::StoredSeatLineage = serde_json::from_value(serde_json::json!({
+            "recorded_by": "shell",
+            "kind": "a_later_kind",
+            "a_later_member": { "kept": [1, 2] },
+        }))
+        .expect("a stored record");
+        let spawned = MemberSpawnedEvent::new(
+            identity.clone(),
+            Generation::INITIAL,
+            FenceToken::new(1),
+            AgentRuntimeId::initial(identity),
+            ProfileName::from("worker"),
+        )
+        .with_bridge_member_ref(Some(MemberRef::from_bridge_session_id(SessionId::new())))
+        .with_seat_lineage(Some(record.clone()));
+        {
+            let store = SqliteMobStores::open(&path).unwrap().event_store();
+            store
+                .append(NewMobEvent {
+                    mob_id: MobId::from("mob"),
+                    timestamp: None,
+                    kind: MobEventKind::MemberSpawned(spawned),
+                })
+                .await
+                .unwrap();
+        }
+        let store = SqliteMobStores::open(&path).unwrap().event_store();
+        let replayed = store.replay_all().await.unwrap();
+        let stored: Vec<_> = replayed
+            .iter()
+            .filter_map(|event| match &event.kind {
+                MobEventKind::MemberSpawned(spawned) => Some(spawned.seat_lineage().cloned()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(stored, vec![Some(record)]);
     }
 
     #[test]

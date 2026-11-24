@@ -63,6 +63,11 @@ pub trait AnnouncementStore: Send + Sync {
         source_key: &SourceKey,
     ) -> Result<Option<Announcement>>;
 
+    /// Put a subscription: make it, or change the one its id names. What
+    /// another member announced is not judged by this form: where an
+    /// earlier start replays it, a store that judges readers
+    /// ([`Self::judges_readers`]) owes it to the subscription, and
+    /// [`Self::seal_batch_with_roster`] judges it.
     async fn put_subscription(
         &self,
         operation: &OperationId,
@@ -107,6 +112,42 @@ pub trait AnnouncementStore: Send + Sync {
         ended: &BTreeSet<MobId>,
         now_ms: u64,
     ) -> Result<Vec<SubscriptionId>>;
+
+    /// Release what a mob of the id `mob_id` left here: a mob is about to
+    /// be created under that id, and none of it is the new mob's.
+    ///
+    /// - Its announcements go, with what each source item's announcement
+    ///   was: no read by source key answers one, a key is free again, and
+    ///   nothing of them is replayed. The log keeps its head, so the new
+    ///   mob's first announcement takes the next sequence and no capture of
+    ///   it meets a row of an earlier one.
+    /// - What a subscriber still awaited of them is told, not delivered: a
+    ///   sealed batch that holds one is cancelled and what else it held is
+    ///   owed again, and each such announcement is a gap line of its member
+    ///   ([`super::types::GapReason::NotRetained`]), but for an item held
+    ///   from its member, of which the member learns nothing. A batch the
+    ///   native owner may hold carries its own body and settles as it does.
+    /// - The mob leaves every live subscription that names it, as a
+    ///   destroyed mob does ([`Self::drop_ended_mobs`]).
+    /// - Its sources end, their topics and streams are free, and what was
+    ///   counted about them goes; a declared one is no longer marked, so the
+    ///   declarations start it again for the mob that stands under the id.
+    /// - The subscriptions of its members end
+    ///   ([`SubscriptionEnd::MemberMobEnded`]), and their kept routes,
+    ///   markers and gap lines go.
+    /// - The role templates of its roles are cancelled and no longer marked,
+    ///   and keep no child: a child of such a template is a subscription of
+    ///   a member of the mob and ends with it. The mob leaves the mobs every
+    ///   other template captures from, and a template left with none is
+    ///   cancelled with its children.
+    /// - Its lineage record ends.
+    ///
+    /// Asked again, it changes nothing. A store that cannot do it refuses,
+    /// and the caller then refuses the create.
+    async fn release_mob(&self, mob_id: &MobId, now_ms: u64) -> Result<MobRelease> {
+        let _ = (mob_id, now_ms);
+        Err(no_release())
+    }
 
     async fn subscriptions(
         &self,
@@ -197,6 +238,10 @@ pub trait AnnouncementStore: Send + Sync {
     /// A store that keeps sources seals here with no roster facts, so a
     /// member is covered by member grants alone: a caller whose sources
     /// grant by role or label uses [`Self::seal_batch_with_facts`].
+    ///
+    /// What another member announced is not judged by this form: a store
+    /// that judges readers ([`Self::judges_readers`]) leaves such an item
+    /// owed, in no batch, until [`Self::seal_batch_with_roster`] judges it.
     async fn seal_batch(
         &self,
         member: &Member,
@@ -210,7 +255,9 @@ pub trait AnnouncementStore: Send + Sync {
     /// every item it holds, against the member's coverage and routes first:
     /// an item that fails is held, not sealed and not dropped, and a held
     /// item that passes this fresh check is released and sealed. A store
-    /// without sources owns no topic and seals as before.
+    /// without sources owns no topic and seals as before. What another
+    /// member announced is not judged by this form either (see
+    /// [`Self::seal_batch`]).
     async fn seal_batch_with_facts(
         &self,
         member: &Member,
@@ -552,7 +599,9 @@ pub trait AnnouncementStore: Send + Sync {
     /// live conversation on the source's scope, a direct route names the
     /// topic (or the member triages it), and the member would not reach the
     /// source both directly and through a forward. A store that keeps no
-    /// sources owns no topic, so its default is the plain put.
+    /// sources owns no topic, so its default is the plain put. What another
+    /// member announced is not judged by this form either (see
+    /// [`Self::put_subscription`]).
     async fn put_subscription_with_facts(
         &self,
         operation: &OperationId,
@@ -564,10 +613,96 @@ pub trait AnnouncementStore: Send + Sync {
         self.put_subscription(operation, request, now_ms).await
     }
 
+    /// Whether this store keeps the rule of who receives a member's
+    /// announcement: it judges every capture, every replay of an earlier
+    /// start and every seal by the roster facts it is handed (see
+    /// [`Self::announce_with_facts`], [`Self::put_subscription_with_roster`]
+    /// and [`Self::seal_batch_with_roster`]). The owner gives a store that
+    /// does not say so no announcement of a member that is private to a
+    /// person, or that its mob's roster does not name, and makes no
+    /// subscription there that starts at an earlier frontier. The answer
+    /// gates those two calls and not the seal: what such a store holds
+    /// already is sealed as that store seals it.
+    fn judges_readers(&self) -> bool {
+        false
+    }
+
+    /// The members whose retained announcements `request` would replay: the
+    /// announcers of what its earlier start names, on its topics. None for a
+    /// start that replays nothing.
+    async fn replay_announcers(&self, request: &PutSubscription) -> Result<BTreeSet<Member>> {
+        let _ = request;
+        Ok(BTreeSet::new())
+    }
+
+    /// [`Self::put_subscription_with_facts`] with the roster facts of the
+    /// subscriber and of the members [`Self::replay_announcers`] names, as
+    /// the owner read them. An earlier start replays what a member announced
+    /// only where the announcer's facts let the subscriber receive it (see
+    /// [`Self::announce_with_facts`]), and not where the owner asked about
+    /// the announcer and the facts do not name it. What a member announced
+    /// that the owner did not ask about ([`RosterFacts::mark_asked`]) is
+    /// owed to the subscription and judged at its seal. The facts are the
+    /// ones a member is judged by: its roster row with the person the
+    /// record of who members are private to holds for it, and that record's
+    /// answer for a member that has ended.
+    async fn put_subscription_with_roster(
+        &self,
+        operation: &OperationId,
+        request: PutSubscription,
+        facts: &RosterFacts,
+        now_ms: u64,
+    ) -> Result<Subscription> {
+        let subscriber = facts.get(&request.member).cloned();
+        self.put_subscription_with_facts(operation, request, subscriber, now_ms)
+            .await
+    }
+
+    /// The members that announced an item `member` is owed and no batch
+    /// holds yet.
+    async fn owed_announcers(&self, member: &Member) -> Result<BTreeSet<Member>> {
+        let _ = member;
+        Ok(BTreeSet::new())
+    }
+
+    /// [`Self::seal_batch_with_facts`] with the roster facts of the member
+    /// and of the members [`Self::owed_announcers`] names, as the owner read
+    /// them now. An owed item the member may not receive by its announcer's
+    /// facts (see [`Self::announce_with_facts`]) is settled as cancelled and
+    /// enters no batch, and so is an item of a member's whose announcer the
+    /// owner asked about and the facts do not name, and an item of a member
+    /// private to a person for a member the facts do not name. An item
+    /// whose announcer the owner did not ask about
+    /// ([`RosterFacts::mark_asked`]) stays owed and enters no batch of this
+    /// seal: a later seal judges it, so it can be delivered after a newer
+    /// item of an announcer the owner asked about.
+    async fn seal_batch_with_roster(
+        &self,
+        member: &Member,
+        batch_id: &BatchId,
+        policy: &SealingPolicy,
+        facts: &RosterFacts,
+        now_ms: u64,
+    ) -> Result<Option<Batch>> {
+        let own = facts.get(member).cloned();
+        self.seal_batch_with_facts(member, batch_id, policy, own, now_ms)
+            .await
+    }
+
     /// [`Self::announce`] with the roster facts of the members whose
     /// subscriptions take a topic a source owns: on such a topic only a
     /// covered member captures, and each withheld capture is an audit row.
     /// A member the facts do not name is covered by a member grant alone.
+    ///
+    /// What a member announces is captured as the facts say too: where its
+    /// announcer's facts name a person it is private to, by the announcer's
+    /// own subscriptions and by those of members whose facts name the same
+    /// person, and not by those of members whose facts name another person
+    /// or none; a member the facts do not name is owed the item until its
+    /// seal judges it. Where the facts do not name its announcer, it is
+    /// captured by the announcer's own subscriptions alone. No audit row
+    /// counts what is left out. The host's and a source's announcements are
+    /// not judged.
     async fn announce_with_facts(
         &self,
         request: AnnounceRequest,
@@ -895,6 +1030,22 @@ pub trait AnnouncementStore: Send + Sync {
         let _ = (kind, id, now_ms);
         Err(no_templates())
     }
+
+    /// [`Self::backlogs_at`] that reads past the members of `past`: a
+    /// member named there takes no place in the page, and the page holds
+    /// the members after it. The owner names the members whose last seal
+    /// took nothing because the facts of a member that announced to them
+    /// could not be read, until it looks at them again. A store that does
+    /// not read past them answers [`Self::backlogs_at`].
+    async fn backlogs_past(
+        &self,
+        limit: usize,
+        now_ms: u64,
+        past: &BTreeSet<Member>,
+    ) -> Result<Vec<MemberBacklog>> {
+        let _ = past;
+        self.backlogs_at(limit, now_ms).await
+    }
 }
 
 /// What the last check before a submission found.
@@ -907,6 +1058,43 @@ pub enum SubmissionCheck {
     Failed,
     /// An item failed and the batch was cancelled.
     Cancelled(Box<Batch>),
+}
+
+/// What [`AnnouncementStore::release_mob`] ended and removed.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub struct MobRelease {
+    /// The sources it ended, as they stand now: the schedule of each one's
+    /// runner follows its record.
+    pub sources: Vec<AnnouncementSource>,
+    /// The subscriptions it changed or ended, in id order: those that named
+    /// the mob, its members', and the children of the role templates it
+    /// cancelled.
+    pub subscriptions: Vec<SubscriptionId>,
+    /// The role templates it cancelled or changed, in id order.
+    pub templates: Vec<SubscriptionId>,
+    /// The mob's members whose subscriptions it ended or whose kept route,
+    /// marker or gap lines it removed, in key order.
+    pub members: Vec<Member>,
+    /// How many announcements it removed.
+    pub announcements: u64,
+}
+
+impl MobRelease {
+    /// Whether the release found nothing of the mob to end or remove.
+    pub fn is_empty(&self) -> bool {
+        self.sources.is_empty()
+            && self.subscriptions.is_empty()
+            && self.templates.is_empty()
+            && self.members.is_empty()
+            && self.announcements == 0
+    }
+}
+
+fn no_release() -> AnnouncementStoreError {
+    AnnouncementStoreError::Storage(
+        "this announcement store cannot release what a mob left under an id".to_string(),
+    )
 }
 
 fn no_sources() -> AnnouncementStoreError {

@@ -198,6 +198,19 @@
   padding: 2px 6px;
 }
 
+/* === The gateway serves another console bundle than this page runs === */
+.meta-update-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 14px;
+  background: var(--bg-elev-1);
+  color: var(--ink);
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+}
+
 /* === One sign-in state: the login ended, or this browser signed out === */
 .console-sign-in {
   display: flex;

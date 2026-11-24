@@ -4588,6 +4588,26 @@ impl ModelRoutingHandoffRecord {
     }
 }
 
+/// What the host found when it looked, once, at the target of a switch for
+/// the reasoning effort level the session holds. It is evidence a switch
+/// request carries to the routing machine, which alone decides: `Refused`
+/// (the target's route definitely does not accept the level) ends the
+/// request Denied; every other value admits it. `LegacyUnverified` is a
+/// host's own acceptance through its older hooks, kept apart from
+/// `HeldEffortAccepted`, which is the route's answer. `LevelsUnreadable`
+/// is neither an acceptance nor a refusal: a client for the target can be
+/// built and the levels its route accepts could not be read at that
+/// moment, so the switch goes on as it did before the level was judged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum TargetReasoningEffortVerdict {
+    #[default]
+    NoHeldEffort,
+    HeldEffortAccepted,
+    LegacyUnverified,
+    Refused,
+    LevelsUnreadable,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum RoutingSwitchApprovalReason {
     #[default]

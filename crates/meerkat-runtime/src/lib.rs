@@ -696,9 +696,9 @@ pub use meerkat_machine::{
     RuntimeSessionUnregisterObserver, RuntimeSessionUnregisterUseAdmission,
     SessionDurabilityReloadRequired, SessionDurableWork, SessionWorkState, StagedCustodyRelease,
     StagedMeerkatMachine, StandaloneSessionRuntimeAuthorities, StoppedRegistrationTakeover,
-    UnregisterQueuedInputs, UnregisterQueuedInputsError, classify_runtime_lifecycle_state,
-    classify_runtime_loop_queue_admission, standalone_session_runtime_authorities,
-    standalone_tool_visibility_owner,
+    UnregisterQueuedInputs, UnregisterQueuedInputsError, UnsettledRun,
+    classify_runtime_lifecycle_state, classify_runtime_loop_queue_admission,
+    standalone_session_runtime_authorities, standalone_tool_visibility_owner,
 };
 pub use meerkat_machine::{
     ColdPredecessorSettlement, MachinePredecessorSettlementLease, PredecessorOwnerLoss,
@@ -711,6 +711,7 @@ pub use meerkat_machine_types::{
     ModelRoutingHandoffRealization, ModelRoutingRealtimePolicy, ResolvedSessionLlmReconfigure,
     SessionLlmCapabilitySurface, SessionLlmCapabilitySurfaceStatus, SessionLlmReconfigureHost,
     SessionLlmReconfigureReport, SessionLlmReconfigureRequest, SessionToolVisibilityDelta,
+    TargetSessionLlmInspection,
 };
 #[doc(hidden)]
 pub use meerkat_machine_types::{

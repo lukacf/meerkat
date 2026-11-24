@@ -152,6 +152,7 @@ async fn status_of(aggregator: &MetaConsoleAggregator, frame_id: &str) -> Consol
         .inner
         .store
         .query_frames(ConsoleTimelineQuery {
+            mob_id: None,
             identity: None,
             conversation_id: None,
             after: None,
@@ -522,6 +523,7 @@ async fn frame_of(aggregator: &MetaConsoleAggregator, frame_id: &str) -> Console
         .inner
         .store
         .query_frames(ConsoleTimelineQuery {
+            mob_id: None,
             identity: None,
             conversation_id: None,
             after: None,

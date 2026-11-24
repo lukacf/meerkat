@@ -845,6 +845,12 @@ impl IngressView<'_> {
         self.driver.durable_steer_order()
     }
 
+    /// The steer lane's first input that the machine holds a durable
+    /// live-boundary delivery for and that has no live-boundary work running.
+    pub(crate) fn durable_steer_waiting_without_work(&self) -> Option<InputId> {
+        self.driver.durable_steer_waiting_without_work()
+    }
+
     /// Whether `input_id` may join the current run `run_id` at a live
     /// boundary: inputs of different requesters never share a run, and the
     /// Steer lane is first in, first out across requesters (see
@@ -8926,8 +8932,18 @@ pub(crate) fn machine_declare_recovered_terminal_completion_unrecoverable(
     Ok(declared)
 }
 
+/// Ask the generated authority whether cold recovery keeps a stored input
+/// row.
+///
+/// `pending_terminal_carrier` is the recovery's own observation of where the
+/// row came from: true only for a terminal row the store names as still
+/// carrying an unfinished completion or publication of a committed run (an
+/// owner of the pending terminal index, or a recipient of such an owner's
+/// batch). The machine keeps such a row whatever its durability; durability
+/// decides only whether unfinished work survives.
 pub(crate) fn machine_classify_recovered_input_durability(
     state: &InputState,
+    pending_terminal_carrier: bool,
 ) -> Result<crate::meerkat_machine::dsl::RecoveredInputRecoveryDisposition, RuntimeDriverError> {
     let input_id = state.input_id.to_string();
     let mut authority = crate::meerkat_machine::dsl::MeerkatMachineAuthority::new();
@@ -8936,6 +8952,7 @@ pub(crate) fn machine_classify_recovered_input_durability(
         crate::meerkat_machine::dsl::MeerkatMachineInput::ClassifyRecoveredInputDurability {
             input_id: input_id.clone(),
             durability: crate::meerkat_machine::dsl::InputDurabilityKind::from(state.durability),
+            pending_terminal_carrier,
         },
     )
     .map_err(|err| {
@@ -9537,11 +9554,42 @@ pub(crate) async fn machine_recover_persistent_inputs(
     let observed_input_states = load_input_states_for_runtime(store, runtime_id)
         .await
         .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?;
+    // This wrapper reads every stored row, not the two sets a registration
+    // observes. The terminal rows among them that still owe a completion or
+    // a publication are the pending terminal carriers.
+    let pending_terminal_carriers = observed_input_states
+        .iter()
+        .filter(|stored| {
+            !crate::store::input_state_is_recovery_nonterminal(stored)
+                && (stored
+                    .state
+                    .terminal_completion
+                    .as_ref()
+                    .is_some_and(|completion| {
+                        matches!(
+                            completion.phase,
+                            crate::input_state::InputTerminalCompletionPhase::Pending
+                        )
+                    })
+                    || stored
+                        .state
+                        .interaction_terminal_outbox
+                        .as_ref()
+                        .is_some_and(|outbox| {
+                            !matches!(
+                                outbox.phase,
+                                crate::input_state::InteractionTerminalOutboxPhase::Published { .. }
+                            )
+                        }))
+        })
+        .map(|stored| stored.state.input_id.clone())
+        .collect::<std::collections::HashSet<_>>();
     machine_recover_persistent_inputs_from_observed(
         store,
         runtime_id,
         driver,
         observed_input_states,
+        &pending_terminal_carriers,
         recovered_unregister_progress,
         None,
     )
@@ -9554,11 +9602,19 @@ pub(crate) async fn machine_recover_persistent_inputs(
 /// CAS precondition for the eventual fenced recovery write. A successor that
 /// advances any input while recovery is being prepared therefore wins cleanly
 /// instead of being overwritten by the stale preparation.
+///
+/// `pending_terminal_carriers` names the observed rows that came from the
+/// store's pending terminal observation (the owners its index names and the
+/// recipients of their batches), not from its nonterminal set. The generated
+/// durability classification is asked with that fact and keeps such a row
+/// whatever its durability, so every owner the store names is in the
+/// recovered driver.
 pub(crate) async fn machine_recover_persistent_inputs_from_observed(
     store: &dyn crate::store::RuntimeStore,
     runtime_id: &LogicalRuntimeId,
     driver: &mut crate::driver::ephemeral::EphemeralRuntimeDriver,
     observed_input_states: Vec<StoredInputState>,
+    pending_terminal_carriers: &std::collections::HashSet<InputId>,
     recovered_unregister_progress: Option<&crate::store::MachineUnregisterProgressSnapshot>,
     resumable_run: Option<&crate::recovery::ResumableRunObservation>,
 ) -> Result<RecoveryReport, RuntimeDriverError> {
@@ -9594,8 +9650,9 @@ pub(crate) async fn machine_recover_persistent_inputs_from_observed(
             machine_normalize_recovered_input_state(store, runtime_id, bundle, resumable_run)
                 .await?;
 
+        let pending_terminal_carrier = pending_terminal_carriers.contains(&bundle.state.input_id);
         if matches!(
-            machine_classify_recovered_input_durability(&bundle.state)?,
+            machine_classify_recovered_input_durability(&bundle.state, pending_terminal_carrier)?,
             crate::meerkat_machine::dsl::RecoveredInputRecoveryDisposition::Discard
         ) {
             continue;
@@ -14819,24 +14876,44 @@ mod recovery_tests {
 
         state.durability = Some(crate::input::InputDurability::Ephemeral);
         assert_eq!(
-            machine_classify_recovered_input_durability(&state)
+            machine_classify_recovered_input_durability(&state, false)
                 .expect("generated durability classification should accept ephemeral witness"),
             crate::meerkat_machine::dsl::RecoveredInputRecoveryDisposition::Discard
         );
+        assert_eq!(
+            machine_classify_recovered_input_durability(&state, true).expect(
+                "generated durability classification should accept an ephemeral terminal carrier"
+            ),
+            crate::meerkat_machine::dsl::RecoveredInputRecoveryDisposition::Retain,
+            "a pending terminal carrier is kept whatever its durability"
+        );
 
         state.durability = Some(crate::input::InputDurability::Durable);
-        assert_eq!(
-            machine_classify_recovered_input_durability(&state)
-                .expect("generated durability classification should accept durable witness"),
-            crate::meerkat_machine::dsl::RecoveredInputRecoveryDisposition::Retain
-        );
+        for pending_terminal_carrier in [false, true] {
+            assert_eq!(
+                machine_classify_recovered_input_durability(&state, pending_terminal_carrier)
+                    .expect("generated durability classification should accept durable witness"),
+                crate::meerkat_machine::dsl::RecoveredInputRecoveryDisposition::Retain
+            );
+        }
+
+        state.durability = Some(crate::input::InputDurability::Derived);
+        for pending_terminal_carrier in [false, true] {
+            assert_eq!(
+                machine_classify_recovered_input_durability(&state, pending_terminal_carrier)
+                    .expect("generated durability classification should accept derived witness"),
+                crate::meerkat_machine::dsl::RecoveredInputRecoveryDisposition::Retain
+            );
+        }
 
         state.durability = None;
-        assert_eq!(
-            machine_classify_recovered_input_durability(&state)
-                .expect("generated durability classification should accept missing witness"),
-            crate::meerkat_machine::dsl::RecoveredInputRecoveryDisposition::Retain
-        );
+        for pending_terminal_carrier in [false, true] {
+            assert_eq!(
+                machine_classify_recovered_input_durability(&state, pending_terminal_carrier)
+                    .expect("generated durability classification should accept missing witness"),
+                crate::meerkat_machine::dsl::RecoveredInputRecoveryDisposition::Retain
+            );
+        }
     }
 
     fn recovered_admission_rejection(state: crate::input_state::InputState) -> String {

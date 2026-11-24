@@ -4,8 +4,17 @@
 //! Behavioral fresh/resume and category-mutation tests live beside the
 //! private wrapper implementation. These assertions make the production
 //! gateway roots fail if either persistent or ephemeral composition bypasses
-//! `MobBootstrapSpec::new`, or if the wrapper stops evaluating after the
-//! inner service has materialized the live catalog.
+//! `MobBootstrapSpec::new` (a root calls it, or `MobBootstrapSpec::declared`,
+//! which calls it), or if the wrapper stops evaluating after the inner
+//! service has materialized the live catalog.
+//!
+//! A launch over a declared store hands its wrapped service to the launch's
+//! composition, and the mob set builds the launch mob through that
+//! composition: both lines of that hand-over are pinned here. Not read by
+//! this guard: what the mob set's own build of a mob does with the builder
+//! the composition returns. Not seen by it either: a root that builds the
+//! spec by a struct literal, and a root built in another file than the two
+//! gateways' sources.
 
 #![allow(clippy::expect_used, clippy::panic)]
 
@@ -17,6 +26,24 @@ const RPC_GATEWAY_SOURCE: &str = include_str!("../src/rpc_gateway.rs");
 
 fn occurrences(haystack: &str, needle: &str) -> usize {
     haystack.match_indices(needle).count()
+}
+
+/// Every call of a `MobBootstrapSpec` constructor in `source`, by the
+/// constructor's name: each `MobBootstrapSpec::<name>(`. A mention without
+/// the opening parenthesis (a comment that names a constructor) is no call.
+fn spec_constructor_calls(source: &str) -> std::collections::BTreeMap<&str, usize> {
+    const PREFIX: &str = "MobBootstrapSpec::";
+    let mut calls = std::collections::BTreeMap::new();
+    for (at, _) in source.match_indices(PREFIX) {
+        let rest = &source[at + PREFIX.len()..];
+        let name_len = rest
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .unwrap_or(rest.len());
+        if name_len > 0 && rest[name_len..].starts_with('(') {
+            *calls.entry(&rest[..name_len]).or_insert(0) += 1;
+        }
+    }
+    calls
 }
 
 /// `source` without its test modules, so a count sees production composition
@@ -95,23 +122,102 @@ fn bootstrap_constructor_installs_the_post_materialization_wrapper() {
     assert!(prepare < materialize && materialize < evaluate);
 }
 
+/// Both gateways build their persistent and their ephemeral root through
+/// the constructor that installs the wrapper: `MobBootstrapSpec::new`, or
+/// `MobBootstrapSpec::declared`, which is `new` over a store that is
+/// declared and not opened. The counts are exact and name every constructor
+/// the production text calls, so a root built by another constructor, and a
+/// root added or removed, fails here.
 #[test]
 fn both_gateways_funnel_persistent_and_ephemeral_roots_through_the_choke() {
+    let declared = RUNTIME_SOURCE
+        .split("pub fn declared(")
+        .nth(1)
+        .expect("the declared constructor")
+        .split("\n    }\n")
+        .next()
+        .expect("the declared constructor's body");
+    assert!(
+        declared.contains("Self::new("),
+        "the declared constructor must build its spec through the common wrapper: {declared}"
+    );
+    assert!(
+        !declared.contains("session_service =") && !declared.contains("with_session_service"),
+        "the declared constructor must keep the session service the common wrapper built: \
+         {declared}"
+    );
+
+    let meta_gateway = production_source(META_GATEWAY_SOURCE);
     assert_eq!(
-        occurrences(
-            &production_source(META_GATEWAY_SOURCE),
-            "MobBootstrapSpec::new("
-        ),
-        2,
-        "meta_gateway persistent and ephemeral roots must both use the common wrapper"
+        spec_constructor_calls(&meta_gateway),
+        std::collections::BTreeMap::from([("declared", 2)]),
+        "meta_gateway persistent and ephemeral roots must both use the common wrapper: each \
+         declares its mob's store"
     );
     assert_eq!(
-        occurrences(
-            &production_source(RPC_GATEWAY_SOURCE),
-            "MobBootstrapSpec::new("
-        ),
-        2,
-        "rpc_gateway persistent and ephemeral roots must both use the common wrapper"
+        occurrences(&meta_gateway, "MobBootstrapSpec::"),
+        3,
+        "meta_gateway names the spec's paths three times: its two roots, and one comment \
+         that says what `MobBootstrapSpec::ephemeral` does not accept; any other path is a \
+         root or a hand-over this guard has not judged"
+    );
+    let rpc_gateway = production_source(RPC_GATEWAY_SOURCE);
+    assert_eq!(
+        spec_constructor_calls(&rpc_gateway),
+        std::collections::BTreeMap::from([("declared", 2), ("new", 1)]),
+        "rpc_gateway persistent and ephemeral roots must both use the common wrapper: the \
+         persistent root declares its mob's store or opens it itself, the ephemeral root \
+         declares a store in memory"
+    );
+    assert_eq!(
+        occurrences(&rpc_gateway, "MobBootstrapSpec::"),
+        3,
+        "rpc_gateway names the spec's paths three times, each a root's call; any other path \
+         is a root or a hand-over this guard has not judged"
+    );
+}
+
+/// A launch hands the service the common wrapper built to its composition,
+/// and the composition gives it to every mob the launch's mob set builds:
+/// the launch mob of a declared store and each mob beside it.
+#[test]
+fn the_launchs_composition_takes_and_hands_on_the_wrapped_service() {
+    let made = RUNTIME_SOURCE
+        .split("fn launch_mob_composition(&self) -> LaunchMobComposition {")
+        .nth(1)
+        .expect("the launch's composition is made from the spec")
+        .split("\n    }\n")
+        .next()
+        .expect("the function's body");
+    assert!(
+        made.contains("session_service: self.session_service.clone(),"),
+        "the composition must take the spec's own session service: {made}"
+    );
+    let configure = RUNTIME_SOURCE
+        .split("impl LaunchMobComposition {")
+        .nth(1)
+        .expect("the composition's own functions")
+        .split("\n    fn configure(")
+        .nth(1)
+        .expect("the composition configures a mob's builder")
+        .split("\n    }\n")
+        .next()
+        .expect("the function's body");
+    assert!(
+        configure.contains(".with_session_service(self.session_service.clone())"),
+        "every mob the composition builds must take the composition's session service"
+    );
+}
+
+/// The count of constructor calls is by name and skips a mention that is no
+/// call.
+#[test]
+fn spec_constructor_calls_are_counted_by_name() {
+    let source = "MobBootstrapSpec::declared(a); MobBootstrapSpec::new(b);\n// \
+                  MobBootstrapSpec::ephemeral is not called\nMobBootstrapSpec::declared(c)";
+    assert_eq!(
+        spec_constructor_calls(source),
+        std::collections::BTreeMap::from([("declared", 2), ("new", 1)])
     );
 }
 

@@ -1,5 +1,5 @@
 import React from "react";
-import { queryVoiceAvailability, type VoiceAvailability } from "./voice-session";
+import { queryVoiceAvailability, type VoiceAvailability, type VoiceMemberDoor } from "./voice-session";
 
 /**
  * What the console knows about one identity's voice readiness.
@@ -72,7 +72,11 @@ export function useVoiceReadiness(
   focusedIdentity: string | null,
   voiceIdentity: string | null,
   enabled: boolean,
+  /** The door of a member: voice is not asked for, nor offered to, a member behind a door other than the launch mob's. */
+  memberDoor?: VoiceMemberDoor,
 ): Readonly<Record<string, VoiceReadinessState>> {
+  const memberDoorRef = React.useRef(memberDoor);
+  memberDoorRef.current = memberDoor;
   const identities = React.useMemo(
     () => enabled
       ? [...new Set([focusedIdentity, voiceIdentity].filter(
@@ -93,7 +97,10 @@ export function useVoiceReadiness(
     for (const identity of identities) {
       let failures = 0;
       const check = async () => {
-        const availability = await queryVoiceAvailability(baseUrl, identity, abort.signal);
+        const memberDoor = memberDoorRef.current;
+        const availability = memberDoor
+          ? await queryVoiceAvailability(baseUrl, identity, abort.signal, memberDoor)
+          : await queryVoiceAvailability(baseUrl, identity, abort.signal);
         if (abort.signal.aborted) return;
         failures = availability === "unknown" ? failures + 1 : 0;
         setState((previous) => {

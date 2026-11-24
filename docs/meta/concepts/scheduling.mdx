@@ -4,7 +4,7 @@ description: "Durable schedule ownership, occurrence claims, firing, and target 
 icon: "clock"
 ---
 
-*Mirrored from Meerkat Meta main at [de520227a811](https://github.com/lukacf/meerkat/commit/de520227a81178fce9ffea3abcafa4a7bddfbf27) on 2026-11-17; Meta version 0.9.16 at that commit.*
+*Mirrored from Meerkat Meta main at [f853345e4f7a](https://github.com/lukacf/meerkat/commit/f853345e4f7a157b561d8c68e8d51908c031508c) on 2026-11-24; Meta version 0.9.18 at that commit.*
 
 Meta uses Meerkat's durable `ScheduleService` as its only scheduling
 authority. Schedule definitions live in the schedule store, every firing is
@@ -61,13 +61,58 @@ Schedules can target:
 - a mob member
 - a named host runnable
 
+An agent schedules for itself, or for an agent of its own mob that it is
+wired to. A schedule
+an agent's own schedule tools write for any other target that names an
+agent is refused as a policy denial (`schedule_target_not_a_peer`), in the
+same words whether the name is an agent it is not wired to, an agent of
+another mob or a name no agent holds. Schedules the host writes, and the
+Console's schedules, are not judged this way.
+
+A schedule can also have the gateway create something when it fires: a
+fresh session (a session target of type `materialize_on_demand_session`) or
+a helper (a mob target of type `spawn_helper` or `fork_helper`). The fresh
+session is built as the gateway builds a session by default, and the helper
+from the role the schedule names, so these are not every agent's to write.
+On a stock gateway every agent is a mob member: an agent's create, update
+or resume of a schedule that creates a session is refused as a policy
+denial (`schedule_session_creation_not_allowed`), and a schedule that
+creates a helper is taken only from an agent whose profile holds the mob
+tools as well as the schedule tools (`tools.mob` and `tools.schedule`); the
+helper is then held to that agent's tool access policy, so give an agent
+both only if it may hold the tools of every role it can name. An agent can
+still read, pause and delete such a schedule. A gateway whose Meerkat host
+configuration sets `agent_schedules_may_create_sessions = true` under
+`[tools]` takes both kinds from every agent that holds the schedule tools;
+the host configuration is the file
+[`meerkat_config_path`](/meta/reference/configuration#sdk-and-gateway-runtime-options)
+names. Schedules the host writes are not judged, and a schedule stored
+earlier fires as before.
+
 Python applications register deterministic host runnables with
 `MetaBuilder.host_runnables(...)` and handle
 `callback/schedule_fire` through `MetaRuntime.on_schedule_fire(...)`.
+TypeScript applications use `MetaBuilder.hostRunnables(...)` and
+`MetaBuilder.onScheduleFire(...)`, or `MetaRuntime.onScheduleFire(...)` on a
+runtime they already have; see [Host runnables](/meta/sdks/typescript#host-runnables).
 The callback is delivery for a durable occurrence, not a substitute scheduler.
-In releases 0.7.32 to 0.9.16 a callback can arrive while the application is
-still starting, before its handler is registered: see
+A handler for a schedule that can be due when the gateway starts belongs on
+the builder: `MetaBuilder.on_schedule_fire(name, handler)` in Python or
+`MetaBuilder.onScheduleFire(name, handler)` in TypeScript. The gateway can
+fire such a schedule before `build()` returns the runtime, and a fire that
+finds no handler ends that occurrence as `delivery_failed`. A handler given
+to the builder can run before `build()` returns, so it must not need the
+runtime object. Python releases 0.7.32 to 0.9.16 have no handler on the builder:
+a program that uses `build()` there cannot have its handler in place for such
+a fire, see
 [Schedule callbacks that arrive during startup](/meta/sdks/python#schedule-callbacks-that-arrive-during-startup).
+
+Every member that holds the schedule tools and is not private to a person
+can create a schedule that fires any runnable the host registers, with
+parameters of its choosing (the handler reads them as the occurrence's
+`payload`). The fire does not tell the handler who wrote the schedule.
+Register only runnables that any such member may fire, and check the payload
+in the handler.
 
 ## Console schedules
 
@@ -84,6 +129,23 @@ them is sent. A refused send fails that occurrence, and the schedule keeps its
 later times. See [Schedules](/meta/guides/console#schedules) for
 the Console and [Console schedules](/meta/api/rpc#console-schedules-console) for the
 methods.
+
+The memory steward's scheduled pass is reserved in the same way. A gateway
+with the steward enabled keeps one schedule whose target is the host
+runnable `meta.memory.steward.dream` and retimes it itself: an application
+cannot register a host runnable or callback under that name, an agent's
+schedule tools cannot create or retarget a schedule that names it, and those
+tools neither list nor change the host's steward schedule.
+
+The gateway's own steward schedule carries the label
+`meta.memory.steward.schedule`, which an agent's schedule tools refuse on a
+create or an update. At each start the gateway keeps that schedule, resumes
+it if it is paused, sets it to the configured interval, and deletes any
+other schedule that names the steward's runnable. A store written by an
+earlier version holds no schedule with the label: the first start after an
+upgrade deletes the schedules that name the runnable and creates the
+gateway's own, so the steward's first pass after an upgrade comes one
+interval after that start.
 
 ## Rust embedding
 
@@ -109,4 +171,4 @@ standard `-32601` method-not-found error.
 
 - [Rust SDK](/meta/sdks/rust) - library-mode composition
 - [Python SDK](/meta/sdks/python) - host-runnable callbacks
-- [RPC API](/meta/api/rpc) - current contract 0.5.0
+- [RPC API](/meta/api/rpc) - current contract 0.6.0

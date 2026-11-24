@@ -462,8 +462,9 @@ where
     S: AgentSessionStore + ?Sized,
 {
     /// Whether a call of `name` passes the visibility precheck to the dispatch
-    /// gate: the name is grant-gated and only its closed grant gate hides it.
-    /// The dispatch gate then adjudicates the grants, so every refusal of a
+    /// gate: the name is grant-gated, or stands on the grant of a gated tool
+    /// it is never wider than, and only a closed grant gate hides it. The
+    /// dispatch gate then adjudicates the grants, so every refusal of a
     /// gated name has one site.
     pub(crate) fn call_reaches_tool_grant_gate(&self, name: &str) -> bool {
         let Some(gate) = self.tool_grant_gate.as_ref() else {
@@ -471,13 +472,17 @@ where
         };
         // The call's provenance, from the dispatcher that serves it: a tool of
         // a gated MCP server is gated by it from the moment it appears.
-        let provenance = self
-            .tools
-            .tools()
-            .iter()
-            .find(|tool| tool.name == name)
-            .and_then(|tool| tool.provenance.clone());
-        gate.is_gated(name, provenance.as_ref())
+        let tools = self.tools.tools();
+        let gated = std::iter::once(name)
+            .chain(crate::tool_scope::tool_never_wider_than(name))
+            .any(|candidate| {
+                let provenance = tools
+                    .iter()
+                    .find(|tool| tool.name == candidate)
+                    .and_then(|tool| tool.provenance.clone());
+                gate.is_gated(candidate, provenance.as_ref())
+            });
+        gated
             && self
                 .tool_scope
                 .hidden_only_by_closed_grant_gate(name)
@@ -1217,7 +1222,11 @@ where
         Ok(())
     }
 
-    /// Rotate runtime auth-lease tracking alongside a live LLM identity swap.
+    /// Move runtime auth-lease tracking alongside a live LLM identity swap.
+    ///
+    /// The target's lease is acquired when absent; the previous credential's
+    /// lease is left as it is (see
+    /// `Self::stage_auth_lease_credential_identity`).
     pub fn rotate_auth_lease_auth_binding(
         &self,
         previous: Option<&crate::AuthBindingRef>,
@@ -1229,77 +1238,57 @@ where
             .map(|_| ())
     }
 
-    /// Stage a credential-authority rotation and retain exact generated
-    /// lifecycle snapshots so a later model-routing rejection can restore both
-    /// credentials.
+    /// Stage a session's move to another credential.
+    ///
+    /// A credential's lease is that credential's lifecycle on the lease
+    /// handle, and every session of a host shares the handle. A session that
+    /// leaves a credential therefore releases nothing: the other sessions on
+    /// it, and the sessions started on it later, keep it. Only a sign-out or
+    /// a credential removal withdraws a lease, for every session at once.
+    ///
+    /// The target's lease is acquired only when it is absent, and only then
+    /// is its exact generated lifecycle snapshot retained, so a later
+    /// model-routing rejection undoes this session's own acquire and never
+    /// rewrites a lease other sessions already use.
     pub(crate) fn stage_auth_lease_credential_identity(
         &self,
         previous: Option<&crate::AuthCredentialIdentity>,
         target: Option<&crate::AuthCredentialIdentity>,
     ) -> Result<StagedAuthLeaseRotation, AgentError> {
+        let nothing_staged = StagedAuthLeaseRotation {
+            handle: None,
+            snapshots: Vec::new(),
+        };
         let Some(generated_handle) = self.auth_lease_handle.as_ref() else {
-            return Ok(StagedAuthLeaseRotation {
-                handle: None,
-                snapshots: Vec::new(),
-            });
+            return Ok(nothing_staged);
         };
         let handle = generated_handle.as_handle();
         if previous == target {
-            return Ok(StagedAuthLeaseRotation {
-                handle: None,
-                snapshots: Vec::new(),
-            });
+            return Ok(nothing_staged);
         }
-        let previous_key = previous.map(crate::handles::LeaseKey::from_credential_identity);
-        let target_key = target.map(crate::handles::LeaseKey::from_credential_identity);
-        let mut snapshots = Vec::new();
-        if let Some(target_key) = target_key.as_ref() {
-            snapshots.push(handle.capture_auth_lifecycle_restore_snapshot(target_key));
-        }
-        if let Some(previous_key) = previous_key.as_ref()
-            && target_key.as_ref() != Some(previous_key)
-        {
-            snapshots.push(handle.capture_auth_lifecycle_restore_snapshot(previous_key));
+        let Some(target_identity) = target else {
+            return Ok(nothing_staged);
+        };
+        let target_key = crate::handles::LeaseKey::from_credential_identity(target_identity);
+        let target_snapshot = handle.snapshot(&target_key);
+        if target_snapshot.credential_present && target_snapshot.phase.is_some() {
+            return Ok(nothing_staged);
         }
         let staged = StagedAuthLeaseRotation {
             handle: Some(generated_handle.clone()),
-            snapshots,
+            snapshots: vec![handle.capture_auth_lifecycle_restore_snapshot(&target_key)],
         };
-
-        if let Some(target_identity) = target {
-            let target_key = crate::handles::LeaseKey::from_credential_identity(target_identity);
-            let target_snapshot = handle.snapshot(&target_key);
-            if !(target_snapshot.credential_present && target_snapshot.phase.is_some())
-                && let Err(error) = handle.acquire_lease(&target_key, u64::MAX)
-            {
-                let rollback = staged.rollback();
-                return Err(match rollback {
-                    Ok(()) => AgentError::ConfigError(format!(
-                        "failed to rotate auth lease to credential {target_key}: {error}"
-                    )),
-                    Err(rollback_error) => AgentError::ConfigError(format!(
-                        "failed to rotate auth lease to credential {target_key}: {error}; \
-                         additionally failed to restore staged auth state: {rollback_error}"
-                    )),
-                });
-            }
-        }
-        if let Some(previous_identity) = previous {
-            let previous_key =
-                crate::handles::LeaseKey::from_credential_identity(previous_identity);
-            if let Err(error) = handle.release_lease(&previous_key) {
-                let rollback = staged.rollback();
-                return Err(AgentError::ConfigError(match rollback {
-                    Err(rollback_error) => format!(
-                        "failed to release previous auth lease {previous_key} during rotation: \
-                         {error}; additionally failed to release newly acquired target lease: \
-                         {rollback_error}"
-                    ),
-                    Ok(()) => format!(
-                        "failed to release previous auth lease {previous_key} during rotation: {error}"
-                    ),
-                }));
-            }
+        if let Err(error) = handle.acquire_lease(&target_key, u64::MAX) {
+            let rollback = staged.rollback();
+            return Err(match rollback {
+                Ok(()) => AgentError::ConfigError(format!(
+                    "failed to rotate auth lease to credential {target_key}: {error}"
+                )),
+                Err(rollback_error) => AgentError::ConfigError(format!(
+                    "failed to rotate auth lease to credential {target_key}: {error}; \
+                     additionally failed to restore staged auth state: {rollback_error}"
+                )),
+            });
         }
         Ok(staged)
     }
@@ -2267,7 +2256,21 @@ where
         }
     }
 
-    async fn handle_run_failure(
+    /// [`Self::handle_run_failure_unboxed`], built and boxed in its own
+    /// frame: every exit of a run awaits it, and a debug build reserves
+    /// room for an awaited future at each of those sites in the run's poll
+    /// frame. A failure path only: nothing is allocated for a run that
+    /// succeeds.
+    #[inline(never)]
+    fn handle_run_failure<'a>(
+        &'a mut self,
+        error: &'a AgentError,
+        event_tx: Option<&'a mpsc::Sender<AgentEvent>>,
+    ) -> super::state::BoxedAgentFuture<'a, ()> {
+        Box::pin(self.handle_run_failure_unboxed(error, event_tx))
+    }
+
+    async fn handle_run_failure_unboxed(
         &mut self,
         error: &AgentError,
         event_tx: Option<&mpsc::Sender<AgentEvent>>,
@@ -2285,7 +2288,17 @@ where
     /// boundary rolls the pre-compaction transcript/control parent back and
     /// aborts its invisible memory stages while retaining real provider usage
     /// and failed-attempt cadence.
-    async fn settle_compaction_after_run_error(&mut self, error: AgentError) -> AgentError {
+    #[inline(never)]
+    fn settle_compaction_after_run_error(
+        &mut self,
+        error: AgentError,
+    ) -> super::state::BoxedAgentFuture<'_, AgentError> {
+        Box::pin(self.settle_compaction_after_run_error_unboxed(error))
+    }
+
+    /// Awaited through [`Self::settle_compaction_after_run_error`], its
+    /// boxed form (a failure path awaited at every exit of a run).
+    async fn settle_compaction_after_run_error_unboxed(&mut self, error: AgentError) -> AgentError {
         if matches!(
             error,
             AgentError::CallbackPending { .. } | AgentError::CallbackBatchPending { .. }
@@ -8469,7 +8482,7 @@ mod skill_activation_effect_tests {
             .expect("ordinary boundary resumed")
             .expect("take task")
             .expect("take original ordinary context");
-        assert!(contexts.durable.is_none());
+        assert!(contexts.durable.is_empty());
         let contexts = contexts.request_only;
         assert_eq!(contexts.len(), 1);
         assert_eq!(contexts[0].as_str(), "ordinary pending context");

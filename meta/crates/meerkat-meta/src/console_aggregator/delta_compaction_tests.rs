@@ -383,6 +383,7 @@ async fn a_legacy_history_row_finds_the_compacted_blocks_complete_row() {
         ]
     );
     let history = NewConsoleFrame {
+        mob_id: None,
         id: None,
         dedupe_key: "history-answer".into(),
         timestamp_ms: 2_000,

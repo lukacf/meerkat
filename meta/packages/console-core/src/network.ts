@@ -7,6 +7,9 @@ import {
 } from "./control-plane";
 import {
   CONSOLE_BLOB_PATH_PREFIX,
+  CONSOLE_MOB_ID_PARAM,
+  CONSOLE_MOBS_SELECTOR_EVERY,
+  CONSOLE_MOBS_SELECTOR_PARAM,
   CONSOLE_REST_PATHS,
   CONSOLE_RPC_METHODS,
   CONSOLE_RPC_PATHS,
@@ -27,6 +30,7 @@ function unwrapConsoleEnvelope(
   id?: string;
   event?: string;
   identity?: string;
+  mobId?: string;
   interactionId?: string;
   timestampMs?: number;
   cursor?: string;
@@ -52,6 +56,7 @@ function unwrapConsoleEnvelope(
       id: frame.id,
       event: isUpdateEnvelope ? "frame_updated" : frame.event,
       identity: frame.identity,
+      mobId: frame.mobId,
       interactionId: frame.interactionId,
       timestampMs: frame.timestampMs,
       cursor: frame.cursor,
@@ -72,6 +77,12 @@ function unwrapConsoleEnvelope(
     };
   }
   return { data };
+}
+
+/** The mob a frame names beside its member (`mob_id`); absent for the launch mob's. */
+function frameMob(record: Record<string, unknown>, inner?: ConsoleFrame): { mobId?: string } {
+  const mobId = typeof record.mob_id === "string" && record.mob_id ? record.mob_id : inner?.mobId;
+  return mobId ? { mobId } : {};
 }
 
 function timelineFrameToConsoleFrame(raw: unknown): ConsoleFrame {
@@ -95,6 +106,7 @@ function timelineFrameToConsoleFrame(raw: unknown): ConsoleFrame {
       id: String(record.id || cursor || ""),
       event: "frame_updated",
       identity: typeof record.identity === "string" ? record.identity : updated.identity,
+      ...frameMob(record, updated),
       interactionId:
         typeof record.interaction_id === "string" ? record.interaction_id : updated.interactionId,
       timestampMs: typeof record.timestamp_ms === "number" ? record.timestamp_ms : undefined,
@@ -117,6 +129,7 @@ function timelineFrameToConsoleFrame(raw: unknown): ConsoleFrame {
     id: String(record.id || cursor || ""),
     event: String(record.kind || "event"),
     identity: typeof record.identity === "string" ? record.identity : undefined,
+    ...frameMob(record),
     interactionId: typeof record.interaction_id === "string" ? record.interaction_id : undefined,
     timestampMs: typeof record.timestamp_ms === "number" ? record.timestamp_ms : undefined,
     cursor,
@@ -179,6 +192,7 @@ export function parseSseFrames(rawText: string): ConsoleFrame[] {
       id: normalized.id || id,
       event: normalized.event || event,
       identity: normalized.identity,
+      ...(normalized.mobId ? { mobId: normalized.mobId } : {}),
       interactionId: normalized.interactionId,
       timestampMs: normalized.timestampMs,
       cursor: normalized.cursor,
@@ -419,6 +433,18 @@ export function callerScopeParam(callerScope: string | null | undefined): { expe
   return callerScope ? { expected_caller_scope: callerScope } : {};
 }
 
+/** The `mob_id` param a request carries for a member served by a door other
+ * than the launch mob's (see mob-door). Absent, the request names no mob. */
+export function mobIdParam(mobId: string | null | undefined): { mob_id?: string } {
+  return mobId ? { [CONSOLE_MOB_ID_PARAM]: mobId } : {};
+}
+
+/** The `mobs` selector of a read over the host's values: every mob the
+ * caller may address. Absent, the read answers for the launch mob alone. */
+export function everyMobParam(everyMob: boolean | undefined): { mobs?: string } {
+  return everyMob ? { [CONSOLE_MOBS_SELECTOR_PARAM]: CONSOLE_MOBS_SELECTOR_EVERY } : {};
+}
+
 async function rpc<T>(
   baseUrl: string,
   method: string,
@@ -494,6 +520,8 @@ export async function sendConsoleMultipart(
   /** The caller the console sends for (`meta/console/whoami`'s
    * `caller_scope`); the gateway refuses the send for anyone else. */
   callerScope?: string,
+  /** The mob whose door serves `identity` (`mob_id`); absent for the launch mob's door. */
+  mobId?: string,
 ): Promise<ConsoleTimelineAccepted> {
   const content: Array<Record<string, unknown>> = typeof contentInput === "string"
     ? (contentInput.trim() ? [{ type: "text", text: contentInput }] : [])
@@ -521,6 +549,7 @@ export async function sendConsoleMultipart(
       idempotency_key: idempotencyKey,
       handling_mode: handlingMode,
       ...callerScopeParam(callerScope),
+      ...mobIdParam(mobId),
     },
   }));
 
@@ -757,6 +786,10 @@ export async function queryTimeline(
     after?: string;
     before?: string;
     mode?: "since" | "recent";
+    /** The mob whose door serves `identity`. */
+    mobId?: string;
+    /** A read with no member: ask for every mob the caller may address. */
+    everyMob?: boolean;
   },
   limit = 400,
   timeoutMs = DEFAULT_CONSOLE_FETCH_TIMEOUT_MS,
@@ -769,6 +802,8 @@ export async function queryTimeline(
     ...(target.after?.trim() ? { after: target.after.trim() } : {}),
     ...(target.before?.trim() ? { before: target.before.trim() } : {}),
     ...(target.mode ? { mode: target.mode } : {}),
+    ...mobIdParam(target.mobId),
+    ...everyMobParam(target.everyMob && !target.mobId),
   }, timeoutMs, signal);
   if (!result || typeof result !== "object") {
     return { frames: [], available: false };
@@ -794,6 +829,8 @@ export async function sendConsole(
   timeoutMs = DEFAULT_CONSOLE_FETCH_TIMEOUT_MS,
   /** The caller the console sends for (`expected_caller_scope`). */
   callerScope?: string,
+  /** The mob whose door serves `identity` (`mob_id`); absent for the launch mob's door. */
+  mobId?: string,
 ): Promise<ConsoleTimelineAccepted> {
   const accepted = await rpc<unknown>(baseUrl, CONSOLE_RPC_METHODS.send, {
     identity,
@@ -803,6 +840,7 @@ export async function sendConsole(
     idempotency_key: idempotencyKey,
     handling_mode: handlingMode,
     ...callerScopeParam(callerScope),
+    ...mobIdParam(mobId),
   }, timeoutMs);
   if (!accepted || typeof accepted !== "object") {
     throw new Error(`${CONSOLE_RPC_METHODS.send} returned an invalid acceptance payload`);
@@ -845,16 +883,33 @@ export async function callConsoleRpc<T>(
   return rpc<T>(baseUrl, method, params, timeoutMs, signal);
 }
 
-function timelineStreamPath(target: { identity?: string; conversationId?: string }): string {
+/** What a timeline stream is opened for. */
+export interface ConsoleTimelineStreamTarget {
+  identity?: string;
+  conversationId?: string;
+  after?: string;
+  /** The mob whose door serves `identity`. */
+  mobId?: string;
+  /** A stream with no member: whether to ask for every mob the caller may
+   * address, read each time the stream connects. */
+  everyMob?: boolean | (() => boolean);
+}
+
+function timelineStreamPath(target: ConsoleTimelineStreamTarget): string {
   const params = new URLSearchParams();
   if (target.identity?.trim()) params.set("identity", target.identity.trim());
   if (target.conversationId?.trim()) params.set("conversation_id", target.conversationId.trim());
+  if (target.mobId) {
+    params.set(CONSOLE_MOB_ID_PARAM, target.mobId);
+  } else if (typeof target.everyMob === "function" ? target.everyMob() : target.everyMob) {
+    params.set(CONSOLE_MOBS_SELECTOR_PARAM, CONSOLE_MOBS_SELECTOR_EVERY);
+  }
   return `${CONSOLE_REST_PATHS.timelineStream}${params.size > 0 ? `?${params.toString()}` : ""}`;
 }
 
 export function subscribeTimelineEvents(
   baseUrl: string,
-  target: { identity?: string; conversationId?: string; after?: string },
+  target: ConsoleTimelineStreamTarget,
   onFrame: (frame: ConsoleFrame) => void,
   options: ConsoleTimelineSubscriptionOptions = {},
 ): ConsoleTimelineSubscription {

@@ -50,6 +50,44 @@ rkat run --skill builtin-utilities-workflow "Explain the builtin utility workflo
 `shell-patterns` additionally requires shell access; the sample SKILL.md shows
 that requirement but is not the least-privilege CLI preload example.
 
+## Check a released binary without a model call
+
+On Linux x86_64, set `BIN` to the absolute directory containing `rkat` and
+`rkat-rpc` extracted from the **same release**, after verifying both archives
+against its `checksums.sha256`. Set `SRC` to an absolute path to a checkout of
+the matching tag. For example, use both `v0.9.16` binaries and the `v0.9.16`
+source. This check needs Bash, Python 3 and local loopback access;
+it does not need a provider key. The subshell uses a fresh project and home.
+
+```bash
+(
+  set -eu
+  : "${BIN:?set BIN to the release binaries}" "${SRC:?set SRC to the tagged source}"
+  scratch=$(mktemp -d)
+  trap 'rm -rf -- "$scratch"' EXIT
+  mkdir "$scratch/home" "$scratch/project" "$scratch/tmp"
+  cd "$scratch/project"
+  clean=(env -i PATH=/usr/bin:/bin HOME="$scratch/home" TMPDIR="$scratch/tmp")
+  "${clean[@]}" "$BIN/rkat" --isolated skill list
+  "${clean[@]}" "$BIN/rkat" --isolated skill inspect \
+    --source-uuid 00000000-0000-4b11-8111-000000000001 builtin-utilities-workflow
+  "${clean[@]}" python3 "$SRC/scripts/check-release-binary-registrations" \
+    --source-root "$SRC" "$BIN/rkat-rpc"
+)
+```
+
+**CLI inventory and inspection.** On 0.9.16 the default list has six built-in
+skills. `builtin-utilities-workflow` is not one of those six, but inspection
+by its canonical key prints its body. Neither command starts a session or
+proves that the CLI preloaded that body into a prompt.
+
+**Member prompt.** The separate `rkat-rpc` check spawns a member with comms
+enabled. Look for `the mob member it spawned carries the` in the successful
+`RUN` result. The check finds the first Markdown heading from the registered
+`mob-communication` skill body in that member's stored prompt. This does not
+compare the whole body, test the CLI skill above, or show that a model used
+the instructions.
+
 ## When to Use Skills
 - Same agent logic, different domains (code review vs. API design)
 - Team-shared behavioral standards

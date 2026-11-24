@@ -853,6 +853,142 @@ fn a_duplicated_arm_is_refused() {
     );
 }
 
+/// The two switch inputs of MeerkatMachine, each with the arms of a target
+/// that carries the transcript beside which its denial of a target that
+/// refuses the held reasoning effort level stands.
+const SWITCH_INPUTS: [(&str, [&str; 4]); 2] = [
+    (
+        "RequestFiniteSwitchTurn",
+        [
+            "ApprovalUnavailable",
+            "ApprovalDenied",
+            "ScopedConflict",
+            "Accepted",
+        ],
+    ),
+    (
+        "RequestUntilChangedSwitchTurn",
+        [
+            "Accepted",
+            "ApprovalUnavailable",
+            "ApprovalDenied",
+            "PendingConflict",
+        ],
+    ),
+];
+const SWITCH_PHASES: [&str; 3] = ["Idle", "Attached", "Running"];
+
+/// Remove the one guard named `guard` from the MeerkatMachine arm `name`.
+fn drop_guard(machines: &mut [MachineSchema], name: &str, guard: &str) {
+    let arm = arm(machine(machines, "MeerkatMachine"), name);
+    let before = arm.guards.len();
+    arm.guards.retain(|kept| kept.name != guard);
+    assert_eq!(
+        arm.guards.len() + 1,
+        before,
+        "`{name}` has exactly one guard `{guard}`"
+    );
+}
+
+fn switch_pair(phase: &str, input: &str, a: String, b: String) -> String {
+    let mut names = [a, b];
+    names.sort();
+    format!(
+        "MeerkatMachine {phase} input:{input} {} {}",
+        names[0], names[1]
+    )
+}
+
+/// Every pair of a refusal arm and one of its four siblings, in all phases.
+fn refusal_and_sibling_pairs() -> BTreeSet<String> {
+    let mut pairs = BTreeSet::new();
+    for (input, siblings) in SWITCH_INPUTS {
+        for phase in SWITCH_PHASES {
+            for sibling in siblings {
+                pairs.insert(switch_pair(
+                    phase,
+                    input,
+                    format!("{input}{sibling}{phase}"),
+                    format!("{input}ReasoningEffortRefused{phase}"),
+                ));
+            }
+        }
+    }
+    pairs
+}
+
+fn new_pairs(machines: &[MachineSchema]) -> BTreeSet<String> {
+    exclusivity_drift(machines, BASELINE)
+        .new
+        .into_iter()
+        .collect()
+}
+
+/// Mutant: a switch arm of a target that carries the transcript, without
+/// its guard that the evidence is not a refusal, overlaps the denial of a
+/// refused level. The guard on each of the eight arms, in each phase, is
+/// what keeps its own pair apart: with every one of them dropped, exactly
+/// those twenty-four pairs are reported.
+#[test]
+fn a_switch_arm_that_admits_a_refused_level_overlaps_its_denial() {
+    let mut machines = canonical_machine_schemas();
+    for (input, siblings) in SWITCH_INPUTS {
+        for phase in SWITCH_PHASES {
+            for sibling in siblings {
+                drop_guard(
+                    &mut machines,
+                    &format!("{input}{sibling}{phase}"),
+                    "held_effort_not_refused",
+                );
+            }
+        }
+    }
+    assert_eq!(new_pairs(&machines), refusal_and_sibling_pairs());
+}
+
+/// Mutant: the denial of a refused level without its guard that the
+/// evidence is a refusal would deny what its siblings admit or refuse for
+/// their own reasons: the same twenty-four pairs are reported.
+#[test]
+fn a_level_denial_without_its_refusal_guard_overlaps_its_siblings() {
+    let mut machines = canonical_machine_schemas();
+    for (input, _) in SWITCH_INPUTS {
+        for phase in SWITCH_PHASES {
+            drop_guard(
+                &mut machines,
+                &format!("{input}ReasoningEffortRefused{phase}"),
+                "held_effort_refused",
+            );
+        }
+    }
+    assert_eq!(new_pairs(&machines), refusal_and_sibling_pairs());
+}
+
+/// Mutant: the denial of a refused level without its guard that the target
+/// carries the transcript overlaps the denial of a target that cannot. The
+/// two write the same denial, so only this ledger tells them apart.
+#[test]
+fn a_level_denial_without_its_transcript_guard_overlaps_the_transcript_denial() {
+    let mut machines = canonical_machine_schemas();
+    let mut expected = BTreeSet::new();
+    for (input, _) in SWITCH_INPUTS {
+        for phase in SWITCH_PHASES {
+            drop_guard(
+                &mut machines,
+                &format!("{input}ReasoningEffortRefused{phase}"),
+                "transcript_carried",
+            );
+            expected.insert(switch_pair(
+                phase,
+                input,
+                format!("{input}ReasoningEffortRefused{phase}"),
+                format!("{input}TranscriptUnsupported{phase}"),
+            ));
+        }
+    }
+    assert_eq!(new_pairs(&machines), expected);
+}
+
 /// Mutant (c): an unrefuted pair dropped from the baseline is refused.
 #[test]
 fn a_dropped_baseline_entry_is_refused() {

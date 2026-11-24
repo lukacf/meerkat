@@ -55,7 +55,7 @@
 //! The hook path is observe-and-mark only: it never denies, never mutates
 //! the request or response, and does no I/O (the tracker is in-memory).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, RwLock};
 
 use meerkat_core::model_fallback::ModelFallbackRequest;
@@ -88,13 +88,118 @@ pub type HostDefaultDecoratorSource = Arc<RwLock<Option<AgentLlmClientDecorator>
 /// composition binds it: the member decorator composes over the effective
 /// host decorator, and when the request has none that is the builder's
 /// default.
+///
+/// A launch that hosts mobs beside its launch mob keeps one tracker per
+/// memory: its own, and one for each mob it composes beside its launch mob.
+/// Which of them observes a member is asked at each of the member's model
+/// calls, of the launch's record of its mobs
+/// (`PrivateOwners::memory_home_of`) for the mob
+/// the member's build is bound to: never of a name, a label or an id a
+/// caller supplied.
 #[derive(Clone, Default)]
 pub struct DispatchTaintSlot {
     inner: Arc<RwLock<Option<SessionTaintTracker>>>,
     host_default: Arc<RwLock<Option<HostDefaultDecoratorSource>>>,
+    /// What says which memory the members of a mob are members of: the
+    /// launch's record of its mobs. A slot without one observes every
+    /// member build with its one tracker.
+    homes: Arc<RwLock<Option<crate::private_owners::PrivateOwners>>>,
+    /// The trackers of the mobs the launch composes beside its launch mob,
+    /// by mob id, and what makes one ([`HostedMobTrackers`]).
+    of_hosted_mobs: Arc<RwLock<HostedMobTrackers>>,
+}
+
+/// The trackers of the mobs a launch composes beside its launch mob. A
+/// mob's tracker is made when it is first asked for and kept for the life
+/// of the process, so what a member took in stays marked while its mob is
+/// unloaded and loaded again, as the launch mob's marks stay.
+#[derive(Default)]
+struct HostedMobTrackers {
+    /// Makes the tracker of a mob that has none yet; none until the launch
+    /// hands its memory over for the mobs it hosts.
+    make: Option<Arc<dyn Fn() -> SessionTaintTracker + Send + Sync>>,
+    by_mob: BTreeMap<String, SessionTaintTracker>,
 }
 
 impl DispatchTaintSlot {
+    /// From now on which memory observes a member build is asked of
+    /// `owners`, the launch's record of its mobs, for the mob the build is
+    /// bound to.
+    pub(crate) fn decide_by(&self, owners: crate::private_owners::PrivateOwners) {
+        *self
+            .homes
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(owners);
+    }
+
+    /// From now on a mob the launch composes beside its launch mob gets a
+    /// tracker of its own, made by `make` when it is first asked for.
+    pub(crate) fn make_hosted_mob_trackers_with(
+        &self,
+        make: Arc<dyn Fn() -> SessionTaintTracker + Send + Sync>,
+    ) {
+        self.of_hosted_mobs
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .make = Some(make);
+    }
+
+    /// The tracker of the mob `mob_id`, which the launch composes beside
+    /// its launch mob: the one the mob's memory answers its write gate
+    /// from and the one its members' model calls mark. `None` while the
+    /// launch has handed no memory over for the mobs it hosts.
+    pub(crate) fn tracker_of_hosted_mob(&self, mob_id: &str) -> Option<SessionTaintTracker> {
+        let mut trackers = self
+            .of_hosted_mobs
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(tracker) = trackers.by_mob.get(mob_id) {
+            return Some(tracker.clone());
+        }
+        let tracker = trackers.make.as_ref()?();
+        trackers.by_mob.insert(mob_id.to_string(), tracker.clone());
+        Some(tracker)
+    }
+
+    /// Forget the tracker of the mob `mob_id`: the mob is destroyed, or a
+    /// mob is created anew under its id, and the new mob's members start
+    /// unmarked.
+    pub(crate) fn forget_hosted_mob(&self, mob_id: &str) {
+        self.of_hosted_mobs
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .by_mob
+            .remove(mob_id);
+    }
+
+    /// The tracker that observes a member of the mob `mob_id` now; `None`
+    /// for a member no memory observes.
+    ///
+    /// A member of the launch's memory is observed by the launch's
+    /// tracker, a member of a mob with a memory of its own by that mob's,
+    /// and a member of a mob whose members are members of no memory by
+    /// none. A member of a mob whose memory is not decided is observed by
+    /// the launch's tracker, as every member was before a launch hosted a
+    /// second mob: an observer that cannot tell keeps observing, so no
+    /// model call goes unobserved while the launch's record is still
+    /// reading.
+    fn tracker_of(&self, mob_id: Option<&str>) -> Option<SessionTaintTracker> {
+        use crate::private_owners::MemoryHome;
+        let homes = self
+            .homes
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let (Some(mob_id), Some(homes)) = (mob_id, homes) else {
+            return self.tracker();
+        };
+        match homes.memory_home_of(mob_id) {
+            MemoryHome::Launch | MemoryHome::NotKnown => self.tracker(),
+            MemoryHome::Hosted(mob) => self.tracker_of_hosted_mob(&mob),
+            MemoryHome::Nowhere => None,
+        }
+    }
+
     /// Bind the live tracker. Called once when the memory stack attaches;
     /// decorators installed earlier (bootstrap members) pick it up on their
     /// next LLM call because they read the slot per call.
@@ -171,6 +276,10 @@ fn member_taint_identity(req: &CreateSessionRequest) -> Option<String> {
 /// own decorator when it has one, otherwise the session builder's default
 /// (the bound cell). The factory applies its default only to a request with
 /// no decorator, so supplying the default here does not run it twice.
+///
+/// Every member build carries the join, whichever mob it is a member of:
+/// which memory observes the member is asked at each of its model calls
+/// ([`DispatchTaintSlot::tracker_of`]), for the mob its build is bound to.
 pub(crate) fn attach_member_taint_decorator(
     req: &mut CreateSessionRequest,
     slot: &DispatchTaintSlot,
@@ -180,6 +289,10 @@ pub(crate) fn attach_member_taint_decorator(
     };
     // `member_taint_identity` proved `build` present (the binding rides it).
     let build = req.build.get_or_insert_with(SessionBuildOptions::default);
+    let mob_id = build
+        .mob_member_binding
+        .as_ref()
+        .map(|binding| binding.mob_id.clone());
     let prior = build
         .agent_llm_client_decorator
         .take()
@@ -190,11 +303,10 @@ pub(crate) fn attach_member_taint_decorator(
             Some(prior) => prior(client),
             None => client,
         };
-        Arc::new(TaintObservingLlmClient::new(
-            client,
-            identity.clone(),
-            slot.clone(),
-        ))
+        Arc::new(
+            TaintObservingLlmClient::new(client, identity.clone(), slot.clone())
+                .of_a_member_of(mob_id.clone()),
+        )
     }));
 }
 
@@ -208,6 +320,10 @@ pub(crate) fn attach_member_taint_decorator(
 pub struct TaintObservingLlmClient {
     inner: Arc<dyn AgentLlmClient>,
     identity: String,
+    /// The mob the member's build is bound to, as the mob set wrote it on
+    /// the build; `None` for a client that observes with the slot's own
+    /// tracker.
+    mob_id: Option<String>,
     slot: DispatchTaintSlot,
     /// Messages already classified. The transcript is append-only within a
     /// session; a shrink (compaction rebuild) resets the cursor and rescans
@@ -220,9 +336,22 @@ impl TaintObservingLlmClient {
         Self {
             inner,
             identity,
+            mob_id: None,
             slot,
             scanned: Mutex::new(0),
         }
+    }
+
+    /// This client is a member's of the mob `mob_id`: the memory that
+    /// observes it is that mob's members', asked at each call.
+    fn of_a_member_of(mut self, mob_id: Option<String>) -> Self {
+        self.mob_id = mob_id;
+        self
+    }
+
+    /// The tracker that observes this client now.
+    fn tracker(&self) -> Option<SessionTaintTracker> {
+        self.slot.tracker_of(self.mob_id.as_deref())
     }
 
     /// Classify every tool result newly appended since the last call. Tool
@@ -290,7 +419,7 @@ impl TaintObservingLlmClient {
     /// Classify the provider-executed server-tool content of one response
     /// before the loop can see it.
     fn mark_response_server_tools(&self, result: &LlmStreamResult) {
-        if let Some(tracker) = self.slot.tracker() {
+        if let Some(tracker) = self.tracker() {
             for block in result.blocks() {
                 if let AssistantBlock::ServerToolContent { kind, .. } = block {
                     tracker.observe_dispatched_server_tool(&self.identity, kind);
@@ -303,6 +432,7 @@ impl TaintObservingLlmClient {
     /// controller child or a live-bridge fork), with its own cursor.
     fn observe(&self, inner: Arc<dyn AgentLlmClient>) -> Self {
         Self::new(inner, self.identity.clone(), self.slot.clone())
+            .of_a_member_of(self.mob_id.clone())
     }
 }
 
@@ -323,12 +453,12 @@ impl AgentLlmRequestAttempt for TaintObservingRequestAttempt {
         &self,
         assistant_message_id: AssistantMessageId,
     ) -> Result<LlmStreamResult, AgentError> {
-        if let Some(tracker) = self.client.slot.tracker() {
+        if let Some(tracker) = self.client.tracker() {
             self.client
                 .mark_request_ingestions(&tracker, &self.messages, &self.tools);
         }
         let result = self.inner.stream_response(assistant_message_id).await?;
-        if let Some(tracker) = self.client.slot.tracker() {
+        if let Some(tracker) = self.client.tracker() {
             for block in result.blocks() {
                 if let AssistantBlock::ServerToolContent { kind, .. } = block {
                     tracker.observe_dispatched_server_tool(&self.client.identity, kind);
@@ -453,7 +583,7 @@ impl AgentLlmClient for TaintObservingLlmClient {
         provider_params: Option<&ProviderParamsOverride>,
         authorization: Option<LlmRequestAuthorization>,
     ) -> Result<LlmStreamResult, AgentError> {
-        if let Some(tracker) = self.slot.tracker() {
+        if let Some(tracker) = self.tracker() {
             self.mark_request_ingestions(&tracker, messages, tools);
         }
         let result = self
@@ -506,7 +636,7 @@ impl AgentLlmClient for TaintObservingLlmClient {
         temperature: Option<f32>,
         provider_params: Option<&ProviderParamsOverride>,
     ) -> Result<LlmStreamResult, AgentError> {
-        if let Some(tracker) = self.slot.tracker() {
+        if let Some(tracker) = self.tracker() {
             self.mark_request_ingestions(&tracker, messages, tools);
         }
         let result = self
@@ -791,6 +921,121 @@ mod tests {
         // classified on the first tracked call.
         drive(&client, &messages, &[]).await;
         assert!(tracker.identity_taint("identity:a").is_some());
+    }
+
+    /// The record of a launch whose mob is `launch` and which composes
+    /// `second` beside it, with a mob a member of each created and a mob
+    /// no member created.
+    fn a_launch_of_two_mobs() -> crate::private_owners::PrivateOwners {
+        let owners = crate::private_owners::PrivateOwners::default();
+        owners.bind_launch_mob("launch");
+        owners.hosted_mobs().name("second");
+        owners.hold_the_creation_in_tests("of-launch", Some("launch"));
+        owners.hold_the_creation_in_tests("of-second", Some("second"));
+        owners.hold_the_creation_in_tests("unowned", None);
+        owners
+    }
+
+    /// One model call of the member `name` of the mob `mob_id` that
+    /// carries a result of an outside tool.
+    async fn takes_in(slot: &DispatchTaintSlot, mob_id: &str, name: &str) {
+        let client = TaintObservingLlmClient::new(
+            Arc::new(ScriptedInner { blocks: vec![] }),
+            name.to_string(),
+            slot.clone(),
+        )
+        .of_a_member_of(Some(mob_id.to_string()));
+        let messages = vec![
+            assistant(vec![tool_use("call-1", "web_fetch")]),
+            tool_results("call-1", "attacker text"),
+        ];
+        drive(&client, &messages, &[]).await;
+    }
+
+    fn a_tracker() -> SessionTaintTracker {
+        SessionTaintTracker::new(ContentTrustConfig::default())
+    }
+
+    // Which memory observes a member is the one its mob's members are
+    // members of: a mob with a memory of its own marks its own tracker
+    // alone, a mob with none marks nobody, and the launch mob, the mobs
+    // its members created and a mob whose memory is not decided mark the
+    // launch's, as every member did before a launch hosted a second mob.
+    #[tokio::test]
+    async fn a_member_is_observed_by_the_memory_its_mobs_members_are_members_of() {
+        let slot = DispatchTaintSlot::default();
+        let of_the_launch = a_tracker();
+        slot.fill(of_the_launch.clone());
+        slot.decide_by(a_launch_of_two_mobs());
+        slot.make_hosted_mob_trackers_with(Arc::new(a_tracker));
+        let of_the_second = slot
+            .tracker_of_hosted_mob("second")
+            .expect("the second mob's tracker");
+
+        for (mob, name, marks_the_launchs, marks_the_seconds) in [
+            ("second", "in-second", false, true),
+            ("of-second", "in-of-second", false, false),
+            ("launch", "in-launch", true, false),
+            ("of-launch", "in-of-launch", true, false),
+            ("unowned", "in-unowned", true, false),
+            ("never-read", "in-never-read", true, false),
+        ] {
+            takes_in(&slot, mob, name).await;
+            assert_eq!(
+                (
+                    of_the_launch.identity_taint(name).is_some(),
+                    of_the_second.identity_taint(name).is_some()
+                ),
+                (marks_the_launchs, marks_the_seconds),
+                "a member of the mob {mob}: the launch's tracker, the second mob's"
+            );
+        }
+    }
+
+    // A hosted mob's tracker is one value for the life of the process: it
+    // is made at the first ask, also when that ask is a member's model
+    // call before the mob's memory is composed, and it is the one a later
+    // ask answers, so a mark survives the mob's unload and load. Only a
+    // forget of the mob (its destroy, a create under its id) starts anew.
+    #[tokio::test]
+    async fn a_hosted_mobs_tracker_is_kept_until_the_mob_is_forgotten() {
+        let slot = DispatchTaintSlot::default();
+        slot.fill(a_tracker());
+        slot.decide_by(a_launch_of_two_mobs());
+
+        // No memory handed over for hosted mobs yet: nobody observes.
+        takes_in(&slot, "second", "early").await;
+        assert!(slot.tracker_of_hosted_mob("second").is_none());
+
+        slot.make_hosted_mob_trackers_with(Arc::new(a_tracker));
+        takes_in(&slot, "second", "desk").await;
+        let composed_later = slot
+            .tracker_of_hosted_mob("second")
+            .expect("the second mob's tracker");
+        assert!(
+            composed_later.identity_taint("desk").is_some(),
+            "the tracker a later composition is given holds the earlier mark"
+        );
+
+        slot.forget_hosted_mob("second");
+        let of_the_new_mob = slot
+            .tracker_of_hosted_mob("second")
+            .expect("the new mob's tracker");
+        assert!(
+            of_the_new_mob.identity_taint("desk").is_none(),
+            "a mob created anew under the id starts unmarked"
+        );
+    }
+
+    // A slot no record was bound to observes every member build with its
+    // one tracker, whatever mob the build names: a composition of one mob.
+    #[tokio::test]
+    async fn a_slot_with_no_record_observes_every_member_with_its_one_tracker() {
+        let slot = DispatchTaintSlot::default();
+        let tracker = a_tracker();
+        slot.fill(tracker.clone());
+        takes_in(&slot, "any-mob", "desk").await;
+        assert!(tracker.identity_taint("desk").is_some());
     }
 
     // The controller surface reaches the wrapped client, and the pinned

@@ -30,6 +30,12 @@ pub struct ConsoleMember {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
     pub wired_to: Vec<String>,
+    /// The member's console labels. `source_mob_id` names the mob of a
+    /// member that sits in a mob other than the console's own: the gateway's
+    /// walk of its mobs writes it and discards a value a roster row carries
+    /// under it. A host that builds a snapshot of its own and sets
+    /// `source_mob_id` on a member says the same of it: its row then offers
+    /// no respawn, reset, run stop or side chat fork.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub labels: std::collections::BTreeMap<String, String>,
     /// Machine-owned liveness projection (meerkat 0.7.29+, ask 14):
@@ -142,11 +148,136 @@ pub struct ConsoleLiveSnapshot {
     /// runtimes or none, or a snapshot whose host sets none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mob_id: Option<String>,
+    /// Every mob the snapshot lists: its own mob ([`Self::mob_id`]), each mob
+    /// a member created, nested under that member's mob at any depth, and
+    /// each mob whose record leaves its creator undecided, at the top
+    /// level. A mob the host created is a mob of its own and is not among
+    /// them. A mob is listed only
+    /// through members the snapshot lists ([`ConsoleMob`]): one with no
+    /// listed member is absent, whatever is nested under it. The experience
+    /// carries the list as `topology.live_snapshot.mobs`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mobs: Vec<ConsoleMob>,
+}
+
+/// One mob a console lists ([`ConsoleLiveSnapshot::mobs`]): its own mob, a
+/// mob a member created (nested under that member's mob), or a mob whose
+/// record leaves its creator undecided. The mob's definition names no
+/// title, so its id is its name; the
+/// console puts it in words.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct ConsoleMob {
+    pub mob_id: String,
+    /// The mob it is nested under: the mob of the member that created it,
+    /// or, where the reader is listed no member of that mob, the nearest mob
+    /// above it the reader is listed. `None` for a top-level mob.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_mob_id: Option<String>,
+    /// The console identity of the member that created the mob, while the
+    /// snapshot lists that member to the reader; absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_identity: Option<String>,
+    pub state: ConsoleMobState,
+    /// How many of the mob's members the snapshot lists.
+    pub member_count: usize,
+}
+
+/// Whether a listed mob runs, as its lifecycle is observed without asking
+/// its actor. Readers treat a value they do not know as [`Self::Unknown`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ConsoleMobState {
+    /// The mob runs.
+    Running,
+    /// The mob does not run: stopped, completed or failed.
+    Stopped,
+    /// Nothing observed whether it runs, or a state this build does not know.
+    #[serde(other)]
+    Unknown,
+}
+
+impl ConsoleMob {
+    pub(crate) fn new(
+        mob_id: String,
+        parent_mob_id: Option<String>,
+        host_identity: Option<String>,
+        state: ConsoleMobState,
+    ) -> Self {
+        Self {
+            mob_id,
+            parent_mob_id,
+            host_identity,
+            state,
+            member_count: 0,
+        }
+    }
+}
+
+impl ConsoleMobState {
+    /// The state of a mob whose running is `running`, as
+    /// [`ConsoleLiveSnapshot::running`] reports it.
+    pub(crate) fn of_running(running: Option<bool>) -> Self {
+        match running {
+            Some(true) => Self::Running,
+            Some(false) => Self::Stopped,
+            None => Self::Unknown,
+        }
+    }
 }
 
 fn console_member_console_identity(member: &ConsoleMember) -> &str {
     crate::member_comms_id::durable_identity_label(&member.labels)
         .unwrap_or(member.agent_identity.as_str())
+}
+
+/// Whether `member` is a member of a mob other than the console's own: the
+/// console's walk wrote its mob on it as `source_mob_id` (and discards that
+/// label from a member of the console's own mob).
+fn console_member_is_nested(member: &ConsoleMember) -> bool {
+    member.labels.contains_key("source_mob_id")
+}
+
+/// The name a console shows for `member`: its `display_name` label, else
+/// its own name. A member of a nested mob is shown under its name, never
+/// under the identity that holds its mob.
+pub(crate) fn console_member_display_name(member: &ConsoleMember) -> String {
+    member
+        .labels
+        .get("display_name")
+        .cloned()
+        .unwrap_or_else(|| {
+            crate::console_member_ref::member_name_in_mob(
+                &member.agent_identity,
+                member.labels.get("source_mob_id").map(String::as_str),
+            )
+            .to_string()
+        })
+}
+
+/// Name, on the member row or topology node `entry` of `member`, the mob
+/// whose door it was read on and the member it is of: `mob_id` is the
+/// snapshot's own mob, `member_mob_id` the mob the member sits in
+/// ([`ConsoleLiveSnapshot::member_mob_id`]) and `member_name` its name
+/// there. A request names the member with these three as they stand. They
+/// are the gateway's own facts of where its walk read the member, never a
+/// name or a label a roster row carries.
+fn name_entry_member(
+    entry: &mut Value,
+    live_snapshot: &ConsoleLiveSnapshot,
+    member: &ConsoleMember,
+) {
+    if let Some(door) = live_snapshot.mob_id.as_deref() {
+        entry["mob_id"] = serde_json::json!(door);
+    }
+    if let Some(mob_id) = live_snapshot.member_mob_id(member) {
+        entry["member_mob_id"] = serde_json::json!(mob_id);
+    }
+    entry["member_name"] = serde_json::json!(crate::console_member_ref::member_name_in_mob(
+        console_member_console_identity(member),
+        member.labels.get("source_mob_id").map(String::as_str),
+    ));
 }
 
 impl ConsoleLiveSnapshot {
@@ -184,6 +315,7 @@ impl ConsoleLiveSnapshot {
                 .then(|| UnobservedFacts::new(UnobservedReason::NotObserved, &["running"])),
             last_activity_ms: BTreeMap::new(),
             mob_id: None,
+            mobs: Vec::new(),
         }
     }
 
@@ -193,6 +325,100 @@ impl ConsoleLiveSnapshot {
     pub(crate) fn with_mob_id(mut self, mob_id: Option<String>) -> Self {
         self.mob_id = mob_id;
         self
+    }
+
+    /// The snapshot listing `mobs` ([`Self::mobs`]), uncounted: a caller
+    /// narrows them to the members the snapshot lists
+    /// ([`Self::narrow_mobs`]).
+    #[must_use]
+    pub(crate) fn with_mobs(mut self, mobs: Vec<ConsoleMob>) -> Self {
+        self.mobs = mobs;
+        self
+    }
+
+    /// The mob `member` is a member of: the mob the console's walk read it
+    /// from, which the walk writes on the member as `source_mob_id` (it
+    /// discards any value a roster row carried under that label), else the
+    /// snapshot's own mob.
+    pub(crate) fn member_mob_id<'a>(&'a self, member: &'a ConsoleMember) -> Option<&'a str> {
+        member
+            .labels
+            .get("source_mob_id")
+            .map(String::as_str)
+            .or(self.mob_id.as_deref())
+    }
+
+    /// Narrow the mobs, and what names their creators, to the members the
+    /// snapshot lists now. Every stage that drops members runs this: the
+    /// snapshot's build, the console's visibility policy and each caller's
+    /// access.
+    ///
+    /// - A mob is kept only while the snapshot lists a member of it, and
+    ///   counts those members. A mob with no listed member is dropped
+    ///   whatever is nested under it: that it exists is told to no reader
+    ///   who is listed none of its members.
+    /// - A kept mob sits under the nearest kept mob above it, else at the
+    ///   top level.
+    /// - The member that created a mob is named only while the snapshot
+    ///   lists that member: otherwise the mob's `host_identity` is cleared,
+    ///   and so are the `delegate_host_identity` label of the mob's members
+    ///   and the creator among their peers.
+    pub(crate) fn narrow_mobs(&mut self) {
+        let listed: BTreeSet<String> = self
+            .members
+            .iter()
+            .map(|member| member.agent_identity.clone())
+            .collect();
+        for member in &mut self.members {
+            if member
+                .labels
+                .get("delegate_host_identity")
+                .is_some_and(|host| !listed.contains(host))
+                && let Some(host) = member.labels.remove("delegate_host_identity")
+            {
+                member.wired_to.retain(|peer| *peer != host);
+            }
+        }
+        if self.mobs.is_empty() {
+            return;
+        }
+        let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+        for member in &self.members {
+            if let Some(mob_id) = self.member_mob_id(member) {
+                *counts.entry(mob_id.to_string()).or_default() += 1;
+            }
+        }
+        let parents: BTreeMap<String, Option<String>> = self
+            .mobs
+            .iter()
+            .map(|mob| (mob.mob_id.clone(), mob.parent_mob_id.clone()))
+            .collect();
+        self.mobs
+            .retain(|mob| counts.get(&mob.mob_id).is_some_and(|count| *count > 0));
+        for mob in &mut self.mobs {
+            mob.member_count = counts.get(&mob.mob_id).copied().unwrap_or(0);
+            // The nearest kept mob above it: a parent that lists no member
+            // is skipped, and a parent chain that loops ends at the top.
+            let mut seen = BTreeSet::from([mob.mob_id.clone()]);
+            let mut parent = mob.parent_mob_id.take();
+            while let Some(candidate) = parent {
+                if !seen.insert(candidate.clone()) {
+                    break;
+                }
+                if counts.get(&candidate).is_some_and(|count| *count > 0) {
+                    mob.parent_mob_id = Some(candidate);
+                    break;
+                }
+                parent = parents.get(&candidate).cloned().flatten();
+            }
+            if mob
+                .host_identity
+                .as_deref()
+                .is_some_and(|host| !listed.contains(host))
+            {
+                mob.host_identity = None;
+            }
+        }
     }
 
     /// The snapshot with each identity's last console activity
@@ -343,11 +569,13 @@ pub(crate) fn handle_console_rest_json_route_with_pending_rows(
             request,
             resolved_auth.as_ref(),
             live_snapshot,
+            SnapshotRows::OfRosters,
             access,
             None,
             memory_panel_available,
             workgraph_available,
             pending,
+            None,
         ),
         Err(refused) => refused,
     }
@@ -481,11 +709,36 @@ pub(crate) fn console_rest_route_view(
         .on_console(identifies_people)
 }
 
+/// Where the member rows of a live snapshot come from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SnapshotRows {
+    /// Roster rows: each row carries its member's role in its mob and the
+    /// member's console labels, the values every route's roster priming
+    /// records. The experience records them as its members' access
+    /// attributes.
+    OfRosters,
+    /// Identity records, on a console with no runtime of its own. A record
+    /// is what a list serializes of a member: it carries the role under
+    /// the label key `role`, where a label of that name would sit, and not
+    /// every label the roster priming records. Its rows are no access
+    /// attributes: the route's caller primed the cache from the runtimes,
+    /// as every other route of such a console does, and a member row is
+    /// shown only if the view of its agent allows it too. With no caller
+    /// resolved (no audience handed in) nothing primed a cache, there is
+    /// no view of an agent to ask, and no member is shown: no member row,
+    /// no agent row and no module row.
+    OfIdentityRecords,
+}
+
 /// The response to a request [`authorize_console_rest_json_route`] accepted,
 /// given the authentication it resolved. `audience` is the caller's agent
 /// audience when the Console resolved it ([`crate::http_console`]'s routes:
 /// the caller owns the agents private to them); without one the experience
 /// is decided by a view of the resolved subject that owns no private agent.
+/// `members_mob` is the mob whose roster `live_snapshot` is, as a stored
+/// record names it (none for the host's default mob): its members are
+/// recorded as agents of that mob, and a caller's `audience` for another
+/// mob is its view taken for that mob.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_console_rest_json_route(
     decisions: &RuntimeDecisionState,
@@ -493,11 +746,13 @@ pub(crate) fn render_console_rest_json_route(
     request: &ConsoleRestJsonRequest,
     resolved_auth: Option<&ConsoleAccessRequest>,
     live_snapshot: Option<&ConsoleLiveSnapshot>,
+    rows: SnapshotRows,
     access: Option<&AccessController>,
     audience: Option<&AccessView>,
     memory_panel_available: bool,
     workgraph_available: bool,
     pending: &BTreeSet<String>,
+    members_mob: Option<&meerkat_mob::MobId>,
 ) -> ConsoleRestJsonResponse {
     let (base_path, _) = split_path_and_query(&request.path);
     let view = match audience {
@@ -517,7 +772,17 @@ pub(crate) fn render_console_rest_json_route(
         .unwrap_or_else(|| default_console_live_snapshot(decisions));
     // Every caller's experience is decided per agent: a view that enforces
     // nothing still hides the agents private to another person.
-    prime_access_attributes(&view.controller(), &live_snapshot);
+    if rows == SnapshotRows::OfRosters {
+        prime_access_attributes(&view.controller(), &live_snapshot, members_mob);
+    } else if audience.is_none() {
+        // Record rows and no caller resolved: closed. The sidebar and the
+        // topology fall back to the agent rows and the module rows when
+        // no member is left, and in such a snapshot both are the records
+        // again: all three are cleared.
+        live_snapshot.members.clear();
+        live_snapshot.agents.clear();
+        live_snapshot.loaded_modules.clear();
+    }
     filter_snapshot_for_access(&mut live_snapshot, &view);
     let mut body = if base_path == CONSOLE_EXPERIENCE_ROUTE {
         build_console_experience_contract(&modules, &live_snapshot, &decisions.console, pending)
@@ -724,7 +989,17 @@ fn apply_memory_to_experience(
 /// Feed the controller's attribute cache from a roster snapshot so
 /// label/role selectors resolve on surfaces that only carry an identity
 /// string (timeline frames, send requests, SSE streams).
-fn prime_access_attributes(controller: &AccessController, snapshot: &ConsoleLiveSnapshot) {
+///
+/// `mob` is the mob whose roster the snapshot is, as a stored record names
+/// it: none for the host's default mob. The members are recorded as agents
+/// of that mob, where a view taken for that mob reads them: a member of
+/// another mob never replaces what the default mob's agent of the same
+/// name is recorded as.
+fn prime_access_attributes(
+    controller: &AccessController,
+    snapshot: &ConsoleLiveSnapshot,
+    mob: Option<&meerkat_mob::MobId>,
+) {
     // Fold the snapshot to one final attribute set per identity, then record
     // each once. Members carry the richer attribute set, so a member's entry
     // replaces the agent entry of the same identity. Recording the agent
@@ -746,24 +1021,100 @@ fn prime_access_attributes(controller: &AccessController, snapshot: &ConsoleLive
             },
         );
     }
-    attributes.extend(fold_console_member_attributes(snapshot.members.iter().map(
-        |member| {
+    // A member of a nested mob is kept apart from the agents of the walk's
+    // own mob, in its mob's own entries: the two can spell one string, and
+    // each is recorded. A member is a nested mob's when the walk wrote a
+    // mob other than its own on it and its identity is that mob's
+    // member's string; any other row is recorded among the walk's own
+    // mob's agents, as before. The walk has no namespace to test: it is
+    // fed the roster rows of a console with a runtime of its own only,
+    // which names its members without one.
+    let (nested_members, own_members): (Vec<_>, Vec<_>) = snapshot
+        .members
+        .iter()
+        .map(|member| {
             console_member_access_attributes(&member.agent_identity, &member.role, &member.labels)
-        },
-    )));
+        })
+        .partition(|attributes| keyed_nested_mob(attributes, snapshot.mob_id.as_deref()).is_some());
+    // The walk holds one agent row for every member it lists, a nested
+    // mob's included. An agent row that a nested member's row names, by
+    // its identity or its agent id, is that member's: it is no agent of
+    // the walk's own mob, and nothing is recorded among them for it. A
+    // member of the walk's own mob that holds the same string is
+    // recorded from its own row, folded in next.
+    let nested_names: std::collections::BTreeSet<&str> = nested_members
+        .iter()
+        .flat_map(|nested| [Some(nested.identity.as_str()), nested.agent_id.as_deref()])
+        .flatten()
+        .collect();
+    attributes.retain(|identity, agent| {
+        !nested_names.contains(identity.as_str())
+            && !agent
+                .agent_id
+                .as_deref()
+                .is_some_and(|agent_id| nested_names.contains(agent_id))
+    });
+    attributes.extend(fold_console_member_attributes(own_members));
+    // The snapshot is a walk made earlier and kept: a row of it may be older
+    // than its agent's end, so it never replaces an entry recorded as ended.
     for attributes in attributes.into_values() {
-        controller.record_agent_attributes(attributes);
+        match mob {
+            None => controller.record_snapshot_agent_attributes(attributes),
+            Some(mob) => controller.record_snapshot_agent_attributes_in(mob, attributes),
+        }
+    }
+    for attributes in fold_console_member_attributes(nested_members).into_values() {
+        let AgentResourceAttributes {
+            identity,
+            role,
+            labels,
+            ..
+        } = attributes;
+        // The mob is the one the walk wrote, and the name there is what
+        // the walk's identity holds after it. A member the door can give
+        // no name has no console identity: nothing is recorded for it.
+        let Some(nested_mob) = labels
+            .get("source_mob_id")
+            .map(|mob_id| meerkat_mob::MobId::from(mob_id.as_str()))
+        else {
+            continue;
+        };
+        let Some(name) =
+            crate::console_member_ref::nested_member_name(&identity, nested_mob.as_str())
+        else {
+            continue;
+        };
+        if controller
+            .record_snapshot_nested_agent_attributes(
+                crate::access::NestedMobRef {
+                    under: mob,
+                    mob: &nested_mob,
+                },
+                name,
+                role,
+                labels,
+            )
+            .is_err()
+        {
+            tracing::debug!(
+                mob_id = %nested_mob,
+                "access priming: a member of a nested mob that the door cannot name is not recorded"
+            );
+        }
     }
 }
 
 /// One final access value per console identity from live members listed as
-/// the console lists them, primary members first. A member whose runtime
-/// alias an earlier member holds is skipped, as the console shows the first
-/// one. A member of an agent-created sub-mob (it carries
-/// `delegate_host_identity`) never replaces a primary member's value under
-/// the same identity. Otherwise the last member under an identity wins. The
-/// console experience and every route's roster priming fold through this, so
-/// they record the same value.
+/// the console lists them, primary members first. A member whose console
+/// name an earlier member holds is skipped, as the console shows the first
+/// one. A member of a mob other than the primary one (it carries the mob
+/// the console's walk wrote, `source_mob_id`) is named by its mob and name
+/// ([`crate::console_member_ref`]) and never replaces a primary member's
+/// value under the same identity: the two can spell one identity once a
+/// runtime's identity namespace is applied, so a caller that records in a
+/// namespace folds the namespaced values. Otherwise the last member under
+/// an identity wins. The console experience and every route's roster
+/// priming fold through this, so they record the same value.
 pub(crate) fn fold_console_member_attributes(
     members: impl IntoIterator<Item = AgentResourceAttributes>,
 ) -> std::collections::BTreeMap<String, AgentResourceAttributes> {
@@ -776,11 +1127,11 @@ pub(crate) fn fold_console_member_attributes(
         {
             continue;
         }
-        let sub_mob_member = attributes.labels.contains_key("delegate_host_identity");
-        if sub_mob_member && primary_identities.contains(&attributes.identity) {
+        let nested_member = attributes.labels.contains_key("source_mob_id");
+        if nested_member && primary_identities.contains(&attributes.identity) {
             continue;
         }
-        if !sub_mob_member {
+        if !nested_member {
             primary_identities.insert(attributes.identity.clone());
         }
         folded.insert(attributes.identity.clone(), attributes);
@@ -808,18 +1159,88 @@ pub(crate) fn console_member_access_attributes(
     }
 }
 
+/// The nested mob whose own entries the access records keep the member
+/// `attributes` describes, a row of a walk whose own mob is `own_mob`:
+/// the mob the walk wrote on the row, when it is another mob than the
+/// walk's own and the member's identity is the string the door gives a
+/// member of that mob (its mob and its name there). None for a member
+/// of the walk's own mob, and for a nested mob's member named in another
+/// form, which is recorded among the walk's own mob's agents. The walk
+/// that records the rows and the listing that decides them ask this one
+/// test ([`crate::console_member_ref::keyed_nested_mob`]), and so does
+/// the listing of identities.
+fn keyed_nested_mob<'a>(
+    attributes: &'a AgentResourceAttributes,
+    own_mob: Option<&str>,
+) -> Option<&'a str> {
+    crate::console_member_ref::keyed_nested_mob(&attributes.identity, &attributes.labels, own_mob)
+}
+
 fn filter_snapshot_for_access(snapshot: &mut ConsoleLiveSnapshot, view: &AccessView) {
     // Each member is judged by the attributes its row carries, then along
     // its lineage, as every agent-scoped check judges it: a member an agent
     // spawned follows its spawner, and a side chat its source. A view that
     // enforces nothing still hides the agents private to another person.
-    snapshot.members.retain(|member| {
-        view.decide_agent_with_attributes(
-            crate::access::ACTION_AGENT_VIEW,
-            &console_member_access_attributes(&member.agent_identity, &member.role, &member.labels),
-        )
-        .is_allow()
-    });
+    // A row is also judged by the view of its agent, on the entry the
+    // access cache holds. A row built from an identity record is not the
+    // member's access attributes ([`SnapshotRows::OfIdentityRecords`]); a
+    // roster row is, and its entry was recorded from it, unless the row
+    // was walked before its member's end: the entry is then the ended
+    // one, and the row is shown to nobody that entry refuses.
+    // The cache is taken once for all rows, and nothing here awaits.
+    let own_mob = snapshot.mob_id.clone();
+    {
+        let held = view.over_held_attributes();
+        snapshot.members.retain(|member| {
+            let attributes = console_member_access_attributes(
+                &member.agent_identity,
+                &member.role,
+                &member.labels,
+            );
+            // A member of a nested mob is decided below, in the view of
+            // its mob.
+            if keyed_nested_mob(&attributes, own_mob.as_deref()).is_some() {
+                return true;
+            }
+            held.decide_agent_with_attributes(crate::access::ACTION_AGENT_VIEW, &attributes)
+                .is_allow()
+                && !held.refuses_view_of_known_agent(&attributes.identity)
+        });
+    }
+    // A member of a nested mob is judged the same way by the view of its
+    // mob, where its entry is kept: a member of the snapshot's own mob
+    // can hold the same string, and each row is decided by its own
+    // member's entry. The cache is taken once for the rows of each
+    // nested mob, after the take above was given back.
+    let nested_mobs: std::collections::BTreeSet<String> = snapshot
+        .members
+        .iter()
+        .filter_map(|member| {
+            let attributes = console_member_access_attributes(
+                &member.agent_identity,
+                &member.role,
+                &member.labels,
+            );
+            keyed_nested_mob(&attributes, own_mob.as_deref()).map(str::to_string)
+        })
+        .collect();
+    for mob_id in nested_mobs {
+        let nested_view = view.in_nested_mob(&meerkat_mob::MobId::from(mob_id.as_str()));
+        let held = nested_view.over_held_attributes();
+        snapshot.members.retain(|member| {
+            let attributes = console_member_access_attributes(
+                &member.agent_identity,
+                &member.role,
+                &member.labels,
+            );
+            if keyed_nested_mob(&attributes, own_mob.as_deref()) != Some(mob_id.as_str()) {
+                return true;
+            }
+            held.decide_agent_with_attributes(crate::access::ACTION_AGENT_VIEW, &attributes)
+                .is_allow()
+                && !held.refuses_view_of_known_agent(&attributes.identity)
+        });
+    }
     // A member's peer list names no member hidden from the caller.
     for member in &mut snapshot.members {
         member.wired_to.retain(|peer| !view.hides_agent(peer));
@@ -830,10 +1251,16 @@ fn filter_snapshot_for_access(snapshot: &mut ConsoleLiveSnapshot, view: &AccessV
     });
     // Module IDs double as module-agent sidebar rows when no roster
     // member survives filtering; gate them like any other agent so a
-    // fully-denied caller is not shown the module fallback.
+    // fully-denied caller is not shown the module fallback. A configured
+    // module's id is no agent the access records hold a row of: one they
+    // do not know is judged by its name.
     snapshot
         .loaded_modules
-        .retain(|module_id| view.allows_agent(crate::access::ACTION_AGENT_VIEW, module_id));
+        .retain(|module_id| view.allows_name(crate::access::ACTION_AGENT_VIEW, module_id));
+    // A mob is listed to the caller only through members the caller is
+    // listed, an access admin included, and its creator is named only to a
+    // caller who is listed that member.
+    snapshot.narrow_mobs();
 }
 
 /// Intersect the projected experience with the caller's grants and append
@@ -860,6 +1287,8 @@ fn apply_access_to_experience(body: &mut Value, view: &AccessView) {
                     view.allows_agent(crate::access::ACTION_AGENT_RETIRE, identity.as_str());
                 let can_respawn =
                     view.allows_agent(crate::access::ACTION_AGENT_RESPAWN, identity.as_str());
+                let can_reset =
+                    view.allows_agent(crate::access::ACTION_AGENT_RESET, identity.as_str());
                 let can_manage_schedules =
                     view.allows_agent(crate::access::ACTION_SCHEDULE_MANAGE, identity.as_str());
                 if let Some(affordances) =
@@ -868,6 +1297,16 @@ fn apply_access_to_experience(body: &mut Value, view: &AccessView) {
                     intersect_bool(affordances, "can_send_message", can_send);
                     intersect_bool(affordances, "can_retire", can_retire);
                     intersect_bool(affordances, "can_respawn", can_respawn);
+                    // A row that says whether the gateway resets the agent
+                    // or stops a run of it says it for this caller: a reset
+                    // takes `agent.reset`, a stop what a retirement takes.
+                    // A row that does not say stays silent.
+                    if affordances.contains_key("can_reset") {
+                        intersect_bool(affordances, "can_reset", can_reset);
+                    }
+                    if affordances.contains_key("can_stop_run") {
+                        intersect_bool(affordances, "can_stop_run", can_retire);
+                    }
                     // A console schedule change takes `agent.send` and
                     // `schedule.manage` on the agent.
                     let can_send_message = affordances
@@ -1125,7 +1564,7 @@ fn build_console_experience_contract(
                 .map(|member| {
                     let console_identity = console_member_console_identity(member);
                     if pending.contains(console_identity) {
-                        return pending_sidebar_record(
+                        let mut record = pending_sidebar_record(
                             member,
                             console_identity,
                             response_phases.get(console_identity).copied(),
@@ -1133,12 +1572,12 @@ fn build_console_experience_contract(
                             is_read_only,
                             is_aggregate_console,
                         );
+                        // Every row names its door, its member's mob and
+                        // its member's name there.
+                        name_entry_member(&mut record, live_snapshot, member);
+                        return record;
                     }
-                    let label = member
-                        .labels
-                        .get("display_name")
-                        .cloned()
-                        .unwrap_or_else(|| member.agent_identity.clone());
+                    let label = console_member_display_name(member);
                     let is_active = member.state == "active";
                     let addressable = is_active
                         && member
@@ -1176,6 +1615,15 @@ fn build_console_experience_contract(
                     // (`crate::side_chat::project_side_chat_lineage`). It is
                     // closed and forked again, never respawned or reset.
                     let side_chat_of = member.labels.get(crate::side_chat::SIDE_CHAT_OF_LABEL);
+                    // `meta/respawn`, `meta/reset`, `meta/stop_member_run`
+                    // and `meta/fork_member` act on the members of the
+                    // console's own mob: a nested mob's member is offered
+                    // none of the four.
+                    let own_mob_member = !console_member_is_nested(member);
+                    let can_restart = own_mob_member
+                        && !is_read_only
+                        && !is_aggregate_console
+                        && side_chat_of.is_none();
                     let mut record = serde_json::json!({
                         "agent_id": member.agent_identity,
                         "member_id": member.agent_identity,
@@ -1199,7 +1647,17 @@ fn build_console_experience_contract(
                             "addressable": addressable,
                             "can_send_message": can_send_message,
                             "can_retire": is_active && !is_read_only && !is_aggregate_console && !singleton,
-                            "can_respawn": !is_read_only && !is_aggregate_console && side_chat_of.is_none(),
+                            "can_respawn": can_restart,
+                            "can_reset": can_restart,
+                            // Offered where a retirement is: a console
+                            // that reads it alone offers Stop where it
+                            // offered it before.
+                            "can_stop_run": own_mob_member
+                                && is_active
+                                && !is_read_only
+                                && !is_aggregate_console
+                                && !singleton,
+                            "can_fork_side_chat": own_mob_member && !is_read_only,
                             "runtime_mode": if is_aggregate_console { "console_aggregator" } else { "mob_agent" },
                         },
                     });
@@ -1212,6 +1670,7 @@ fn build_console_experience_contract(
                     if let Some(source) = side_chat_of {
                         record["side_chat_of"] = serde_json::json!(source);
                     }
+                    name_entry_member(&mut record, live_snapshot, member);
                     record
                 })
                 .collect()
@@ -1408,7 +1867,7 @@ fn build_console_experience_contract(
                 "supported_scopes": ["mob", "agent"],
             },
             "list_item_contract": {
-                "fields": ["agent_id", "member_id", "identity", "label", "kind", "role", "state", "progress", "model_capabilities", "response_phase", "last_activity_ms", "wired_to", "labels", "group", "addressable", "affordances", "watched", "alertLevel", "degraded", "degradedReason"],
+                "fields": ["agent_id", "member_id", "identity", "label", "kind", "role", "state", "progress", "model_capabilities", "response_phase", "last_activity_ms", "wired_to", "labels", "group", "addressable", "affordances", "watched", "alertLevel", "degraded", "degradedReason", "mob_id"],
                 "agent_id_field": "agent_id",
                 "member_id_field": "member_id",
                 "group_by_field": "group",
@@ -1521,22 +1980,25 @@ fn build_console_experience_contract(
                 // Mob runtime: identity-native topology from members.
                 serde_json::json!({
                     "nodes": live_snapshot.members.iter().map(|member| {
-                        if pending.contains(console_member_console_identity(member)) {
-                            return pending_topology_node(member);
-                        }
-                        let addressable = member.state == "active" && member
-                            .labels
-                            .get("addressable")
-                            .map(|value| value != "false")
-                            .unwrap_or(true);
-                        serde_json::json!({
-                            "identity": member.agent_identity,
-                            "label": member.labels.get("display_name").cloned().unwrap_or_else(|| member.agent_identity.clone()),
-                            "role": member.role,
-                            "state": member.state,
-                            "wired_to": member.wired_to,
-                            "addressable": addressable,
-                        })
+                        let mut node = if pending.contains(console_member_console_identity(member)) {
+                            pending_topology_node(member)
+                        } else {
+                            let addressable = member.state == "active" && member
+                                .labels
+                                .get("addressable")
+                                .map(|value| value != "false")
+                                .unwrap_or(true);
+                            serde_json::json!({
+                                "identity": member.agent_identity,
+                                "label": console_member_display_name(member),
+                                "role": member.role,
+                                "state": member.state,
+                                "wired_to": member.wired_to,
+                                "addressable": addressable,
+                            })
+                        };
+                        name_entry_member(&mut node, live_snapshot, member);
+                        node
                     }).collect::<Vec<_>>(),
                     "node_count": live_snapshot.members.len(),
                 })
@@ -1617,6 +2079,12 @@ fn build_console_experience_contract(
     // nodes. Without it the console names no team.
     if let Some(mob_id) = &live_snapshot.mob_id {
         body["topology"]["live_snapshot"]["mob_id"] = Value::String(mob_id.clone());
+    }
+    // Every mob the caller may see: the console lists the roster by mob and
+    // narrows the topology to the mob the person chooses.
+    if !live_snapshot.mobs.is_empty() {
+        body["topology"]["live_snapshot"]["mobs"] =
+            serde_json::to_value(&live_snapshot.mobs).unwrap_or(Value::Null);
     }
     if let Some(fetch_timeout_ms) = console_policy.fetch_timeout_ms {
         body["console_policy"] = serde_json::json!({
@@ -3210,12 +3678,13 @@ mod access_priming_tests {
             unobserved: None,
             last_activity_ms: BTreeMap::new(),
             mob_id: None,
+            mobs: Vec::new(),
         };
         // The first poll records the roster.
-        prime_access_attributes(&controller, &snapshot);
+        prime_access_attributes(&controller, &snapshot, None);
         let quiet = publication.observe(|| ()).expect("quiet publication").1;
         for _ in 0..3 {
-            prime_access_attributes(&controller, &snapshot);
+            prime_access_attributes(&controller, &snapshot, None);
         }
         assert!(
             quiet.check_current().is_ok(),
@@ -3231,13 +3700,13 @@ mod access_priming_tests {
         snapshot.members[0]
             .labels
             .insert("tier".to_string(), "secret".to_string());
-        prime_access_attributes(&controller, &snapshot);
+        prime_access_attributes(&controller, &snapshot, None);
         assert!(
             quiet.check_current().is_err(),
             "a changed member label publishes"
         );
         let changed = publication.observe(|| ()).expect("quiet publication").1;
-        prime_access_attributes(&controller, &snapshot);
+        prime_access_attributes(&controller, &snapshot, None);
         assert!(
             changed.check_current().is_ok(),
             "the next poll of the changed snapshot publishes nothing"
@@ -3248,5 +3717,517 @@ mod access_priming_tests {
                 .allows_agent(ACTION_AGENT_VIEW, "scout"),
             "the member's richer attributes stay recorded"
         );
+    }
+
+    /// The snapshot is a walk made earlier and kept. A member that ended
+    /// after the walk is recorded as ended by a priming that reads the
+    /// roster; a poll with the stale snapshot does not record it whole
+    /// again and publishes nothing. Seated again under its name, the member
+    /// stays decided as ended here until a priming that reads the roster
+    /// records it whole; from then on the snapshot's row is recorded again.
+    #[test]
+    fn a_poll_of_a_stale_snapshot_never_records_an_ended_member_whole_again() {
+        let controller = AccessController::new(AccessControlConfig {
+            enabled: true,
+            admins: vec!["root@example.test".to_string()],
+            rules: vec![
+                AccessRule {
+                    id: "everyone-views".to_string(),
+                    actions: vec![ACTION_AGENT_VIEW.to_string()],
+                    agents: vec!["*".to_string()],
+                    ..AccessRule::default()
+                },
+                AccessRule {
+                    id: "deny-secret".to_string(),
+                    effect: AccessEffect::Deny,
+                    actions: vec![ACTION_AGENT_VIEW.to_string()],
+                    match_labels: BTreeMap::from([("tier".to_string(), "secret".to_string())]),
+                    ..AccessRule::default()
+                },
+            ],
+            ..AccessControlConfig::default()
+        })
+        .expect("controller");
+        let publication = LocalAuthorizationPublication::new();
+        controller
+            .join_authorization_publication(publication.clone())
+            .expect("first join");
+        let mut snapshot = ConsoleLiveSnapshot {
+            runtime_id: None,
+            running: Some(true),
+            loaded_modules: Vec::new(),
+            agents: vec![agent("scout", "worker")],
+            members: vec![member("scout", "worker", "public")],
+            has_mob_runtime: true,
+            unobserved: None,
+            last_activity_ms: BTreeMap::new(),
+            mob_id: None,
+            mobs: Vec::new(),
+        };
+        let shown = || {
+            controller
+                .view_for_subject(None)
+                .allows_agent(ACTION_AGENT_VIEW, "scout")
+        };
+        prime_access_attributes(&controller, &snapshot, None);
+        assert!(shown(), "the living member, by its row");
+
+        // The member ends: a priming that reads the roster records what
+        // outlives it. Its labels are not known, so the deny on a label
+        // cannot be ruled out for it.
+        controller.record_ended_agent_attributes(AgentResourceAttributes {
+            identity: "scout".to_string(),
+            agent_id: None,
+            role: None,
+            labels: BTreeMap::new(),
+        });
+        assert!(!shown(), "ended: the deny on a label is not ruled out");
+        let quiet = publication.observe(|| ()).expect("quiet publication").1;
+        prime_access_attributes(&controller, &snapshot, None);
+        assert!(
+            !shown(),
+            "a row of the stale snapshot does not record the ended member whole again"
+        );
+        assert!(
+            quiet.check_current().is_ok(),
+            "a poll of the stale snapshot publishes no access change"
+        );
+
+        // Seated again: a priming that reads the roster records the member
+        // whole, and the snapshot's rows are recorded over that entry again.
+        let seated = member("scout", "worker", "public");
+        controller.record_agent_attributes(console_member_access_attributes(
+            &seated.agent_identity,
+            &seated.role,
+            &seated.labels,
+        ));
+        assert!(shown(), "seated again and read from the roster: by its row");
+        snapshot.members[0]
+            .labels
+            .insert("tier".to_string(), "secret".to_string());
+        prime_access_attributes(&controller, &snapshot, None);
+        assert!(
+            !shown(),
+            "an entry that is not of an ended member is replaced by the snapshot's row"
+        );
+    }
+
+    /// The sidebar keeps a member row by the row's own attributes and by
+    /// the view of its agent on the entry the access records hold. A row
+    /// whose agent the records do not hold yet is kept by the row alone: a
+    /// live member is not dropped for a record that was not read yet. A row
+    /// whose agent is recorded as ended (the row was walked before the
+    /// member's end) is dropped for a caller the ended entry refuses.
+    #[test]
+    fn a_member_row_is_kept_by_its_row_until_its_agent_is_recorded_and_dropped_once_recorded_as_ended()
+     {
+        let controller = AccessController::new(AccessControlConfig {
+            enabled: true,
+            admins: vec!["root@example.test".to_string()],
+            rules: vec![
+                AccessRule {
+                    id: "everyone-views".to_string(),
+                    actions: vec![ACTION_AGENT_VIEW.to_string()],
+                    agents: vec!["*".to_string()],
+                    ..AccessRule::default()
+                },
+                AccessRule {
+                    id: "deny-secret".to_string(),
+                    effect: AccessEffect::Deny,
+                    actions: vec![ACTION_AGENT_VIEW.to_string()],
+                    match_labels: BTreeMap::from([("tier".to_string(), "secret".to_string())]),
+                    ..AccessRule::default()
+                },
+            ],
+            ..AccessControlConfig::default()
+        })
+        .expect("controller");
+        let snapshot = || ConsoleLiveSnapshot {
+            runtime_id: None,
+            running: Some(true),
+            loaded_modules: Vec::new(),
+            agents: Vec::new(),
+            members: vec![member("scout", "worker", "public")],
+            has_mob_runtime: true,
+            unobserved: None,
+            last_activity_ms: BTreeMap::new(),
+            mob_id: None,
+            mobs: Vec::new(),
+        };
+        let listed = || {
+            let mut snapshot = snapshot();
+            filter_snapshot_for_access(&mut snapshot, &controller.view_for_subject(None));
+            snapshot.members.len()
+        };
+        assert!(!controller.view_for_subject(None).knows_agent("scout"));
+        assert_eq!(
+            listed(),
+            1,
+            "the records do not hold the agent yet: the row alone keeps it"
+        );
+        prime_access_attributes(&controller, &snapshot(), None);
+        assert_eq!(listed(), 1, "recorded from the row: the row is kept");
+        controller.record_ended_agent_attributes(AgentResourceAttributes {
+            identity: "scout".to_string(),
+            agent_id: None,
+            role: None,
+            labels: BTreeMap::new(),
+        });
+        prime_access_attributes(&controller, &snapshot(), None);
+        assert_eq!(
+            listed(),
+            0,
+            "recorded as ended, and the deny on a label is not ruled out for it: the stale row is \
+             dropped"
+        );
+    }
+
+    /// A kept walk's row of a member of another mob of the host never takes
+    /// the place of an entry recorded as ended in that mob, as it never does
+    /// for a member of the default mob. The second mob's `scout` is recorded
+    /// as ended: a deny keyed on a label cannot be ruled out for it, so a
+    /// caller the deny applies to is refused its view in that mob. The
+    /// experience of that mob then records its snapshot's row of `scout`,
+    /// a row walked before the member's end: the caller is still refused.
+    /// Neither record makes the default mob know an agent of that name.
+    #[test]
+    fn a_kept_row_of_another_mobs_member_never_takes_the_place_of_its_ended_entry() {
+        let controller = AccessController::new(AccessControlConfig {
+            enabled: true,
+            admins: vec!["root@example.test".to_string()],
+            rules: vec![
+                AccessRule {
+                    id: "everyone-views-in-every-mob".to_string(),
+                    actions: vec![ACTION_AGENT_VIEW.to_string()],
+                    agents: vec!["*".to_string()],
+                    mobs: vec!["*".to_string()],
+                    ..AccessRule::default()
+                },
+                AccessRule {
+                    id: "deny-secret".to_string(),
+                    effect: AccessEffect::Deny,
+                    actions: vec![ACTION_AGENT_VIEW.to_string()],
+                    match_labels: BTreeMap::from([("tier".to_string(), "secret".to_string())]),
+                    ..AccessRule::default()
+                },
+            ],
+            ..AccessControlConfig::default()
+        })
+        .expect("controller");
+        let second = meerkat_mob::MobId::from("second");
+        let snapshot = ConsoleLiveSnapshot {
+            runtime_id: None,
+            running: Some(true),
+            loaded_modules: Vec::new(),
+            agents: Vec::new(),
+            members: vec![member("scout", "worker", "public")],
+            has_mob_runtime: true,
+            unobserved: None,
+            last_activity_ms: BTreeMap::new(),
+            mob_id: None,
+            mobs: Vec::new(),
+        };
+        let shown_in_the_second_mob = || {
+            controller
+                .view_for_subject(None)
+                .in_mob(&second)
+                .can_view_agent("scout")
+        };
+        controller.record_ended_agent_attributes_in(
+            &second,
+            AgentResourceAttributes {
+                identity: "scout".to_string(),
+                agent_id: None,
+                role: None,
+                labels: BTreeMap::new(),
+            },
+        );
+        assert!(
+            !shown_in_the_second_mob(),
+            "recorded as ended in the second mob: the deny on a label is not ruled out for it"
+        );
+        prime_access_attributes(&controller, &snapshot, Some(&second));
+        assert!(
+            !shown_in_the_second_mob(),
+            "the kept row does not take the place of the ended entry in the second mob"
+        );
+        assert!(
+            !controller.view_for_subject(None).knows_agent("scout"),
+            "the default mob knows no agent of that name by either record"
+        );
+    }
+
+    /// A member of a nested mob never replaces the value of a member of the
+    /// console's own mob under one identity. A runtime's identity namespace
+    /// can make the two spell one identity; the member of the console's own
+    /// mob, listed first, keeps its role and its labels. Two members of the
+    /// console's own mob under one identity fold as before (the last wins),
+    /// and a nested member under an identity of its own is recorded.
+    #[test]
+    fn a_nested_member_never_replaces_a_primary_member_of_its_namespaced_identity() {
+        let attributes = |identity: &str, alias: &str, role: &str, nested_in: Option<&str>| {
+            AgentResourceAttributes {
+                identity: identity.to_string(),
+                agent_id: Some(alias.to_string()),
+                role: Some(role.to_string()),
+                labels: nested_in
+                    .map(|mob_id| ("source_mob_id".to_string(), mob_id.to_string()))
+                    .into_iter()
+                    .collect(),
+            }
+        };
+        let folded = fold_console_member_attributes([
+            attributes("ops/clerk", "ops/rt:clerk:1", "worker", None),
+            attributes("ops/scribe", "ops/rt:scribe:1", "worker", None),
+            attributes("ops/scribe", "ops/rt:scribe:2", "editor", None),
+            attributes("ops/clerk", "ops/clerk", "auditor", Some("ops")),
+            attributes("ops/usher", "ops/usher", "greeter", Some("ops")),
+        ]);
+        let role = |identity: &str| {
+            folded
+                .get(identity)
+                .and_then(|attributes| attributes.role.clone())
+        };
+        assert_eq!(
+            role("ops/clerk").as_deref(),
+            Some("worker"),
+            "the member of the console's own mob keeps its value"
+        );
+        assert!(
+            folded
+                .get("ops/clerk")
+                .is_some_and(|attributes| !attributes.labels.contains_key("source_mob_id")),
+            "no label of the nested member lands on it"
+        );
+        assert_eq!(role("ops/scribe").as_deref(), Some("editor"));
+        assert_eq!(role("ops/usher").as_deref(), Some("greeter"));
+    }
+
+    /// A kept walk that holds a member of a nested mob records it in that
+    /// mob's own entries. A member of the walk's own mob whose name is the
+    /// string the door gives the nested member keeps its own entry, and
+    /// each of the two is decided by its own row. No agent of the walk's
+    /// own mob is recorded under a nested member's string, also not from
+    /// the agent row the walk holds for every member it lists: right
+    /// after the walk that mob holds no agent under such a string, the
+    /// member is hidden from another person on the plain view, and a
+    /// roster projection of that mob, which replaces that mob's agents,
+    /// leaves the nested member's entry. An agent row carries no mob:
+    /// one that a nested member's row names, by its identity or its
+    /// agent id, is taken for that member's, and one that no such row
+    /// names is an agent of the walk's own mob, as before.
+    #[test]
+    fn a_walk_records_a_nested_mobs_member_in_that_mobs_own_entries() {
+        let private_to = crate::access::PRIVATE_TO_LABEL;
+        let controller = AccessController::audience_only();
+        let nested_member = |name: &str, owner: &str| {
+            let mut row = member(&format!("pair-team/{name}"), "worker", "public");
+            // The console's walk writes the mob of a nested mob's member,
+            // and such a member is no identity of the walk's own runtime.
+            row.labels.remove("agent_identity");
+            row.labels
+                .insert("source_mob_id".to_string(), "pair-team".to_string());
+            row.labels.insert(private_to.to_string(), owner.to_string());
+            row
+        };
+        let mut own = member("pair-team/helper", "worker", "public");
+        own.labels
+            .insert(private_to.to_string(), "person:bob".to_string());
+        let snapshot = ConsoleLiveSnapshot {
+            runtime_id: None,
+            running: Some(true),
+            loaded_modules: Vec::new(),
+            // One agent row for every string the walk lists a member
+            // under, a member of its own mob first.
+            agents: vec![
+                agent("pair-team/helper", "worker"),
+                agent("plain", "worker"),
+                agent("pair-team/solo", "worker"),
+            ],
+            members: vec![
+                own,
+                member("plain", "worker", "public"),
+                nested_member("helper", "person:alice"),
+                nested_member("solo", "person:alice"),
+            ],
+            has_mob_runtime: true,
+            unobserved: None,
+            last_activity_ms: BTreeMap::new(),
+            mob_id: None,
+            mobs: Vec::new(),
+        };
+        prime_access_attributes(&controller, &snapshot, None);
+        let team = meerkat_mob::MobId::from("pair-team");
+        let view_of = |person: &str| {
+            controller.view_for_caller(Some(person), Some(&format!("person:{person}")))
+        };
+        let (alice, bob) = (view_of("alice"), view_of("bob"));
+        assert!(
+            alice.hides_agent("pair-team/helper") && !bob.hides_agent("pair-team/helper"),
+            "the member of the walk's own mob is decided by its own row"
+        );
+        assert!(
+            !alice.knows_own_agent("pair-team/solo")
+                && !alice.hides_agent("pair-team/solo")
+                && bob.hides_agent("pair-team/solo"),
+            "right after the walk no agent of its own mob holds the nested member's string, \
+             and the plain view reads the nested member under it"
+        );
+        for name in ["helper", "solo"] {
+            let (owners, others) = (alice.in_nested_mob(&team), bob.in_nested_mob(&team));
+            assert!(
+                owners.knows_agent(name) && !owners.hides_agent(name) && others.hides_agent(name),
+                "the nested mob's member {name} is decided by its own row"
+            );
+        }
+        assert!(
+            alice.knows_agent("plain"),
+            "the fixture: the walk recorded the plain member of its own mob"
+        );
+        controller.replace_agent_attributes([AgentResourceAttributes {
+            identity: "another".to_string(),
+            agent_id: None,
+            role: None,
+            labels: BTreeMap::new(),
+        }]);
+        assert!(
+            !alice.knows_agent("plain"),
+            "the fixture: the projection replaced the agents of the walk's own mob"
+        );
+        assert!(
+            alice.knows_agent("pair-team/solo") && bob.hides_agent("pair-team/solo"),
+            "no agent of the walk's own mob was recorded under the nested member's string"
+        );
+    }
+
+    /// A kept walk never brings back as a whole member a nested member
+    /// that was recorded as ended: the walk still lists it, with its
+    /// agent row, and the member is refused under a rule that what is
+    /// known of it cannot rule out, in the view of its mob and in the
+    /// plain view.
+    #[test]
+    fn a_walk_never_records_an_ended_nested_member_whole_again() {
+        let config = AccessControlConfig {
+            enabled: true,
+            admins: vec!["root@example.test".to_string()],
+            rules: vec![
+                AccessRule {
+                    id: "everyone-views".to_string(),
+                    actions: vec![ACTION_AGENT_VIEW.to_string()],
+                    agents: vec!["*".to_string()],
+                    ..AccessRule::default()
+                },
+                AccessRule {
+                    id: "deny-secret".to_string(),
+                    effect: AccessEffect::Deny,
+                    actions: vec![ACTION_AGENT_VIEW.to_string()],
+                    match_labels: BTreeMap::from([("tier".to_string(), "secret".to_string())]),
+                    ..AccessRule::default()
+                },
+            ],
+            ..AccessControlConfig::default()
+        };
+        let team = meerkat_mob::MobId::from("pair-team");
+        let mut solo = member("pair-team/solo", "worker", "public");
+        solo.labels.remove("agent_identity");
+        solo.labels
+            .insert("source_mob_id".to_string(), "pair-team".to_string());
+        let snapshot = ConsoleLiveSnapshot {
+            runtime_id: None,
+            running: Some(true),
+            loaded_modules: Vec::new(),
+            agents: vec![agent("pair-team/solo", "worker")],
+            members: vec![solo],
+            has_mob_runtime: true,
+            unobserved: None,
+            last_activity_ms: BTreeMap::new(),
+            mob_id: None,
+            mobs: Vec::new(),
+        };
+        let seated = AccessController::new(config.clone()).expect("controller");
+        prime_access_attributes(&seated, &snapshot, None);
+        assert!(
+            seated
+                .view_for_subject(None)
+                .allows_agent(ACTION_AGENT_VIEW, "pair-team/solo"),
+            "the fixture: the walk's row of a seated nested member is viewed"
+        );
+        let ended = AccessController::new(config).expect("controller");
+        ended
+            .record_ended_nested_agent_attributes(
+                crate::access::NestedMobRef {
+                    under: None,
+                    mob: &team,
+                },
+                "solo",
+                BTreeMap::new(),
+            )
+            .expect("the door can name the member");
+        prime_access_attributes(&ended, &snapshot, None);
+        let view = ended.view_for_subject(None);
+        assert_eq!(
+            (
+                view.in_nested_mob(&team).knows_agent("solo"),
+                view.in_nested_mob(&team)
+                    .allows_agent(ACTION_AGENT_VIEW, "solo"),
+                view.allows_agent(ACTION_AGENT_VIEW, "pair-team/solo"),
+            ),
+            (true, false, false),
+            "the ended nested member is known in its mob's entries and viewed as a whole \
+             member neither in the view of its mob nor in the plain view"
+        );
+    }
+
+    /// The facts a kept walk takes a row for a nested mob's member by:
+    /// the walk wrote a mob other than its own on the row, and the row's
+    /// identity is that mob's member's string. A row that carries the
+    /// walk's own mob, and a row whose identity is not a member's string
+    /// of the mob it carries, are agents of the walk's own mob, as
+    /// before, and no nested mob holds them.
+    #[test]
+    fn a_walk_takes_a_row_for_a_nested_members_by_its_mob_and_its_string() {
+        let controller = AccessController::audience_only();
+        let carrying = |identity: &str, mob_id: &str| {
+            let mut row = member(identity, "worker", "public");
+            row.labels
+                .insert("source_mob_id".to_string(), mob_id.to_string());
+            row
+        };
+        let snapshot = ConsoleLiveSnapshot {
+            runtime_id: None,
+            running: Some(true),
+            loaded_modules: Vec::new(),
+            agents: Vec::new(),
+            members: vec![
+                carrying("own", "launch"),
+                carrying("launch/slashed", "launch"),
+                carrying("odd", "pair-team"),
+            ],
+            has_mob_runtime: true,
+            unobserved: None,
+            last_activity_ms: BTreeMap::new(),
+            mob_id: Some("launch".to_string()),
+            mobs: Vec::new(),
+        };
+        prime_access_attributes(&controller, &snapshot, None);
+        let view = controller.view_for_subject(None);
+        for identity in ["own", "launch/slashed", "odd"] {
+            assert!(
+                view.knows_own_agent(identity),
+                "{identity} is an agent of the walk's own mob"
+            );
+        }
+        for (mob_id, name) in [
+            ("launch", "slashed"),
+            ("launch", "own"),
+            ("pair-team", "odd"),
+        ] {
+            assert!(
+                !view
+                    .in_nested_mob(&meerkat_mob::MobId::from(mob_id))
+                    .knows_agent(name),
+                "no nested mob {mob_id} holds a member {name}"
+            );
+        }
     }
 }

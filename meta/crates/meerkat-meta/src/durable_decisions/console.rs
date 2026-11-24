@@ -20,6 +20,18 @@
 //! - any other caller, an Open Console's anonymous caller included, sees
 //!   nothing of the decision: it reads as a decision that is not there.
 //!
+//! A held change of an agent (the `identity.*` kinds) is its mob's. One
+//! whose agent is of a mob other than the Console's launch mob is read, by
+//! whichever of the rules above, only by a caller who may address that
+//! mob, as the Console's request doors judge it; to every other caller it
+//! reads as a decision that is not there. A caller who addresses the mob
+//! by an access rule, and may not address every mob, reads it only while
+//! the mob it is held for stands under the id: the incarnation its body
+//! names is the incarnation of the mob that stands there, which the door
+//! reads without loading the mob. Where no mob stands under the id, where
+//! the standing mob's incarnation is not read, and where the body names
+//! none, it reads to that caller as a decision that is not there.
+//!
 //! A list pages over what the caller may see, so that it learns of no
 //! other decision: a row it may not see fills no place in a page and is
 //! never a cursor, and the request's filters choose among the rows it may
@@ -40,18 +52,21 @@
 //! and the console audit log records it. The Console decides nothing yet:
 //! `meta/decisions/decide` and `present` are not Console methods.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use meerkat_contracts::{
-    DecisionGetParams, DecisionListParams, DecisionRenderingParams, DecisionResult,
-    DecisionWithdrawParams,
+    DecisionGetParams, DecisionListParams, DecisionRenderingParams, DecisionRenderingResult,
+    DecisionResult, DecisionWithdrawParams,
 };
 use meerkat_core::approval::decision::{
-    ApproverId, DecisionId, DecisionListFilter, DecisionPrincipalKey, StoredDecision,
-    UnreadableDecision,
+    ApproverId, DecisionId, DecisionListFilter, DecisionPhase, DecisionPrincipalKey,
+    StoredDecision, UnreadableDecision,
 };
+use meerkat_runtime::ask_user::ASK_USER_QUESTIONS_KIND;
 use meerkat_runtime::decision::wire::{wire_decision, wire_unreadable_decision};
 use meerkat_runtime::decision::{DecisionError, DecisionWithdrawer, DurableDecisionService};
+use serde::Serialize;
 use serde_json::{Value, json};
 
 use super::owner::RuntimeDecisions;
@@ -83,6 +98,28 @@ pub(crate) struct ConsoleDecisionCaller<'a> {
     pub(crate) access_view: Option<&'a AccessView>,
     /// The verified Console human's qualified principal, as a requester key.
     pub(crate) requester: Option<DecisionPrincipalKey>,
+    /// The mob this Console serves to every caller it lets in (its launch
+    /// mob), when it serves one: a held change of an agent of any other
+    /// mob is read only by a caller who may address that mob.
+    pub(crate) launch_mob: Option<meerkat_mob::MobId>,
+}
+
+/// The incarnation of the mob that stands under each mob id the door read
+/// for one decision request, by mob id: `None` where no mob stands under
+/// the id or its incarnation is not read. The door reads an id when the
+/// request's answer needs it ([`ConsoleDecisionAnswer::StandingMobsToRead`])
+/// and no other.
+pub(crate) type StandingMobs = BTreeMap<String, Option<String>>;
+
+/// What the Console's decision methods answer one pass over a request.
+pub(crate) enum ConsoleDecisionAnswer {
+    /// The answer to the request.
+    Answer(Value),
+    /// No answer yet: what the caller may see depends on the mobs that
+    /// stand under these ids, which the door has not read for this
+    /// request. The door reads each once and asks again with them. Nothing
+    /// was changed, and nothing of the pass is given to the caller.
+    StandingMobsToRead(BTreeSet<String>),
 }
 
 /// What a caller may see of one decision.
@@ -125,6 +162,24 @@ impl ConsoleDecisionCaller<'_> {
     fn reads_undecodable(&self) -> bool {
         self.administers() && !self.kept_apart()
     }
+
+    /// Whether the caller cannot be told yet whose a question set is: who
+    /// held its asker's name when it was asked is still being read
+    /// (`crate::http_console::gating_origins_not_read`). Every request of
+    /// such a caller is answered that it must ask again, whatever the store
+    /// holds: an answer that depended on the store would tell the caller
+    /// of what it may not see.
+    fn awaits_askers(&self) -> bool {
+        crate::http_console::gating_origins_not_read(self.access_view)
+    }
+}
+
+/// The answer to a caller who cannot be told yet whose a question set is:
+/// the Console's retryable refusal
+/// (`crate::http_console::gating_origins_not_read_error`).
+fn askers_not_read(id: &Value) -> Value {
+    let error = crate::http_console::gating_origins_not_read_error();
+    wire::failure(id, error.code, error.message, error.data)
 }
 
 /// The caller's sight of decisions, fixed for one request: the approver ids
@@ -133,10 +188,16 @@ struct Viewer<'a> {
     caller: &'a ConsoleDecisionCaller<'a>,
     administers: bool,
     held: BTreeSet<String>,
+    /// The standing mobs the door read for this request.
+    standing_mobs: &'a StandingMobs,
+    /// The mob ids whose standing mob this pass needed and the door has
+    /// not read: while it holds one, the pass gives no answer
+    /// ([`Self::standing_mobs_to_read`]).
+    unread_mobs: RefCell<BTreeSet<String>>,
 }
 
 impl<'a> Viewer<'a> {
-    fn of(caller: &'a ConsoleDecisionCaller<'a>) -> Self {
+    fn of(caller: &'a ConsoleDecisionCaller<'a>, standing_mobs: &'a StandingMobs) -> Self {
         Self {
             caller,
             administers: caller.administers(),
@@ -144,7 +205,21 @@ impl<'a> Viewer<'a> {
                 .access_view
                 .map(AccessView::held_approver_ids)
                 .unwrap_or_default(),
+            standing_mobs,
+            unread_mobs: RefCell::new(BTreeSet::new()),
         }
+    }
+
+    /// Whether this pass needed a standing mob the door has not read: it
+    /// then gives no answer and changes nothing.
+    fn awaits_standing_mobs(&self) -> bool {
+        !self.unread_mobs.borrow().is_empty()
+    }
+
+    /// The mob ids whose standing mob this pass needed and the door has
+    /// not read.
+    fn standing_mobs_to_read(self) -> BTreeSet<String> {
+        self.unread_mobs.into_inner()
     }
 
     fn sight(&self, row: &StoredDecision) -> Sight {
@@ -154,19 +229,30 @@ impl<'a> Viewer<'a> {
         if !self.sees_asker(row) {
             return Sight::Nothing;
         }
-        if self.administers || self.held.contains(row.descriptor.approver_id.as_str()) {
-            return Sight::Whole;
-        }
-        match self.caller.requester.as_ref() {
-            Some(requester) if *requester == row.descriptor.requester => {
-                if REQUESTER_READS_CONTENT.contains(&row.descriptor.kind.as_str()) {
-                    Sight::Whole
-                } else {
-                    Sight::Status
+        let by_the_kinds_rule =
+            if self.administers || self.held.contains(row.descriptor.approver_id.as_str()) {
+                Sight::Whole
+            } else {
+                match self.caller.requester.as_ref() {
+                    Some(requester) if *requester == row.descriptor.requester => {
+                        if REQUESTER_READS_CONTENT.contains(&row.descriptor.kind.as_str()) {
+                            Sight::Whole
+                        } else {
+                            Sight::Status
+                        }
+                    }
+                    _ => Sight::Nothing,
                 }
-            }
-            _ => Sight::Nothing,
+            };
+        // A held change of an agent is its mob's: whatever the caller
+        // holds or administers, the change of an agent of a mob the caller
+        // may not address reads as a decision that is not there. The mob is
+        // asked last, of a decision the caller would see: a standing mob is
+        // read for no other.
+        if by_the_kinds_rule == Sight::Nothing || !self.addresses_mob_of(row) {
+            return Sight::Nothing;
         }
+        by_the_kinds_rule
     }
 
     /// Whether the caller may see the member that asked `row`, when `row`
@@ -180,9 +266,85 @@ impl<'a> Viewer<'a> {
         match crate::ask_user::question_set_asker(row) {
             crate::ask_user::QuestionSetAsker::NotAQuestionSet => true,
             crate::ask_user::QuestionSetAsker::Asker(asker) => {
-                crate::http_console::gating_origin_visible(self.caller.access_view, &asker)
+                // A set is its asking member's: decided by who held the
+                // asker's name when the set was asked.
+                crate::http_console::gating_origin_visible(
+                    self.caller.access_view,
+                    &asker,
+                    Some(row.descriptor.created_at_ms),
+                )
             }
             crate::ask_user::QuestionSetAsker::Unreadable => !self.caller.kept_apart(),
+        }
+    }
+
+    /// Whether the caller may address the mob whose agent `row` changes,
+    /// when `row` is a held change of an agent (the `identity.*` kinds):
+    /// the mob the host's family wrote into the held body. The Console's
+    /// launch mob is every caller's; any other mob of the host is the
+    /// caller's only when its access view lets it address that mob
+    /// ([`AccessView::may_address_other_mob`]: access is not enforced, the
+    /// caller is an administrator, or an allow rule that applies to it
+    /// selects the mob), which is what the Console's request doors ask
+    /// before they serve a request for that mob. A decision of any other
+    /// kind names no mob here. The mob is the body's own `mob_id`, read
+    /// whether or not this version reads the rest of the body. A Console
+    /// that serves no mob has no other mob to keep.
+    ///
+    /// A caller who may address every mob (access is not enforced, or the
+    /// caller is an administrator) is asked nothing more. A caller an allow
+    /// rule lets address the mob is served only the changes held for the
+    /// mob that stands under the id: the body's own `mob_incarnation` is
+    /// the standing mob's ([`StandingMobs`]). A body that names no
+    /// incarnation, an id no mob stands under and a standing mob whose
+    /// incarnation is not read serve nothing. Where the door has not read
+    /// the id for this request, the id is noted for it to read, and the
+    /// pass, which gives no answer, goes on as if the mob were the
+    /// caller's: a list then reads no further than its answer will.
+    fn addresses_mob_of(&self, row: &StoredDecision) -> bool {
+        if !crate::identity_creation::IDENTITY_DECISION_KINDS
+            .contains(&row.descriptor.kind.as_str())
+        {
+            return true;
+        }
+        let Some(launch_mob) = self.caller.launch_mob.as_ref() else {
+            return true;
+        };
+        // The mob is read from the body's own `mob_id` and from nothing
+        // else of it: a body this version does not read whole still names
+        // its mob, and is judged by it. A body that names no mob is no
+        // held change any version of the family wrote: it has no mob to
+        // keep, and is read by the rules above alone.
+        let body = serde_json::from_str::<Value>(row.descriptor.request.get()).ok();
+        let named = |member: &str| {
+            body.as_ref()
+                .and_then(|body| body.get(member))
+                .and_then(Value::as_str)
+        };
+        let Some(mob_id) = named("mob_id") else {
+            return true;
+        };
+        if mob_id == launch_mob.as_str() {
+            return true;
+        }
+        let Some(view) = self.caller.access_view else {
+            return false;
+        };
+        if view.may_address_every_mob() {
+            return true;
+        }
+        if !view.may_address_other_mob(&meerkat_mob::MobId::from(mob_id)) {
+            return false;
+        }
+        let Some(held_for) = named("mob_incarnation") else {
+            return false;
+        };
+        match self.standing_mobs.get(mob_id) {
+            Some(standing) => standing.as_deref() == Some(held_for),
+            None => {
+                self.unread_mobs.borrow_mut().insert(mob_id.to_string());
+                true
+            }
         }
     }
 
@@ -263,29 +425,49 @@ pub(crate) fn advertised_methods(
 /// refusals of the caller are decided before any store read, and are the
 /// same for every decision id. A decision the caller may not see at all is
 /// then answered as an id that names no decision.
+///
+/// `standing_mobs` holds the standing mobs the door read for this request,
+/// none at first. A pass whose answer depends on a mob id that is not among
+/// them answers [`ConsoleDecisionAnswer::StandingMobsToRead`] in place of
+/// the answer, having changed nothing; the door reads those ids and asks
+/// again.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn handle_console_decision_rpc(
     decisions: &RuntimeDecisions,
     caller: &ConsoleDecisionCaller<'_>,
+    standing_mobs: &StandingMobs,
     change: &ConsoleChangeChecks<'_>,
     read_only: bool,
     method: &str,
     id: &Value,
     params: Value,
-) -> Option<Value> {
+) -> Option<ConsoleDecisionAnswer> {
+    let viewer = Viewer::of(caller, standing_mobs);
     let answer = match method {
         LIST_METHOD | GET_METHOD | RENDERING_METHOD if !caller.may(ACTION_DECISIONS_VIEW) => {
             access_denied(id, ACTION_DECISIONS_VIEW)
         }
-        LIST_METHOD => list(decisions, caller, id, params),
-        GET_METHOD => get(decisions, caller, id, params),
-        RENDERING_METHOD => rendering(decisions, caller, id, params),
+        LIST_METHOD | GET_METHOD | RENDERING_METHOD if caller.awaits_askers() => {
+            askers_not_read(id)
+        }
+        LIST_METHOD => list(decisions, &viewer, id, params),
+        GET_METHOD => get(decisions, &viewer, id, params),
+        RENDERING_METHOD => rendering(decisions, &viewer, id, params),
         // With access control off, or without an access controller, nobody
         // administers decisions on the Console: it serves no withdraw.
         WITHDRAW_METHOD if !is_served_decision_change(method, caller) => return None,
-        WITHDRAW_METHOD => withdraw_change(decisions, caller, change, read_only, id, params),
+        WITHDRAW_METHOD => withdraw_change(decisions, &viewer, change, read_only, id, params),
         _ => return None,
     };
-    Some(answer)
+    // A pass that needed a standing mob the door has not read gives its
+    // caller nothing: what it built judged that mob's decisions as the
+    // caller's.
+    let to_read = viewer.standing_mobs_to_read();
+    Some(if to_read.is_empty() {
+        ConsoleDecisionAnswer::Answer(answer)
+    } else {
+        ConsoleDecisionAnswer::StandingMobsToRead(to_read)
+    })
 }
 
 /// The Console withdraw, a console change, refused in this order: made for
@@ -295,12 +477,13 @@ pub(crate) fn handle_console_decision_rpc(
 /// (`caller_not_current`).
 fn withdraw_change(
     decisions: &RuntimeDecisions,
-    caller: &ConsoleDecisionCaller<'_>,
+    viewer: &Viewer<'_>,
     change: &ConsoleChangeChecks<'_>,
     read_only: bool,
     id: &Value,
     params: Value,
 ) -> Value {
+    let caller = viewer.caller;
     if let Some(refusal) = change.other_caller {
         return caller_refused(id, refusal);
     }
@@ -313,7 +496,7 @@ fn withdraw_change(
     if let Err(refusal) = (change.caller_current)() {
         return caller_refused(id, refusal);
     }
-    withdraw(decisions, caller, id, params)
+    withdraw(decisions, viewer, id, params)
 }
 
 /// The refusal of a console change for its caller, as the Console's other
@@ -332,12 +515,8 @@ fn access_denied(id: &Value, action: &str) -> Value {
     )
 }
 
-fn list(
-    decisions: &RuntimeDecisions,
-    caller: &ConsoleDecisionCaller<'_>,
-    id: &Value,
-    params: Value,
-) -> Value {
+fn list(decisions: &RuntimeDecisions, viewer: &Viewer<'_>, id: &Value, params: Value) -> Value {
+    let caller = viewer.caller;
     let params: DecisionListParams = match params {
         Value::Null => DecisionListParams::default(),
         params => match parse(id, params) {
@@ -345,7 +524,6 @@ fn list(
             Err(answer) => return answer,
         },
     };
-    let viewer = Viewer::of(caller);
     let filter = match list_filter(id, &params) {
         Ok(filter) => filter,
         Err(answer) => return answer,
@@ -480,10 +658,11 @@ fn visible_page(
 /// that does not decode, to a caller that does not administer.
 fn visible(
     decisions: &RuntimeDecisions,
-    caller: &ConsoleDecisionCaller<'_>,
+    viewer: &Viewer<'_>,
     id: &Value,
     decision_id: String,
 ) -> Result<(StoredDecision, Sight), Value> {
+    let caller = viewer.caller;
     let decision_id = DecisionId::new(decision_id)
         .map_err(|error| wire::invalid_params(id, format!("invalid decision request: {error}")))?;
     if !decisions.is_available() {
@@ -500,23 +679,18 @@ fn visible(
         }
         Err(error) => return Err(wire::decision_error(id, error)),
     };
-    match Viewer::of(caller).sight(&row) {
+    match viewer.sight(&row) {
         Sight::Nothing => Err(wire::not_found(id)),
         sight => Ok((row, sight)),
     }
 }
 
-fn get(
-    decisions: &RuntimeDecisions,
-    caller: &ConsoleDecisionCaller<'_>,
-    id: &Value,
-    params: Value,
-) -> Value {
+fn get(decisions: &RuntimeDecisions, viewer: &Viewer<'_>, id: &Value, params: Value) -> Value {
     let params: DecisionGetParams = match parse(id, params) {
         Ok(params) => params,
         Err(answer) => return answer,
     };
-    match visible(decisions, caller, id, params.decision_id) {
+    match visible(decisions, viewer, id, params.decision_id) {
         Ok((row, Sight::Whole)) => wire::success(
             id,
             MetaDecisionView::Decision(Box::new(wire_decision(&row, params.include_request))),
@@ -528,7 +702,7 @@ fn get(
 
 fn rendering(
     decisions: &RuntimeDecisions,
-    caller: &ConsoleDecisionCaller<'_>,
+    viewer: &Viewer<'_>,
     id: &Value,
     params: Value,
 ) -> Value {
@@ -540,8 +714,8 @@ fn rendering(
         Ok(size) => size,
         Err(answer) => return answer,
     };
-    match visible(decisions, caller, id, params.decision_id) {
-        Ok((row, Sight::Whole)) => wire::success(id, rendering_of(&row, max_part_bytes)),
+    match visible(decisions, viewer, id, params.decision_id) {
+        Ok((row, Sight::Whole)) => wire::success(id, console_rendering(&row, max_part_bytes)),
         Ok(_) => wire::failure(
             id,
             crate::http_console::ACCESS_DENIED_RPC_CODE,
@@ -552,17 +726,58 @@ fn rendering(
     }
 }
 
+/// What the Console adds to the end of the rendering of an open question
+/// set: a blank line and a closing note. A Console page of an earlier
+/// release draws a question set, where it shows one at all, as the text of
+/// a decision with no way to answer; the note says where the questions are
+/// answered and what to do on such a page.
+const QUESTION_SET_CLOSING_NOTE: &str = "\n\nAnswer these questions in the Console, in the agent's chat or under Approvals. If this page offers no way to answer them, it runs an earlier Console: reload the page, or, in an application that builds the Console in, update its Console.";
+
+/// The Console's `meta/decisions/rendering` answer: the held rendering as
+/// every door answers it and, for an open question set, the closing note
+/// after it.
+#[derive(Serialize)]
+struct ConsoleDecisionRendering {
+    #[serde(flatten)]
+    held: DecisionRenderingResult,
+    /// Exactly what was added to the end of `rendering`, the blank line
+    /// included, so that a reader takes it off again: a current Console
+    /// page does, and says in its own words where a set is answered.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rendering_suffix: Option<&'static str>,
+}
+
+/// The rendering of `row` as the Console answers it. The note is added
+/// here, after the answer is built from the held text, and nowhere else:
+/// the decision's rendering, its digest (the one a decide compares) and its
+/// parts stay those of the held text, and the stdio host's answer never
+/// carries the note. Only an open decision of kind `ask_user.questions`
+/// gets it; a set that ended, a set past its deadline (which the read finds
+/// ended) and every other kind are answered as they are held.
+fn console_rendering(
+    row: &StoredDecision,
+    max_part_bytes: Option<std::num::NonZeroU32>,
+) -> ConsoleDecisionRendering {
+    let mut held = rendering_of(row, max_part_bytes);
+    let open_question_set = row.descriptor.kind.as_str() == ASK_USER_QUESTIONS_KIND
+        && row.state.phase == DecisionPhase::Open;
+    let rendering_suffix = open_question_set.then_some(QUESTION_SET_CLOSING_NOTE);
+    if let Some(note) = rendering_suffix {
+        held.rendering.push_str(note);
+    }
+    ConsoleDecisionRendering {
+        held,
+        rendering_suffix,
+    }
+}
+
 /// The administrator withdraws an open decision as the host. A decision
 /// the caller may not see at all (for an administrator: the question set of
 /// a member hidden from them, and, unless the caller is told of such rows,
 /// a row the store cannot decode) is not there to withdraw: its id is
 /// answered as an id that names no decision, as the reads answer it.
-fn withdraw(
-    decisions: &RuntimeDecisions,
-    caller: &ConsoleDecisionCaller<'_>,
-    id: &Value,
-    params: Value,
-) -> Value {
+fn withdraw(decisions: &RuntimeDecisions, viewer: &Viewer<'_>, id: &Value, params: Value) -> Value {
+    let caller = viewer.caller;
     let params: DecisionWithdrawParams = match parse(id, params) {
         Ok(params) => params,
         Err(answer) => return answer,
@@ -573,18 +788,30 @@ fn withdraw(
             return wire::invalid_params(id, format!("invalid decision request: {error}"));
         }
     };
+    // A caller who cannot be told yet whose a question set is asks again,
+    // before any store is read.
+    if caller.awaits_askers() {
+        return askers_not_read(id);
+    }
     if !decisions.is_available() {
         return wire::no_decision_store(id);
     }
     // The read records nothing: the withdraw's own touch still answers
     // what it records (the expiry of a decision past its deadline).
-    let hidden = match decisions.owner().for_candidate_launch().get(&decision_id) {
-        Ok(row) => Viewer::of(caller).sight(&row) == Sight::Nothing,
+    let read = decisions.owner().for_candidate_launch().get(&decision_id);
+    let hidden = match read {
+        Ok(row) => viewer.sight(&row) == Sight::Nothing,
         Err(DecisionError::Unreadable { .. }) => !caller.reads_undecodable(),
         Err(_) => false,
     };
     if hidden {
         return wire::not_found(id);
+    }
+    // Whether the decision is the caller's to withdraw depends on a
+    // standing mob the door has not read: nothing is withdrawn in this
+    // pass, which gives no answer (`handle_console_decision_rpc`).
+    if viewer.awaits_standing_mobs() {
+        return Value::Null;
     }
     match decisions
         .owner()
@@ -602,3 +829,7 @@ fn withdraw(
         Err(error) => wire::decision_error(id, error),
     }
 }
+
+#[cfg(test)]
+#[path = "console_standing_mob_tests.rs"]
+mod standing_mob_tests;

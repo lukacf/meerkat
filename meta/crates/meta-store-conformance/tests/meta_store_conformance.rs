@@ -154,6 +154,45 @@ async fn in_memory_console_store_passes_console_profile() {
         .expect("InMemoryConsoleLogStore must satisfy the console profile");
 }
 
+/// The bundled SQLite console log passes the profile of a host that creates
+/// a mob beside its default mob, on a log of its own and on the log the
+/// console profile ran on (one handle after another, as a host reopens it).
+#[tokio::test(flavor = "multi_thread")]
+async fn sqlite_console_store_passes_the_profile_of_a_host_of_several_mobs() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let fresh = SqliteConsoleFactory {
+        path: dir.path().join("meta_console_fresh.sqlite"),
+    };
+    chapters::console_log_mobs(&fresh)
+        .await
+        .expect("SqliteConsoleLogStore must satisfy the several-mobs profile");
+
+    let after_the_console_profile = SqliteConsoleFactory {
+        path: dir.path().join("meta_console.sqlite"),
+    };
+    chapters::console_log(&after_the_console_profile)
+        .await
+        .expect("SqliteConsoleLogStore must satisfy the console profile");
+    chapters::console_log_mobs(&after_the_console_profile)
+        .await
+        .expect("SqliteConsoleLogStore must satisfy the several-mobs profile after the other");
+}
+
+/// The bundled in-memory console log passes it too, on the handle the
+/// console profile ran on.
+#[tokio::test(flavor = "multi_thread")]
+async fn in_memory_console_store_passes_the_profile_of_a_host_of_several_mobs() {
+    let factory = SharedConsoleFactory {
+        store: Arc::new(InMemoryConsoleLogStore::new()),
+    };
+    chapters::console_log(&factory)
+        .await
+        .expect("InMemoryConsoleLogStore must satisfy the console profile");
+    chapters::console_log_mobs(&factory)
+        .await
+        .expect("InMemoryConsoleLogStore must satisfy the several-mobs profile");
+}
+
 // ---------------------------------------------------------------------------
 // BinaryBlobStore profile
 // ---------------------------------------------------------------------------

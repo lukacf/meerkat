@@ -322,8 +322,8 @@ impl TopologySnapshot {
     /// inspect through the topology action family.
     pub fn retain_visible_to(&mut self, view: &crate::access::AccessView) {
         let visible = |endpoint: &TopologyEndpoint| {
-            view.can_view_agent(endpoint.identity.as_str())
-                && view.allows_agent(
+            view.can_view_name(endpoint.identity.as_str())
+                && view.allows_name(
                     crate::access::ACTION_TOPOLOGY_VIEW,
                     endpoint.identity.as_str(),
                 )
@@ -687,12 +687,32 @@ struct BilateralCoordinatorBinding {
     journal_path: String,
 }
 
+/// Where a controller keeps its state. One cell says it, for every clone.
+enum StatePlace {
+    /// In memory only: a host with no topology state file, or a mob the
+    /// host keeps in memory.
+    InMemory,
+    /// In this file, with the lock on it held for as long as this stands.
+    File { path: PathBuf, _lock: std::fs::File },
+    /// Nowhere: the state of this controller's mob could not be opened
+    /// ([`HostTopologyControl::controller_of`]). Every read and every
+    /// change of that mob's topology is refused, and nothing is written.
+    NotOpened,
+    /// Given up ([`TopologyController::close`]): the mob is no longer
+    /// served through this controller. Nothing is read or written through
+    /// it again, and the file is free for the next open.
+    Closed,
+}
+
 struct TopologyControllerInner {
-    policy: RwLock<TopologyControlPolicy>,
+    /// The policy of the host. A host has one: the controller of every mob
+    /// the host serves holds this same cell
+    /// ([`HostTopologyControl::controller_of`]), so a change of
+    /// it reaches every mob at once.
+    policy: Arc<RwLock<TopologyControlPolicy>>,
     state: tokio::sync::RwLock<TopologyIntentState>,
     mutation: tokio::sync::Mutex<()>,
-    persist_path: RwLock<Option<PathBuf>>,
-    _lock_file: Option<std::fs::File>,
+    place: RwLock<StatePlace>,
     /// Concurrent topology reads share one snapshot computation (see
     /// `TopologyRuntimeHandle::query`). Shared by every cloned handle.
     query_flights: std::sync::Mutex<TopologyQueryFlights>,
@@ -746,22 +766,117 @@ impl Default for TopologyController {
     }
 }
 
+/// What a host gives the topology controller of every mob it serves beside
+/// its default mob ([`TopologyController::host_part`]): the host's one
+/// policy and whether the host keeps topology state at all. It is not a
+/// controller and keeps no state file open, so holding it keeps nothing of
+/// the default mob's state.
+#[derive(Clone)]
+pub(crate) struct HostTopologyControl {
+    policy: Arc<RwLock<TopologyControlPolicy>>,
+    keeps_state: bool,
+}
+
+impl HostTopologyControl {
+    /// Whether the host keeps topology state in a file. A host that does
+    /// not keeps none for any mob.
+    pub(crate) fn keeps_state(&self) -> bool {
+        self.keeps_state
+    }
+
+    /// The controller of the mob `authority`, a mob the host serves beside
+    /// its default mob: a controller of its own that reads the host's one
+    /// policy and is bound to that mob. With `state_path` it keeps that
+    /// mob's operator intent in that file, opened as
+    /// [`TopologyController::load_or_default`] opens the default mob's;
+    /// without one the mob has no durable place and is not edited
+    /// ([`TopologyController::policy`]).
+    ///
+    /// A state that cannot be opened, or that says it belongs to another
+    /// mob, does not stop the mob from being served: its controller then
+    /// refuses every read and every change of that mob's topology, and
+    /// writes nothing, until the mob is loaded again. The refusal is one
+    /// fixed sentence: why the open failed (the place of the file, the mob
+    /// it names) is written to the host's log here and reaches no caller.
+    pub(crate) async fn controller_of(
+        &self,
+        authority: &str,
+        state_path: Option<PathBuf>,
+    ) -> TopologyController {
+        let opened = match state_path {
+            Some(path) => {
+                TopologyController::open_durable_state(&path).map(|(state, lock_file)| {
+                    TopologyController::over(
+                        Arc::clone(&self.policy),
+                        state,
+                        StatePlace::File {
+                            path,
+                            _lock: lock_file,
+                        },
+                    )
+                })
+            }
+            None => Ok(TopologyController::over(
+                Arc::clone(&self.policy),
+                TopologyIntentState::default(),
+                StatePlace::InMemory,
+            )),
+        };
+        let bound = match opened {
+            Ok(controller) => controller
+                .bind_authority(authority)
+                .await
+                .map(|()| controller),
+            Err(error) => Err(error),
+        };
+        match bound {
+            Ok(controller) => controller,
+            Err(error) => {
+                tracing::error!(
+                    mob_id = %authority,
+                    %error,
+                    "the topology state of a mob could not be opened: its topology is refused \
+                     until the mob is loaded again"
+                );
+                TopologyController::over(
+                    Arc::clone(&self.policy),
+                    TopologyIntentState::default(),
+                    StatePlace::NotOpened,
+                )
+            }
+        }
+    }
+}
+
 impl TopologyController {
     pub fn new(policy: TopologyControlPolicy) -> Result<Self, TopologyControlError> {
         policy.validate()?;
         if policy.mode == TopologyControlMode::Editable {
             return Err(TopologyControlError::DurableStateRequired);
         }
-        Ok(Self {
+        Ok(Self::over(
+            Arc::new(RwLock::new(policy)),
+            TopologyIntentState::default(),
+            StatePlace::InMemory,
+        ))
+    }
+
+    /// A controller over `state`, kept at `place`, reading the policy cell
+    /// `policy`.
+    fn over(
+        policy: Arc<RwLock<TopologyControlPolicy>>,
+        state: TopologyIntentState,
+        place: StatePlace,
+    ) -> Self {
+        Self {
             inner: Arc::new(TopologyControllerInner {
-                policy: RwLock::new(policy),
-                state: tokio::sync::RwLock::new(TopologyIntentState::default()),
+                policy,
+                state: tokio::sync::RwLock::new(state),
                 mutation: tokio::sync::Mutex::new(()),
-                persist_path: RwLock::new(None),
-                _lock_file: None,
+                place: RwLock::new(place),
                 query_flights: std::sync::Mutex::new(TopologyQueryFlights::default()),
             }),
-        })
+        }
     }
 
     pub fn load_or_default(
@@ -770,6 +885,23 @@ impl TopologyController {
     ) -> Result<Self, TopologyControlError> {
         policy.validate()?;
         let path = path.into();
+        let (state, lock_file) = Self::open_durable_state(&path)?;
+        Ok(Self::over(
+            Arc::new(RwLock::new(policy)),
+            state,
+            StatePlace::File {
+                path,
+                _lock: lock_file,
+            },
+        ))
+    }
+
+    /// Open the state file `path`: take its lock, read the state it holds
+    /// (none yet: the default), bring it to this build's form and write it
+    /// back. The state and the held lock.
+    fn open_durable_state(
+        path: &Path,
+    ) -> Result<(TopologyIntentState, std::fs::File), TopologyControlError> {
         if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
         {
@@ -791,7 +923,7 @@ impl TopologyController {
             ))
         })?;
         let mut state = if path.is_file() {
-            let bytes = std::fs::read(&path)
+            let bytes = std::fs::read(path)
                 .map_err(|error| TopologyControlError::Persistence(error.to_string()))?;
             serde_json::from_slice(&bytes)
                 .map_err(|error| TopologyControlError::Persistence(error.to_string()))?
@@ -821,17 +953,63 @@ impl TopologyController {
             &state.receipts,
             pending_audit,
         );
-        persist_state(&path, &state)?;
-        Ok(Self {
-            inner: Arc::new(TopologyControllerInner {
-                policy: RwLock::new(policy),
-                state: tokio::sync::RwLock::new(state),
-                mutation: tokio::sync::Mutex::new(()),
-                persist_path: RwLock::new(Some(path)),
-                _lock_file: Some(lock_file),
-                query_flights: std::sync::Mutex::new(TopologyQueryFlights::default()),
-            }),
-        })
+        persist_state(path, &state)?;
+        Ok((state, lock_file))
+    }
+
+    /// What this controller's host gives the controllers of the mobs it
+    /// serves beside this controller's mob: the host's one policy (this
+    /// controller's cell, not a copy) and whether the host keeps topology
+    /// state. It holds nothing of this controller's own state: not its
+    /// file, not the lock on it.
+    pub(crate) fn host_part(&self) -> HostTopologyControl {
+        HostTopologyControl {
+            policy: Arc::clone(&self.inner.policy),
+            keeps_state: self.keeps_durable_state(),
+        }
+    }
+
+    /// Why nothing is read or written through this controller, when that is
+    /// so: its mob's state could not be opened, or the controller was
+    /// closed.
+    fn available(&self) -> Result<(), TopologyControlError> {
+        match &*self
+            .inner
+            .place
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        {
+            StatePlace::NotOpened => Err(state_not_opened()),
+            StatePlace::Closed => Err(closed_controller()),
+            StatePlace::InMemory | StatePlace::File { .. } => Ok(()),
+        }
+    }
+
+    /// Whether this controller keeps its state in a file.
+    pub(crate) fn keeps_durable_state(&self) -> bool {
+        matches!(
+            &*self
+                .inner
+                .place
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            StatePlace::File { .. }
+        )
+    }
+
+    /// The mob this controller served is no longer served through it (its
+    /// actor closed: an unload, a destroy, a shutdown): the controller
+    /// waits for a change under way, then gives up its state file and the
+    /// lock on it. A clone a request still holds is refused every read and
+    /// every change after this and writes nothing, and the next load of
+    /// the mob opens the file anew.
+    pub(crate) async fn close(&self) {
+        let _admission = self.mutation_guard().await;
+        *self
+            .inner
+            .place
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = StatePlace::Closed;
     }
 
     pub(crate) async fn bind_authority(
@@ -854,24 +1032,27 @@ impl TopologyController {
         Ok(())
     }
 
+    /// The policy of this controller's mob: the host's one policy. A mob
+    /// with no durable place for operator intent (a mob the host keeps in
+    /// memory beside its default mob) is not edited: under an editable host
+    /// policy it reads the read-only mode, as a host with no state file may
+    /// not be made editable at all.
     pub fn policy(&self) -> TopologyControlPolicy {
-        self.inner
+        let mut policy = self
+            .inner
             .policy
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
+            .clone();
+        if policy.mode == TopologyControlMode::Editable && !self.keeps_durable_state() {
+            policy.mode = TopologyControlMode::ReadOnly;
+        }
+        policy
     }
 
     pub fn set_policy(&self, policy: TopologyControlPolicy) -> Result<(), TopologyControlError> {
         policy.validate()?;
-        if policy.mode == TopologyControlMode::Editable
-            && self
-                .inner
-                .persist_path
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .is_none()
-        {
+        if policy.mode == TopologyControlMode::Editable && !self.keeps_durable_state() {
             return Err(TopologyControlError::DurableStateRequired);
         }
         *self
@@ -884,6 +1065,74 @@ impl TopologyController {
 
     pub async fn revision(&self) -> u64 {
         self.inner.state.read().await.revision
+    }
+
+    /// Test builds only: whether `other` is this controller, a clone of it
+    /// over the same state.
+    #[cfg(test)]
+    pub(crate) fn is_the_same_controller_in_tests(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+
+    /// Test builds only: leave in the state file `path` what an apply
+    /// leaves when it is interrupted right after its journal was written.
+    /// The apply is a disconnect of the one connection an operator added
+    /// (the file must hold exactly one, and no journal): the state in the
+    /// file is the state after the disconnect, at the next revision, and
+    /// the journal that rolls it back to the state before is pending. The
+    /// file must be free: no controller may own it.
+    #[cfg(test)]
+    pub(crate) async fn interrupt_a_disconnect_in_tests(
+        path: &Path,
+    ) -> Result<(), TopologyControlError> {
+        let invalid = |what: &str| TopologyControlError::InvalidRequest(what.to_string());
+        let controller = Self::load_or_default(TopologyControlPolicy::default(), path)?;
+        let current = controller.inner.state.read().await.clone();
+        let authority = current
+            .authority
+            .clone()
+            .ok_or_else(|| invalid("the state file names no mob"))?;
+        let mut added = current.additions.iter();
+        let (Some(connection), None, None) = (added.next(), added.next(), &current.pending) else {
+            return Err(invalid(
+                "the state file must hold one operator connection and no journal",
+            ));
+        };
+        let (a, b) = connection.endpoints();
+        let endpoint = |identity: &str| TopologyEndpoint {
+            authority: Some(authority.clone()),
+            identity: identity.to_string(),
+        };
+        let edge = TopologyEdge::new(endpoint(a), endpoint(b))
+            .map_err(|error| invalid(&error.to_string()))?;
+        let mut next = current.clone();
+        next.additions.remove(connection);
+        next.revision = current.revision.saturating_add(1);
+        next.pending = Some(PendingTopologyOperation {
+            operation_id: "interrupted-disconnect".to_string(),
+            audit_record_id: String::new(),
+            idempotency_key: "interrupted-disconnect".to_string(),
+            scoped_idempotency_key: None,
+            fingerprint: "interrupted-disconnect".to_string(),
+            actor: "operator".to_string(),
+            base_revision: current.revision,
+            target_revision: next.revision,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            reason: None,
+            operations: vec![TopologyMutation {
+                action: TopologyAction::Disconnect,
+                edge,
+            }],
+            phase: PendingTopologyPhase::Applying,
+            rollback_additions: current.additions.clone(),
+            rollback_suppressions: current.suppressions.clone(),
+            rollback_cross_additions: current.cross_additions.clone(),
+            rollback_cross_suppressions: current.cross_suppressions.clone(),
+            rollback_revision: current.revision,
+            last_recovery_error: None,
+            recovery_attempts: 0,
+        });
+        controller.persist_candidate(&next)
     }
 
     pub(crate) async fn has_pending(&self) -> bool {
@@ -1016,6 +1265,7 @@ impl TopologyController {
         &self,
         mut record: TopologyOperationRecord,
     ) -> Result<(), TopologyControlError> {
+        self.available()?;
         let _admission = self.mutation_guard().await;
         let mut state_guard = self.inner.state.write().await;
         let mut state = state_guard.clone();
@@ -1040,6 +1290,7 @@ impl TopologyController {
     /// while the in-memory write guard is already held, leaving no await gap
     /// between fsync and publishing the reconciled state in this process.
     async fn reconcile_operation_records_unlocked(&self) -> Result<(), TopologyControlError> {
+        self.available()?;
         let mut state_guard = self.inner.state.write().await;
         let mut next = state_guard.clone();
         let pending_audit = next.pending.as_ref().map(|pending| {
@@ -1123,6 +1374,9 @@ impl TopologyController {
         &self,
         declared: &[crate::identity_first::ManagedPeerEdge],
     ) -> Result<Vec<crate::identity_first::ManagedPeerEdge>, TopologyControlError> {
+        // Without the mob's operator intent the declared edges alone would
+        // wire what an operator disconnected: refused, not guessed.
+        self.available()?;
         let mut desired = Vec::with_capacity(declared.len());
         for edge in declared {
             desired.push(
@@ -1183,14 +1437,16 @@ impl TopologyController {
     }
 
     fn persist_candidate(&self, state: &TopologyIntentState) -> Result<(), TopologyControlError> {
-        let path = self
+        let path = match &*self
             .inner
-            .persist_path
+            .place
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        let Some(path) = path else {
-            return Ok(());
+        {
+            StatePlace::File { path, .. } => path.clone(),
+            StatePlace::InMemory => return Ok(()),
+            StatePlace::NotOpened => return Err(state_not_opened()),
+            StatePlace::Closed => return Err(closed_controller()),
         };
         persist_state(&path, state)
     }
@@ -1253,6 +1509,7 @@ impl TopologyController {
     }
 
     pub(crate) async fn prepare_pending_recovery(&self) -> Result<(), TopologyControlError> {
+        self.available()?;
         let mut state = self.inner.state.read().await.clone();
         let Some(mut pending) = state.pending.clone() else {
             return Ok(());
@@ -1322,6 +1579,28 @@ impl TopologyController {
         *self.inner.state.write().await = state;
         Ok(())
     }
+}
+
+/// The refusal of a controller whose mob's state could not be opened
+/// ([`HostTopologyControl::controller_of`]). One fixed sentence: it goes on
+/// the wire to every caller who may address the mob, so it says nothing of
+/// why the open failed. The reason is in the host's log.
+fn state_not_opened() -> TopologyControlError {
+    TopologyControlError::Persistence(
+        "the topology state of this mob could not be opened: its topology is refused until \
+         the mob is loaded again"
+            .to_string(),
+    )
+}
+
+/// The refusal of a controller that was closed
+/// ([`TopologyController::close`]).
+fn closed_controller() -> TopologyControlError {
+    TopologyControlError::Persistence(
+        "the topology state of this mob was given up: the mob is no longer served through \
+         this controller"
+            .to_string(),
+    )
 }
 
 fn persist_state(path: &Path, state: &TopologyIntentState) -> Result<(), TopologyControlError> {
@@ -1427,6 +1706,9 @@ impl TopologyRuntimeHandle {
     /// unwires nothing, and the report says what an authoritative launch's
     /// reconcile would wire, unwire and prune, with a census line in the log.
     pub async fn reconcile(&self) -> UnifiedRuntimeReconcileEdgesReport {
+        if let Err(error) = self.controller.available() {
+            return recovery_failure_report(error);
+        }
         let _admission = self.controller.mutation_guard().await;
         if self.candidate_launch {
             return self.reconcile_current_unlocked().await;
@@ -1710,6 +1992,7 @@ impl TopologyRuntimeHandle {
     /// in flight. Concurrent reads share one snapshot computation, so N
     /// callers cost at most two edge discoveries instead of N.
     pub async fn query(&self) -> Result<TopologySnapshot, TopologyControlError> {
+        self.controller.available()?;
         self.recover_interrupted_for_read().await?;
         self.coalesced_query().await
     }
@@ -1947,6 +2230,7 @@ impl TopologyRuntimeHandle {
         &self,
         request: TopologyPlanRequest,
     ) -> Result<TopologyPlan, TopologyControlError> {
+        self.controller.available()?;
         let policy = self.policy();
         if policy.mode == TopologyControlMode::Disabled {
             return Err(TopologyControlError::FeatureDisabled);
@@ -2017,6 +2301,7 @@ impl TopologyRuntimeHandle {
         principal: Option<&str>,
         actor: impl Into<String>,
     ) -> Result<TopologyOperationReceipt, TopologyControlError> {
+        self.controller.available()?;
         let actor = actor.into();
         let mut normalized = request.clone();
         normalized.idempotency_key = normalized.idempotency_key.trim().to_string();
@@ -2048,6 +2333,24 @@ impl TopologyRuntimeHandle {
             return Err(error);
         }
         let _ = record_id;
+        // An apply keeps its mob loaded: it owns the mob from before its
+        // journal is written until its receipt is closed, so the idle close
+        // of a mob with an open apply answers busy and the mob is not
+        // unloaded between the journal and the wiring. A mob whose
+        // admission closed takes no apply.
+        let _owner = match self.mob_handle.acquire_owner() {
+            Ok(owner) => owner,
+            Err(closed) => {
+                let error = TopologyControlError::Actuator(format!(
+                    "the mob takes no topology change: {closed}"
+                ));
+                let (status, _) =
+                    operation_record_outcome(&Err::<TopologyOperationReceipt, _>(error.clone()));
+                set_operation_record_status(&mut record, status, Some(error.kind()));
+                self.controller.upsert_operation_record(record).await?;
+                return Err(error);
+            }
+        };
         self.apply_inner(normalized, scoped_key, actor, record)
             .await
     }
@@ -2060,6 +2363,7 @@ impl TopologyRuntimeHandle {
         actor: &str,
         error: &TopologyControlError,
     ) -> Result<(), TopologyControlError> {
+        self.controller.available()?;
         let scoped_key =
             scope.idempotency_key(&[self.authority().as_str()], request.idempotency_key.trim());
         let mut record = operation_record_for_local_request(
@@ -4559,6 +4863,235 @@ mod tests {
         let state = reloaded.inner.state.read().await;
         assert_eq!(state.revision, 4);
         assert!(state.suppressions.contains(&edge));
+    }
+
+    /// A policy that lets an operator edit.
+    fn editable_policy() -> TopologyControlPolicy {
+        TopologyControlPolicy {
+            mode: TopologyControlMode::Editable,
+            ..TopologyControlPolicy::default()
+        }
+    }
+
+    /// The controller of a launch's default mob with an editable policy and
+    /// a state file under `dir`, and the state file of another mob there.
+    async fn launch_controller(dir: &Path) -> (TopologyController, PathBuf) {
+        let launch = TopologyController::load_or_default(
+            editable_policy(),
+            dir.join("topology-control.json"),
+        )
+        .expect("the launch's controller");
+        launch
+            .bind_authority("launch")
+            .await
+            .expect("the launch's controller is bound");
+        (
+            launch,
+            dir.join("mob--second.db.incarnation.topology-control.json"),
+        )
+    }
+
+    /// Whether `answer` is the refusal of a controller whose mob's state
+    /// could not be opened, in its one fixed wording: the same words
+    /// whatever the reason was, so nothing of the reason (a file's place,
+    /// another mob's name) reaches a caller.
+    fn says_only_that_the_state_was_not_opened(answer: &Result<(), TopologyControlError>) -> bool {
+        matches!(
+            answer,
+            Err(TopologyControlError::Persistence(words))
+                if words == "the topology state of this mob could not be opened: its topology \
+                             is refused until the mob is loaded again"
+        )
+    }
+
+    /// The controller of another mob of a host reads the host's one policy,
+    /// also after a change of it, is bound to its own mob and keeps a state
+    /// of its own; a mob with no state file reads the read-only mode under
+    /// an editable host.
+    #[tokio::test]
+    async fn another_mobs_controller_reads_the_hosts_policy_and_keeps_its_own_state() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (launch, path) = launch_controller(temp.path()).await;
+        let second = launch
+            .host_part()
+            .controller_of("second", Some(path.clone()))
+            .await;
+        assert!(second.available().is_ok());
+        assert!(!Arc::ptr_eq(&second.inner, &launch.inner));
+        assert_eq!(second.policy(), editable_policy());
+        assert_eq!(
+            second.inner.state.read().await.authority.as_deref(),
+            Some("second")
+        );
+        assert!(matches!(
+            second.bind_authority("third").await,
+            Err(TopologyControlError::Persistence(_))
+        ));
+        let in_memory = launch.host_part().controller_of("volatile", None).await;
+        assert!(in_memory.available().is_ok());
+        assert_eq!(
+            in_memory.policy().mode,
+            TopologyControlMode::ReadOnly,
+            "a mob with no durable place is not edited"
+        );
+
+        launch
+            .set_policy(TopologyControlPolicy::default())
+            .expect("the host disables topology control");
+        assert_eq!(second.policy().mode, TopologyControlMode::Disabled);
+        assert_eq!(in_memory.policy().mode, TopologyControlMode::Disabled);
+
+        second.inner.state.write().await.revision = 2;
+        assert_eq!(launch.revision().await, 0, "a state of its own");
+    }
+
+    /// One controller owns a mob's state file at a time, and a closed
+    /// controller gives the file up: an open of the same file is refused
+    /// while the first controller stands, and succeeds once it was closed,
+    /// also while a clone of the closed controller is still held, and reads
+    /// what the first wrote.
+    #[tokio::test]
+    async fn a_closed_controller_gives_up_its_state_file_to_the_next_open() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (launch, path) = launch_controller(temp.path()).await;
+        let first = launch
+            .host_part()
+            .controller_of("second", Some(path.clone()))
+            .await;
+        assert!(first.available().is_ok() && first.keeps_durable_state());
+        {
+            let mut state = first.inner.state.write().await;
+            state.revision = 3;
+            first.persist_candidate(&state).expect("persist");
+        }
+        let held = first.clone();
+
+        let meanwhile = launch
+            .host_part()
+            .controller_of("second", Some(path.clone()))
+            .await;
+        assert!(
+            says_only_that_the_state_was_not_opened(&meanwhile.available()),
+            "a second open of a state file that has an owner is refused, and the refusal \
+             names no file: {:?}",
+            meanwhile.available()
+        );
+
+        first.close().await;
+        let next = launch
+            .host_part()
+            .controller_of("second", Some(path.clone()))
+            .await;
+        assert!(
+            next.available().is_ok(),
+            "the file is free once its controller was closed: {:?}",
+            next.available()
+        );
+        assert_eq!(next.revision().await, 3);
+        drop(held);
+    }
+
+    /// A clone of a closed controller reads nothing and writes nothing:
+    /// each of its entry points answers the persistence refusal, the state
+    /// file keeps its bytes, and it has no durable place any more.
+    #[tokio::test]
+    async fn a_clone_of_a_closed_controller_refuses_and_writes_nothing() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (launch, path) = launch_controller(temp.path()).await;
+        let first = launch
+            .host_part()
+            .controller_of("second", Some(path.clone()))
+            .await;
+        let held = first.clone();
+        first.close().await;
+        let before = std::fs::read(&path).expect("the state file reads");
+
+        let refused = |answer: &Result<(), TopologyControlError>| {
+            matches!(answer, Err(TopologyControlError::Persistence(_)))
+        };
+        assert!(refused(&held.available()));
+        let state = held.inner.state.read().await.clone();
+        assert!(refused(&held.persist_candidate(&state)));
+        assert!(refused(&held.bind_authority("second").await));
+        assert!(refused(&held.prepare_pending_recovery().await));
+        assert!(matches!(
+            held.operation("no-such-operation").await,
+            Err(TopologyControlError::Persistence(_))
+        ));
+        assert!(matches!(
+            held.compose_managed_peer_edges(&[]).await,
+            Err(TopologyControlError::Persistence(_))
+        ));
+        assert!(!held.keeps_durable_state());
+        assert_eq!(
+            held.policy().mode,
+            TopologyControlMode::ReadOnly,
+            "under an editable host a closed controller is not editable"
+        );
+        assert_eq!(
+            std::fs::read(&path).expect("the state file reads"),
+            before,
+            "nothing was written after the close"
+        );
+    }
+
+    /// A state file that says it belongs to another mob, and one that is no
+    /// state file, each give the mob a controller that refuses: its entry
+    /// points answer one fixed refusal that says nothing of why the open
+    /// failed (not the other mob's name, not the file), it keeps no durable
+    /// place, and the next open of a file that was put right succeeds.
+    #[tokio::test]
+    async fn a_state_that_cannot_be_opened_gives_a_controller_that_refuses() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (launch, path) = launch_controller(temp.path()).await;
+        let of_another = launch
+            .host_part()
+            .controller_of("another", Some(path.clone()))
+            .await;
+        assert!(of_another.available().is_ok());
+        of_another.close().await;
+
+        let misplaced = launch
+            .host_part()
+            .controller_of("second", Some(path.clone()))
+            .await;
+        assert!(
+            says_only_that_the_state_was_not_opened(&misplaced.available()),
+            "a state file of another mob: {:?}",
+            misplaced.available()
+        );
+        assert!(!misplaced.keeps_durable_state());
+        let composed = misplaced.compose_managed_peer_edges(&[]).await.map(|_| ());
+        assert!(
+            says_only_that_the_state_was_not_opened(&composed),
+            "a compose over a state file of another mob: {composed:?}"
+        );
+        drop(misplaced);
+
+        std::fs::write(&path, b"not a topology state file").expect("the file is damaged");
+        let damaged = launch
+            .host_part()
+            .controller_of("second", Some(path.clone()))
+            .await;
+        assert!(
+            says_only_that_the_state_was_not_opened(&damaged.available()),
+            "a file that is no state file: {:?}",
+            damaged.available()
+        );
+        assert_eq!(
+            std::fs::read(&path).expect("the file reads"),
+            b"not a topology state file",
+            "a file that is no state file is left as it was found"
+        );
+        drop(damaged);
+
+        std::fs::remove_file(&path).expect("the operator removes the file");
+        let anew = launch
+            .host_part()
+            .controller_of("second", Some(path.clone()))
+            .await;
+        assert!(anew.available().is_ok());
+        assert_eq!(anew.revision().await, 0);
     }
 
     #[test]

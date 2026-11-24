@@ -356,6 +356,65 @@ impl Drop for ActorExitHold {
     }
 }
 
+/// The whole shutdown report of an idle persistent runtime with a durable
+/// child root, member by member, and the release of its state directory by
+/// the shutdown itself, while the runtime is still alive. However the
+/// runtime composes what it holds for its mob, this is what its shutdown
+/// reports.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_idle_persistent_runtime_shuts_down_with_this_report() {
+    use super::types::RetiredSupervisorCleanupOutcome;
+    use super::{IdentityAuthorityReleaseOutcome, MemberMcpSettlement};
+    use crate::state_dir_claim::StateDirClaim;
+
+    let dir = tempfile::tempdir().expect("state dir");
+    let (runtime, _adapter) = persistent_runtime(dir.path(), true).await;
+    StateDirClaim::acquire(dir.path()).expect_err("a live runtime holds its state directory");
+
+    let report = runtime.shutdown().await;
+
+    assert!(!report.drain.timed_out, "{report:?}");
+    assert!(
+        report.module_shutdown.terminated_modules.is_empty(),
+        "{report:?}"
+    );
+    assert_eq!(report.module_shutdown.orphan_processes, 0, "{report:?}");
+    assert!(report.mob_stop.is_ok(), "{report:?}");
+    assert_eq!(
+        report.identity_authority_release,
+        IdentityAuthorityReleaseOutcome::NotConfigured,
+        "{report:?}"
+    );
+    assert!(
+        matches!(
+            report.retired_supervisor_cleanup,
+            RetiredSupervisorCleanupOutcome::NothingPending
+        ),
+        "{report:?}"
+    );
+    assert!(
+        matches!(
+            &report.mob_terminal_shutdown,
+            MobTerminalShutdownOutcome::Completed(native) if native.is_clean()
+        ),
+        "{report:?}"
+    );
+    assert_eq!(
+        report.child_mob_stand_down,
+        ChildMobStandDownOutcome::Released { child_mobs: 0 },
+        "{report:?}"
+    );
+    assert_eq!(
+        report.member_mcp_settlement,
+        MemberMcpSettlement::NothingOwned,
+        "{report:?}"
+    );
+    assert!(report.cleanup_completed(), "{report:?}");
+    // The shutdown released the directory; the runtime has not dropped.
+    StateDirClaim::acquire(dir.path()).expect("a shut down runtime holds no state directory");
+    drop(runtime);
+}
+
 /// A host that shuts a runtime down, drops it and composes a successor on
 /// the same state directory in this process at once is not refused as in
 /// use. The root mob's actor answers its terminal Shutdown first and drops

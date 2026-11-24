@@ -23,6 +23,7 @@ without `--model` and keeps that session's model. To run against another
 provider, change `MODEL` and export that provider's key: setting an API key
 alone does not select its provider, and a `rkat run` without `--model` on a
 fresh configuration selects `gpt-6-astra`, which needs an OpenAI key.
+<!-- model-names: keep gpt-6-astra (the unconfigured CLI default, not an example model selection) -->
 
 ## Run
 ```bash

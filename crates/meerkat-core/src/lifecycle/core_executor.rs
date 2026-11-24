@@ -1397,6 +1397,27 @@ impl CoreBoundaryStageError {
 pub(crate) trait CoreBoundaryStageCommitAuthority: Send {
     fn commit(&mut self) -> Result<(), CoreBoundaryStageError>;
     fn abort(&mut self) -> Result<(), CoreBoundaryStageError>;
+
+    /// Attach one more durable delivery to the parked claim. Only a durable
+    /// boundary preparation supports it.
+    fn attach_durable_delivery(
+        &mut self,
+        _appends: crate::lifecycle::DurableTurnBoundaryAppends,
+    ) -> Result<crate::lifecycle::CoreBoundaryDeliveryWitness, CoreBoundaryStageError> {
+        Err(CoreBoundaryStageError::fault(
+            "this prepared boundary carries no durable delivery",
+        ))
+    }
+
+    /// Take one delivery back out of the parked claim before its commit.
+    fn withdraw_durable_delivery(
+        &mut self,
+        _witness: &crate::lifecycle::CoreBoundaryDeliveryWitness,
+    ) -> Result<(), CoreBoundaryStageError> {
+        Err(CoreBoundaryStageError::fault(
+            "this prepared boundary carries no durable delivery",
+        ))
+    }
 }
 
 /// Successful prepare result for one exact parked model boundary.
@@ -1453,6 +1474,49 @@ impl CoreBoundaryStageOutput {
     #[must_use]
     pub fn delivery_witness(&self) -> Option<&crate::lifecycle::CoreBoundaryDeliveryWitness> {
         self.delivery_witness.as_ref()
+    }
+
+    /// Attach one more durable delivery to this parked durable preparation.
+    ///
+    /// A durable preparation is one claim on its boundary and one publication
+    /// authority. While the runner is parked and before [`Self::commit`], its
+    /// holder may attach the deliveries of other inputs that join the same
+    /// boundary: the one commit publishes every attached delivery after this
+    /// preparation's own, in attach order, and the runner applies them in
+    /// that order in one synchronous segment. An abort (or dropping this
+    /// value) withdraws them all. Returns the attached delivery's witness,
+    /// which is final once the prepared run has ended, as
+    /// [`Self::delivery_witness`] is.
+    ///
+    /// Fails with `Stale` when this value no longer owns its exact parked
+    /// generation, and with `Fault` for a request-only preparation.
+    pub fn attach_durable_delivery(
+        &mut self,
+        appends: crate::lifecycle::DurableTurnBoundaryAppends,
+    ) -> Result<crate::lifecycle::CoreBoundaryDeliveryWitness, CoreBoundaryStageError> {
+        let Some(authority) = self.authority.as_mut() else {
+            return Err(CoreBoundaryStageError::stale(
+                "prepared boundary authority was already resolved",
+            ));
+        };
+        authority.attach_durable_delivery(appends)
+    }
+
+    /// Take one delivery back out of this parked durable preparation before
+    /// [`Self::commit`]: its witness becomes `Withdrawn` and the runner never
+    /// applies it. `witness` names the delivery: this preparation's own
+    /// ([`Self::delivery_witness`]) or one that
+    /// [`Self::attach_durable_delivery`] returned. The other deliveries stay.
+    pub fn withdraw_durable_delivery(
+        &mut self,
+        witness: &crate::lifecycle::CoreBoundaryDeliveryWitness,
+    ) -> Result<(), CoreBoundaryStageError> {
+        let Some(authority) = self.authority.as_mut() else {
+            return Err(CoreBoundaryStageError::stale(
+                "prepared boundary authority was already resolved",
+            ));
+        };
+        authority.withdraw_durable_delivery(witness)
     }
 
     /// Publish the prepared candidate exactly once and unblock its runner.

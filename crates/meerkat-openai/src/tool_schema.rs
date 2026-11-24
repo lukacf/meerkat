@@ -31,9 +31,21 @@
 //! builders are meant to emit one shape. A schema that needs no rewrite is
 //! returned borrowed, so the common case costs one read-only walk and no
 //! allocation per tool per request.
+//!
+//! One rewrite below the root exists, and only for a self-hosted server
+//! ([`openai_tool_parameters`]): the closed string choices of a tool the
+//! engine itself authors are sent as a plain typed `enum`, in place of the
+//! untyped union schemars writes for an enum (a `oneOf` of constants, joined
+//! with `null` when the parameter is optional). The typed form states its
+//! `type`, which the union does not; what a given server accepts is not
+//! established here. OpenAI backends are sent the authored form, and so is
+//! every tool the engine did not author (an MCP server's, a host's): the
+//! tradeoff above stands for them.
 
 use std::borrow::Cow;
 
+use meerkat_core::ToolDef;
+use meerkat_core::types::ToolSourceKind;
 use meerkat_llm_core::LlmError;
 use serde_json::{Map, Value};
 
@@ -106,6 +118,158 @@ pub fn normalize_openai_tool_parameters_schema<'a>(
         root.remove("definitions");
     }
     Ok(Cow::Owned(normalized))
+}
+
+/// The `parameters` a request builder emits for `tool`:
+/// [`normalize_openai_tool_parameters_schema`], and for a self-hosted server
+/// the closed choices of a tool the engine authors as plain typed enums
+/// ([`lower_choice_properties`]). That walk takes the schema owned: where the
+/// normalizer returned it borrowed, an engine tool's schema is copied once
+/// per self-hosted request, lowered or not. Every other tool and every other
+/// server keeps the borrowed schema.
+pub(crate) fn openai_tool_parameters(
+    tool: &ToolDef,
+    self_hosted: bool,
+) -> Result<Cow<'_, Value>, LlmError> {
+    let mut parameters = normalize_openai_tool_parameters_schema(&tool.name, &tool.input_schema)?;
+    if self_hosted && engine_authored(tool) {
+        lower_choice_properties(parameters.to_mut());
+    }
+    Ok(parameters)
+}
+
+/// Whether the engine itself authors `tool`'s schema. A tool of an MCP
+/// server, a host callback or a bundle, and a tool of no stated source, is
+/// its author's: its schema is sent as written.
+fn engine_authored(tool: &ToolDef) -> bool {
+    tool.provenance
+        .as_ref()
+        .is_some_and(|provenance| match provenance.kind {
+            ToolSourceKind::Builtin
+            | ToolSourceKind::Shell
+            | ToolSourceKind::Comms
+            | ToolSourceKind::Memory
+            | ToolSourceKind::Schedule
+            | ToolSourceKind::WorkGraph
+            | ToolSourceKind::Mob => true,
+            ToolSourceKind::Callback | ToolSourceKind::Mcp | ToolSourceKind::RustBundle => false,
+        })
+}
+
+/// Rewrite every property, at any depth, whose schema is a union stating a
+/// closed choice of strings as `{"type": "string", "enum": [...]}`
+/// ([`typed_choice`]). A choice that admits `null` is rewritten only where
+/// the property is not `required`, and a required one is left as authored:
+/// the typed form has no way to say `null`. Whether a server treats a
+/// property that is left out as it treats `null` is not established here.
+fn lower_choice_properties(schema: &mut Value) {
+    match schema {
+        Value::Object(node) => {
+            let required = node.get("required").and_then(Value::as_array);
+            let required = required.cloned().unwrap_or_default();
+            for (keyword, child) in node.iter_mut() {
+                match (keyword.as_str(), child) {
+                    // `properties` maps parameter names to schemas: only the
+                    // schemas are looked at, a name is never a keyword.
+                    ("properties", Value::Object(properties)) => {
+                        for (name, property) in properties.iter_mut() {
+                            match typed_choice(property) {
+                                Some((typed, nullable))
+                                    if !(nullable
+                                        && required.iter().any(|entry| entry == name)) =>
+                                {
+                                    *property = typed;
+                                }
+                                _ => lower_choice_properties(property),
+                            }
+                        }
+                    }
+                    ("items" | "anyOf" | "oneOf" | "allOf" | "additionalProperties", child) => {
+                        lower_choice_properties(child);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Value::Array(members) => members.iter_mut().for_each(lower_choice_properties),
+        _ => {}
+    }
+}
+
+/// The typed form of a `oneOf`/`anyOf` that states a closed choice of
+/// strings, and whether that choice admitted `null`. The node keeps its
+/// `description` (or, having none, that of a choice wrapped alone beside
+/// `null`) and a string `default`; the descriptions of the single constants
+/// are not carried.
+fn typed_choice(schema: &Value) -> Option<(Value, bool)> {
+    let node = schema.as_object()?;
+    let members = node
+        .get("oneOf")
+        .or_else(|| node.get("anyOf"))?
+        .as_array()?;
+    let (literals, nullable) = choice_literals(schema)?;
+    if literals.is_empty() || !literals.iter().all(Value::is_string) {
+        return None;
+    }
+    let description = node.get("description").or_else(|| {
+        // Only a choice wrapped alone beside `null` describes the whole
+        // parameter; a single constant's text, or one alternative's among
+        // several, does not.
+        let mut wrapped = members.iter().filter(|member| !is_null_schema(member));
+        match (wrapped.next(), wrapped.next()) {
+            (Some(only), None) if only.get("const").is_none() => only.get("description"),
+            _ => None,
+        }
+    });
+    let mut typed = Map::new();
+    typed.insert("type".to_string(), Value::String("string".to_string()));
+    typed.insert("enum".to_string(), Value::Array(literals));
+    if let Some(description) = description {
+        typed.insert("description".to_string(), description.clone());
+    }
+    if let Some(default @ Value::String(_)) = node.get("default") {
+        typed.insert("default".to_string(), default.clone());
+    }
+    Some((Value::Object(typed), nullable))
+}
+
+/// The literals a closed choice admits and whether it admits `null`: a
+/// `const`/`enum`-only schema, `{"type": "null"}`, or one `oneOf`/`anyOf` of
+/// such schemas beside nothing but `title`, `description` and `default`.
+fn choice_literals(schema: &Value) -> Option<(Vec<Value>, bool)> {
+    if let Some(literals) = literal_values(schema) {
+        return Some((literals, false));
+    }
+    if is_null_schema(schema) {
+        return Some((Vec::new(), true));
+    }
+    let node = schema.as_object()?;
+    let mut union = None;
+    for (keyword, value) in node {
+        match keyword.as_str() {
+            "oneOf" | "anyOf" if union.is_none() => union = Some(value.as_array()?),
+            "title" | "description" | "default" => {}
+            _ => return None,
+        }
+    }
+    let (mut literals, mut nullable) = (Vec::new(), false);
+    for member in union? {
+        let (member_literals, member_nullable) = choice_literals(member)?;
+        nullable |= member_nullable;
+        for literal in member_literals {
+            if !literals.contains(&literal) {
+                literals.push(literal);
+            }
+        }
+    }
+    Some((literals, nullable))
+}
+
+/// `{"type": "null"}` and nothing else.
+fn is_null_schema(schema: &Value) -> bool {
+    schema.as_object().is_some_and(|node| {
+        node.len() == 1 && node.get("type").and_then(Value::as_str) == Some("null")
+    })
 }
 
 /// Whether any rule of the normalizer would change `schema`. Read-only, so a
@@ -408,6 +572,56 @@ pub(crate) mod test_fixtures {
             "required": ["id", "expected_revision", "owner"],
             "additionalProperties": false,
             "not": { "required": ["lease_seconds", "lease_expires_at"] }
+        })
+    }
+
+    /// The stock `task_list` input schema as the tool advertises it (the
+    /// `task_list` entry of `meerkat-tools`' built-in tool schema snapshot):
+    /// `status` is an optional choice of three, which schemars writes as an
+    /// `anyOf` of a reference and `null` because the field is an `Option` of
+    /// an enum whose variants carry doc comments.
+    pub(crate) fn stock_task_list_schema() -> Value {
+        json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "title": "TaskListParams",
+            "description": "Parameters for the task_list tool",
+            "type": "object",
+            "properties": {
+                "labels": {
+                    "default": null,
+                    "description": "Filter by labels (any match)",
+                    "items": { "type": "string" },
+                    "type": ["array", "null"]
+                },
+                "status": {
+                    "anyOf": [{ "$ref": "#/$defs/TaskStatus" }, { "type": "null" }],
+                    "default": null,
+                    "description": "Filter by status: \"pending\", \"in_progress\", \"completed\""
+                }
+            },
+            "required": [],
+            "$defs": {
+                "TaskStatus": {
+                    "description": "Status of a task in its lifecycle",
+                    "oneOf": [
+                        {
+                            "const": "pending",
+                            "description": "Task is waiting to be started",
+                            "type": "string"
+                        },
+                        {
+                            "const": "in_progress",
+                            "description": "Task is actively being worked on",
+                            "type": "string"
+                        },
+                        {
+                            "const": "completed",
+                            "description": "Task has been finished",
+                            "type": "string"
+                        }
+                    ]
+                }
+            }
         })
     }
 }
@@ -765,6 +979,70 @@ mod tests {
         let normalized = normalize(&schema);
 
         assert_eq!(normalized, schema);
+    }
+
+    #[test]
+    fn closed_string_choices_are_typed_and_other_shapes_are_left_as_authored() {
+        let constants = json!([{"const": "a", "description": "first"}, {"const": "b"}]);
+        let mut schema = json!({
+            "type": "object",
+            "required": ["must", "plain"],
+            "properties": {
+                // An optional choice: the null branch goes, the name stays
+                // outside `required`, the wrapped choice lends its description.
+                "may": {"anyOf": [{"type": "null"}, {"description": "which", "oneOf": constants}]},
+                // A required choice that admits null cannot be typed.
+                "must": {"anyOf": [{"type": "string", "enum": ["a", "b"]}, {"type": "null"}]},
+                // A union of constants without a null branch is typed wherever it is.
+                "plain": {"oneOf": constants, "default": "a", "title": "dropped"},
+                // Only a choice wrapped alone beside `null` describes the whole
+                // parameter; one alternative's text among several does not.
+                "listed": {"anyOf": [
+                    {"type": "string", "enum": ["a", "b"], "description": "the listed choice"},
+                    {"type": "null"}
+                ]},
+                "grouped": {"oneOf": [{"enum": ["a", "b"], "description": "one group"}, {"const": "c"}]},
+                // Not a closed choice of strings: left as authored.
+                "open": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                "numbers": {"anyOf": [{"enum": [1, 2]}, {"type": "null"}]},
+                "bounded": {"oneOf": constants, "minLength": 1},
+                // A parameter named like a keyword is a name, and nesting is followed.
+                "items": {"type": "array", "items": {
+                    "type": "object",
+                    "properties": {"anyOf": {"anyOf": [{"const": "x"}, {"type": "null"}]}}
+                }}
+            }
+        });
+        let authored = schema.clone();
+
+        lower_choice_properties(&mut schema);
+
+        let typed = &schema["properties"];
+        assert_eq!(
+            typed["may"],
+            json!({"type": "string", "enum": ["a", "b"], "description": "which"})
+        );
+        assert_eq!(
+            typed["plain"],
+            json!({"type": "string", "enum": ["a", "b"], "default": "a"})
+        );
+        assert_eq!(
+            typed["listed"],
+            json!({"type": "string", "enum": ["a", "b"], "description": "the listed choice"})
+        );
+        assert_eq!(
+            typed["grouped"],
+            json!({"type": "string", "enum": ["a", "b", "c"]}),
+            "one alternative's description is not the parameter's"
+        );
+        assert_eq!(
+            typed["items"]["items"]["properties"]["anyOf"],
+            json!({"type": "string", "enum": ["x"]})
+        );
+        for kept in ["must", "open", "numbers", "bounded"] {
+            assert_eq!(typed[kept], authored["properties"][kept], "{kept}");
+        }
+        assert_eq!(schema["required"], json!(["must", "plain"]));
     }
 
     #[test]

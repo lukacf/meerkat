@@ -32,7 +32,7 @@ name: CI
 #                     when machine authority or a dogma document changed
 #   governance-docs-gate - the machine-authority docs gate, on the same
 #                     changes, in parallel with governance-gates
-#   tlc-audits      - (x24) the hand-written TLC audit shards on a
+#   tlc-audits      - (x27) the hand-written TLC audit shards on a
 #                     machine-authority change
 #   clippy (xN)     - one lane per shard of directly changed packages:
 #                     clippy --no-deps --all-features over every target; in a
@@ -1053,7 +1053,7 @@ jobs:
   # in `ratchets` only proves the artifacts match the DSL). Each shard of
   # the canonical TLC lane needs only a JDK and the TLC jar
   # (setup-tlc-ci; the audit parts never run xtask), runs in parallel, and
-  # fits the PR budget: twenty-four shards, which took 146-751 s each on the
+  # fits the PR budget: twenty-seven shards, which took 146-751 s each on the
   # hosted runners of the 0.9.9 release pushes and up to 776 s on its pull
   # requests, audits-f aside (1020 s, then its 20-minute timeout, before
   # two of its audits moved out). machine_verify_all_tlc_test.sh lists
@@ -1063,7 +1063,13 @@ jobs:
   # shorter only when its part splits. The identity entry audit's entry and
   # lifecycle runs take three shards (audits-l, audits-w and audits-x) since
   # its single entry run reached the 900 s per-run cap, and its legacy run
-  # two (audits-m and audits-y) since one shard of it took 1182 s.
+  # two (audits-m and audits-y) since one shard of it took 1182 s. The
+  # durable decision audit's whole-space run, witnesses and seeded defects
+  # take three (audits-j, audits-z and audits-a) since its one shard took
+  # 833-1598 s on the pull requests of 2026-11-09 to 2026-11-20. Two
+  # shards (audits-aa and audits-ab) take five whole audits from audits-r,
+  # audits-h, audits-u and audits-s, which took up to 1271 s, 1089 s,
+  # 1152 s and 1049 s on those pull requests.
   # The `machine-verify --all` sweep stays on nightly, the release gate and
   # the release-tag graph.
   tlc-audits:
@@ -1076,9 +1082,12 @@ jobs:
     # classification), but a budget failure is reported while a cancelled
     # shard is a failed lane. A shard is sized to about 13 minutes hosted
     # (776 s, the longest shard of this assignment on the 0.9.9 release
-    # runs), but one audit cannot be split across shards: the durable
-    # decision audit with --mutants, alone in audits-j, took 1120 s on main
-    # push 42552143103, near 20 minutes. On that push audits-s took 3072 s
+    # runs), but shards have run past 20 minutes: the durable decision audit
+    # with --mutants, then whole in audits-j, took 1120 s on main push
+    # 42552143103 and 1598 s on a pull request's run 42698827144 (its three
+    # parts now run in audits-j, audits-z and audits-a), and audits-r took
+    # 1271 s on a pull request's run 43650149872. On main push 42552143103
+    # audits-s took 3072 s
     # (1111 s locally with 4 TLC workers) while the AuthMachine
     # source-credential publication audit explored the whole domains of a
     # restore's last_refresh and refresh_attempt, which nothing reads (797 s
@@ -1089,7 +1098,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        part: [audits-a, audits-b, audits-c, audits-d, audits-e, audits-f, audits-g, audits-h, audits-i, audits-j, audits-k, audits-l, audits-m, audits-n, audits-o, audits-q, audits-r, audits-s, audits-t, audits-u, audits-v, audits-w, audits-x, audits-y]
+        part: [audits-a, audits-b, audits-c, audits-d, audits-e, audits-f, audits-g, audits-h, audits-i, audits-j, audits-k, audits-l, audits-m, audits-n, audits-o, audits-q, audits-r, audits-s, audits-t, audits-u, audits-v, audits-w, audits-x, audits-y, audits-z, audits-aa, audits-ab]
     env:
       # A 4-vCPU runner: four TLC workers, and a heap that leaves room for
       # the runner.

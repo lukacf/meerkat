@@ -4,7 +4,7 @@
 id = "announcements"
 
 [profiles.listener]
-model = "gpt-6-astra"
+model = "gpt-6.2-astra"
 # A turn_driven agent runs when something is delivered to it: a batch of
 # announcements, or a message of the host.
 runtime_mode = "turn_driven"

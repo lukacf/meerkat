@@ -198,8 +198,8 @@ describe("Python SDK example controls", { concurrency: 4 }, () => {
       if (example.startsWith("021")) {
         const creates = result.requests.filter((r) => r.method === "session/create");
         assert.deepEqual(creates.map((r) => r.params.model),
-          ["claude-sonnet-5-5", "gpt-6-astra", "gemini-4-hydrogen",
-            "claude-sonnet-5-5", "gpt-6-astra", "gemini-4-hydrogen", "claude-sonnet-5-5"]);
+          ["claude-sonnet-5-5", "gpt-6.2-astra", "gemini-4-hydrogen",
+            "claude-sonnet-5-5", "gpt-6.2-astra", "gemini-4-hydrogen", "claude-sonnet-5-5"]);
         // One provider-neutral level for all three; no provider-specific effort.
         for (const create of creates.slice(3, 6)) {
           assert.equal(create.params.reasoning_effort, "high");

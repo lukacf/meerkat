@@ -718,11 +718,15 @@ committed yet) and the admission state:
 The answer comes from memory: the poll makes no store call, asks the gate
 nothing, wakes nothing and changes nothing, so it also answers for a worker
 whose runtime loop makes no pass, and it never moves `rounds`. It does not
-wait for a busy session either. `NotReadableNow` names a session whose state
-stayed held past `PENDING_RESUMED_RUN_READ_BOUND` (100 ms; a store commit in
-flight holds it) or whose registration needs a reload: ask again, and do not
-read it as "no run waits". Whether a run is held, and which run, is the
-runtime machine's own state; the rounds, the times, the cause and the reason
+wait out a busy session either. `NotReadableNow` names a session whose state
+stayed held for longer than the read waits for it
+(`PENDING_RESUMED_RUN_READ_BOUND`; a store commit in flight holds it) or
+whose registration needs a reload: ask again, and do not read it as "no run
+waits". That constant is the length of that one wait, not a promise of how
+long a poll takes: the lookup of the session comes before the wait, and a
+poll of several sessions or members reads them one after another. Whether a
+run is held, and which run, is the runtime machine's own state; the rounds,
+the times, the cause and the reason
 are what the current registration noted beside it. They start over at every
 registration, so after a restart `rounds` counts from one again and the
 times do not reach back before the restart: a host that alerts on a run

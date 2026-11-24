@@ -11432,10 +11432,12 @@ impl MobHandle {
     /// Read from the published machine state and the member's runtime in
     /// memory, with no actor command, no wake, no store call and no change:
     /// a poll never moves a round count, and it answers for a member whose
-    /// runtime loop makes no pass. A member whose session's state cannot be
-    /// read inside the runtime's read bound is listed as not readable now;
-    /// the members are read one after another, so each such member costs
-    /// the call up to that bound. A member whose session has no
+    /// runtime loop makes no pass. A member whose session's state stays held
+    /// for longer than the runtime's read waits for it is listed as not
+    /// readable now; the members are read one after another, and for each
+    /// such member the read first waits out that wait
+    /// (`meerkat_runtime::PENDING_RESUMED_RUN_READ_BOUND`), so the call as a
+    /// whole has no bound of its own. A member whose session has no
     /// registration in this process (a member not woken yet) is not
     /// listed: it is answered from the moment its session registers.
     ///

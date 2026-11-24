@@ -235,17 +235,17 @@ impl MeerkatMachine {
     /// admission, makes no store call, applies no machine input and wakes
     /// nothing, so it never moves
     /// [`ResumedRunAdmissionUndecided::rounds`](crate::ResumedRunAdmissionUndecided::rounds).
-    /// It does not wait for the session either: a session whose state stays
-    /// held past
+    /// It does not wait out a busy session either: the read gives up its
+    /// wait for the session's own state after
     /// [`PENDING_RESUMED_RUN_READ_BOUND`](crate::PENDING_RESUMED_RUN_READ_BOUND)
-    /// (a store commit in flight holds it), or whose registration needs a
-    /// reload, answers
+    /// (a store commit in flight holds that state), and then, as for a
+    /// session whose registration needs a reload, answers
     /// [`PendingResumedRunRead::NotReadableNow`](crate::PendingResumedRunRead::NotReadableNow).
-    /// The bound covers the wait for the session's own state. The lookup of
-    /// the session in the machine's session map comes first and is outside
-    /// it: that lookup returns promptly because no holder of the map waits
-    /// on a store or on a session while it holds the map, not because the
-    /// read bounds it.
+    /// That constant is the length of that one wait, not a bound on the
+    /// call. The lookup of the session in the machine's session map comes
+    /// first and is outside it: that lookup returns promptly because no
+    /// holder of the map waits on a store or on a session while it holds
+    /// the map, not because the read bounds it.
     ///
     /// The machine decides the answer: the run it marks, whether it holds
     /// that run for its admission
@@ -281,9 +281,11 @@ impl MeerkatMachine {
 
     /// [`Self::pending_resumed_run`] for every session registered in this
     /// process: one answer for each session that marks a run or cannot be
-    /// read now, in session id order. A session that cannot be read costs
-    /// the read at most
+    /// read now, in session id order. The sessions are read one after
+    /// another; for each session that cannot be read, the read first waits
+    /// out
     /// [`PENDING_RESUMED_RUN_READ_BOUND`](crate::PENDING_RESUMED_RUN_READ_BOUND).
+    /// The call as a whole has no bound of its own.
     pub async fn pending_resumed_runs(
         &self,
     ) -> Vec<crate::resumed_run_admission::PendingResumedRunRead> {

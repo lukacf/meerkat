@@ -137,9 +137,14 @@ pub trait ResumedRunAdmission: Send + Sync {
 /// character boundary.
 pub const RESUMED_RUN_ADMISSION_REASON_MAX_BYTES: usize = 512;
 
-/// The longest a read of a session's marked run
+/// How long a read of a session's marked run
 /// ([`crate::MeerkatMachine::pending_resumed_run`]) waits for that session's
-/// state before it answers [`PendingResumedRunRead::NotReadableNow`].
+/// own state before it gives up and answers
+/// [`PendingResumedRunRead::NotReadableNow`].
+///
+/// It is the length of that one wait and no promise of how long the call
+/// takes: the lookup of the session in the machine's session map comes
+/// before the wait, and the caller's task is scheduled like any other.
 pub const PENDING_RESUMED_RUN_READ_BOUND: Duration = Duration::from_millis(100);
 
 /// What [`crate::MeerkatMachine::pending_resumed_run`] answers for a session
@@ -151,10 +156,10 @@ pub enum PendingResumedRunRead {
     /// settled.
     Pending(PendingResumedRun),
     /// The session's state cannot be read now: something held it for longer
-    /// than [`PENDING_RESUMED_RUN_READ_BOUND`] (a store commit in flight, for
-    /// example), or the session's registration needs a reload, whose
-    /// in-memory state is not answered. Ask again. Whether the session marks
-    /// a run is not known from this answer.
+    /// than the read waits for it ([`PENDING_RESUMED_RUN_READ_BOUND`]; a
+    /// store commit in flight, for example), or the session's registration
+    /// needs a reload, whose in-memory state is not answered. Ask again.
+    /// Whether the session marks a run is not known from this answer.
     NotReadableNow {
         /// The session that could not be read.
         session_id: SessionId,

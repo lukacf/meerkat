@@ -18,6 +18,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - An update of an agent's instructions that arrives while the agent's run is in a tool round answers by the agent's model, as one that arrives between runs does. Before, from the run's first tool round until the run committed, Meerkat's read of the agent's session failed and the update answered `applies_after_compaction` whatever the model: also for a model that takes the change at its next run (`applies_at_next_run`) and for a backend that takes it only with a fresh conversation (`applies_at_next_session`, reason `lowering_unavailable`). In the same state the agent's row of `meta/instruction_status` read `effective_read: unreadable`; it now shows the session's last committed state, in which a change the running run applied at its start reads `pending` until the run commits. Affected: 0.9.15 to 0.9.18 for the update's answer and 0.9.11 to 0.9.18 for the status row, agents on a SQLite realm. The change is in Meerkat's status read; no Meta code changed. Read from the source, not seen in a run.
 
+- The WorkGraph resume gate says why it could not read, where it used to
+  leave Meerkat's admission attempt to time out in silence. For a durable
+  member's interrupted run that carries no attention projection, the gate
+  pages through every open work item of the mob's WorkGraph namespace, and
+  each page is one full list of the store. Over a store whose list takes
+  longer than one admission attempt
+  (`RESUMED_RUN_ADMISSION_ATTEMPT_TIMEOUT`, 8 seconds), Meerkat dropped the
+  gate in the middle of its scan: the gate logged nothing, and the only
+  detail was that the admission did not answer in time. The gate now ends
+  its own scan a little before the attempt ends (after seven eighths of it)
+  and answers unavailable with a reason that names the open work item list
+  by realm and namespace, the pages it had read and the time it waited. An
+  operator sees that reason in the gate's own warning
+  (`durable resume gate: the gate cannot decide`) and as the detail of
+  Meerkat's `resumed run admission is unavailable` warning. A scan that is
+  ended draws no verdict from the pages it read and writes nothing. Nothing
+  else changes: while the list stays that slow the run is held as before,
+  and a list that answers in time decides as before.
+
 ### Upgrade notes
 
 - Type checkers can now report mistakes that a `str` annotation

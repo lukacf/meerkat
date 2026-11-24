@@ -26,8 +26,12 @@
 //!   the worker holds no claim, the run continues.
 //! - A lapsed lease is first committed with `observe_lease_expiry`, as a
 //!   lease sweep would, so the item can be claimed again.
-//! - A WorkGraph read fault answers unavailable. Meerkat asks again a bounded
-//!   number of times and then settles the run as superseded.
+//! - A WorkGraph read fault answers unavailable, and so does a claim scan
+//!   that outlasts its budget (below). Meerkat asks again a bounded number
+//!   of times. When every attempt goes unanswered it neither resumes the run
+//!   nor settles it: the run stays held, and Meerkat asks the gate again at
+//!   the next wake of the worker's runtime loop or at the next registration
+//!   of its session.
 //!
 //! Meerkat drops an attempt that outlasts its timeout and asks again, so the
 //! gate is idempotent across the attempts of one resume: a superseded verdict
@@ -56,9 +60,22 @@
 //! seen, so the run continues, as in the known limit, and its later writes
 //! conflict on revision. An item comes back twice only after the store clock
 //! moved back; the scan then keeps the newest claimed sighting.
+//!
+//! The claim scan ends itself. One page is one full list of the namespace's
+//! open items, and Meerkat drops an attempt that outlasts
+//! [`RESUMED_RUN_ADMISSION_ATTEMPT_TIMEOUT`] without a word from the gate. So
+//! the scan reads for that timeout less a margin at most
+//! ([`CLAIM_SCAN_BUDGET`]). A scan that is not done by then, between two
+//! pages or in the middle of one, answers unavailable with a reason that
+//! names the list, the pages it read and the time it waited. It draws no
+//! verdict from the pages it read, because an earlier page may hold an older
+//! sighting of an item, and it has written nothing: a lapsed lease's expiry
+//! is committed only after the whole walk. The next attempt starts the scan
+//! again from its first page.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use meerkat::{
@@ -68,11 +85,28 @@ use meerkat::{
 };
 use meerkat_core::SessionId;
 use meerkat_core::lifecycle::RunId;
+use meerkat_runtime::RESUMED_RUN_ADMISSION_ATTEMPT_TIMEOUT;
 
 /// How many non-terminal items one page of the claim scan reads: the
 /// WorkGraph's largest list page. The scan pages through every open item
 /// with the list cursor.
 const CLAIM_SCAN_PAGE: usize = 1000;
+
+/// The part of one of Meerkat's admission attempts the claim scan leaves
+/// unused, so that the gate's own answer about a slow list arrives before
+/// Meerkat cuts the attempt: an eighth of
+/// [`RESUMED_RUN_ADMISSION_ATTEMPT_TIMEOUT`]. A share of that timeout, not a
+/// fixed time, so that the budget follows the timeout wherever it is set.
+const CLAIM_SCAN_MARGIN: Duration = match RESUMED_RUN_ADMISSION_ATTEMPT_TIMEOUT.checked_div(8) {
+    Some(margin) => margin,
+    None => Duration::ZERO,
+};
+
+/// How long the claim scan may read before the gate ends it and answers
+/// unavailable: one of Meerkat's admission attempts less
+/// [`CLAIM_SCAN_MARGIN`].
+const CLAIM_SCAN_BUDGET: Duration =
+    RESUMED_RUN_ADMISSION_ATTEMPT_TIMEOUT.saturating_sub(CLAIM_SCAN_MARGIN);
 
 /// How many superseded runs the gate remembers. A superseded run is settled
 /// and never resumed again, so only the attempts of a resume still in
@@ -87,8 +121,9 @@ pub(crate) enum ResumeCheck {
     /// The work moved: Meerkat settles the run the way a stop does, and it
     /// never resumes.
     Superseded(String),
-    /// The gate cannot decide: Meerkat asks again, then settles the run as
-    /// superseded.
+    /// The gate cannot decide: Meerkat asks again a bounded number of times,
+    /// then holds the run, neither resumed nor settled, and asks again
+    /// later.
     Unavailable(String),
 }
 
@@ -201,10 +236,10 @@ pub(crate) struct WorkGraphResumeGate {
 /// without a service, none over a backend that has no WorkGraph, and none
 /// on a candidate launch. With no gate bound Meerkat asks no resumed-run
 /// admission. A store without a WorkGraph refuses every read, so a gate
-/// over it could only answer unavailable until Meerkat settles the run as
-/// superseded; it holds no item and no claim, so there is nothing to
-/// check, as without a service. On a candidate, a run it holds stays
-/// parked with its mark: the gate's verdict, and the lease expiry it
+/// over it could only answer unavailable, and Meerkat would hold the run
+/// for as long as it asked; it holds no item and no claim, so there is
+/// nothing to check, as without a service. On a candidate, a run it holds
+/// stays parked with its mark: the gate's verdict, and the lease expiry it
 /// commits, belong to the authoritative launch.
 pub(crate) fn launch_resume_gate(
     service: Option<WorkGraphService>,
@@ -379,7 +414,9 @@ impl WorkGraphResumeGate {
     }
 
     /// The run named no item: every claim the worker holds decides. The scan
-    /// pages through every open item with the list cursor.
+    /// pages through every open item with the list cursor, for
+    /// [`CLAIM_SCAN_BUDGET`] at most: a scan that is not done by then is
+    /// ended and answers unavailable ([`Self::claim_scan_cut`]).
     async fn decide_by_claims(
         &self,
         keys: &WorkerKeys<'_>,
@@ -388,20 +425,34 @@ impl WorkGraphResumeGate {
         if keys.member.is_none() && keys.session.is_none() {
             return Ok(ResumeCheck::Continue);
         }
+        let started = tokio::time::Instant::now();
+        let deadline = started + CLAIM_SCAN_BUDGET;
         // The worker's claimed items by id. A walk returns an item twice only
         // when a write moved it back past the cursor; the newer revision
         // decides.
         let mut held = BTreeMap::<WorkItemId, WorkItem>::new();
         let mut cursor = None;
+        let mut pages_read = 0_usize;
         loop {
-            let page = self
-                .service
-                .list_page(WorkItemFilter {
-                    limit: Some(CLAIM_SCAN_PAGE),
-                    cursor,
-                    ..WorkItemFilter::default()
-                })
-                .await?;
+            // The scan ends at its deadline, between two pages or in the
+            // middle of one: a page is one full list of the store, and a
+            // single list can outlast the budget. Nothing below this loop
+            // has run then, so no verdict is drawn and nothing is written.
+            if tokio::time::Instant::now() >= deadline {
+                return Ok(self.claim_scan_cut(pages_read, started.elapsed()));
+            }
+            let read = self.service.list_page(WorkItemFilter {
+                limit: Some(CLAIM_SCAN_PAGE),
+                cursor,
+                ..WorkItemFilter::default()
+            });
+            let page = match tokio::time::timeout_at(deadline, read).await {
+                Ok(page) => page?,
+                Err(_elapsed) => {
+                    return Ok(self.claim_scan_cut(pages_read, started.elapsed()));
+                }
+            };
+            pages_read += 1;
             // A page that took no item cannot move the walk on.
             let advanced = !page.items.is_empty();
             for item in page.items {
@@ -440,6 +491,24 @@ impl WorkGraphResumeGate {
             }
         }
         Ok(verdict)
+    }
+
+    /// The answer of a claim scan that reached [`CLAIM_SCAN_BUDGET`] before
+    /// its last page: unavailable, with what was slow. The reason is read by
+    /// an operator: it names the list by the realm and namespace the gate
+    /// reads, the number of pages read and the time waited, and nothing of
+    /// any item.
+    fn claim_scan_cut(&self, pages_read: usize, waited: Duration) -> ResumeCheck {
+        ResumeCheck::Unavailable(format!(
+            "the WorkGraph open work item list of realm '{}' namespace '{}' was too slow for \
+             the resume gate's claim scan: {pages_read} page(s) of up to {CLAIM_SCAN_PAGE} items \
+             read in {} ms, scan budget {} ms; the scan was ended, no verdict was drawn from the \
+             pages read and nothing was written",
+            self.service.default_realm_id(),
+            self.service.default_namespace(),
+            waited.as_millis(),
+            CLAIM_SCAN_BUDGET.as_millis(),
+        ))
     }
 
     /// The item-level verdict for the run's item: terminal, claimed by
@@ -1741,6 +1810,16 @@ mod tests {
         assert!(
             waited > attempt / 2,
             "most of an attempt is left to the read: waited {waited:?} of {attempt:?}"
+        );
+        assert_eq!(
+            CLAIM_SCAN_BUDGET + CLAIM_SCAN_MARGIN,
+            attempt,
+            "the budget is Meerkat's attempt timeout less the margin"
+        );
+        assert!(!CLAIM_SCAN_MARGIN.is_zero(), "the margin is not empty");
+        assert!(
+            waited >= CLAIM_SCAN_BUDGET,
+            "the scan had its whole budget: waited {waited:?} of {CLAIM_SCAN_BUDGET:?}"
         );
     }
 

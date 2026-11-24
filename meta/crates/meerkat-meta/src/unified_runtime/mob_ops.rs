@@ -69,7 +69,7 @@ impl UnifiedRuntime {
     /// authorship from a certification pass.
     #[must_use]
     pub fn speaks_for_composition(&self) -> bool {
-        self.mob_runtime.speaks_for_composition()
+        self.default_mob().mob_runtime.speaks_for_composition()
     }
 
     /// A public, owning handle to the mob: while it (or any clone) lives,
@@ -105,7 +105,7 @@ impl UnifiedRuntime {
         match self.public_owner.as_ref() {
             Some(owner) => owner,
             // Only the retained teardown runs without a public owner.
-            None => &self.mob_runtime,
+            None => &self.default_mob().mob_runtime,
         }
     }
 
@@ -172,90 +172,116 @@ impl UnifiedRuntime {
     /// comms-safe roster id here (meerkat 0.7 `MemberCommsName` rejects `:`,
     /// which Meta's identity-first aliases like `rt:review:singleton:0`
     /// contain). Hooks and error events keep speaking the alias.
-    pub async fn spawn(&self, mut spec: SpawnMemberSpec) -> Result<SpawnResult, MobRuntimeError> {
-        if let Some(labels) = spec.labels.as_ref() {
-            crate::member_comms_id::validate_member_creation_labels(labels)
-                .map_err(MobRuntimeError::InvalidConfig)?;
-        }
-        let raw_reservation = crate::member_comms_id::reserve_raw_member_target(
-            self.identity_runtime_ref(),
-            spec.identity.as_str(),
-        )
-        .await
-        .map_err(MobRuntimeError::InvalidConfig)?;
-        let member_id = raw_reservation.alias().to_string();
-        let profile = spec.role_name.to_string();
-        spec.identity = crate::member_comms_id::mob_member_id(member_id.as_str());
-        let spawn_result = Box::pin(self.mob_handle().spawn_spec(spec)).await;
-        drop(raw_reservation);
-        match spawn_result {
-            Ok(result) => {
-                if let Some(hook) = &self.post_spawn_hook {
-                    hook(vec![member_id]).await;
-                }
-                Ok(result)
+    ///
+    /// This is the default mob's form of the operation: the member joins
+    /// the mob the launch names.
+    pub async fn spawn(&self, spec: SpawnMemberSpec) -> Result<SpawnResult, MobRuntimeError> {
+        spawn_in(&self.default_mob_resolved(), spec).await
+    }
+
+    /// Spawn many members, firing `post_spawn_hook` once on success with all ids.
+    /// The default mob's form: the members join the mob the launch names.
+    pub async fn spawn_many(
+        &self,
+        specs: Vec<SpawnMemberSpec>,
+    ) -> Result<Vec<SpawnResult>, MobRuntimeError> {
+        spawn_many_in(&self.default_mob_resolved(), specs).await
+    }
+}
+
+/// Spawn a member of the resolved mob `mob`: the member is reserved under
+/// that mob's identity runtime and joins that mob's roster. The post-spawn
+/// hook is the default mob's, so it is told of a member of the default mob
+/// alone; a failure is reported on the host's error hook whichever mob it
+/// was.
+pub(super) async fn spawn_in(
+    mob: &super::MobEntryRef<'_>,
+    mut spec: SpawnMemberSpec,
+) -> Result<SpawnResult, MobRuntimeError> {
+    if let Some(labels) = spec.labels.as_ref() {
+        crate::member_comms_id::validate_host_member_creation_labels(labels)
+            .map_err(MobRuntimeError::InvalidConfig)?;
+    }
+    let raw_reservation = crate::member_comms_id::reserve_raw_member_target(
+        mob.identity_runtime_ref(),
+        spec.identity.as_str(),
+    )
+    .await
+    .map_err(MobRuntimeError::InvalidConfig)?;
+    let member_id = raw_reservation.alias().to_string();
+    let profile = spec.role_name.to_string();
+    spec.identity = crate::member_comms_id::mob_member_id(member_id.as_str());
+    let spawn_result = Box::pin(mob.mob_handle().spawn_spec(spec)).await;
+    drop(raw_reservation);
+    match spawn_result {
+        Ok(result) => {
+            if let Some(hook) = mob.post_spawn_hook() {
+                hook(vec![member_id]).await;
             }
-            Err(err) => {
-                self.fire_error(super::types::ErrorEvent::SpawnFailure {
+            Ok(result)
+        }
+        Err(err) => {
+            mob.runtime()
+                .fire_error(super::types::ErrorEvent::SpawnFailure {
                     member_id,
                     profile,
                     error: format!("{err}"),
                 });
-                Err(err.into())
-            }
+            Err(err.into())
         }
     }
+}
 
-    /// Spawn many members, firing `post_spawn_hook` once on success with all ids.
-    pub async fn spawn_many(
-        &self,
-        mut specs: Vec<SpawnMemberSpec>,
-    ) -> Result<Vec<SpawnResult>, MobRuntimeError> {
-        let requested_member_ids = specs
-            .iter()
-            .map(|spec| spec.identity.to_string())
-            .collect::<Vec<_>>();
-        for spec in &specs {
-            if let Some(labels) = spec.labels.as_ref() {
-                crate::member_comms_id::validate_member_creation_labels(labels)
-                    .map_err(MobRuntimeError::InvalidConfig)?;
-            }
+/// Spawn many members of the resolved mob `mob`, as [`spawn_in`] spawns
+/// one: the default mob's post-spawn hook is told once, with all ids.
+pub(super) async fn spawn_many_in(
+    mob: &super::MobEntryRef<'_>,
+    mut specs: Vec<SpawnMemberSpec>,
+) -> Result<Vec<SpawnResult>, MobRuntimeError> {
+    let requested_member_ids = specs
+        .iter()
+        .map(|spec| spec.identity.to_string())
+        .collect::<Vec<_>>();
+    for spec in &specs {
+        if let Some(labels) = spec.labels.as_ref() {
+            crate::member_comms_id::validate_host_member_creation_labels(labels)
+                .map_err(MobRuntimeError::InvalidConfig)?;
         }
-        let raw_reservation = if specs.is_empty() {
-            None
-        } else {
-            Some(
-                crate::member_comms_id::reserve_raw_member_targets(
-                    self.identity_runtime_ref(),
-                    requested_member_ids.iter().map(String::as_str),
-                )
-                .await
-                .map_err(MobRuntimeError::InvalidConfig)?,
-            )
-        };
-        let member_ids = raw_reservation
-            .as_ref()
-            .map(|reservation| reservation.aliases().to_vec())
-            .unwrap_or(requested_member_ids);
-        // As in `spawn`: wire aliases become comms-safe roster ids.
-        for (spec, member_id) in specs.iter_mut().zip(&member_ids) {
-            spec.identity = crate::member_comms_id::mob_member_id(member_id);
-        }
-        let handle = self.mob_handle();
-        let refs = try_join_in_batches(specs, MAX_CONCURRENT_SPAWN_MANY, |spec| {
-            let handle = handle.clone();
-            async move { Box::pin(handle.spawn_spec(spec)).await }
-        })
-        .await
-        .map_err(MobRuntimeError::from)?;
-        drop(raw_reservation);
-        if !member_ids.is_empty()
-            && let Some(hook) = &self.post_spawn_hook
-        {
-            hook(member_ids).await;
-        }
-        Ok(refs)
     }
+    let raw_reservation = if specs.is_empty() {
+        None
+    } else {
+        Some(
+            crate::member_comms_id::reserve_raw_member_targets(
+                mob.identity_runtime_ref(),
+                requested_member_ids.iter().map(String::as_str),
+            )
+            .await
+            .map_err(MobRuntimeError::InvalidConfig)?,
+        )
+    };
+    let member_ids = raw_reservation
+        .as_ref()
+        .map(|reservation| reservation.aliases().to_vec())
+        .unwrap_or(requested_member_ids);
+    // As in `spawn_in`: wire aliases become comms-safe roster ids.
+    for (spec, member_id) in specs.iter_mut().zip(&member_ids) {
+        spec.identity = crate::member_comms_id::mob_member_id(member_id);
+    }
+    let handle = mob.mob_handle();
+    let refs = try_join_in_batches(specs, MAX_CONCURRENT_SPAWN_MANY, |spec| {
+        let handle = handle.clone();
+        async move { Box::pin(handle.spawn_spec(spec)).await }
+    })
+    .await
+    .map_err(MobRuntimeError::from)?;
+    drop(raw_reservation);
+    if !member_ids.is_empty()
+        && let Some(hook) = mob.post_spawn_hook()
+    {
+        hook(member_ids).await;
+    }
+    Ok(refs)
 }
 
 async fn try_join_in_batches<I, F, T, E, Build>(

@@ -43,8 +43,17 @@ export type IdentityCommand =
   | "planAgentChange";
 
 /** Runs one command of the family and answers its result; a refusal is the
- * transport's error with the family's JSON-RPC error on it. */
-export type IdentityCommandRunner = (command: IdentityCommand, params: Record<string, unknown>) => Promise<unknown>;
+ * transport's error with the family's JSON-RPC error on it. `about` is the
+ * agent the command is made for, by the console's key for it: the command
+ * is sent to that agent's team, whatever name its params carry. */
+export type IdentityCommandRunner = (
+  command: IdentityCommand,
+  params: Record<string, unknown>,
+  about?: string,
+  /** `automatic`: the console makes this read on its own (with every read
+   * of its lists), so it is not made for an agent whose team is not loaded. */
+  by?: { automatic?: boolean },
+) => Promise<unknown>;
 
 const CHANGE_COMMANDS: Readonly<Record<IdentityChangeKind, IdentityCommand>> = {
   create: "createAgent",
@@ -95,8 +104,9 @@ export interface IdentityChangesApi {
   revision: number;
   /** A new request id, for one action. */
   mintRequestId(): string;
-  /** What a create or an update may name: every page. */
-  loadDirectory(): Promise<IdentityDirectory>;
+  /** What a create or an update may name: every page. `about` is the agent
+   * an update is made for: the directory is the one of that agent's team. */
+  loadDirectory(about?: string): Promise<IdentityDirectory>;
   /** One agent's record, read now: its spec digest is what a change of it
    * names. */
   loadRecord(name: string): Promise<AgentRecord>;
@@ -154,20 +164,34 @@ export function useIdentityChanges({
   const pendingRef = React.useRef(pending);
   pendingRef.current = pending;
 
+  // The agent each request of this page was made for, by request id: a
+  // request that waits for a decision is read again and withdrawn by its
+  // id alone, and still goes where its agent is.
+  const aboutRef = React.useRef(new Map<string, string>());
   const api = React.useMemo(() => {
     const changed = () => {
       setRevision((current) => current + 1);
       changedRef.current();
     };
+    // Every command of an agent's change is made for one agent: the one
+    // the person acted on, never one named by an answer.
+    const ask = (command: IdentityCommand, params: Record<string, unknown>, about?: string): Promise<unknown> =>
+      about ? runRef.current(command, params, about) : runRef.current(command, params);
+    const agentOf = (request: Record<string, unknown>): string | undefined =>
+      typeof request.name === "string" && request.name ? request.name : undefined;
     const loadRecord = async (name: string): Promise<AgentRecord> => {
-      const record = parseAgentRecord(await runRef.current("getAgentRecord", { name }));
+      const record = parseAgentRecord(await ask("getAgentRecord", { name }, name));
       if (!record) throw new Error("The gateway's answer was not an agent's record.");
-      return record;
+      // The record of the agent asked for, under the key it was asked by:
+      // a change built from it names that agent, whatever the answer calls it.
+      return record.name === name ? record : { ...record, name };
     };
     const change: IdentityChangesApi["change"] = async (kind, request, requestId, name) => {
       let answer: unknown;
+      const about = agentOf(request);
+      if (about) aboutRef.current.set(requestId, about);
       try {
-        answer = await runRef.current(CHANGE_COMMANDS[kind], { ...request, request_id: requestId });
+        answer = await ask(CHANGE_COMMANDS[kind], { ...request, request_id: requestId }, about);
       } catch (error) {
         const result = failure(error);
         // A lost answer may be a change that was made.
@@ -193,10 +217,10 @@ export function useIdentityChanges({
     };
     return {
       mintRequestId: () => createConsoleId("agent-change"),
-      loadDirectory: async (): Promise<IdentityDirectory> => {
+      loadDirectory: async (about?: string): Promise<IdentityDirectory> => {
         const profiles: DirectoryProfile[] = [];
         const peers = await readAllPages(async (after) => {
-          const page = parseIdentityDirectory(await runRef.current("listAgentDirectory", after ? { after } : {}));
+          const page = parseIdentityDirectory(await ask("listAgentDirectory", after ? { after } : {}, about));
           for (const profile of page.profiles) {
             if (!profiles.some((known) => known.profile === profile.profile)) profiles.push(profile);
           }
@@ -216,7 +240,7 @@ export function useIdentityChanges({
       plan: async (kind, request): Promise<IdentityPlanResult> => {
         let answer: unknown;
         try {
-          answer = await runRef.current("planAgentChange", { ...request, change: kind, request_id: createConsoleId("agent-plan") });
+          answer = await ask("planAgentChange", { ...request, change: kind, request_id: createConsoleId("agent-plan") }, agentOf(request));
         } catch (error) {
           // Only the family's own refusal is the gateway's judgment of the
           // change. A plan that was not answered, not asked or refused as a
@@ -229,7 +253,7 @@ export function useIdentityChanges({
       },
       withdraw: async (requestId: string): Promise<IdentityChangeResult | { kind: "withdrawn" }> => {
         try {
-          await runRef.current("withdrawAgentChange", { request_id: requestId });
+          await ask("withdrawAgentChange", { request_id: requestId }, aboutRef.current.get(requestId));
         } catch (error) {
           return failure(error);
         }
@@ -242,7 +266,13 @@ export function useIdentityChanges({
         for (const entry of pendingRef.current) {
           let outcome: IdentityOutcome | null;
           try {
-            outcome = parseIdentityOutcome(await runRef.current("getAgentChange", { request_id: entry.requestId }));
+            // The console's own read, made with every read of its lists: it
+            // is not made for an agent whose team is not loaded (the team
+            // would be loaded again each time). The request stays listed.
+            const about = aboutRef.current.get(entry.requestId);
+            outcome = parseIdentityOutcome(about
+              ? await runRef.current("getAgentChange", { request_id: entry.requestId }, about, { automatic: true })
+              : await runRef.current("getAgentChange", { request_id: entry.requestId }));
           } catch {
             continue;
           }

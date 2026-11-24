@@ -16,8 +16,91 @@ pub(crate) const MEMORY_CONFLICT_LOOKUP_FAILED_EVENT: &str = "memory_conflict_lo
 /// and action text.
 pub(crate) const APPROVAL_NOTIFICATION_KIND: &str = "gating_approval_request";
 
+/// The key, in an audit row's `detail`, of the mob a request with no origin
+/// was made for, where that is a mob beside the host's launch mob: the id of
+/// that mob. Every row an evaluation for such a mob writes carries it, and
+/// every later row of the action takes it from a retained earlier one. A
+/// request made for the launch mob has no row with the key.
+pub(crate) const GATING_REQUEST_MOB_KEY: &str = "request_mob_id";
+
+/// The mob a gating request with no origin was made for, as the retained
+/// audit rows of its action tell it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum GatingRequestMob {
+    /// A row an evaluation writes is retained and no row names a mob: the
+    /// launch mob's request, as every request was before a host served a
+    /// second mob.
+    Launch,
+    /// A row names this mob ([`GATING_REQUEST_MOB_KEY`]).
+    Named(meerkat_mob::MobId),
+    /// No row that would tell is retained: neither a row that names a mob
+    /// nor a row an evaluation writes. The audit keeps its newest rows.
+    NotKnown,
+}
+
+impl GatingRequestMob {
+    /// What is known of an action's request mob once the row `entry` of
+    /// that action is read, given what its rows read before told.
+    pub(crate) fn told_by(self, entry: &GatingAuditEntry) -> Self {
+        if let Self::Named(mob_id) = self {
+            return Self::Named(mob_id);
+        }
+        if let Some(mob_id) = entry
+            .detail
+            .get(GATING_REQUEST_MOB_KEY)
+            .and_then(Value::as_str)
+        {
+            return Self::Named(meerkat_mob::MobId::from(mob_id));
+        }
+        if gating_row_is_an_evaluations(entry) {
+            return Self::Launch;
+        }
+        self
+    }
+
+    /// The request mob of the action `action_id`, as the rows `audit` tell
+    /// it.
+    fn of_action(audit: &[GatingAuditEntry], action_id: &str) -> Self {
+        audit
+            .iter()
+            .filter(|entry| entry.action_id == action_id)
+            .fold(Self::NotKnown, Self::told_by)
+    }
+}
+
+/// Whether `entry` is a row an evaluation writes for its action: one of
+/// the evaluation's own event types, and never the pending row of an
+/// escalation successor, which a decision writes.
+pub(crate) fn gating_row_is_an_evaluations(entry: &GatingAuditEntry) -> bool {
+    match entry.event_type.as_str() {
+        "evaluated" | "conflict_blocked" | MEMORY_CONFLICT_LOOKUP_FAILED_EVENT => true,
+        "pending_created" => entry.detail.get("escalated_from_pending_id").is_none(),
+        _ => false,
+    }
+}
+
+/// Name the request mob `mob_id` in an audit row's `detail`.
+fn name_gating_request_mob(detail: &mut Value, mob_id: &str) {
+    if detail.is_null() {
+        *detail = Value::Object(serde_json::Map::new());
+    }
+    // A detail that is no object carries no key.
+    if let Value::Object(detail) = detail {
+        detail.insert(
+            GATING_REQUEST_MOB_KEY.to_string(),
+            Value::String(mob_id.to_string()),
+        );
+    }
+}
+
 fn valid_gating_origin(origin: &GatingOrigin) -> bool {
     !origin.identity.trim().is_empty()
+        // The mob is half of the member's key: a blank one names no mob, and
+        // is never read as the default mob.
+        && origin
+            .mob_id
+            .as_ref()
+            .is_none_or(|mob_id| !mob_id.as_str().trim().is_empty())
         && origin
             .conversation_id
             .as_deref()
@@ -102,6 +185,7 @@ fn approval_notification_disposition(
             | DeliverySendError::InvalidRouteId
             | DeliverySendError::UnknownRouteId(_)
             | DeliverySendError::ForgedResolution
+            | DeliverySendError::ResolutionOfAnotherMob { .. }
             | DeliverySendError::InvalidRecipient
             | DeliverySendError::InvalidSink
             | DeliverySendError::InvalidIdempotencyKey
@@ -294,7 +378,26 @@ impl MetaRuntimeHandle {
     }
     fn record_gating_audit(&mut self, audit_id: String, mut entry: GatingAuditEntry) {
         entry.audit_id = audit_id;
-        entry.timestamp_ms = current_time_ms();
+        entry.timestamp_ms = gating_time_ms();
+        // A row of a request made for a mob names that mob as a retained
+        // earlier row of its action does: every row of such an action
+        // tells its mob while one row of it is retained.
+        if entry.detail.get(GATING_REQUEST_MOB_KEY).is_none()
+            && let Some(mob_id) = self
+                .gating_audit
+                .iter()
+                .rev()
+                .filter(|earlier| earlier.action_id == entry.action_id)
+                .find_map(|earlier| {
+                    earlier
+                        .detail
+                        .get(GATING_REQUEST_MOB_KEY)
+                        .and_then(Value::as_str)
+                })
+                .map(str::to_string)
+        {
+            name_gating_request_mob(&mut entry.detail, &mob_id);
+        }
         // A wake only; readers pull what changed through the audit cursor.
         let _ = self.gating_changes.send(());
         self.gating_audit.push(entry);
@@ -303,7 +406,7 @@ impl MetaRuntimeHandle {
         }
     }
     fn refresh_gating_timeouts(&mut self) {
-        self.refresh_gating_timeouts_at(current_time_ms());
+        self.refresh_gating_timeouts_at(gating_time_ms());
     }
 
     /// Apply expiry as of `now_ms`. A decision uses the same instant for its
@@ -424,7 +527,23 @@ impl MetaRuntimeHandle {
         &mut self,
         request: GatingEvaluateRequest,
     ) -> GatingEvaluateResult {
-        self.evaluate_gating_action_with_origin(request, None)
+        self.evaluate_gating_action_of_mob(request, None)
+    }
+
+    /// Evaluate a request that has no origin and was made for the mob
+    /// `request_mob`: a mob the host serves beside its launch mob, or none
+    /// for the launch mob. The gating owner is the host's, one for every
+    /// mob it serves, so a request for another mob names that mob on every
+    /// audit row its evaluation writes ([`GATING_REQUEST_MOB_KEY`]): the
+    /// console shows and takes such a request only from a caller who may
+    /// address that mob. A request for the launch mob is written as it
+    /// always was.
+    pub(crate) fn evaluate_gating_action_of_mob(
+        &mut self,
+        request: GatingEvaluateRequest,
+        request_mob: Option<&meerkat_mob::MobId>,
+    ) -> GatingEvaluateResult {
+        self.evaluate_gating_action_as(request, None, request_mob)
     }
 
     /// Evaluate at a trusted host action boundary with optional conversation
@@ -434,6 +553,15 @@ impl MetaRuntimeHandle {
         &mut self,
         request: GatingEvaluateRequest,
         origin: Option<GatingOrigin>,
+    ) -> GatingEvaluateResult {
+        self.evaluate_gating_action_as(request, origin, None)
+    }
+
+    fn evaluate_gating_action_as(
+        &mut self,
+        request: GatingEvaluateRequest,
+        origin: Option<GatingOrigin>,
+        request_mob: Option<&meerkat_mob::MobId>,
     ) -> GatingEvaluateResult {
         let action = request.action.trim().to_string();
         let actor_id = request.actor_id.trim().to_string();
@@ -449,6 +577,18 @@ impl MetaRuntimeHandle {
                 pending_id: None,
                 fallback_reason: Some(unavailable.fallback_reason().to_string()),
             });
+        // The action's id was minted by this evaluation, so the retained
+        // rows of that action are the rows it wrote: each names the mob
+        // the request was made for.
+        if let Some(mob_id) = request_mob
+            && !result.action_id.is_empty()
+        {
+            for entry in &mut self.gating_audit {
+                if entry.action_id == result.action_id {
+                    name_gating_request_mob(&mut entry.detail, mob_id.as_str());
+                }
+            }
+        }
         self.flush_gating_notices();
         result
     }
@@ -688,7 +828,7 @@ impl MetaRuntimeHandle {
             }
             GatingRiskTier::R3 => {
                 let pending_id = self.mint_gating_id("pending")?;
-                let created_at_ms = current_time_ms();
+                let created_at_ms = gating_time_ms();
                 // Clamp both ends. The upper bound stops a deadline that
                 // saturates past `u64::MAX` from never expiring (the
                 // timeout-fallback guarantee must stay reachable). The lower
@@ -714,6 +854,11 @@ impl MetaRuntimeHandle {
                 {
                     if self.is_module_loaded("router") && self.is_module_loaded("delivery") {
                         match self.resolve_routing(RoutingResolveRequest {
+                            // An approval's notice is a delivery of the mob
+                            // its action came from: it is resolved over that
+                            // mob's routes (the default mob's when the
+                            // origin names no mob, or there is no origin).
+                            mob_id: origin.as_ref().and_then(|origin| origin.mob_id.clone()),
                             recipient: recipient.clone(),
                             channel: Some(channel.clone()),
                             retry_max: None,
@@ -811,6 +956,10 @@ impl MetaRuntimeHandle {
                 if let Some(resolution) = resolution {
                     let route_id = resolution.route_id.clone();
                     let sent = self.send_delivery(DeliverySendRequest {
+                        // The notice is sent and recorded for the mob its
+                        // resolution was made for: the mob of the action's
+                        // origin.
+                        mob_id: resolution.mob_id.clone(),
                         resolution,
                         payload: serde_json::json!({
                             "kind": APPROVAL_NOTIFICATION_KIND,
@@ -1002,7 +1151,7 @@ impl MetaRuntimeHandle {
         evidence: Option<&GatingDecisionEvidence>,
         withheld: bool,
     ) -> Result<GatingDecisionResult, GatingDecideError> {
-        let now_ms = current_time_ms();
+        let now_ms = gating_time_ms();
         self.refresh_gating_timeouts_at(now_ms);
         // Every check runs against a copy of the entry before anything is
         // taken, so a refusal leaves the entry, its order, the ids and the
@@ -1235,7 +1384,7 @@ impl MetaRuntimeHandle {
         &mut self,
         request: GatingWithdrawRequest,
     ) -> Result<GatingWithdrawResult, GatingWithdrawError> {
-        let now_ms = current_time_ms();
+        let now_ms = gating_time_ms();
         self.refresh_gating_timeouts_at(now_ms);
         // Every check runs before anything is taken: a refusal leaves the
         // entry, its order, the ids and the audit exactly as they were.
@@ -1299,6 +1448,62 @@ impl MetaRuntimeHandle {
             withdrawn_by,
             reason,
         })
+    }
+
+    /// Withdraw, as the host, every pending request that names the mob
+    /// `mob_id`. Asked before a mob is created under that id
+    /// ([`Self::forget_mob`]): what names the id then is an earlier mob's,
+    /// none of whose members waits for the answer, and the mob created
+    /// under the id is not asked for a request of the earlier one. A
+    /// request names the mob when its origin does; a request with no
+    /// origin, when the audit rows of its action do
+    /// ([`GatingRequestMob`]). A request with no origin whose rows name no
+    /// mob (the launch mob's), name another mob, or tell no mob still
+    /// waits: a create under an id says nothing of a request that does not
+    /// name that id. Each is the host's
+    /// withdrawal ([`Self::withdraw_gating_action`]): the request leaves
+    /// the pending set together with its audit entry, and the audit keeps
+    /// what it holds. A request whose withdrawal cannot be recorded stays
+    /// pending, as one whose expiry cannot be recorded does; it cannot be
+    /// decided either.
+    pub(super) fn withdraw_gating_requests_of_mob(&mut self, mob_id: &meerkat_mob::MobId) {
+        self.refresh_gating_timeouts();
+        let of_the_mob = self
+            .gating_pending_order
+            .iter()
+            .filter_map(|pending_id| {
+                let entry = self.gating_pending.get(pending_id)?;
+                let reason = match entry.origin.as_ref() {
+                    Some(origin) => (origin.mob_id.as_ref() == Some(mob_id))
+                        .then_some("the mob of the request's origin is gone"),
+                    None => {
+                        match GatingRequestMob::of_action(&self.gating_audit, &entry.action_id) {
+                            GatingRequestMob::Named(named) => (&named == mob_id)
+                                .then_some("the mob the request was made for is gone"),
+                            GatingRequestMob::NotKnown | GatingRequestMob::Launch => None,
+                        }
+                    }
+                }?;
+                Some((pending_id.clone(), reason))
+            })
+            .collect::<Vec<_>>();
+        for (pending_id, reason) in of_the_mob {
+            // A request that expired since the listing is gone already: only
+            // a withdrawal that cannot be recorded is worth a word.
+            if let Err(GatingWithdrawError::IdsUnavailable(unavailable)) = self
+                .withdraw_gating_action_as_host(GatingWithdrawRequest {
+                    pending_id: pending_id.clone(),
+                    reason: Some(reason.to_string()),
+                })
+            {
+                tracing::warn!(
+                    %pending_id,
+                    %unavailable,
+                    "a gone mob's gating request not withdrawn"
+                );
+            }
+        }
+        self.flush_gating_notices();
     }
 
     /// Audit entries strictly after `after_audit_id`, oldest first, or every
@@ -1687,6 +1892,7 @@ mod notification_disposition_tests {
         DeliveryRecord {
             delivery_id: "delivery-000001".to_string(),
             route_id: "route-1".to_string(),
+            mob_id: None,
             recipient: "approvals@example.com".to_string(),
             sink: "email".to_string(),
             target_module: "delivery".to_string(),
@@ -1964,6 +2170,138 @@ mod withdraw_tests {
         }
     }
 
+    /// A mob that is forgotten leaves no request of its members pending, an
+    /// escalated one included: the live successor of a request a member of
+    /// the mob made is withdrawn by the host and the waiting action is told
+    /// so. The request of another mob's member stays pending.
+    #[test]
+    fn forgetting_a_mob_withdraws_an_escalated_requests_live_successor_and_tells_its_action() {
+        let mut owner = owner();
+        let notices = Arc::new(Notices::default());
+        owner.register_gating_resolution_observer(notices.clone());
+        owner.set_gating_escalation_routes(GatingEscalationRoutes {
+            default: Some("person:deputy".to_string()),
+            ..GatingEscalationRoutes::default()
+        });
+        let a_member_of = |mob: &str| GatingOrigin {
+            mob_id: Some(meerkat_mob::MobId::from(mob)),
+            identity: "worker".to_string(),
+            conversation_id: None,
+            interaction_id: None,
+        };
+        let original = owner
+            .evaluate_gating_action_with_origin(r3(), Some(a_member_of("second")))
+            .pending_id
+            .expect("an R3 action pends");
+        let of_another_mob = owner
+            .evaluate_gating_action_with_origin(r3(), Some(a_member_of("third")))
+            .pending_id
+            .expect("an R3 action pends");
+        let successor = owner
+            .decide_gating_action(decide(&original, GatingDecision::Escalate))
+            .expect("escalated")
+            .next_pending_id
+            .expect("a successor");
+
+        owner.forget_mob(&meerkat_mob::MobId::from("second"));
+
+        let still_pending: Vec<String> = owner
+            .list_gating_pending()
+            .into_iter()
+            .map(|entry| entry.pending_id)
+            .collect();
+        assert_eq!(
+            still_pending,
+            vec![of_another_mob],
+            "the forgotten mob's escalated request no longer waits, and the other mob's does"
+        );
+        let withdrawn: Vec<Option<String>> = owner
+            .gating_audit_entries(50)
+            .into_iter()
+            .filter(|entry| entry.event_type == "request_withdrawn")
+            .map(|entry| entry.pending_id)
+            .collect();
+        assert_eq!(
+            withdrawn,
+            vec![Some(successor.clone())],
+            "the host withdrew the live successor"
+        );
+        assert_eq!(
+            notices.0.lock().unwrap().last().cloned(),
+            Some((successor, false, "withdrawn".to_string())),
+            "the waiting action is told its request was withdrawn"
+        );
+    }
+
+    /// A create under an id withdraws the waiting requests with no origin
+    /// that name that id: those whose audit rows name the mob. A request
+    /// whose rows name another mob, one whose rows name no mob (the launch
+    /// mob's), and one none of whose evaluation's rows is retained, which
+    /// names no mob, still wait.
+    #[test]
+    fn forgetting_a_mob_withdraws_the_requests_made_for_it_with_no_origin() {
+        let mut first = owner();
+        let of_the_gone_mob = pend(&mut first);
+        let of_another_mob = pend(&mut first);
+        let of_the_launch_mob = pend(&mut first);
+        let of_no_known_mob = pend(&mut first);
+        let mut stored = first.gating_state_snapshot();
+        let action_of = |pending_id: &str| {
+            stored
+                .pending
+                .iter()
+                .find(|entry| entry.pending_id == pending_id)
+                .map(|entry| entry.action_id.clone())
+                .expect("the request waits")
+        };
+        // As an evaluation for a mob writes its rows, and as an audit that
+        // kept only its newest rows holds them.
+        let named: std::collections::BTreeMap<String, &str> = [
+            (action_of(&of_the_gone_mob), "second"),
+            (action_of(&of_another_mob), "third"),
+        ]
+        .into_iter()
+        .collect();
+        let lost = action_of(&of_no_known_mob);
+        stored.audit.retain(|entry| entry.action_id != lost);
+        for entry in &mut stored.audit {
+            if let Some(mob) = named.get(&entry.action_id) {
+                entry.detail["request_mob_id"] = serde_json::json!(mob);
+            }
+        }
+        let mut owner = owner();
+        owner
+            .restore_gating_state(stored)
+            .expect("the stored state is restored");
+
+        owner.forget_mob(&meerkat_mob::MobId::from("second"));
+
+        let still_pending: Vec<String> = owner
+            .list_gating_pending()
+            .into_iter()
+            .map(|entry| entry.pending_id)
+            .collect();
+        assert_eq!(
+            still_pending,
+            vec![of_another_mob, of_the_launch_mob, of_no_known_mob],
+            "the request that names the mob no longer waits, and every other does"
+        );
+        let withdrawn: Vec<(Option<String>, Value)> = owner
+            .gating_audit_entries(512)
+            .into_iter()
+            .filter(|entry| entry.event_type == "request_withdrawn")
+            .map(|entry| (entry.pending_id, entry.detail["reason"].clone()))
+            .collect();
+        assert_eq!(
+            withdrawn,
+            vec![(
+                Some(of_the_gone_mob),
+                serde_json::json!("the mob the request was made for is gone")
+            )],
+            "the one withdrawal is of the request that names the mob"
+        );
+    }
+
     #[test]
     fn an_escalation_chain_that_ended_in_a_verdict_answers_unknown() {
         let mut owner = owner();
@@ -2207,5 +2545,243 @@ mod withdraw_tests {
             ),
         );
         assert_eq!(decided["error"]["code"], serde_json::json!(-32602));
+    }
+
+    fn member_keyed_origin(mob_id: Option<&str>) -> GatingOrigin {
+        GatingOrigin {
+            mob_id: mob_id.map(meerkat_mob::MobId::from),
+            identity: "alice".to_string(),
+            conversation_id: None,
+            interaction_id: None,
+        }
+    }
+
+    /// Two mobs of one host each have a member named `alice`, and each asks
+    /// for an approval. The gating owner's requests are the host's: each
+    /// keeps the member it came from, mob and identity, across the owner's
+    /// stored state, and a caller who may view one alice sees her request
+    /// and not the other's.
+    #[test]
+    fn member_keyed_gating_two_mobs_members_of_one_name_keep_their_own_requests() {
+        let mut gating = owner();
+        let of_launch =
+            gating.evaluate_gating_action_with_origin(r3(), Some(member_keyed_origin(None)));
+        let of_second = gating
+            .evaluate_gating_action_with_origin(r3(), Some(member_keyed_origin(Some("second"))));
+        assert_eq!(of_launch.outcome, GatingOutcome::PendingApproval);
+        assert_eq!(of_second.outcome, GatingOutcome::PendingApproval);
+
+        // The stored state keeps each origin's mob, and a restored owner
+        // reads the same members.
+        let snapshot = gating.gating_state_snapshot();
+        let stored = serde_json::to_string(&snapshot).expect("snapshot");
+        let mut restored = owner();
+        restored
+            .restore_gating_state(serde_json::from_str(&stored).expect("stored state"))
+            .expect("restore");
+        let default_mob = crate::member_key::DefaultMob::new(meerkat_mob::MobId::from("launch"));
+        let pending = restored.list_gating_pending();
+        let mobs = pending
+            .iter()
+            .map(|entry| {
+                entry
+                    .origin
+                    .as_ref()
+                    .expect("origin")
+                    .mob(&default_mob)
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(mobs, ["launch", "second"]);
+
+        // Bob may view the default mob's alice. The second mob's alice is
+        // private to someone else.
+        let access = crate::access::AccessController::disabled();
+        access.record_agent_attributes(crate::access::AgentResourceAttributes {
+            identity: "alice".to_string(),
+            ..Default::default()
+        });
+        access.record_agent_attributes_in(
+            &meerkat_mob::MobId::from("second"),
+            crate::access::AgentResourceAttributes {
+                identity: "alice".to_string(),
+                labels: std::collections::BTreeMap::from([(
+                    crate::access::PRIVATE_TO_LABEL.to_string(),
+                    "person:dana".to_string(),
+                )]),
+                ..Default::default()
+            },
+        );
+        let bob = access.view_for_subject(Some("bob@example.test"));
+        let visible = pending
+            .iter()
+            .filter(|entry| {
+                crate::http_console::gating_origin_agent_viewable(
+                    &bob,
+                    entry.origin.as_ref().expect("origin"),
+                )
+            })
+            .map(|entry| entry.pending_id.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            visible,
+            [of_launch.pending_id.expect("pending")],
+            "bob sees the request of the alice he may view, and not the other's"
+        );
+    }
+
+    /// A gating request stored before origins named a mob has none: its
+    /// member is the default mob's, never the member of that name in
+    /// another mob, and the owner writes it back as it was.
+    #[test]
+    fn member_keyed_gating_an_origin_stored_without_a_mob_is_the_default_mobs() {
+        let mut first = owner();
+        first.evaluate_gating_action_with_origin(r3(), Some(member_keyed_origin(None)));
+        let mut stored = serde_json::to_value(first.gating_state_snapshot()).expect("snapshot");
+        let origin = &stored["pending"][0]["origin"];
+        assert_eq!(
+            origin,
+            &serde_json::json!({ "identity": "alice" }),
+            "an origin of the default mob is stored as it always was"
+        );
+        let mut restored = owner();
+        restored
+            .restore_gating_state(serde_json::from_value(stored.clone()).expect("stored state"))
+            .expect("restore");
+        let default_mob = crate::member_key::DefaultMob::new(meerkat_mob::MobId::from("launch"));
+        let pending = restored.list_gating_pending();
+        let origin = pending[0].origin.as_ref().expect("origin");
+        assert_eq!(origin.mob(&default_mob), meerkat_mob::MobId::from("launch"));
+
+        let access = crate::access::AccessController::disabled();
+        access.record_agent_attributes_in(
+            &meerkat_mob::MobId::from("second"),
+            crate::access::AgentResourceAttributes {
+                identity: "alice".to_string(),
+                labels: std::collections::BTreeMap::from([(
+                    crate::access::PRIVATE_TO_LABEL.to_string(),
+                    "person:dana".to_string(),
+                )]),
+                ..Default::default()
+            },
+        );
+        let bob = access.view_for_subject(Some("bob@example.test"));
+        assert!(
+            crate::http_console::gating_origin_agent_viewable(&bob, origin),
+            "the stored request is the default mob's alice's, whom nothing hides"
+        );
+
+        // A blank mob names no mob: the owner refuses the state rather than
+        // read it as the default mob's.
+        stored["pending"][0]["origin"]["mob_id"] = serde_json::json!(" ");
+        let refused =
+            owner().restore_gating_state(serde_json::from_value(stored).expect("stored state"));
+        assert!(refused.is_err(), "{refused:?}");
+    }
+
+    /// A blank mob (an empty id, or only white space) in an origin names no
+    /// mob. The gating owner fails closed on it and never reads such an
+    /// origin as the default mob's member: it refuses a stored state that
+    /// holds one, in a pending request and in an audit entry alike, and a
+    /// request that is evaluated with one is not recorded, neither as a
+    /// pending request nor in the audit. No released version writes a blank
+    /// mob, so no state a host stored meets this. The default mob is named
+    /// by leaving the mob out.
+    #[test]
+    fn member_keyed_gating_a_blank_or_whitespace_mob_in_an_origin_is_refused_and_never_the_default_mobs()
+     {
+        let mut first = owner();
+        first.evaluate_gating_action_with_origin(r3(), Some(member_keyed_origin(Some("second"))));
+        let stored = serde_json::to_value(first.gating_state_snapshot()).expect("snapshot");
+        assert_eq!(
+            stored["pending"][0]["origin"]["mob_id"],
+            serde_json::json!("second")
+        );
+        let audit_with_origin = stored["audit"]
+            .as_array()
+            .expect("audit")
+            .iter()
+            .position(|entry| entry["detail"]["origin"]["mob_id"] == serde_json::json!("second"))
+            .expect("an audit entry that carries the origin");
+        owner()
+            .restore_gating_state(serde_json::from_value(stored.clone()).expect("stored state"))
+            .expect("the state as it was stored restores");
+
+        for blank in ["", " ", "\t"] {
+            let mut in_pending = stored.clone();
+            in_pending["pending"][0]["origin"]["mob_id"] = serde_json::json!(blank);
+            let refused = owner()
+                .restore_gating_state(serde_json::from_value(in_pending).expect("stored state"));
+            assert!(
+                refused.is_err(),
+                "{blank:?} in a pending origin: {refused:?}"
+            );
+
+            let mut in_audit = stored.clone();
+            in_audit["audit"][audit_with_origin]["detail"]["origin"]["mob_id"] =
+                serde_json::json!(blank);
+            let refused = owner()
+                .restore_gating_state(serde_json::from_value(in_audit).expect("stored state"));
+            assert!(
+                refused.is_err(),
+                "{blank:?} in an audit origin: {refused:?}"
+            );
+
+            let mut gating = owner();
+            gating.evaluate_gating_action_with_origin(r3(), Some(member_keyed_origin(Some(blank))));
+            assert!(
+                gating.list_gating_pending().is_empty(),
+                "{blank:?}: a request of a member of no mob is pending"
+            );
+            let recorded = serde_json::to_value(gating.gating_state_snapshot()).expect("snapshot");
+            assert_eq!(
+                recorded["audit"],
+                serde_json::json!([]),
+                "{blank:?}: a request of a member of no mob is in the audit"
+            );
+        }
+    }
+
+    /// The origin of a gating request as a release before origins named a
+    /// mob reads it: three members, and no refusal of a member it does not
+    /// know.
+    #[derive(Debug, serde::Deserialize, serde::Serialize)]
+    struct OriginBeforeOriginsNamedAMob {
+        identity: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        conversation_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        interaction_id: Option<String>,
+    }
+
+    /// A release before origins named a mob reads the origin of another
+    /// mob's member as the default mob's member of that name, and writes it
+    /// back without the mob. The stored state keeps its version, so such a
+    /// release restores it instead of refusing it: the upgrade notes say
+    /// what to do before going back to one.
+    #[test]
+    fn member_keyed_gating_an_earlier_build_reads_an_origin_of_another_mob_as_the_default_mobs() {
+        let mut first = owner();
+        first.evaluate_gating_action_with_origin(r3(), Some(member_keyed_origin(Some("second"))));
+        let stored = serde_json::to_value(first.gating_state_snapshot()).expect("snapshot");
+        assert_eq!(
+            stored["version"],
+            serde_json::json!(2),
+            "the state keeps the version an earlier build restores"
+        );
+        let origin = &stored["pending"][0]["origin"];
+        assert_eq!(
+            origin,
+            &serde_json::json!({ "mob_id": "second", "identity": "alice" }),
+            "the origin of another mob's member is stored with its mob"
+        );
+        let earlier: OriginBeforeOriginsNamedAMob =
+            serde_json::from_value(origin.clone()).expect("an earlier build reads the origin");
+        assert_eq!(earlier.identity, "alice");
+        assert_eq!(
+            serde_json::to_value(&earlier).expect("written back"),
+            serde_json::json!({ "identity": "alice" }),
+            "written back as the default mob's alice"
+        );
     }
 }

@@ -5539,9 +5539,13 @@ fn autonomous_stop_phase(pending_kickoffs: usize, resolved_kickoffs: usize) -> A
 fn disposal_uses_host_release_authority(host_owned: bool) -> bool {
     host_owned
 }
+/// The delay a row asked for before a spawn's provisioned completion is sent,
+/// per mob. Only the spawns of the mob a row named are held back: rows that
+/// run side by side in one process neither end each other's delay nor sleep
+/// through it.
 #[cfg(test)]
-pub(super) static SPAWN_PROVISIONED_COMMAND_DELAY_MS: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
+pub(super) static SPAWN_PROVISIONED_COMMAND_DELAYS_MS: std::sync::Mutex<Vec<(MobId, u64)>> =
+    std::sync::Mutex::new(Vec::new());
 /// The sessions of the spawns whose completion the delay above is holding
 /// back: each is recorded once its pending slot names it, before the delay.
 #[cfg(test)]
@@ -7474,6 +7478,10 @@ pub(super) struct PendingSpawn {
     /// admission: the root its row stores and, for a fork seat, the record
     /// its membership commit's step makes in MobMachine.
     pub(super) instruction_lineage: operator_instructions::SpawnInstructionLineage,
+    /// Who seats the member, composed once at the spawn's admission from
+    /// what the runtime observed: its spawn row stores it. `None` only for
+    /// a runtime successor of a seat whose row holds no record.
+    pub(super) seat_record: Option<crate::MemberSeat>,
     /// Whether the spawn acts for the identity entry of its name
     /// (`SpawnMemberSpec::entry_custody`), carried to its ladder's open.
     pub(super) entry_custody: bool,
@@ -8468,6 +8476,8 @@ struct SpawnFinalizeCtx {
     /// spawn event stores and, for a fork seat, the record the membership
     /// commit's own step makes in MobMachine.
     instruction_lineage: operator_instructions::SpawnInstructionLineage,
+    /// Who seats the member, for its spawn row.
+    seat_record: Option<crate::MemberSeat>,
     /// Whether the spawn acts for the identity entry of its name: its
     /// ladder's open carries it, and its membership commit records the
     /// member an entry (MobMachine's `spawn_exec_entry_custody`).
@@ -8609,6 +8619,8 @@ impl SpawnActivateState {
             // Stored on the spawn's row and recorded in MobMachine at its
             // admission: the roster keeps no copy.
             instruction_lineage: _,
+            // Stored on the spawn's row at its admission.
+            seat_record: _,
             entry_custody: _,
             created_custody: _,
             // Recorded on the spawn's row at its admission.
@@ -9850,7 +9862,9 @@ pub(super) struct MobActor {
     pub(super) autonomous_stop_interrupts: BTreeMap<AgentIdentity, AutonomousStopInterruptTask>,
     /// Same-process exact successes so one slow host does not make command
     /// retries re-interrupt already-quiesced peers. Cold replay may safely
-    /// repeat the exact fenced interrupt.
+    /// repeat the exact fenced interrupt. A kept success is true only while
+    /// the hold taken with it is in place: a failed Stop that releases the
+    /// holds drops them all.
     pub(super) autonomous_stop_interrupted: BTreeMap<AgentIdentity, AutonomousStopInterrupted>,
     /// Per-member outcomes of the current Stop (#1500), reported on its reply.
     pub(super) stop_member_outcomes: BTreeMap<AgentIdentity, super::stop_report::MemberStopOutcome>,
@@ -10057,6 +10071,14 @@ pub(super) struct MobActor {
     /// durable HostStatus truth drive a retry.
     pub(super) orphan_release_reservations:
         BTreeMap<super::state::HostOrphanReleaseKey, HostOrphanReleaseReservation>,
+    /// The runtime each external reciprocal trust row was realized on, by the
+    /// external edge it belongs to: the handle the removal of that row is
+    /// realized through when the edge ends. Realization custody only, and
+    /// weak: MobMachine authorizes the row and its removal, and a runtime
+    /// that is gone holds no row. Volatile: a restart clears it, and the
+    /// rows of a runtime another process built are not this actor's to reach.
+    pub(super) external_peer_reciprocal_trust_targets:
+        BTreeMap<mob_dsl::ExternalPeerKey, std::sync::Weak<dyn CoreCommsRuntime>>,
     /// Volatile binding-incarnation fence for each host identity. Supervisor
     /// epochs are not sufficient here: revoke followed by a fresh bind may
     /// reuse the same authority epoch while changing the host route/process.
@@ -10511,6 +10533,95 @@ async fn observe_member_runtime_run_state(
     _session_id: &SessionId,
 ) -> Option<super::handle::MemberRunState> {
     None
+}
+
+/// Name the member whose session holds a committed run with unsettled
+/// terminal work: the member starts nothing further until it is settled.
+/// The runtime knows the session and the run; the mob knows whose they are.
+fn report_member_unsettled_run(
+    mob_id: &MobId,
+    agent_identity: &AgentIdentity,
+    session_id: &SessionId,
+    run_id: &meerkat_core::lifecycle::RunId,
+    unsettled_for: Duration,
+) {
+    tracing::error!(
+        %mob_id,
+        member = %agent_identity,
+        %session_id,
+        %run_id,
+        unsettled_secs = unsettled_for.as_secs(),
+        "member's committed run is not settled; the member starts nothing further until it is"
+    );
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod unsettled_run_report_tests {
+    use super::*;
+
+    #[derive(Clone, Default)]
+    struct CapturedErrors(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CapturedErrors {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn an_unsettled_member_run_is_reported_by_member_and_session() {
+        let errors = CapturedErrors::default();
+        let writer = errors.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::ERROR)
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let mob_id = MobId::from("review-mob");
+        let member = AgentIdentity::from("reviewer");
+        let session_id = SessionId::new();
+        let run_id = meerkat_core::lifecycle::RunId::new();
+        report_member_unsettled_run(
+            &mob_id,
+            &member,
+            &session_id,
+            &run_id,
+            Duration::from_secs(75),
+        );
+
+        let log = String::from_utf8_lossy(
+            &errors
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+        .into_owned();
+        for expected in [
+            "ERROR".to_string(),
+            "member's committed run is not settled".to_string(),
+            "mob_id=review-mob".to_string(),
+            "member=reviewer".to_string(),
+            format!("session_id={session_id}"),
+            format!("run_id={run_id}"),
+            "unsettled_secs=75".to_string(),
+        ] {
+            assert!(
+                log.contains(&expected),
+                "the report must carry `{expected}`: {log}"
+            );
+        }
+    }
 }
 
 pub(super) fn unavailable_member_progress(
@@ -22301,7 +22412,11 @@ impl MobActor {
     }
 
     /// Member sessions whose native runtime holds accepted work that has not
-    /// reached a terminal: queued, held at its start, or running.
+    /// reached a terminal (queued, held at its start, or running), or holds
+    /// an open live channel. A live channel is opened and closed on the
+    /// member's session without a command of this actor, so the session's
+    /// own machine state is the one place that knows it: a mob is not idle
+    /// while a member of it is in a live conversation.
     async fn native_accepted_work(&self) -> usize {
         #[cfg(feature = "runtime-adapter")]
         if let Some(runtime) = self.runtime_adapter.as_ref() {
@@ -22314,13 +22429,27 @@ impl MobActor {
                 .collect();
             let mut busy_sessions = 0_usize;
             for session_id in &sessions {
-                if runtime.session_has_active_inputs(session_id).await {
+                if runtime.session_has_active_inputs(session_id).await
+                    || runtime.session_live_channel_active(session_id).await
+                {
                     busy_sessions = busy_sessions.saturating_add(1);
                 }
             }
             return busy_sessions;
         }
         0
+    }
+
+    /// What is in flight, for a close and for an observation alike: the
+    /// actor's own busy counts and, only when those are idle, the members'
+    /// native accepted work. One computation, so an observation reads what
+    /// a close is decided on.
+    async fn admission_in_flight(&self, deferred_commands: &VecDeque<RoutedMobCommand>) -> MobBusy {
+        let mut busy = self.admission_busy(deferred_commands);
+        if busy.is_idle() {
+            busy.runs = self.native_accepted_work().await;
+        }
+        busy
     }
 
     /// Decide one close on the serialized admission path. Mob-admitted work
@@ -22332,16 +22461,26 @@ impl MobActor {
         request: super::admission_close::CloseRequest,
         deferred_commands: &VecDeque<RoutedMobCommand>,
     ) -> super::admission_close::CloseDecision {
-        let mut busy = self.admission_busy(deferred_commands);
-        if busy.is_idle() {
-            busy.runs = self.native_accepted_work().await;
-        }
+        let busy = self.admission_in_flight(deferred_commands).await;
         let ownership = Arc::clone(&self.ownership);
         let decision = ownership.decide(request, || busy);
         if let super::admission_close::CloseDecision::Closed { reason, .. } = decision {
             self.enter_admission_closed(reason);
         }
         decision
+    }
+
+    /// Observe, on the serialized admission path, the facts a close is
+    /// decided on, and decide nothing: the actor's own busy counts, the
+    /// members' native accepted work when those are idle, the foreground
+    /// leases and why admission is closed when it is. Nothing is closed,
+    /// and no owner is taken.
+    async fn observe_admission_idle(
+        &self,
+        deferred_commands: &VecDeque<RoutedMobCommand>,
+    ) -> super::admission_close::MobIdleObservation {
+        let busy = self.admission_in_flight(deferred_commands).await;
+        self.ownership.observe(busy)
     }
 
     /// Close admission if the mob is idle and no foreground owner holds a
@@ -22817,14 +22956,25 @@ impl MobActor {
             // The Stop's error stays the reported one. An actor
             // fail-stopping for cold recovery releases none: cold replay
             // alone decides whether work can start.
-            if !self.durable_uncertainty_fail_stop.is_set()
-                && let Err(error) = self.release_all_member_run_starts().await
-            {
-                tracing::warn!(
-                    mob_id = %self.definition.id,
-                    error = %error,
-                    "a failed stop could not release every member's run-start hold"
-                );
+            if !self.durable_uncertainty_fail_stop.is_set() {
+                // The interrupts kept as done stand for members held since
+                // they were interrupted. Releasing the holds ends that: a
+                // released member can start a run its kept interrupt never
+                // saw, and a Stop or Shutdown issued again would skip the
+                // member and wait for a run nobody cancels. So the kept
+                // interrupts go with the holds, and so do the ones still in
+                // flight, whose results belong to this failed Stop. The Stop
+                // or Shutdown issued again holds each member and cancels
+                // exactly the run the member has then.
+                self.autonomous_stop_interrupted.clear();
+                self.autonomous_stop_interrupts.clear();
+                if let Err(error) = self.release_all_member_run_starts().await {
+                    tracing::warn!(
+                        mob_id = %self.definition.id,
+                        error = %error,
+                        "a failed stop could not release every member's run-start hold"
+                    );
+                }
             }
         }
         stop_result
@@ -33837,9 +33987,19 @@ impl MobActor {
                 MobCommand::DrainRunsSnapshot { reply_tx } => {
                     let _ = reply_tx.send(self.drain_runs_snapshot().await);
                 }
+                MobCommand::ObserveIdle { reply_tx } => {
+                    let _ = reply_tx.send(Ok(self.observe_admission_idle(deferred_commands).await));
+                }
                 MobCommand::CloseIfIdle { reply_tx } => {
-                    let outcome = self.close_admission_if_idle(deferred_commands).await;
-                    let _ = reply_tx.send(Ok(outcome));
+                    // A caller that stopped waiting has already read the
+                    // missing answer as "not closed". Deciding the close now
+                    // would close a mob nobody is told about, so a request
+                    // whose caller is gone is skipped before anything is
+                    // decided.
+                    if !reply_tx.is_closed() {
+                        let outcome = self.close_admission_if_idle(deferred_commands).await;
+                        let _ = reply_tx.send(Ok(outcome));
+                    }
                 }
                 MobCommand::CloseAdmission { reason, reply_tx } => {
                     let busy = self.close_admission(reason, deferred_commands).await;
@@ -37243,6 +37403,7 @@ impl MobActor {
             definition_wiring: entry.definition_wiring,
             dispatch_admission: Default::default(),
             instruction_lineage: Default::default(),
+            seat_record: None,
             entry_custody: false,
             created_custody: false,
             history_unavailable: None,
@@ -37433,11 +37594,15 @@ impl MobActor {
             && owner_bridge_session_id.is_none()
             && spec.seats_store_owned_row())
         .then(|| spec.labels.clone().unwrap_or_default());
+        // What the handle's entries observed of the call stands whatever
+        // the customizer answers: it is no part of what a customizer writes.
+        let seat_observed = spec.seat.clone();
         if respawn_origin.is_none()
             && let Err(error) = self.customize_spawn_spec(spawn_source, spawner.as_ref(), &mut spec)
         {
             reject_spawn_before_custody!("customize_spawn_spec", error);
         }
+        spec.seat = seat_observed;
         // A store-owned member carries its seat's labels and no others: a
         // label the customizer set, dropped or changed is refused as one
         // the host's composition answered is, for good, naming the keys.
@@ -37759,6 +37924,8 @@ impl MobActor {
             instruction_lineage_root,
             // Answered at the fork source's first lookup; nothing else reads it.
             fork_source_answered_absent: _,
+            // Read for the member's seat record alone.
+            seat,
         } = spec;
         let dispatch_admission = super::fork_build::SpawnDispatchAdmissionFacts {
             lineage: dispatch_admission_lineage,
@@ -37809,6 +37976,39 @@ impl MobActor {
         } else {
             creation_origin
         };
+        // Who seats the member, composed once from what the runtime
+        // observed: the spawn's row stores it. Nothing reads it to decide.
+        let seat_record = super::seat_lineage::compose_seat(
+            &seat,
+            &super::seat_lineage::SeatStepFacts {
+                owner_session: owner_bridge_session_id.clone(),
+                definition_seat: matches!(
+                    spawn_source,
+                    super::handle::SpawnSource::FlowProvisioning
+                        | super::handle::SpawnSource::PolicySpawn
+                ),
+                fork_seat: fork_spec.is_some() || fork_source.is_some(),
+                fork_source: fork_source.is_some(),
+                // The caller's own copy: the member whose turn asked for the
+                // copy is the sealed creator itself, a member of this mob.
+                own_turn: spawned_by.as_ref().is_some_and(|by| {
+                    seat.creator
+                        .as_ref()
+                        .and_then(|creator| creator.recorded())
+                        .is_some_and(|recorded| {
+                            &recorded.creator_identity == by
+                                && recorded.parent_mob_id == self.definition.id
+                        })
+                }),
+                placed: false,
+                same_mob_bindings_agree: super::seat_lineage::sealed_creator_bindings_agree(
+                    seat.creator.as_ref(),
+                    &self.definition.id,
+                    self.incarnation.incarnation(),
+                    self.dsl_authority.state(),
+                ),
+            },
+        );
         let inline_preparation = async {
             if agent_identity.is_system_reserved() && !allow_reserved_flow_identity {
                 return Err(MobError::WiringError(format!(
@@ -38024,6 +38224,7 @@ impl MobActor {
             definition_wiring,
             dispatch_admission,
             instruction_lineage,
+            seat_record,
             entry_custody,
             created_custody,
             history_unavailable,
@@ -38672,6 +38873,7 @@ impl MobActor {
             definition_wiring,
             dispatch_admission,
             instruction_lineage,
+            seat_record,
             entry_custody,
             created_custody,
             history_unavailable,
@@ -38892,6 +39094,7 @@ impl MobActor {
                 definition_wiring,
                 dispatch_admission,
                 instruction_lineage,
+                seat_record,
                 entry_custody,
                 created_custody,
                 history_unavailable,
@@ -39157,6 +39360,7 @@ impl MobActor {
             definition_wiring,
             dispatch_admission,
             instruction_lineage,
+            seat_record,
             entry_custody,
             created_custody,
             history_unavailable,
@@ -39355,8 +39559,12 @@ impl MobActor {
                         }
                         #[cfg(test)]
                         {
-                            let delay_ms = SPAWN_PROVISIONED_COMMAND_DELAY_MS
-                                .load(std::sync::atomic::Ordering::Relaxed);
+                            let delay_ms = SPAWN_PROVISIONED_COMMAND_DELAYS_MS
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .iter()
+                                .find(|(delayed_mob_id, _)| *delayed_mob_id == panic_mob_id)
+                                .map_or(0, |(_, delay_ms)| *delay_ms);
                             if delay_ms > 0 {
                                 // The slot names the provisioned session from
                                 // here on. A row that holds the completion
@@ -40344,6 +40552,8 @@ impl MobActor {
             instruction_lineage_root: _,
             // Answered at the fork source's first lookup; nothing else reads it.
             fork_source_answered_absent: _,
+            // Read for the member's seat record alone.
+            seat,
         } = spec;
         let Some(host) = placement else {
             fail!(MobError::Internal(
@@ -41289,6 +41499,16 @@ impl MobActor {
                     .await
                 ),
             };
+        // A placed member's seat shows nothing of who asked (its carrier
+        // keeps none of it); a runtime successor keeps what the seat it
+        // follows holds.
+        let seat_record = super::seat_lineage::compose_seat(
+            &seat,
+            &super::seat_lineage::SeatStepFacts {
+                placed: true,
+                ..Default::default()
+            },
+        );
         let pending = PendingSpawn {
             profile_name,
             agent_identity: agent_identity.clone(),
@@ -41324,6 +41544,7 @@ impl MobActor {
             // controller recovers from its carrier after a restart seats
             // its member with no lineage.
             instruction_lineage,
+            seat_record,
             // The remote ladder's custody is MobMachine's, recorded at its
             // open (spawn_exec_entry_custody, spawn_exec_created_custody):
             // the pending record of a placed spawn carries none.
@@ -41628,6 +41849,7 @@ impl MobActor {
                 definition_wiring,
                 dispatch_admission,
                 instruction_lineage,
+                seat_record,
                 entry_custody,
                 created_custody,
                 history_unavailable,
@@ -41838,6 +42060,7 @@ impl MobActor {
                                 definition_wiring,
                                 dispatch_admission,
                                 instruction_lineage,
+                                seat_record,
                                 entry_custody,
                                 created_custody,
                                 history_unavailable,
@@ -41928,6 +42151,7 @@ impl MobActor {
                                 definition_wiring,
                                 dispatch_admission,
                                 instruction_lineage,
+                                seat_record,
                                 entry_custody,
                                 created_custody,
                                 history_unavailable,
@@ -42110,6 +42334,8 @@ impl MobActor {
             // Nor is it a fork seat.
             instruction_lineage_root: _,
             fork_source_answered_absent: _,
+            // Read for the member's seat record alone.
+            seat: _,
         } = member_spec;
 
         if agent_identity.is_system_reserved() {
@@ -42347,6 +42573,14 @@ impl MobActor {
         // The pending slot's reply is forwarded to the parked deliveries by
         // `PolicySpawnSettled`; nothing awaits it on the actor.
         let (pending_reply_tx, pending_reply_rx) = oneshot::channel();
+        // The mob's own definition seats the member.
+        let seat_record = super::seat_lineage::compose_seat(
+            &super::seat_lineage::SeatObservations::default(),
+            &super::seat_lineage::SeatStepFacts {
+                definition_seat: true,
+                ..Default::default()
+            },
+        );
         let pending = PendingSpawn {
             profile_name: profile_name.clone(),
             agent_identity: agent_identity.clone(),
@@ -42379,6 +42613,7 @@ impl MobActor {
                 present: policy_dispatch_admission.is_some(),
             },
             instruction_lineage,
+            seat_record,
             entry_custody: false,
             created_custody: false,
             history_unavailable: None,
@@ -43347,6 +43582,11 @@ impl MobActor {
             // member (recorded above for a fork seat), so replay records it
             // again once the carrier has seated the member.
             spawned.instruction_lineage_root = ctx.instruction_lineage.root.clone();
+            // Durable: who seated the member, as its admission composed it.
+            spawned.seat_lineage = ctx
+                .seat_record
+                .as_ref()
+                .and_then(crate::MemberSeat::to_stored);
             // Durable: the identity entry MobMachine recorded for the placed
             // member in its membership commit (a spawn holding the entry's
             // custody), so replay records the entry again after the carrier.
@@ -43590,6 +43830,12 @@ impl MobActor {
         // entry MobMachine keeps for the identity, so the replay of either
         // row writes the entry the live mob holds.
         spawned_event.instruction_lineage_root = ctx.instruction_lineage.root.clone();
+        // Durable: who seated the member, as its admission composed it from
+        // what the runtime observed. It allows nothing.
+        spawned_event.seat_lineage = ctx
+            .seat_record
+            .as_ref()
+            .and_then(crate::MemberSeat::to_stored);
         // Durable: replay records an exempt member in MobMachine again, and
         // its roster entry keeps it for its respawn.
         spawned_event.definition_wiring = ctx.definition_wiring;
@@ -50842,16 +51088,11 @@ impl MobActor {
         self.ensure_member_runtime_durability_ready(&recipient_entry)
             .await?;
 
-        let edge = mob_dsl::WiringEdge::new(
-            mob_dsl::AgentIdentity::from_domain(&AgentIdentity::from(from.as_str())),
-            mob_dsl::AgentIdentity::from_domain(&AgentIdentity::from(to.as_str())),
+        let wired_by_machine = super::handle::MobHandle::machine_members_wired(
+            self.dsl_authority.state(),
+            from.as_str(),
+            to.as_str(),
         );
-        let wired_by_machine = self
-            .dsl_authority
-            .state()
-            .wiring_edges
-            .iter()
-            .any(|existing| existing == &edge);
         if !wired_by_machine {
             return Err(MobError::WiringError(format!(
                 "peer message requires wired members '{from}' and '{to}'"
@@ -52021,7 +52262,155 @@ impl MobActor {
         .map_err(MobError::WiringError)?;
         self.apply_trusted_peer_add(target_comms.as_ref(), peer, authority)
             .await
+            .map_err(MobError::CommsError)?;
+        // The row stands on `target_comms`: its removal, when the edge ends,
+        // is realized through this handle.
+        self.external_peer_reciprocal_trust_targets
+            .insert(key, Arc::downgrade(&target_comms));
+        Ok(())
+    }
+
+    /// Ask MobMachine for the removal of the reciprocal trust row that
+    /// [`Self::apply_external_peer_reciprocal_trust`] added for `key`'s
+    /// member on the external peer's runtime, and realize it there. Called
+    /// before a machine input ends the external edge (the member's
+    /// retirement, its mob's destroy, an explicit unwire), while MobMachine
+    /// still holds the edge and the member's peer. The runtime handle is the
+    /// one the add was realized on, and it is taken: the removal is asked
+    /// once. Best effort: a runtime that is gone holds no row, and a removal
+    /// that is refused is logged and never fails the edge's end.
+    async fn remove_external_peer_reciprocal_trust_before_edge_end(
+        &mut self,
+        key: &mob_dsl::ExternalPeerKey,
+    ) {
+        let Some(target) = self.external_peer_reciprocal_trust_targets.remove(key) else {
+            return;
+        };
+        let Some(target_comms) = target.upgrade() else {
+            return;
+        };
+        if let Err(error) = self
+            .remove_external_peer_reciprocal_trust(key, target_comms)
+            .await
+        {
+            tracing::warn!(
+                mob_id = %self.definition.id,
+                agent_identity = %key.local.0,
+                %error,
+                "external reciprocal trust removal was not realized; the external edge ends regardless"
+            );
+        }
+    }
+
+    async fn remove_external_peer_reciprocal_trust(
+        &mut self,
+        key: &mob_dsl::ExternalPeerKey,
+        target_comms: Arc<dyn CoreCommsRuntime>,
+    ) -> Result<bool, MobError> {
+        let local_identity = AgentIdentity::from(key.local.0.as_str());
+        let transition = self.apply_dsl_input_collect_transition(
+            mob_dsl::MobMachineInput::AuthorizeExternalPeerReciprocalTrustRemoval {
+                key: key.clone(),
+                agent_identity: mob_dsl::AgentIdentity::from_domain(&local_identity),
+            },
+            "remove_external_peer_reciprocal_trust",
+        )?;
+        let Some(obligation) =
+            crate::generated::protocol_mob_external_peer_reciprocal_trust_removal::extract_obligations_with_freshness(
+                &transition,
+                crate::generated::protocol_mob_external_peer_reciprocal_trust_removal::MobTopologyFreshnessAuthority::from_live_topology_epoch(self.dsl_topology_epoch.clone(), Arc::clone(&self.dsl_authority_owner_token)),
+            )
+            .into_iter()
+            .find(|obligation| obligation.key() == key)
+        else {
+            return Err(MobError::WiringError(
+                "MobMachine produced no external reciprocal trust removal obligation".to_string(),
+            ));
+        };
+        let target_peer_id = target_comms.peer_id().ok_or_else(|| {
+            MobError::WiringError(
+                "external reciprocal trust removal target runtime did not expose peer_id"
+                    .to_string(),
+            )
+        })?;
+        if target_peer_id.to_string() != obligation.edge().endpoint.peer_id.0 {
+            return Err(MobError::WiringError(format!(
+                "external reciprocal trust removal target peer_id {target_peer_id} does not match MobMachine external edge peer_id {}",
+                obligation.edge().endpoint.peer_id.0
+            )));
+        }
+        let peer_id = obligation.peer_id().0.clone();
+        let authority = crate::generated::protocol_mob_external_peer_reciprocal_trust_removal::reciprocal_removal_authority_for_peer(
+            &obligation,
+            &peer_id,
+        )
+        .map_err(MobError::WiringError)?;
+        self.apply_trusted_peer_remove(target_comms.as_ref(), peer_id, authority)
+            .await
             .map_err(MobError::CommsError)
+    }
+
+    /// Delete the comms key pair of a delegation helper whose seat ended
+    /// with its session archived. A delegation helper is a member under the
+    /// `delegate` profile of a session's implicit delegation mob (both facts
+    /// are MobMachine's and the roster's, so they hold after a restart too);
+    /// its session is never the seat of a later incarnation, and a later
+    /// build of that session mints a new key pair, so it is another peer.
+    /// Callers pass only a seat that ended with
+    /// [`mob_dsl::MemberSessionDisposal::Archived`]: a session kept for a
+    /// successor keeps its key pair. Only a session-scoped key pair is
+    /// deleted: under network comms the key is the realm's. Best effort: a
+    /// deletion that fails is logged once, by session, and fails nothing.
+    #[cfg_attr(target_arch = "wasm32", allow(clippy::unused_async))]
+    async fn delete_ended_delegation_helper_key_pair(&self, entry: &RosterEntry) {
+        if !self.dsl_authority.state().implicit_delegation_mob
+            || entry.role.as_str() != super::delegation::DELEGATION_HELPER_PROFILE
+        {
+            return;
+        }
+        let Some(session_id) = entry.bridge_session_id() else {
+            return;
+        };
+        let Ok(super::dormant_seat::MemberSeatEndpointSource::SessionScopedInproc {
+            identity_root,
+        }) = self.seat_endpoint_source()
+        else {
+            return;
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let dir = identity_root.join(session_id.to_string());
+            let mut failure = None;
+            for file in ["identity.key", "identity.pub"] {
+                match tokio::fs::remove_file(dir.join(file)).await {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => failure = Some(error.kind()),
+                }
+            }
+            if failure.is_none() {
+                // The directory held the key pair only; anything else in it
+                // keeps it in place.
+                match tokio::fs::remove_dir(&dir).await {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => failure = Some(error.kind()),
+                }
+            }
+            if let Some(kind) = failure {
+                tracing::warn!(
+                    mob_id = %self.definition.id,
+                    agent_identity = %entry.agent_identity,
+                    session_id = %session_id,
+                    error_kind = ?kind,
+                    "the ended delegation helper's session key pair was not deleted"
+                );
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (identity_root, session_id);
+        }
     }
 
     fn apply_unwire_external_peer_idempotent(
@@ -52651,6 +53040,9 @@ impl MobActor {
         let edge = authority_edge
             .unwrap_or_else(|| Self::external_peer_edge(&local_identity, &prior_spec));
         let key = Self::external_peer_key_for_edge(&edge);
+        // The unwire ends this edge: the external peer's reciprocal row for
+        // the member goes first, while the machine holds both.
+        Box::pin(self.remove_external_peer_reciprocal_trust_before_edge_end(&key)).await;
         // MobMachine's verdict says whether the local member holds a row to
         // remove: one that is not materialized holds none, and its wake
         // installs only the edges the machine still holds.
@@ -53963,6 +54355,18 @@ impl MobActor {
             &mut replacement_spec,
         )
         .map_err(MobRespawnError::from)?;
+        // The successor keeps the seat record of the member's life: read
+        // here, while the incarnation it follows is still seated. Nothing of
+        // the respawn's own call is observed for it.
+        replacement_spec.seat = super::seat_lineage::SeatObservations::successor(
+            super::seat_lineage::CarriedSeat::of(
+                self.roster
+                    .read()
+                    .await
+                    .member_seat(&original_identity)
+                    .as_ref(),
+            ),
+        );
         // A member whose lineage runs under a host's tool dispatch admission
         // passes that lineage to its successor. MobMachine decides from the
         // lineage it records for the member's current incarnation (the one
@@ -54387,6 +54791,9 @@ impl MobActor {
                 })?;
             let prior_spec = Self::trusted_peer_descriptor_from_machine_endpoint(&edge.endpoint)?;
             let key = Self::external_peer_key_for_edge(&edge);
+            // The member's end ends this edge: the external peer's reciprocal
+            // row for the member goes first, while the machine holds both.
+            Box::pin(self.remove_external_peer_reciprocal_trust_before_edge_end(&key)).await;
             match comms.as_ref() {
                 Some(comms) => {
                     let unwiring_authority =
@@ -54841,6 +55248,11 @@ impl MobActor {
             {
                 report.aborted_at = Some((DisposalStep::ArchiveSession, error));
             } else {
+                // The member's archive is committed: a delegation helper's
+                // session key pair goes with its seat.
+                if disposal == mob_dsl::MemberSessionDisposal::Archived {
+                    Box::pin(self.delete_ended_delegation_helper_key_pair(&ctx.entry)).await;
+                }
                 #[cfg(test)]
                 if let Ok(mut target) = FAIL_AFTER_DESTROY_MEMBER_ARCHIVE_FOR_IDENTITY.lock()
                     && target.as_ref() == Some(&ctx.entry.agent_identity)

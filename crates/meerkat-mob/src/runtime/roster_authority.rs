@@ -85,6 +85,12 @@ impl RosterAuthority {
         self.roster.creation_history.get(session_id)
     }
 
+    /// The seat record of the member seated under `identity` now: who
+    /// seated its life, as its seat rows say.
+    pub(crate) fn member_seat(&self, identity: &AgentIdentity) -> Option<crate::MemberSeat> {
+        self.roster.seat(identity).cloned()
+    }
+
     /// The creation witness of the incarnation the runtime puts in place of
     /// `entry`'s (a respawn, a rotation): the creation `entry`'s own session
     /// recorded, so the successor keeps the member's creation id, with
@@ -172,6 +178,12 @@ impl RosterAuthority {
         identity: &AgentIdentity,
     ) -> Option<&std::collections::BTreeMap<String, String>> {
         self.roster.seat_row_labels(identity)
+    }
+
+    /// Whether `identity`'s last seat row is still the one its adoption
+    /// into store custody found ([`Roster::seat_is_as_adopted`]).
+    pub(crate) fn seat_is_as_adopted(&self, identity: &AgentIdentity) -> bool {
+        self.roster.seat_is_as_adopted(identity)
     }
 
     /// Set a store-owned identity's seat labels to its row's

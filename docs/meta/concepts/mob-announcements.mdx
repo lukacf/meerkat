@@ -4,7 +4,7 @@ description: "Announce a development to a mob and deliver it, in bounded batches
 icon: "bullhorn"
 ---
 
-*Mirrored from Meerkat Meta main at [de520227a811](https://github.com/lukacf/meerkat/commit/de520227a81178fce9ffea3abcafa4a7bddfbf27) on 2026-11-17; Meta version 0.9.16 at that commit.*
+*Mirrored from Meerkat Meta main at [5f09cda4ef4a](https://github.com/lukacf/meerkat/commit/5f09cda4ef4ac96d41b72f5fe7413b7da4c4454c) on 2026-11-24; Meta version 0.9.18 at that commit.*
 
 Mob announcements carry developments to the members that asked for them. The
 host, or a member through its tools, announces a development to a mob. Every
@@ -31,6 +31,19 @@ refuses the ones that change state. From 0.9.15 they keep an agent private
 to another person, and its subscriptions and deliveries, from a caller who
 is not its owner: they are answered as ones that do not exist (see
 [Access control](/meta/concepts/access-control#private-side-chats)).
+
+Every mob a request names is judged:
+a mob other than the launch mob that a request names, in its `mob_id` or in
+a member, a role selector, `mobs`, an audience grant or a declaration, must
+be one the caller may address (see
+[Access control](/meta/concepts/access-control)), or the request is answered
+`foreign_mob_target` like an id no mob has, and a member of such a mob,
+with every record of one, is answered as a member private to another
+person is. A record that caller is shown names no such mob: a
+subscription, a role template and an announcement are shown without the
+entries of such a mob, an escalation about a source of such a mob is not
+listed, and a role template that selects the members of such a mob is
+answered as an id nobody holds.
 
 From 0.9.15 a gateway with mob announcements logs one WARN line at every
 start, under the target

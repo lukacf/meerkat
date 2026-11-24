@@ -2371,6 +2371,150 @@ impl RecordedToolOverrides {
     }
 }
 
+/// The session's say on running one of its recorded monitors again after a
+/// host restart, as its build resolves it: the execution policy (a denied
+/// name, a read-only profile, an allow list that leaves the name out), the
+/// session's durable visibility layers (its own tool filter, an inherited
+/// filter) and the tool grant gate. The gate and the visibility owner exist
+/// only after the tool dispatcher, so the build binds them then; until then
+/// nothing is admitted.
+#[cfg(not(target_arch = "wasm32"))]
+struct BuildMonitorRerunAdmission {
+    policy: Option<meerkat_core::ToolExecutionPolicy>,
+    bound: std::sync::OnceLock<MonitorRerunBindings>,
+}
+
+/// What the build binds to the re-run admission once it exists.
+#[cfg(not(target_arch = "wasm32"))]
+struct MonitorRerunBindings {
+    /// The build's grant gate (`None` for a build without one).
+    gate: Option<meerkat_core::tool_grant::ToolGrantGate>,
+    /// The owner of the session's visibility state (`None` for a build
+    /// that is not session-owned and so has no durable filters).
+    visibility: Option<meerkat_core::GeneratedToolVisibilityOwner>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl BuildMonitorRerunAdmission {
+    const MONITOR_START: &'static str = "monitor_start";
+
+    fn new(policy: Option<meerkat_core::ToolExecutionPolicy>) -> Self {
+        Self {
+            policy,
+            bound: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// Bind the build's grant gate and the owner of the session's
+    /// visibility state.
+    fn bind(&self, bindings: MonitorRerunBindings) {
+        if self.bound.set(bindings).is_err() {
+            tracing::warn!("the monitor re-run admission is already bound");
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[async_trait::async_trait]
+impl meerkat_tools::builtin::shell::MonitorRerunAdmission for BuildMonitorRerunAdmission {
+    async fn answer(&self) -> meerkat_tools::builtin::shell::MonitorRerunAnswer {
+        use meerkat_tools::builtin::shell::MonitorRerunAnswer;
+        if self.policy.as_ref().is_some_and(|policy| {
+            !policy.permits_call(
+                Self::MONITOR_START,
+                meerkat_core::ToolMutationClass::Mutating,
+            )
+        }) {
+            return MonitorRerunAnswer::Refused;
+        }
+        // Nothing bound yet: the build has not said what the session may
+        // do, so nothing is decided.
+        let Some(bound) = self.bound.get() else {
+            return MonitorRerunAnswer::NotKnown;
+        };
+        // The session's durable visibility layers. Where they hide the
+        // monitor, or `shell`, which bounds it, the session cannot call
+        // it, so its recorded monitor is not run again. The turn's own
+        // overlay is not a durable layer and is not asked. The filters are
+        // composed as they are stored; the tool scope drops an entry whose
+        // witness no longer applies, which no built-in shell name has.
+        if let Some(owner) = &bound.visibility {
+            let state = match owner.visibility_state() {
+                Ok(state) => state,
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        "the session's tool filters could not be read for a monitor's re-run"
+                    );
+                    return MonitorRerunAnswer::NotKnown;
+                }
+            };
+            let layers = meerkat_core::ToolScope::compose(&[
+                state.capability_base_filter,
+                state.inherited_base_filter,
+                state.policy_base_filter,
+                state.active_filter,
+            ]);
+            if !layers.allows(Self::MONITOR_START) {
+                return MonitorRerunAnswer::Refused;
+            }
+        }
+        let Some(gate) = &bound.gate else {
+            return MonitorRerunAnswer::Admitted;
+        };
+        // The monitor is never wider than `shell`: a grant gate that is
+        // closed for either name closes the re-run. (The execution policy
+        // above already refuses the monitor where its name lists leave
+        // `shell` out.)
+        for name in std::iter::once(Self::MONITOR_START).chain(
+            meerkat_core::tool_scope::tool_never_wider_than(Self::MONITOR_START),
+        ) {
+            match Self::gate_is_open_for(gate, name).await {
+                MonitorRerunAnswer::Admitted => {}
+                closed_or_not_known => return closed_or_not_known,
+            }
+        }
+        MonitorRerunAnswer::Admitted
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl BuildMonitorRerunAdmission {
+    /// Whether `gate` leaves the shell tool `name` open at this moment: not
+    /// gated, or gated and opened by a live grant. Grants that cannot be
+    /// read are not an answer.
+    async fn gate_is_open_for(
+        gate: &meerkat_core::tool_grant::ToolGrantGate,
+        name: &str,
+    ) -> meerkat_tools::builtin::shell::MonitorRerunAnswer {
+        use meerkat_tools::builtin::shell::MonitorRerunAnswer;
+        let provenance = meerkat_core::ToolProvenance {
+            kind: meerkat_core::ToolSourceKind::Shell,
+            source_id: name.into(),
+            artifact: None,
+        };
+        if !gate.is_gated(name, Some(&provenance)) {
+            return MonitorRerunAnswer::Admitted;
+        }
+        let view = meerkat_core::tool_grant::GatedToolView::new(
+            BTreeSet::from([meerkat_core::ToolName::new(name)]),
+            BTreeMap::new(),
+        );
+        match gate.open_names(&view, None).await {
+            Ok(open) if open.contains(name) => MonitorRerunAnswer::Admitted,
+            Ok(_) => MonitorRerunAnswer::Refused,
+            Err(refusal) => {
+                tracing::warn!(
+                    tool = name,
+                    code = refusal.code(),
+                    "the session's tool grants could not be read for a monitor's re-run"
+                );
+                MonitorRerunAnswer::NotKnown
+            }
+        }
+    }
+}
+
 /// A build's grant gate, rules 1 and 2: every gated family is a built-in
 /// tool family, and a gated family whose category override mounts it is
 /// mounted as if enabled; the build may not disable it. A family that shares
@@ -3277,6 +3421,7 @@ impl CreateSessionModelResolutionError {
                         ..
                     }
                     | meerkat_core::ProviderBindingError::CredentialCommandProfileOverride { .. }
+                    | meerkat_core::ProviderBindingError::InlineSecretProfileOverride { .. }
                     | meerkat_core::ProviderBindingError::UnknownProviderName(_)
                     | meerkat_core::ProviderBindingError::InvalidRealmId { .. }
                     | meerkat_core::ProviderBindingError::ServerRequiresSelfHostedProvider { .. }
@@ -6039,14 +6184,19 @@ impl AgentFactory {
     /// [`crate::HostConfinement::convention_sources`]), and
     /// `realm_documents` is [`crate::HostConfinement::realm_documents`] of
     /// the realm it serves. Those tools run in the host process, so OS
-    /// process confinement does not reach them, whatever its mode.
+    /// process confinement does not reach them, whatever its mode. The
+    /// reading tools (`blob_load_file`, `view_image`) do not read the
+    /// declared paths either.
     ///
     /// A declared path that lies strictly inside a dispatcher's project
     /// root is refused with everything under it (a realm state root given
-    /// inside the project, a config document, a credential store). One
+    /// inside the project, a config document, a credential store), and a
+    /// declared file with its side files (its write-ahead log, locks and
+    /// backups beside it). One
     /// that contains or equals the project root is not applied, so a host
-    /// whose tools are rooted in its realm directory keeps the realm
-    /// documents and still lets other files be written there. A relative
+    /// whose tools are rooted in its realm directory keeps the realm's
+    /// documents and stores and still lets other files be written there. A
+    /// relative
     /// path is taken from the process working directory, as the host
     /// itself opens it. A `.rkat` directory at or below the project root is
     /// refused without this call. A declared path that is a symbolic link is
@@ -8652,6 +8802,244 @@ impl AgentFactory {
         built
     }
 
+    /// Whether `build` is this factory's default build: a session built
+    /// from it is under no restriction that a session this factory builds
+    /// with nothing set would not be under.
+    ///
+    /// A schedule whose target is a session created on demand has the host
+    /// build such a default session at the fire. A writer whose own build
+    /// is the default one gains nothing by it; any other writer would get a
+    /// session without its restrictions, so its schedule tools refuse the
+    /// write (`CurrentSessionScheduleToolDispatcher::with_host_default_build`).
+    ///
+    /// The build is taken apart field by field with no rest pattern: a
+    /// field added to [`AgentBuildConfig`] does not compile here until it
+    /// is classified as one that restricts the session's tools or as one
+    /// that does not. A restricting field makes the build not the default
+    /// one whatever it holds beyond its empty value. A tool family switch
+    /// is the default when it is unset or says what the factory's own
+    /// switch says, so the comparison is with what this factory would
+    /// build, not with a constant.
+    ///
+    /// Read after a resumed session's stored tooling is merged into the
+    /// build, so a resumed session is classified by what it runs under.
+    /// The credential binding is not read here but where the provider is
+    /// settled ([`Self::binding_is_the_hosts_default`]).
+    /// What a host changes on a live session after the build (a filter, a
+    /// per-turn overlay, a grant gate) is not a fact of the build: the
+    /// agent loop states it on every dispatch
+    /// ([`meerkat_core::ToolDispatchContext::live_tool_narrowing`]).
+    pub(crate) fn build_is_the_factorys_default(
+        &self,
+        build: &AgentBuildConfig,
+        config: &Config,
+    ) -> bool {
+        // A switch the factory itself resolves from a flag.
+        let as_the_factory = |switch: ToolCategoryOverride, factory: bool| match switch {
+            ToolCategoryOverride::Inherit => true,
+            ToolCategoryOverride::Enable => factory,
+            ToolCategoryOverride::Disable => !factory,
+        };
+        // A switch the factory resolves from more than a flag (the model,
+        // the provider): only the unset one is known to be the default.
+        let unset = |switch: ToolCategoryOverride| switch == ToolCategoryOverride::Inherit;
+        let AgentBuildConfig {
+            // RESTRICTING: who the session is.
+            mob_member_binding,
+            mob_incarnation,
+            // RESTRICTING: the tool family switches.
+            override_builtins,
+            override_shell,
+            override_memory,
+            override_schedule,
+            override_workgraph,
+            override_mob,
+            override_comms,
+            override_image_generation,
+            override_web_search,
+            // RESTRICTING: policies, filters, admissions and gates.
+            tool_access_policy,
+            declared_tool_restriction,
+            tool_dispatch_admission,
+            grant_gated_tools,
+            grant_gated_tools_where_mounted,
+            application_tool_policy,
+            tool_consequence_policy_registry,
+            initial_tool_filter,
+            initial_tool_visibility_state,
+            // RESTRICTING: a pre-built dispatcher REPLACES the factory's
+            // own tools (it skips the shell and file tool resolution), so
+            // the session can hold less than a session the factory builds.
+            tool_dispatcher_override,
+            // RESTRICTING: per-run hooks can refuse a tool call.
+            hooks_override,
+            hook_engine_override,
+            // RESTRICTING: what the session may spend. A session the fire
+            // creates is built with the configuration's own budget, so a
+            // budget of the build's own (other than the configuration's)
+            // is a bound it would not be under.
+            budget_limits,
+            // RESTRICTING, CLASSIFIED APART: whose credentials the session
+            // runs on. The binding is read once the provider is settled
+            // and a resumed build's binding is seated
+            // ([`Self::binding_is_the_hosts_default`]), since a build
+            // records the binding its resolution selected and a session
+            // rebuilt from storage is built on the recorded one.
+            auth_binding: _,
+            // NOT RESTRICTING: the model and how it is called.
+            model_fallback: _,
+            model: _,
+            provider: _,
+            self_hosted_server_id: _,
+            custom_models: _,
+            image_generation_provider: _,
+            auto_compact_threshold_override: _,
+            compaction_curator_override: _,
+            max_tokens: _,
+            system_prompt: _,
+            output_schema: _,
+            structured_output_retries: _,
+            llm_client_override: _,
+            agent_llm_client_override: _,
+            agent_llm_client_decorator: _,
+            provider_params: _,
+            call_timeout_override: _,
+            // NOT RESTRICTING: tools and stores the build adds or swaps in.
+            // `external_tools` is composed WITH the factory's tools: it adds
+            // callback tools and takes none away.
+            external_tools: _,
+            mcp_servers: _,
+            refused_mcp_servers: _,
+            recoverable_tool_defs: _,
+            blob_store_override: _,
+            #[cfg(not(target_arch = "wasm32"))]
+                detached_job_store_override: _,
+            #[cfg(not(target_arch = "wasm32"))]
+                shell_job_delivery_projector_override: _,
+            image_generation_machine_override: _,
+            image_generation_executor_override: _,
+            web_search_executor_override: _,
+            schedule_tools: _,
+            workgraph_tools: _,
+            workgraph_namespace_grant: _,
+            // `host_tools` is one more part composed BESIDE the build's
+            // tools, whatever the base is: it adds and takes none away.
+            host_tools: _,
+            mob_tool_authority_context: _,
+            mob_tools: _,
+            session_store_override: _,
+            skill_engine_override: _,
+            #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
+                mcp_auth_resolver: _,
+            // NOT RESTRICTING: identity, placement, prompt and lifecycle.
+            keep_alive: _,
+            comms_name: _,
+            peer_meta: _,
+            resume_session: _,
+            resume_session_intent: _,
+            event_tx: _,
+            preload_skills: _,
+            realm_id: _,
+            instance_id: _,
+            backend: _,
+            config_generation: _,
+            silent_comms_intents: _,
+            max_inline_peer_notifications: _,
+            app_context: _,
+            fork_source: _,
+            prompt_context_fork_source: _,
+            additional_instructions: _,
+            wait_for_mcp: _,
+            shell_env: _,
+            shell_timeout_secs: _,
+            checkpointer: _,
+            resume_override_mask: _,
+            runtime_build_mode: _,
+            initial_metadata_entries: _,
+            session_comms_runtime_override: _,
+            prepared_controller: _,
+            host_prompt_sections: _,
+        } = build;
+        #[cfg(feature = "comms")]
+        let comms_as_the_factory = as_the_factory(*override_comms, self.enable_comms);
+        // Built without the `comms` feature the factory has no comms switch
+        // and composes no comms tools, which is what a switch that is off
+        // builds: the build's switch is compared with "off".
+        #[cfg(not(feature = "comms"))]
+        let comms_as_the_factory = as_the_factory(*override_comms, false);
+        mob_member_binding.is_none()
+            && mob_incarnation.is_none()
+            && as_the_factory(*override_builtins, self.enable_builtins)
+            && as_the_factory(*override_shell, self.enable_shell)
+            && as_the_factory(*override_memory, self.enable_memory)
+            && as_the_factory(*override_schedule, self.enable_schedule)
+            && as_the_factory(*override_workgraph, self.enable_workgraph)
+            && as_the_factory(*override_mob, self.enable_mob)
+            && comms_as_the_factory
+            && unset(*override_image_generation)
+            && unset(*override_web_search)
+            && tool_access_policy.is_none()
+            && declared_tool_restriction
+                .as_ref()
+                .is_none_or(meerkat_core::ops::DeclaredToolRestriction::is_unrestricted)
+            && tool_dispatch_admission.is_none()
+            && grant_gated_tools.is_none()
+            && grant_gated_tools_where_mounted.is_none()
+            && *application_tool_policy == meerkat_core::ApplicationToolPolicyBinding::Unmanaged
+            && tool_consequence_policy_registry.is_none()
+            && initial_tool_filter
+                .as_ref()
+                .is_none_or(|filter| *filter == meerkat_core::ToolFilter::All)
+            && initial_tool_visibility_state.is_none()
+            && tool_dispatcher_override.is_none()
+            && *hooks_override == HookRunOverrides::default()
+            && hook_engine_override.is_none()
+            && budget_limits
+                .as_ref()
+                .is_none_or(|limits| *limits == config.budget_limits())
+    }
+
+    /// Whether the credential binding a build runs on is one this host
+    /// selects by default, so that it is no bound a session the host
+    /// creates would not be under: the build names none, or names one
+    /// the default resolution would select for `provider` with none
+    /// named (the selection of each realm of the build's chain, then the
+    /// environment default). Any other binding is the session's own. The
+    /// comparison is with what this host would select, not with
+    /// "none": a build records the binding its resolution selected, and
+    /// a session rebuilt from storage is built on the recorded one. A
+    /// resolution that fails answers no.
+    fn binding_is_the_hosts_default(
+        build: &AgentBuildConfig,
+        config: &Config,
+        provider: Provider,
+    ) -> bool {
+        let Some(binding) = build.auth_binding.as_ref() else {
+            return true;
+        };
+        Self::resolve_realm_binding_candidates_for_provider(
+            config,
+            provider,
+            None,
+            build.realm_id.as_ref(),
+        )
+        .is_ok_and(|selected| {
+            selected
+                .iter()
+                .any(|target| target.auth_binding == *binding)
+        })
+    }
+
+    /// Whether a build may mount the mob tools: its mob family is not
+    /// switched off and it carries a generated mob authority context. The
+    /// tools are mounted when the build or the factory also supplies them.
+    fn build_has_mob_authority(build: &AgentBuildConfig) -> bool {
+        !matches!(build.override_mob, ToolCategoryOverride::Disable)
+            && build.mob_tool_authority_context.as_ref().is_some_and(
+                meerkat_core::service::MobToolAuthorityContext::is_generated_authority_context,
+            )
+    }
+
     async fn assemble_agent(
         &self,
         mut build_config: AgentBuildConfig,
@@ -8740,6 +9128,9 @@ impl AgentFactory {
         // the resumed binding is settled against the registry's provider below.
         let caller_auth_binding = build_config.auth_binding.clone();
         let resumed_session_metadata = Self::apply_resumed_session_metadata(&mut build_config)?;
+        // Classified here: after the resumed session's stored tooling is in
+        // the build, before anything below takes a field out of it.
+        let factorys_default_build = self.build_is_the_factorys_default(&build_config, config);
         // The build's scoped tool grant gate. The session's metadata records
         // the category overrides the caller asked for, before the gate mounts
         // its gated families as if enabled. A mob member's build carries the
@@ -9054,6 +9445,11 @@ impl AgentFactory {
         } else {
             None
         };
+        // The binding is classified here: the provider is settled and a
+        // resumed build's binding is seated, before the credential
+        // resolution writes the binding it selects into the build.
+        let factorys_default_build = factorys_default_build
+            && Self::binding_is_the_hosts_default(&build_config, config, provider);
         if let Some(client) = build_config.llm_client_override.as_ref() {
             let claimed_provider = client.provider();
             if !matches!(claimed_provider, Provider::Other) && claimed_provider != provider {
@@ -9753,6 +10149,12 @@ impl AgentFactory {
             }
             None => None,
         };
+        // A recorded resumable monitor is run again after a host restart
+        // only while this build would admit a `monitor_start` call.
+        #[cfg(not(target_arch = "wasm32"))]
+        let monitor_rerun_admission = Arc::new(BuildMonitorRerunAdmission::new(
+            tool_execution_policy.clone(),
+        ));
         #[cfg(not(target_arch = "wasm32"))]
         let durable_shell_runtime = if effective_shell {
             match (
@@ -9772,7 +10174,9 @@ impl AgentFactory {
                             blob_store,
                             projector,
                         )
-                        .map_err(|error| BuildAgentError::Config(error.to_string()))?,
+                        .map_err(|error| BuildAgentError::Config(error.to_string()))?
+                        .with_monitor_rerun_admission(Arc::clone(&monitor_rerun_admission)
+                            as Arc<dyn meerkat_tools::builtin::shell::MonitorRerunAdmission>),
                     )
                 }
                 _ => None,
@@ -10409,6 +10813,11 @@ impl AgentFactory {
             // must be applied at creation or a gated agent could schedule a
             // helper that escapes its own containment.
             let creator_tool_access_policy = build_config.tool_access_policy.clone();
+            // Whether this build mounts the mob tools (step 9d below
+            // composes them by the same facts): a session that holds them
+            // creates helpers with tools of its own.
+            let mob_tools_held = Self::build_has_mob_authority(&build_config)
+                && (build_config.mob_tools.is_some() || self.mob_tools.is_some());
             let schedule_dispatcher = match build_config.mob_member_binding.clone() {
                 Some(binding) => Arc::new(
                     meerkat_schedule::CurrentSessionScheduleToolDispatcher::new_with_resolver(
@@ -10418,14 +10827,18 @@ impl AgentFactory {
                             crate::surface::MobMemberCurrentSessionScheduleResolver::new(binding),
                         ),
                     )
-                    .with_creator_tool_access_policy(creator_tool_access_policy),
+                    .with_creator_tool_access_policy(creator_tool_access_policy)
+                    .with_host_default_build(factorys_default_build)
+                    .with_mob_tools_held(mob_tools_held),
                 ) as Arc<dyn AgentToolDispatcher>,
                 None => Arc::new(
                     meerkat_schedule::CurrentSessionScheduleToolDispatcher::new(
                         schedule_dispatcher,
                         session.id().clone(),
                     )
-                    .with_creator_tool_access_policy(creator_tool_access_policy),
+                    .with_creator_tool_access_policy(creator_tool_access_policy)
+                    .with_host_default_build(factorys_default_build)
+                    .with_mob_tools_held(mob_tools_held),
                 ) as Arc<dyn AgentToolDispatcher>,
             };
             tools = Arc::new(meerkat_core::DynamicToolComposite::new(vec![
@@ -10539,13 +10952,7 @@ impl AgentFactory {
         // generated authority context (an embedder can set both directly):
         // the mob operator dispatchers in its external tools were bound to no
         // authority above, so they hide and deny, and this surface agrees.
-        let effective_mob = !matches!(build_config.override_mob, ToolCategoryOverride::Disable)
-            && build_config
-                .mob_tool_authority_context
-                .as_ref()
-                .is_some_and(
-                    meerkat_core::service::MobToolAuthorityContext::is_generated_authority_context,
-                );
+        let effective_mob = Self::build_has_mob_authority(&build_config);
         let mob_factory = build_config
             .mob_tools
             .take()
@@ -11683,6 +12090,8 @@ impl AgentFactory {
             RuntimeBuildMode::SessionOwned(bindings) => Some(bindings.tool_visibility_owner()),
             RuntimeBuildMode::StandaloneEphemeral => None,
         };
+        #[cfg(not(target_arch = "wasm32"))]
+        let monitor_rerun_visibility = grant_gate_owner.cloned();
         let ResolvedGrantGate {
             gate: tool_grant_gate,
             recorded: recorded_grant_gate,
@@ -11701,6 +12110,13 @@ impl AgentFactory {
         // build installed.
         let mut factory_metadata = factory_metadata;
         factory_metadata.tooling.grant_gated = recorded_grant_gate;
+        // A grant gate that closes `monitor_start`, and a session filter
+        // that hides it, close the re-run of a recorded monitor too.
+        #[cfg(not(target_arch = "wasm32"))]
+        monitor_rerun_admission.bind(MonitorRerunBindings {
+            gate: tool_grant_gate.clone(),
+            visibility: monitor_rerun_visibility,
+        });
         if let Some(gate) = &tool_grant_gate {
             builder = builder.with_tool_grant_gate(gate.clone());
             let request_tool = Arc::new(meerkat_core::tool_grant::ToolGrantRequestDispatcher::new(
@@ -12784,6 +13200,15 @@ mod account_model_tests;
 #[cfg(all(test, feature = "session-store", not(target_arch = "wasm32")))]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod auth_clear_default_hot_swap_tests;
+#[cfg(all(
+    test,
+    feature = "session-store",
+    feature = "openai",
+    feature = "anthropic",
+    not(target_arch = "wasm32")
+))]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod auth_lease_neighbour_session_tests;
 #[cfg(all(test, feature = "session-store", not(target_arch = "wasm32")))]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod brain_swap_runtime_loop_ab_tests;
@@ -14137,6 +14562,59 @@ mod tests {
     }
 
     #[test]
+    fn create_session_model_gemini_neon_default_preserves_explicit_and_configured_models() {
+        // Request model, global config model, Gemini config model, result.
+        for (requested, global, configured, expected) in [
+            (None, "", "", "gemini-4-neon"),
+            (None, "gpt-6-astra", "", "gemini-4-neon"),
+            (None, "", "gemini-4-argon", "gemini-4-argon"),
+            (None, "", "gemini-4-hydrogen", "gemini-4-hydrogen"),
+            (
+                None,
+                "gemini-4-argon",
+                "gemini-4-hydrogen",
+                "gemini-4-argon",
+            ),
+            (
+                Some("gemini-4-argon"),
+                "",
+                "gemini-4-hydrogen",
+                "gemini-4-argon",
+            ),
+            (
+                Some("gemini-4-hydrogen"),
+                "gemini-4-argon",
+                "",
+                "gemini-4-hydrogen",
+            ),
+            (
+                Some("gemini-3.1-pro-preview"),
+                "",
+                "",
+                "gemini-3.1-pro-preview",
+            ),
+        ] {
+            let mut config = Config::default();
+            config.agent.model = global.to_string();
+            config.models.gemini = configured.to_string();
+            let resolved = resolve_create_session_model(
+                &config,
+                CreateSessionModelResolutionRequest {
+                    model: requested.map(str::to_string),
+                    provider: Some(Provider::Gemini),
+                    ..Default::default()
+                },
+            )
+            .expect("Gemini selection resolves without provider access");
+            assert_eq!(resolved.provider, Provider::Gemini);
+            assert_eq!(
+                resolved.model, expected,
+                "request={requested:?}, agent={global}, Gemini={configured}"
+            );
+        }
+    }
+
+    #[test]
     fn create_session_model_binding_default_wins_when_model_omitted() {
         let (mut config, auth_binding) = create_model_configured_auth_binding(
             Provider::Gemini,
@@ -15227,6 +15705,8 @@ mod tests {
             "gpt-6-sol",
             "gpt-6.1-sol",
             "gpt-6.1-terra",
+            "gpt-6.2-astra",
+            "gpt-6.2-sol",
             "gpt-6-luna",
         ] {
             let identity = SessionLlmIdentity {
@@ -15276,6 +15756,8 @@ mod tests {
             "gpt-6-sol",
             "gpt-6.1-sol",
             "gpt-6.1-terra",
+            "gpt-6.2-astra",
+            "gpt-6.2-sol",
             "gpt-6-luna",
             "gpt-5.6-sol",
             "gpt-5.6-terra",
@@ -18941,10 +19423,9 @@ mod tests {
     }
 
     /// Each test that resolves a sticky-fallback binding has a realm of its
-    /// own. A fallback rotation releases the primary binding's lease, which
-    /// refuses with `release_lease::Busy` while another test of the process
-    /// holds that binding's credential lifecycle, and plain `cargo test` runs
-    /// these tests at once in one process.
+    /// own: a binding's lease and credential lifecycle are shared by every
+    /// test of the process that names it, and plain `cargo test` runs these
+    /// tests at once in one process.
     const FALLBACK_REALM_SESSION_OWNED: &str = "fallback_session_owned";
     const FALLBACK_REALM_UNBOUND_SOURCE: &str = "fallback_unbound_source";
     const FALLBACK_REALM_CHATGPT_BOUND: &str = "fallback_chatgpt_bound";
@@ -21067,8 +21548,9 @@ mod tests {
 
         // A sibling test (the reload test, which plain `cargo test` runs at
         // once in this process) holds its primary binding's credential
-        // lifecycle while this turn falls back. The rotation releases this
-        // test's own primary lease, never a sibling's binding.
+        // lifecycle while this turn falls back. The rotation asks for no
+        // binding's credential lifecycle, so the sibling's hold does not
+        // stop it.
         let _sibling = meerkat_core::auth::acquire_auth_login_lifecycle_guard(
             &meerkat_core::handles::LeaseKey::from_auth_binding(&configured_auth_binding(
                 FALLBACK_REALM_RELOAD,
@@ -27385,6 +27867,201 @@ mod tests {
         );
     }
 
+    /// Which builds are the factory's default build: the one with nothing
+    /// set, and one whose tool family switch says what the factory's own
+    /// says. Each kind of restriction makes a build not the default one: a
+    /// member binding, a family switched against the factory's, a tool
+    /// access policy, a declared restriction, a grant gate, an application
+    /// tool policy, a tool filter, a replaced dispatcher, per-run hooks, a
+    /// budget of its own. A budget that is the configuration's own is the
+    /// default. The binding is read apart
+    /// (`a_binding_the_host_selects_by_default_is_not_the_sessions_own`).
+    #[test]
+    fn a_build_under_any_restriction_is_not_the_factorys_default_build() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let hidden = || {
+            meerkat_core::types::ToolNameSet(
+                [meerkat_core::types::ToolName::new("datetime")]
+                    .into_iter()
+                    .collect(),
+            )
+        };
+        let build = |change: &dyn Fn(&mut AgentBuildConfig)| {
+            let mut build = AgentBuildConfig::new("claude-sonnet-4-5");
+            change(&mut build);
+            build
+        };
+
+        // A factory with the built-in tools and the shell on, as the RPC
+        // host, the MCP server, the member host and a gateway build theirs.
+        let on = AgentFactory::new(temp.path().join("on"))
+            .builtins(true)
+            .shell(true)
+            .schedule(true);
+        let config = Config::default();
+        assert!(on.build_is_the_factorys_default(&build(&|_| {}), &config));
+        assert!(
+            on.build_is_the_factorys_default(
+                &build(&|build| {
+                    build.override_shell = ToolCategoryOverride::Enable;
+                }),
+                &config
+            ),
+            "a switch that says what the factory's says is the default"
+        );
+        assert!(
+            on.build_is_the_factorys_default(
+                &build(&|build| {
+                    build.budget_limits = Some(Config::default().budget_limits());
+                }),
+                &config
+            ),
+            "the configuration's own budget is the default"
+        );
+        let restricted: [(&str, &dyn Fn(&mut AgentBuildConfig)); 13] = [
+            ("a member binding", &|build| {
+                build.mob_member_binding = Some(meerkat_core::MobMemberBinding {
+                    mob_id: "desk".to_string(),
+                    role: "worker".to_string(),
+                    member: "anna".to_string(),
+                });
+            }),
+            ("the shell switched off", &|build| {
+                build.override_shell = ToolCategoryOverride::Disable;
+            }),
+            ("the built-in tools switched off", &|build| {
+                build.override_builtins = ToolCategoryOverride::Disable;
+            }),
+            ("the schedule tools switched off", &|build| {
+                build.override_schedule = ToolCategoryOverride::Disable;
+            }),
+            ("the mob tools switched on", &|build| {
+                build.override_mob = ToolCategoryOverride::Enable;
+            }),
+            ("a tool access policy", &|build| {
+                build.tool_access_policy =
+                    Some(meerkat_core::ops::ToolAccessPolicy::DenyList(hidden()));
+            }),
+            ("a grant gate", &|build| {
+                build.grant_gated_tools =
+                    Some(meerkat_core::tool_grant::GrantGatedTools::default().with_family("shell"));
+            }),
+            ("a grant gate where mounted", &|build| {
+                build.grant_gated_tools_where_mounted =
+                    Some(meerkat_core::tool_grant::GrantGatedTools::default().with_family("shell"));
+            }),
+            ("an application tool policy", &|build| {
+                build.application_tool_policy = meerkat_core::ApplicationToolPolicyBinding::Inherit;
+            }),
+            ("a tool filter", &|build| {
+                build.initial_tool_filter = Some(meerkat_core::ToolFilter::Deny(hidden()));
+            }),
+            ("a replaced tool dispatcher", &|build| {
+                build.tool_dispatcher_override = Some(Arc::new(
+                    meerkat_core::DynamicToolComposite::new(Vec::new()),
+                ));
+            }),
+            ("per-run hooks", &|build| {
+                build.hooks_override.disable = vec![meerkat_core::HookId::new("guard")];
+            }),
+            ("a budget of its own", &|build| {
+                build.budget_limits =
+                    Some(meerkat_core::BudgetLimits::unlimited().with_max_tokens(100));
+            }),
+        ];
+        for (kind, change) in restricted {
+            assert!(
+                !on.build_is_the_factorys_default(&build(change), &config),
+                "a build with {kind} is not the default build"
+            );
+        }
+
+        // A factory whose own shell is off, as the REST host and the CLI
+        // build theirs unless their configuration turns it on: a session
+        // created with the shell off is built as the host builds one.
+        let off = AgentFactory::new(temp.path().join("off")).schedule(true);
+        assert!(
+            off.build_is_the_factorys_default(
+                &build(&|build| {
+                    build.override_shell = ToolCategoryOverride::Disable;
+                    build.override_builtins = ToolCategoryOverride::Disable;
+                }),
+                &config
+            ),
+            "switched off where the factory's own is off"
+        );
+        assert!(
+            !off.build_is_the_factorys_default(
+                &build(&|build| {
+                    build.override_shell = ToolCategoryOverride::Enable;
+                }),
+                &config
+            ),
+            "switched on where the factory's own is off"
+        );
+    }
+
+    /// Which bindings are the host's own selection: none named, and the
+    /// binding the default resolution selects for the provider in the
+    /// build's realm. A second binding of that realm, the default binding
+    /// of a realm that is not on the build's chain, and that same binding
+    /// for another provider are the session's own.
+    #[test]
+    fn a_binding_the_host_selects_by_default_is_not_the_sessions_own() {
+        let config: Config = toml::from_str(
+            r#"
+[realm.desk]
+default_binding = "main"
+
+[realm.desk.backend.openai_primary]
+provider = "openai"
+backend_kind = "openai_api"
+
+[realm.desk.auth.openai_key]
+provider = "openai"
+auth_method = "api_key"
+source = { kind = "env", env = "SCHEDULE_ROW_KEY_NOT_SET" }
+
+[realm.desk.binding.main]
+backend_profile = "openai_primary"
+auth_profile = "openai_key"
+
+[realm.desk.binding.second]
+backend_profile = "openai_primary"
+auth_profile = "openai_key"
+"#,
+        )
+        .expect("the row's configuration parses");
+        let desk = || RealmId::parse("desk").expect("realm id");
+        let build = |realm: Option<RealmId>, binding: Option<&str>| {
+            let mut build = AgentBuildConfig::new("gpt-5.4");
+            build.realm_id = realm;
+            build.auth_binding = binding.map(|binding| configured_auth_binding("desk", binding));
+            build
+        };
+        let is_default = |build: &AgentBuildConfig, provider: Provider| {
+            AgentFactory::binding_is_the_hosts_default(build, &config, provider)
+        };
+        assert!(is_default(&build(Some(desk()), None), Provider::OpenAI));
+        assert!(is_default(&build(None, None), Provider::OpenAI));
+        assert!(
+            is_default(&build(Some(desk()), Some("main")), Provider::OpenAI),
+            "the binding the realm selects by default"
+        );
+        assert!(
+            !is_default(&build(Some(desk()), Some("second")), Provider::OpenAI),
+            "a second binding of the realm is the session's own"
+        );
+        assert!(
+            !is_default(&build(None, Some("main")), Provider::OpenAI),
+            "the default of a realm that is not on the build's chain"
+        );
+        assert!(
+            !is_default(&build(Some(desk()), Some("main")), Provider::Anthropic),
+            "a binding the host would not select for this provider"
+        );
+    }
+
     #[test]
     fn build_options_roundtrip_custom_model_and_image_provider_and_threshold() {
         let mut build = AgentBuildConfig::new("claude-internal-preview");
@@ -27832,7 +28509,7 @@ mod tests {
 
         assert_eq!(
             visible_names, expected_names,
-            "shell-only builtin composition must expose exactly four shell tools while preserving the external dispatcher unchanged"
+            "shell-only builtin composition without a durable job runtime must expose exactly the four standard shell tools, no monitor_start, while preserving the external dispatcher unchanged"
         );
     }
 
@@ -28064,17 +28741,23 @@ impl AgentFactory {
         // own tool(s). This keeps profile category intent one-owner: enabling
         // `image_generation` must not also expose task/patch/skill utilities.
         let builtin_config = if effective_shell {
+            let mut policy = ToolPolicyLayer::new()
+                .enable_tool("shell")
+                .enable_tool("shell_job_status")
+                .enable_tool("shell_jobs")
+                .enable_tool("shell_job_cancel");
+            // Shell turns on its whole family. A monitor is a durable job,
+            // so a session without a durable job runtime is not offered
+            // `monitor_start`, as its `shell` offers no `background`.
+            if durable_shell_runtime.is_some() {
+                policy = policy.enable_tool("monitor_start");
+            }
             BuiltinToolConfig {
-                policy: ToolPolicyLayer::new()
-                    .enable_tool("shell")
-                    .enable_tool("shell_job_status")
-                    .enable_tool("shell_jobs")
-                    .enable_tool("shell_job_cancel")
-                    .with_mode(if effective_builtins {
-                        ToolMode::AllowAll
-                    } else {
-                        ToolMode::AllowList
-                    }),
+                policy: policy.with_mode(if effective_builtins {
+                    ToolMode::AllowAll
+                } else {
+                    ToolMode::AllowList
+                }),
                 ..Default::default()
             }
         } else if effective_builtins {

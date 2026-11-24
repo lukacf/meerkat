@@ -703,6 +703,27 @@ const MEERKAT_TRANSITION_ENUM_LATE_TAIL: &[&str] = &[
     "DeferInputBehindBacklogEndedWithRefusedRunRunning",
     "DeferInputBehindBacklogEndedWithRefusedRunRetired",
     "DeferInputBehindBacklogEndedWithRefusedRunStopped",
+    // The recovery verdict that keeps a consumed ephemeral input whose
+    // terminal carrier is pending (0.9.17), declared beside its sibling
+    // verdicts in the catalog: after every variant 0.9.16 published.
+    "ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierInitializing",
+    "ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierIdle",
+    "ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierAttached",
+    "ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierRunning",
+    "ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierRetired",
+    "ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierStopped",
+    // The routing denial of a switch onto a target that refuses the
+    // reasoning effort level the session holds: declared beside
+    // its siblings in the catalog, emitted here after every variant 0.9.17
+    // published. Both inputs are declared before the appended-input
+    // section, so nothing but this list keeps these arms off the middle of
+    // the enum.
+    "RequestFiniteSwitchTurnReasoningEffortRefusedIdle",
+    "RequestFiniteSwitchTurnReasoningEffortRefusedAttached",
+    "RequestFiniteSwitchTurnReasoningEffortRefusedRunning",
+    "RequestUntilChangedSwitchTurnReasoningEffortRefusedIdle",
+    "RequestUntilChangedSwitchTurnReasoningEffortRefusedAttached",
+    "RequestUntilChangedSwitchTurnReasoningEffortRefusedRunning",
 ];
 
 /// One published `TransitionId` variant whose transition no longer exists.
@@ -1371,6 +1392,11 @@ const MACHINE_TRANSITION_ENUM_LATE_TAILS: &[(&str, &[&str])] = &[
             // operator instructions (0.9.15).
             "RecordMemberInstructionLineageRunning",
             "RecordMemberInstructionLineageStopped",
+            // The removal twin of the reciprocal trust request (0.9.17),
+            // declared beside the request in the catalog: after every
+            // variant 0.9.16 published.
+            "AuthorizeExternalPeerReciprocalTrustRemovalRunning",
+            "AuthorizeExternalPeerReciprocalTrustRemovalStopped",
         ],
     ),
     // The end of a grant with its subject (0.9.11), after every arm 0.9.10

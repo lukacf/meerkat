@@ -168,6 +168,15 @@ describe("MetaBuilder.agentMemory()", () => {
     });
   });
 
+  it("serializes ownMemoryOnlyProfiles to the gateway wire key", () => {
+    const builder = Meta.builder();
+    builder.agentMemory({ ownMemoryOnlyProfiles: ["guest", "visitor"] });
+
+    assert.deepEqual(builder._config.agentMemoryConfig, {
+      own_memory_only_profiles: ["guest", "visitor"],
+    });
+  });
+
   it("keeps only disabled hygienist compatibility forms", () => {
     const builder = Meta.builder();
     builder.agentMemory({

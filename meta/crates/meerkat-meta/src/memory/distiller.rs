@@ -612,8 +612,16 @@ pub trait TranscriptSource: Send + Sync {
     /// ([`crate::access::PRIVATE_TO_LABEL`], a console side chat opened on a
     /// console with sign-in). Such a transcript is that person's alone, and
     /// the engine never distills it, whatever the cause. `false` for a
-    /// session the store does not hold. A source that cannot tell answers
-    /// `false`, the default.
+    /// session a source over a whole store does not hold, and the default
+    /// of a source that cannot tell.
+    ///
+    /// An error says that the answer is unknown for this session (a store
+    /// or a record the source could not read; a session a source that
+    /// reads one memory's sessions alone does not take for that memory's).
+    /// No engine then treats the session as private to no one: the
+    /// Distiller skips the run, and the steward holds the member's exit
+    /// interview until the question is answered. A held interview does not
+    /// count against the interviews one dream takes.
     async fn private_to_a_person(&self, session_key: &str) -> Result<bool, DistillerError> {
         let _ = session_key;
         Ok(false)
@@ -624,6 +632,10 @@ pub trait TranscriptSource: Send + Sync {
 /// surface the console history uses). The transcript is durable and
 /// positionally indexed, and survives member teardown/retire/reset — which
 /// is what makes the detached reset-boundary distillation possible.
+///
+/// It reads every session of its store, as it is stored. Which sessions
+/// are one memory's own is said by the source that stands in front of it
+/// where a launch assembles its engines (`crate::memory_wiring`).
 pub struct SessionStoreTranscriptSource {
     store: Arc<dyn meerkat::SessionStore>,
 }
@@ -632,26 +644,28 @@ impl SessionStoreTranscriptSource {
     pub fn new(store: Arc<dyn meerkat::SessionStore>) -> Self {
         Self { store }
     }
-}
 
-#[async_trait]
-impl TranscriptSource for SessionStoreTranscriptSource {
-    async fn read(
+    /// The session `session_key` names, when the store holds it.
+    pub(crate) async fn stored(
         &self,
         session_key: &str,
-        from_index: u64,
-    ) -> Result<Option<TranscriptSlice>, DistillerError> {
+    ) -> Result<Option<meerkat_core::Session>, DistillerError> {
         let session_id = meerkat_core::types::SessionId::parse(session_key).map_err(|err| {
             DistillerError::Transcript(format!("invalid session key '{session_key}': {err}"))
         })?;
-        let session = self
-            .store
+        self.store
             .load(&session_id)
             .await
-            .map_err(|err| DistillerError::Transcript(err.to_string()))?;
-        let Some(session) = session else {
-            return Ok(None);
-        };
+            .map_err(|err| DistillerError::Transcript(err.to_string()))
+    }
+
+    /// The messages of `session` from `from_index` to the end of its
+    /// persisted transcript, as the evidence window of `session_key`.
+    pub(crate) fn slice_of(
+        session: &meerkat_core::Session,
+        session_key: &str,
+        from_index: u64,
+    ) -> TranscriptSlice {
         // Ask 4 refinement: pin the head revision the extractor is about to
         // read. `transcript_revision()` is fallible serialization; a failure
         // degrades to None ("head at capture time") rather than blocking the
@@ -675,28 +689,44 @@ impl TranscriptSource for SessionStoreTranscriptSource {
                 })
             })
             .collect();
-        Ok(Some(TranscriptSlice {
+        TranscriptSlice {
             session_key: session_key.to_string(),
             start_index,
             end_index,
             messages,
             head_revision,
-        }))
+        }
+    }
+
+    /// Whether the stored session says of itself that it is the session of
+    /// a member private to a person: the member labels its build recorded
+    /// carry a private owner.
+    pub(crate) fn stored_as_private(session: &meerkat_core::Session) -> bool {
+        session
+            .session_metadata()
+            .and_then(|metadata| metadata.peer_meta)
+            .is_some_and(|peer_meta| crate::access::private_owner(&peer_meta.labels).is_some())
+    }
+}
+
+#[async_trait]
+impl TranscriptSource for SessionStoreTranscriptSource {
+    async fn read(
+        &self,
+        session_key: &str,
+        from_index: u64,
+    ) -> Result<Option<TranscriptSlice>, DistillerError> {
+        Ok(self
+            .stored(session_key)
+            .await?
+            .map(|session| Self::slice_of(&session, session_key, from_index)))
     }
 
     async fn private_to_a_person(&self, session_key: &str) -> Result<bool, DistillerError> {
-        let session_id = meerkat_core::types::SessionId::parse(session_key).map_err(|err| {
-            DistillerError::Transcript(format!("invalid session key '{session_key}': {err}"))
-        })?;
-        let session = self
-            .store
-            .load(&session_id)
-            .await
-            .map_err(|err| DistillerError::Transcript(err.to_string()))?;
-        Ok(session
-            .and_then(|session| session.session_metadata())
-            .and_then(|metadata| metadata.peer_meta)
-            .is_some_and(|peer_meta| crate::access::private_owner(&peer_meta.labels).is_some()))
+        Ok(self
+            .stored(session_key)
+            .await?
+            .is_some_and(|session| Self::stored_as_private(&session)))
     }
 }
 
@@ -1289,6 +1319,11 @@ pub(crate) const SKIP_NO_DISCARDS: &str = "no compaction discards to harvest";
 /// nothing to harvest: the distiller never reads it.
 pub(crate) const SKIP_PRIVATE_SESSION: &str =
     "the session is private to one person; its transcript is never distilled";
+/// The skip of a member whose name is no plain identity scope key, which no
+/// run distills for (any cause). For the §8.6 ordering check its compaction
+/// boundary has nothing to harvest, as a private session's has none.
+pub(crate) const SKIP_NO_PLAIN_NAME: &str =
+    "the member's name is no plain memory name; nothing is distilled for it";
 
 impl DistillOutcome {
     /// §8.6 ordering invariant input: whether a compaction-cause run left
@@ -1304,6 +1339,7 @@ impl DistillOutcome {
                 reason == SKIP_NO_DISCARDS
                     || reason == SKIP_NO_DISCARD_SOURCE
                     || reason == SKIP_PRIVATE_SESSION
+                    || reason == SKIP_NO_PLAIN_NAME
             }
         }
     }
@@ -1369,6 +1405,18 @@ pub struct DistillerEngine {
     compaction_follow_up: Mutex<Option<CompactionFollowUp>>,
     /// Synchronous compaction-observation hook (see [`CompactionObserved`]).
     compaction_observed: Mutex<Option<CompactionObserved>>,
+    /// The engine's detached runs ([`Self::spawn_detached`],
+    /// [`Self::spawn_compaction_harvest`]).
+    detached: Mutex<DetachedRuns>,
+}
+
+/// The detached runs of one engine: the ones under way, and whether the
+/// engine's detached runs were ended, after which none starts
+/// ([`DistillerEngine::end_detached_runs`]).
+#[derive(Default)]
+struct DetachedRuns {
+    ended: bool,
+    under_way: tokio::task::JoinSet<()>,
 }
 
 impl DistillerEngine {
@@ -1406,7 +1454,82 @@ impl DistillerEngine {
             run_counter: std::sync::atomic::AtomicU64::new(0),
             compaction_follow_up: Mutex::new(None),
             compaction_observed: Mutex::new(None),
+            detached: Mutex::default(),
         }
+    }
+
+    /// Start `run` as a detached run of this engine, unless the engine's
+    /// detached runs were ended ([`Self::end_detached_runs`]).
+    fn start_detached(&self, run: impl std::future::Future<Output = ()> + Send + 'static) {
+        let mut detached = self
+            .detached
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if detached.ended {
+            return;
+        }
+        // The runs that ended are let go: the set holds the ones under way.
+        while detached.under_way.try_join_next().is_some() {}
+        detached.under_way.spawn(run);
+    }
+
+    /// End the engine's detached runs: none starts from now on, the ones
+    /// under way are stopped, and this returns once each of them has ended.
+    ///
+    /// For an engine that is held for a while only: the distiller of a mob
+    /// a launch hosts beside its launch mob holds that mob's provider,
+    /// store and transcript source, and what serves the mob's memory ends
+    /// its runs with the mob's identity plane, so none outlives the plane.
+    /// A launch's own engine lives as long as the process and is never
+    /// ended. A run stopped at its model call has written nothing; a store
+    /// statement that was already running when its run was stopped runs to
+    /// its end. A stopped run is not asked again: the next composition of
+    /// the mob makes a new engine, which distils a session from its first
+    /// message at that session's next run; the window of a session that
+    /// has no later run (one a reset or a failed resume left) is then not
+    /// distilled. The runs stopped are counted in one log line.
+    pub(crate) async fn end_detached_runs(&self) {
+        let mut under_way = {
+            let mut detached = self
+                .detached
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            detached.ended = true;
+            while detached.under_way.try_join_next().is_some() {}
+            std::mem::take(&mut detached.under_way)
+        };
+        if !under_way.is_empty() {
+            tracing::info!(
+                realm = %self.realm,
+                stopped = under_way.len(),
+                "agent memory distiller: detached runs under way were stopped with what the \
+                 engine served; they are not asked again"
+            );
+        }
+        under_way.shutdown().await;
+    }
+
+    /// [`Self::end_detached_runs`] without the wait: none starts from now
+    /// on, and the ones under way are stopped.
+    pub(crate) fn stop_detached_runs(&self) {
+        let mut detached = self
+            .detached
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        detached.ended = true;
+        detached.under_way.abort_all();
+    }
+
+    /// Test builds only: whether the engine's detached runs were ended, and
+    /// how many are under way.
+    #[cfg(test)]
+    pub(crate) fn detached_runs_in_tests(&self) -> (bool, usize) {
+        let mut detached = self
+            .detached
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while detached.under_way.try_join_next().is_some() {}
+        (detached.ended, detached.under_way.len())
     }
 
     #[cfg(test)]
@@ -1430,6 +1553,12 @@ impl DistillerEngine {
         &self,
     ) -> Option<meerkat_core::auth::ProviderAuthPersistenceId> {
         self.handle.provider_auth_authority()
+    }
+
+    /// The transcript source the engine reads sessions through.
+    #[cfg(test)]
+    pub(crate) fn transcripts_in_tests(&self) -> &Arc<dyn TranscriptSource> {
+        &self.transcripts
     }
 
     /// Wire the §9.3 timeline sink (skipped pre-rotation distillations,
@@ -1690,6 +1819,16 @@ impl DistillerEngine {
         discards: Option<Vec<DiscardEntry>>,
         reserved: Option<BudgetPermit>,
     ) -> Result<DistillOutcome, BudgetDenied> {
+        // A name that is no plain identity scope key (it holds a `/`) is
+        // the key of no member's memory
+        // (`crate::memory::records::IdentityScopeKey`): no run distills for
+        // it, whatever the cause, so no scope is ever built from such a
+        // name.
+        if !crate::memory::records::IdentityScopeKey::of(identity).is_named() {
+            return Ok(DistillOutcome::Skipped {
+                reason: SKIP_NO_PLAIN_NAME.to_string(),
+            });
+        }
         // A transcript private to one person is never distilled, whatever
         // the cause: its memory would reach no one else, but nothing in it
         // may leave it. A session whose privacy cannot be read is not
@@ -2126,7 +2265,9 @@ impl DistillerEngine {
 
     /// Detached distillation (reset / resume-fallback / compaction): never
     /// on any critical path. The session store outlives the session, so the
-    /// read stays valid after teardown.
+    /// read stays valid after teardown. A run of the engine: it is not
+    /// started once the engine's detached runs were ended, and it ends with
+    /// them (`end_detached_runs`, within this crate).
     pub fn spawn_detached(
         self: &Arc<Self>,
         identity: &str,
@@ -2136,7 +2277,7 @@ impl DistillerEngine {
         let engine = self.clone();
         let identity = identity.to_string();
         let session_key = session_key.to_string();
-        tokio::spawn(async move {
+        self.start_detached(async move {
             engine.distill_now(&identity, &session_key, cause).await;
         });
     }
@@ -2232,7 +2373,7 @@ impl DistillerEngine {
         let engine = self.clone();
         let identity = identity.to_string();
         let session_key = session_key.to_string();
-        tokio::spawn(async move {
+        self.start_detached(async move {
             engine
                 .distill_now_with(
                     &identity,
@@ -4050,6 +4191,45 @@ mod tests {
         session.id().clone()
     }
 
+    /// A transcript source over a session store reads every session of the
+    /// store as it is stored, and an id the store holds no session under as
+    /// none, private to no one. It keeps no session out: which sessions are
+    /// one memory's own is said by the source a launch puts in front of it.
+    #[tokio::test]
+    async fn a_session_store_transcript_source_reads_every_session_of_its_store_as_it_is_stored() {
+        let store = Arc::new(meerkat::MemoryStore::new());
+        let private_labels = [("console.private_to", "console-caller:v1:owner")];
+        let one = member_session(&store, &private_labels).await;
+        let another = member_session(&store, &private_labels).await;
+        let shared = member_session(&store, &[]).await;
+        let absent = meerkat_core::types::SessionId::new();
+
+        let every_session = SessionStoreTranscriptSource::new(store);
+        for (session, private) in [(&one, true), (&another, true), (&shared, false)] {
+            let key = session.to_string();
+            assert!(
+                matches!(every_session.read(&key, 0).await, Ok(Some(slice)) if !slice.messages.is_empty()),
+                "the source reads every session of its store"
+            );
+            assert_eq!(
+                every_session.private_to_a_person(&key).await.ok(),
+                Some(private),
+                "private as the session is stored"
+            );
+        }
+
+        let key = absent.to_string();
+        assert!(
+            matches!(every_session.read(&key, 0).await, Ok(None)),
+            "an id the store holds no session under is not read"
+        );
+        assert_eq!(
+            every_session.private_to_a_person(&key).await.ok(),
+            Some(false),
+            "and is private to no one"
+        );
+    }
+
     /// A side chat that is private to a person is never distilled, whatever
     /// asks for it: its transcript is that person's alone. A side chat that is
     /// private to nobody (forked on a console without sign-in) is distilled
@@ -4115,5 +4295,38 @@ mod tests {
             matches!(outcome, DistillOutcome::Completed { written: 1, .. }),
             "{outcome:?}"
         );
+    }
+
+    /// No run distills for a member whose name is no plain identity scope
+    /// key (a raw member's name may hold a `/`): no scope is built from the
+    /// name, whatever the cause, and the compaction boundary counts as
+    /// harvested, as a private session's does.
+    #[tokio::test]
+    async fn a_member_named_as_a_reserved_key_is_given_no_memory_work() {
+        let provider = Arc::new(CapturingProvider::default());
+        let transcript = slice(&[("user", "the heron is at the north pond")]);
+        let session_key = transcript.session_key.clone();
+        let (engine, _client) = engine_with(
+            vec![NOOP_REPLY],
+            provider,
+            Some(transcript),
+            Vec::new(),
+            None,
+            enabled_config(),
+        );
+        for name in [
+            "private/console-caller:v1:aa/ledger-side",
+            "set-aside/ledger-side",
+            "team/ledger-side",
+        ] {
+            for cause in [DistillCause::Interactions, DistillCause::Compaction] {
+                let outcome = engine.distill_now(name, &session_key, cause).await;
+                assert!(
+                    matches!(&outcome, DistillOutcome::Skipped { reason } if reason == SKIP_NO_PLAIN_NAME),
+                    "{name}: {outcome:?}"
+                );
+                assert!(outcome.compaction_harvest_satisfied(), "{name}");
+            }
+        }
     }
 }

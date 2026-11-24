@@ -350,6 +350,12 @@ pub(crate) struct SendSweepOutcome {
     /// Submitted sends whose input the runtime did not hold: failed, their
     /// outcome unknown.
     pub(crate) lost: usize,
+    /// The sweep ran to its end: it listed the sends, examined each within
+    /// its deadline, held the dispatch of each send it examined, read its
+    /// evidence, settled each send its evidence settles, was not cut at its
+    /// limit and wrote for a registration that stood. A sweep that did not
+    /// complete leaves its sends to the next sweep.
+    pub(crate) completed: bool,
 }
 
 #[cfg(test)]
@@ -416,6 +422,7 @@ mod tests {
 
     fn frame(session_id: Option<&str>) -> ConsoleFrame {
         ConsoleFrame {
+            mob_id: None,
             id: "console-frame-1".to_string(),
             cursor: ConsoleCursor::from_seq(1),
             dedupe_key: "send-scoped:x".to_string(),

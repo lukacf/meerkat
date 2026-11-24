@@ -44,17 +44,17 @@ use super::sources::{
     TopicOwnership, UnhandledPolicy, covers,
 };
 use super::store::{
-    AnnouncementStore, AppliedDeclarations, DeclarationMark, RoleChild, RoleChildStatus,
-    RoleExpansion, RoleExpansions, RoleMember, SubmissionCheck, TemplateChangeOutcome,
-    TemplateChildren,
+    AnnouncementStore, AppliedDeclarations, DeclarationMark, MobRelease, RoleChild,
+    RoleChildStatus, RoleExpansion, RoleExpansions, RoleMember, SubmissionCheck,
+    TemplateChangeOutcome, TemplateChildren,
 };
 use super::types::{
     AnnounceOutcome, AnnounceRequest, Announcement, AnnouncementStoreError, Announcer, Batch,
     BatchEvent, BatchGap, BatchId, BatchItem, BatchPosition, BatchQuery, BatchState, BatchStateTag,
     ChildMemberLimits, ExpiryReport, GapReason, LateOutcome, MAX_BACKFILL, MAX_ITEM_WIRE_BYTES,
-    MAX_PAGE, Member, MemberBacklog, MemberRoute, MemberRouteRecord, MobId, MobLineage,
-    OperationId, PruneReport, PutSubscription, Result, SOURCE_KEY_PREFIX, SealingPolicy, Selector,
-    SourceId, SourceKey, StartFrontier, Subscription, SubscriptionChange,
+    MAX_PAGE, Member, MemberBacklog, MemberIdentity, MemberRoute, MemberRouteRecord, MobId,
+    MobLineage, OperationId, PruneReport, PutSubscription, Result, SOURCE_KEY_PREFIX,
+    SealingPolicy, Selector, SourceId, SourceKey, StartFrontier, Subscription, SubscriptionChange,
     SubscriptionChangeOutcome, SubscriptionEnd, SubscriptionId, SubscriptionState, Topic,
     content_digest, header_wire_bound, merge_gaps, quoted, render_batch_with_notice, render_gap,
     render_item, render_redelivered_line, render_redelivery_header, request_fingerprint,
@@ -1013,6 +1013,20 @@ fn announce_in(
         if sequence <= after {
             continue;
         }
+        // What a member announces is captured by the subscriptions the
+        // facts let receive it, and owed to a member they do not name until
+        // its seal judges it; no audit row counts the others. An announcer
+        // the facts do not name is read by itself alone, asked about or
+        // not.
+        if readers_of(
+            &announcement,
+            &subscription.member,
+            facts,
+            UnreadMember::Owed,
+        ) != Readers::Inside
+        {
+            continue;
+        }
         // A topic a source owns admits only the members its audience covers
         // and its routes reach, and none that owns a live conversation on
         // its scope.
@@ -1053,6 +1067,7 @@ fn announce_in(
 fn create_subscription(
     db: &Connection,
     request: &PutSubscription,
+    facts: &RosterFacts,
     now_ms: u64,
 ) -> Result<Subscription> {
     let heads = log_heads(db)?;
@@ -1136,6 +1151,21 @@ fn create_subscription(
             }
         }
         for (sequence, bytes) in selected {
+            // What a member announced is replayed where its roster facts
+            // let the subscriber receive it, as a capture would be; only
+            // what is replayed counts against the bound. One whose
+            // announcer the owner did not ask about is owed to the
+            // subscription and judged at its seal.
+            let announcement = announcement_at(db, mob_id, sequence)?;
+            if readers_of(
+                &announcement,
+                &subscription.member,
+                facts,
+                UnreadMember::Owed,
+            ) == Readers::Outside
+            {
+                continue;
+            }
             replayed += 1;
             if replayed > MAX_BACKFILL {
                 return Err(AnnouncementStoreError::TooLarge(format!(
@@ -1152,6 +1182,7 @@ fn put_subscription_in(
     db: &Connection,
     operation: &OperationId,
     request: &PutSubscription,
+    facts: &RosterFacts,
     now_ms: u64,
 ) -> Result<Subscription> {
     let fingerprint = request_fingerprint("put_subscription", request)?;
@@ -1179,7 +1210,7 @@ fn put_subscription_in(
                 subscription_id: request.id.clone(),
             });
         }
-        (None, None) => create_subscription(db, request, now_ms)?,
+        (None, None) => create_subscription(db, request, facts, now_ms)?,
         (None, Some(_)) => return Err(AnnouncementStoreError::UnknownSubscription),
         (Some(existing), None) => {
             return Err(AnnouncementStoreError::StaleRevision {
@@ -1713,11 +1744,277 @@ fn drop_ended_mobs_in(
     Ok(changed)
 }
 
+/// Why a member's subscriptions end when its mob's id is released for a new
+/// mob: the words a reconcile ends them with when it finds the mob created
+/// again.
+const CREATED_AGAIN: &str = "created again";
+
+/// One column of text of every row `sql` selects for the one text `key`.
+fn texts(db: &Connection, sql: &str, key: &str) -> Result<Vec<String>> {
+    let mut statement = db.prepare(sql).map_err(storage)?;
+    let rows = statement
+        .query_map(params![key], |row| row.get::<_, String>(0))
+        .map_err(storage)?;
+    rows.map(|row| row.map_err(storage)).collect()
+}
+
+/// Delete the rows of each of `tables` whose `mob_id` is `mob_id`.
+fn delete_of_mob(db: &Connection, tables: &[&str], mob_id: &MobId) -> Result<u64> {
+    let mut deleted = 0;
+    for table in tables {
+        deleted += db
+            .execute(
+                &format!("DELETE FROM {table} WHERE mob_id = ?1"),
+                params![mob_id.as_str()],
+            )
+            .map_err(storage)? as u64;
+    }
+    Ok(deleted)
+}
+
+/// Release what a mob of the id `mob_id` left: see
+/// [`AnnouncementStore::release_mob`].
+fn release_mob_in(db: &Connection, mob_id: &MobId, now_ms: u64) -> Result<MobRelease> {
+    let mob = mob_id.as_str();
+    let mut subscriptions = BTreeSet::new();
+
+    // A sealed batch that holds an announcement of the mob would read it
+    // again before its submission: it is cancelled as a failed check before
+    // a submission cancels one, its gap lines go to its member's next batch,
+    // and what it held is owed again in no batch.
+    let sealed = texts(
+        db,
+        "SELECT DISTINCT b.id FROM owed_announcements o
+         JOIN announcement_batches b ON b.id = o.batch_id
+         WHERE o.mob_id = ?1 AND o.settlement IS NULL AND b.state = 'sealed' ORDER BY b.id",
+        mob,
+    )?;
+    for id in sealed {
+        let Some(mut batch) = load_batch(db, &BatchId::new(id)?)? else {
+            continue;
+        };
+        batch.state = batch.state.apply(&BatchEvent::Cancel)?;
+        batch.updated_at_ms = now_ms;
+        add_gaps(db, &batch.member, &batch.gaps)?;
+        db.execute(
+            "UPDATE owed_announcements SET batch_id = NULL
+             WHERE batch_id = ?1 AND settlement IS NULL",
+            params![batch.id.as_str()],
+        )
+        .map_err(storage)?;
+        update_batch(db, &batch)?;
+    }
+
+    // The mob leaves every live subscription that names it, and a
+    // subscription that named it alone ends with what it awaited.
+    subscriptions.extend(drop_ended_mobs_in(
+        db,
+        &BTreeSet::from([mob_id.clone()]),
+        now_ms,
+    )?);
+
+    // What a live subscription still awaits of the mob, in no batch, is not
+    // delivered: its member is told once per announcement, unless every row
+    // of it is held from the member, which then learns nothing of it.
+    let mut told = BTreeMap::<String, u64>::new();
+    for member in texts(
+        db,
+        "SELECT o.member FROM owed_announcements o
+         WHERE o.mob_id = ?1 AND o.batch_id IS NULL AND o.settlement IS NULL
+           AND NOT EXISTS (
+             SELECT 1 FROM announcement_holds h WHERE h.subscription_id = o.subscription_id
+               AND h.mob_id = o.mob_id AND h.sequence = o.sequence)
+         GROUP BY o.member, o.sequence",
+        mob,
+    )? {
+        *told.entry(member).or_default() += 1;
+    }
+    for (member, count) in told {
+        add_gaps(
+            db,
+            &Member::from_key(&member)?,
+            &[BatchGap {
+                mob_id: mob_id.clone(),
+                count,
+                reason: GapReason::NotRetained,
+            }],
+        )?;
+    }
+    // Every row of the mob's announcements goes but those of a batch the
+    // native owner may hold, which carries its own body and settles them.
+    db.execute(
+        "DELETE FROM owed_announcements
+         WHERE mob_id = ?1 AND (batch_id IS NULL OR settlement IS NOT NULL)",
+        params![mob],
+    )
+    .map_err(storage)?;
+    delete_of_mob(
+        db,
+        &["announcement_holds", "announcement_redeliveries"],
+        mob_id,
+    )?;
+
+    // The announcements go, with what each source item's announcement was.
+    // The log keeps its head: the next announcement into the id takes the
+    // sequence after it, so no row of it meets a row of an earlier one.
+    let announcements = delete_of_mob(db, &["announcements"], mob_id)?;
+    delete_of_mob(
+        db,
+        &["announcement_topics", "announcement_source_items"],
+        mob_id,
+    )?;
+    db.execute(
+        "UPDATE announcement_logs SET earliest_retained = head_sequence + 1,
+           ended_at_ms = COALESCE(ended_at_ms, ?2)
+         WHERE mob_id = ?1",
+        params![mob, int(now_ms)?],
+    )
+    .map_err(storage)?;
+
+    // Its sources end, at a new revision: a source put again under one of
+    // their ids starts its next generation. Their topics and streams are
+    // free, and what was counted about them goes.
+    let mut sources = Vec::new();
+    for record in texts(
+        db,
+        "SELECT record FROM announcement_sources
+         WHERE mob_id = ?1 AND state != 'ended' ORDER BY source_id",
+        mob,
+    )? {
+        let mut source: AnnouncementSource = decode(&record)?;
+        source.state = SourceState::Ended;
+        source.revision += 1;
+        source.updated_at_ms = now_ms;
+        source.refresh_status();
+        write_source(db, &source)?;
+        sources.push(source);
+    }
+    delete_of_mob(
+        db,
+        &[
+            "announcement_source_topics",
+            "announcement_source_streams",
+            "announcement_audit",
+        ],
+        mob_id,
+    )?;
+
+    // Its members: their subscriptions end, and their kept routes, markers
+    // and gap lines go, so a member of the same name in the new mob starts
+    // as a member never seen.
+    let mut members = BTreeSet::new();
+    for sql in [
+        "SELECT DISTINCT member FROM member_subscriptions WHERE state IN ('active', 'paused')",
+        "SELECT member FROM member_routes",
+        "SELECT member FROM announcement_member_markers",
+        "SELECT DISTINCT member FROM announcement_gaps",
+    ] {
+        let mut statement = db.prepare(sql).map_err(storage)?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(storage)?;
+        for row in rows {
+            let key = row.map_err(storage)?;
+            if Member::from_key(&key)?.mob_id == *mob_id {
+                members.insert(key);
+            }
+        }
+    }
+    let end = SubscriptionEnd::MemberMobEnded {
+        why: CREATED_AGAIN.to_string(),
+    };
+    let mut released_members = Vec::with_capacity(members.len());
+    for key in members {
+        let member = Member::from_key(&key)?;
+        subscriptions.extend(end_member_in(db, &member, &end, now_ms)?);
+        for table in [
+            "member_routes",
+            "announcement_member_markers",
+            "announcement_gaps",
+        ] {
+            db.execute(
+                &format!("DELETE FROM {table} WHERE member = ?1"),
+                params![key],
+            )
+            .map_err(storage)?;
+        }
+        released_members.push(member);
+    }
+
+    // The role templates: one of a role of the mob is cancelled with its
+    // children; the mob leaves the mobs every other one captures from, and
+    // one left with none is cancelled. A declared one is no longer marked,
+    // so the declarations start it again.
+    let mut templates = Vec::new();
+    let records = {
+        let mut statement = db
+            .prepare(
+                "SELECT record FROM announcement_role_templates
+                 WHERE state != 'cancelled' ORDER BY id",
+            )
+            .map_err(storage)?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(storage)?;
+        rows.map(|row| row.map_err(storage))
+            .collect::<Result<Vec<_>>>()?
+    };
+    for record in records {
+        let mut template: RoleTemplate = decode(&record)?;
+        let of_the_mob = template.members.mob_id == *mob_id;
+        if !of_the_mob && !template.mobs.remove(mob_id) {
+            continue;
+        }
+        template.revision += 1;
+        template.updated_at_ms = now_ms;
+        if of_the_mob || template.mobs.is_empty() {
+            template.state = SubscriptionState::Cancelled;
+            write_role_template(db, &template)?;
+            for child in cascade_role_template(db, &template, SubscriptionChange::Cancel, now_ms)? {
+                subscriptions.insert(child.id);
+            }
+            remove_declaration_mark_in(
+                db,
+                DeclarationRecordKind::Subscription,
+                template.id.as_str(),
+                now_ms,
+            )?;
+        } else {
+            write_role_template(db, &template)?;
+        }
+        templates.push(template.id);
+    }
+
+    // A declared source of the mob is no longer marked: the declarations
+    // start it again for the mob that stands under the id.
+    for mark in declaration_marks_in(db)? {
+        if mark.kind == DeclarationRecordKind::Source && mark.mob_id.as_ref() == Some(mob_id) {
+            remove_declaration_mark_in(db, mark.kind, &mark.id, now_ms)?;
+        }
+    }
+
+    end_lineage_in(db, &BTreeSet::from([mob_id.clone()]), now_ms)?;
+
+    Ok(MobRelease {
+        sources,
+        subscriptions: subscriptions.into_iter().collect(),
+        templates,
+        members: released_members,
+        announcements,
+    })
+}
+
 /// Members with deliverable announcements and no unsettled batch, oldest
 /// first, at most `limit`. Read at `at_ms`, the page also reads past each
 /// member that waits for the handling of its previous batch then (see
-/// [`waits_for_handling`]): it cannot be sealed either.
-fn backlogs_in(db: &Connection, limit: usize, at_ms: Option<u64>) -> Result<Vec<MemberBacklog>> {
+/// [`waits_for_handling`]): it cannot be sealed either. It reads past the
+/// members of `past` too.
+fn backlogs_in(
+    db: &Connection,
+    limit: usize,
+    at_ms: Option<u64>,
+    past: &BTreeSet<Member>,
+) -> Result<Vec<MemberBacklog>> {
     let wanted = limit.clamp(1, MAX_PAGE);
     let mut statement = db
         .prepare(
@@ -1741,6 +2038,9 @@ fn backlogs_in(db: &Connection, limit: usize, at_ms: Option<u64>) -> Result<Vec<
         && let Some(row) = rows.next().map_err(storage)?
     {
         let member = Member::from_key(&row.get::<_, String>(0).map_err(storage)?)?;
+        if past.contains(&member) {
+            continue;
+        }
         if let Some(now_ms) = at_ms
             && waits_for_handling(db, &member, now_ms)?
         {
@@ -1890,6 +2190,20 @@ fn seal_batch_in(
             continue;
         }
         let announcement = announcement_at(db, &key.0, key.1)?;
+        // An item the member may not receive, as its announcer's roster
+        // facts read now, is settled and enters no batch. One whose
+        // announcer the owner did not ask about for this seal is not
+        // judged: it stays owed, and the next seal's listing names it. It
+        // can so be delivered after a newer item of an announcer that was
+        // asked about.
+        match readers_of(&announcement, member, facts, UnreadMember::Outside) {
+            Readers::Inside => {}
+            Readers::Outside => {
+                settle_outside_readers(db, member, &key)?;
+                continue;
+            }
+            Readers::NotAsked => continue,
+        }
         // An item enters when one of its rows passes the member's check: it
         // reaches the member once, through that row. One no row passes is
         // held, every row of it.
@@ -4528,6 +4842,157 @@ fn withholding<'a>(
     refusal
 }
 
+/// What the judgement of an announcement's readers takes a member for that
+/// the facts do not name, where the announcer is private to a person.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UnreadMember {
+    /// Owed the item: the seal judges it with the facts read then (a
+    /// capture, a replay).
+    Owed,
+    /// Outside the readers (the seal).
+    Outside,
+}
+
+/// What the facts the owner hands say of a member and an announcement.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Readers {
+    /// The member is among its readers.
+    Inside,
+    /// The member is outside its readers.
+    Outside,
+    /// The owner did not ask about the announcer for this call, so the
+    /// call judges nothing.
+    NotAsked,
+}
+
+/// Whether `member` is among the readers of `announcement`, as the facts
+/// the owner hands say. What a member private to a person announces is read
+/// by the announcer itself and by the members private to the same person
+/// ([`crate::access::private_to_another`], the comparison a caller's view
+/// is judged by, with the member's own person as the reader). What a member
+/// announced that the owner asked about and the facts do not name is read
+/// by that member alone. What the host, a source, or a member private to no
+/// one announces is read by every member. An announcer the owner did not
+/// ask about ([`RosterFacts::was_asked`]) is not judged.
+///
+/// The facts are the owner's: a member's roster row, with the person the
+/// record of who members are private to holds for it where the row names
+/// none, and that record's answer alone for a member that has ended.
+fn readers_of(
+    announcement: &Announcement,
+    member: &Member,
+    facts: &RosterFacts,
+    unread: UnreadMember,
+) -> Readers {
+    let Announcer::Member { identity } = &announcement.announced_by else {
+        return Readers::Inside;
+    };
+    let announcer = Member::new(announcement.mob_id.clone(), identity.clone());
+    if announcer == *member {
+        return Readers::Inside;
+    }
+    let Some(announced_by) = facts.get(&announcer) else {
+        return if facts.was_asked(&announcer) {
+            Readers::Outside
+        } else {
+            Readers::NotAsked
+        };
+    };
+    if crate::access::private_owner(&announced_by.labels).is_none() {
+        return Readers::Inside;
+    }
+    let outside = match facts.get(member) {
+        Some(reader) => crate::access::private_to_another(
+            &announced_by.labels,
+            crate::access::private_owner(&reader.labels),
+        ),
+        None => unread == UnreadMember::Outside,
+    };
+    if outside {
+        Readers::Outside
+    } else {
+        Readers::Inside
+    }
+}
+
+/// Settle every open row `member` has for the item `key` as cancelled, and
+/// drop the holds on them: the item reaches the member through none.
+fn settle_outside_readers(db: &Connection, member: &Member, key: &(MobId, u64)) -> Result<()> {
+    for statement in [
+        "DELETE FROM announcement_holds WHERE member = ?1 AND mob_id = ?2 AND sequence = ?3",
+        "UPDATE owed_announcements SET settlement = 'cancelled'
+         WHERE member = ?1 AND mob_id = ?2 AND sequence = ?3
+           AND batch_id IS NULL AND settlement IS NULL",
+    ] {
+        db.execute(
+            statement,
+            params![member.key(), key.0.as_str(), int(key.1)?],
+        )
+        .map_err(storage)?;
+    }
+    Ok(())
+}
+
+/// The members that announced what `request` would replay: the announcers
+/// of the retained announcements after its start, on its topics.
+fn replay_announcers_in(db: &Connection, request: &PutSubscription) -> Result<BTreeSet<Member>> {
+    let StartFrontier::After { frontier } = &request.start else {
+        return Ok(BTreeSet::new());
+    };
+    let mut statement = db
+        .prepare_cached(
+            "SELECT DISTINCT json_extract(p.record, '$.announced_by.identity')
+             FROM announcement_topics t
+             JOIN announcements p ON p.mob_id = t.mob_id AND p.sequence = t.sequence
+             WHERE t.topic = ?1 AND t.mob_id = ?2 AND t.sequence > ?3
+               AND json_extract(p.record, '$.announced_by.kind') = 'member'",
+        )
+        .map_err(storage)?;
+    let mut announcers = BTreeSet::new();
+    for (mob_id, after) in frontier {
+        for topic in &request.selector.topics {
+            let rows = statement
+                .query_map(
+                    params![topic.as_str(), mob_id.as_str(), int(*after)?],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(storage)?;
+            for identity in rows {
+                let identity = MemberIdentity::new(identity.map_err(storage)?)?;
+                announcers.insert(Member::new(mob_id.clone(), identity));
+            }
+        }
+    }
+    Ok(announcers)
+}
+
+/// The members that announced an item `member` is owed and no batch holds.
+fn owed_announcers_in(db: &Connection, member: &Member) -> Result<BTreeSet<Member>> {
+    let mut statement = db
+        .prepare_cached(
+            "SELECT DISTINCT o.mob_id, json_extract(p.record, '$.announced_by.identity')
+             FROM owed_announcements o
+             JOIN announcements p ON p.mob_id = o.mob_id AND p.sequence = o.sequence
+             WHERE o.member = ?1 AND o.settlement IS NULL AND o.batch_id IS NULL
+               AND json_extract(p.record, '$.announced_by.kind') = 'member'",
+        )
+        .map_err(storage)?;
+    let rows = statement
+        .query_map(params![member.key()], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(storage)?;
+    let mut announcers = BTreeSet::new();
+    for row in rows {
+        let (mob_id, identity) = row.map_err(storage)?;
+        announcers.insert(Member::new(
+            MobId::new(mob_id)?,
+            MemberIdentity::new(identity)?,
+        ));
+    }
+    Ok(announcers)
+}
+
 /// What one counted audit entry is about. Every refusal or withholding with
 /// the same key counts on the same entry.
 #[derive(Serialize, serde::Deserialize)]
@@ -5114,7 +5579,7 @@ fn put_subscription_admitted_in(
     db: &Connection,
     operation: &OperationId,
     request: &PutSubscription,
-    facts: Option<&MemberFacts>,
+    facts: &RosterFacts,
     now_ms: u64,
 ) -> Result<std::result::Result<Subscription, SubscriptionRefusal>> {
     // A replay of a committed put answers its original.
@@ -5122,10 +5587,12 @@ fn put_subscription_admitted_in(
     if let Some(result) = operation_result(db, operation, &fingerprint)? {
         return Ok(Ok(decode(&result)?));
     }
-    if let Some(refusal) = ensure_subscription_admitted(db, request, facts)? {
+    if let Some(refusal) = ensure_subscription_admitted(db, request, facts.get(&request.member))? {
         return Ok(Err(refusal));
     }
-    Ok(Ok(put_subscription_in(db, operation, request, now_ms)?))
+    Ok(Ok(put_subscription_in(
+        db, operation, request, facts, now_ms,
+    )?))
 }
 
 /// Refuse a declaration under which an existing live subscriber would reach
@@ -5255,11 +5722,33 @@ impl AnnouncementStore for SqliteAnnouncementStore {
         facts: Option<MemberFacts>,
         now_ms: u64,
     ) -> Result<Subscription> {
+        let facts = facts_of(&request.member, facts);
+        self.put_subscription_with_roster(operation, request, &facts, now_ms)
+            .await
+    }
+
+    fn judges_readers(&self) -> bool {
+        true
+    }
+
+    async fn replay_announcers(&self, request: &PutSubscription) -> Result<BTreeSet<Member>> {
+        let request = request.clone();
+        self.run(move |db| replay_announcers_in(db, &request)).await
+    }
+
+    async fn put_subscription_with_roster(
+        &self,
+        operation: &OperationId,
+        request: PutSubscription,
+        facts: &RosterFacts,
+        now_ms: u64,
+    ) -> Result<Subscription> {
         let request = Arc::new(request);
         let put = {
-            let (operation, request) = (operation.clone(), Arc::clone(&request));
+            let (operation, request, facts) =
+                (operation.clone(), Arc::clone(&request), facts.clone());
             move |db: &Connection| {
-                put_subscription_admitted_in(db, &operation, &request, facts.as_ref(), now_ms)
+                put_subscription_admitted_in(db, &operation, &request, &facts, now_ms)
             }
         };
         let refusal = match self.run(put).await? {
@@ -5326,6 +5815,12 @@ impl AnnouncementStore for SqliteAnnouncementStore {
     ) -> Result<Vec<SubscriptionId>> {
         let ended = ended.clone();
         self.run(move |db| drop_ended_mobs_in(db, &ended, now_ms))
+            .await
+    }
+
+    async fn release_mob(&self, mob_id: &MobId, now_ms: u64) -> Result<MobRelease> {
+        let mob_id = mob_id.clone();
+        self.run(move |db| release_mob_in(db, &mob_id, now_ms))
             .await
     }
 
@@ -5416,11 +5911,23 @@ impl AnnouncementStore for SqliteAnnouncementStore {
     }
 
     async fn backlogs(&self, limit: usize) -> Result<Vec<MemberBacklog>> {
-        self.run(move |db| backlogs_in(db, limit, None)).await
+        self.run(move |db| backlogs_in(db, limit, None, &BTreeSet::new()))
+            .await
     }
 
     async fn backlogs_at(&self, limit: usize, now_ms: u64) -> Result<Vec<MemberBacklog>> {
-        self.run(move |db| backlogs_in(db, limit, Some(now_ms)))
+        self.run(move |db| backlogs_in(db, limit, Some(now_ms), &BTreeSet::new()))
+            .await
+    }
+
+    async fn backlogs_past(
+        &self,
+        limit: usize,
+        now_ms: u64,
+        past: &BTreeSet<Member>,
+    ) -> Result<Vec<MemberBacklog>> {
+        let past = past.clone();
+        self.run(move |db| backlogs_in(db, limit, Some(now_ms), &past))
             .await
     }
 
@@ -5443,8 +5950,26 @@ impl AnnouncementStore for SqliteAnnouncementStore {
         facts: Option<MemberFacts>,
         now_ms: u64,
     ) -> Result<Option<Batch>> {
+        let facts = facts_of(member, facts);
+        self.seal_batch_with_roster(member, batch_id, policy, &facts, now_ms)
+            .await
+    }
+
+    async fn owed_announcers(&self, member: &Member) -> Result<BTreeSet<Member>> {
+        let member = member.clone();
+        self.run(move |db| owed_announcers_in(db, &member)).await
+    }
+
+    async fn seal_batch_with_roster(
+        &self,
+        member: &Member,
+        batch_id: &BatchId,
+        policy: &SealingPolicy,
+        facts: &RosterFacts,
+        now_ms: u64,
+    ) -> Result<Option<Batch>> {
         let (member, batch_id, policy) = (member.clone(), batch_id.clone(), *policy);
-        let facts = facts_of(&member, facts);
+        let facts = facts.clone();
         self.run(move |db| seal_batch_in(db, &member, &batch_id, &policy, &facts, now_ms))
             .await
     }
@@ -7637,7 +8162,7 @@ fn make_role_child_in(
         if route.route == MemberRoute::Child {
             within_child_limits(db, &request)?;
         }
-        create_subscription(db, &request, now_ms)
+        create_subscription(db, &request, facts, now_ms)
     });
     match made {
         Ok(_) => Ok(Ok(())),

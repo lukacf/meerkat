@@ -13,7 +13,7 @@ use meerkat_rest::{AppState, router};
 use meerkat_store::RealmBackend;
 use std::process::ExitCode;
 use std::{net::SocketAddr, path::PathBuf};
-use tower_http::{cors::CorsLayer, trace::TraceLayer};
+use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Parser, Debug)]
@@ -251,11 +251,23 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .parse()
         .map_err(|e| format!("Invalid host:port combination: {e}"))?;
 
-    // Build router with middleware. Keep a clone for shutdown cleanup.
+    // Build the router. Keep a clone for shutdown cleanup. The router checks
+    // its callers itself (`meerkat_rest::allowed_origins`): nothing here
+    // answers a request before those checks, and the trace layer is outside
+    // them, so a refused request is logged too.
     let shutdown_state = state.clone();
-    let app = router(state)
-        .layer(TraceLayer::new_for_http())
-        .layer(CorsLayer::permissive());
+    tracing::info!(
+        allowed_origins = ?state.rest_allowed_origins.as_slice(),
+        "Browser origins this server answers"
+    );
+    if state.rest_served_hosts.refuses_every_name_off_loopback() {
+        tracing::warn!(
+            "This server is not bound to loopback and `rest.served_hosts` is empty: it serves \
+             a request addressed to `localhost` or to an address and refuses every other Host \
+             name. List the names it is reached under in the realm's `[rest] served_hosts`."
+        );
+    }
+    let app = router(state).layer(TraceLayer::new_for_http());
 
     tracing::info!("Listening on http://{}", addr);
 

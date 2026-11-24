@@ -105,7 +105,7 @@ class TestCapabilitiesResult:
     def test_from_dict_with_runtime_capabilities(self):
         r = CapabilitiesResult.from_dict(
             {
-                "contract_version": "0.5.0",
+                "contract_version": "0.6.0",
                 "methods": ["status"],
                 "loaded_modules": ["x"],
                 "runtime_capabilities": {
@@ -126,7 +126,7 @@ class TestCapabilitiesResult:
     def test_from_dict_with_profile_capabilities(self):
         r = CapabilitiesResult.from_dict(
             {
-                "contract_version": "0.5.0",
+                "contract_version": "0.6.0",
                 "methods": [],
                 "loaded_modules": [],
                 "runtime_capabilities": {
@@ -940,6 +940,17 @@ class TestGatingPendingEntry:
         })
         assert partial.origin == GatingOrigin("person:alice")
 
+    def test_preserves_the_origin_mob(self):
+        entry = GatingPendingEntry.from_dict({
+            "pending_id": "p1", "action_id": "a1", "action": "publish",
+            "actor_id": "agent:writer",
+            "origin": {"identity": "alice", "mob_id": "second"},
+        })
+        assert entry.origin == GatingOrigin("alice", mob_id="second")
+        # An origin that names no mob is a member of the default mob.
+        for origin in ({"identity": "alice"}, {"identity": "alice", "mob_id": " "}):
+            assert GatingOrigin.from_dict(origin) == GatingOrigin("alice")
+
     @pytest.mark.parametrize(
         "origin",
         [None, "person:alice", [], {}, {"identity": ""}, {"identity": 3},
@@ -1205,6 +1216,55 @@ class TestPersistedEvent:
         assert isinstance(r.event, UnifiedAgentEvent)
         assert r.event.agent_id == "agent-1"
         assert r.event.event_type == "run_completed"
+        assert r.mob_id is None
+
+    def test_from_dict_reads_the_mob_of_an_event_of_another_mob(self):
+        # Two rows of one member name, as a host of two mobs answers them:
+        # the row of the second mob names its mob, the launch mob's row
+        # names none.
+        row = {
+            "id": "ev-second",
+            "seq": 7,
+            "timestamp_ms": 1700000000000,
+            "member_id": "desk",
+            "mob_id": "second-mob",
+            "mob_incarnation": "0190d6c3-7a1b-7c3e-8f2a-5b6c7d8e9f01",
+            "event": {
+                "kind": "agent",
+                "agent_id": "desk",
+                "event_type": "run_completed",
+            },
+        }
+        of_the_second_mob = PersistedEvent.from_dict(row)
+        of_the_launch_mob = PersistedEvent.from_dict(
+            {
+                key: value
+                for key, value in row.items()
+                if key not in ("mob_id", "mob_incarnation")
+            }
+        )
+        assert of_the_second_mob.mob_id == "second-mob"
+        assert of_the_second_mob.mob_incarnation == "0190d6c3-7a1b-7c3e-8f2a-5b6c7d8e9f01"
+        assert of_the_launch_mob.mob_id is None
+        assert of_the_launch_mob.mob_incarnation is None
+        assert of_the_second_mob.member_id == of_the_launch_mob.member_id == "desk"
+        assert of_the_second_mob.event == of_the_launch_mob.event
+
+    def test_from_dict_reads_a_mob_that_is_not_a_string_as_no_mob(self):
+        for not_a_string in (None, 7, {"id": "second-mob"}, ["second-mob"]):
+            r = PersistedEvent.from_dict(
+                {
+                    "id": "ev-other",
+                    "seq": 8,
+                    "timestamp_ms": 1700000000001,
+                    "member_id": "desk",
+                    "mob_id": not_a_string,
+                    "mob_incarnation": not_a_string,
+                    "event": {"kind": "agent", "agent_id": "desk", "event_type": "run_completed"},
+                }
+            )
+            assert r.mob_id is None, not_a_string
+            assert r.mob_incarnation is None, not_a_string
 
     def test_from_dict_accepts_rust_internal_agent_event(self):
         r = PersistedEvent.from_dict(

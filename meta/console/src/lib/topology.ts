@@ -489,6 +489,7 @@ export function normalizeConsoleTopologyQuery(
         identity: runtimeIdentity,
         member_id: agent?.member_id,
         agent_id: agent?.agent_id,
+        mob_id: agent?.mob_id,
         labels: agent?.labels,
         role: node.role || fallback?.role || agent?.role,
         group: fallback?.group || agent?.group,

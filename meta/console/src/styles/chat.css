@@ -1088,5 +1088,25 @@
 }
 .queue-import__action:hover { background: var(--_cc-surface-hover); border-color: var(--_cc-foreground-muted); }
 .queue-import__action:focus-visible { outline: 2px solid var(--_cc-focus-ring); outline-offset: 2px; }
+/* Queued messages that wait because their agent's team is asleep: one quiet line above the queue. */
+.queue-waiting { margin: 0 0 6px; color: var(--_cc-foreground-meta); font-size: 12px; overflow-wrap: anywhere; }
+/* In the place of an interactive view that was not loaded (its agent's team
+   is asleep or unavailable): why, the way to wake the team, the tool's words. */
+.console-mcp-app--not-loaded {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 8px;
+  padding: 10px 12px; border: 1px solid var(--_cc-border-soft); border-radius: 8px;
+  background: var(--_cc-surface-soft);
+}
+.console-mcp-app--not-loaded p { margin: 0; overflow-wrap: anywhere; }
+.console-mcp-app__why { color: var(--_cc-foreground-muted); font-size: 13px; }
+.console-mcp-app__fallback { color: var(--_cc-foreground); }
+.console-mcp-app__wake {
+  appearance: none; border: 1px solid var(--_cc-border-soft); border-radius: 6px;
+  background: var(--_cc-surface-card); color: var(--_cc-foreground);
+  padding: 4px 10px; font: inherit; font-weight: 500; cursor: pointer;
+}
+.console-mcp-app__wake:hover { background: var(--_cc-surface-hover); }
+.console-mcp-app__wake:focus-visible { outline: 2px solid var(--_cc-focus-ring); outline-offset: 2px; }
+.console-mcp-app__wake:disabled { cursor: default; opacity: 0.6; }
 
 

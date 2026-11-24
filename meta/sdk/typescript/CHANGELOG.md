@@ -2,6 +2,188 @@
 
 ## Unreleased
 
+## 0.9.18
+
+- `PersistedEvent` gains `mobId` and `mobIncarnation` (`string | null`).
+  `mobId` is the event's mob when the event is of a mob of the host other
+  than the launch mob, or of a mob below such a mob; `mobIncarnation` is
+  the incarnation of that mob the event came from, present where `mobId`
+  is. `parsePersistedEvent` reads the gateway's `mob_id` and
+  `mob_incarnation` and sets `null` where the gateway sends none, so an
+  event of the launch mob, of a host of one mob or of an earlier gateway
+  reads `null` in both. Code that builds a `PersistedEvent` as an object
+  literal adds `mobId: null` and `mobIncarnation: null`.
+
+- `GatingOrigin` keeps `mobId`: the mob the origin's member is in, when it
+  is not the gateway's default mob. `parseGatingOrigin` reads the gateway's
+  `mob_id` and leaves the field out for a member of the default mob, so an
+  origin from an earlier gateway reads as before.
+
+- `MetaRuntime.mob(mobId)` returns the `MobHandle` of a mob of the host
+  named by its id: the same class `mobHandle()` returns, with
+  `handle.mobId` set. Obtaining it sends nothing. Every call it makes
+  carries `mob_id`: in each JSON-RPC request, in the multipart upload, and
+  as `?mob_id=` on the two event stream URLs. A `mobId` you pass to a method
+  that takes one (the announcement methods, an event query) is sent as
+  given. `mobHandle()` is unchanged: its requests name no mob.
+
+- A named handle needs the gateway's `mob_addressing` feature capability
+  (`MOB_ADDRESSING`, `supportsMobAddressing`): an earlier gateway would
+  ignore `mob_id` and answer for its own mob, so without the capability
+  every call rejects with `CapabilityUnavailableError` and nothing else is
+  sent. The capability is read once per started gateway; the default handle
+  reads it only before an event query that names a mob.
+
+- `MetaRuntime.mobs` (`MobsHandle`): `create(mobConfig)`, `list()` and
+  `get(mobId)` call `meta/mobs/create`, `meta/mobs/list` and
+  `meta/mobs/get`. They need the `hosted_mobs` feature capability
+  (`HOSTED_MOBS`, `supportsHostedMobs`) and ask the gateway on every call:
+  the SDK keeps no list of mobs. An entry is a `HostedMob` (`mobId`,
+  `default`, `state`, and `provenance`, `failure`, `quarantine`, `revision`
+  when sent; `parseHostedMob`; `revision` is what a redefine is made
+  against, carried by `get` for a loaded mob and by the entry of a create,
+  lifecycle or redefine answer). `HOSTED_MOB_STATES` (`HostedMobState`,
+  `HOSTED_MOB_STATE_TOKENS`) is an open list: a state newer than the SDK is
+  kept as its text, with `knownState` false.
+
+- `MetaRuntime.mobs` also has `lifecycle(mobId, action)` (`"stop"` or
+  `"resume"`), `redefine(mobId, mobConfig, expectedRevision)` and
+  `destroy(mobId)` for `meta/mobs/lifecycle`, `meta/mobs/redefine` and
+  `meta/mobs/destroy`. They resolve `MobLifecycleResult` (the entry and, for
+  a stop, the stop report), `MobRedefineResult` (the entry and a
+  `MobRedefineReceipt`) and `MobDestroyResult` (the mob's id and the destroy
+  report), read by `parseMobLifecycleResult`, `parseMobRedefineResult` and
+  `parseMobDestroyResult`. Each names its mob itself: none has a default,
+  and a call that lacks what the wire requires is refused before anything is
+  sent, with a `TypeError`. A destroy of the launch's own mob rejects with
+  `MobHostingRefusedError` (`default_mob`). An answer of a hosting call that
+  the SDK cannot read (no entry, no id, a receipt without a member, a stop
+  without its stop report, a report that is not an object) rejects with
+  `ContractMismatchError`: the request was sent.
+
+- `MobHostingRefusedError` (`MOB_HOSTING_REFUSED_CODE`, `-32059`) is the one
+  refusal error of the hosting calls: `kind`, `mobId`, `retryable`,
+  `detail`, `details`, `knownKind`, and the `MobHostingRefusal` as
+  `refusal` (`parseMobHostingRefusal`). `MobHostingRefusalKind`,
+  `MOB_HOSTING_REFUSAL_KINDS`, `MOB_HOSTING_REFUSAL_KIND_TOKENS` and
+  `isMobHostingRefusalKind` are the closed vocabulary (`mob_exists`,
+  `invalid_mob_id`, `default_mob`, `mob_not_stopped`, `mob_busy`; only
+  `mob_busy` is retryable); a kind newer than the
+  SDK is still this error, with `knownKind` false. A mob the host does not
+  have stays a plain `RpcError` (`-32602`, data `kind`
+  `foreign_mob_target`).
+
+- `SseBridge` takes an optional second constructor argument, the id of the
+  mob whose streams it reads. The id is written into `?mob_id=` with every
+  reserved character percent-encoded (`! * ' ( )` too), the bytes the Python
+  SDK writes.
+
+- The callbacks `customize_build`, `after_create` and `compute_edges` read
+  the top-level `mob_id` a host with more than one mob sends:
+  `AgentBuildContext.mobId`, `SessionCreatedContext.mobId`, and `mob_id` in
+  the context a topology provider is given. Absent when the host names
+  none, which is its own mob: the contexts are then whole as they were. A
+  `mob_id` that is not text is refused with `ContractMismatchError`.
+
+- Changed for a host with more than one mob: the callback tools a customizer
+  registers are kept per mob and identity, not per identity name, so a build
+  of a member in one mob no longer releases the tools of the member with the
+  same name in another. An SDK older than this keeps the earlier behaviour
+  under such a host.
+
+- Changed: `queryEvents` with a `mobId` in its query first reads the
+  gateway's `mob_addressing` feature capability, on the handle of the
+  launch's own mob too. Against a gateway that does not list it the call
+  rejects with `CapabilityUnavailableError` and the query is not sent, where
+  from 0.6.0 on it was sent: such a gateway would answer the query without
+  an error and for its own mob. A query without a `mobId` is unchanged and
+  reads no capability, and so are `queryMobEvents` and `subscribeMobEvents`
+  with a `mobId`.
+
+- Compatibility of the mob on the customize callback, both ways. The
+  gateway names the member's mob as `mob_id` beside `scope_id` in the params
+  of `callback/agent_customizer/customize_build`, its launch mob included,
+  and leaves it out for a build that has none. With an earlier gateway
+  the callback names no mob: the key is the member name alone, the
+  context has no `mobId` property and a host observes no change. An earlier
+  SDK ignores `mob_id`: on a gateway that hosts two mobs with
+  a member of one name, the second mob's build of that name releases the
+  first mob's customizer tools for it until the first mob builds it again
+  (a call then fails with `no handler registered for tool`, never with
+  another mob's handler); the remedy is this SDK. A `mob_id` that is the
+  empty text is a mob of its own, and a `mob_id` inside the context object
+  is not read. Nothing is stored, and neither side states the versions of
+  the other it accepts, so no version pin moves.
+
+- A mob created under the id of a destroyed mob starts with none of that
+  mob's customizer tools. The gateway names the mob's incarnation as
+  `mob_incarnation` beside `mob_id` in the params of
+  `callback/agent_customizer/customize_build`; a build that names an
+  incarnation for the first time, for a mob id that was named by another,
+  releases every callback tool kept under that mob id before the
+  customizer is asked, whether or not that build registers a tool. A build
+  of an incarnation that a later one superseded (handled after the later
+  mob's build, or ended after it) releases nothing and registers none; its
+  customizer is still asked. The release is made at the later mob's first
+  member build, not at its create. Tools of other mobs, and of the builds
+  of one incarnation, are kept as before. A `mob_incarnation` that is
+  present and is not a non-empty text is refused with
+  `ContractMismatchError`. The
+  incarnation is not shown to the customizer: no exported type changes.
+  With an earlier gateway, which names none, a host observes no change.
+
+- The SDK exposes the existing gateway host-runnable path through
+  `MetaBuilder.hostRunnables(names)` and
+  `MetaRuntime.onScheduleFire(name, handler)`: TypeScript hosts declare
+  deterministic schedule targets and handle their fires, with Python SDK
+  dispatch parity. Chainable `MetaBuilder.onScheduleFire(name, handler)`
+  installs host-local handlers before `build()` connects, so stored
+  schedules can call them during startup. Each runtime copies the handlers;
+  runtime replacements survive reconnect without reinstalling builder
+  defaults. `build()` refuses builder handlers for undeclared names, naming
+  them before any gateway transport starts. Registration may precede
+  declaration; declared names without handlers and later runtime
+  registration remain allowed. Sync and async handlers receive the raw occurrence; errors fail
+  the occurrence attempt, and returning nothing acknowledges completion.
+  Includes the exported `ScheduleFireHandler` type and a runnable source
+  collector example. With the published Meta 0.9.15 Linux x86_64 gateway,
+  the example succeeds, and a stored occurrence due while stopped completes
+  on a fresh-process restart with builder registration. A declared runnable without a handler records
+  `delivery_failed` / `runtime_rejected`, while an undeclared source-runner
+  target records `misfired` / `target_missing` under the default policy
+  without an SDK callback. These occurrences are terminal with no next
+  retry action and are not delivered later when a handler is registered;
+  later interval occurrences remain pending. Older gateways
+  have not been checked. This is opt-in access to the existing gateway
+  contract; callers, defaults, wire schemas and stored forms are unchanged.
+  On upgrade or restart, declare stored schedules' runnable names and
+  register their handlers on the builder before `build()` connects.
+
+## 0.9.17
+
+- A request or callback reply written to a gateway whose input is gone (it
+  exited, or closed its input) no longer ends the Node program with an
+  unhandled `write EPIPE` error: the waiting requests and every later
+  request on that gateway process reject with `TransportReaderFailedError`;
+  for the waiting requests its `reason` names the failed write. A failed
+  read of the gateway's output rejects the same way. So when a gateway
+  refuses the start after it has accepted the init request, and exits,
+  `MetaBuilder.build()` rejects with the refusal (its own typed
+  error: see the next entry). No new error type.
+- A gateway start refused after the init request was accepted raises the
+  refusal's own typed error (`CompositionProvenanceError`,
+  `StorageResolutionError` or the typed RPC error) instead of
+  `GatewayStartupCleanupError`; see Breaking in Meta's changelog.
+  For this the exported `PersistentTransport` gains the public method
+  `initSettledFailed()`, which the runtime calls when the init settles
+  `failed`, so that the stop that follows makes no shutdown request. A
+  subclass inherits it; a subclass must not define a method of that name
+  for another purpose.
+- `GatewayStartupCleanupError`'s message names the startup failure it wraps
+  by the error's `name` ("gateway startup failed (CompositionProvenanceError)
+  and the stop of its gateway transport ..."), or by its `typeof` when it is
+  no Error; it still formats nothing of the failure itself.
+
 ## 0.9.16
 
 No SDK API changes; released with Meta 0.9.16.

@@ -15,11 +15,18 @@ import type {
   UnobservedFacts,
 } from "./control-plane";
 import type { TopologyEndpointRef } from "./topology";
+import type { ConsoleMobEntry } from "./mobs";
 
 export interface ConsoleFrame {
   id: string;
   event: string;
   identity?: string;
+  /**
+   * The mob a frame names beside its member, as the gateway sent it; absent
+   * for the launch mob's. The transport reads it to key the frame by its
+   * member's row and hands the frame over without it.
+   */
+  mobId?: string;
   interactionId?: string;
   timestampMs?: number;
   cursor?: string;
@@ -64,6 +71,17 @@ export interface ConsoleAgentAffordances {
   can_manage_schedules?: boolean;
   can_retire?: boolean;
   can_respawn?: boolean;
+  /** Whether the gateway resets the agent (`meta/reset`) for the viewer.
+   * False for a member of a nested mob: the gateway resets, respawns, stops
+   * and forks the members of its own mob only. Absent on a gateway that
+   * does not say; Reset is then offered as it was. */
+  can_reset?: boolean;
+  /** Whether the gateway stops a run of the agent (`meta/stop_member_run`)
+   * for the viewer. Absent on a gateway that does not say. */
+  can_stop_run?: boolean;
+  /** Whether the gateway forks the agent's conversation into a side chat
+   * (`meta/fork_member`). Absent on a gateway that does not say. */
+  can_fork_side_chat?: boolean;
   runtime_mode?: string;
 }
 
@@ -95,6 +113,8 @@ export interface ConsoleAgent extends SidebarWatchFields {
    * human's branch of that agent's conversation (`meta/fork_member`),
    * as the runtime's roster records the fork. */
   side_chat_of?: string;
+  /** The mob the agent is a member of (`/console/experience` names it on every row). */
+  mob_id?: string;
   unobserved?: UnobservedFacts;
 }
 
@@ -116,6 +136,7 @@ export interface ConsoleExperienceAgentSnapshotRow extends Partial<IdentityStatu
   affordances?: ConsoleAgentAffordances;
   model_capabilities?: ConsoleModelCapabilities;
   side_chat_of?: string;
+  mob_id?: string;
 }
 
 export interface ConsoleSidebarButtonConfig {
@@ -267,6 +288,8 @@ export interface ConsoleTopologyNode {
   subgroup?: string;
   addressable?: boolean;
   unobserved?: UnobservedFacts;
+  /** The mob of the node's member (`/console/experience` names it). */
+  mob_id?: string;
 }
 
 export interface ConsoleHealthSnapshot {
@@ -306,6 +329,12 @@ export interface ConsoleExperience {
    * resends an uncertain message (same idempotency key) only when true.
    */
   send_dedupe?: { durable?: boolean };
+  /**
+   * The console bundle the gateway serves: the version in its page's
+   * `console-app.js?v=`. Absent on older gateways. A page that runs another
+   * bundle says that it is out of date.
+   */
+  console_bundle?: string;
   contract_version?: string;
   runtime_id?: string;
   console_config?: ConsoleUiConfig;
@@ -360,6 +389,12 @@ export interface ConsoleExperience {
        * one registered runtime's. Absent names no team.
        */
       mob_id?: string;
+      /**
+       * Every mob the console lists for the caller: its own mob, the mobs
+       * nested under its members at any depth, and any mob no member owns.
+       * Absent on a gateway that lists no more than its own mob.
+       */
+      mobs?: ConsoleMobEntry[];
     };
   }>;
   health_overview?: ConsoleExperienceSection<{

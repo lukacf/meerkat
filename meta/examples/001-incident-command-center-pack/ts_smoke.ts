@@ -215,7 +215,7 @@ async function main() {
     activity_feed?: { filter_presets?: Array<{ id?: string }> };
   }>(`${baseUrl}/console/experience`);
 
-  assert.equal(experience.contract_version, "0.5.0");
+  assert.equal(experience.contract_version, "0.6.0");
   assert.ok(Array.isArray(experience.identity_status?.rows));
   assert.ok(Array.isArray(experience.activity_feed?.filter_presets));
   assert.ok(experience.activity_feed!.filter_presets!.some((preset) => preset.id === "watched-only"));

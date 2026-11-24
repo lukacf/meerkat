@@ -27,7 +27,7 @@ pub use driver::{
     ExistingDeliveryAnswer, IdentityTargetDeliverability, ScheduleDeliveryIdentity, ScheduleDriver,
     ScheduleDriverConfig, ScheduleExecutorLockout, ScheduleIdentityTargetProbe,
     ScheduleRefillFault, ScheduleTargetDelivery, ScheduleTargetProbe, ScheduleTickReport,
-    TargetProbeOutcome,
+    ScheduleWriteJudge, ScheduleWriteVerdict, TargetProbeOutcome,
 };
 pub use error::{ScheduleDomainError, ScheduleStoreError};
 pub use lifecycle::{
@@ -63,8 +63,10 @@ pub use tools::{
     CurrentSessionScheduleTargetResolver, CurrentSessionScheduleToolDispatcher,
     DefaultCurrentSessionScheduleTargetResolver,
     INVALID_ARGUMENTS as SCHEDULE_TOOL_INVALID_ARGUMENTS, NOT_FOUND as SCHEDULE_TOOL_NOT_FOUND,
-    ScheduleToolDispatcher, ScheduleToolError, dispatch_schedule_list_where,
-    handle_schedule_tools_call, schedule_tool_names, schedule_tools_list,
+    SCHEDULE_SESSION_CREATION_NOT_ALLOWED, SCHEDULE_TARGET_NOT_A_PEER, ScheduleToolDispatcher,
+    ScheduleToolError, dispatch_schedule_list_where, handle_schedule_tools_call,
+    schedule_session_creation_not_allowed, schedule_target_not_a_peer, schedule_tool_names,
+    schedule_tools_list,
 };
 pub use trigger::{CronAuthoringSpec, next_due_after, occurrences_for_horizon};
 pub use types::{

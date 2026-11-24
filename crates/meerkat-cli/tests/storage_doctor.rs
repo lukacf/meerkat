@@ -699,3 +699,45 @@ fn identity_store_rows_are_counted_per_mob_database() {
         "the doctor changes no file of the realm"
     );
 }
+
+/// [`run_doctor`] from `context` (below `<temp>/project`), with no root
+/// given unless `args` names one.
+fn run_rkat_from(temp: &TempDir, context: &Path, args: &[&str]) -> Output {
+    let binary = std::env::var_os("CARGO_BIN_EXE_rkat")
+        .map(PathBuf::from)
+        .expect("Cargo or Nextest must provide the runtime rkat binary path");
+    std::fs::create_dir_all(context).unwrap();
+    let mut command = Command::new(binary);
+    command
+        .current_dir(context)
+        .env("HOME", temp.path())
+        .env("XDG_DATA_HOME", temp.path().join("data"))
+        .env("RKAT_TEST_CLIENT", "1")
+        .arg("--context-root")
+        .arg(context)
+        .args(args);
+    command.output().unwrap()
+}
+
+/// With no root given, the doctor reads the state root of every ancestor of
+/// the context root that holds a `.rkat` entry, the roots ordinary
+/// resolution probes: a realm present under two of them is reported.
+#[test]
+fn doctor_reads_every_ancestor_state_root_by_default() {
+    let temp = TempDir::new().unwrap();
+    let project = temp.path().join("project");
+    let nested = project.join("sub");
+    let project_realms = project.join(".rkat").join("realms");
+    let nested_realms = nested.join(".rkat").join("realms");
+    create_healthy_realm(&project_realms, "team");
+    create_healthy_realm(&nested_realms, "team");
+
+    let output = run_rkat_from(&temp, &nested, &["storage", "doctor", "--json"]);
+    let report = parse_json(&output);
+    let twins = findings_with_code(&report, "split-brain-realm");
+    assert_eq!(twins.len(), 1, "{report:#}");
+    let message = twins[0]["message"].as_str().unwrap();
+    assert!(message.contains(&project_realms.join("team").display().to_string()));
+    assert!(message.contains(&nested_realms.join("team").display().to_string()));
+    assert_eq!(output.status.code(), Some(1), "{report:#}");
+}

@@ -40,7 +40,7 @@ import {
 } from "./scenario.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const repoRoot = resolve(here, "../..");
+const repoRoot = resolve(here, "../../..");
 const configDir = join(here, "config");
 
 function sleep(ms: number): Promise<void> {

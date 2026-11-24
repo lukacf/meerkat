@@ -102,6 +102,9 @@ entry 036 O 3 180 "$RKAT_RPC" \
 entry 037 O 2 240 "$RKAT_RPC $ROOT/examples/037-live-webrtc-web/node_modules/.bin/tsx" \
   "cd $ROOT/examples/037-live-webrtc-web && RKAT_RPC=$RKAT_RPC $LIVE/with-server.sh http://127.0.0.1:4173/ npm start -- npm run smoke:webrtc"
 
+python_example 038 038-mob-control-py A 16 360
+typescript_example 039 039-mob-control-ts 16 360
+
 key_name() { case "$1" in A) echo ANTHROPIC_API_KEY ;; O) echo OPENAI_API_KEY ;; G) echo GEMINI_API_KEY ;; esac; }
 
 # Why an entry cannot run, or nothing when it can.

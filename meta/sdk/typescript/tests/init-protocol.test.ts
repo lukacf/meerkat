@@ -12,7 +12,7 @@
 
 import { afterEach, describe, it, mock } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -43,7 +43,9 @@ const rl = readline.createInterface({ input: process.stdin });
 const lines = [];
 let wake = null;
 rl.on("line", (line) => { lines.push(JSON.parse(line)); if (wake) { const w = wake; wake = null; w(); } });
-rl.on("close", () => process.exit(0));
+// The exit code when stdin ends; a scenario may set its own.
+let closeCode = 0;
+rl.on("close", () => process.exit(closeCode));
 async function next() {
   while (lines.length === 0) await new Promise((resolve) => { wake = resolve; });
   return lines.shift();
@@ -127,6 +129,31 @@ async function startupErrorBehindRejectedStop(rt: MetaRuntime, exitCode: number)
   return failure.startupError;
 }
 
+/**
+ * A gateway whose init settled `failed` exits without waiting for a shutdown
+ * request, so the runtime's stop makes none: it ends the gateway's input and
+ * reaps it. The refusal is thrown exactly, with no cleanup error around it,
+ * and the stop's record says no shutdown was asked. Returns the refusal.
+ */
+async function refusalOfFailedSettlement(rt: MetaRuntime, exitCode: number): Promise<any> {
+  let failure: unknown = null;
+  await assert.rejects(rt.connect(), (error: unknown) => {
+    failure = error;
+    return true;
+  });
+  assert.ok(!(failure instanceof GatewayStartupCleanupError), String(failure));
+  assert.ok(failure instanceof RpcError, String(failure));
+  assert.equal(failure.cause, undefined);
+  assert.deepEqual(rt.lastGatewayTermination(), {
+    state: "exited",
+    exitCode,
+    signal: null,
+    escalation: "none",
+    nativeShutdown: "not_negotiated",
+  });
+  return failure;
+}
+
 function runtime(bin: string, options: { timeoutMs?: number; initDeadlineMs?: number } = {}): MetaRuntime {
   const builder = Meta.builder().gateway(bin);
   if (options.timeoutMs !== undefined) builder.gatewayTimeoutMs(options.timeoutMs);
@@ -169,11 +196,12 @@ describe("meta/init accepted then settled", () => {
         progress("storage");
         settled({ outcome: "failed", code: ${code}, message: "refused for the test", durable_effects: "${durableEffects}" });
         // A gateway exits right after a failed settlement.
+        closeCode = 1;
         await sleep(20);
         process.exit(1);
       `);
       const rt = runtime(bin);
-      const error = await startupErrorBehindRejectedStop(rt, 1);
+      const error = await refusalOfFailedSettlement(rt, 1);
       assert.ok(error instanceof errorType);
       assert.ok(!(error instanceof InitOutcomeUnknownError));
       assert.equal(error.code, code);
@@ -189,16 +217,37 @@ describe("meta/init accepted then settled", () => {
         message: "Runtime bootstrap failed: the candidate definition differs",
         durable_effects: "none",
         data: { kind: "candidate_divergent", fields: ["profiles.lead.tools.deny"] } });
+      closeCode = 1;
       await sleep(20);
       process.exit(1);
     `);
     const rt = runtime(bin);
-    const error = await startupErrorBehindRejectedStop(rt, 1);
+    const error = await refusalOfFailedSettlement(rt, 1);
     assert.ok(error instanceof CompositionProvenanceError);
     assert.equal(error.code, COMPOSITION_PROVENANCE_CODE);
     assert.equal(error.kind, "candidate_divergent");
     assert.deepEqual(error.fields, ["profiles.lead.tools.deny"]);
     assert.equal((error.data as Record<string, unknown>).durable_effects, "none");
+  });
+
+  it("asks no shutdown of a gateway still running after a failed settlement", async () => {
+    const { bin, record } = gateway(`
+      accepted();
+      progress("storage");
+      settled({ outcome: "failed", code: -32019, message: "refused for the test",
+        durable_effects: "possible",
+        data: { kind: "divergent", fields: ["profiles.lead"] } });
+      // Exits, unanswered, on anything it is sent, and when its input ends.
+      closeCode = 1;
+      log({ after_init: await next() });
+      process.exit(1);
+    `);
+    const rt = runtime(bin);
+    const error = await refusalOfFailedSettlement(rt, 1);
+    assert.ok(error instanceof CompositionProvenanceError);
+    assert.equal(error.kind, "divergent");
+    assert.equal((error.data as Record<string, unknown>).durable_effects, "possible");
+    assert.deepEqual(records(record).filter((entry) => "after_init" in entry), []);
   });
 
   it("throws CompositionProvenanceError for a refusal answered as the init's error response", async () => {
@@ -372,6 +421,50 @@ describe("init in progress refusal", () => {
       });
     } finally {
       await rt.shutdown();
+    }
+  });
+});
+
+describe("a refused start and the builder's convention files", () => {
+  it("says once which convention files the builder applied", async () => {
+    // A program that named no access file is refused for the one the
+    // builder found in the working directory: the SDK says that it applied
+    // it. A file the program named is no convention file: nothing is said.
+    const { bin } = gateway(`
+      emit({ jsonrpc: "2.0", id: init.id, error: { code: -32602,
+        message: "runtime_options.access_config_path is invalid: refused" } });
+    `);
+    const dir = mkdtempSync(join(tmpdir(), "meta-convention-refusal-"));
+    dirs.push(dir);
+    mkdirSync(join(dir, "config"));
+    writeFileSync(join(dir, "config", "access.toml"), "enabled = true\n");
+    const previous = process.cwd();
+    const warned: string[] = [];
+    const warn = mock.method(console, "warn", (...args: unknown[]) => {
+      warned.push(args.map(String).join(" "));
+    });
+    const said = (): string[] => warned.filter((line) => line.includes("by convention"));
+    try {
+      process.chdir(dir);
+      const refused = await Meta.builder()
+        .gateway(bin)
+        .build()
+        .then(() => null, (error: unknown) => error);
+      assert.ok(isRpcError(refused), String(refused));
+      assert.equal(said().length, 1, warned.join("\n"));
+      assert.match(said()[0], /config\/access\.toml/);
+
+      warned.length = 0;
+      const named = await Meta.builder()
+        .gateway(bin)
+        .accessControl("config/access.toml")
+        .build()
+        .then(() => null, (error: unknown) => error);
+      assert.ok(isRpcError(named), String(named));
+      assert.deepEqual(said(), []);
+    } finally {
+      process.chdir(previous);
+      warn.mock.restore();
     }
   });
 });

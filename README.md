@@ -126,12 +126,16 @@ or fallback Azure key/endpoint pair the OpenAI environment default.
 
 </details>
 
-The catalog defaults are `gpt-6-astra` (OpenAI, and the global default),
-`claude-opus-5-5` (Anthropic) and `gemini-4-argon` (Gemini, on paid Gemini API
-tiers; on the free tier select `gemini-3.8-flash` or, from 0.9.15,
-`gemini-4-hydrogen`). Catalog support does not
-guarantee access for an API organization or through Azure, Copilot or custom
-backends, so select an available model explicitly when needed:
+The catalog defaults are `gpt-6-astra` (OpenAI, and the global default) and
+`claude-opus-5-5` (Anthropic). The Gemini default is `gemini-4-argon` from
+0.9.1 through 0.9.17; 0.9.18 changes it to `gemini-4-neon`.
+Both Gemini defaults require paid Gemini API access; on the free tier select
+`gemini-3.8-flash` or `gemini-4-hydrogen` (available from 0.9.15).
+Neon support, from 0.9.18, includes `low`/`medium`/`high`; Meerkat does not yet
+send Google's `xhigh`. Argon and Hydrogen remain explicitly selectable.
+Catalog support does not guarantee access for an API organization or through
+Azure, Copilot or custom backends, so select an available model explicitly
+when needed:
 
 ```bash
 rkat run --model gpt-6-luna "Explain async/await"
@@ -302,7 +306,7 @@ Meerkat is pre-1.0 and patch releases can contain declared public API breaks.
 Exactly pin the Meerkat crate family and bump deliberately:
 
 ```toml
-meerkat = { version = "=0.9.16", features = ["sqlite-store", "session-store"] }
+meerkat = { version = "=0.9.18", features = ["sqlite-store", "session-store"] }
 ```
 
 ### Architecture
@@ -329,7 +333,7 @@ crate ownership, construction paths and failure domains.
 ## Meerkat Meta
 
 <p align="center">
-  <img src="meta/docs/images/meta-console.png" alt="Meta console with conversations, topology and roster" width="900">
+  <img src="meta/docs/images/meta-console.png" alt="Meerkat Meta console showing a sample team conversation, the agent roster, and a pending approval" width="900">
 </p>
 
 Meerkat Meta composes Core agents into applications with lasting identities,

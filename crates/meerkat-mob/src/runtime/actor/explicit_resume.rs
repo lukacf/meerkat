@@ -2,6 +2,42 @@ use super::*;
 use crate::runtime::provision_guard::RetainedProvisionCustody;
 use crate::runtime::provisioner::{ProvisionAttemptFailure, RetainedProvisionEffects};
 
+/// Repair advice of a member left Broken by an explicit resume that could not
+/// certify the cleanup of its own attempt. One sentence for the member's
+/// Broken error (both sites) and for the log line of its parked custody. The
+/// cause reaches these sites as text, so the sentence tells the two cases
+/// apart in words: a member whose cause is a Recovery corruption is left as
+/// it is (its retire, respawn and rotation are refused in that state), and
+/// retire or respawn is the repair of every other cause.
+const UNCERTIFIED_RESUME_REPAIR_ADVICE: &str = "the member is Broken; if the cause is a Recovery corruption, leave the member as it is: do not retire, respawn or rotate it (all are refused in this state and leave the mob unable to start), send it nothing, keep a copy of the state directory, and see Known limitations in the release notes; for any other cause, repair required: retire or respawn the member (not for a Recovery corruption)";
+
+/// What the attempt that parks a custody settled for its member. Only a
+/// member this attempt leaves Broken gets its repair advice in the log line
+/// of the parked custody: a member settled accepted is live, and a member
+/// whose work settled earlier got its advice then.
+#[derive(Clone, Copy)]
+enum ParkedCustodyMember {
+    LeftBroken,
+    SettledElsewhere,
+}
+
+/// The log line of a custody an explicit resume parks.
+const PARKED_CUSTODY_LOG_LINE: &str =
+    "explicit resume cannot certify member cleanup; custody remains parked";
+
+/// [`PARKED_CUSTODY_LOG_LINE`], followed by the member's repair advice when
+/// the attempt leaves that member Broken.
+fn parked_custody_log_line(member: ParkedCustodyMember) -> std::borrow::Cow<'static, str> {
+    match member {
+        ParkedCustodyMember::LeftBroken => std::borrow::Cow::Owned(format!(
+            "{PARKED_CUSTODY_LOG_LINE}; {UNCERTIFIED_RESUME_REPAIR_ADVICE}"
+        )),
+        ParkedCustodyMember::SettledElsewhere => {
+            std::borrow::Cow::Borrowed(PARKED_CUSTODY_LOG_LINE)
+        }
+    }
+}
+
 impl MobActor {
     pub(super) async fn continue_explicit_resume_after_rebuild(&mut self) {
         if !self
@@ -968,7 +1004,7 @@ impl MobActor {
             return;
         }
         let reason = format!(
-            "explicit resume of bridge session '{}' retains uncertified cleanup of its own attempt: {error}; the member is Broken until retired or respawned (repair required: retire or respawn the member); the retained cleanup obligation is retried separately on the next lifecycle control",
+            "explicit resume of bridge session '{}' retains uncertified cleanup of its own attempt: {error}; {UNCERTIFIED_RESUME_REPAIR_ADVICE}; the retained cleanup obligation is retried separately on the next lifecycle control",
             work.rebuild.bridge_session_id
         );
         self.retained_resume_cleanup
@@ -1005,7 +1041,11 @@ impl MobActor {
             // The member was accepted and is live; only the provision guard's
             // custody is uncertain. Park that obligation and settle the member
             // accepted, so the mob-wide Resume continues (#1251 isolation).
-            self.park_unproven_resume_cleanup(Arc::clone(&work), failure);
+            self.park_unproven_resume_cleanup(
+                Arc::clone(&work),
+                failure,
+                ParkedCustodyMember::SettledElsewhere,
+            );
             Box::pin(
                 self.explicit_resume_member_settled(work, ExplicitResumeMemberCompletion::Accepted),
             )
@@ -1013,10 +1053,14 @@ impl MobActor {
             return;
         }
         let reason = format!(
-            "explicit resume of bridge session '{}' could not certify cleanup of its own attempt: {failure}; the member is Broken until retired or respawned (repair required: retire or respawn the member); the parked cleanup obligation is reported separately on each lifecycle control",
+            "explicit resume of bridge session '{}' could not certify cleanup of its own attempt: {failure}; {UNCERTIFIED_RESUME_REPAIR_ADVICE}; the parked cleanup obligation is reported separately on each lifecycle control",
             work.rebuild.bridge_session_id
         );
-        self.park_unproven_resume_cleanup(Arc::clone(&work), failure);
+        self.park_unproven_resume_cleanup(
+            Arc::clone(&work),
+            failure,
+            ParkedCustodyMember::LeftBroken,
+        );
         Box::pin(self.explicit_resume_member_settled(
             work,
             ExplicitResumeMemberCompletion::Failed(MobError::Internal(reason)),
@@ -1028,11 +1072,13 @@ impl MobActor {
         &mut self,
         work: Arc<ExplicitResumeMemberWork>,
         failure: ProvisionAttemptFailure,
+        member: ParkedCustodyMember,
     ) {
         tracing::error!(
             agent_identity = %work.rebuild.entry.agent_identity,
             error = %failure,
-            "explicit resume cannot certify member cleanup; custody remains parked"
+            "{}",
+            parked_custody_log_line(member)
         );
         self.unproven_resume_cleanup
             .push(UnprovenExplicitResumeCleanup { work, failure });
@@ -1053,6 +1099,7 @@ impl MobActor {
                     ProvisionAttemptFailure::unproven(MobError::Internal(
                         "resume cleanup owner is unavailable".to_string(),
                     )),
+                    ParkedCustodyMember::SettledElsewhere,
                 );
             }
         }
@@ -1524,5 +1571,33 @@ async fn send_member_completion(
         .is_err()
     {
         tracing::warn!("resume owner settled after its actor stopped");
+    }
+}
+
+#[cfg(test)]
+mod parked_custody_log_line_rows {
+    use super::*;
+
+    /// A custody parked for a member the attempt does not leave Broken (a
+    /// member settled accepted, or one whose work settled earlier) keeps the
+    /// line it had: no repair advice.
+    #[test]
+    fn a_member_not_left_broken_keeps_the_line_without_advice() {
+        assert_eq!(
+            parked_custody_log_line(ParkedCustodyMember::SettledElsewhere),
+            "explicit resume cannot certify member cleanup; custody remains parked"
+        );
+    }
+
+    /// A custody parked for a member the attempt leaves Broken has the same
+    /// line, then the member's repair advice.
+    #[test]
+    fn a_member_left_broken_gets_the_line_then_its_repair_advice() {
+        assert_eq!(
+            parked_custody_log_line(ParkedCustodyMember::LeftBroken),
+            format!(
+                "explicit resume cannot certify member cleanup; custody remains parked; {UNCERTIFIED_RESUME_REPAIR_ADVICE}"
+            )
+        );
     }
 }

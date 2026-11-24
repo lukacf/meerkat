@@ -276,6 +276,24 @@ pub struct Roster {
     /// against ([`Self::seat_row_labels`]).
     #[serde(skip)]
     seat_row_labels: BTreeMap<AgentIdentity, (Generation, BTreeMap<String, String>)>,
+    /// The identities whose member's last seat row is still the one its
+    /// entry into store custody found: the binding row of that entry (a
+    /// `MemberSessionBindingRecovered` row with the Created origin, which
+    /// an adoption writes, and an import that binds a record in place to a
+    /// seated member) records the identity, and its member's next seat
+    /// row, or the retirement of that incarnation, lets it go
+    /// ([`Self::seat_is_as_adopted`]).
+    #[serde(skip)]
+    seats_as_adopted: BTreeSet<AgentIdentity>,
+    /// Who seated each identity's member, as its last seat row reads
+    /// ([`crate::MemberSeat`]), with that row's incarnation and session.
+    /// [`Self::seat`] answers it only for the roster's entry at that same
+    /// generation. Each seat row replaces it in the row's own step, live
+    /// and on replay; it is kept past a retirement only so that the
+    /// runtime's own successor of exactly that incarnation reads as the
+    /// seat it follows, and a mob reset forgets it.
+    #[serde(skip)]
+    seats: BTreeMap<AgentIdentity, crate::runtime::SeatReading>,
     /// The sessions whose member comms endpoint (and so its public key) a
     /// journal row of this mob recorded: a `MemberSpawned` or a
     /// `MemberSessionBindingRecovered` row naming the session with its
@@ -420,6 +438,9 @@ impl Roster {
                     .is_some_and(|(spawned, _)| spawned == generation)
                 {
                     self.seat_row_labels.remove(agent_identity);
+                    // The seat row goes, and with it the mark that it is
+                    // the seat an entry into store custody found.
+                    self.seats_as_adopted.remove(agent_identity);
                 }
             }
             MobEventKind::RespawnTopologyAbandoned { agent_identity, .. } => {
@@ -473,10 +494,18 @@ impl Roster {
                 // An adoption into store custody (the row's Created origin)
                 // makes the member a host root, live and on replay: its
                 // former spawner no longer reaches it.
-                if recovered.identity_entry == Some(crate::runtime::IdentityEntryOrigin::Created)
-                    && let Some(entry) = self.entries.get_mut(&recovered.agent_identity)
-                {
-                    entry.spawned_by = None;
+                if recovered.identity_entry == Some(crate::runtime::IdentityEntryOrigin::Created) {
+                    if let Some(entry) = self.entries.get_mut(&recovered.agent_identity) {
+                        entry.spawned_by = None;
+                    }
+                    if let Some(reading) = self.seats.get_mut(&recovered.agent_identity) {
+                        reading.seat =
+                            crate::MemberSeat::from_older_row(crate::MemberSeatKind::Host, false);
+                    }
+                    // The member's last seat row is the one this adoption
+                    // found, until its next seat row.
+                    self.seats_as_adopted
+                        .insert(recovered.agent_identity.clone());
                 }
             }
             MobEventKind::MemberKickoffUpdated { member, kickoff } => {
@@ -554,6 +583,8 @@ impl Roster {
                 self.incarnation_builds.clear();
                 self.seat_builds.clear();
                 self.seat_row_labels.clear();
+                self.seats_as_adopted.clear();
+                self.seats.clear();
                 self.sessions_with_recorded_endpoint.clear();
             }
             _ => {}
@@ -605,6 +636,8 @@ impl Roster {
             incarnation_builds: BTreeMap::new(),
             seat_builds: BTreeMap::new(),
             seat_row_labels: BTreeMap::new(),
+            seats_as_adopted: BTreeSet::new(),
+            seats: BTreeMap::new(),
             sessions_with_recorded_endpoint: BTreeSet::new(),
             entries: entries
                 .into_iter()
@@ -806,8 +839,12 @@ impl Roster {
     /// answers: the member released, or left as it is because it holds
     /// work), and at a start for a row
     /// that records its seat is owed a label restamp
-    /// (`CreatedIdentityRecord::label_restamp_owed`). No other seat is
-    /// touched: a label only a seat carries stays on its entry. Only the
+    /// (`CreatedIdentityRecord::label_restamp_owed`). An adoption from a
+    /// roster spec is such an act too: its commit sets the entry from the
+    /// row it wrote, and a start does while the member's last seat row is
+    /// still the one the adoption found ([`Self::seat_is_as_adopted`]). No
+    /// other seat is touched: a label only a seat carries stays on its
+    /// entry. Only the
     /// roster entry changes: no seat row is written, the member keeps its
     /// generation, fence and session, and its live session keeps the labels
     /// it was built with until its next build.
@@ -849,6 +886,36 @@ impl Roster {
                 .get(agent_identity)
                 .map_or(&entry.labels, |(_, labels)| labels),
         )
+    }
+
+    /// Whether `agent_identity`'s last seat row is still the one its
+    /// adoption into store custody found: no seat row of its member was
+    /// written since. Such a member was seated before its identity had a
+    /// row, so its seat row can carry other labels than the row the
+    /// adoption wrote. An adoption from a roster spec makes that row the
+    /// identity's record, as an update does: the adoption's commit, a start
+    /// and a build read such a member's seat labels from the row
+    /// ([`Self::set_store_owned_seat_labels`]), and write nothing. An
+    /// import that binds a record in place to a seated member writes the
+    /// same binding row, so the seat it found is marked too; its labels
+    /// are read from the record only when the record says an adoption from
+    /// a roster spec wrote it.
+    pub(crate) fn seat_is_as_adopted(&self, agent_identity: &AgentIdentity) -> bool {
+        self.seats_as_adopted.contains(agent_identity)
+    }
+
+    /// The seat record of the member seated under `agent_identity` now: who
+    /// seated its life, as its seat rows say ([`crate::MemberSeat`]). `None`
+    /// when no member is seated under the name.
+    pub(crate) fn seat(&self, agent_identity: &AgentIdentity) -> Option<&crate::MemberSeat> {
+        // Only the reading of the entry's own incarnation is answered: a
+        // name the roster does not hold, and an entry at another generation
+        // than the reading's row, read no seat.
+        let entry = self.entries.get(agent_identity)?;
+        self.seats
+            .get(agent_identity)
+            .filter(|reading| reading.generation == entry.generation)
+            .map(|reading| &reading.seat)
     }
 
     /// Whether a journal row of this mob recorded the member comms endpoint
@@ -912,6 +979,31 @@ impl Roster {
         self.seat_row_labels.insert(
             identity.clone(),
             (member_spawned.generation, member_spawned.labels.clone()),
+        );
+        // A new seat row: the seat is no longer the one an adoption found.
+        self.seats_as_adopted.remove(identity);
+        // Who seated the member, as this row says.
+        let session = member_ref.bridge_session_id().cloned();
+        let snapshot = session
+            .as_ref()
+            .and_then(|session_id| self.creation_history.get(session_id).ok().flatten());
+        let seat = match member_spawned.seat_lineage() {
+            // The record the row stores, when it stores one.
+            Some(stored) => crate::MemberSeat::from_stored(stored),
+            None => crate::runtime::seat_of_older_row(
+                member_spawned,
+                snapshot.as_ref(),
+                event.cursor,
+                self.seats.get(identity),
+            ),
+        };
+        self.seats.insert(
+            identity.clone(),
+            crate::runtime::SeatReading {
+                generation: member_spawned.generation,
+                session,
+                seat,
+            },
         );
         match member_spawned.kickoff_prompt() {
             Some(prompt) => {
@@ -2597,6 +2689,120 @@ mod tests {
         assert!(
             live.session_endpoint_recorded(&session),
             "the live roster knows the row recorded the session's endpoint"
+        );
+    }
+
+    /// A spawn row of `identity`'s member at `generation` on `session`,
+    /// with no label.
+    fn seat_row(
+        identity: &AgentIdentity,
+        generation: Generation,
+        fence: u64,
+        session: &SessionId,
+    ) -> MobEventKind {
+        let mut event = crate::event::MemberSpawnedEvent::new(
+            identity.clone(),
+            generation,
+            FenceToken::new(fence),
+            AgentRuntimeId::new(identity.clone(), generation),
+            ProfileName::from("worker"),
+        )
+        .with_bridge_member_ref(Some(MemberRef::from_bridge_session_id(session.clone())));
+        event.runtime_mode = MobRuntimeMode::TurnDriven;
+        MobEventKind::MemberSpawned(event)
+    }
+
+    /// The binding row an entry into store custody writes for the member it
+    /// found at `generation` on `session` (an adoption's, or an import's
+    /// that binds a record in place).
+    fn store_custody_binding_row(
+        identity: &AgentIdentity,
+        generation: Generation,
+        session: &SessionId,
+    ) -> MobEventKind {
+        MobEventKind::MemberSessionBindingRecovered(
+            crate::event::MemberSessionBindingRecoveredEvent::identity_entry_adopted(
+                identity.clone(),
+                AgentRuntimeId::new(identity.clone(), generation),
+                session.clone(),
+                None,
+                crate::runtime::IdentityEntryOrigin::Created,
+            ),
+        )
+    }
+
+    /// The fold keeps the mark of the seat an adoption found across a
+    /// retirement row of an earlier generation of the identity: a delayed
+    /// completion for an older incarnation never touches a newer one. The
+    /// member's own retirement lets the mark go, with its seat row.
+    #[test]
+    fn a_retirement_of_an_earlier_generation_keeps_the_mark_of_the_seat_an_adoption_found() {
+        let identity = AgentIdentity::from("listed");
+        let second = Generation::new(1);
+        let session = session_id();
+        let retired = |generation: Generation| MobEventKind::MemberRetired {
+            agent_identity: identity.clone(),
+            generation,
+            role: ProfileName::from("worker"),
+            session_archived: false,
+            facts: crate::event::MemberRetiredFacts::default(),
+        };
+        let mut events = vec![
+            make_event(1, seat_row(&identity, Generation::INITIAL, 0, &session)),
+            make_event(2, seat_row(&identity, second, 1, &session)),
+            make_event(3, store_custody_binding_row(&identity, second, &session)),
+        ];
+        assert!(
+            Roster::project(&events).seat_is_as_adopted(&identity),
+            "the adoption's binding row marks the seat it found"
+        );
+        // The earlier incarnation's retirement, folded late.
+        events.push(make_event(4, retired(Generation::INITIAL)));
+        assert!(
+            Roster::project(&events).seat_is_as_adopted(&identity),
+            "a retirement of an earlier generation leaves the mark"
+        );
+        // The member's own retirement.
+        events.push(make_event(5, retired(second)));
+        assert!(
+            !Roster::project(&events).seat_is_as_adopted(&identity),
+            "the member's own retirement lets the mark go"
+        );
+    }
+
+    /// A binding row with the Created origin marks the seat it found,
+    /// whichever entry into store custody wrote it. An adoption's row marks
+    /// the seat the adoption found; the member's next seat row lets the
+    /// mark go; and an import that binds a record in place to the member
+    /// writes the same binding row, so the seat it found is marked again,
+    /// though that seat row is later than the adoption. The readers of the
+    /// mark read the seat's labels from the record only when the record
+    /// says an adoption from a roster spec wrote it.
+    #[test]
+    fn a_binding_row_with_the_created_origin_marks_the_seat_it_found_whatever_wrote_it() {
+        let identity = AgentIdentity::from("listed");
+        let second = Generation::new(1);
+        let session = session_id();
+        let mut events = vec![
+            make_event(1, seat_row(&identity, Generation::INITIAL, 0, &session)),
+            make_event(
+                2,
+                store_custody_binding_row(&identity, Generation::INITIAL, &session),
+            ),
+        ];
+        assert!(Roster::project(&events).seat_is_as_adopted(&identity));
+        events.push(make_event(3, seat_row(&identity, second, 1, &session)));
+        assert!(
+            !Roster::project(&events).seat_is_as_adopted(&identity),
+            "the member's next seat row lets the mark go"
+        );
+        events.push(make_event(
+            4,
+            store_custody_binding_row(&identity, second, &session),
+        ));
+        assert!(
+            Roster::project(&events).seat_is_as_adopted(&identity),
+            "an import's binding row marks the seat it found"
         );
     }
 }

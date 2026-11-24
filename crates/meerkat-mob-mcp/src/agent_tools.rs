@@ -1590,13 +1590,20 @@ impl AgentMobToolSurface {
         let mut member = DelegationMemberOptions::default();
         let source_state = Arc::clone(&self.state);
         let source_session = self.owner_bridge_session_id.clone();
-        member.creation_source = Some(
+        // The calling member's seat, sealed by the set for the helper's seat
+        // record, beside the creation source: both from the session this
+        // surface is bound to, neither from the call's arguments.
+        let (captured, seat_creator) =
             meerkat_runtime::stack_relief::relieve_caller_stack(move || async move {
-                Self::capture_creation_source(source_state, source_session).await
+                let seat_creator = source_state.seat_creator_of(&source_session).await;
+                (
+                    Self::capture_creation_source(source_state, source_session).await,
+                    seat_creator,
+                )
             })
-            .await
-            .into_admitted_witness(call.name),
-        );
+            .await;
+        member.creation_source = Some(captured.into_admitted_witness(call.name));
+        member.seat_creator = Some(seat_creator);
         member.placement = lower_wire_placement(args.placement);
         member.additional_instructions = args.additional_instructions.map(|value| vec![value]);
         member.inherited_tool_filter = resolved.inherited_tool_filter;
@@ -1797,10 +1804,11 @@ impl AgentMobToolSurface {
                 // The hold's reason is read from the state's own typed
                 // lookup, which starts nothing; a mob that is no longer
                 // held by then is answered the lookup's fixed text.
-                let refusal = match self.state.handle_for_agent(named, false, None).await {
-                    Err(held @ crate::AgentMobLookupRefusal::Held { .. }) => held,
-                    _ => crate::AgentMobLookupRefusal::Unshown(error),
-                };
+                let refusal = self
+                    .state
+                    .held_refusal_for_agent(named)
+                    .await
+                    .unwrap_or(crate::AgentMobLookupRefusal::Unshown(error));
                 Self::map_lookup_refusal(call.name, None, named, refusal)
             }
             error => Self::map_mob_error(call, error),
@@ -1825,6 +1833,13 @@ impl AgentMobToolSurface {
             .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
         let mob_id = MobId::from(args.mob_id.clone());
         let caller = self.destroy_caller();
+
+        // The host's default mob is the launch's: refused before the mob is
+        // resolved, so the refusal never waits for the launch's serve.
+        self.state
+            .refuse_default_mob_destroy(&mob_id)
+            .await
+            .map_err(|error| Self::map_mob_error(call, error))?;
 
         // A destroy this state already admitted for this exact caller and
         // natively completed is continued, or its report collected again,
@@ -2575,13 +2590,17 @@ impl AgentMobToolSurface {
         let source_state = Arc::clone(&self.state);
         Box::pin(meerkat_runtime::stack_relief::relieve_caller_stack(
             move || async move {
+                // The calling member's seat, sealed by the set for the
+                // seat record of the member this call seats.
+                let seat_creator = source_state.seat_creator_of(&owner_bridge_session_id).await;
                 let source =
                     Self::capture_creation_source(source_state, owner_bridge_session_id.clone())
                         .await
                         .into_admitted_witness("mob_spawn_member");
                 handle
                     .spawn_spec_with_generated_owner_context(
-                        spec.with_creation_source(source),
+                        spec.with_creation_source(source)
+                            .with_seat_creator(seat_creator),
                         owner_bridge_session_id,
                     )
                     .await
@@ -2759,9 +2778,11 @@ impl AgentMobToolSurface {
         &self,
         call: ToolCallView<'_>,
     ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
-        let mobs = self
+        // One read of the set: the managed mobs as `mob_list` reports them,
+        // and the mobs the set knows and has not loaded.
+        let inventory = self
             .state
-            .mob_list()
+            .mob_inventory()
             .await
             .map_err(|e| Self::map_mob_error(call, e))?;
         // Lower each per-mob visibility decision through MobMachine, exactly
@@ -2771,7 +2792,7 @@ impl AgentMobToolSurface {
         // ruling. Fails closed: a mob whose handle cannot resolve, or whose
         // admission errors or is Denied, is omitted.
         let mut mob_list: Vec<serde_json::Value> = Vec::new();
-        for (id, observation) in mobs {
+        for (id, observation) in inventory.managed {
             let Ok(handle) = self.bound_handle(&id).await else {
                 continue;
             };
@@ -2800,6 +2821,55 @@ impl AgentMobToolSurface {
                         );
                     }
                     mob_list.push(row);
+                }
+                Ok(meerkat_mob::CurrentMobAdmission::Denied) | Err(_) => {}
+            }
+        }
+        // A mob that is not loaded has no handle to ask, and the list loads
+        // none and opens no store. The caller is told of the ones it may
+        // manage, judged from what the set's record keeps, by the two
+        // observations a loaded mob is judged by (`authority_over`): its
+        // own grant over the mob, bound to the incarnation the record
+        // keeps, and, for a session that may still create mobs, the rule
+        // that re-derives a creator's grant, put to the creation the record
+        // keeps. MobMachine's verdict over the raw observation is its
+        // stateless classification. So the list never names a mob that is
+        // not loaded which it would leave out once that mob is loaded.
+        // Left out until something loads them: a mob whose record the set
+        // has not read yet (nothing is guessed for it), and a mob another
+        // session or the host created that the caller holds no grant over.
+        // A stopped one says so; any other is dormant.
+        let authority = self.authority_context_snapshot();
+        let may_rederive =
+            authority.is_generated_authority_context() && authority.can_create_mobs();
+        for id in &inventory.dormant {
+            let granted = inventory
+                .dormant_incarnation
+                .get(id)
+                .is_some_and(|incarnation| authority.can_manage_mob(id.as_str(), *incarnation));
+            let can_manage_mob = granted
+                || match inventory.dormant_creation.get(id) {
+                    Some(creation) if may_rederive => {
+                        self.state
+                            .provenance_proves_creator(
+                                creation.clone(),
+                                &self.owner_bridge_session_id,
+                            )
+                            .await
+                    }
+                    _ => false,
+                };
+            match meerkat_mob::mob_machine_current_mob_admission(can_manage_mob) {
+                Ok(meerkat_mob::CurrentMobAdmission::Allowed) => {
+                    let status = if inventory.dormant_stopped.contains(id) {
+                        meerkat_mob::MobState::Stopped.as_str()
+                    } else {
+                        "Dormant"
+                    };
+                    mob_list.push(json!({
+                        "mob_id": id,
+                        "status": status,
+                    }));
                 }
                 Ok(meerkat_mob::CurrentMobAdmission::Denied) | Err(_) => {}
             }
@@ -3598,7 +3668,12 @@ fn build_tool_defs_with_profile_support(
             "List all mobs managed by this agent.\n\n\
              Returns both explicit mobs (created via mob_create) and implicit mobs (created \
              automatically by delegate). Each entry includes the mob_id, member count, and \
-             creation metadata. Use this to discover mob_ids for mob_list_members or mob_destroy.",
+             creation metadata. Use this to discover mob_ids for mob_list_members or mob_destroy.\n\n\
+             On a host that loads mobs on demand, a mob that is not loaded is listed with the \
+             status Dormant, or Stopped when it was stopped before it was unloaded, when your \
+             own session created it with these tools or you hold a manage grant over it (the \
+             mob your delegate calls use, for one). A mob the host has not read since it \
+             started is listed once it is loaded: name it by its mob_id to use it.",
             typed_schema::<NoParamsArgs>(),
         ),
         tool_def(
@@ -11062,12 +11137,30 @@ mod tests {
 
         let mob_id = parsed["mob_id"].as_str().expect("mob id");
         let helper_name = format!("{mob_id}/delegate/helper-dispatch-1");
+        // The helper's row on the parent goes when the helper ends. In this
+        // harness its retirement cannot complete (the debt asserted above),
+        // so the helper is still a member, and a member that has not ended
+        // is still its parent's peer. The mob crate's rows cover a
+        // retirement that completes: the row and the listing entry go.
+        let helper_still_seated = state
+            .handle_for(&meerkat_mob::MobId::from(mob_id.to_string()))
+            .await
+            .expect("mob handle")
+            .get_member(&AgentIdentity::from("helper-dispatch-1"))
+            .await
+            .expect("roster lookup")
+            .is_some();
+        assert!(
+            helper_still_seated,
+            "a helper whose retirement did not complete is still a member: {}",
+            parsed["retirement_error"]
+        );
         let parent_peers = CoreCommsRuntime::peers(&*parent_comms).await;
         assert!(
             parent_peers
                 .iter()
                 .any(|entry| entry.name.as_str() == helper_name),
-            "delegate() should add the helper to the parent peer directory"
+            "a helper that is still a member is still in the parent peer directory"
         );
     }
 
@@ -12633,5 +12726,206 @@ mod tests {
             profile.model, expected_model,
             "override_profile.model must match the inline profile's model"
         );
+    }
+
+    /// A member the agent spawn tool seats records its caller: the calling
+    /// member's seat, sealed after the mob set's complete lookup of the
+    /// hosted rosters, when the calling session is a member's; the bare
+    /// session when no hosted roster names it. Nothing of the call's
+    /// arguments is read for it.
+    #[tokio::test]
+    async fn a_member_the_agent_spawn_tool_seats_records_its_caller() {
+        use meerkat_mob::{MemberSeatKind, SeatNow, SeatRecorder, SeatSealer};
+        let state = MobMcpState::new_in_memory();
+        let mob_id = state
+            .mob_create_definition(sample_definition("seat-doors"))
+            .await
+            .expect("create mob");
+        let handle = state.handle_for(&mob_id).await.expect("the mob's handle");
+        let lead = AgentIdentity::from("calling-lead");
+        let mut spec = SpawnMemberSpec::new("worker", lead.clone());
+        spec.runtime_mode = Some(meerkat_mob::MobRuntimeMode::TurnDriven);
+        state
+            .mob_spawn_spec(&mob_id, spec)
+            .await
+            .expect("the host seats the calling member");
+        let lead_session = state
+            .mob_resolve_bridge_session_id(&mob_id, &lead)
+            .await
+            .expect("resolve bridge session")
+            .expect("the calling member's session");
+        let incarnation = live_incarnation(&state, &mob_id).await;
+        let surface_of = |session: SessionId| {
+            AgentMobToolSurface::new(
+                Arc::clone(&state),
+                None,
+                scope_only_authority(mob_id.as_str(), incarnation.clone()),
+                "claude-sonnet-4-5".to_string(),
+                session,
+                None,
+                None,
+                None,
+            )
+        };
+        let spawn = |surface: AgentMobToolSurface, name: &'static str| {
+            let mob_id = mob_id.clone();
+            async move {
+                let args = serde_json::value::RawValue::from_string(
+                    json!({ "mob_id": mob_id, "profile": "worker", "member_id": name }).to_string(),
+                )
+                .expect("raw args");
+                surface
+                    .dispatch(ToolCallView {
+                        id: "seat-record",
+                        name: "mob_spawn_member",
+                        args: &args,
+                    })
+                    .await
+                    .expect("the spawn tool seats the member");
+            }
+        };
+
+        spawn(surface_of(lead_session.clone()), "by-member").await;
+        let seat = handle
+            .member_seat(&AgentIdentity::from("by-member"))
+            .await
+            .expect("the member is seated");
+        assert_eq!(seat.kind(), MemberSeatKind::Member);
+        assert_eq!(seat.sealed_by(), Some(SeatSealer::Set));
+        assert_eq!(seat.recorded_by(), Some(SeatRecorder::Shell));
+        assert!(!seat.own_turn());
+        let recorded = seat.recorded().expect("the calling member's seat");
+        assert_eq!(recorded.parent_mob_id, mob_id);
+        assert_eq!(recorded.parent_incarnation, handle.incarnation());
+        assert_eq!(recorded.creator_identity, lead);
+        assert_eq!(recorded.owner_session, lead_session);
+        assert_eq!(
+            recorded.creator_life,
+            Some(handle.identity_life(&lead).expect("life marker"))
+        );
+        assert!(recorded.creator_creation.is_some());
+        assert_eq!(handle.seat_now(recorded).await, SeatNow::Current);
+
+        spawn(surface_of(SessionId::new()), "by-session").await;
+        let seat = handle
+            .member_seat(&AgentIdentity::from("by-session"))
+            .await
+            .expect("the member is seated");
+        assert_eq!(seat.kind(), MemberSeatKind::Session);
+        assert_eq!(seat.recorded(), None);
+        assert_eq!(seat.sealed_by(), None);
+        assert_eq!(seat.recorded_by(), Some(SeatRecorder::Shell));
+    }
+    /// The seat of the helper a `delegate` call of the surface bound to
+    /// `session` seats, read after the call returned.
+    async fn delegated_helper_seat(
+        service: &Arc<RealCommsSessionSvc>,
+        state: &Arc<MobMcpState>,
+        session: SessionId,
+        helper: &str,
+    ) -> meerkat_mob::MemberSeat {
+        let parent_name = format!("parent/lead/{helper}");
+        let parent_comms = service.register_external_comms(&parent_name).await;
+        let parent_peer_id = parent_comms.peer_id().expect("parent peer id");
+        let surface = AgentMobToolSurface::new_with_effective_authority(
+            Arc::clone(state),
+            None,
+            Arc::new(std::sync::RwLock::new(create_only_authority())),
+            "claude-sonnet-4-5".to_string(),
+            session,
+            Some(parent_name),
+            Some(parent_peer_id),
+            Some(parent_comms as Arc<dyn CoreCommsRuntime>),
+            parent_snapshot_context_for_tools(Vec::new()).await,
+        );
+        let args = serde_json::value::RawValue::from_string(
+            json!({
+                "member_id": helper,
+                "task": "report back",
+                "result_label": "delegate_result",
+                "max_text_bytes": 4096
+            })
+            .to_string(),
+        )
+        .expect("raw args");
+        let result = surface
+            .dispatch(ToolCallView {
+                id: "delegate-seat-record",
+                name: "delegate",
+                args: &args,
+            })
+            .await
+            .expect("delegate seats and runs the helper");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&result.result.text_content()).expect("delegate JSON");
+        let helper_mob = meerkat_mob::MobId::from(parsed["mob_id"].as_str().expect("mob id"));
+        // In this harness the helper's retirement cannot complete, so it is
+        // still seated when the call returns.
+        state
+            .handle_for(&helper_mob)
+            .await
+            .expect("the helper's mob")
+            .member_seat(&AgentIdentity::from(helper))
+            .await
+            .expect("the helper is still seated")
+    }
+
+    /// A helper `delegate` seats for a session no hosted roster names records
+    /// that session's seat: a bare session, nothing of the call's arguments.
+    #[tokio::test]
+    async fn a_helper_delegate_seats_for_a_bare_session_records_the_session() {
+        use meerkat_mob::{MemberSeatKind, SeatRecorder};
+        let service = Arc::new(RealCommsSessionSvc::new());
+        let state = Arc::new(
+            MobMcpState::new(service.clone(), meerkat_mob::MobControlPrincipal::Owner)
+                .expect("construct runtime authority"),
+        );
+        let seat =
+            delegated_helper_seat(&service, &state, SessionId::new(), "helper-of-session").await;
+        assert_eq!(seat.kind(), MemberSeatKind::Session);
+        assert_eq!(seat.recorded(), None);
+        assert_eq!(seat.sealed_by(), None);
+        assert_eq!(seat.recorded_by(), Some(SeatRecorder::Shell));
+    }
+
+    /// A helper `delegate` seats for a member's session records that
+    /// member's seat in its own mob, sealed by the set after its complete
+    /// lookup of the hosted rosters.
+    #[tokio::test]
+    async fn a_helper_delegate_seats_for_a_member_records_the_calling_member() {
+        use meerkat_mob::{MemberSeatKind, SeatNow, SeatRecorder, SeatSealer};
+        let service = Arc::new(RealCommsSessionSvc::new());
+        let state = Arc::new(
+            MobMcpState::new(service.clone(), meerkat_mob::MobControlPrincipal::Owner)
+                .expect("construct runtime authority"),
+        );
+        let mob_id = state
+            .mob_create_definition(sample_definition("delegating-mob"))
+            .await
+            .expect("create mob");
+        let lead = AgentIdentity::from("delegating-lead");
+        let mut spec = SpawnMemberSpec::new("worker", lead.clone());
+        spec.runtime_mode = Some(meerkat_mob::MobRuntimeMode::TurnDriven);
+        state
+            .mob_spawn_spec(&mob_id, spec)
+            .await
+            .expect("the host seats the calling member");
+        let lead_session = state
+            .mob_resolve_bridge_session_id(&mob_id, &lead)
+            .await
+            .expect("resolve bridge session")
+            .expect("the calling member's session");
+        let seat =
+            delegated_helper_seat(&service, &state, lead_session.clone(), "helper-of-member").await;
+        assert_eq!(seat.kind(), MemberSeatKind::Member);
+        assert_eq!(seat.sealed_by(), Some(SeatSealer::Set));
+        assert_eq!(seat.recorded_by(), Some(SeatRecorder::Shell));
+        assert!(!seat.own_turn());
+        let recorded = seat.recorded().expect("the calling member's seat");
+        assert_eq!(recorded.parent_mob_id, mob_id);
+        assert_eq!(recorded.creator_identity, lead);
+        assert_eq!(recorded.owner_session, lead_session);
+        let handle = state.handle_for(&mob_id).await.expect("the caller's mob");
+        assert_eq!(handle.seat_now(recorded).await, SeatNow::Current);
     }
 }

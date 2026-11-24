@@ -815,8 +815,8 @@ async def test_stop_refuses_the_event_loop_thread_and_runs_on_a_worker_thread(ad
 @pytest.mark.asyncio
 async def test_shutdown_and_failed_builds_run_the_stop_off_the_loop(adopt, monkeypatch):
     # The worker-only stop, reached through the runtime's own paths: a builder
-    # configured before build(), shutdown(), a failed build(), and the cleanup
-    # a failed build hands its caller.
+    # configured before build(), shutdown(), a refused and a failed build(), a
+    # build() whose stop fails, and the cleanup that one hands its caller.
     loop_thread = threading.current_thread().name
     stops: list[tuple[str, bool]] = []
     stock_stop = AdoptedGatewayTransport.stop
@@ -844,13 +844,23 @@ async def test_shutdown_and_failed_builds_run_the_stop_off_the_loop(adopt, monke
         await configure_builder(AdoptedGatewayTransport(refused_host.carrier())).build()
 
     _, failed_host = adopt(fails_closed)
-    with pytest.raises(GatewayStartupCleanupError) as raised:
+    with pytest.raises(StorageResolutionError):
         await configure_builder(AdoptedGatewayTransport(failed_host.carrier())).build()
+
+    def exits_after_acceptance(child: FakeGatewayChild) -> int:
+        # No settlement: the init's outcome is unknown, and the stop's
+        # shutdown request finds the gateway gone.
+        accept_init(child)
+        return 0
+
+    _, gone_host = adopt(exits_after_acceptance)
+    with pytest.raises(GatewayStartupCleanupError) as raised:
+        await configure_builder(AdoptedGatewayTransport(gone_host.carrier())).build()
     await raised.value.cleanup.shutdown()
 
-    assert len(stops) == 4
+    assert len(stops) == 5
     assert all(not on_event_loop and thread != loop_thread for thread, on_event_loop in stops)
-    for each in (host, refused_host, failed_host):
+    for each in (host, refused_host, failed_host, gone_host):
         assert len(each.retirement_threads) == 1
         assert off_loop(each)
 
@@ -918,24 +928,25 @@ async def test_a_refused_init_retires_and_observes_the_child_without_a_spawn(ado
 
 
 @pytest.mark.asyncio
-async def test_a_failed_settlement_keeps_the_native_failure_apart_from_the_exit(adopt):
+async def test_a_failed_settlement_raises_the_refusal_and_asks_no_shutdown(adopt):
     child, host = adopt(fails_closed)
     transport = AdoptedGatewayTransport(host.carrier())
-    with pytest.raises(GatewayStartupCleanupError) as raised:
+    with pytest.raises(StorageResolutionError) as raised:
         await Meta.builder().gateway_transport(transport).build()
-    failure = raised.value
-    assert isinstance(failure.startup_error, StorageResolutionError)
-    assert failure.startup_error.data["durable_effects"] == "possible"
-    # The shutdown request found the gateway gone: the native shutdown answer
-    # is its own outcome, apart from the observed exit.
-    assert "gateway shutdown failed after bounded cleanup" in str(failure.cleanup_error)
-    assert transport.start_failure == GatewayStartFailure(failure.startup_error, "failed")
+    error = raised.value
+    assert error.data["durable_effects"] == "possible"
+    assert error.__cause__ is None
+    assert transport.start_failure == GatewayStartFailure(error, "failed")
+    assert transport.start_failure.error is error
+    # A gateway whose init settled failed exits without an answer to a
+    # shutdown request: the stop makes none and only ends the input.
+    assert "meta/shutdown" not in child.methods()
     assert transport.child_exit == GatewayChildExit("exited", 0)
-    record = TransportTermination("exited", 0, None, "none", "unanswered")
-    assert failure.cleanup.last_termination == record
-    # Nothing is left to stop: the exit was observed.
-    await failure.cleanup.shutdown()
+    assert transport.last_termination == TransportTermination(
+        "exited", 0, None, "none", "not_negotiated"
+    )
     assert len(host.retirement_threads) == 1
+    assert off_loop(host)
 
 
 @pytest.mark.asyncio

@@ -32,6 +32,7 @@ fn revision_frame(key: &str, witness: &str) -> NewConsoleFrame {
         identity,
     };
     NewConsoleFrame {
+        mob_id: None,
         id: None,
         dedupe_key: key.into(),
         timestamp_ms: 1,

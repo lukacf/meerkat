@@ -54,7 +54,8 @@ import {
   parseStreamingConversationRichBlocks,
 } from "@console-core";
 import type { ConsoleAgent, ConsoleFrame } from "../types";
-import { agentDisplayTitle } from "../../../packages/console-core/src/agent-title";
+import { agentDisplayTitle, identityDisplayTitle } from "../../../packages/console-core/src/agent-title";
+import { memberNameInMob, nestedMobIdsOfMembers } from "../../../packages/console-core/src/member-ref";
 import { createConsoleId } from "./id";
 import { formatWorkGraphTimestamp } from "./workgraph-time";
 
@@ -237,7 +238,9 @@ export function buildInspectTarget(agent: ConsoleAgent): IdentityInspectTarget {
     identity: agent.identity || agent.member_id,
     memberId: agent.member_id,
     title: `${agentDisplayTitle(agent)} Details`,
-    subtitle: agent.identity || agent.member_id,
+    // The member's own name, never its mob and name: the panel's details
+    // carry the identity.
+    subtitle: memberNameInMob(agent.identity || agent.member_id, agent.mob_id),
     iconName: "i-terminal",
   };
 }
@@ -367,7 +370,7 @@ export function buildSidebarViewState(args: {
       return {
         id: agent.member_id,
         title: agentDisplayTitle(agent),
-        subtitle: agent.identity || agent.member_id,
+        subtitle: memberNameInMob(agent.identity || agent.member_id, agent.mob_id),
         selected: agent.member_id === selectedMemberId,
         pinned: isPinned,
         disabled: !isAddressable,
@@ -1691,12 +1694,12 @@ function workGraphTargetLabel(value: unknown): string | undefined {
   if (!record) return undefined;
   const sessionId = workGraphString(record.session_id);
   if (sessionId) return sessionId;
-  const ownerKey = record.owner_key && typeof record.owner_key === "object"
+  const owner = record.owner_key && typeof record.owner_key === "object"
     ? record.owner_key as Record<string, unknown>
     : null;
-  if (ownerKey) {
-    const kind = workGraphString(ownerKey.kind);
-    const id = workGraphString(ownerKey.id);
+  if (owner) {
+    const kind = workGraphString(owner.kind);
+    const id = workGraphString(owner.id);
     return [kind, id].filter(Boolean).join(":") || undefined;
   }
   return undefined;
@@ -6295,6 +6298,7 @@ export function buildActivityRailViewState(args: {
     return true;
   });
 
+  const nestedMobs = nestedMobIdsOfMembers(args.agents);
   const pulseItems: ConsoleActivityPulseItem[] = filteredFrames
     .slice(0, 200)
     .map((frame, index) => {
@@ -6305,7 +6309,7 @@ export function buildActivityRailViewState(args: {
         : "";
       return {
         id: `event:${frame.id || index}`,
-        title: agent ? agentDisplayTitle(agent) : frameIdentity ? agentDisplayTitle({ label: frameIdentity, identity: frameIdentity }) : frame.event || "event",
+        title: agent ? agentDisplayTitle(agent) : frameIdentity ? identityDisplayTitle(frameIdentity, nestedMobs) : frame.event || "event",
         line: summarizeFrameData(frame.data).slice(0, 120) || frame.event,
         meta: `${frame.event}${ts ? ` · ${ts}` : ""}`,
         ...(agent ? { focusId: agent.member_id } : {}),

@@ -117,6 +117,10 @@ pub(super) struct RecoveredCreatedRows {
     pub(super) specs: BTreeMap<AgentIdentity, crate::identity::CreatedIdentitySpec>,
     pub(super) role_migrations_owed: std::collections::BTreeSet<AgentIdentity>,
     pub(super) label_restamps_owed: std::collections::BTreeSet<AgentIdentity>,
+    /// The present identities whose row an adoption from a roster spec
+    /// wrote: while such an identity's member holds the seat the adoption
+    /// found, its roster entry reads the row's labels.
+    pub(super) adopted_from_roster: std::collections::BTreeSet<AgentIdentity>,
     pub(super) pending_constructions: std::collections::BTreeSet<AgentIdentity>,
 }
 
@@ -167,6 +171,9 @@ pub(super) async fn recover_created_identity_entries(
                 }
                 if record.label_restamp_owed {
                     recovered.label_restamps_owed.insert(identity.clone());
+                }
+                if record.adopted_from_roster() {
+                    recovered.adopted_from_roster.insert(identity.clone());
                 }
             }
             if let CreatedIdentityObservation::Created(record) = observation

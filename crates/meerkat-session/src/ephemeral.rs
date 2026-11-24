@@ -11411,138 +11411,6 @@ async fn session_task<A: SessionAgent>(
         }
 
         match cmd {
-            SessionCommand::AttachMcpServer {
-                expected_actor,
-                attachment,
-                reply_tx,
-            } => {
-                let outcome = if expected_actor.is_live()
-                    && expected_actor.same_incarnation(&control.actor_witness)
-                {
-                    // The attempt is observed only through this exact actor
-                    // incarnation.
-                    agent
-                        .attach_mcp_server(*attachment)
-                        .await
-                        .map(|receipt| ActorBoundAttempt::bind(receipt, expected_actor.clone()))
-                } else {
-                    Err(meerkat_core::mcp_attachment::LiveMcpAttachError::Refused(
-                        meerkat_core::mcp_attachment::McpAttachmentRefusal::NotCurrent,
-                    ))
-                };
-                let _ = reply_tx.send(outcome);
-                continue;
-            }
-            SessionCommand::PinControllerClient {
-                expected_actor,
-                reply_tx,
-            } => {
-                let controller = if expected_actor.is_live()
-                    && expected_actor.same_incarnation(&control.actor_witness)
-                {
-                    agent.pin_controller_client()
-                } else {
-                    None
-                };
-                let _ = reply_tx.send(controller.ok_or_else(|| AgentError::OperationRefused {
-                    refusal: meerkat_core::authorization::OperationRefused::new(
-                        meerkat_core::authorization::OperationRefusalKind::MalformedFacts,
-                    ),
-                }));
-                continue;
-            }
-            SessionCommand::ValidateLiveBridgeMemberEligibility { reply_tx } => {
-                let _ = reply_tx.send(agent.validate_live_bridge_member_eligibility());
-                continue;
-            }
-            SessionCommand::StartLiveBridgeOperation {
-                request,
-                cancellation,
-                accepted_tx,
-            } => {
-                if let Err(error) = agent.validate_live_bridge_operation(&request) {
-                    let _ = accepted_tx.send(Err(error));
-                    continue;
-                }
-                let execution = match agent.prepare_live_bridge_operation(request, cancellation) {
-                    Ok(execution) => execution,
-                    Err(error) => {
-                        let _ = accepted_tx.send(Err(error));
-                        continue;
-                    }
-                };
-                let (terminal_tx, terminal_rx) = oneshot::channel();
-                if accepted_tx.send(Ok(terminal_rx)).is_err() {
-                    continue;
-                }
-                tokio::spawn(async move {
-                    let result = execution.await;
-                    let _ = terminal_tx.send(result);
-                });
-                continue;
-            }
-            SessionCommand::ReplaceClient { client, reply_tx } => {
-                let _ = reply_tx.send(agent.replace_client(client));
-                continue;
-            }
-            SessionCommand::HotSwapLlmIdentity {
-                client,
-                identity,
-                request_policy,
-                reply_tx,
-            } => {
-                let result =
-                    agent.hot_swap_llm_identity(client, (*identity).clone(), *request_policy);
-                if result.is_ok() {
-                    control.llm_identity_tx.send_replace(*identity);
-                }
-                let _ = reply_tx.send(result);
-                continue;
-            }
-            SessionCommand::StageToolFilter { filter, reply_tx } => {
-                let _ = reply_tx.send(agent.stage_external_tool_filter(filter));
-                continue;
-            }
-            #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
-            SessionCommand::SetToolVisibilityState { state, reply_tx } => {
-                let _ = reply_tx.send(agent.set_tool_visibility_state(state.map(|state| *state)));
-                continue;
-            }
-            #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
-            SessionCommand::SyncSessionFromDurableSnapshot { session, reply_tx } => {
-                let durable_deferred_turn_state = session
-                    .try_deferred_turn_state()
-                    .map_err(|err| {
-                        meerkat_core::error::AgentError::InternalError(format!(
-                            "failed to restore durable deferred-turn state during live session sync: {err}"
-                        ))
-                    });
-                let result = match durable_deferred_turn_state {
-                    Ok(durable_deferred_turn_state) => {
-                        let result = agent.sync_session_from_durable_snapshot(*session);
-                        if result.is_ok()
-                            && let Some(durable_deferred_turn_state) = durable_deferred_turn_state
-                        {
-                            *lock_deferred_turn_state(&deferred_turn_state) =
-                                durable_deferred_turn_state;
-                        }
-                        result
-                    }
-                    Err(err) => Err(err),
-                };
-                if result.is_ok() {
-                    let snap = agent.snapshot();
-                    control.publish_summary(SessionSummaryCache {
-                        updated_at: snap.updated_at,
-                        message_count: snap.message_count,
-                        total_tokens: snap.total_tokens,
-                        usage: snap.usage,
-                        last_assistant_text: snap.last_assistant_text,
-                    });
-                }
-                let _ = reply_tx.send(result);
-                continue;
-            }
             SessionCommand::StartTurn {
                 prompt,
                 system_messages,
@@ -12515,844 +12383,26 @@ async fn session_task<A: SessionAgent>(
                     .await;
                 }
             }
-            SessionCommand::ExportSession { reply_tx } => {
-                let _ = reply_tx.send(agent.session_clone());
-            }
-            SessionCommand::ObserveSessionTranscriptAuthority { reply_tx } => {
-                let result = agent.session_transcript_authority().map(|snapshot| {
-                    snapshot.bind_actor_generation(transcript_authority_generation)
-                });
-                let _ = reply_tx.send(result);
-            }
-            SessionCommand::ExportSessionIfTranscriptAuthority { expected, reply_tx } => {
-                let result = agent
-                    .session_transcript_authority()
-                    .map(|snapshot| snapshot.bind_actor_generation(transcript_authority_generation))
-                    .and_then(|current| {
-                        if current == expected {
-                            agent.session_clone().map(Some)
-                        } else {
-                            Ok(None)
-                        }
-                    });
-                let _ = reply_tx.send(result);
-            }
-            #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
-            SessionCommand::ClassifyCallbackResultIngress { results, reply_tx } => {
-                let _ = reply_tx.send(agent.classify_callback_result_ingress(&results));
-            }
-            SessionCommand::ReconcileRuntimeCompactionProjections { intents, reply_tx } => {
-                let result = agent
-                    .reconcile_runtime_compaction_projections(&intents)
-                    .await;
-                // The runtime reconciles between turns, when no turn reads
-                // the agent's event channel: forward what the agent queued
-                // (a finalized compaction's `CompactionCompleted`) to the
-                // session's event stream before the runtime hears back, so
-                // it neither waits for the next turn nor ends with the actor.
-                while let Ok(event) = agent_event_rx.try_recv() {
-                    let envelope = stamp_event_envelope(&next_seq, &source, event);
-                    control.publish_session_event(envelope).await;
-                }
-                let _ = reply_tx.send(result);
-            }
-            SessionCommand::AbortUncommittedCompactionProjections { reply_tx } => {
-                let result = agent.abort_uncommitted_compaction_projections().await;
-                let _ = reply_tx.send(result);
-            }
-            SessionCommand::ExecutionSnapshot { reply_tx } => {
-                let _ = reply_tx.send(agent.execution_snapshot());
-            }
-            SessionCommand::ToolScopeSnapshot { reply_tx } => {
-                let _ = reply_tx.send(agent.tool_scope_snapshot());
-            }
-            SessionCommand::ToolCatalogView { reply_tx } => {
-                let _ = reply_tx.send(agent.tool_catalog_view());
-            }
-            SessionCommand::VisibleToolDefs { reply_tx } => {
-                let _ = reply_tx.send(agent.visible_tool_defs());
-            }
-            SessionCommand::ExternalToolSurfaceSnapshot { reply_tx } => {
-                let _ = reply_tx.send(agent.external_tool_surface_snapshot());
-            }
-            #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
-            SessionCommand::PublishInteractionTerminalsExactBatch {
-                expected_actor,
-                events,
-                event_store,
-                reply_tx,
-            } => {
-                let result = publish_interaction_terminal_batch(
-                    &session_id,
-                    &next_seq,
-                    &control,
-                    event_store.as_ref(),
-                    expected_actor.as_ref(),
-                    events,
+            // Every command that is not a turn is handled in a future of its
+            // own, boxed (see `session_task_command`): what its arms hold is
+            // not part of this task's poll frame, which lies under every frame
+            // of a turn.
+            command => {
+                session_task_command(
+                    command,
+                    SessionTaskCommandScope {
+                        agent: &mut agent,
+                        session_id: &session_id,
+                        agent_event_rx: &mut agent_event_rx,
+                        deferred_turn_state: &deferred_turn_state,
+                        control: &control,
+                        next_seq: &next_seq,
+                        source: &source,
+                        runtime_interaction_terminals: &mut runtime_interaction_terminals,
+                        transcript_authority_generation,
+                    },
                 )
                 .await;
-                let _ = reply_tx.send(result);
-            }
-            SessionCommand::PublishBoundaryAppendsDiscarded {
-                expected_actor,
-                discarded,
-                reply_tx,
-            } => {
-                let result = if discarded.session_id != session_id
-                    || !expected_actor.same_incarnation(&control.actor_witness)
-                    || !expected_actor.is_live()
-                {
-                    Err(SessionError::NotFound {
-                        id: expected_actor.session_id().clone(),
-                    })
-                } else {
-                    if !discarded.input_ids.is_empty() {
-                        let event = stamp_event_envelope(
-                            &next_seq,
-                            &source,
-                            AgentEvent::BoundaryAppendsDiscarded(discarded),
-                        );
-                        control.publish_session_event(event).await;
-                    }
-                    Ok(())
-                };
-                let _ = reply_tx.send(result);
-            }
-            SessionCommand::PublishSettledRunTerminal {
-                expected_actor,
-                settled,
-                reply_tx,
-            } => {
-                let result = if *settled.session_id() != session_id
-                    || !expected_actor.same_incarnation(&control.actor_witness)
-                    || !expected_actor.is_live()
-                {
-                    Err(SessionError::NotFound {
-                        id: expected_actor.session_id().clone(),
-                    })
-                } else {
-                    let event =
-                        stamp_event_envelope(&next_seq, &source, settled.run_failed_event());
-                    control.publish_session_event(event).await;
-                    Ok(())
-                };
-                let _ = reply_tx.send(result);
-            }
-            SessionCommand::PublishRuntimeInteractionTerminals {
-                expected_actor,
-                events,
-                reply_tx,
-            } => {
-                let result = if !expected_actor.same_incarnation(&control.actor_witness)
-                    || !expected_actor.is_live()
-                {
-                    Err(SessionError::NotFound {
-                        id: expected_actor.session_id().clone(),
-                    })
-                } else {
-                    match runtime_interaction_terminals.append_exact_batch(&next_seq, events) {
-                        Ok((receipts, inserted)) => {
-                            for envelope in inserted {
-                                control.publish_session_event(envelope).await;
-                            }
-                            Ok(receipts)
-                        }
-                        Err(error) => Err(error),
-                    }
-                };
-                let _ = reply_tx.send(result);
-            }
-            SessionCommand::RecordLiveTerminalError { cause, reply_tx } => {
-                let message = render_live_terminal_error_message(&cause);
-                let failed = stamp_event_envelope(
-                    &next_seq,
-                    &source,
-                    AgentEvent::RunFailed {
-                        identity: Default::default(),
-                        session_id: session_id.clone(),
-                        terminal_cause_kind: None,
-                        error_report: meerkat_core::event::AgentErrorReport {
-                            class: meerkat_core::event::AgentErrorClass::Terminal,
-                            reason: None,
-                            message,
-                        },
-                    },
-                );
-                control.publish_session_event(failed).await;
-                let _ = reply_tx.send(());
-            }
-            SessionCommand::RecordLiveOutputAudioDegraded { dropped, reply_tx } => {
-                let truncated = stamp_event_envelope(
-                    &next_seq,
-                    &source,
-                    AgentEvent::StreamTruncated {
-                        reason: meerkat_core::event::StreamTruncationReason::OutputAudioDegraded {
-                            dropped,
-                        },
-                    },
-                );
-                control.publish_session_event(truncated).await;
-                let _ = reply_tx.send(());
-            }
-            SessionCommand::RecordLiveTurnAccounting {
-                accounting,
-                reply_tx,
-            } => {
-                // #1883: a failed live response commits nothing and
-                // publishes no turn terminal; only its accounting is
-                // recorded. Measured usage advances session usage and the
-                // budget; an absent one is the routed unmeasured fact.
-                let result = match accounting {
-                    meerkat_core::live_adapter::LiveResponseAccounting::Measured { usage } => {
-                        let result = agent.record_external_turn_usage(usage);
-                        if result.is_ok() {
-                            let snap = agent.snapshot();
-                            control.publish_summary(SessionSummaryCache {
-                                updated_at: snap.updated_at,
-                                message_count: snap.message_count,
-                                total_tokens: snap.total_tokens,
-                                usage: snap.usage,
-                                last_assistant_text: snap.last_assistant_text,
-                            });
-                        }
-                        result
-                    }
-                    meerkat_core::live_adapter::LiveResponseAccounting::Unmeasured {
-                        unmeasured,
-                    } => {
-                        let envelope = stamp_event_envelope(
-                            &next_seq,
-                            &source,
-                            AgentEvent::TurnUsageAccountingUnmeasured {
-                                session_id: session_id.clone(),
-                                unmeasured,
-                            },
-                        );
-                        control.publish_session_event(envelope).await;
-                        Ok(())
-                    }
-                };
-                let _ = reply_tx.send(result);
-            }
-            SessionCommand::DeliverStagedPromptForLiveOpen { reply_tx } => {
-                // Consume the deferred inputs, keep only the staged prompt and
-                // restore the first-turn phase and staged tool results at
-                // once: a live open delivers the prompt, the first turn still
-                // starts the session.
-                let mut consumed = {
-                    let mut guard = lock_deferred_turn_state(&deferred_turn_state);
-                    guard.consume_for_started_turn()
-                };
-                let staged = consumed.take_initial_prompt();
-                restore_deferred_turn_inputs(&deferred_turn_state, consumed);
-                let Some(prompt) = staged
-                    .pending_initial_prompt()
-                    .map(|pending| pending.prompt.clone())
-                else {
-                    let _ = reply_tx.send(Ok(StagedPromptLiveOpenDelivery::NothingStaged));
-                    continue;
-                };
-                let result = match agent.admit_staged_prompt_for_live_open(&prompt).await {
-                    Err(refusal) => {
-                        restore_deferred_turn_inputs(&deferred_turn_state, staged);
-                        Ok(StagedPromptLiveOpenDelivery::Refused(refusal))
-                    }
-                    Ok(()) => match agent.append_external_user_content(prompt) {
-                        Ok(()) => {
-                            let snap = agent.snapshot();
-                            control.publish_summary(SessionSummaryCache {
-                                updated_at: snap.updated_at,
-                                message_count: snap.message_count,
-                                total_tokens: snap.total_tokens,
-                                usage: snap.usage,
-                                last_assistant_text: snap.last_assistant_text,
-                            });
-                            Ok(StagedPromptLiveOpenDelivery::Delivered)
-                        }
-                        Err(error) => {
-                            restore_deferred_turn_inputs(&deferred_turn_state, staged);
-                            Err(error)
-                        }
-                    },
-                };
-                let _ = reply_tx.send(result);
-            }
-            SessionCommand::AppendExternalUserContent { content, reply_tx } => {
-                let result = agent.append_external_user_content(content);
-                if result.is_ok() {
-                    let snap = agent.snapshot();
-                    control.publish_summary(SessionSummaryCache {
-                        updated_at: snap.updated_at,
-                        message_count: snap.message_count,
-                        total_tokens: snap.total_tokens,
-                        usage: snap.usage,
-                        last_assistant_text: snap.last_assistant_text,
-                    });
-                }
-                let _ = reply_tx.send(result);
-            }
-            SessionCommand::AppendExternalAssistantOutput {
-                blocks,
-                stop_reason,
-                usage,
-                reply_tx,
-            } => {
-                // Project both `Text` (display) and `Transcript` (spoken)
-                // lanes to the rendered text stream — they share the same
-                // surface for end-user display.
-                let text_content = blocks
-                    .iter()
-                    .filter_map(|block| match block {
-                        meerkat_core::types::AssistantBlock::Text { text, .. }
-                        | meerkat_core::types::AssistantBlock::Transcript { text, .. } => {
-                            Some(text.as_str())
-                        }
-                        _ => None,
-                    })
-                    .collect::<String>();
-                let usage_for_event = meerkat_core::TurnUsage::try_from_usage(usage.clone()).ok();
-                let result = agent.append_external_assistant_output(blocks, stop_reason, usage);
-                if let Ok(assistant_message_id) = &result {
-                    // The id core minted for the committed row; `None` when
-                    // the drain committed no row.
-                    let assistant_message_id = *assistant_message_id;
-                    let snap = agent.snapshot();
-                    control.publish_summary(SessionSummaryCache {
-                        updated_at: snap.updated_at,
-                        message_count: snap.message_count,
-                        total_tokens: snap.total_tokens,
-                        usage: snap.usage,
-                        last_assistant_text: snap.last_assistant_text,
-                    });
-                    if !text_content.is_empty() {
-                        let envelope = stamp_event_envelope(
-                            &next_seq,
-                            &source,
-                            AgentEvent::TextComplete {
-                                content: text_content,
-                                assistant_message_id,
-                            },
-                        );
-                        control.publish_session_event(envelope).await;
-                    }
-                    // The completion is published whether or not the host
-                    // supplied normalized accounting. Withholding it when the
-                    // number is missing would let an accounting gap erase a
-                    // semantic fact the caller has already observed.
-                    let envelope = stamp_event_envelope(
-                        &next_seq,
-                        &source,
-                        AgentEvent::TurnCompleted {
-                            stop_reason,
-                            usage: usage_for_event,
-                            assistant_message_id,
-                        },
-                    );
-                    control.publish_session_event(envelope).await;
-                }
-                let _ = reply_tx.send(result.map(|_| ()));
-            }
-            SessionCommand::PublishLiveChannelClosed {
-                channel_id,
-                reason,
-                reopen_recommended,
-                reply_tx,
-            } => {
-                let envelope = stamp_event_envelope(
-                    &next_seq,
-                    &source,
-                    AgentEvent::LiveChannelClosed {
-                        session_id: session_id.clone(),
-                        channel_id: channel_id.to_string(),
-                        reason,
-                        reopen_recommended,
-                    },
-                );
-                control.publish_session_event(envelope).await;
-                let _ = reply_tx.send(Ok(()));
-            }
-            SessionCommand::AppendRealtimeTranscriptEvent {
-                event,
-                channel_id,
-                reply_tx,
-            } => {
-                let result = match channel_id {
-                    Some(channel) => {
-                        agent.append_realtime_transcript_event_for_channel(event, channel)
-                    }
-                    None => agent.append_realtime_transcript_event(event),
-                };
-                if let Ok(outcome) = &result {
-                    let snap = agent.snapshot();
-                    control.publish_summary(SessionSummaryCache {
-                        updated_at: snap.updated_at,
-                        message_count: snap.message_count,
-                        total_tokens: snap.total_tokens,
-                        usage: snap.usage,
-                        last_assistant_text: snap.last_assistant_text,
-                    });
-                    for materialized in &outcome.materialized_messages {
-                        if let RealtimeTranscriptMaterializedMessage::Assistant {
-                            text,
-                            stop_reason: Some(stop_reason),
-                            usage,
-                            ..
-                        } = materialized
-                        {
-                            if !text.is_empty() {
-                                let envelope = stamp_event_envelope(
-                                    &next_seq,
-                                    &source,
-                                    AgentEvent::TextComplete {
-                                        content: text.clone(),
-                                        assistant_message_id: None,
-                                    },
-                                );
-                                control.publish_session_event(envelope).await;
-                            }
-                            let envelope = stamp_event_envelope(
-                                &next_seq,
-                                &source,
-                                AgentEvent::TurnCompleted {
-                                    stop_reason: *stop_reason,
-                                    usage: usage.clone(),
-                                    assistant_message_id: None,
-                                },
-                            );
-                            control.publish_session_event(envelope).await;
-                        }
-                    }
-                }
-                let _ = reply_tx.send(result);
-            }
-            SessionCommand::AdmitLiveAssistantPlaybackTarget {
-                channel_id,
-                interaction_id,
-                response_id,
-                item_id,
-                content_index,
-                context_observation_id,
-                reply_tx,
-            } => {
-                let result = crate::live_transcript_authority::admit_live_assistant_playback_target_with_context_observation(
-                    &mut agent,
-                    &session_id,
-                    channel_id,
-                    interaction_id,
-                    response_id,
-                    item_id,
-                    content_index,
-                    context_observation_id,
-                );
-                let _ = reply_tx.send(result);
-            }
-            SessionCommand::ResolveLiveAssistantPlaybackTarget {
-                channel_id,
-                item_id,
-                content_index,
-                reply_tx,
-            } => {
-                let target =
-                    agent.live_assistant_playback_target(&channel_id, &item_id, content_index);
-                let _ = reply_tx.send(target);
-            }
-            SessionCommand::ResolveLiveAssistantPlaybackOnChannelClose {
-                channel_id,
-                reply_tx,
-            } => {
-                let result = crate::live_transcript_authority::resolve_live_assistant_playback_on_channel_close(
-                    &mut agent,
-                    &session_id,
-                    channel_id,
-                );
-                let _ = reply_tx.send(result);
-            }
-            SessionCommand::CommitLiveUserTranscriptFinal {
-                provisional,
-                final_event,
-                reply_tx,
-            } => {
-                let result = crate::live_transcript_authority::commit_final_live_user_transcript(
-                    &mut agent,
-                    &session_id,
-                    provisional,
-                    final_event,
-                );
-                if result.is_ok() {
-                    let snap = agent.snapshot();
-                    control.publish_summary(SessionSummaryCache {
-                        updated_at: snap.updated_at,
-                        message_count: snap.message_count,
-                        total_tokens: snap.total_tokens,
-                        usage: snap.usage,
-                        last_assistant_text: snap.last_assistant_text,
-                    });
-                }
-                let _ = reply_tx.send(result);
-            }
-            SessionCommand::CommitLiveUserTranscriptRepresented {
-                provisional,
-                final_event,
-                represented,
-                reply_tx,
-            } => {
-                let result =
-                    crate::live_transcript_authority::commit_represented_live_user_transcript(
-                        &mut agent,
-                        &session_id,
-                        provisional,
-                        final_event,
-                        &represented,
-                    );
-                if result.is_ok() {
-                    let snap = agent.snapshot();
-                    control.publish_summary(SessionSummaryCache {
-                        updated_at: snap.updated_at,
-                        message_count: snap.message_count,
-                        total_tokens: snap.total_tokens,
-                        usage: snap.usage,
-                        last_assistant_text: snap.last_assistant_text,
-                    });
-                }
-                let _ = reply_tx.send(result);
-            }
-            SessionCommand::CommitLiveAssistantPlaybackTruncation {
-                channel_id,
-                interaction_id,
-                response_id,
-                item_id,
-                content_index,
-                evidence,
-                reply_tx,
-            } => {
-                let result =
-                    crate::live_transcript_authority::commit_live_assistant_playback_truncation(
-                        &mut agent,
-                        &session_id,
-                        channel_id,
-                        interaction_id,
-                        response_id,
-                        item_id,
-                        content_index,
-                        evidence,
-                    );
-                if matches!(
-                    result.as_ref().map(|receipt| receipt.disposition()),
-                    Ok(meerkat_core::LiveAssistantPlaybackTruncationDisposition::CommittedReportedPrefix)
-                ) {
-                    let snap = agent.snapshot();
-                    control.publish_summary(SessionSummaryCache {
-                        updated_at: snap.updated_at,
-                        message_count: snap.message_count,
-                        total_tokens: snap.total_tokens,
-                        usage: snap.usage,
-                        last_assistant_text: snap.last_assistant_text,
-                    });
-                }
-                let _ = reply_tx.send(result);
-            }
-            SessionCommand::CommitLiveAssistantPlaybackComplete {
-                channel_id,
-                interaction_id,
-                response_id,
-                item_id,
-                content_index,
-                stop_reason,
-                usage,
-                reply_tx,
-            } => {
-                let result =
-                    crate::live_transcript_authority::commit_live_assistant_playback_complete(
-                        &mut agent,
-                        &session_id,
-                        channel_id,
-                        interaction_id,
-                        response_id,
-                        item_id,
-                        content_index,
-                        stop_reason,
-                        usage,
-                    );
-                let _ = reply_tx.send(result);
-            }
-            SessionCommand::ObserveLiveAssistantPlaybackTerminal {
-                channel_id,
-                interaction_id,
-                response_id,
-                item_id,
-                content_index,
-                evidence,
-                stop_reason,
-                usage,
-                reply_tx,
-            } => {
-                let result = crate::live_transcript_authority::observe_live_assistant_playback_terminal_with_completion(
-                    &mut agent,
-                    &session_id,
-                    channel_id,
-                    interaction_id,
-                    response_id,
-                    item_id,
-                    content_index,
-                    evidence,
-                    stop_reason,
-                    usage,
-                );
-                if matches!(&result, Ok(crate::LiveAssistantPlaybackObservationResult::Resolved(receipt))
-                    if receipt.continues_provider_group())
-                {
-                    let snap = agent.snapshot();
-                    control.publish_summary(SessionSummaryCache {
-                        updated_at: snap.updated_at,
-                        message_count: snap.message_count,
-                        total_tokens: snap.total_tokens,
-                        usage: snap.usage,
-                        last_assistant_text: snap.last_assistant_text,
-                    });
-                }
-                let _ = reply_tx.send(result);
-            }
-            SessionCommand::ObserveLiveAssistantPlaybackFinal {
-                channel_id,
-                interaction_id,
-                response_id,
-                item_id,
-                content_index,
-                reply_tx,
-            } => {
-                let result =
-                    crate::live_transcript_authority::observe_live_assistant_playback_final(
-                        &mut agent,
-                        &session_id,
-                        channel_id,
-                        interaction_id,
-                        response_id,
-                        item_id,
-                        content_index,
-                    );
-                let _ = reply_tx.send(result);
-            }
-            SessionCommand::SettleToolApplication {
-                actor,
-                control: request_control,
-                mut outcome,
-                reply_tx,
-            } => {
-                let result = if actor.is_live() && actor.same_incarnation(&control.actor_witness) {
-                    // Settlement can wait behind a model turn. A revoked
-                    // viewer or invocation must not publish a private result
-                    // or transcript append, while entered effects still settle.
-                    if let Err(error) = request_control.revalidate_async().await {
-                        outcome = outcome.withhold_result(AgentError::tool(error.into()));
-                    }
-                    agent.settle_tool_application(outcome)
-                } else {
-                    let failures = outcome.settlement_failures();
-                    (
-                        outcome.into_refused_result(AgentError::Cancelled),
-                        false,
-                        failures,
-                    )
-                };
-                if result.1 {
-                    let snap = agent.snapshot();
-                    control.publish_summary(SessionSummaryCache {
-                        updated_at: snap.updated_at,
-                        message_count: snap.message_count,
-                        total_tokens: snap.total_tokens,
-                        usage: snap.usage,
-                        last_assistant_text: snap.last_assistant_text,
-                    });
-                }
-                let _ = reply_tx.send(result);
-            }
-            SessionCommand::ToolApplication {
-                control: request_control,
-                context,
-                reply_tx,
-            } => {
-                if reply_tx.is_closed() {
-                    continue;
-                }
-                let result = match request_control.revalidate_async().await {
-                    Err(error) => Err(AgentError::InternalError(error.to_string())),
-                    Ok(()) if reply_tx.is_closed() => continue,
-                    // Once admitted, finish native settlement even if the
-                    // browser stops waiting. Dropping a dispatched future can
-                    // otherwise discard effects after transport handoff.
-                    Ok(()) => {
-                        agent
-                            .tool_application(request_control.request().clone(), context)
-                            .await
-                    }
-                };
-                let result = match result {
-                    Ok(value) => request_control
-                        .revalidate_async()
-                        .await
-                        .map(|()| value)
-                        .map_err(|error| AgentError::InternalError(error.to_string())),
-                    Err(error) => Err(error),
-                };
-                let snap = agent.snapshot();
-                control.publish_summary(SessionSummaryCache {
-                    updated_at: snap.updated_at,
-                    message_count: snap.message_count,
-                    total_tokens: snap.total_tokens,
-                    usage: snap.usage,
-                    last_assistant_text: snap.last_assistant_text,
-                });
-                let _ = reply_tx.send(result);
-            }
-            SessionCommand::DispatchExternalToolCall {
-                call,
-                timeout_policy,
-                reply_tx,
-            } => {
-                let result = agent
-                    .dispatch_external_tool_call_with_timeout_policy(call, timeout_policy)
-                    .await;
-                if result.is_ok() {
-                    let snap = agent.snapshot();
-                    control.publish_summary(SessionSummaryCache {
-                        updated_at: snap.updated_at,
-                        message_count: snap.message_count,
-                        total_tokens: snap.total_tokens,
-                        usage: snap.usage,
-                        last_assistant_text: snap.last_assistant_text,
-                    });
-                }
-                let _ = reply_tx.send(result);
-            }
-            SessionCommand::UpdateMobToolAuthority {
-                authority_context,
-                reply_tx,
-            } => {
-                let _ = reply_tx.send(agent.update_mob_tool_authority_context(authority_context));
-            }
-            SessionCommand::ApplyMcpAttachmentIntent { mutation, reply_tx } => {
-                // A caller that is already gone owns no settlement for the
-                // change, so it is not applied.
-                if !reply_tx.is_closed() {
-                    let _ = reply_tx.send(agent.apply_mcp_attachment_intent(mutation));
-                }
-            }
-            SessionCommand::AppendSystemNoticeControl { record, reply_tx } => {
-                let result = match control.archive_snapshot_gate.enter_apply() {
-                    Ok(_gate) => agent.append_system_notice_control(record),
-                    Err(error) => Err(AgentError::InternalError(error.to_string())),
-                };
-                if result.is_ok() {
-                    let snap = agent.snapshot();
-                    control.publish_summary(SessionSummaryCache {
-                        updated_at: snap.updated_at,
-                        message_count: snap.message_count,
-                        total_tokens: snap.total_tokens,
-                        usage: snap.usage,
-                        last_assistant_text: snap.last_assistant_text,
-                    });
-                }
-                let _ = reply_tx.send(result);
-            }
-            SessionCommand::GovernedSystemContextControl {
-                control: command,
-                reply_tx,
-            } => {
-                let result = match control.archive_snapshot_gate.enter_apply() {
-                    Ok(_gate) => agent.append_governed_system_context(command),
-                    Err(error) => Err(SessionError::Agent(AgentError::InternalError(
-                        error.to_string(),
-                    ))
-                    .into()),
-                };
-                // Refusal may have staged a protected control observation.
-                let snap = agent.snapshot();
-                control.publish_summary(SessionSummaryCache {
-                    updated_at: snap.updated_at,
-                    message_count: snap.message_count,
-                    total_tokens: snap.total_tokens,
-                    usage: snap.usage,
-                    last_assistant_text: snap.last_assistant_text,
-                });
-                let _ = reply_tx.send(result);
-            }
-            SessionCommand::AppendSystemMessageControl { req, reply_tx } => {
-                let result = match control.archive_snapshot_gate.enter_apply() {
-                    Ok(_gate) => agent.append_system_message_control(req),
-                    Err(error) => Err(AgentError::InternalError(error.to_string())),
-                };
-                if result.is_ok() {
-                    let snap = agent.snapshot();
-                    control.publish_summary(SessionSummaryCache {
-                        updated_at: snap.updated_at,
-                        message_count: snap.message_count,
-                        total_tokens: snap.total_tokens,
-                        usage: snap.usage,
-                        last_assistant_text: snap.last_assistant_text,
-                    });
-                }
-                let _ = reply_tx.send(result);
-            }
-            #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
-            SessionCommand::SetSessionInstructionControl { write, reply_tx } => {
-                let result = match control.archive_snapshot_gate.enter_apply() {
-                    Ok(_gate) => Ok(agent.set_session_instruction_control(write)),
-                    Err(error) => Err(AgentError::InternalError(error.to_string())),
-                };
-                let _ = reply_tx.send(result);
-            }
-            #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
-            SessionCommand::RecordInstructionTargetControl { record, reply_tx } => {
-                let result = match control.archive_snapshot_gate.enter_apply() {
-                    Ok(_gate) => Ok(agent.record_instruction_target_control(record)),
-                    Err(error) => Err(AgentError::InternalError(error.to_string())),
-                };
-                let _ = reply_tx.send(result);
-            }
-            #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
-            SessionCommand::ReleaseInstructionTargetControl { mob_id, reply_tx } => {
-                let result = match control.archive_snapshot_gate.enter_apply() {
-                    Ok(_gate) => Ok(agent.release_instruction_target_control(&mob_id)),
-                    Err(error) => Err(AgentError::InternalError(error.to_string())),
-                };
-                let _ = reply_tx.send(result);
-            }
-            #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
-            SessionCommand::ActivateInstructionControl { request, reply_tx } => {
-                let result = match control.archive_snapshot_gate.enter_apply() {
-                    Ok(_gate) => Ok(agent.activate_instruction_control(request)),
-                    Err(error) => Err(AgentError::InternalError(error.to_string())),
-                };
-                if matches!(result, Ok(Ok(_))) {
-                    let snap = agent.snapshot();
-                    control.publish_summary(SessionSummaryCache {
-                        updated_at: snap.updated_at,
-                        message_count: snap.message_count,
-                        total_tokens: snap.total_tokens,
-                        usage: snap.usage,
-                        last_assistant_text: snap.last_assistant_text,
-                    });
-                }
-                let _ = reply_tx.send(result);
-            }
-            SessionCommand::PrepareHeadCanonicalRuntimeBoundary { request, reply_tx } => {
-                let result = agent.prepare_head_canonical_runtime_boundary(request).await;
-                let _ = reply_tx.send(result);
-            }
-            SessionCommand::AcknowledgeHeadCanonicalRuntimeBoundary {
-                successor_head_token,
-                reply_tx,
-            } => {
-                let result =
-                    agent.acknowledge_head_canonical_runtime_boundary(&successor_head_token);
-                let _ = reply_tx.send(result);
-            }
-            SessionCommand::AcknowledgeHeadCanonicalCompactionFinalization {
-                committed,
-                reply_tx,
-            } => {
-                let result = agent.acknowledge_head_canonical_compaction_finalization(&committed);
-                let _ = reply_tx.send(result);
             }
         }
     };
@@ -13362,6 +12412,1026 @@ async fn session_task<A: SessionAgent>(
     // unit marker, so an observed exit does not prove the release completed.
     agent.release_owned_resources().await;
     teardown_authorization.complete_task_exit();
+}
+
+/// What a command of the session task that is not a turn reads and changes:
+/// the task's own values, lent for one command
+/// (see [`session_task_command`]).
+struct SessionTaskCommandScope<'a, A> {
+    agent: &'a mut A,
+    session_id: &'a SessionId,
+    agent_event_rx: &'a mut mpsc::Receiver<AgentEvent>,
+    deferred_turn_state: &'a Arc<std::sync::Mutex<SessionDeferredTurnState>>,
+    control: &'a SessionTaskControl,
+    next_seq: &'a SessionEventLine,
+    source: &'a EventSourceIdentity,
+    runtime_interaction_terminals: &'a mut RuntimeInteractionTerminalJournal,
+    /// The task's transcript authority generation, after this command
+    /// advanced it.
+    transcript_authority_generation: u64,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+type SessionTaskCommandFuture<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>;
+#[cfg(target_arch = "wasm32")]
+type SessionTaskCommandFuture<'a> = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'a>>;
+
+/// [`session_task_command_unboxed`], built and boxed in its own frame: the
+/// session task handles every command that is not a turn through it.
+///
+/// A turn's whole path is polled beneath the session task's poll frame, and
+/// at opt-level 0 a poll frame reserves a slot for every local of every arm
+/// of its function. With the commands' arms inline, close to half of that
+/// frame was theirs (160 KB of 343 KB in the build the worker-stack rows of
+/// `meerkat-mob-mcp`, `tests/fork_relink.rs`, measure), under every frame of
+/// a turn that uses none of it. Here their locals belong to a frame that
+/// exists only while a command is handled, and their state lives on the heap
+/// for that time. Nothing about the handling changes: the task awaits the
+/// future where the arm stood, polls it to completion and drops it there.
+#[inline(never)]
+fn session_task_command<A: SessionAgent>(
+    cmd: SessionCommand,
+    scope: SessionTaskCommandScope<'_, A>,
+) -> SessionTaskCommandFuture<'_> {
+    Box::pin(session_task_command_unboxed(cmd, scope))
+}
+
+/// One command of the session task that is not a turn. Awaited through
+/// [`session_task_command`], its boxed form.
+async fn session_task_command_unboxed<A: SessionAgent>(
+    cmd: SessionCommand,
+    scope: SessionTaskCommandScope<'_, A>,
+) {
+    let SessionTaskCommandScope {
+        agent,
+        session_id,
+        agent_event_rx,
+        deferred_turn_state,
+        control,
+        next_seq,
+        source,
+        runtime_interaction_terminals,
+        transcript_authority_generation,
+    } = scope;
+    match cmd {
+        SessionCommand::AttachMcpServer {
+            expected_actor,
+            attachment,
+            reply_tx,
+        } => {
+            let outcome = if expected_actor.is_live()
+                && expected_actor.same_incarnation(&control.actor_witness)
+            {
+                // The attempt is observed only through this exact actor
+                // incarnation.
+                agent
+                    .attach_mcp_server(*attachment)
+                    .await
+                    .map(|receipt| ActorBoundAttempt::bind(receipt, expected_actor.clone()))
+            } else {
+                Err(meerkat_core::mcp_attachment::LiveMcpAttachError::Refused(
+                    meerkat_core::mcp_attachment::McpAttachmentRefusal::NotCurrent,
+                ))
+            };
+            let _ = reply_tx.send(outcome);
+        }
+        SessionCommand::PinControllerClient {
+            expected_actor,
+            reply_tx,
+        } => {
+            let controller = if expected_actor.is_live()
+                && expected_actor.same_incarnation(&control.actor_witness)
+            {
+                agent.pin_controller_client()
+            } else {
+                None
+            };
+            let _ = reply_tx.send(controller.ok_or_else(|| AgentError::OperationRefused {
+                refusal: meerkat_core::authorization::OperationRefused::new(
+                    meerkat_core::authorization::OperationRefusalKind::MalformedFacts,
+                ),
+            }));
+        }
+        SessionCommand::ValidateLiveBridgeMemberEligibility { reply_tx } => {
+            let _ = reply_tx.send(agent.validate_live_bridge_member_eligibility());
+        }
+        SessionCommand::StartLiveBridgeOperation {
+            request,
+            cancellation,
+            accepted_tx,
+        } => {
+            if let Err(error) = agent.validate_live_bridge_operation(&request) {
+                let _ = accepted_tx.send(Err(error));
+                return;
+            }
+            let execution = match agent.prepare_live_bridge_operation(request, cancellation) {
+                Ok(execution) => execution,
+                Err(error) => {
+                    let _ = accepted_tx.send(Err(error));
+                    return;
+                }
+            };
+            let (terminal_tx, terminal_rx) = oneshot::channel();
+            if accepted_tx.send(Ok(terminal_rx)).is_err() {
+                return;
+            }
+            tokio::spawn(async move {
+                let result = execution.await;
+                let _ = terminal_tx.send(result);
+            });
+        }
+        SessionCommand::ReplaceClient { client, reply_tx } => {
+            let _ = reply_tx.send(agent.replace_client(client));
+        }
+        SessionCommand::HotSwapLlmIdentity {
+            client,
+            identity,
+            request_policy,
+            reply_tx,
+        } => {
+            let result = agent.hot_swap_llm_identity(client, (*identity).clone(), *request_policy);
+            if result.is_ok() {
+                control.llm_identity_tx.send_replace(*identity);
+            }
+            let _ = reply_tx.send(result);
+        }
+        SessionCommand::StageToolFilter { filter, reply_tx } => {
+            let _ = reply_tx.send(agent.stage_external_tool_filter(filter));
+        }
+        #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+        SessionCommand::SetToolVisibilityState { state, reply_tx } => {
+            let _ = reply_tx.send(agent.set_tool_visibility_state(state.map(|state| *state)));
+        }
+        #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+        SessionCommand::SyncSessionFromDurableSnapshot { session, reply_tx } => {
+            let durable_deferred_turn_state = session.try_deferred_turn_state().map_err(|err| {
+                meerkat_core::error::AgentError::InternalError(format!(
+                    "failed to restore durable deferred-turn state during live session sync: {err}"
+                ))
+            });
+            let result = match durable_deferred_turn_state {
+                Ok(durable_deferred_turn_state) => {
+                    let result = agent.sync_session_from_durable_snapshot(*session);
+                    if result.is_ok()
+                        && let Some(durable_deferred_turn_state) = durable_deferred_turn_state
+                    {
+                        *lock_deferred_turn_state(deferred_turn_state) =
+                            durable_deferred_turn_state;
+                    }
+                    result
+                }
+                Err(err) => Err(err),
+            };
+            if result.is_ok() {
+                let snap = agent.snapshot();
+                control.publish_summary(SessionSummaryCache {
+                    updated_at: snap.updated_at,
+                    message_count: snap.message_count,
+                    total_tokens: snap.total_tokens,
+                    usage: snap.usage,
+                    last_assistant_text: snap.last_assistant_text,
+                });
+            }
+            let _ = reply_tx.send(result);
+        }
+        SessionCommand::ExportSession { reply_tx } => {
+            let _ = reply_tx.send(agent.session_clone());
+        }
+        SessionCommand::ObserveSessionTranscriptAuthority { reply_tx } => {
+            let result = agent
+                .session_transcript_authority()
+                .map(|snapshot| snapshot.bind_actor_generation(transcript_authority_generation));
+            let _ = reply_tx.send(result);
+        }
+        SessionCommand::ExportSessionIfTranscriptAuthority { expected, reply_tx } => {
+            let result = agent
+                .session_transcript_authority()
+                .map(|snapshot| snapshot.bind_actor_generation(transcript_authority_generation))
+                .and_then(|current| {
+                    if current == expected {
+                        agent.session_clone().map(Some)
+                    } else {
+                        Ok(None)
+                    }
+                });
+            let _ = reply_tx.send(result);
+        }
+        #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+        SessionCommand::ClassifyCallbackResultIngress { results, reply_tx } => {
+            let _ = reply_tx.send(agent.classify_callback_result_ingress(&results));
+        }
+        SessionCommand::ReconcileRuntimeCompactionProjections { intents, reply_tx } => {
+            let result = agent
+                .reconcile_runtime_compaction_projections(&intents)
+                .await;
+            // The runtime reconciles between turns, when no turn reads
+            // the agent's event channel: forward what the agent queued
+            // (a finalized compaction's `CompactionCompleted`) to the
+            // session's event stream before the runtime hears back, so
+            // it neither waits for the next turn nor ends with the actor.
+            while let Ok(event) = agent_event_rx.try_recv() {
+                let envelope = stamp_event_envelope(next_seq, source, event);
+                control.publish_session_event(envelope).await;
+            }
+            let _ = reply_tx.send(result);
+        }
+        SessionCommand::AbortUncommittedCompactionProjections { reply_tx } => {
+            let result = agent.abort_uncommitted_compaction_projections().await;
+            let _ = reply_tx.send(result);
+        }
+        SessionCommand::ExecutionSnapshot { reply_tx } => {
+            let _ = reply_tx.send(agent.execution_snapshot());
+        }
+        SessionCommand::ToolScopeSnapshot { reply_tx } => {
+            let _ = reply_tx.send(agent.tool_scope_snapshot());
+        }
+        SessionCommand::ToolCatalogView { reply_tx } => {
+            let _ = reply_tx.send(agent.tool_catalog_view());
+        }
+        SessionCommand::VisibleToolDefs { reply_tx } => {
+            let _ = reply_tx.send(agent.visible_tool_defs());
+        }
+        SessionCommand::ExternalToolSurfaceSnapshot { reply_tx } => {
+            let _ = reply_tx.send(agent.external_tool_surface_snapshot());
+        }
+        #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+        SessionCommand::PublishInteractionTerminalsExactBatch {
+            expected_actor,
+            events,
+            event_store,
+            reply_tx,
+        } => {
+            let result = publish_interaction_terminal_batch(
+                session_id,
+                next_seq,
+                control,
+                event_store.as_ref(),
+                expected_actor.as_ref(),
+                events,
+            )
+            .await;
+            let _ = reply_tx.send(result);
+        }
+        SessionCommand::PublishBoundaryAppendsDiscarded {
+            expected_actor,
+            discarded,
+            reply_tx,
+        } => {
+            let result = if discarded.session_id != *session_id
+                || !expected_actor.same_incarnation(&control.actor_witness)
+                || !expected_actor.is_live()
+            {
+                Err(SessionError::NotFound {
+                    id: expected_actor.session_id().clone(),
+                })
+            } else {
+                if !discarded.input_ids.is_empty() {
+                    let event = stamp_event_envelope(
+                        next_seq,
+                        source,
+                        AgentEvent::BoundaryAppendsDiscarded(discarded),
+                    );
+                    control.publish_session_event(event).await;
+                }
+                Ok(())
+            };
+            let _ = reply_tx.send(result);
+        }
+        SessionCommand::PublishSettledRunTerminal {
+            expected_actor,
+            settled,
+            reply_tx,
+        } => {
+            let result = if settled.session_id() != session_id
+                || !expected_actor.same_incarnation(&control.actor_witness)
+                || !expected_actor.is_live()
+            {
+                Err(SessionError::NotFound {
+                    id: expected_actor.session_id().clone(),
+                })
+            } else {
+                let event = stamp_event_envelope(next_seq, source, settled.run_failed_event());
+                control.publish_session_event(event).await;
+                Ok(())
+            };
+            let _ = reply_tx.send(result);
+        }
+        SessionCommand::PublishRuntimeInteractionTerminals {
+            expected_actor,
+            events,
+            reply_tx,
+        } => {
+            let result = if !expected_actor.same_incarnation(&control.actor_witness)
+                || !expected_actor.is_live()
+            {
+                Err(SessionError::NotFound {
+                    id: expected_actor.session_id().clone(),
+                })
+            } else {
+                match runtime_interaction_terminals.append_exact_batch(next_seq, events) {
+                    Ok((receipts, inserted)) => {
+                        for envelope in inserted {
+                            control.publish_session_event(envelope).await;
+                        }
+                        Ok(receipts)
+                    }
+                    Err(error) => Err(error),
+                }
+            };
+            let _ = reply_tx.send(result);
+        }
+        SessionCommand::RecordLiveTerminalError { cause, reply_tx } => {
+            let message = render_live_terminal_error_message(&cause);
+            let failed = stamp_event_envelope(
+                next_seq,
+                source,
+                AgentEvent::RunFailed {
+                    identity: Default::default(),
+                    session_id: session_id.clone(),
+                    terminal_cause_kind: None,
+                    error_report: meerkat_core::event::AgentErrorReport {
+                        class: meerkat_core::event::AgentErrorClass::Terminal,
+                        reason: None,
+                        message,
+                    },
+                },
+            );
+            control.publish_session_event(failed).await;
+            let _ = reply_tx.send(());
+        }
+        SessionCommand::RecordLiveOutputAudioDegraded { dropped, reply_tx } => {
+            let truncated = stamp_event_envelope(
+                next_seq,
+                source,
+                AgentEvent::StreamTruncated {
+                    reason: meerkat_core::event::StreamTruncationReason::OutputAudioDegraded {
+                        dropped,
+                    },
+                },
+            );
+            control.publish_session_event(truncated).await;
+            let _ = reply_tx.send(());
+        }
+        SessionCommand::RecordLiveTurnAccounting {
+            accounting,
+            reply_tx,
+        } => {
+            // #1883: a failed live response commits nothing and
+            // publishes no turn terminal; only its accounting is
+            // recorded. Measured usage advances session usage and the
+            // budget; an absent one is the routed unmeasured fact.
+            let result = match accounting {
+                meerkat_core::live_adapter::LiveResponseAccounting::Measured { usage } => {
+                    let result = agent.record_external_turn_usage(usage);
+                    if result.is_ok() {
+                        let snap = agent.snapshot();
+                        control.publish_summary(SessionSummaryCache {
+                            updated_at: snap.updated_at,
+                            message_count: snap.message_count,
+                            total_tokens: snap.total_tokens,
+                            usage: snap.usage,
+                            last_assistant_text: snap.last_assistant_text,
+                        });
+                    }
+                    result
+                }
+                meerkat_core::live_adapter::LiveResponseAccounting::Unmeasured { unmeasured } => {
+                    let envelope = stamp_event_envelope(
+                        next_seq,
+                        source,
+                        AgentEvent::TurnUsageAccountingUnmeasured {
+                            session_id: session_id.clone(),
+                            unmeasured,
+                        },
+                    );
+                    control.publish_session_event(envelope).await;
+                    Ok(())
+                }
+            };
+            let _ = reply_tx.send(result);
+        }
+        SessionCommand::DeliverStagedPromptForLiveOpen { reply_tx } => {
+            // Consume the deferred inputs, keep only the staged prompt and
+            // restore the first-turn phase and staged tool results at
+            // once: a live open delivers the prompt, the first turn still
+            // starts the session.
+            let mut consumed = {
+                let mut guard = lock_deferred_turn_state(deferred_turn_state);
+                guard.consume_for_started_turn()
+            };
+            let staged = consumed.take_initial_prompt();
+            restore_deferred_turn_inputs(deferred_turn_state, consumed);
+            let Some(prompt) = staged
+                .pending_initial_prompt()
+                .map(|pending| pending.prompt.clone())
+            else {
+                let _ = reply_tx.send(Ok(StagedPromptLiveOpenDelivery::NothingStaged));
+                return;
+            };
+            let result = match agent.admit_staged_prompt_for_live_open(&prompt).await {
+                Err(refusal) => {
+                    restore_deferred_turn_inputs(deferred_turn_state, staged);
+                    Ok(StagedPromptLiveOpenDelivery::Refused(refusal))
+                }
+                Ok(()) => match agent.append_external_user_content(prompt) {
+                    Ok(()) => {
+                        let snap = agent.snapshot();
+                        control.publish_summary(SessionSummaryCache {
+                            updated_at: snap.updated_at,
+                            message_count: snap.message_count,
+                            total_tokens: snap.total_tokens,
+                            usage: snap.usage,
+                            last_assistant_text: snap.last_assistant_text,
+                        });
+                        Ok(StagedPromptLiveOpenDelivery::Delivered)
+                    }
+                    Err(error) => {
+                        restore_deferred_turn_inputs(deferred_turn_state, staged);
+                        Err(error)
+                    }
+                },
+            };
+            let _ = reply_tx.send(result);
+        }
+        SessionCommand::AppendExternalUserContent { content, reply_tx } => {
+            let result = agent.append_external_user_content(content);
+            if result.is_ok() {
+                let snap = agent.snapshot();
+                control.publish_summary(SessionSummaryCache {
+                    updated_at: snap.updated_at,
+                    message_count: snap.message_count,
+                    total_tokens: snap.total_tokens,
+                    usage: snap.usage,
+                    last_assistant_text: snap.last_assistant_text,
+                });
+            }
+            let _ = reply_tx.send(result);
+        }
+        SessionCommand::AppendExternalAssistantOutput {
+            blocks,
+            stop_reason,
+            usage,
+            reply_tx,
+        } => {
+            // Project both `Text` (display) and `Transcript` (spoken)
+            // lanes to the rendered text stream — they share the same
+            // surface for end-user display.
+            let text_content = blocks
+                .iter()
+                .filter_map(|block| match block {
+                    meerkat_core::types::AssistantBlock::Text { text, .. }
+                    | meerkat_core::types::AssistantBlock::Transcript { text, .. } => {
+                        Some(text.as_str())
+                    }
+                    _ => None,
+                })
+                .collect::<String>();
+            let usage_for_event = meerkat_core::TurnUsage::try_from_usage(usage.clone()).ok();
+            let result = agent.append_external_assistant_output(blocks, stop_reason, usage);
+            if let Ok(assistant_message_id) = &result {
+                // The id core minted for the committed row; `None` when
+                // the drain committed no row.
+                let assistant_message_id = *assistant_message_id;
+                let snap = agent.snapshot();
+                control.publish_summary(SessionSummaryCache {
+                    updated_at: snap.updated_at,
+                    message_count: snap.message_count,
+                    total_tokens: snap.total_tokens,
+                    usage: snap.usage,
+                    last_assistant_text: snap.last_assistant_text,
+                });
+                if !text_content.is_empty() {
+                    let envelope = stamp_event_envelope(
+                        next_seq,
+                        source,
+                        AgentEvent::TextComplete {
+                            content: text_content,
+                            assistant_message_id,
+                        },
+                    );
+                    control.publish_session_event(envelope).await;
+                }
+                // The completion is published whether or not the host
+                // supplied normalized accounting. Withholding it when the
+                // number is missing would let an accounting gap erase a
+                // semantic fact the caller has already observed.
+                let envelope = stamp_event_envelope(
+                    next_seq,
+                    source,
+                    AgentEvent::TurnCompleted {
+                        stop_reason,
+                        usage: usage_for_event,
+                        assistant_message_id,
+                    },
+                );
+                control.publish_session_event(envelope).await;
+            }
+            let _ = reply_tx.send(result.map(|_| ()));
+        }
+        SessionCommand::PublishLiveChannelClosed {
+            channel_id,
+            reason,
+            reopen_recommended,
+            reply_tx,
+        } => {
+            let envelope = stamp_event_envelope(
+                next_seq,
+                source,
+                AgentEvent::LiveChannelClosed {
+                    session_id: session_id.clone(),
+                    channel_id: channel_id.to_string(),
+                    reason,
+                    reopen_recommended,
+                },
+            );
+            control.publish_session_event(envelope).await;
+            let _ = reply_tx.send(Ok(()));
+        }
+        SessionCommand::AppendRealtimeTranscriptEvent {
+            event,
+            channel_id,
+            reply_tx,
+        } => {
+            let result = match channel_id {
+                Some(channel) => agent.append_realtime_transcript_event_for_channel(event, channel),
+                None => agent.append_realtime_transcript_event(event),
+            };
+            if let Ok(outcome) = &result {
+                let snap = agent.snapshot();
+                control.publish_summary(SessionSummaryCache {
+                    updated_at: snap.updated_at,
+                    message_count: snap.message_count,
+                    total_tokens: snap.total_tokens,
+                    usage: snap.usage,
+                    last_assistant_text: snap.last_assistant_text,
+                });
+                for materialized in &outcome.materialized_messages {
+                    if let RealtimeTranscriptMaterializedMessage::Assistant {
+                        text,
+                        stop_reason: Some(stop_reason),
+                        usage,
+                        ..
+                    } = materialized
+                    {
+                        if !text.is_empty() {
+                            let envelope = stamp_event_envelope(
+                                next_seq,
+                                source,
+                                AgentEvent::TextComplete {
+                                    content: text.clone(),
+                                    assistant_message_id: None,
+                                },
+                            );
+                            control.publish_session_event(envelope).await;
+                        }
+                        let envelope = stamp_event_envelope(
+                            next_seq,
+                            source,
+                            AgentEvent::TurnCompleted {
+                                stop_reason: *stop_reason,
+                                usage: usage.clone(),
+                                assistant_message_id: None,
+                            },
+                        );
+                        control.publish_session_event(envelope).await;
+                    }
+                }
+            }
+            let _ = reply_tx.send(result);
+        }
+        SessionCommand::AdmitLiveAssistantPlaybackTarget {
+            channel_id,
+            interaction_id,
+            response_id,
+            item_id,
+            content_index,
+            context_observation_id,
+            reply_tx,
+        } => {
+            let result = crate::live_transcript_authority::admit_live_assistant_playback_target_with_context_observation(
+                agent,
+                session_id,
+                channel_id,
+                interaction_id,
+                response_id,
+                item_id,
+                content_index,
+                context_observation_id,
+            );
+            let _ = reply_tx.send(result);
+        }
+        SessionCommand::ResolveLiveAssistantPlaybackTarget {
+            channel_id,
+            item_id,
+            content_index,
+            reply_tx,
+        } => {
+            let target = agent.live_assistant_playback_target(&channel_id, &item_id, content_index);
+            let _ = reply_tx.send(target);
+        }
+        SessionCommand::ResolveLiveAssistantPlaybackOnChannelClose {
+            channel_id,
+            reply_tx,
+        } => {
+            let result =
+                crate::live_transcript_authority::resolve_live_assistant_playback_on_channel_close(
+                    agent, session_id, channel_id,
+                );
+            let _ = reply_tx.send(result);
+        }
+        SessionCommand::CommitLiveUserTranscriptFinal {
+            provisional,
+            final_event,
+            reply_tx,
+        } => {
+            let result = crate::live_transcript_authority::commit_final_live_user_transcript(
+                agent,
+                session_id,
+                provisional,
+                final_event,
+            );
+            if result.is_ok() {
+                let snap = agent.snapshot();
+                control.publish_summary(SessionSummaryCache {
+                    updated_at: snap.updated_at,
+                    message_count: snap.message_count,
+                    total_tokens: snap.total_tokens,
+                    usage: snap.usage,
+                    last_assistant_text: snap.last_assistant_text,
+                });
+            }
+            let _ = reply_tx.send(result);
+        }
+        SessionCommand::CommitLiveUserTranscriptRepresented {
+            provisional,
+            final_event,
+            represented,
+            reply_tx,
+        } => {
+            let result = crate::live_transcript_authority::commit_represented_live_user_transcript(
+                agent,
+                session_id,
+                provisional,
+                final_event,
+                &represented,
+            );
+            if result.is_ok() {
+                let snap = agent.snapshot();
+                control.publish_summary(SessionSummaryCache {
+                    updated_at: snap.updated_at,
+                    message_count: snap.message_count,
+                    total_tokens: snap.total_tokens,
+                    usage: snap.usage,
+                    last_assistant_text: snap.last_assistant_text,
+                });
+            }
+            let _ = reply_tx.send(result);
+        }
+        SessionCommand::CommitLiveAssistantPlaybackTruncation {
+            channel_id,
+            interaction_id,
+            response_id,
+            item_id,
+            content_index,
+            evidence,
+            reply_tx,
+        } => {
+            let result =
+                crate::live_transcript_authority::commit_live_assistant_playback_truncation(
+                    agent,
+                    session_id,
+                    channel_id,
+                    interaction_id,
+                    response_id,
+                    item_id,
+                    content_index,
+                    evidence,
+                );
+            if matches!(
+                result.as_ref().map(|receipt| receipt.disposition()),
+                Ok(meerkat_core::LiveAssistantPlaybackTruncationDisposition::CommittedReportedPrefix)
+            ) {
+                let snap = agent.snapshot();
+                control.publish_summary(SessionSummaryCache {
+                    updated_at: snap.updated_at,
+                    message_count: snap.message_count,
+                    total_tokens: snap.total_tokens,
+                    usage: snap.usage,
+                    last_assistant_text: snap.last_assistant_text,
+                });
+            }
+            let _ = reply_tx.send(result);
+        }
+        SessionCommand::CommitLiveAssistantPlaybackComplete {
+            channel_id,
+            interaction_id,
+            response_id,
+            item_id,
+            content_index,
+            stop_reason,
+            usage,
+            reply_tx,
+        } => {
+            let result = crate::live_transcript_authority::commit_live_assistant_playback_complete(
+                agent,
+                session_id,
+                channel_id,
+                interaction_id,
+                response_id,
+                item_id,
+                content_index,
+                stop_reason,
+                usage,
+            );
+            let _ = reply_tx.send(result);
+        }
+        SessionCommand::ObserveLiveAssistantPlaybackTerminal {
+            channel_id,
+            interaction_id,
+            response_id,
+            item_id,
+            content_index,
+            evidence,
+            stop_reason,
+            usage,
+            reply_tx,
+        } => {
+            let result = crate::live_transcript_authority::observe_live_assistant_playback_terminal_with_completion(
+                agent,
+                session_id,
+                channel_id,
+                interaction_id,
+                response_id,
+                item_id,
+                content_index,
+                evidence,
+                stop_reason,
+                usage,
+            );
+            if matches!(&result, Ok(crate::LiveAssistantPlaybackObservationResult::Resolved(receipt))
+                if receipt.continues_provider_group())
+            {
+                let snap = agent.snapshot();
+                control.publish_summary(SessionSummaryCache {
+                    updated_at: snap.updated_at,
+                    message_count: snap.message_count,
+                    total_tokens: snap.total_tokens,
+                    usage: snap.usage,
+                    last_assistant_text: snap.last_assistant_text,
+                });
+            }
+            let _ = reply_tx.send(result);
+        }
+        SessionCommand::ObserveLiveAssistantPlaybackFinal {
+            channel_id,
+            interaction_id,
+            response_id,
+            item_id,
+            content_index,
+            reply_tx,
+        } => {
+            let result = crate::live_transcript_authority::observe_live_assistant_playback_final(
+                agent,
+                session_id,
+                channel_id,
+                interaction_id,
+                response_id,
+                item_id,
+                content_index,
+            );
+            let _ = reply_tx.send(result);
+        }
+        SessionCommand::SettleToolApplication {
+            actor,
+            control: request_control,
+            mut outcome,
+            reply_tx,
+        } => {
+            let result = if actor.is_live() && actor.same_incarnation(&control.actor_witness) {
+                // Settlement can wait behind a model turn. A revoked
+                // viewer or invocation must not publish a private result
+                // or transcript append, while entered effects still settle.
+                if let Err(error) = request_control.revalidate_async().await {
+                    outcome = outcome.withhold_result(AgentError::tool(error.into()));
+                }
+                agent.settle_tool_application(outcome)
+            } else {
+                let failures = outcome.settlement_failures();
+                (
+                    outcome.into_refused_result(AgentError::Cancelled),
+                    false,
+                    failures,
+                )
+            };
+            if result.1 {
+                let snap = agent.snapshot();
+                control.publish_summary(SessionSummaryCache {
+                    updated_at: snap.updated_at,
+                    message_count: snap.message_count,
+                    total_tokens: snap.total_tokens,
+                    usage: snap.usage,
+                    last_assistant_text: snap.last_assistant_text,
+                });
+            }
+            let _ = reply_tx.send(result);
+        }
+        SessionCommand::ToolApplication {
+            control: request_control,
+            context,
+            reply_tx,
+        } => {
+            if reply_tx.is_closed() {
+                return;
+            }
+            let result = match request_control.revalidate_async().await {
+                Err(error) => Err(AgentError::InternalError(error.to_string())),
+                Ok(()) if reply_tx.is_closed() => return,
+                // Once admitted, finish native settlement even if the
+                // browser stops waiting. Dropping a dispatched future can
+                // otherwise discard effects after transport handoff.
+                Ok(()) => {
+                    agent
+                        .tool_application(request_control.request().clone(), context)
+                        .await
+                }
+            };
+            let result = match result {
+                Ok(value) => request_control
+                    .revalidate_async()
+                    .await
+                    .map(|()| value)
+                    .map_err(|error| AgentError::InternalError(error.to_string())),
+                Err(error) => Err(error),
+            };
+            let snap = agent.snapshot();
+            control.publish_summary(SessionSummaryCache {
+                updated_at: snap.updated_at,
+                message_count: snap.message_count,
+                total_tokens: snap.total_tokens,
+                usage: snap.usage,
+                last_assistant_text: snap.last_assistant_text,
+            });
+            let _ = reply_tx.send(result);
+        }
+        SessionCommand::DispatchExternalToolCall {
+            call,
+            timeout_policy,
+            reply_tx,
+        } => {
+            let result = agent
+                .dispatch_external_tool_call_with_timeout_policy(call, timeout_policy)
+                .await;
+            if result.is_ok() {
+                let snap = agent.snapshot();
+                control.publish_summary(SessionSummaryCache {
+                    updated_at: snap.updated_at,
+                    message_count: snap.message_count,
+                    total_tokens: snap.total_tokens,
+                    usage: snap.usage,
+                    last_assistant_text: snap.last_assistant_text,
+                });
+            }
+            let _ = reply_tx.send(result);
+        }
+        SessionCommand::UpdateMobToolAuthority {
+            authority_context,
+            reply_tx,
+        } => {
+            let _ = reply_tx.send(agent.update_mob_tool_authority_context(authority_context));
+        }
+        SessionCommand::ApplyMcpAttachmentIntent { mutation, reply_tx } => {
+            // A caller that is already gone owns no settlement for the
+            // change, so it is not applied.
+            if !reply_tx.is_closed() {
+                let _ = reply_tx.send(agent.apply_mcp_attachment_intent(mutation));
+            }
+        }
+        SessionCommand::AppendSystemNoticeControl { record, reply_tx } => {
+            let result = match control.archive_snapshot_gate.enter_apply() {
+                Ok(_gate) => agent.append_system_notice_control(record),
+                Err(error) => Err(AgentError::InternalError(error.to_string())),
+            };
+            if result.is_ok() {
+                let snap = agent.snapshot();
+                control.publish_summary(SessionSummaryCache {
+                    updated_at: snap.updated_at,
+                    message_count: snap.message_count,
+                    total_tokens: snap.total_tokens,
+                    usage: snap.usage,
+                    last_assistant_text: snap.last_assistant_text,
+                });
+            }
+            let _ = reply_tx.send(result);
+        }
+        SessionCommand::GovernedSystemContextControl {
+            control: command,
+            reply_tx,
+        } => {
+            let result = match control.archive_snapshot_gate.enter_apply() {
+                Ok(_gate) => agent.append_governed_system_context(command),
+                Err(error) => {
+                    Err(SessionError::Agent(AgentError::InternalError(error.to_string())).into())
+                }
+            };
+            // Refusal may have staged a protected control observation.
+            let snap = agent.snapshot();
+            control.publish_summary(SessionSummaryCache {
+                updated_at: snap.updated_at,
+                message_count: snap.message_count,
+                total_tokens: snap.total_tokens,
+                usage: snap.usage,
+                last_assistant_text: snap.last_assistant_text,
+            });
+            let _ = reply_tx.send(result);
+        }
+        SessionCommand::AppendSystemMessageControl { req, reply_tx } => {
+            let result = match control.archive_snapshot_gate.enter_apply() {
+                Ok(_gate) => agent.append_system_message_control(req),
+                Err(error) => Err(AgentError::InternalError(error.to_string())),
+            };
+            if result.is_ok() {
+                let snap = agent.snapshot();
+                control.publish_summary(SessionSummaryCache {
+                    updated_at: snap.updated_at,
+                    message_count: snap.message_count,
+                    total_tokens: snap.total_tokens,
+                    usage: snap.usage,
+                    last_assistant_text: snap.last_assistant_text,
+                });
+            }
+            let _ = reply_tx.send(result);
+        }
+        #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+        SessionCommand::SetSessionInstructionControl { write, reply_tx } => {
+            let result = match control.archive_snapshot_gate.enter_apply() {
+                Ok(_gate) => Ok(agent.set_session_instruction_control(write)),
+                Err(error) => Err(AgentError::InternalError(error.to_string())),
+            };
+            let _ = reply_tx.send(result);
+        }
+        #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+        SessionCommand::RecordInstructionTargetControl { record, reply_tx } => {
+            let result = match control.archive_snapshot_gate.enter_apply() {
+                Ok(_gate) => Ok(agent.record_instruction_target_control(record)),
+                Err(error) => Err(AgentError::InternalError(error.to_string())),
+            };
+            let _ = reply_tx.send(result);
+        }
+        #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+        SessionCommand::ReleaseInstructionTargetControl { mob_id, reply_tx } => {
+            let result = match control.archive_snapshot_gate.enter_apply() {
+                Ok(_gate) => Ok(agent.release_instruction_target_control(&mob_id)),
+                Err(error) => Err(AgentError::InternalError(error.to_string())),
+            };
+            let _ = reply_tx.send(result);
+        }
+        #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+        SessionCommand::ActivateInstructionControl { request, reply_tx } => {
+            let result = match control.archive_snapshot_gate.enter_apply() {
+                Ok(_gate) => Ok(agent.activate_instruction_control(request)),
+                Err(error) => Err(AgentError::InternalError(error.to_string())),
+            };
+            if matches!(result, Ok(Ok(_))) {
+                let snap = agent.snapshot();
+                control.publish_summary(SessionSummaryCache {
+                    updated_at: snap.updated_at,
+                    message_count: snap.message_count,
+                    total_tokens: snap.total_tokens,
+                    usage: snap.usage,
+                    last_assistant_text: snap.last_assistant_text,
+                });
+            }
+            let _ = reply_tx.send(result);
+        }
+        SessionCommand::PrepareHeadCanonicalRuntimeBoundary { request, reply_tx } => {
+            let result = agent.prepare_head_canonical_runtime_boundary(request).await;
+            let _ = reply_tx.send(result);
+        }
+        SessionCommand::AcknowledgeHeadCanonicalRuntimeBoundary {
+            successor_head_token,
+            reply_tx,
+        } => {
+            let result = agent.acknowledge_head_canonical_runtime_boundary(&successor_head_token);
+            let _ = reply_tx.send(result);
+        }
+        SessionCommand::AcknowledgeHeadCanonicalCompactionFinalization {
+            committed,
+            reply_tx,
+        } => {
+            let result = agent.acknowledge_head_canonical_compaction_finalization(&committed);
+            let _ = reply_tx.send(result);
+        }
+        // The session task runs a turn in its own frame and hands none here;
+        // kept total rather than assumed: the turn's waiter is answered.
+        SessionCommand::StartTurn { result_tx, .. } => {
+            let _ = result_tx.send(SessionTurnExecutionOutcome::without_machine_terminal(Err(
+                AgentError::InternalError(
+                    "a turn start reached the session task's command handler".to_string(),
+                ),
+            )));
+        }
+    }
 }
 
 #[cfg(test)]

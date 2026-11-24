@@ -65,7 +65,7 @@ rust_library(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.16",
+        "CARGO_PKG_VERSION": "0.9.18",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-session",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
     },
@@ -118,7 +118,7 @@ rust_library(
         "//tests/integration:__pkg__",
     ],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.16",
+        "CARGO_PKG_VERSION": "0.9.18",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-session",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
     },
@@ -163,7 +163,7 @@ rust_library(
         "//crates/meerkat:__pkg__",
     ],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.16",
+        "CARGO_PKG_VERSION": "0.9.18",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-session",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
     },
@@ -208,7 +208,7 @@ rust_library(
         "//crates/meerkat:__pkg__",
     ],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.16",
+        "CARGO_PKG_VERSION": "0.9.18",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-session",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
     },
@@ -257,7 +257,7 @@ rust_test(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.16",
+        "CARGO_PKG_VERSION": "0.9.18",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-session",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
     },
@@ -323,7 +323,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.16",
+        "CARGO_PKG_VERSION": "0.9.18",
         "CARGO_BIN_NAME": "ephemeral_contract",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-session",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -387,7 +387,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.16",
+        "CARGO_PKG_VERSION": "0.9.18",
         "CARGO_BIN_NAME": "member_rewind_fork",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-session",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -451,7 +451,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.16",
+        "CARGO_PKG_VERSION": "0.9.18",
         "CARGO_BIN_NAME": "persistence_compat",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-session",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -515,7 +515,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.16",
+        "CARGO_PKG_VERSION": "0.9.18",
         "CARGO_BIN_NAME": "planned_identity_fork",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-session",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -579,7 +579,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.16",
+        "CARGO_PKG_VERSION": "0.9.18",
         "CARGO_BIN_NAME": "regression_lifecycle",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-session",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -643,7 +643,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.16",
+        "CARGO_PKG_VERSION": "0.9.18",
         "CARGO_BIN_NAME": "session_store_append_only_trybuild",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-session",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",

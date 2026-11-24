@@ -10,6 +10,7 @@ use meerkat_meta::unified_runtime::PersistedEvent;
 /// A deterministic console frame keyed by `dedupe_key`.
 pub fn console_frame(dedupe_key: &str, identity: &str, timestamp_ms: u64) -> NewConsoleFrame {
     NewConsoleFrame {
+        mob_id: None,
         id: None,
         dedupe_key: dedupe_key.to_string(),
         timestamp_ms,
@@ -85,11 +86,30 @@ pub fn persisted_event(id: &str, seq: u64) -> PersistedEvent {
         seq,
         timestamp_ms: 1_000 + seq,
         member_id: None,
+        mob_id: None,
+        mob_incarnation: None,
         event: UnifiedEvent::Agent {
             agent_id: "conformance-agent".to_string(),
             event_type: "conformance_probe".to_string(),
             payload: Some(serde_json::json!({ "id": id })),
         },
+    }
+}
+
+/// [`persisted_event`] for an event of the mob `mob_id` at the incarnation
+/// `mob_incarnation`: a row that is not of the launch selection.
+pub fn persisted_event_of_mob(
+    id: &str,
+    seq: u64,
+    mob_id: &str,
+    mob_incarnation: meerkat_core::service::MobIncarnationId,
+) -> PersistedEvent {
+    PersistedEvent {
+        // This crate names no mob id type: the field's own type takes the
+        // id, so there is no id it could fail to read.
+        mob_id: Some(mob_id.into()),
+        mob_incarnation: Some(mob_incarnation),
+        ..persisted_event(id, seq)
     }
 }
 

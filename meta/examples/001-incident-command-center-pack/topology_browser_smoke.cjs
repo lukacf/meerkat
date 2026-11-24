@@ -29,6 +29,62 @@ function topologyEdge(snapshot, left, right) {
   });
 }
 
+// The only values of a topology answer that a timed-out wait prints: these
+// booleans of one edge entry, and the snapshot's numeric revision.
+const TOPOLOGY_EDGE_FLAGS = ["actual", "declared", "operator_added", "suppressed", "desired"];
+
+// What a timed-out wait keeps of the last answer it read: whether the edge
+// was in it, the edge's allowlisted booleans and the snapshot's revision.
+// A value of another type is kept as "?"; no string of the answer is kept.
+function observedTopologyEdge(edge, snapshot) {
+  const entry = edge !== null && typeof edge === "object" ? edge : null;
+  const revision = snapshot !== null && typeof snapshot === "object" ? snapshot.revision : undefined;
+  const flags = {};
+  for (const name of TOPOLOGY_EDGE_FLAGS) {
+    flags[name] = entry !== null && typeof entry[name] === "boolean" ? entry[name] : "?";
+  }
+  return {
+    present: entry !== null,
+    flags,
+    revision: typeof revision === "number" && Number.isFinite(revision) ? revision : "?",
+  };
+}
+
+// The one line a timed-out wait fails with: the caller's sentence, then the
+// edge by the labels the caller passed, the flags the caller waited for, the
+// state kept from the last answer, the number of polls and the time waited.
+// It prints booleans, finite numbers and the caller's own labels only, and
+// is cut at 400 characters. The revision is context only: it does not show
+// that a click reached the server or that anything was written.
+function describeTopologyWaitTimeout(message, left, right, expected, observed, polls, elapsedMs) {
+  const label = (value) => (typeof value === "string" && /^[a-z0-9-]{1,40}$/.test(value) ? value : "?");
+  const flag = (value) => (typeof value === "boolean" ? String(value) : "?");
+  const number = (value) => (typeof value === "number" && Number.isFinite(value) ? String(value) : "?");
+  const wanted = expected !== null && typeof expected === "object"
+    ? TOPOLOGY_EDGE_FLAGS
+      .filter((name) => Object.hasOwn(expected, name))
+      .map((name) => `${name}=${flag(expected[name])}`)
+      .join(" ")
+    : "";
+  const seen = observed !== null && typeof observed === "object" ? observed : null;
+  const flags = seen !== null && seen.flags !== null && typeof seen.flags === "object" ? seen.flags : {};
+  let state = "none";
+  if (seen !== null && seen.present === true) {
+    const seenFlags = TOPOLOGY_EDGE_FLAGS.map((name) => `${name}=${flag(flags[name])}`).join(" ");
+    state = `present=true ${seenFlags} revision=${number(seen.revision)}`;
+  } else if (seen !== null) {
+    state = `present=false revision=${number(seen.revision)}`;
+  }
+  const line = [
+    String(message).replace(/\s+/g, " "),
+    `edge ${label(left)}<->${label(right)}`,
+    `expected ${wanted || "?"}`,
+    `last observed ${state}`,
+    `polls=${number(polls)} elapsed_ms=${number(elapsedMs)}`,
+  ].join(" | ");
+  return line.length > 400 ? line.slice(0, 400) : line;
+}
+
 function stockEndpointId(snapshot, identity) {
   const node = (snapshot.nodes || []).find((candidate) =>
     candidate?.endpoint?.identity === identity
@@ -38,15 +94,21 @@ function stockEndpointId(snapshot, identity) {
   return `mk1|${encodeURIComponent(authority)}|${encodeURIComponent(identity)}`;
 }
 
-async function waitForTopologyEdge(baseUrl, left, right, predicate, message, timeout = 30000) {
+async function waitForTopologyEdge(baseUrl, left, right, predicate, message, expected, timeout = 30000) {
   const deadline = Date.now() + timeout;
+  let polls = 0;
+  let observed = null;
   while (Date.now() < deadline) {
     const snapshot = await rpc(baseUrl, "meta/topology/query");
     const edge = topologyEdge(snapshot, left, right);
     if (predicate(edge, snapshot)) return { edge, snapshot };
+    polls += 1;
+    observed = observedTopologyEdge(edge, snapshot);
     await new Promise((resolve) => setTimeout(resolve, 150));
   }
-  assert.fail(message);
+  assert.fail(describeTopologyWaitTimeout(
+    message, left, right, expected, observed, polls, Date.now() - (deadline - timeout),
+  ));
 }
 
 async function clickNav(page, id) {
@@ -122,6 +184,7 @@ async function main() {
         "api-investigator",
         (edge) => edge?.actual === true && edge?.operator_added === true,
         "pairwise connect did not become authoritative",
+        { actual: true, operator_added: true },
       );
 
       // A declared edge proves de-peer is a durable suppression, not merely a
@@ -133,6 +196,7 @@ async function main() {
         "payments-sre",
         (edge) => edge?.actual === false && edge?.suppressed === true,
         "declared edge was not suppressed",
+        { actual: false, suppressed: true },
       );
       await rpc(baseUrl, "meta/reconcile_edges");
       await waitForTopologyEdge(
@@ -141,6 +205,7 @@ async function main() {
         "payments-sre",
         (edge) => edge?.actual === false && edge?.suppressed === true,
         "reconcile healed an operator-suppressed declared edge",
+        { actual: false, suppressed: true },
       );
     }
 
@@ -156,6 +221,7 @@ async function main() {
           && edge?.operator_added === true
           && edge?.desired === true,
         "operator-added connection did not survive runtime restart",
+        { actual: true, operator_added: true, desired: true },
       );
       await waitForTopologyEdge(
         baseUrl,
@@ -163,6 +229,7 @@ async function main() {
         "payments-sre",
         (edge) => edge?.actual === false && edge?.suppressed === true,
         "operator suppression did not survive runtime restart",
+        { actual: false, suppressed: true },
       );
       // Refresh the console's authoritative query and use the distinct
       // reconnect action, which has its own bilateral permission gate.
@@ -180,6 +247,7 @@ async function main() {
         "payments-sre",
         (edge) => edge?.actual === true && edge?.suppressed === false,
         "reconnect did not restore the declared edge",
+        { actual: true, suppressed: false },
       );
     }
 

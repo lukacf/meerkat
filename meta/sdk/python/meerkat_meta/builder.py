@@ -2,16 +2,20 @@
 from __future__ import annotations
 
 import copy
+import logging
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Iterable, Mapping, Sequence
 
+from .agent_builder import _check_schedule_fire_registration
 from ._transport import PersistentTransport
-from .errors import GatewayTransportConflictError
+from .errors import GatewayStartupCleanupError, GatewayTransportConflictError, RpcError
 from .identity_first_models import IdentityBootstrapMode, RoleMigrationDeclaration
 from .live import ExperimentalLiveGatewayConfig, OpenAiLiveGatewayConfig
 from .models import AuthBindingRef, NativeRealm, ToolArtifactRef
+
+_log = logging.getLogger("meerkat_meta")
 
 if TYPE_CHECKING:
     # Named by the annotation of `MetaBuilder.build`, which imports it when
@@ -31,6 +35,7 @@ class MetaBuilderConfig:
     event_log: Any | None = None
     runtime_store: Any | None = None
     console_read_only: bool | None = None
+    console_list_nested_mobs: bool | None = None
     console_fetch_timeout_ms: int | None = None
     console_require_app_auth: bool | None = None
     console_config_path: str | None = None
@@ -57,6 +62,10 @@ class MetaBuilderConfig:
     identity_creation: dict[str, Any] | None = None
     routing_config_path: str | None = None
     host_runnables: list[str] = field(default_factory=list)
+    # Schedule-fire handlers by host runnable name, given to the builder so
+    # that they are in place before the runtime first connects. Host-local:
+    # nothing of them is sent to the gateway.
+    schedule_fire_handlers: dict[str, Any] = field(default_factory=dict)
     installed_artifacts: list[ToolArtifactRef] | None = None
     memory_config: Any | None = None
     agent_memory_config: Any | None = None
@@ -110,6 +119,9 @@ class MetaBuilder:
 
     def __init__(self) -> None:
         self._config = MetaBuilderConfig()
+        # The files `_apply_convention_defaults` applied: the config field
+        # each one filled, its path, and what it configures.
+        self._convention_applied: dict[str, tuple[str, str]] = {}
 
     def mob(self, config_path: str) -> MetaBuilder:
         """Set the mob definition from a TOML file path."""
@@ -570,13 +582,41 @@ class MetaBuilder:
         schedule-host runnable: a durable schedule with target
         ``{"target_kind": "host_runnable", "runnable": "<name>"}`` fires as
         ``callback/schedule_fire`` into this process, dispatched to the
-        handler registered via :meth:`MetaRuntime.on_schedule_fire`.
+        handler registered via :meth:`on_schedule_fire` (in place before the
+        first connect) or :meth:`MetaRuntime.on_schedule_fire`.
         """
         names = list(names)
         for name in names:
             if not isinstance(name, str) or not name.strip():
                 raise ValueError(f"host runnable names must be non-empty strings, got {name!r}")
         self._config.host_runnables = names
+        return self
+
+    def on_schedule_fire(self, name: str, handler: Any) -> MetaBuilder:
+        """Register the handler for a named host runnable before the first connect.
+
+        ``handler`` runs when a durable schedule with a ``host_runnable``
+        target of ``name`` fires (``callback/schedule_fire``), with the
+        occurrence dict (``schedule_id``, ``occurrence_id``, ``due_at``,
+        optional ``payload``). Sync or async; raising fails the occurrence
+        attempt in the durable schedule store.
+
+        The handler is in place before :meth:`build` connects, so a schedule
+        that is due when the gateway starts finds it. A handler registered on
+        the runtime (:meth:`MetaRuntime.on_schedule_fire`) is there only once
+        ``build()`` has returned, and the gateway can fire such a schedule
+        before that. The handler can therefore run before ``build()`` returns:
+        it must not need the runtime object. A later call for one name
+        replaces the earlier, and a registration on the runtime still replaces
+        or adds afterwards.
+
+        ``name`` must be one :meth:`host_runnables` declares, in either order
+        of the two calls: :meth:`build` refuses a handler for an undeclared
+        name with ``ValueError``, since the gateway fires declared names only.
+        A declared name may have no handler at ``build()``.
+        """
+        _check_schedule_fire_registration(name, handler)
+        self._config.schedule_fire_handlers[name] = handler
         return self
 
     def installed_artifacts(self, artifacts: Iterable[ToolArtifactRef]) -> MetaBuilder:
@@ -639,6 +679,16 @@ class MetaBuilder:
         ``enabled=False`` is accepted for migration compatibility. The
         internal Rust engine remains available for validation, but the public
         SDK/gateway path has no supported activation or provider proof.
+
+        ``own_memory_only_profiles`` is a list of distinct profile names of
+        the launch mob. An agent of a listed profile, an agent it created
+        (and so on up the agents that created each other), and an agent whose
+        profile its own mob does not define, is listed the records of its
+        own memory only in the memory index of its build: none of its mob's
+        shared records and none of the realm's. It is a filter on what an
+        agent is listed, not a boundary between tenants, and it takes effect
+        at an agent's next new session. The gateway refuses the start when a
+        listed name is no profile of the launch mob.
         """
         if kwargs:
             if config is not True:
@@ -685,6 +735,8 @@ class MetaBuilder:
             "steward",
             "operator_scope",
             "operatorScope",
+            "own_memory_only_profiles",
+            "ownMemoryOnlyProfiles",
             "hygienist",
         }
         unknown = sorted(set(config) - known)
@@ -752,6 +804,19 @@ class MetaBuilder:
             wire["operator_scope"] = config["operator_scope"]
         elif "operatorScope" in config:
             wire["operator_scope"] = config["operatorScope"]
+        # Forwarded as given: the gateway checks the names against the
+        # launch mob's definition and refuses the start on one it lacks.
+        own_memory_only = config.get(
+            "own_memory_only_profiles", config.get("ownMemoryOnlyProfiles")
+        )
+        if own_memory_only is not None:
+            # A tuple is a list on the wire; anything else goes as given, for
+            # the gateway to judge.
+            wire["own_memory_only_profiles"] = (
+                list(own_memory_only)
+                if isinstance(own_memory_only, tuple)
+                else own_memory_only
+            )
         distiller = config.get("distiller")
         if distiller is not None:
             if isinstance(distiller, dict):
@@ -905,6 +970,20 @@ class MetaBuilder:
 
     def console_read_only(self, read_only: bool = True) -> MetaBuilder:
         self._config.console_read_only = bool(read_only)
+        return self
+
+    def console_list_nested_mobs(self, listed: bool) -> MetaBuilder:
+        """Set whether the console lists the mobs nested under the gateway's mob.
+
+        Emitted as ``runtime_options.console_list_nested_mobs``. The gateway
+        default lists them: the mobs a member of that mob created, and the
+        mobs made under those at any depth, with their members, to the
+        callers the access rules allow. Pass ``False`` to hide every nested
+        mob and its members on every console read, as releases before the
+        listing did. Mirrors the TypeScript builder's
+        ``consoleListNestedMobs``.
+        """
+        self._config.console_list_nested_mobs = bool(listed)
         return self
 
     def console_auth_required(self, required: bool) -> MetaBuilder:
@@ -1356,11 +1435,43 @@ class MetaBuilder:
         runtime that keeps that transport; for a cancelled or interrupted
         startup, the propagating exception carries it as ``gateway_cleanup``
         (see ``MetaRuntime.connect()``).
+
+        When the gateway refuses the start and this builder applied a file by
+        convention (one found in the working directory that no builder method
+        named), one warning on the ``meerkat_meta`` logger names those files.
         """
         self._validate()
         self._apply_convention_defaults()
         from .runtime import MetaRuntime
-        return await MetaRuntime._create(self._config)
+        try:
+            return await MetaRuntime._create(self._config)
+        except (RpcError, GatewayStartupCleanupError) as failure:
+            self._say_convention_files_of_a_refused_start(failure)
+            raise
+
+    def _say_convention_files_of_a_refused_start(self, failure: BaseException) -> None:
+        """Log once which files this builder applied by convention.
+
+        The program named none of them, so the gateway's refusal alone does
+        not say where a refused file came from.
+        """
+        refusal = (
+            failure.startup_error
+            if isinstance(failure, GatewayStartupCleanupError)
+            else failure
+        )
+        applied = [
+            f"{path} ({what})"
+            for option, (path, what) in self._convention_applied.items()
+            if getattr(self._config, option) == path
+        ]
+        if applied and isinstance(refusal, RpcError):
+            _log.warning(
+                "the gateway refused this start. The builder applied these files "
+                "by convention, from the working directory, because no builder "
+                "method named one: %s",
+                ", ".join(applied),
+            )
 
     def _validate(self) -> None:
         if self._config.mob_config_path and self._config.mob_config_inline:
@@ -1397,6 +1508,18 @@ class MetaBuilder:
                 "identity_bootstrap_mode() requires roster() because every "
                 "explicit bootstrap mode is identity-first"
             )
+        undeclared = sorted(
+            name
+            for name in self._config.schedule_fire_handlers
+            if name not in self._config.host_runnables
+        )
+        if undeclared:
+            raise ValueError(
+                "on_schedule_fire() was given a handler for a host runnable that "
+                "host_runnables() does not declare: "
+                + ", ".join(repr(name) for name in undeclared)
+                + "; the gateway fires declared names only"
+            )
         transport = self._config.gateway_transport
         if isinstance(transport, PersistentTransport) and not transport._is_fresh():
             raise GatewayTransportConflictError(
@@ -1424,16 +1547,22 @@ class MetaBuilder:
             candidate = Path("config/gating.toml")
             if _entry_present(candidate):
                 self._config.gating_config_path = str(candidate)
+                self._convention_applied["gating_config_path"] = (str(candidate), "gating")
 
         if self._config.access_config_path is None:
             candidate = Path("config/access.toml")
             if _entry_present(candidate):
                 self._config.access_config_path = str(candidate)
+                self._convention_applied["access_config_path"] = (
+                    str(candidate),
+                    "access control",
+                )
 
         if self._config.routing_config_path is None:
             candidate = Path("deployment/routing.toml")
             if candidate.is_file():
                 self._config.routing_config_path = str(candidate)
+                self._convention_applied["routing_config_path"] = (str(candidate), "routing")
 
 
 def _entry_present(path: Path) -> bool:

@@ -321,24 +321,27 @@ store that holds its first definition is at revision 1, and each committed
 update adds one: the first update declares `expected_revision=1` and leaves
 the store at 2, the next declares 2. An exact retry of a committed update
 adds nothing, and a refused declaration leaves the definition and its
-revision as they were. In 0.9.15 no call of the Python or TypeScript SDK
-returns the revision as a value of its own, so a host keeps count of its own
-updates. When an update is committed, the gateway logs a warning on its
-standard error, `operator-declared mob spec update committed`, with
-`previous_revision` and `committed_revision`. A host that has lost count can
-recover it from the text of a refusal: a declaration that names another
-number than the stored one is refused, and its message names the stored one
-(in 0.9.15 `... moved from revision <declared> to <stored> ...`; the error's
-typed fields do not carry the number). In 0.9.15 a running host can also
-read it from the mob's structural events: `query_mob_events` (TypeScript
-`queryMobEvents`) with the event type `mob_definition_updated` returns one
-event for each committed update, and the `epoch` in its `data` is the
-revision that update left the store at; a store with no such event is at 1.
-This reads an internal event: its shape is not a stable contract, and a
-typed read of the revision is planned to replace it. It needs a started
-gateway, so a host whose definition already differs from the stored one
-reads the revision at its last ordinary start, or from the refusal's
-message. Run with both SDKs on 0.9.15.
+revision as they were. When an update commits, the gateway logs
+`operator-declared mob spec update committed` on standard error, with
+`previous_revision` and `committed_revision`.
+
+In 0.9.15 and 0.9.16, a host that has lost count can read the stored
+revision from the message of a stale declaration (`-32014`), not from a
+typed revision field. For example, if the declaration expects revision 1
+and the store is at revision 2:
+
+- **0.9.15:** `moved from revision 1 to 2 while the update was being declared`
+  names the stored revision **second**.
+- **0.9.16:** `is at revision 2, not the expected revision 1` names the
+  stored revision **first**.
+
+On those versions a running host can also query `mob_definition_updated`
+events with `query_mob_events` (TypeScript: `queryMobEvents`). The `epoch`
+in the event data is the revision left by that update. This is an internal
+event shape, not a stable SDK contract. The query needs a started gateway;
+if startup is already refused for a stale revision, use the refusal message.
+The event read was checked with both SDKs on 0.9.15 and with Python on
+0.9.16.
 
 On an ordinary restart, compare the parsed definitions, not the spelling or
 order of the original TOML. In `profiles.<name>.tools.grant_gated`, the

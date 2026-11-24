@@ -1026,10 +1026,15 @@ fn minimal_decision_state() -> RuntimeDecisionState {
 }
 
 /// What the gateway warns at start when its console refuses every caller
-/// (`ConsoleAuthPosture::ClosedToEveryCaller`).
+/// (`ConsoleAuthPosture::ClosedToEveryCaller`). It names what that means for
+/// the questions a member asks with `ask_user`: the console cannot answer
+/// them, the program that embeds the gateway still can.
 const CONSOLE_CLOSED_TO_EVERY_CALLER_WARNING: &str = "console requires app auth but trusts no signing key: every console request will be \
      refused with 401. Pass runtime_options.auth_config to trust an issuer, or set \
-     runtime_options.console_require_app_auth = false for an explicitly open local console";
+     runtime_options.console_require_app_auth = false for an explicitly open local console. \
+     Until then no person can answer a member's `ask_user` questions in the console; the \
+     program that embeds this gateway can still answer them over its own connection \
+     (meta/gating/questions, meta/gating/decide)";
 
 /// The HTTP listener exposure gate, run before any bootstrap work. The
 /// decision state it consults is the one the console will serve with:

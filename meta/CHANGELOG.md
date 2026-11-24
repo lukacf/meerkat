@@ -24,6 +24,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   previously hid, such as comparing against an impossible outcome. The outcome
   strings, returned objects and behavior at run time are unchanged.
 
+### Changed
+
+- `ask_user` on a gateway whose Console requires sign-in and trusts no
+  signing key (what a launch gets with neither `runtime_options.auth_config`
+  nor `console_require_app_auth = false`, the SDKs' default): the text the
+  asking agent's model reads with `asked` changes. Such a Console refuses
+  every caller, so no person can answer there; where a set is held (a launch
+  with a persistent state directory, as before) it is still held and the
+  call still answers `asked`, because the embedding host can read and answer
+  it (`meta/gating/questions`, `meta/gating/decide`). The result's `note`
+  said "A person is being asked". It now says that no person can answer in
+  the Console as it is configured, that the program that embeds the gateway
+  may still answer, and that the result is `timed_out` if none came by
+  `answer_by`. The note of every other `asked` result is unchanged, and so
+  are the outcome, the result's fields, the deadline and every default. The
+  gateway's start warning for such a Console now names this consequence for
+  questions too.
+
 ## [0.9.18] - 2026-11-22
 
 Records that name a member carry the member's mob, so that one host can keep

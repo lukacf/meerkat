@@ -140,6 +140,8 @@ them.
 ### Changed
 
 - For a staged model switch, the compatibility check now covers the session's existing reasoning level when the target model's supported levels are available at decision time.
+
+- Configured self-hosted Chat Completions and Responses clients now describe an engine-authored closed set of string choices as a string enum in the outgoing tool schema. An optional parameter still stays out of `required`. The schema no longer advertises a description for each choice or an explicit `null` alternative.
 - Operator instructions: a model that lowers System rows only inside the
   leading System prefix takes a changed instruction at its session's next
   fresh run start, as a model that lowers them anywhere always has. Which
@@ -246,8 +248,6 @@ them.
   (`RetiredTransitionFollowsUnknown`). A list is append-only. This release
   retires SessionDocumentMachine's
   `ResolveRunStartInstructionsDeferredLeadingPrefix` (see Breaking).
-
-- Configured self-hosted Chat Completions and Responses clients now describe an engine-authored closed set of string choices as a string enum in the outgoing tool schema. An optional parameter still stays out of `required`. The schema no longer advertises a description for each choice or an explicit `null` alternative.
 
 ### Upgrade notes
 

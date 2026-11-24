@@ -396,6 +396,53 @@ jobs:
         uses: ./.github/actions/setup-cargo-tool-ci
         with:
           tool: nextest
+      # Memory relief before the lane's one compile. The compile of
+      # meerkat-meta's lib test harness reaches a hosted runner's memory
+      # (the build step below prints its readings). This step shows the
+      # runner's size and adds 12 GiB of swap, with the size and the guard
+      # of the root CI's step for its Meta rows (ci.yml, "Show the runner's
+      # size and add swap (meerkat-meta rows)"): on /mnt when it is a mount
+      # point with 20 GiB free, else on / when it has 40 GiB free, else no
+      # swap and a warning. Readings and swap only: no command, selection,
+      # limit or runner of the job changes, and continue-on-error keeps a
+      # failure here from failing the job: the compile then runs as it
+      # did without this step.
+      - name: Show the runner's size and add swap before the compile
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          show_resources() {
+            nproc
+            free -m
+            if [[ -d /mnt ]]; then
+              df -h / /mnt
+            else
+              df -h /
+            fi
+            swapon --show || true
+          }
+          show_resources
+          swapfile=/meta-unit-swapfile
+          need_gib=40
+          if mountpoint -q /mnt; then
+            mnt_avail_kib="$(df --output=avail -k /mnt | tail -n 1 | tr -d ' ')"
+            if ((mnt_avail_kib >= 20 * 1024 * 1024)); then
+              swapfile=/mnt/meta-unit-swapfile
+              need_gib=20
+            fi
+          fi
+          avail_kib="$(df --output=avail -k "$(dirname "${swapfile}")" | tail -n 1 | tr -d ' ')"
+          if ((avail_kib < need_gib * 1024 * 1024)); then
+            echo "::warning title=Meta unit row swap::under ${need_gib} GiB free for ${swapfile}: no swap added"
+            exit 0
+          fi
+          echo "Adding 12 GiB of swap at ${swapfile}"
+          sudo fallocate -l 12GiB "${swapfile}"
+          sudo chmod 600 "${swapfile}"
+          sudo mkswap "${swapfile}"
+          sudo swapon "${swapfile}"
+          show_resources
       # Measurement only: the compiler cache's counters before the compile,
       # into a file. It prints nothing and cannot fail the job.
       - name: Compile statistics, before

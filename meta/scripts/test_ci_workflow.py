@@ -96,6 +96,7 @@ COMPILE_PATHS = {
 MEASURE_BEFORE = "Compile statistics, before"
 MEASURE_AFTER = "Compile statistics and timing report, after"
 MEASURE_UPLOAD = "Retain the Cargo timing reports"
+SWAP_PREFLIGHT = "Show the runner's size and add swap before the compile"
 # What stands in for a bucket name in the rows: it must never reach a line
 # the report step prints.
 FIXTURE_LOCATION_NAME = "fixture-cache-location-name"
@@ -1217,11 +1218,13 @@ class CiWorkflowTests(unittest.TestCase):
         # of a leg can be skipped or fail without failing its job, and
         # neither job can fail without failing the run. Only the build's
         # three measurement steps carry a condition or continue-on-error
-        # (test_the_four_compile_paths_are_measured_in_steps_of_their_own).
+        # (test_the_four_compile_paths_are_measured_in_steps_of_their_own),
+        # and its swap step continue-on-error alone
+        # (test_the_unit_build_adds_swap_before_its_compile).
         for owner in (build, job):
             self.assertNotIn("continue-on-error", owner)
             for each in steps_of(owner):
-                if each.get("name") not in (MEASURE_BEFORE, MEASURE_AFTER, MEASURE_UPLOAD):
+                if each.get("name") not in (MEASURE_BEFORE, MEASURE_AFTER, MEASURE_UPLOAD, SWAP_PREFLIGHT):
                     for key in ("continue-on-error", "if"):
                         self.assertNotIn(key, each, each.get("name") or uses_of(each))
         # A partition that selects no test is a failure, said in the command
@@ -1477,6 +1480,122 @@ class CiWorkflowTests(unittest.TestCase):
                     pass
                 shell.stdout.close()
                 shell.wait()
+
+    def test_the_unit_build_adds_swap_before_its_compile(self):
+        """rust-unit-build compiles the lib test harness once for the whole
+        lane, and that compile reaches a hosted runner's memory. Before it,
+        one step shows the runner's size and adds 12 GiB of swap, with the
+        size and the guard of the root CI's step for its Meta rows: on /mnt
+        when it is a mount point with 20 GiB free, else on / when it has 40
+        GiB free, else no swap and a warning. It is the build's step alone:
+        no leg and no other job adds swap. It stands before the statistics
+        step that precedes the compile, changes no command of the job, and
+        carries continue-on-error and nothing else: a failure here leaves the
+        compile to run as it did without it, and nothing lets the step be
+        skipped. The step's script is run here, as the runner runs a
+        `shell: bash` step, with stand-ins for the commands that read the
+        disk and the ones that need root."""
+        workflow = load(CI_WORKFLOW)
+        holders = [name for name, job in workflow["jobs"].items()
+                   if any(step.get("name") == SWAP_PREFLIGHT for step in steps_of(job))]
+        self.assertEqual(holders, ["rust-unit-build"])
+        for name, job in workflow["jobs"].items():
+            for step in steps_of(job):
+                if step.get("name") != SWAP_PREFLIGHT:
+                    self.assertIsNone(re.search(r"\b(swapon|mkswap|fallocate)\b", step.get("run") or ""),
+                                      f"{name}: {step.get('name')}")
+        steps = steps_of(workflow["jobs"]["rust-unit-build"])
+        names = [step.get("name") for step in steps]
+        self.assertEqual(names.count(SWAP_PREFLIGHT), 1)
+        at = names.index(SWAP_PREFLIGHT)
+        self.assertEqual(names[at + 1:at + 3], [MEASURE_BEFORE, "Build the lib test archive"])
+        step = steps[at]
+        self.assertEqual(sorted(step), ["continue-on-error", "name", "run", "shell"])
+        self.assertIs(step["continue-on-error"], True)
+        self.assertEqual(step["shell"], "bash")
+        lines = [line.strip() for line in step["run"].splitlines() if line.strip()]
+        self.assertEqual(lines[0], "set -euo pipefail")
+        # From the swap file's name to the end: the root CI's lines, the
+        # guard on free space and the size included.
+        self.assertEqual(lines[lines.index("swapfile=/meta-unit-swapfile"):], [
+            "swapfile=/meta-unit-swapfile",
+            "need_gib=40",
+            "if mountpoint -q /mnt; then",
+            "mnt_avail_kib=\"$(df --output=avail -k /mnt | tail -n 1 | tr -d ' ')\"",
+            "if ((mnt_avail_kib >= 20 * 1024 * 1024)); then",
+            "swapfile=/mnt/meta-unit-swapfile",
+            "need_gib=20",
+            "fi",
+            "fi",
+            "avail_kib=\"$(df --output=avail -k \"$(dirname \"${swapfile}\")\" | tail -n 1 | tr -d ' ')\"",
+            "if ((avail_kib < need_gib * 1024 * 1024)); then",
+            'echo "::warning title=Meta unit row swap::under ${need_gib} GiB free for ${swapfile}: no swap added"',
+            "exit 0",
+            "fi",
+            'echo "Adding 12 GiB of swap at ${swapfile}"',
+            'sudo fallocate -l 12GiB "${swapfile}"',
+            'sudo chmod 600 "${swapfile}"',
+            'sudo mkswap "${swapfile}"',
+            'sudo swapon "${swapfile}"',
+            "show_resources",
+        ])
+        # Nothing of the step runs in the background or outlives it, and
+        # only the four swap commands need root.
+        self.assertFalse([line for line in lines if line.endswith("&") or "nohup" in line])
+        self.assertEqual(sum(line.startswith("sudo ") for line in lines), 4)
+        gib = 1024 * 1024
+        on_root, on_mnt = "/meta-unit-swapfile", "/mnt/meta-unit-swapfile"
+        cases = (
+            ("/mnt is a mount point with 20 GiB free", True, 20 * gib, 5 * gib, "", 0, on_mnt),
+            ("/mnt has a kibibyte less and / has 40 GiB", True, 20 * gib - 1, 40 * gib, "", 0, on_root),
+            ("no /mnt mount point and / has 40 GiB", False, 0, 40 * gib, "", 0, on_root),
+            ("no /mnt mount point and / has a kibibyte less than 40 GiB", False, 0, 40 * gib - 1, "", 0, None),
+            ("/mnt and / are both short", True, 20 * gib - 1, 40 * gib - 1, "", 0, None),
+            ("the swap file cannot be allocated", False, 0, 40 * gib, "fallocate", 1, on_root),
+        )
+        for name, mounted, mnt, root, fails, status, swapfile in cases:
+            with self.subTest(case=name), tempfile.TemporaryDirectory() as temp:
+                fake = Path(temp) / "bin"
+                fake.mkdir()
+                log = Path(temp) / "root-commands"
+                stand_ins = {
+                    "mountpoint": f"#!/bin/sh\nexit {0 if mounted else 1}\n",
+                    "df": ("#!/bin/sh\n"
+                           'if [ "$1" = "--output=avail" ]; then\n'
+                           "  echo Avail\n"
+                           f'  if [ "$3" = /mnt ]; then echo " {mnt}"; else echo " {root}"; fi\n'
+                           "else\n"
+                           "  echo 'Filesystem Size Used Avail Use% Mounted on'\n"
+                           "fi\n"),
+                    "swapon": "#!/bin/sh\nexit 0\n",
+                    "sudo": ("#!/bin/sh\n"
+                             f'echo "$*" >> "{log}"\n'
+                             f'if [ "$1" = "{fails}" ]; then exit 1; fi\n'),
+                }
+                for command, text in stand_ins.items():
+                    (fake / command).write_text(text)
+                    (fake / command).chmod(0o755)
+                result = subprocess.run(
+                    ["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", step["run"]],
+                    env={"PATH": f"{fake}:{os.environ['PATH']}"}, capture_output=True, text=True,
+                )
+                self.assertEqual(result.returncode, status, result.stdout + result.stderr)
+                ran = log.read_text().splitlines() if log.exists() else []
+                warnings = [line for line in result.stdout.splitlines() if line.startswith("::warning ")]
+                if swapfile is None:
+                    self.assertEqual(ran, [])
+                    self.assertEqual(warnings, [f"::warning title=Meta unit row swap::under 40 GiB free for {on_root}: "
+                                                "no swap added"])
+                    self.assertNotIn("Adding", result.stdout)
+                elif fails:
+                    # The script stops at the command that failed; the step's
+                    # continue-on-error is what lets the job go on.
+                    self.assertEqual(ran, [f"fallocate -l 12GiB {swapfile}"])
+                else:
+                    self.assertEqual(warnings, [])
+                    self.assertIn(f"Adding 12 GiB of swap at {swapfile}\n", result.stdout)
+                    self.assertEqual(ran, [f"fallocate -l 12GiB {swapfile}", f"chmod 600 {swapfile}",
+                                           f"mkswap {swapfile}", f"swapon {swapfile}"])
 
     def test_the_examples_build_takes_the_bin_tests_profile_on_a_pull_request(self):
         """rust-examples builds every example with one wrapper line whose

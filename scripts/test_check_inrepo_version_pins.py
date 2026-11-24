@@ -332,6 +332,8 @@ class ShapeTests(GuardTest):
             f"See the [known issue on the Meta 1.4.1 release page]({releases}/tag/v1.4.1).",
             f"See the [known issue on the meta 1.4.1 release page]({releases}/tag/meta-v1.4.1).",
             f"See the [{known}]({releases}/tag/v1.4.1/assets).",
+            f"See the [{known}]({releases}/tag/v1.4.1#known-issues).",
+            f"See the [{known}]({releases}/tag/v1.4.1?expanded=true).",
             f"See the [{known}]({releases}/download/v1.4.1/checksums.sha256).",
             f"See the {known}: {releases}/tag/v1.4.1",
             f"See the [known issue on the Tool 0.3.0 release page]({releases}/tag/tool-v0.3.0).",
@@ -365,6 +367,47 @@ class ShapeTests(GuardTest):
                                   'docs/install.md:2: cargo demo-core = "=1.4.1"')
         self.assertNotIn("docs/upgrade.md:5", err)
         self.assertIn("6 pin(s) below", err)
+
+    def test_a_release_link_with_a_fragment_or_a_query_is_a_pin(self):
+        # The tag of a release URL ends where its fragment or its query starts: the link
+        # names the same release page with them as without them.
+        releases = "https://github.com/lukacf/meerkat/releases"
+        lines = [
+            (f"See {releases}/tag/v1.4.1#known-issues", "release lukacf/meerkat release v1.4.1: pins core 1.4.1"),
+            (f"See the [notes]({releases}/tag/meta-v1.4.1#upgrade).",
+             "release lukacf/meerkat release meta-v1.4.1: pins meta 1.4.1"),
+            (f"Open {releases}/tag/connect-v1.4.1?expanded=true for the archives.",
+             "release lukacf/meerkat release connect-v1.4.1: pins connect 1.4.1"),
+            (f"See <{releases}/tag/v1.4.0?expanded=true#assets>.",
+             "release lukacf/meerkat release v1.4.0: pins core 1.4.0"),
+            ("See https://github.com/lukacf/meerkat-meta/releases/tag/v1.0.0#notes",
+             "lukacf/meerkat-meta release v1.0.0: a release of the retired"),
+        ]
+        self.repo.write("docs/get.md", "\n".join(line for line, _ in lines) + "\n")
+        err = self.assertFindings(*(f"docs/get.md:{number}: {finding}"
+                                    for number, (_, finding) in enumerate(lines, 1)))
+        self.assertIn(f"{len(lines)} pin(s) below", err)
+        # A fragment or a query makes no pin of a link that is none without it: the version
+        # in this tree, and a tag of no product.
+        self.repo.write("docs/get.md", f"See {releases}/tag/v1.4.2#known-issues and {releases}/tag/meta-v1.4.2?x=1\n"
+                        f"See {releases}/tag/mirror-v1.0.0#notes\n")
+        self.assertClean()
+
+    def test_an_entry_covers_a_release_link_with_a_fragment_by_its_tag(self):
+        # The pin an entry matches is the release, without the fragment: an entry written for
+        # the plain link covers the same link to a section of the page, and its context holds it.
+        url = "https://github.com/lukacf/meerkat/releases/tag/v1.4.1"
+        self.repo.write("docs/pair.md", f"Use [Demo Core 1.4.1]({url}#assets), the release the\n"
+                        "add-on 1.4.1 was made with.\n\n"
+                        f"Install [Demo Core 1.4.1]({url}#assets) first.\n")
+        self.repo.allow(path="docs/pair.md", match=r"^lukacf/meerkat release v1\.4\.1$",
+                        context=r"\[Demo Core 1\.4\.1\]\([^)]*/tag/v1\.4\.1#assets\), "
+                                r"the release the add-on 1\.4\.1 was made with",
+                        reason="The page of the add-on names the release it was made with.")
+        err = self.assertFindings("docs/pair.md:4: release lukacf/meerkat release v1.4.1: pins core 1.4.1")
+        self.assertNotIn("docs/pair.md:1:", err)
+        self.assertNotIn("covers nothing", err)
+        self.assertIn("1 pin(s) below", err)
 
 
 class AllowlistTests(GuardTest):
@@ -493,12 +536,73 @@ class HoldTests(GuardTest):
         self.repo.allow(**{name: value for name, value in entry.items() if value is not None})
 
     def test_a_hold_waits_below_its_version(self):
-        # The entry lands before the bump it is for: the pin is no finding yet, with or
-        # without the words, and the entry is not stale.
-        for page in (self.PLAIN, self.HELD):
-            with self.subTest(page=page):
-                self.tree("1.4.2", page)
-                self.assertIn("1 allow entries", self.assertClean())
+        # The entry lands before the bump it is for: the pin it will cover is no finding
+        # yet, and the entry is not stale. --write leaves both as they are.
+        self.tree("1.4.2", self.HELD)
+        self.assertIn("1 allow entries", self.assertClean())
+        code, out, err = self.repo.run(write=True)
+        self.assertEqual(code, 0, err)
+        self.assertIn("1 allow entries", out)
+        self.assertEqual((self.repo.root / "connect/README.md").read_text(), self.HELD)
+
+    def test_a_waiting_hold_needs_the_words_beside_the_link(self):
+        # A hold whose context holds no pin covers nothing at its version: the bump it was
+        # written for would stop on the pin and on the entry. It is stale while it waits,
+        # so the entry or the page is put right before that bump, not during it.
+        self.tree("1.4.2", self.PLAIN)
+        err = self.assertFindings(self.STALE)
+        self.assertIn("0 pin(s) below", err)
+        self.assertIn("1 stale allow entry.", err)
+        # The words stand on the page, and the pin the entry names stands beside them, not
+        # inside them: it is not the sentence's pin now, and will not be at the hold's version.
+        beside = "allow entry 0 connect/README.md (^demo-cli-1\\.4\\.2$) [at 1.4.3] covers nothing; delete it"
+        self.tree("1.4.2", "Unpack demo-cli-1.4.2-linux-x86_64.tar.gz, then install\n"
+                  f"[Demo Core 1.4.2]({self.URL}), the Core release\nConnect 1.4.2 was released with.\n",
+                  match=r"^demo-cli-1\.4\.2$")
+        err = self.assertFindings(beside)
+        self.assertIn("0 pin(s) below", err)
+        self.assertIn("1 stale allow entry.", err)
+        # --write changes nothing about it.
+        code, _, err = self.repo.run(write=True)
+        self.assertEqual(code, 1, err)
+        self.assertIn(beside, err)
+
+    def test_a_waiting_hold_of_a_context_alone_waits_on_the_pin_inside_its_text(self):
+        # Without a match the context alone says which pin the entry holds. Another pin on
+        # the same package in the file does not keep the entry waiting.
+        releases = "https://github.com/lukacf/meerkat/releases"
+        stale = "allow entry 0 connect/README.md [at 1.4.3] covers nothing; delete it"
+        self.tree("1.4.2", self.HELD, match=None)
+        self.assertIn("1 allow entries", self.assertClean())
+        self.tree("1.4.3", self.HELD, match=None)
+        self.assertClean()
+        for label, page in (
+                ("the link without the words", self.PLAIN),
+                ("a download address and no sentence",
+                 f"Install Demo Core first.\n\nFetch {releases}/download/v1.4.2/sums\n"),
+                ("an archive name beside the words",
+                 "Unpack demo-cli-1.4.2-linux-x86_64.tar.gz, the Core release\nConnect 1.4.2 was released with.\n")):
+            with self.subTest(label):
+                self.tree("1.4.2", page, match=None)
+                err = self.assertFindings(stale)
+                self.assertIn("0 pin(s) below", err)
+                self.assertIn("1 stale allow entry.", err)
+
+    def test_a_waiting_hold_with_a_context_waits_on_no_pin_read_from_a_structure(self):
+        # A dependency read from a manifest's structure has no place in a line: no context
+        # covers it at the hold's version, and none waits on it before.
+        manifest = json.dumps({"name": "@rkat/demo-connect", "version": "1.4.2",
+                               "dependencies": {"@rkat/demo": "1.4.2"}}, indent=2) + "\n"
+        hold = {"path": "connect/sdk/package.json", "match": r"^@rkat/demo@1\.4\.2$", "context": "@rkat/demo"}
+        self.tree("1.4.2", self.PLAIN, **hold)
+        self.repo.write("connect/sdk/package.json", manifest)
+        err = self.assertFindings("allow entry 0 connect/sdk/package.json (^@rkat/demo@1\\.4\\.2$) [at 1.4.3] covers "
+                                  "nothing; delete it")
+        self.assertIn("0 pin(s) below", err)
+        # Without the context the same entry waits on the dependency.
+        self.tree("1.4.2", self.PLAIN, **dict(hold, context=None))
+        self.repo.write("connect/sdk/package.json", manifest)
+        self.assertIn("1 allow entries", self.assertClean())
 
     def test_a_hold_covers_its_pin_at_its_version(self):
         self.tree("1.4.3", self.HELD)
@@ -552,6 +656,11 @@ class HoldTests(GuardTest):
         stale = "allow entry 0 connect/README.md (^demo-meta==1\\.4\\.2$) [at 1.4.3] covers nothing; delete it"
         self.tree("1.4.2", page, **hold)
         self.assertClean()
+        # While the hold waits, other words around the pin are not the held sentence either:
+        # the entry is stale before the bump it was written for.
+        self.tree("1.4.2", page.replace("the extra\nrequires", "the extra\nneeds"), **hold)
+        err = self.assertFindings(stale)
+        self.assertIn("0 pin(s) below", err)
         self.tree("1.4.3", page, **hold)
         self.assertClean()
         # A bare install command on the same page is not the sentence.
@@ -1137,6 +1246,37 @@ class CommandTests(unittest.TestCase):
             self.assertEqual(subprocess.run(command, capture_output=True).returncode, 1)
             repo.write(pins.CONFIG, "{")
             self.assertEqual(subprocess.run(command, capture_output=True).returncode, 2)
+
+    def help_text(self):
+        """The command's help, each run of white space read as one space."""
+        command = [sys.executable, "-I", str(SCRIPTS / "check_inrepo_version_pins.py"), "--help"]
+        result = subprocess.run(command, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return " ".join(result.stdout.split())
+
+    def test_the_help_describes_a_hold_that_waits_for_its_release(self):
+        # The module text is the command's help: it says what a hold does before its
+        # release, at it and after it.
+        text = self.help_text()
+        self.assertEqual(text.count(" ".join(pins.__doc__.split())), 1)
+        for sentence in (
+                "An entry with `at` (a version; beside `match` or `context`, never `key`) is a hold decided for one "
+                "release: it covers its pins only while the package they pin is at exactly that version in this tree.",
+                "While that package is still below the version the entry waits",
+                "Once the package is past the version the entry covers nothing: its pins are findings again and the "
+                "entry is stale"):
+            with self.subTest(sentence=sentence):
+                self.assertIn(sentence, text)
+
+    def test_the_help_says_what_keeps_a_waiting_hold_from_being_stale(self):
+        text = self.help_text()
+        for sentence in (
+                "the entry waits for its release:",
+                "it is not stale as long as it finds a pin it will cover then: one its path and `match` find and, "
+                "where it has a `context`, one that stands inside the text the `context` matches.",
+                "A waiting entry whose `context` holds no such pin is stale at once"):
+            with self.subTest(sentence=sentence):
+                self.assertIn(sentence, text)
 
 
 if __name__ == "__main__":

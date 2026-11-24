@@ -55,7 +55,10 @@ them.
     `meerkat_machine_schema::catalog::dsl::session_document::InstructionDeferReason`
     (whose `SessionDocumentInput::ResolveRunStartInstructions` loses the
     field too). `LoweringUnavailable` is the one reason left and the
-    default.
+    default. With the variant removed, `LoweringUnavailable` moves from
+    second to first in each enum's declaration order, and at the Rust API
+    level its implicit Rust discriminant changes from 1 to 0 (and so its
+    position in the derived ordering, where the enum derives `Ord`).
   - The transition `ResolveRunStartInstructionsDeferredLeadingPrefix` no
     longer exists. Its `TransitionId` variant stays in
     `meerkat_machine_kernels::generated::session_document::TransitionId`

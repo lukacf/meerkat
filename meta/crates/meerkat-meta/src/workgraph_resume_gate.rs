@@ -72,6 +72,13 @@
 //! sighting of an item, and it has written nothing: a lapsed lease's expiry
 //! is committed only after the whole walk. The next attempt starts the scan
 //! again from its first page.
+//!
+//! An unavailable answer's reason is the gate's own sentence. It is shown to
+//! whoever reads the held run, so it carries no text of a store's error or
+//! of a decoder's: a failed read names the error's kind, a projection that
+//! does not decode is said in one fixed sentence, and both texts go to the
+//! gate's log. The realm and the namespace come last in a reason, so that a
+//! reason cut for length keeps what it says.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Mutex, MutexGuard, PoisonError};
@@ -303,13 +310,38 @@ impl WorkGraphResumeGate {
         let check = match self.decide(worker, &run).await {
             Ok(check) => check,
             Err(error) => {
-                ResumeCheck::Unavailable(format!("the WorkGraph could not be read: {error}"))
+                // The store's own words stay in this log line. The reason
+                // is shown to whoever reads the held run, so it holds the
+                // error's kind and no word of its text.
+                tracing::warn!(
+                    mob_id = %worker.mob_id,
+                    agent_identity = %worker.agent_identity,
+                    session_id = %worker.session_id,
+                    run_id = %worker.run_id,
+                    %error,
+                    "durable resume gate: a WorkGraph read failed"
+                );
+                self.read_fault(&error)
             }
         };
         if let ResumeCheck::Superseded(reason) = &check {
             self.superseded.remember(&run, reason);
         }
         check
+    }
+
+    /// The answer to a WorkGraph read that failed: unavailable, with the
+    /// error's kind and the realm and namespace the gate reads, the names
+    /// last as in [`Self::claim_scan_cut`]. The error's own text is not in
+    /// it: a store may print a path, an id or anything else there, and the
+    /// reason is shown to a caller.
+    fn read_fault(&self, error: &WorkGraphError) -> ResumeCheck {
+        ResumeCheck::Unavailable(format!(
+            "the WorkGraph could not be read: {}; no verdict was drawn; realm '{}' namespace '{}'",
+            read_fault_kind(error),
+            self.service.default_realm_id(),
+            self.service.default_namespace(),
+        ))
     }
 
     async fn decide(
@@ -319,10 +351,24 @@ impl WorkGraphResumeGate {
     ) -> Result<ResumeCheck, WorkGraphError> {
         // The run executes under attention the gate cannot read, so it can
         // neither name the run's item nor treat the run as one without
-        // attention: it cannot decide.
-        if let Some(reason) = worker.attention_projection_unreadable {
+        // attention: it cannot decide. Why it does not decode is the
+        // decoder's text: it goes to the log, and the reason is the gate's
+        // own sentence.
+        if let Some(decode_error) = worker.attention_projection_unreadable {
+            tracing::warn!(
+                mob_id = %worker.mob_id,
+                agent_identity = %worker.agent_identity,
+                session_id = %worker.session_id,
+                run_id = %worker.run_id,
+                decode_error,
+                "durable resume gate: the run's WorkGraph attention projection does not decode"
+            );
             return Ok(ResumeCheck::Unavailable(format!(
-                "the run's WorkGraph attention projection does not decode: {reason}"
+                "the run's WorkGraph attention projection does not decode, so the resume gate \
+                 can neither name the run's work item nor treat the run as one without \
+                 attention; no verdict was drawn; realm '{}' namespace '{}'",
+                self.service.default_realm_id(),
+                self.service.default_namespace(),
             )));
         }
         let keys = WorkerKeys::of(worker);
@@ -593,6 +639,27 @@ fn terminal_status_name(status: WorkStatus) -> Option<&'static str> {
         WorkStatus::Cancelled => Some("cancelled"),
         WorkStatus::Failed => Some("failed"),
         WorkStatus::Open | WorkStatus::InProgress | WorkStatus::Blocked => None,
+    }
+}
+
+/// The kind of a WorkGraph read fault, for the gate's reason: the error's
+/// variant in fixed words, and nothing the error carries.
+fn read_fault_kind(error: &WorkGraphError) -> &'static str {
+    match error {
+        WorkGraphError::NotFound { .. } => "work item not found",
+        WorkGraphError::AttentionNotFound { .. } => "attention binding not found",
+        WorkGraphError::StaleRevision { .. } => "stale revision",
+        WorkGraphError::Conflict(_) => "conflict",
+        WorkGraphError::InvalidTransition(_) => "invalid transition",
+        WorkGraphError::InvalidInput(_) => "invalid input",
+        WorkGraphError::InvalidTimestampMillis { .. } => "invalid timestamp",
+        WorkGraphError::Store(_) => "store error",
+        WorkGraphError::NamespaceAssignmentRequired { .. } => "namespace assignment required",
+        WorkGraphError::UnsupportedBackend(_) => "unsupported backend",
+        WorkGraphError::AttentionTargetRealmMismatch { .. } => "attention target realm mismatch",
+        WorkGraphError::BackingStoreUnavailable { .. } => "backing store unavailable",
+        WorkGraphError::UnpairedAdmissionIdentity { .. } => "unpaired admission identity",
+        WorkGraphError::SchemaMismatch { .. } => "schema mismatch",
     }
 }
 
@@ -1395,6 +1462,9 @@ mod tests {
         writes: AtomicUsize,
         /// Signalled each time a slow list starts to wait.
         stalled: tokio::sync::Notify,
+        /// When set, every read of an item or of the item list fails with a
+        /// store error of this text.
+        failing_with: Mutex<Option<String>>,
     }
 
     impl SlowListStore {
@@ -1406,7 +1476,21 @@ mod tests {
                 list_calls: AtomicUsize::new(0),
                 writes: AtomicUsize::new(0),
                 stalled: tokio::sync::Notify::new(),
+                failing_with: Mutex::new(None),
             })
+        }
+
+        /// From now on every read of an item or of the item list fails with
+        /// a store error of the text `text`.
+        fn fail_reads_with(&self, text: &str) {
+            *self.failing_with.lock().unwrap() = Some(text.to_string());
+        }
+
+        fn read_fault(&self) -> Result<(), WorkGraphError> {
+            match self.failing_with.lock().unwrap().clone() {
+                Some(text) => Err(WorkGraphError::Store(text)),
+                None => Ok(()),
+            }
         }
 
         /// The service a gate reads this store through.
@@ -1514,6 +1598,7 @@ mod tests {
             namespace: &WorkNamespace,
             id: &WorkItemId,
         ) -> Result<Option<WorkItem>, WorkGraphError> {
+            self.read_fault()?;
             self.inner.get_item(realm_id, namespace, id).await
         }
 
@@ -1521,6 +1606,7 @@ mod tests {
             &self,
             filter: WorkItemFilter,
         ) -> Result<Vec<WorkItem>, WorkGraphError> {
+            self.read_fault()?;
             let call = self.list_calls.fetch_add(1, Ordering::SeqCst) + 1;
             let slow_from = self.slow_from_call.load(Ordering::SeqCst);
             if slow_from != 0 && call >= slow_from {
@@ -1873,6 +1959,9 @@ mod tests {
         }
     }
 
+    /// A projection that does not decode is never read as a run without
+    /// attention: the gate answers unavailable, in its own sentence. What the
+    /// decoder said is in the gate's log, not in the reason.
     #[tokio::test]
     async fn an_unreadable_projection_is_unavailable() {
         let service = service();
@@ -1885,8 +1974,81 @@ mod tests {
 
         let check = gate.check_worker(resuming).await;
         assert!(
-            matches!(&check, ResumeCheck::Unavailable(reason) if reason.contains("binding_id")),
-            "never read as a run without attention: {check:?}"
+            matches!(
+                &check,
+                ResumeCheck::Unavailable(reason)
+                    if reason.contains("attention projection does not decode")
+                        && !reason.contains("binding_id")
+            ),
+            "never read as a run without attention, and in the gate's own words: {check:?}"
+        );
+    }
+
+    /// No unavailable reason carries a word of a store's error or of a
+    /// decoder's. A store may print a path, an id or anything else in its
+    /// error, and the reason is shown to whoever reads the held run. The
+    /// reason of a failed read names the error's kind and the realm and
+    /// namespace; the reason of a projection that does not decode is one
+    /// sentence of the gate. Both texts go to the gate's log.
+    #[tokio::test]
+    async fn an_unavailable_reason_carries_no_text_of_a_store_or_a_decoder() {
+        const MARKER: &str = "marker-7f3a";
+
+        let store = SlowListStore::new();
+        let direct = store.direct();
+        let worker = Worker::named(WORKER);
+        let (_item, projection) = goal_for(
+            &direct,
+            GoalAttentionTarget::Owner {
+                owner_key: member_key(WORKER),
+            },
+        )
+        .await;
+        let gate = WorkGraphResumeGate::new(store.service());
+        store.fail_reads_with(&format!("no such file /var/lib/{MARKER}/items.db"));
+
+        // The claim scan's list fails, and then the projected item's read.
+        for (read, projection) in [
+            ("the item list", None),
+            ("the projected item", Some(&projection)),
+        ] {
+            let check = gate.check_worker(worker.resuming(projection)).await;
+            let ResumeCheck::Unavailable(reason) = &check else {
+                panic!("a failed read of {read} is unavailable: {check:?}");
+            };
+            assert!(
+                !reason.contains(MARKER) && !reason.contains("/var/lib"),
+                "no word of the store's error after a failed read of {read}: {reason}"
+            );
+            for part in [
+                "the WorkGraph could not be read: store error".to_string(),
+                format!("realm '{}'", mob_realm()),
+                format!("namespace '{}'", WorkNamespace::default()),
+            ] {
+                assert!(
+                    reason.contains(&part),
+                    "the reason of a failed read of {read} holds \"{part}\": {reason}"
+                );
+            }
+        }
+
+        let decoder_said = format!("missing field `binding_id` at {MARKER}");
+        let check = gate
+            .check_worker(ResumingWorker {
+                attention_projection_unreadable: Some(decoder_said.as_str()),
+                ..worker.resuming(None)
+            })
+            .await;
+        let ResumeCheck::Unavailable(reason) = &check else {
+            panic!("a projection that does not decode is unavailable: {check:?}");
+        };
+        assert!(
+            !reason.contains(MARKER) && !reason.contains("binding_id"),
+            "no word of the decoder's: {reason}"
+        );
+        assert!(
+            reason.contains("attention projection does not decode"),
+            "the gate's own sentence: {reason}"
         );
     }
 

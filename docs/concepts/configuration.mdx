@@ -374,7 +374,7 @@ event re-arms the window, so long-but-alive responses are unaffected. Set
 omitted value inherits from the model profile: a model whose provider
 documents responses that can stay silent for minutes has its own catalog
 window (`gemini-4-carbon`, `gemini-4-argon`,
-`gemini-4-hydrogen`: 900 s; `gemini-4-neon`: 900 s in the unreleased catalog;
+`gemini-4-hydrogen`: 900 s; `gemini-4-neon`: 900 s from 0.9.18;
 `gpt-5.5-pro`: 7200 s), a self-hosted model
 can declare one with `stream_inactivity_timeout_secs` (at least 60 seconds;
 config validation refuses a shorter one), and every other model uses the

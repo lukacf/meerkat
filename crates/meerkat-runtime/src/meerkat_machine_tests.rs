@@ -39736,6 +39736,51 @@ async fn await_census_reading(mut sample: impl FnMut() -> Option<usize>) -> Opti
     .ok()
 }
 
+/// How many times [`census_count_within_tries`] asks.
+const CENSUS_COUNT_TRIES: usize = 10_000;
+
+/// [`await_census_reading`] for a row on a PAUSED clock, bounded by a count
+/// of tries: the first count the census answers, or a panic that says it
+/// never answered one.
+///
+/// A `tokio::time::timeout` bounds nothing there: paused time advances only
+/// when the runtime is idle, and a task that keeps yielding is never idle,
+/// so the timeout of [`await_census_reading`] would never fire. This asks
+/// at most [`CENSUS_COUNT_TRIES`] times, only while the answer is `None`.
+///
+/// Why a miss happens at all: `overdue_run_start_session_count` reads each
+/// entry's shared machine authority with `try_lock`. A registered session's
+/// runtime loop is served by the process-owned multi-thread runtime, outside
+/// the row's paused clock, and every machine input and machine read of its
+/// driver takes that same mutex for a moment (the loop reads the machine's
+/// state under the driver at the top of every pass, its first included). A
+/// probe that meets that moment answers `None`: nobody looked. It says
+/// nothing about the count.
+///
+/// Between tries the row yields twice, and sleeps never: to its own runtime
+/// (`tokio::task::yield_now`, for a holder that is a task of this runtime)
+/// and to the scheduler (`std::thread::yield_now`, for a holder on another
+/// thread that lost its time slice while holding). Neither advances the
+/// paused clock, so a retry cannot move a window across its notice bound.
+///
+/// A count is returned as it is read: the caller compares it at once, so a
+/// WRONG count fails on the first reading and is never retried away. Use it
+/// only where the assertion expects a count; a probe that expects `None`
+/// samples the accessor directly, once.
+async fn census_count_within_tries(
+    asked: &str,
+    mut sample: impl FnMut() -> Option<usize>,
+) -> usize {
+    for _ in 0..CENSUS_COUNT_TRIES {
+        if let Some(count) = sample() {
+            return count;
+        }
+        tokio::task::yield_now().await;
+        std::thread::yield_now();
+    }
+    panic!("the census never answered a count in {CENSUS_COUNT_TRIES} tries: {asked}")
+}
+
 fn machine_terminal_receipt(
     run_id: RunId,
     contributing_input_ids: Vec<InputId>,
@@ -62292,17 +62337,32 @@ async fn overdue_run_start_session_count_sees_a_wedged_staged_run() {
             );
     }
 
+    // The three probes that expect a COUNT ask through
+    // `census_count_within_tries`: the runtime loop registered above is
+    // alive on its own threads, and a probe that meets a moment in which it
+    // holds the authority answers `None`, which is "nobody looked" and not a
+    // reading. They ask again only while the answer is `None`, a bounded
+    // number of times; the first count answered is compared at once, so a
+    // count other than the expected one fails immediately. The one probe
+    // that expects `None` (the row itself holds the authority) is a single
+    // immediate ask, as before.
     assert_eq!(
-        machine.overdue_run_start_session_count(),
-        Some(0),
+        census_count_within_tries("inside the notice bound", || {
+            machine.overdue_run_start_session_count()
+        })
+        .await,
+        0,
         "inside the notice bound the same facts are ordinary staging latency"
     );
 
     tokio::time::advance(crate::run_progress::RUN_EXECUTION_START_NOTICE + Duration::from_secs(1))
         .await;
     assert_eq!(
-        machine.overdue_run_start_session_count(),
-        Some(1),
+        census_count_within_tries("past the notice bound", || {
+            machine.overdue_run_start_session_count()
+        })
+        .await,
+        1,
         "a staged run past the notice bound with its primitive provably \
          un-applied is exactly what this accessor exists to report"
     );
@@ -62335,8 +62395,11 @@ async fn overdue_run_start_session_count_sees_a_wedged_staged_run() {
         drop(held);
     }
     assert_eq!(
-        machine.overdue_run_start_session_count(),
-        Some(1),
+        census_count_within_tries("after the row dropped its guard on the authority", || {
+            machine.overdue_run_start_session_count()
+        })
+        .await,
+        1,
         "and the refusal is per-probe, not sticky: the wedge is visible again \
          the moment the authority is readable"
     );

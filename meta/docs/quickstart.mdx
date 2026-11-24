@@ -265,7 +265,8 @@ establish that no identities are registered.
 
 On this identity-first runtime, `rt.mob_handle().reconcile_edges()` reconciles
 dynamic peer wiring; it does not list every connection made by `role_wiring`
-at spawn. See [When to call `reconcile_edges`](/concepts/roster#when-to-call-reconcile_edges).
+at spawn. To inspect the recorded peers, read `wired_to` on the roster entries
+returned by `await rt.mob_handle().list_members()`. See [When to call `reconcile_edges`](/concepts/roster#when-to-call-reconcile_edges).
 
 Pin
 `runtime_mode = "turn_driven"` on profiles that back addressable identities:

@@ -4889,11 +4889,15 @@ class MobHandle:
         """Reconcile dynamic peer wiring and report the targeted pairs and changes.
 
         ``desired_edges`` is not a list of all live connections. On a classic
-        gateway, definition rules can select a pair already wired at spawn.
+        gateway, each successful worker-plane ensure reconciles declared wiring
+        regardless of spawn order. The definition policy unwires only edges it
+        wired itself; it does not claim a pair already wired by the host.
         On an identity-first gateway, the dynamic input comes from the host
         topology provider (or the identity runtime’s current desired edges)
         together with operator topology changes. It can be empty even when
-        members are connected by ``role_wiring``.
+        members are connected by ``role_wiring``. Read ``wired_to`` from
+        the member snapshot returned by ``await handle.get_member(member_id)``
+        for the recorded peers.
         """
         raw = await self._runtime._rpc("meta/reconcile_edges")
         return ReconcileEdgesReport.from_dict(raw)

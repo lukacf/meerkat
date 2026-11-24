@@ -958,7 +958,7 @@ if health.last_delivery_error and health.last_delivery_error["class"] == "reload
 | `respawn_member(member_id)` | `None` | Respawn a previously retired member (identity-first: resets the identity onto a fresh session) |
 | `reload_member(member_id)` | `MemberReloadResult` | Non-destructive cold reload: same identity, same durable session, same generation (identity-first only) |
 | `member_health(member_id)` | `MemberHealth` | Lifecycle and delivery health from in-process reads; carries `actor_loop`, `open_stall_id`, and `last_delivery_error` |
-| `reconcile_edges()` | `ReconcileEdgesReport` | Reconcile dynamic peer wiring. `desired_edges` lists the pairs this call targets, not all live connections. On an identity-first gateway it may be empty even when members are wired at spawn. See [When to call `reconcile_edges`](/concepts/roster#when-to-call-reconcile_edges). |
+| `reconcile_edges()` | `ReconcileEdgesReport` | Reconcile dynamic peer wiring. `desired_edges` lists the pairs this call targets, not all live connections. On an identity-first gateway it may be empty even when members are wired at spawn. For recorded peers, read `(await handle.get_member(member_id)).wired_to`. See [When to call `reconcile_edges`](/concepts/roster#when-to-call-reconcile_edges). |
 
 `MemberSnapshot` exposes `agent_identity`, `role`, `state`, `wired_to`, and
 `labels`. Known state strings are exported from the top-level package as

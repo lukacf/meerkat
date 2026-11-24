@@ -102,21 +102,29 @@ not every pair that can already communicate.
 
 - **Classic gateway:** the default discovery policy matches the definition’s
   `auto_wire_orchestrator` and `role_wiring` rules against eligible roster
-  members. A matching pair already wired at spawn can appear in both
-  `desired_edges` and `preexisting_edges` without a new wire operation.
+  members. Each successful worker-plane `meta/ensure_member` runs this
+  reconciliation, so a declared pair can be wired even when the orchestrator
+  is ensured after its workers. No extra call is needed after the ensure.
+  If the host or the spawn already wired a desired pair, it appears in
+  `preexisting_edges`; this policy does not claim that edge. It unwires
+  only edges it wired itself.
 - **Identity-first gateway:** this call uses the host topology provider’s
   edges, or the identity runtime’s current desired edges if there is no
   provider, together with operator topology changes. A `role_wiring` rule can
   connect members at spawn without adding that pair to this dynamic set. An
   empty `desired_edges` does not mean that the members have no peers. Do not
   call it after boot or `runtime.reconcile()` just to enumerate spawn-time
-  wiring; use `meta/member_status` to inspect a member’s connections.
+  wiring.
 
-With a host `TopologyProvider`, an identity edge outside the desired set can
+On the identity-first path with a host `TopologyProvider`, an identity edge outside the desired set can
 be removed even if it predates this launch. An edge declared by the definition
 or owned by an identity’s stored declaration is not removed just because the
 provider omits it. Without a provider, identity reconciliation prunes only
 edges it manages.
+
+For the peers recorded on the roster, read `wired_to` from `meta/get_member`
+or `meta/list_members`. For live connectivity, `meta/member_status` instead
+returns `peer_connectivity` when available; it does not return `wired_to`. See [Lightweight roster entries](#lightweight-roster-entries).
 
 The `managed_edges` count belongs to `meta/reconcile_identity`, not to the
 `meta/reconcile_edges` report. See the [RPC reference](/api/rpc#meta/reconcile_edges)

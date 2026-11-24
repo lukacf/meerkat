@@ -1284,9 +1284,12 @@ profiles](/concepts/roster#ensure_member-gateway-profiles)).
 | `backend` / `binding` | `string` / `object` | no | Backend kind and runtime binding overrides |
 </Accordion>
 
-A successful worker-plane ensure runs edge reconciliation before returning.
-The [edge report](#meta/reconcile_edges) describes dynamic wiring, not every
-peer connection made at spawn.
+On a classic gateway with the default definition policy, every successful
+worker-plane `meta/ensure_member` runs edge reconciliation before it returns.
+This fills in declared wiring that spawn order can miss (for example, when
+the orchestrator is ensured last). You need not call `meta/reconcile_edges`
+again just because of the ensure. On an identity-first gateway, the [edge
+report](#meta/reconcile_edges) uses different inputs.
 
 Worker-plane spawn refusals use `-32602` on stdio and `-32000` on HTTP,
 with the meerkat error in the message,
@@ -1436,13 +1439,16 @@ Reconcile the selected mob’s dynamic peer edges. The report contains
 and `failures`.
 
 `desired_edges` is the input to this reconciliation, not a list of all live
-connections. On a classic gateway, definition rules can select a pair that
-was already wired at spawn (`preexisting_edges`). On an identity-first
-gateway, the dynamic input comes from the topology provider (or the identity
-runtime’s current desired edges) together with operator topology changes. It
-can be empty even when members are connected by `role_wiring`. Inspect
-`meta/member_status` for a member’s connections. The `managed_edges` count is
-returned by `meta/reconcile_identity`, not by this method.
+connections. On a classic gateway the definition policy only unwires edges it
+wired itself. If a desired pair was already wired at spawn or by the host,
+the reconciler reports it in `preexisting_edges` and does not take ownership.
+
+On an identity-first gateway, the dynamic input comes from the topology
+provider (or the identity runtime’s current desired edges) together with
+operator topology changes. It can be empty even when `role_wiring` connected
+members at spawn. To see the peers recorded for a member, read `wired_to`
+from `meta/get_member` or `meta/list_members`. The `managed_edges` count is
+returned by `meta/reconcile_identity`, not by `meta/reconcile_edges`.
 
 On a candidate launch (`runtime_options.mob_composition.authority =
 "candidate"`) the reconcile is a dry run: it wires, unwires and prunes

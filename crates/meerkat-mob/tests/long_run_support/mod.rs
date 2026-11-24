@@ -2598,12 +2598,55 @@ pub async fn restart(
         // identity, its session and the killed run, held by the machine,
         // with the round the gate left undecided and the gate's own reason.
         // A second poll answers the same round: polls ask nothing.
+        //
+        // Over the reference host store the second poll runs while the
+        // store refuses every head and row read of every scope kind: the
+        // poll is answered from memory, so it answers the same. The refusal
+        // is live (a head read of the store itself fails) and is cleared
+        // before the row goes on.
+        const SCOPE_KINDS: [meerkat_core::host_store::ScopeKind; 4] = [
+            meerkat_core::host_store::ScopeKind::Session,
+            meerkat_core::host_store::ScopeKind::Identity,
+            meerkat_core::host_store::ScopeKind::Mob,
+            meerkat_core::host_store::ScopeKind::Record,
+        ];
         for poll in 1..=2 {
-            let pending = incarnation
-                .mob
-                .members_with_pending_resumed_runs()
-                .await
-                .map_err(|error| format!("the handle's poll of waiting runs: {error}"))?;
+            let refusing_host = match store {
+                Store::Host { host, .. } if poll == 2 => Some(host),
+                _ => None,
+            };
+            if let Some(host) = refusing_host {
+                for kind in SCOPE_KINDS {
+                    host.set_kind_read_fault(
+                        kind,
+                        Some(meerkat_store_conformance::HostStoreReadFault::Unavailable),
+                    );
+                }
+                let probe = meerkat_core::host_store::ScopeRef::new(
+                    meerkat_core::host_store::ScopeKind::Session,
+                    meerkat_core::host_store::ScopeName::try_new("poll-probe")
+                        .map_err(|error| format!("the probe's scope name: {error}"))?,
+                );
+                let refused =
+                    meerkat_core::host_store::HostStore::load_head(host.as_ref(), &probe).await;
+                if refused.is_ok() {
+                    for kind in SCOPE_KINDS {
+                        host.set_kind_read_fault(kind, None);
+                    }
+                    return Err(format!(
+                        "the host store did not refuse a read during the poll: {refused:?}"
+                    ));
+                }
+            }
+            let polled = incarnation.mob.members_with_pending_resumed_runs().await;
+            if let Some(host) = refusing_host {
+                for kind in SCOPE_KINDS {
+                    host.set_kind_read_fault(kind, None);
+                }
+            }
+            let pending = polled.map_err(|error| {
+                format!("poll {poll}: the handle's poll of waiting runs: {error}")
+            })?;
             let [member] = pending.as_slice() else {
                 return Err(format!(
                     "poll {poll}: the handle lists the one held worker, not {pending:?}"
@@ -2623,7 +2666,7 @@ pub async fn restart(
                 .undecided
                 .as_ref()
                 .map(|undecided| (undecided.rounds, undecided.cause, undecided.reason.as_str()));
-            if member.agent_identity != meerkat_mob::AgentIdentity::from(WORKER)
+            if member.agent_identity != WORKER
                 || run.session_id != session
                 || run.run_id != killed.run.run_id
                 || run.stop_requested

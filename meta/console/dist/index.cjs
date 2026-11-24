@@ -25951,6 +25951,8 @@ var CONSOLE_RPC_METHODS = {
   memoryPanelDreamRuns: "meta/memory/panel/dream_runs",
   memoryPanelAuditVerdicts: "meta/memory/panel/audit_verdicts",
   memoryQuarantineDecide: "meta/memory/quarantine/decide",
+  agentMemoryForgetInScope: "meta/agent_memory/forget_in_scope",
+  agentMemoryPurge: "meta/agent_memory/purge",
   workgraphSnapshot: "meta/workgraph/snapshot",
   workgraphGet: "meta/workgraph/get",
   workgraphEvents: "meta/workgraph/events",
@@ -26098,6 +26100,7 @@ var CONSOLE_MEMBER_PARAMS_BY_METHOD = {
   [CONSOLE_RPC_METHODS.scheduleDelete]: ["identity"],
   [CONSOLE_RPC_METHODS.memoryPanelRecords]: ["identity"],
   [CONSOLE_RPC_METHODS.memoryQuarantineDecide]: ["identity"],
+  [CONSOLE_RPC_METHODS.agentMemoryPurge]: ["identity"],
   [CONSOLE_RPC_METHODS.mobEventsQuery]: ["identity", "member_id"],
   [CONSOLE_RPC_METHODS.workgraphAttentionReassign]: ["target.identity"],
   [CONSOLE_RPC_METHODS.topologyPlan]: ["operations.*.edge.a.identity", "operations.*.edge.b.identity"],
@@ -27354,6 +27357,8 @@ var CONSOLE_COMMAND_NAMES = {
   listMemoryDreamRuns: "listMemoryDreamRuns",
   listMemoryAuditVerdicts: "listMemoryAuditVerdicts",
   decideMemoryQuarantine: "decideMemoryQuarantine",
+  forgetMemoryInScope: "forgetMemoryInScope",
+  purgeMemoryRecord: "purgeMemoryRecord",
   workgraphSnapshot: "workgraphSnapshot",
   workgraphGet: "workgraphGet",
   workgraphEvents: "workgraphEvents",
@@ -27602,6 +27607,14 @@ var CONSOLE_COMMAND_SPECS = {
   },
   [CONSOLE_COMMAND_NAMES.decideMemoryQuarantine]: {
     method: CONSOLE_RPC_METHODS.memoryQuarantineDecide,
+    targetKinds: /* @__PURE__ */ new Set(["meta/memory"])
+  },
+  [CONSOLE_COMMAND_NAMES.forgetMemoryInScope]: {
+    method: CONSOLE_RPC_METHODS.agentMemoryForgetInScope,
+    targetKinds: /* @__PURE__ */ new Set(["meta/memory"])
+  },
+  [CONSOLE_COMMAND_NAMES.purgeMemoryRecord]: {
+    method: CONSOLE_RPC_METHODS.agentMemoryPurge,
     targetKinds: /* @__PURE__ */ new Set(["meta/memory"])
   },
   [CONSOLE_COMMAND_NAMES.workgraphSnapshot]: {
@@ -56813,6 +56826,8 @@ var CONSOLE_RPC_METHODS2 = {
   memoryPanelDreamRuns: "meta/memory/panel/dream_runs",
   memoryPanelAuditVerdicts: "meta/memory/panel/audit_verdicts",
   memoryQuarantineDecide: "meta/memory/quarantine/decide",
+  agentMemoryForgetInScope: "meta/agent_memory/forget_in_scope",
+  agentMemoryPurge: "meta/agent_memory/purge",
   workgraphSnapshot: "meta/workgraph/snapshot",
   workgraphEvents: "meta/workgraph/events",
   workgraphGet: "meta/workgraph/get",
@@ -56962,6 +56977,7 @@ var CONSOLE_MEMBER_PARAMS_BY_METHOD2 = {
   [CONSOLE_RPC_METHODS2.scheduleDelete]: ["identity"],
   [CONSOLE_RPC_METHODS2.memoryPanelRecords]: ["identity"],
   [CONSOLE_RPC_METHODS2.memoryQuarantineDecide]: ["identity"],
+  [CONSOLE_RPC_METHODS2.agentMemoryPurge]: ["identity"],
   [CONSOLE_RPC_METHODS2.mobEventsQuery]: ["identity", "member_id"],
   [CONSOLE_RPC_METHODS2.workgraphAttentionReassign]: ["target.identity"],
   [CONSOLE_RPC_METHODS2.topologyPlan]: ["operations.*.edge.a.identity", "operations.*.edge.b.identity"],
@@ -63871,6 +63887,8 @@ var CONSOLE_COMMAND_NAMES2 = {
   listMemoryDreamRuns: "listMemoryDreamRuns",
   listMemoryAuditVerdicts: "listMemoryAuditVerdicts",
   decideMemoryQuarantine: "decideMemoryQuarantine",
+  forgetMemoryInScope: "forgetMemoryInScope",
+  purgeMemoryRecord: "purgeMemoryRecord",
   workgraphSnapshot: "workgraphSnapshot",
   workgraphEvents: "workgraphEvents",
   workgraphGet: "workgraphGet",
@@ -64121,6 +64139,14 @@ var CONSOLE_COMMAND_SPECS2 = {
   },
   [CONSOLE_COMMAND_NAMES2.decideMemoryQuarantine]: {
     method: CONSOLE_RPC_METHODS2.memoryQuarantineDecide,
+    targetKinds: /* @__PURE__ */ new Set(["meta/memory"])
+  },
+  [CONSOLE_COMMAND_NAMES2.forgetMemoryInScope]: {
+    method: CONSOLE_RPC_METHODS2.agentMemoryForgetInScope,
+    targetKinds: /* @__PURE__ */ new Set(["meta/memory"])
+  },
+  [CONSOLE_COMMAND_NAMES2.purgeMemoryRecord]: {
+    method: CONSOLE_RPC_METHODS2.agentMemoryPurge,
     targetKinds: /* @__PURE__ */ new Set(["meta/memory"])
   },
   [CONSOLE_COMMAND_NAMES2.workgraphSnapshot]: {
@@ -71834,6 +71860,7 @@ var ACCESS_ACTION_WORDS = {
   "mob.memory.read": "Read team memory",
   "mob.memory.propose": "Propose team memory",
   "mob.memory.commit": "Commit team memory",
+  "mob.memory.delete": "Remove team memory",
   "memory.quarantine.review": "Review quarantined memory",
   "agent.spawn": "Create agents",
   "agent.respawn": "Restart agents",
@@ -71941,6 +71968,7 @@ var ACCESS_FAMILIES = [
       "mob.memory.read",
       "mob.memory.propose",
       "mob.memory.commit",
+      "mob.memory.delete",
       "memory.quarantine.review"
     ]
   },
@@ -74580,6 +74608,35 @@ function quarantineDecisionErrorText(error48) {
   return { text: errorMessage(error48), ids: [] };
 }
 
+// src/panels/memory/removal.ts
+function memoryScopeParam(record12) {
+  switch (record12.scope.scope) {
+    case "identity":
+      return { kind: "identity", key: record12.scope.identity };
+    case "mob":
+      return { kind: "mob", key: record12.scope.mob };
+    case "realm":
+      return { kind: "realm" };
+    default:
+      return null;
+  }
+}
+function isPurgedRecord(record12) {
+  if (record12.purged === true) return true;
+  const retired = record12.status.status === "tombstoned" || record12.status.status === "superseded";
+  return retired && record12.title === "" && record12.body === "";
+}
+function canRemoveSharedRecord(record12) {
+  return record12.status.status === "active" && (record12.scope.scope === "mob" || record12.scope.scope === "realm");
+}
+function canPurgeRecord(record12) {
+  return record12.status.status === "tombstoned" && memoryScopeParam(record12) !== null && !isPurgedRecord(record12);
+}
+var REMOVAL_NOTE = {
+  remove: "Remove takes this record out of shared memory: agents are no longer given it. Its text stays in the store until its content is purged.",
+  purge: "Purge content blanks this record's title, body and tags, and those of the earlier versions it replaced, for good. Copies made from it, proposals and conversation transcripts are not touched."
+};
+
 // src/panels/memory/viz-model.ts
 var HOUR_MS = 60 * 60 * 1e3;
 var DAY_MS4 = 24 * HOUR_MS;
@@ -75364,6 +75421,59 @@ function QuarantineDecisionBlock({
     notice ? /* @__PURE__ */ (0, import_jsx_runtime96.jsx)(Notice, { tone: "crit", testId: "memory-quarantine-error", children: /* @__PURE__ */ (0, import_jsx_runtime96.jsx)(QuarantineNoticeText, { notice }) }) : null
   ] });
 }
+function RecordRemovalBlock({
+  action,
+  onConfirm
+}) {
+  const [confirming, setConfirming] = import_react68.default.useState(false);
+  const [pending, setPending] = import_react68.default.useState(false);
+  const [failure2, setFailure] = import_react68.default.useState(null);
+  async function run() {
+    setPending(true);
+    setFailure(null);
+    try {
+      await onConfirm();
+      setConfirming(false);
+    } catch (err) {
+      setFailure(errorMessage(err));
+    } finally {
+      setPending(false);
+    }
+  }
+  return /* @__PURE__ */ (0, import_jsx_runtime96.jsxs)("section", { className: "memory-review", "data-testid": "memory-record-".concat(action), children: [
+    /* @__PURE__ */ (0, import_jsx_runtime96.jsx)("p", { className: "memory-review__note", children: REMOVAL_NOTE[action] }),
+    /* @__PURE__ */ (0, import_jsx_runtime96.jsx)("div", { className: "cc-btn-row memory-review__actions", children: confirming ? /* @__PURE__ */ (0, import_jsx_runtime96.jsxs)(import_jsx_runtime96.Fragment, { children: [
+      /* @__PURE__ */ (0, import_jsx_runtime96.jsx)(
+        Button,
+        {
+          variant: "danger",
+          "data-testid": "memory-record-".concat(action, "-confirm"),
+          disabled: pending,
+          onClick: () => void run(),
+          children: pending ? "Working\u2026" : action === "remove" ? "Remove from shared memory" : "Purge for good"
+        }
+      ),
+      /* @__PURE__ */ (0, import_jsx_runtime96.jsx)(
+        Button,
+        {
+          "data-testid": "memory-record-".concat(action, "-cancel"),
+          disabled: pending,
+          onClick: () => setConfirming(false),
+          children: "Cancel"
+        }
+      )
+    ] }) : /* @__PURE__ */ (0, import_jsx_runtime96.jsx)(
+      Button,
+      {
+        variant: "danger",
+        "data-testid": "memory-record-".concat(action, "-start"),
+        onClick: () => setConfirming(true),
+        children: action === "remove" ? "Remove" : "Purge content"
+      }
+    ) }),
+    failure2 ? /* @__PURE__ */ (0, import_jsx_runtime96.jsx)(Notice, { tone: "crit", testId: "memory-record-".concat(action, "-error"), children: failure2 }) : null
+  ] });
+}
 function StoryStep({
   step,
   label: label2,
@@ -75389,7 +75499,9 @@ function Biography({
   onSelectRecord,
   onLoadEvidence,
   onDecideQuarantine,
-  decisionNotice
+  decisionNotice,
+  onRemoveShared,
+  onPurgeRecord
 }) {
   const nameOf = useNameOf();
   const now3 = useNow();
@@ -75510,6 +75622,8 @@ function Biography({
           },
           record12.id
         ) : null,
+        record12.purged === true ? /* @__PURE__ */ (0, import_jsx_runtime96.jsx)(Notice, { testId: "memory-record-purged", className: "memory-detail__notice", children: "The content of this record was purged. Its place in the record's history is kept." }) : null,
+        onRemoveShared && canRemoveSharedRecord(record12) ? /* @__PURE__ */ (0, import_jsx_runtime96.jsx)(RecordRemovalBlock, { action: "remove", onConfirm: () => onRemoveShared(record12) }, "remove:".concat(record12.id)) : onPurgeRecord && canPurgeRecord(record12) ? /* @__PURE__ */ (0, import_jsx_runtime96.jsx)(RecordRemovalBlock, { action: "purge", onConfirm: () => onPurgeRecord(record12) }, "purge:".concat(record12.id)) : null,
         record12.description && !(record12.body ?? "").trim().startsWith(record12.description.trim()) ? /* @__PURE__ */ (0, import_jsx_runtime96.jsx)("p", { className: "memory-detail__description", children: record12.description }) : null,
         /* @__PURE__ */ (0, import_jsx_runtime96.jsx)("div", { className: "memory-detail__body", "data-testid": "memory-detail-body", children: record12.body }),
         record12.tags && record12.tags.length > 0 ? /* @__PURE__ */ (0, import_jsx_runtime96.jsx)("div", { className: "memory-detail__tags", children: record12.tags.map((tag) => /* @__PURE__ */ (0, import_jsx_runtime96.jsx)("span", { className: "memory-tag", children: tag }, tag)) }) : null,
@@ -77706,7 +77820,9 @@ function MemoryPanel({
   onQueryRecords,
   onLoadEvidence,
   onOpenGating,
-  onDecideQuarantine
+  onDecideQuarantine,
+  onRemoveSharedRecord,
+  onPurgeRecord
 }) {
   const nameOf = useNameOf();
   const now3 = useNow();
@@ -77724,6 +77840,18 @@ function MemoryPanel({
     const result = await onDecideQuarantine(realm, record12, verdict, rationale);
     setDecisionNotice(quarantineDecisionSummary(result));
     onSelectRecord(realm, result.successor?.memory_id ?? record12.id);
+  } : void 0;
+  const removeShared = onRemoveSharedRecord ? async (record12) => {
+    if (!detail) return;
+    const realm = detail.realm;
+    await onRemoveSharedRecord(realm, record12);
+    onSelectRecord(realm, record12.id);
+  } : void 0;
+  const purgeRecord = onPurgeRecord ? async (record12) => {
+    if (!detail) return;
+    const realm = detail.realm;
+    await onPurgeRecord(realm, record12);
+    onSelectRecord(realm, record12.id);
   } : void 0;
   const [filter, setFilter] = import_react78.default.useState({});
   const [sortMode, setSortMode] = import_react78.default.useState("recency");
@@ -78066,7 +78194,9 @@ function MemoryPanel({
       onSelectRecord: selectRecord,
       onLoadEvidence,
       onDecideQuarantine: decideQuarantine,
-      decisionNotice
+      decisionNotice,
+      onRemoveShared: removeShared,
+      onPurgeRecord: purgeRecord
     }
   ) : detailLoading ? /* @__PURE__ */ (0, import_jsx_runtime106.jsx)("div", { className: "memory-drawer-loading", children: /* @__PURE__ */ (0, import_jsx_runtime106.jsx)(LoadingState, { label: "Loading record", rows: 5 }) }) : null;
   return /* @__PURE__ */ (0, import_jsx_runtime106.jsxs)(PanelShell, { className: "memory-panel", testId: "memory-panel", density, showTechnicalIds, children: [
@@ -95761,7 +95891,7 @@ function useQuestionSets(input) {
 // src/lib/console-bundle.ts
 var APP_SCRIPT_VERSION = /\/console-app\.js\?(?:[^#]*&)?v=([0-9A-Za-z._-]+)/;
 function builtBeside() {
-  const named = true ? "5ea92381428f".trim() : "";
+  const named = true ? "8d9fc388d313".trim() : "";
   return named || void 0;
 }
 function loadedByThePage(page) {
@@ -98087,7 +98217,9 @@ function emptyMemoryPanelData() {
     dreamRunsDenied: false,
     auditVerdicts: [],
     auditVerdictsDenied: false,
-    canDecideQuarantine: false
+    canDecideQuarantine: false,
+    canRemoveSharedMemory: false,
+    canPurgeMemory: false
   };
 }
 function emptyWorkGraphPanelData() {
@@ -100539,16 +100671,23 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       }
       let quarantineRecords = [];
       let pendingPromotions = [];
+      let advertisedMethods = [];
+      try {
+        advertisedMethods = (await consoleTransport.capabilities()).methods;
+      } catch {
+        advertisedMethods = [];
+      }
+      const canRemoveSharedMemory = advertisedMethods.includes(
+        consoleCommandMethod2(CONSOLE_COMMAND_NAMES2.forgetMemoryInScope)
+      );
+      const canPurgeMemory = advertisedMethods.includes(
+        consoleCommandMethod2(CONSOLE_COMMAND_NAMES2.purgeMemoryRecord)
+      );
       let canDecideQuarantine = false;
       if (experience?.memory?.can_review_quarantine === true) {
-        try {
-          const capabilities = await consoleTransport.capabilities();
-          canDecideQuarantine = capabilities.methods.includes(
-            consoleCommandMethod2(CONSOLE_COMMAND_NAMES2.decideMemoryQuarantine)
-          );
-        } catch {
-          canDecideQuarantine = false;
-        }
+        canDecideQuarantine = advertisedMethods.includes(
+          consoleCommandMethod2(CONSOLE_COMMAND_NAMES2.decideMemoryQuarantine)
+        );
         try {
           const quarantineResult = await executeHeadlessCommand(
             CONSOLE_COMMAND_NAMES2.listMemoryQuarantine,
@@ -100647,6 +100786,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         auditVerdicts: auditVerdicts.value,
         auditVerdictsDenied: auditVerdicts.denied,
         canDecideQuarantine,
+        canRemoveSharedMemory,
+        canPurgeMemory,
         unavailable: false,
         error: null,
         loaded: true
@@ -100817,6 +100958,44 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       );
       void refreshMemoryData();
       return result;
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [baseUrl, refreshMemoryData]
+  );
+  const removeSharedMemoryRecord = import_react107.default.useCallback(
+    async (realm, record12) => {
+      const scope = memoryScopeParam(record12);
+      if (scope === null || scope.kind === "identity") {
+        throw new Error("This record is not in shared memory.");
+      }
+      const result = await executeHeadlessCommand(
+        CONSOLE_COMMAND_NAMES2.forgetMemoryInScope,
+        controlWorkbenchTarget("memory"),
+        { realm, scope, memory_id: record12.id }
+      );
+      void refreshMemoryData();
+      if (!result.deleted) {
+        throw new Error("Nothing was removed: the record is already retired or no longer exists.");
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [baseUrl, refreshMemoryData]
+  );
+  const purgeMemoryRecord = import_react107.default.useCallback(
+    async (realm, record12) => {
+      const scope = memoryScopeParam(record12);
+      if (scope === null) {
+        throw new Error("This record's content cannot be purged here.");
+      }
+      const result = await executeHeadlessCommand(
+        CONSOLE_COMMAND_NAMES2.purgeMemoryRecord,
+        controlWorkbenchTarget("memory"),
+        scope.kind === "identity" ? { realm, identity: scope.key, memory_id: record12.id } : { realm, scope, memory_id: record12.id }
+      );
+      void refreshMemoryData();
+      if (!result.purged) {
+        throw new Error("Nothing was purged: the record's content is already gone.");
+      }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [baseUrl, refreshMemoryData]
@@ -103121,6 +103300,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
             onQueryRecords: queryMemoryRecords,
             onLoadEvidence: loadMemoryEvidence,
             onDecideQuarantine: memoryData.canDecideQuarantine && approvalsDecidable === true && !frontendReadOnly && experience?.console_policy?.read_only !== true ? decideMemoryQuarantine : void 0,
+            onRemoveSharedRecord: memoryData.canRemoveSharedMemory && !frontendReadOnly && experience?.console_policy?.read_only !== true ? removeSharedMemoryRecord : void 0,
+            onPurgeRecord: memoryData.canPurgeMemory && !frontendReadOnly && experience?.console_policy?.read_only !== true ? purgeMemoryRecord : void 0,
             onOpenGating: (
               // Only offered where the nav itself offers gating — on runtimes
               // without a mob control surface (or with gating hidden) the

@@ -2595,7 +2595,7 @@ async fn a_child_mob_restores_its_members_as_the_hosts_member_restore_says() {
             );
             sleep(Duration::from_millis(50)).await;
         }
-        runtime.shutdown().await;
+        custody_wait::teardown_settled(&runtime.shutdown().await);
     }
 }
 

@@ -10,7 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 Memory operator controls: a limit on where the memory steward writes, a
 supported removal of a record from shared memory, and a purge of a retired
 record's content. Review your access rules before upgrading (the Upgrade
-entry under Unreleased), and see Breaking under Unreleased.
+entry on memory access rules), and see the two Breaking entries on the
+memory steward.
 
 ### Breaking
 
@@ -37,11 +38,17 @@ entry under Unreleased), and see Breaking under Unreleased.
   or add a deny rule for `agent.memory.admin` or `mob.memory.delete`,
   where the people it names should not hold the action. Administrators
   hold all of them. Nothing else is to do for an existing configuration.
-  Before a rollback to 0.9.16 or earlier, remove `mob.memory.delete` from
-  the access rules (an earlier Meta refuses a rule that names an action it
-  does not know) and `write_scopes` from the steward block. The memory
-  database needs no migration and stays readable by 0.9.16 and earlier: a
-  purged record reads there as a tombstoned record with empty text.
+  Before going back to an earlier release, remove the access action
+  `mob.memory.delete` from the access rules and the steward key
+  `agent_memory.steward.write_scopes` from the configuration: every
+  release from 0.9.9 to 0.9.18, 0.9.17 and 0.9.18 among them, knows
+  neither, and refuses an access rule that names an action it does not
+  know and a steward block that holds a key it does not support. The
+  memory database takes no new form: this release adds no migration and
+  no column, and a purged record is the row it was, tombstoned or
+  superseded, with its text emptied as the Added entry on the purge
+  describes. A purge cannot be undone on any release: going back does
+  not bring the blanked text back.
 
 ### Added
 

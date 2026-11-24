@@ -628,10 +628,11 @@ class HoldTests(GuardTest):
         # --write refuses it too, and moves nothing.
         manifest = '[project]\nname = "demo-py"\nversion = "1.4.2"\ndependencies = ["demo-meta==1.4.1"]\n'
         self.tree("1.4.2", self.HELD, match=None)
-        self.repo.write("connect/py/pyproject.toml", manifest)
+        moved = self.repo.write("connect/py/pyproject.toml", manifest)
         code, out, err = self.repo.run(write=True)
         self.assertEqual((code, out, err), (2, "", refused))
-        self.assertEqual((self.repo.root / "connect/py/pyproject.toml").read_text(), manifest)
+        self.assertEqual(moved.read_text(), manifest)
+        moved.unlink()
         # A hold of a match alone stays a hold: the context is the optional part.
         self.tree("1.4.2", self.PLAIN, context=None)
         self.assertIn("1 allow entries", self.assertClean())

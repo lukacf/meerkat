@@ -359,6 +359,10 @@ quarantined mobs through `mob/list` and the MCP `meerkat_mob_list` tool (see
 
 ### `delegate`: its wait and how it ends
 
+This section describes `delegate` from the release that carries this change.
+It does not describe 0.9.18: for a `delegate` call that times out in 0.9.18,
+see [Fast Path: Delegate](/guides/mobs#fast-path-delegate).
+
 `delegate` seats a helper in the calling session's implicit mob
 (`implicit-<session id>`), runs the helper's one turn, returns the helper's
 bounded result, and retires the helper. The tool owns its wait:

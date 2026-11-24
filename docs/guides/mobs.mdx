@@ -90,7 +90,19 @@ that should report back.
 rkat run --tools full "Ask one helper to inspect the test failure, then summarize what it found."
 ```
 
-A delegate helper is ephemeral: it is retired after its one task. The call
+A delegate helper is ephemeral: it is retired after its one task. What
+becomes of a helper whose call ends before the helper has answered differs
+by release.
+
+In 0.9.18 the generic `delegate` timeout does not return a helper ID or say
+whether cleanup finished. There may be no helper yet. If the call is dropped
+after its retirement guard is armed, the runtime tries to retire the helper
+in the background; it is not guaranteed either to stay seated or to have
+been retired when the caller sees the timeout.
+
+The owned wait and the typed error in the rest of this paragraph are not in
+0.9.18: they come with the release that carries this change. From that
+release the call
 owns its wait: what the tool call's time limit allows (ten minutes by
 default), or a shorter `max_run_secs`. When the wait ends, or the calling
 turn is interrupted, before the helper has answered, the helper's run is

@@ -61,17 +61,23 @@ them.
   `web_search`) has none, since governance turns the provider's own tools off.
   - Before setting the key, its limits with the released versions, each
     by the evidence it rests on.
-    - A profile that does not set the key writes no new key in any stored
-      or wire form (a test of this change asserts it).
+    - No new key is written when neither the profile sets the key nor a
+      spawn's own web search override is kept for the member (a test of
+      this change asserts it for a profile that does not set the key). A
+      kept override is stored in the member's stored profile, which the
+      mob profile struct named next reads; a placed member's spec carries
+      it in its overlay only.
     - By source, for 0.9.15, 0.9.16, 0.9.17 and 0.9.18, whose three
       deciding source files are byte-identical: the mob profile struct
       (`ToolConfig`) tolerates unknown keys and does not know this one, so
       a set key is ignored there and is not preserved when the profile is
       read into that struct and written again: `web_search = false` is not
-      enforced by that field. Do not rely on `web_search=false` in a JSON
-      mob profile to keep search disabled after a downgrade to 0.9.16. The
-      strict forms reject the unknown key: the portable stored spec of a
-      placed member (`PortableToolConfig`) and the two wire profile structs
+      enforced by that field. So, by source and not as an observed result
+      of running those four releases: do not rely on `web_search=false` in
+      a JSON mob profile to keep search disabled after a downgrade to
+      0.9.15, 0.9.16, 0.9.17 or 0.9.18. The strict forms reject the unknown
+      key: the portable stored spec of a placed member
+      (`PortableToolConfig`) and the two wire profile structs
       (`WireMobToolConfig`, `MobToolConfigInput`).
     - Observed on 0.9.16 only, with a debug build made from the 0.9.16 tag
       (not the published binary). A hand-written JSON mob profile that

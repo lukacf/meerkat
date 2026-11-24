@@ -334,14 +334,27 @@ impl WorkGraphResumeGate {
     /// error's kind and the realm and namespace the gate reads, the names
     /// last as in [`Self::claim_scan_cut`]. The error's own text is not in
     /// it: a store may print a path, an id or anything else there, and the
-    /// reason is shown to a caller.
+    /// reason is shown to a caller. The two names are the only text in the
+    /// reason that the gate did not write ([`Self::names_shown`]).
     fn read_fault(&self, error: &WorkGraphError) -> ResumeCheck {
         ResumeCheck::Unavailable(format!(
-            "the WorkGraph could not be read: {}; no verdict was drawn; realm '{}' namespace '{}'",
+            "the WorkGraph could not be read: {}; no verdict was drawn; {}",
             read_fault_kind(error),
-            self.service.default_realm_id(),
-            self.service.default_namespace(),
+            self.names_shown(),
         ))
+    }
+
+    /// The realm and the namespace this gate reads, as each unavailable
+    /// reason ends: the only text in such a reason that the gate did not
+    /// write. It comes from the service the gate was built over, whose realm
+    /// id is any string, so every control character in the two names is
+    /// replaced: the reason is clean whatever they hold.
+    fn names_shown(&self) -> String {
+        format!(
+            "realm '{}' namespace '{}'",
+            without_control_characters(self.service.default_realm_id()),
+            without_control_characters(self.service.default_namespace().as_str()),
+        )
     }
 
     async fn decide(
@@ -353,7 +366,7 @@ impl WorkGraphResumeGate {
         // neither name the run's item nor treat the run as one without
         // attention: it cannot decide. Why it does not decode is the
         // decoder's text: it goes to the log, and the reason is the gate's
-        // own sentence.
+        // own sentence, with the two names as its only other text.
         if let Some(decode_error) = worker.attention_projection_unreadable {
             tracing::warn!(
                 mob_id = %worker.mob_id,
@@ -366,9 +379,8 @@ impl WorkGraphResumeGate {
             return Ok(ResumeCheck::Unavailable(format!(
                 "the run's WorkGraph attention projection does not decode, so the resume gate \
                  can neither name the run's work item nor treat the run as one without \
-                 attention; no verdict was drawn; realm '{}' namespace '{}'",
-                self.service.default_realm_id(),
-                self.service.default_namespace(),
+                 attention; no verdict was drawn; {}",
+                self.names_shown(),
             )));
         }
         let keys = WorkerKeys::of(worker);
@@ -544,17 +556,18 @@ impl WorkGraphResumeGate {
     /// an operator: it names the list by the realm and namespace the gate
     /// reads, the number of pages read and the time waited, and nothing of
     /// any item. The names come last: where a long reason is cut for
-    /// display, what was slow, the counts and the times are kept.
+    /// display, what was slow, the counts and the times are kept. They are
+    /// the only text in the reason that the gate did not write
+    /// ([`Self::names_shown`]).
     fn claim_scan_cut(&self, pages_read: usize, waited: Duration) -> ResumeCheck {
         ResumeCheck::Unavailable(format!(
             "the WorkGraph open work item list was too slow for the resume gate's claim scan: \
              {pages_read} page(s) of up to {CLAIM_SCAN_PAGE} items read in {} ms, scan budget \
              {} ms; the scan was ended, no verdict was drawn from the pages read and nothing \
-             was written; realm '{}' namespace '{}'",
+             was written; {}",
             waited.as_millis(),
             CLAIM_SCAN_BUDGET.as_millis(),
-            self.service.default_realm_id(),
-            self.service.default_namespace(),
+            self.names_shown(),
         ))
     }
 
@@ -640,6 +653,21 @@ fn terminal_status_name(status: WorkStatus) -> Option<&'static str> {
         WorkStatus::Failed => Some("failed"),
         WorkStatus::Open | WorkStatus::InProgress | WorkStatus::Blocked => None,
     }
+}
+
+/// `name` with every control character replaced by `?`, for a reason that is
+/// shown to a caller: an escape sequence, a line break or a NUL in a name
+/// stays out of it.
+fn without_control_characters(name: &str) -> String {
+    name.chars()
+        .map(|character| {
+            if character.is_control() {
+                '?'
+            } else {
+                character
+            }
+        })
+        .collect()
 }
 
 /// The kind of a WorkGraph read fault, for the gate's reason: the error's
@@ -1955,6 +1983,48 @@ mod tests {
             assert!(
                 kept.contains(&part),
                 "the cut reason holds \"{part}\": {kept}"
+            );
+        }
+    }
+
+    /// The realm id and the namespace are the only text in an unavailable
+    /// reason that the gate did not write, and the service takes any string
+    /// for a realm id. Whatever it holds, no reason carries a control
+    /// character: each one is replaced.
+    #[tokio::test]
+    async fn an_unavailable_reason_holds_no_control_character_of_a_name() {
+        let realm = "mob.\u{1b}[31mred\r\nsecond line\ttab\u{0}";
+        let store: Arc<dyn WorkGraphStore> = Arc::new(MemoryWorkGraphStore::new());
+        let gate = WorkGraphResumeGate::new(WorkGraphService::with_scope(
+            store,
+            realm,
+            WorkNamespace::default(),
+        ));
+        let worker = Worker::named(WORKER);
+
+        let scan = gate.claim_scan_cut(1, Duration::from_secs(7));
+        let fault = gate.read_fault(&WorkGraphError::Store("down".to_string()));
+        let undecodable = gate
+            .check_worker(ResumingWorker {
+                attention_projection_unreadable: Some("bad"),
+                ..worker.resuming(None)
+            })
+            .await;
+        for (which, check) in [
+            ("a cut scan", scan),
+            ("a failed read", fault),
+            ("a projection that does not decode", undecodable),
+        ] {
+            let ResumeCheck::Unavailable(reason) = &check else {
+                panic!("{which} answers unavailable: {check:?}");
+            };
+            assert!(
+                !reason.chars().any(char::is_control),
+                "the reason of {which} holds no control character: {reason:?}"
+            );
+            assert!(
+                reason.ends_with("realm 'mob.?[31mred??second line?tab?' namespace 'default'"),
+                "the reason of {which} ends with the two names, cleaned: {reason:?}"
             );
         }
     }

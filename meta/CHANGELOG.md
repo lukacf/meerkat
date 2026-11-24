@@ -40,7 +40,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `durable resume gate: a WorkGraph read failed` and
   `durable resume gate: the run's WorkGraph attention projection does not
   decode`. A reader that matched the old reason text for either case finds
-  it there. The verdicts are unchanged.
+  it there. The realm and the namespace are the only text in an unavailable
+  reason that the gate does not write itself; they come last in it, and a
+  control character in either is replaced by `?`. The verdicts are
+  unchanged.
 
 ## [0.9.18] - 2026-11-22
 

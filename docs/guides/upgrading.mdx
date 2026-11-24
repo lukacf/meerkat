@@ -1140,6 +1140,12 @@ source, not run).
 Meta 0.9.15 pins Core `=0.9.15`. The full list is in `meta/CHANGELOG.md`
 under `## [0.9.15]`.
 
+- If a Meta 0.9.9 through 0.9.14 gateway respawned an agent or rebuilt it
+  during `meta/compact_member`, upgrading to 0.9.15 does not restore the
+  agent's ability to list or manage mobs it created before that rebuild.
+  See "Agents that created mobs and were seated again on 0.9.15" under
+  [Rolling back to 0.9.14](#rolling-back-to-0-9-14).
+
 - Identity policy: an enabled policy that names an approval outcome or a
   preparation mode this release does not carry out is refused at init. That
   is the approval outcome `notify` or `review`, in a rule or as the default,

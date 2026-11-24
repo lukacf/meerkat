@@ -56,7 +56,7 @@ downloads remain unpromoted and a subsequent launch retries the pair.
 Browser Tab
 ├── Meerkat Mob (4 agents, comms-wired)
 │   ├── Alpha Meerkat (orchestrator) → claude-opus-5-5
-│   ├── Planner → gpt-6-astra
+│   ├── Planner → gpt-6.2-astra
 │   ├── Coder → gpt-5.3-codex
 │   └── Reviewer → gemini-4-hydrogen
 ├── meerkat-web-runtime (Rust WASM)

@@ -4,7 +4,7 @@ description: "TypeScript SDK for Meta with type-safe contracts, parity tests, an
 icon: "js"
 ---
 
-*Mirrored from Meerkat Meta main at [f853345e4f7a](https://github.com/lukacf/meerkat/commit/f853345e4f7a157b561d8c68e8d51908c031508c) on 2026-11-24; Meta version 0.9.18 at that commit.*
+*Mirrored from Meerkat Meta main at [5f09cda4ef4a](https://github.com/lukacf/meerkat/commit/5f09cda4ef4ac96d41b72f5fe7413b7da4c4454c) on 2026-11-24; Meta version 0.9.18 at that commit.*
 
 The TypeScript SDK (`@rkat/meta-sdk`) provides type-safe access to the Meta JSON-RPC gateway from Node.js.
 
@@ -43,7 +43,7 @@ Then create `config/mob.toml`:
 id = "typescript-quickstart"
 
 [profiles.worker]
-model = "gpt-6-astra"
+model = "gpt-6.2-astra"
 runtime_mode = "turn_driven"
 external_addressable = true
 
@@ -105,6 +105,11 @@ turn it started (see [Waiting for a turn](#waiting-for-a-turn)); a build
 without a roster provider refuses it with
 `identity-first runtime not configured`. Run again, the program reuses
 the state under `.meta/state`.
+
+The same program as a project to copy is
+[`008-typescript-quickstart`](https://github.com/lukacf/meerkat/tree/main/meta/examples/008-typescript-quickstart).
+It sends twice, the second time with `sendAndWaitOutcome`, and run twice it
+shows that the agent kept what the first run told it.
 
 ### Knowledge memory and a Console config
 
@@ -218,7 +223,7 @@ later occurrences stay pending.
 
 ### Upgrading a host
 
-These TypeScript methods are unreleased; use the SDK from this checkout.
+These TypeScript methods are in the SDK from 0.9.18.
 They work with Meta gateways 0.9.15 and 0.9.16; compatibility with earlier
 gateway versions is not established. At the next start, an occurrence that
 came due while the gateway was stopped is delivered to the handler the

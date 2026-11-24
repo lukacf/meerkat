@@ -100,7 +100,7 @@ require_peer_auth = true                     # default true
 - Since 0.9.4 a steer is durable: its notice is written into the running
   turn's transcript at the next model boundary, every later model request of
   the run sees it, it commits with the run, and one `peer_content_ingested`
-  event is published for it. Unreleased (after 0.9.17): at a boundary where
+  event is published for it. Since 0.9.18: at a boundary where
   a steer has registered its claim, the eligible waiting steers join it, in
   admission order, each with its own row and event (0.9.17: one per
   boundary); an acknowledged send is not inclusion in the next request. A

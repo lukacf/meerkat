@@ -160,11 +160,6 @@ cd examples
 npm run mdm:real-target-smoke
 ```
 
-`mdm:upgrade-meerkat` is an intentional shared dependency-update helper: it
-rewrites the Rust crate's direct Meerkat normal/dev dependencies and updates
-their lockfile entries after a registry precheck. It is not a normal example
-setup step.
-
 Full operator validation requires at least one local or remote target runtime
 with unrestricted shell tools enabled on the target side. The useful prompt is
 something like: "Ask every target what machine it is running on." The answer

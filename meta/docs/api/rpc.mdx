@@ -3932,9 +3932,10 @@ context. Providers that do not support it do not advertise this method in
 A record of a member private to a person, which lies under its owner and its name, is retired under the member's name: from a host by the application, whether or not the member still exists; on the Console by its owner, while the Console knows the member, or by an access administrator, whom the access rules allow `agent.memory.delete` on it. A note that was set aside from a plain member name is retired under that name where it is not retired yet, from a host or by an access administrator. Any other request is answered as for a member that holds no such record.
 
 `forget` is not erasure. What becomes of the stored text is the provider's
-to say, and the bundled SQLite store erases nothing: it marks the record
-tombstoned and keeps its title, description, body, tags and provenance in
-the realm's database. The Console's Memory panel still lists the record
+to say, and the bundled SQLite store erases nothing on a `forget`: it marks
+the record tombstoned and keeps its title, description, body, tags and
+provenance in the realm's database until the record is purged. The Console's
+Memory panel still lists the record
 (`meta/memory/panel/records`, without its body) and still returns its body
 (`meta/memory/panel/record`): with access control enforced, to a caller with
 `agent.memory.read` and `agent.view` on the identity (an access file in
@@ -3943,7 +3944,12 @@ wherever a rule grants, or denies, `agent.view`), and
 `memory.quarantine.review` as well for a record that was ever quarantined;
 otherwise to any Console caller. In both cases the memory of an agent
 private to a person is shown to no other person except an access admin named
-in `admins`. The bundled store has no call that erases one record; see
+in `admins`. A purge is a call of its own, separate from `forget`:
+[`meta/agent_memory/purge`](#meta%2Fagent_memory%2Fpurge) blanks the content
+of a retired record on a gateway that advertises it in `meta/capabilities`,
+and a release before that call has none that erases one record. See
+[Removing and purging records](/concepts/memory#removing-and-purging-records)
+for what a purge blanks and what it leaves, and
 [Agent memory injection](/concepts/memory#agent-memory-injection) for what
 stays and how a realm's memory is removed.
 
@@ -3959,7 +3965,7 @@ stays and how a realm's memory is removed.
 | Field | Type | Description |
 |-------|------|-------------|
 | `memory_id` | `string` | Requested memory id |
-| `deleted` | `boolean` | `true` when this call withdrew the record, `false` when there was nothing to withdraw: an unknown id, a record already forgotten, or a record of another identity. With the bundled store `true` means the record was marked tombstoned; its text stays in the store |
+| `deleted` | `boolean` | `true` when this call withdrew the record, `false` when there was nothing to withdraw: an unknown id, a record already forgotten, or a record of another identity. With the bundled store `true` means the record was marked tombstoned; its text stays in the store until it is purged ([`meta/agent_memory/purge`](#meta%2Fagent_memory%2Fpurge)) |
 </Accordion>
 
 ### `meta/agent_memory/forget_in_scope`

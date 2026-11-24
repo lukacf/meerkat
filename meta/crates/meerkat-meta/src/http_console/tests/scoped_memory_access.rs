@@ -189,3 +189,139 @@ async fn console_forget_in_scope_answers_false_for_another_mobs_key() -> RowResu
     );
     Ok(())
 }
+
+/// The grants through a wildcard, each held by a caller with no other rule.
+/// A pattern that covers `mob.memory.delete` (`mob.memory.*`, `mob.*`, `*`)
+/// removes a record of the mob's shared memory. A pattern of the agent
+/// family (`agent.memory.*`, `agent.*`) covers no mob action and removes
+/// none there; with no agent named it covers `agent.memory.delete` and so
+/// removes a realm record, which a pattern of the mob family does not.
+/// Both removals need their grant with no resource named: a rule that
+/// selects a resource, even the agents of every mob, removes neither.
+#[tokio::test]
+async fn console_forget_in_scope_is_granted_by_each_wildcard_that_covers_its_action() -> RowResult {
+    /// (the caller, its one pattern, covers the mob's action, covers the
+    /// realm's action)
+    const CALLERS: [(&str, &str, bool, bool); 5] = [
+        ("dana@example.test", "mob.memory.*", true, false),
+        ("erin@example.test", "mob.*", true, false),
+        ("frank@example.test", "*", true, true),
+        ("gina@example.test", "agent.memory.*", false, true),
+        ("hank@example.test", "agent.*", false, true),
+    ];
+    /// The caller whose one rule holds every action for the agents of
+    /// every mob: a rule with a resource selector.
+    const SELECTING: &str = "ivan@example.test";
+    let fixture = ConsoleMemoryFixture::new("console-forget-in-scope-wildcards").await?;
+    for index in 0..=CALLERS.len() {
+        fixture
+            .seed(
+                &format!("mem-shared-{index}"),
+                mob_scope(),
+                &format!("Shared note {index}"),
+                &format!("shared body {index}"),
+            )
+            .await;
+        fixture
+            .seed(
+                &format!("mem-realm-{index}"),
+                realm_scope(),
+                &format!("Realm note {index}"),
+                &format!("realm body {index}"),
+            )
+            .await;
+    }
+    let mut rules: Vec<AccessRule> = CALLERS
+        .iter()
+        .enumerate()
+        .map(|(index, (subject, pattern, _, _))| {
+            allow(&format!("wildcard-{index}"), subject, &[*pattern], &[])
+        })
+        .collect();
+    rules.push(AccessRule {
+        id: "wildcard-for-the-agents-of-every-mob".to_string(),
+        subjects: vec![SELECTING.to_string()],
+        actions: vec!["*".to_string()],
+        mobs: vec!["*".to_string()],
+        ..AccessRule::default()
+    });
+    let controller = AccessController::new(AccessControlConfig {
+        enabled: true,
+        admins: vec![ADMIN.to_string()],
+        rules,
+        ..AccessControlConfig::default()
+    })?;
+
+    // The rule that selects a resource: neither shared scope.
+    let selecting = ConsoleCaller::person(&controller, SELECTING);
+    let shared_id = format!("mem-shared-{}", CALLERS.len());
+    let realm_id = format!("mem-realm-{}", CALLERS.len());
+    let mob = fixture
+        .rpc_as(&selecting, FORGET_IN_SCOPE, mob_params(MOB, &shared_id))
+        .await;
+    assert_denied(&mob, crate::access::ACTION_MOB_MEMORY_DELETE);
+    let realm = fixture
+        .rpc_as(&selecting, FORGET_IN_SCOPE, realm_params(&realm_id))
+        .await;
+    assert_denied(&realm, crate::access::ACTION_AGENT_MEMORY_DELETE);
+    for id in [&shared_id, &realm_id] {
+        assert_eq!(
+            fixture.record(id).await.status,
+            RecordStatus::Active,
+            "{id}"
+        );
+    }
+
+    for (index, (subject, pattern, covers_mob, covers_realm)) in CALLERS.iter().enumerate() {
+        let caller = ConsoleCaller::person(&controller, subject);
+        let shared_id = format!("mem-shared-{index}");
+        let realm_id = format!("mem-realm-{index}");
+
+        let mob = fixture
+            .rpc_as(&caller, FORGET_IN_SCOPE, mob_params(MOB, &shared_id))
+            .await;
+        if *covers_mob {
+            assert_eq!(
+                mob["result"],
+                json!({ "memory_id": shared_id, "deleted": true }),
+                "{pattern}: {mob:#?}"
+            );
+            assert_eq!(
+                fixture.record(&shared_id).await.status,
+                RecordStatus::Tombstoned,
+                "{pattern}"
+            );
+        } else {
+            assert_denied(&mob, crate::access::ACTION_MOB_MEMORY_DELETE);
+            assert_eq!(
+                fixture.record(&shared_id).await.status,
+                RecordStatus::Active,
+                "{pattern}"
+            );
+        }
+
+        let realm = fixture
+            .rpc_as(&caller, FORGET_IN_SCOPE, realm_params(&realm_id))
+            .await;
+        if *covers_realm {
+            assert_eq!(
+                realm["result"],
+                json!({ "memory_id": realm_id, "deleted": true }),
+                "{pattern}: {realm:#?}"
+            );
+            assert_eq!(
+                fixture.record(&realm_id).await.status,
+                RecordStatus::Tombstoned,
+                "{pattern}"
+            );
+        } else {
+            assert_denied(&realm, crate::access::ACTION_AGENT_MEMORY_DELETE);
+            assert_eq!(
+                fixture.record(&realm_id).await.status,
+                RecordStatus::Active,
+                "{pattern}"
+            );
+        }
+    }
+    Ok(())
+}

@@ -690,3 +690,120 @@ async fn console_purge_answers_the_owner_of_an_ended_private_member_as_absent_an
     }
     Ok(())
 }
+
+/// The grant through a wildcard, each held by a caller with no other rule
+/// and with no agent named. A pattern that covers `agent.memory.admin`
+/// (`agent.memory.*`, `agent.*`, `*`) purges an agent's retired record and
+/// a shared one, as the action named exactly does. A pattern of the mob
+/// family (`mob.memory.*`, `mob.*`) covers no agent action and purges
+/// neither. The purge of a shared record needs the grant with no resource
+/// named: a rule that selects a resource, even the agents of every mob,
+/// purges the record of an agent it selects and no shared one.
+#[tokio::test]
+async fn console_purge_is_granted_by_each_wildcard_that_covers_agent_memory_admin() -> RowResult {
+    /// (the caller, its one pattern, covers `agent.memory.admin`)
+    const CALLERS: [(&str, &str, bool); 5] = [
+        ("dana@example.test", "agent.memory.*", true),
+        ("erin@example.test", "agent.*", true),
+        ("frank@example.test", "*", true),
+        ("gina@example.test", "mob.memory.*", false),
+        ("hank@example.test", "mob.*", false),
+    ];
+    /// The caller whose one rule holds every action for the agents of
+    /// every mob: a rule with a resource selector.
+    const SELECTING: &str = "ivan@example.test";
+    let fixture = ConsoleMemoryFixture::new("console-purge-wildcards").await?;
+    for index in 0..=CALLERS.len() {
+        fixture
+            .seed_retired(
+                &format!("gone-agent-{index}"),
+                identity_scope(SHARED),
+                &format!("Home address {index}"),
+                &format!("{index} Example Lane"),
+            )
+            .await;
+        fixture
+            .seed_retired(
+                &format!("gone-mob-{index}"),
+                mob_scope(),
+                &format!("Customer note {index}"),
+                &format!("a detail of customer {index}"),
+            )
+            .await;
+    }
+    let mut rules: Vec<AccessRule> = CALLERS
+        .iter()
+        .enumerate()
+        .map(|(index, (subject, pattern, _))| {
+            allow(&format!("wildcard-{index}"), subject, &[*pattern], &[])
+        })
+        .collect();
+    rules.push(AccessRule {
+        id: "wildcard-for-the-agents-of-every-mob".to_string(),
+        subjects: vec![SELECTING.to_string()],
+        actions: vec!["*".to_string()],
+        mobs: vec!["*".to_string()],
+        ..AccessRule::default()
+    });
+    let controller = AccessController::new(AccessControlConfig {
+        enabled: true,
+        admins: vec![ADMIN.to_string()],
+        rules,
+        ..AccessControlConfig::default()
+    })?;
+    record_member(&controller, SHARED, None);
+
+    for (index, (subject, pattern, covers)) in CALLERS.iter().enumerate() {
+        let caller = ConsoleCaller::person(&controller, subject);
+        let agent_id = format!("gone-agent-{index}");
+        let mob_id = format!("gone-mob-{index}");
+        let of_the_agent = fixture
+            .rpc_as(&caller, PURGE, identity_params(SHARED, &agent_id))
+            .await;
+        let of_the_mob = fixture.rpc_as(&caller, PURGE, mob_params(&mob_id)).await;
+        if *covers {
+            assert_eq!(
+                of_the_agent["result"],
+                purged(&agent_id),
+                "{pattern}: {of_the_agent:#?}"
+            );
+            assert_eq!(
+                of_the_mob["result"],
+                purged(&mob_id),
+                "{pattern}: {of_the_mob:#?}"
+            );
+        } else {
+            assert_denied(&of_the_agent, crate::access::ACTION_AGENT_MEMORY_ADMIN);
+            assert_denied(&of_the_mob, crate::access::ACTION_AGENT_MEMORY_ADMIN);
+        }
+        for id in [&agent_id, &mob_id] {
+            let record = fixture.record(id).await;
+            assert_eq!(record.status, RecordStatus::Tombstoned, "{pattern}: {id}");
+            assert_eq!(
+                record.body.is_empty() && record.title.is_empty(),
+                *covers,
+                "{pattern}: {record:#?}"
+            );
+        }
+    }
+
+    // The rule that selects a resource: the record of an agent it selects,
+    // and no shared record.
+    let selecting = ConsoleCaller::person(&controller, SELECTING);
+    let agent_id = format!("gone-agent-{}", CALLERS.len());
+    let mob_id = format!("gone-mob-{}", CALLERS.len());
+    let of_the_agent = fixture
+        .rpc_as(&selecting, PURGE, identity_params(SHARED, &agent_id))
+        .await;
+    assert_eq!(
+        of_the_agent["result"],
+        purged(&agent_id),
+        "{of_the_agent:#?}"
+    );
+    let of_the_mob = fixture.rpc_as(&selecting, PURGE, mob_params(&mob_id)).await;
+    assert_denied(&of_the_mob, crate::access::ACTION_AGENT_MEMORY_ADMIN);
+    let kept = fixture.record(&mob_id).await;
+    assert_eq!(kept.status, RecordStatus::Tombstoned, "{kept:#?}");
+    assert_ne!(kept.body, "", "{kept:#?}");
+    Ok(())
+}

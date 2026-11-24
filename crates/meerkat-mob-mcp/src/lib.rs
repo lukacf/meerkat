@@ -47107,7 +47107,7 @@ mod tests {
             let root = tempfile::tempdir().expect("tempdir");
             let lazy = lazy_state(&svc, root.path());
             let mob_id = lazy
-                .mob_create_definition(explicit_definition("destroyed-here"))
+                .mob_create_definition(explicit_definition("destroy-read-destroyed-here"))
                 .await
                 .expect("create the mob");
             assert!(
@@ -47135,7 +47135,7 @@ mod tests {
             );
 
             let again = lazy
-                .mob_create_definition(explicit_definition("destroyed-here"))
+                .mob_create_definition(explicit_definition("destroy-read-destroyed-here"))
                 .await
                 .expect("create a mob under the id again");
             assert_eq!(again, mob_id);
@@ -47221,14 +47221,18 @@ mod tests {
             let svc = Arc::new(MockSessionSvc::new());
             let root = tempfile::tempdir().expect("tempdir");
             let mobs = sorted(
-                mobs_of_an_earlier_process(&svc, root.path(), &["asked-for", "not-asked-for"])
-                    .await,
+                mobs_of_an_earlier_process(
+                    &svc,
+                    root.path(),
+                    &["creation-read-asked-for", "creation-read-not-asked-for"],
+                )
+                .await,
             );
             let lazy = lazy_state(&svc, root.path());
             assert!(inventory(&lazy).await.dormant_creation.is_empty());
             assert_eq!(lazy.store_opens_for_test(), 0);
 
-            let asked = MobId::from("asked-for");
+            let asked = MobId::from("creation-read-asked-for");
             assert_eq!(
                 lazy.unloaded_mob_creation(&asked)
                     .await
@@ -47289,12 +47293,12 @@ mod tests {
             let staffed = staffed_mobs_of_an_earlier_process(
                 &svc,
                 root.path(),
-                &["asked-for", "not-asked-for"],
+                &["member-read-asked-for", "member-read-not-asked-for"],
             )
             .await;
             let (asked, incarnation, _) = staffed
                 .iter()
-                .find(|(mob_id, _, _)| mob_id.as_str() == "asked-for")
+                .find(|(mob_id, _, _)| mob_id.as_str() == "member-read-asked-for")
                 .cloned()
                 .expect("the mob that is asked for");
             let lazy = lazy_state(&svc, root.path());
@@ -47365,12 +47369,20 @@ mod tests {
         async fn the_read_of_who_created_one_dormant_mob_keeps_its_incarnation_too() {
             let svc = Arc::new(MockSessionSvc::new());
             let root = tempfile::tempdir().expect("tempdir");
-            mobs_of_an_earlier_process(&svc, root.path(), &["asked-for", "not-asked-for"]).await;
+            mobs_of_an_earlier_process(
+                &svc,
+                root.path(),
+                &[
+                    "incarnation-kept-asked-for",
+                    "incarnation-kept-not-asked-for",
+                ],
+            )
+            .await;
             let lazy = lazy_state(&svc, root.path());
             assert!(inventory(&lazy).await.dormant_incarnation.is_empty());
             assert_eq!(lazy.store_opens_for_test(), 0);
 
-            let asked = MobId::from("asked-for");
+            let asked = MobId::from("incarnation-kept-asked-for");
             assert_eq!(
                 lazy.unloaded_mob_creation(&asked)
                     .await
@@ -49727,8 +49739,12 @@ mod tests {
 
             let svc = Arc::new(MockSessionSvc::new());
             let root = tempfile::tempdir().expect("tempdir");
-            let staffed =
-                staffed_mobs_of_an_earlier_process(&svc, root.path(), &["destroyed-here"]).await;
+            let staffed = staffed_mobs_of_an_earlier_process(
+                &svc,
+                root.path(),
+                &["wake-refused-destroyed-here"],
+            )
+            .await;
             let (mob_id, _, bound) = staffed[0].clone();
             // A second session that carries the member's binding: the
             // destroy retires the member, and a retired member's own
@@ -49881,7 +49897,8 @@ mod tests {
             let svc = Arc::new(MockSessionSvc::new());
             let root = tempfile::tempdir().expect("tempdir");
             let staffed =
-                staffed_mobs_of_an_earlier_process(&svc, root.path(), &["binding-unread"]).await;
+                staffed_mobs_of_an_earlier_process(&svc, root.path(), &["wake-binding-unread"])
+                    .await;
             let svc = Arc::new(svc.cold_restart().await);
             let (mob_id, _, session) = staffed[0].clone();
             let lazy = lazy_state(&svc, root.path());
@@ -50763,7 +50780,8 @@ mod tests {
         async fn a_member_lookup_that_cannot_read_the_binding_refuses_while_a_mob_is_dormant() {
             let svc = Arc::new(MockSessionSvc::new());
             let root = tempfile::tempdir().expect("tempdir");
-            let mobs = mobs_of_an_earlier_process(&svc, root.path(), &["binding-unread"]).await;
+            let mobs =
+                mobs_of_an_earlier_process(&svc, root.path(), &["lookup-binding-unread"]).await;
             let lazy = lazy_state(&svc, root.path());
             assert_eq!(inventory(&lazy).await.dormant, mobs);
             let session = SessionId::new();

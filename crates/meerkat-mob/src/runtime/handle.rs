@@ -6867,7 +6867,9 @@ impl MobHandle {
     /// (accepted inputs that are queued, held or running, an open live
     /// channel) is read only when the actor's own counts are idle, for the
     /// members that have a bridge session in this process, and reads as
-    /// none in a build without the runtime adapter.
+    /// none in a build without the runtime adapter. The step between the
+    /// actor's delivery of a peer message and the member's accepted input
+    /// is not traced for it.
     ///
     /// It costs what an idle close costs: it runs on the actor's loop and,
     /// when the actor's own counts are idle, asks the runtime of each

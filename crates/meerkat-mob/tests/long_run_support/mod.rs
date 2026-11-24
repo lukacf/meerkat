@@ -2594,6 +2594,58 @@ pub async fn restart(
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
+        // The mob's handle answers a host's poll with the held worker: its
+        // identity, its session and the killed run, held by the machine,
+        // with the round the gate left undecided and the gate's own reason.
+        // A second poll answers the same round: polls ask nothing.
+        for poll in 1..=2 {
+            let pending = incarnation
+                .mob
+                .members_with_pending_resumed_runs()
+                .await
+                .map_err(|error| format!("the handle's poll of waiting runs: {error}"))?;
+            let [member] = pending.as_slice() else {
+                return Err(format!(
+                    "poll {poll}: the handle lists the one held worker, not {pending:?}"
+                ));
+            };
+            let meerkat_runtime::PendingResumedRunRead::Pending(run) = &member.run else {
+                return Err(format!(
+                    "poll {poll}: the held worker's session is readable: {member:?}"
+                ));
+            };
+            let meerkat_runtime::ResumedRunAdmissionState::Held(held) = &run.admission else {
+                return Err(format!(
+                    "poll {poll}: the handle reads the worker's run held: {member:?}"
+                ));
+            };
+            let undecided = held
+                .undecided
+                .as_ref()
+                .map(|undecided| (undecided.rounds, undecided.cause, undecided.reason.as_str()));
+            if member.agent_identity != meerkat_mob::AgentIdentity::from(WORKER)
+                || run.session_id != session
+                || run.run_id != killed.run.run_id
+                || run.stop_requested
+                || undecided
+                    != Some((
+                        1,
+                        meerkat_runtime::ResumedRunAdmissionUndecidedCause::AnsweredUnavailable,
+                        "the work record is unreachable",
+                    ))
+            {
+                return Err(format!(
+                    "poll {poll}: the handle names the held worker, its session, the killed run \
+                     and the gate's one undecided round, not {member:?}"
+                ));
+            }
+        }
+        let asked = gate.requests().len();
+        if asked != attempts as usize {
+            return Err(format!(
+                "the handle's polls asked the gate nothing: {asked} asks against {attempts}"
+            ));
+        }
     } else if !incarnation
         .wait_terminal(&session, &killed.input, STEP)
         .await

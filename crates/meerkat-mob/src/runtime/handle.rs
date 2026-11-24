@@ -11415,6 +11415,67 @@ impl MobHandle {
         }
     }
 
+    /// The members of this mob whose session marks a run its registration
+    /// has neither resumed nor settled: a run a restart left open, from the
+    /// moment the member's session registers until the run resumes or its
+    /// settlement commits. In identity order.
+    ///
+    /// A host polls this to see a durable worker whose run waits on the
+    /// mob's resume gate ([`crate::DurableResumeGate`]): the entry names the
+    /// member and the run, says whether the machine holds the run because
+    /// the gate could not decide, with the undecided rounds, how the last
+    /// ended and the gate's reason, and whether a stop of the run was asked
+    /// and is not settled yet. The run id is the one
+    /// [`Self::stop_member_run`] takes; [`Self::settle_member_retained_run`]
+    /// ends the run by the member's identity.
+    ///
+    /// Read from the published machine state and the member's runtime in
+    /// memory, with no actor command, no wake, no store call and no change:
+    /// a poll never moves a round count, and it answers for a member whose
+    /// runtime loop makes no pass. A member whose session's state cannot be
+    /// read inside the runtime's read bound is listed as not readable now.
+    /// The [`crate::ControlScope::List`] scope. A placed member (its session
+    /// lives on its host) and a mob without the runtime adapter list none.
+    pub async fn members_with_pending_resumed_runs(
+        &self,
+    ) -> Result<Vec<super::stop_report::MemberPendingResumedRun>, MobError> {
+        let sessions = self.read_published_machine_state(crate::ControlScope::List, |state| {
+            state
+                .member_session_bindings
+                .iter()
+                // A placed member's session lives on its host.
+                .filter(|(identity, _)| !state.member_placement.contains_key(*identity))
+                .map(|(identity, session)| (identity.0.clone(), session.0.clone()))
+                .collect::<Vec<_>>()
+        })?;
+        #[cfg(feature = "runtime-adapter")]
+        {
+            let Some(adapter) = self.runtime_adapter.as_ref() else {
+                return Ok(Vec::new());
+            };
+            let mut pending = Vec::new();
+            for (identity, session) in sessions {
+                let session_id = SessionId::parse(&session).map_err(|error| {
+                    MobError::Internal(format!(
+                        "member '{identity}' holds an invalid session binding: {error}"
+                    ))
+                })?;
+                if let Some(run) = adapter.pending_resumed_run(&session_id).await {
+                    pending.push(super::stop_report::MemberPendingResumedRun {
+                        agent_identity: AgentIdentity::from(identity.as_str()),
+                        run,
+                    });
+                }
+            }
+            Ok(pending)
+        }
+        #[cfg(not(feature = "runtime-adapter"))]
+        {
+            let _ = sessions;
+            Ok(Vec::new())
+        }
+    }
+
     /// Whether this mob's host holds `agent_identity`'s run starts for
     /// `reason`: [`Self::members_holding_run_starts`] for one member, read
     /// the same way (the published machine state and the runtime's hold

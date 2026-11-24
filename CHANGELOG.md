@@ -64,9 +64,9 @@ them.
     - No new key is written when neither the profile sets the key nor a
       spawn's own web search override is kept for the member (a test of
       this change asserts it for a profile that does not set the key). A
-      kept override is stored in the member's stored profile, which the
-      mob profile struct named next reads; a placed member's spec carries
-      it in its overlay only.
+      kept override is stored in a local member's stored profile, which
+      the mob profile struct named next reads; a placed member's portable
+      spec keeps the profile's own value.
     - By source, for 0.9.15, 0.9.16, 0.9.17 and 0.9.18, whose three
       deciding source files are byte-identical: the mob profile struct
       (`ToolConfig`) tolerates unknown keys and does not know this one, so

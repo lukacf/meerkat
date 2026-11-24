@@ -680,26 +680,36 @@ fi
 # A hand-written audit over the same generated model drives one session, one
 # input and two requests through the accepted until-changed request, its
 # refusal while another one is pending, the refusal of a finite request while
-# a switch is pending, the input's admission, the stop and the input's
+# a switch is pending, the denial of a request of either duration whose
+# target refuses the reasoning effort level the session holds, the input's
+# admission, the stop and the input's
 # abandonment, and the completion and the abort in every phase each declares
 # (only their Idle and Stopped arms fire, since nothing attaches, runs or
 # retires the session; all phases of an arm share one generated body), under
-# every generated invariant plus one invariant and four action properties:
+# every generated invariant plus one invariant and six action properties:
 # the pending switch's id holds no denial; an abort withdraws exactly the
 # pending switch and its request's approval entries (no terminal; the phase
 # and every input's facts unchanged), and fires only for the request still
 # pending; a pending switch ends only through its own request; a completion
-# clears it, records it as applied and makes its target the baseline. It
-# requires five witnesses reached (an approved request withdrawn while
+# clears it, records it as applied and makes its target the baseline; a
+# request is staged only on evidence that admits its target, taken on the
+# identity the session holds; a denial for the level fires only on a
+# refusal and records the capability denial alone. It
+# requires seven witnesses reached (an approved request withdrawn while
 # another input is queued, one withdrawn in Stopped after a stop abandoned
 # that input, a request refused while another one is pending, a finite
-# request refused while the other one is pending, one completed in Stopped)
-# and refuses eight seeded defects (--mutants): an abort that records a
+# request refused while the other one is pending, one completed in Stopped,
+# one denied for the level while another one is pending, one staged on
+# the evidence that the target's levels could not be read)
+# and refuses fifteen seeded defects (--mutants): an abort that records a
 # terminal, one that erases the inputs' phases, one without its
 # pending-request guard, one that keeps its request's approval entry, an
 # accept without its pending-switch guard, a completion that keeps the old
 # baseline, an accept without its denied-request guard, a finite refusal
-# without its pending-request guard.
+# without its pending-request guard, an accept without each of its three
+# evidence guards, a level denial without its refusal guard, without its
+# identity witness guard and without its pending-request guard, a level
+# denial that fires on unreadable levels as on a refusal.
 # 9 steps reach every witness.
 switch_turn_withdrawal_audit="${workspace_root}/specs/machines/meerkat_machine/switch_turn_withdrawal_audit.sh"
 if [[ ! -x "${switch_turn_withdrawal_audit}" ]]; then

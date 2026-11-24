@@ -4,7 +4,7 @@ description: "Combine a Meerkat mob with Meta modules into a single managed runt
 icon: "layer-group"
 ---
 
-*Mirrored from Meerkat Meta main at [dca30fbb4416](https://github.com/lukacf/meerkat/commit/dca30fbb4416907692283c67dcf9db1b0480bdf5) on 2026-11-22; Meta version 0.9.17 at that commit.*
+*Mirrored from Meerkat Meta main at [f853345e4f7a](https://github.com/lukacf/meerkat/commit/f853345e4f7a157b561d8c68e8d51908c031508c) on 2026-11-24; Meta version 0.9.18 at that commit.*
 
 The unified runtime is the production entry point for Meta. It bootstraps a Meerkat mob and Meta's module subsystems together, merges their event streams, and manages the combined lifecycle through a single handle.
 
@@ -119,6 +119,58 @@ applies; an enabled host access controller additionally checks
 disabled or unconfigured, that layer adds no restriction. See
 [Access control](/meta/concepts/access-control) for host rules.
 
+The host rules judge a caller in its own mob, through the rules' `mobs`
+selector: an allow that lists no mobs grants in the default mob (the mob the
+launch names) only, a deny that lists none holds in every mob, and a rule
+that lists mobs reaches the callers of those mobs. A caller's mob is the
+top-level mob its mob belongs to. A mob no member owns (one the host created,
+or one a session outside every mob created) is judged as itself.
+A mob a member created (a helper mob, a council, an agent's own mob) is
+judged in the mob of its owner, so the default mob's members and the workers
+of the mobs they create are judged in the default mob. A caller whose mob's
+owner cannot be read is refused rather than judged in a mob that was guessed.
+
+A stable identity is named by its mob and its name: identities are names
+inside a mob, and two mobs of one host may each have an identity of the same
+name. They are two principals with their own documents, grants, denies and
+receipts. In the store, `Principal::Agent` is an identity of the default mob,
+stored as it always was, so a document or a receipt stored before principals
+carried a mob is the default mob's and nothing is rewritten, and
+`Principal::MobAgent` carries the mob of an identity of another mob.
+
+A tool names identities from its caller's side. An identity named without a
+mob is an identity of the caller's own mob, so a tool bundle written for one
+mob works in every mob: a caller of the default mob names the default mob's
+identities, a caller of another mob its own mob's. An identity of another mob
+is named with that mob's id
+(`{"kind":"mob_agent","value":{"mob_id":"<mob id>","identity":"<name>"}}`),
+which is also how a caller of another mob names an identity of the default
+mob. The document services read a write's owner and audiences into the stored
+forms and give a document that is read in the caller's naming, so reading a
+document and writing its owner or access back changes nothing. A worker of a
+mob that a member created (a helper mob, a council, an agent's own mob) names
+the identities of the mob its owner belongs to. If that owner can no longer
+be read, or a mob on the way to its top-level mob is destroyed, quarantined
+or not loaded, a write that names an identity is refused rather than given a
+mob that was guessed (also one whose identities all carry their mob), and a
+document is read with every identity's mob spelled out, the default mob's
+included, which any caller can write back unchanged once its mob can be told.
+A grant or a deny
+that names an identity the caller's mob does not have is stored and reaches
+nobody until that mob has an identity of that name; an owner that names one
+is refused.
+
+Realm-wide audiences span every mob of the host: one realm holds the
+documents of all its mobs, so a document shared with the realm
+(`Audience::Realm`) is open to the members of every mob, and a document the
+realm owns is managed by the realm administrators whatever their mob, not
+only inside the mob whose member shared or created it. Share with a mob
+(`Audience::Mob`) or with identities to stay inside one mob.
+
+The access subject `agent:<identity>` is the default mob's identity. A rule
+cannot yet name another mob's identity by a stable subject; it selects one by
+its mob, identity, role or labels.
+
 Document persistence does not change native member lifetime. In the current
 Meta composition, `delegate` uses an ephemeral child mob and retires the
 helper and its fork descendants when delegation completes. Such members
@@ -133,15 +185,19 @@ storage provenance. Durable document rows alone cannot reconstruct missing
 native creation facts; the extension refuses unavailable authority.
 
 Documents name a mob by its id alone, as their owner (`Owner::Mob`) or in an
-audience grant or deny (`Audience::Mob`), and they outlive the mob. A new mob
-under the id of a destroyed one would inherit what they grant, so the agent
+audience grant or deny (`Audience::Mob`), or through an identity of the mob
+that owns a document or that a grant or a deny names (`Principal::MobAgent`),
+and they outlive the mob. A new mob
+under the id of a destroyed one, and its identities of the same names, would
+inherit what they grant, so the agent
 mob-tool state refuses every create (an agent's `mob_create`, a temporary
 council, a create without an owner session) under an id that any live
 document of the realm still names, whatever is bound under the id. The typed
 refusal names the remedies: choose another mob id, or have a host or
 operator with access to the extension store transfer each document the id
 owns to another owner and remove or replace each `Audience::Mob` grant or
-deny naming it. An owner transfer alone leaves the audience entries, and the
+deny naming it, and do the same for the documents its identities own or are
+named in. An owner transfer alone leaves the audience entries, and the
 document tools alone cannot manage a document whose owning mob was
 destroyed.
 
@@ -734,6 +790,12 @@ the root mob's terminal shutdown budget), so after a teardown that settled
 every member, dropping the runtime releases Core's custody of the state
 directory at once, and a new runtime composed on it in the same process is
 not refused as in use (`StorageLayoutError::RuntimeInUse`).
+
+A runtime whose launch declares its mob to its mob set
+(`MobBootstrapSpec::declared`) is ended by `shutdown()`. In this release
+such a runtime that is dropped without it does not settle: the mob set
+still owns the launch mob, so the teardown a dropped runtime leaves
+behind waits and does not run.
 
 ## HTTP composition and binding
 

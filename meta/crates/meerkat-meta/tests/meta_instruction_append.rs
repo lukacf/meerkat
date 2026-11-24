@@ -1332,6 +1332,121 @@ async fn a_restart_with_no_change_writes_nothing() {
     rig.shutdown().await;
 }
 
+/// An agent whose spec has no instructions: a restart writes no record and
+/// appends nothing, before and after a run, and a text it is given later
+/// is recorded as any first change is. (A start does not read such an
+/// agent's session to learn this: a session built with any sections was not
+/// built with other sections than none.)
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restart_of_an_agent_with_no_instructions_writes_nothing() {
+    let temp = tempfile::tempdir().unwrap();
+    let mob = fresh_mob_id();
+    let none = vec![configured_spec(&[])];
+    let mut rig = boot(temp.path(), &mob, none.clone()).await;
+    rig.turn(CONFIGURED, "FIRST-TURN").await;
+    rig.shutdown_for_reopen().await;
+
+    let mut rig = boot(temp.path(), &mob, none).await;
+    assert_eq!(
+        rig.record(CONFIGURED).await,
+        None,
+        "no record of an agent that never had instructions"
+    );
+    assert!(rig.dormant(CONFIGURED), "the start woke nothing");
+    rig.turn(CONFIGURED, "SECOND-TURN").await;
+    assert!(
+        entries(&rig.transcript(CONFIGURED).await).is_empty(),
+        "nothing is appended after a restart"
+    );
+
+    rig.configure(&["Answer in ALPHA style."]).await;
+    rig.recorded(CONFIGURED).await;
+    rig.turn(CONFIGURED, "THIRD-TURN").await;
+    let request = entries(&rig.request_messages("THIRD-TURN"));
+    assert!(
+        request
+            .last()
+            .is_some_and(|entry| carries(entry, &["Answer in ALPHA style."])),
+        "a first text given later is recorded and carried: {request:#?}"
+    );
+    rig.shutdown().await;
+}
+
+/// A text given while the gateway was down to an agent that was built with
+/// none, and that the mob holds no record of: the start compares it with
+/// the sections the agent's session was built with (none), records it, and
+/// wakes nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_first_text_given_while_the_gateway_was_down_to_an_agent_built_with_none_is_recorded_at_start()
+ {
+    let temp = tempfile::tempdir().unwrap();
+    let mob = fresh_mob_id();
+    let mut rig = boot(temp.path(), &mob, vec![configured_spec(&[])]).await;
+    rig.turn(CONFIGURED, "FIRST-TURN").await;
+    rig.shutdown_for_reopen().await;
+
+    let alpha = vec![configured_spec(&["Answer in ALPHA style."])];
+    let mut rig = boot(temp.path(), &mob, alpha).await;
+    let record = rig.record(CONFIGURED).await.expect("the agent's record");
+    assert_eq!(
+        record["revision"],
+        json!(1),
+        "the start recorded the first text: {record:#?}"
+    );
+    assert!(rig.dormant(CONFIGURED), "the start woke nothing");
+    rig.recorded(CONFIGURED).await;
+    rig.turn(CONFIGURED, "SECOND-TURN").await;
+    let request = entries(&rig.request_messages("SECOND-TURN"));
+    assert!(
+        request
+            .last()
+            .is_some_and(|entry| carries(entry, &["Answer in ALPHA style."])),
+        "the next run carries the text: {request:#?}"
+    );
+    rig.shutdown().await;
+}
+
+/// A text withdrawn while the gateway was down, for an agent the mob holds
+/// a record of: the start writes the record's next revision with the fixed
+/// withdrawal, wakes nothing, and the agent's next run carries it. The
+/// record decides this, not the session: an agent whose current text has no
+/// section is still reconciled with the record the mob holds.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_withdrawal_made_while_the_gateway_was_down_is_recorded_at_start() {
+    let temp = tempfile::tempdir().unwrap();
+    let mob = fresh_mob_id();
+    let mut rig = boot(
+        temp.path(),
+        &mob,
+        vec![configured_spec(&["Answer in ALPHA style."])],
+    )
+    .await;
+    rig.turn(CONFIGURED, "FIRST-TURN").await;
+    rig.configure(&["Answer in BETA style."]).await;
+    rig.recorded(CONFIGURED).await;
+    rig.turn(CONFIGURED, "SECOND-TURN").await;
+    rig.shutdown_for_reopen().await;
+
+    let mut rig = boot(temp.path(), &mob, vec![configured_spec(&[])]).await;
+    let record = rig.record(CONFIGURED).await.expect("the agent's record");
+    assert_eq!(
+        record["revision"],
+        json!(2),
+        "the start wrote the withdrawal: {record:#?}"
+    );
+    assert!(rig.dormant(CONFIGURED), "the start woke nothing");
+    rig.recorded(CONFIGURED).await;
+    rig.turn(CONFIGURED, "THIRD-TURN").await;
+    let request = entries(&rig.request_messages("THIRD-TURN"));
+    assert!(
+        request
+            .last()
+            .is_some_and(|entry| carries_body(entry, WITHDRAWN_BODY)),
+        "the next run carries the withdrawal: {request:#?}"
+    );
+    rig.shutdown().await;
+}
+
 /// A text that changed while the gateway was down, for an agent the mob
 /// holds a record of: the start writes the record's next revision,
 /// wakes nothing, and the agent's next run carries the text.

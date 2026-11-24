@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- An agent whose instructions have no section is no longer compared against its
+  session's build state. Since 0.9.15 the identity runtime compares an agent's
+  instructions with the sections its session was built with when the mob holds
+  no instruction record of the agent: for a configured agent at its first
+  registration in a process, for an agent whose record is its row before its
+  first delivery (a start compares no such agent), and again in the comparison
+  itself, which is reached when the mob's records could not be read and for an
+  agent listed again in one process. For an agent whose current text has no
+  section that comparison cannot find a difference (a session built with any
+  sections was not built with other sections than none, and a session whose
+  record does not say, or cannot be read, is answered the same way), but the
+  session's committed build state was read for it all the same: at a start, for
+  every configured agent that has a conversation, one after another, during the
+  start's identity bootstrap. On a store that keeps a session as one document
+  (a host store realm) each read is the session's whole committed body. Now
+  such an agent is answered without the read, wherever the comparison is
+  reached. Nothing else changes: an agent the mob holds a record of is
+  reconciled with that record as before, with no read of its session's build
+  state (a text withdrawn while the gateway was down is still recorded at the
+  start); an agent whose current text has a section is compared as before: one
+  build-state read per start while no record exists, two in the start that
+  records a first change, none once a record exists; and nothing is written
+  differently. One log line goes with the read: the warning that an agent's
+  build sections could not be read is no longer logged for an agent with no
+  section. Affected: Meta 0.9.15 and later up to this change (the comparison
+  does not exist before 0.9.15).
+
 ## [0.9.18] - 2026-11-22
 
 Records that name a member carry the member's mob, so that one host can keep

@@ -22811,12 +22811,6 @@ function humanizeRuntimeEventType(eventType) {
   if (!words3) return "Runtime event";
   return "".concat(words3[0].toUpperCase()).concat(words3.slice(1));
 }
-var CHAT_SILENT_RUNTIME_EVENTS = /* @__PURE__ */ new Set([
-  "request_reasoning_effort_resolved"
-]);
-function isChatSilentRuntimeEvent(eventType) {
-  return CHAT_SILENT_RUNTIME_EVENTS.has(eventType);
-}
 function recordOf(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : null;
 }
@@ -34474,7 +34468,7 @@ function QuestionSetReceipt({ set: set3, outcome, answers, closedAtMs }) {
     const active = typeof document === "undefined" ? null : document.activeElement;
     if (Date.now() - closedAtMs < ACTED_FOCUS_MS && (active === null || active === document.body)) lineRef.current?.focus();
   }, []);
-  return /* @__PURE__ */ (0, import_jsx_runtime49.jsxs)("details", { open: true, className: "cc-question-set__receipt", "data-outcome": outcome, "data-testid": "question-set-receipt:".concat(set3.pendingId), children: [
+  return /* @__PURE__ */ (0, import_jsx_runtime49.jsxs)("details", { className: "cc-question-set__receipt", "data-outcome": outcome, "data-testid": "question-set-receipt:".concat(set3.pendingId), children: [
     /* @__PURE__ */ (0, import_jsx_runtime49.jsxs)("summary", { ref: lineRef, className: "cc-question-set__receipt-line", title: formatAbsoluteTime(closedAtMs), children: [
       /* @__PURE__ */ (0, import_jsx_runtime49.jsx)("span", { className: "cc-question-set__receipt-state", children: outcome === "answered" ? "Answered" : "Dismissed" }),
       /* @__PURE__ */ (0, import_jsx_runtime49.jsx)("span", { className: "cc-question-set__receipt-title", children: title }),
@@ -62262,7 +62256,6 @@ function createTimelineFold(agent, frames, options) {
   }
   function step(i2) {
     const frame2 = orderedFrames[i2];
-    if (isChatSilentRuntimeEvent(frame2.event)) return;
     const entryId = frame2.id || "".concat(frame2.event || "frame", ":").concat(i2);
     if (frame2.event === "mcp_app") {
       const entry = mcpAppEntryFromFrame(frame2, entryId, agentIdentity(agent));
@@ -62603,7 +62596,7 @@ function createTimelineFold(agent, frames, options) {
       }
       return;
     }
-    if (HIDDEN_EVENTS2.has(frame2.event)) {
+    if (HIDDEN_EVENTS2.has(frame2.event) || frame2.event === "request_reasoning_effort_resolved") {
       return;
     }
     flushPendingReasoning(true);
@@ -95849,7 +95842,7 @@ function useQuestionSets(input) {
 // src/lib/console-bundle.ts
 var APP_SCRIPT_VERSION = /\/console-app\.js\?(?:[^#]*&)?v=([0-9A-Za-z._-]+)/;
 function builtBeside() {
-  const named = true ? "58a591134e16".trim() : "";
+  const named = true ? "3a2d0a36f8f1".trim() : "";
   return named || void 0;
 }
 function loadedByThePage(page) {

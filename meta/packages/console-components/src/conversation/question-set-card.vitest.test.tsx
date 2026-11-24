@@ -1042,7 +1042,7 @@ describe("ConversationQuestionSets", () => {
     expect(dismissed.queryByTestId(`question-set:${PENDING_ID}`)).toBeNull();
   });
 
-  it("keeps an answered set as one row that shows its questions and the answers given", () => {
+  it("keeps an answered set as a folded receipt that opens to its questions and the answers given", () => {
     // The conversation names the sets it places after a turn.
     const view = inConversation(
       answered(),
@@ -1051,13 +1051,12 @@ describe("ConversationQuestionSets", () => {
     expect(view.queryByTestId(`question-set:${PENDING_ID}`)).toBeNull();
     const receipt = view.getByTestId(`question-set-receipt:${PENDING_ID}`) as HTMLDetailsElement;
     expect(receipt.tagName).toBe("DETAILS");
-    // Shown open: the questions and the answers are read without a click.
-    expect(receipt.open).toBe(true);
+    expect(receipt.open).toBe(false);
     const line = receipt.querySelector("summary")?.textContent ?? "";
     expect(line).toContain("Answered");
     expect(line).toContain("Release plan");
-    // It reads as the questions with the answers given: the one answered,
-    // and the other as not answered.
+    // Opened, it reads as the questions with the answers given: the one
+    // answered, and the other as not answered.
     expect(receipt.textContent).toContain("Which region goes first?");
     expect(receipt.textContent).toContain("Europe");
     expect(receipt.textContent).toContain("When should it start?");
@@ -1073,7 +1072,7 @@ describe("ConversationQuestionSets", () => {
     expect(other.queryByTestId(`question-set-receipt:${PENDING_ID}`)).toBeNull();
   });
 
-  it("reads the answered row as each question with its answer, to a reader and to assistive technology, with nothing to act on", () => {
+  it("opens the answered row to each question with its answer, as a term and its definition, with nothing to act on", () => {
     const view = inConversation(
       answered(),
       <ConversationApprovals approvalIdentity={IDENTITY} interactionIds={[]} questionReceiptIds={[PENDING_ID]} />,
@@ -1086,7 +1085,9 @@ describe("ConversationQuestionSets", () => {
     expect(line.getAttribute("tabindex")).toBeNull();
     expect(line.getAttribute("role")).toBeNull();
     expect([...line.children].map((part) => part.textContent)).toEqual(["Answered", "Release plan", "2 questions"]);
-    // On arrival the questions and the answers are in the row, open.
+    // It arrives folded: one line. The line opens it.
+    expect(receipt.open).toBe(false);
+    fireEvent.click(line);
     expect(receipt.open).toBe(true);
     // A description list: each question is a term and its answer the
     // definition that follows it, which is how a screen reader says them.
@@ -1101,9 +1102,10 @@ describe("ConversationQuestionSets", () => {
     expect(receipt.querySelector("[aria-hidden='true'], [hidden], [inert]")).toBeNull();
     // Read-only: no field, no button, no link, nothing to edit.
     expect(receipt.querySelector("input, textarea, select, button, a[href], [contenteditable], [role='button'], [role='radio'], [role='textbox']")).toBeNull();
-    // The line folds the row and opens it again; folded, the row is still there.
+    // The line folds the row again and opens it again; folded, the row is still there.
     fireEvent.click(line);
     expect(receipt.open).toBe(false);
+    expect(view.queryAllByTestId(`question-set-receipt:${PENDING_ID}`).length).toBe(1);
     fireEvent.click(line);
     expect(receipt.open).toBe(true);
   });

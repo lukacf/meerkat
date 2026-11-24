@@ -5,22 +5,18 @@ import { conversationEntryText } from "@console-core";
 import { ConsoleApp } from "../ConsoleApp";
 import type { ConsoleWhoami, MetaConsoleTransport } from "./headless";
 import type { ConsoleFrame } from "../types";
-import {
-  buildActivityRailViewState as stockActivity,
-  deriveTimelineEntries,
-  mapFramesToTimelineEntries as stock,
-} from "./adapters";
-import {
-  buildActivityRailViewState as sharedActivity,
-  mapFramesToTimelineEntries as shared,
-} from "../../../packages/console-core/src/adapters";
+import { mapFramesToTimelineEntries as stock } from "./adapters";
+import { mapFramesToTimelineEntries as shared } from "../../../packages/console-core/src/adapters";
 
 // The runtime reports, for each request it hands a provider, the reasoning
 // effort the request was sent with (`request_reasoning_effort_resolved`).
-// That is a record for whatever counts or lists events. It is never a line
-// of a chat: not while the turn streams, and not in a transcript that is
-// built again from the frames a page reads when it loads. Every other
-// runtime event keeps its line, and so does a peer's message.
+// That is a record for whatever counts or lists events, and never a line of
+// a chat. The filter and its own rows (replay, live updates, the raw log and
+// the activity rail) are in adapters.ts and adapters.test.ts. These rows add
+// what those do not hold: frames that name where they came from (the
+// gateway's kept events, a session's history), the two kinds of line that
+// must stay beside it (another runtime event, a peer's message), and the
+// whole Console drawing a chat on load and from its open stream.
 
 const EFFORT_EVENT = "request_reasoning_effort_resolved";
 const identity = "identity:release-planner";
@@ -69,16 +65,8 @@ const assistantTexts = (entries: Entries) => entries
   .filter((entry) => entry.identity.role === "assistant")
   .map((entry) => conversationEntryText(entry));
 
-/** A run in progress: the event arrives between two chunks of the answer. */
-const liveFrames = () => [
-  frame("ask", "user_input", { content: "Plan the release." }, { timestampMs: 1_000, interactionId: "turn-1", sourceKind: "send" }),
-  frame("delta-1", "text_delta", { delta: "Looking" }, { timestampMs: 1_100, runId: "run-1", interactionId: "turn-1" }),
-  effort("effort-live", 1_150),
-  frame("delta-2", "text_delta", { delta: " at it." }, { timestampMs: 1_200, runId: "run-1", interactionId: "turn-1" }),
-];
-
-/** The same turn settled, as a page that loads reads it: the gateway's
- * kept event frames and the session's own history rows. */
+/** A settled turn, as a page that loads reads it: the gateway's kept event
+ * frames and the session's own history rows. */
 const reloadedFrames = () => [
   frame("ask", "user_input", { content: "Plan the release." }, { timestampMs: 1_000, interactionId: "turn-1", sourceKind: "send" }),
   effort("effort-kept", 1_150),
@@ -88,15 +76,9 @@ const reloadedFrames = () => [
   peerNotice(1_500, { sourceKind: "session_history" }),
 ];
 
-for (const [name, mapper, activity] of [["stock", stock, stockActivity], ["shared", shared, sharedActivity]] as const) {
+for (const [name, mapper] of [["stock", stock], ["shared", shared]] as const) {
   describe(`${name}: the reasoning effort a request was sent with is not a chat line`, () => {
-    it("live: the event between two chunks of an answer adds no line and does not cut the answer", () => {
-      const entries = mapper(null, liveFrames(), options);
-      expect(effortLines(entries).map((entry) => conversationEntryText(entry))).toEqual([]);
-      expect(assistantTexts(entries)).toEqual(["Looking at it."]);
-    });
-
-    it("reconstructed: a transcript built again from kept frames and history rows has no line of it", () => {
+    it("reconstructed: a transcript built again from kept event frames and history rows has no line of it", () => {
       const entries = mapper(null, reloadedFrames(), options);
       expect(effortLines(entries).map((entry) => conversationEntryText(entry))).toEqual([]);
       expect(assistantTexts(entries)).toEqual(["Looking at it."]);
@@ -110,23 +92,8 @@ for (const [name, mapper, activity] of [["stock", stock, stockActivity], ["share
       expect(peers.length).toBe(1);
       expect(peers[0].peerBody).toBe("The plan reads well.");
     });
-
-    it("the event list still shows the event, as it does every other event", () => {
-      const items = activity({ agents: [], eventFrames: [effort("effort-live", 1_150), otherEvent(1_400)] }).panels[0].items;
-      expect(items.map((item) => item.meta.split(" · ")[0])).toEqual([EFFORT_EVENT, "requested_compaction_skipped"]);
-    });
   });
 }
-
-describe("stock: the reasoning effort event while a derivation is continued", () => {
-  it("live: adding the event to a transcript already derived adds no line", () => {
-    const frames = liveFrames();
-    const before = deriveTimelineEntries(null, frames.slice(0, 2), options);
-    const after = deriveTimelineEntries(null, frames, options, before);
-    expect(effortLines(after.entries).map((entry) => conversationEntryText(entry))).toEqual([]);
-    expect(assistantTexts(after.entries)).toEqual(["Looking at it."]);
-  });
-});
 
 describe("the reasoning effort event in the Console's chat", () => {
   const person: ConsoleWhoami = { actorKind: "person", principal: "a@example.test", approverIds: [], canAdminister: false, callerScope: "caller-a" };

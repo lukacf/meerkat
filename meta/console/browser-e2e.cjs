@@ -3523,9 +3523,9 @@ async function runGatingAuditRefreshErrorProof() {
 }
 
 // A question set answered in the asking agent's chat leaves the place below
-// the newest turn and stays as one read-only row, the question with the
-// answer given, with the turn it was answered after: not drawn in full
-// again below a later turn, after going to another agent and back, or
+// the newest turn and stays as one line with the turn it was answered
+// after, which opens to the question with the answer given: not drawn in
+// full again below a later turn, after going to another agent and back, or
 // after a reload. The same chat carries the runtime's record of the
 // reasoning effort a request was sent with: it is never a line of the chat,
 // read on load or arriving on the stream, while another runtime event and
@@ -3627,26 +3627,25 @@ async function runQuestionSetAnsweredPlacementProof() {
     await waitForRpcMethod(server, "meta/gating/decide");
     await receipt.waitFor({ timeout: 10_000 });
     assert.equal(await card.count(), 0, "the answered card left the chat");
-    assert.equal(await receipt.evaluate((element) => element.tagName === "DETAILS" && element.open), true, "the answered row is shown open");
+    assert.equal(await receipt.evaluate((element) => element.tagName === "DETAILS" && !element.open), true, "the receipt is one folded line");
     const line = await receipt.locator("summary").innerText();
     assert.match(line, /Answered/);
     assert.match(line, /Release plan/);
-    // Without a click it reads as the question with the answer given, to a
-    // reader and as a term with its definition, and holds nothing to act on.
+    // Opened from the keyboard, it reads as the question with the answer
+    // given, a term with its definition, and holds nothing to act on.
+    await receipt.locator("summary").focus();
+    await page.keyboard.press("Enter");
+    assert.equal(await receipt.evaluate((element) => element.open), true, "Enter on the line opens the row");
     await page.getByTestId(`question-set-receipt-summary:${pendingId}`).waitFor({ state: "visible", timeout: 10_000 });
-    const shown = await receipt.innerText();
-    assert.match(shown, /Which region goes first\?/);
-    assert.match(shown, /Europe/);
-    assert(!shown.includes("United States"), "only the answer given is shown");
+    const opened = await receipt.innerText();
+    assert.match(opened, /Which region goes first\?/);
+    assert.match(opened, /Europe/);
+    assert(!opened.includes("United States"), "only the answer given is shown");
     assert.deepEqual(await receipt.getByRole("term").allInnerTexts(), ["Which region goes first?"]);
     assert.deepEqual(await receipt.getByRole("definition").allInnerTexts(), ["Europe"]);
     assert.equal(await receipt.locator("input, textarea, select, button, a[href], [contenteditable]").count(), 0, "the answered row is read-only");
-    // The keyboard folds the row from its line and opens it again.
-    await receipt.locator("summary").focus();
     await page.keyboard.press("Enter");
-    assert.equal(await receipt.evaluate((element) => element.open), false, "Enter on the line folds the row");
-    await page.keyboard.press("Enter");
-    assert.equal(await receipt.evaluate((element) => element.open), true, "Enter on the line opens the row again");
+    assert.equal(await receipt.evaluate((element) => element.open), false, "Enter on the line folds the row again");
 
     // A later turn: the receipt stays above it, and nothing is asked again.
     await fillComposer(page, "Go on with Europe.");
@@ -3658,7 +3657,7 @@ async function runQuestionSetAnsweredPlacementProof() {
     assert.equal(await receipt.count(), 1);
     assert((await top(receipt)) < (await top(turn(1))), "the receipt stays above the later turn");
     assert.equal(await page.getByRole("button", { name: "Send answers" }).count(), 0);
-    assert.equal((await transcript.innerText()).split("Which region goes first?").length - 1, 1, "the question stands once in the chat, in its row");
+    assert.equal((await transcript.evaluate((element) => element.textContent)).split("Which region goes first?").length - 1, 1, "the question stands once in the chat, in its folded row");
     // The later turn's own reasoning effort record came on the stream
     // before its answer: no line of it either.
     await eventLines("after it arrived on the stream");

@@ -328,9 +328,9 @@ describe("an answered question set in the agent's chat", () => {
     const second = await laterTurn(gatewayOf);
     await waitFor(() => expect(receipts().length).toBe(1));
     const receipt = receipts()[0];
-    // One row, shown open: its line, the question and the answer given.
+    // Folded: one line. Its questions and the answers given are inside it.
     expect(receipt.tagName).toBe("DETAILS");
-    expect((receipt as HTMLDetailsElement).open).toBe(true);
+    expect((receipt as HTMLDetailsElement).open).toBe(false);
     expect(receipt.querySelector("summary")?.textContent).toContain("Answered");
     expect(receipt.querySelector("summary")?.textContent).toContain("Release plan");
     expect(receipt.textContent).toContain("Which region goes first?");
@@ -365,7 +365,13 @@ describe("an answered question set in the agent's chat", () => {
         controls: receipt.querySelectorAll("input, textarea, select, button, a[href], [contenteditable]").length,
       };
     };
-    const answeredRow = { open: true, asked: ["Which region goes first?"], answered: ["Europe"], controls: 0 };
+    const answeredRow = { open: false, asked: ["Which region goes first?"], answered: ["Europe"], controls: 0 };
+    expect(row()).toEqual(answeredRow);
+    // Its line opens it to the question and the answer, and folds it again.
+    const line = receipts()[0].querySelector("summary") as HTMLElement;
+    fireEvent.click(line);
+    expect(row()).toEqual({ ...answeredRow, open: true });
+    fireEvent.click(line);
     expect(row()).toEqual(answeredRow);
     // Two later turns: still one row, where it was, and the question is
     // nowhere else in the chat; nothing of the set stands below them.

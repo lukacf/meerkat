@@ -394,12 +394,13 @@ The gateway delegates the mutation to Meerkat's canonical definition CAS. It
 does not append raw events, rewrite a projection independently, or treat the
 creation manifest as mutable authority. Remove `declare_spec_update(...)`
 (TypeScript `declareSpecUpdate(...)`) from later ordinary restarts. A stale
-revision or different successor definition raises `StorageResolutionError` in
-both SDKs (in 0.9.15, with a gateway the SDK starts itself, as the
-`startup_error`, in TypeScript `startupError`, of a
-`GatewayStartupCleanupError`; see Known limitations in the Meta changelog);
-an exact retry returns the already
-committed successor revision and converges its checked projection.
+revision or a different successor definition is refused with
+`StorageResolutionError`. In the 0.9.15 and 0.9.16 SDKs, when the SDK
+starts the gateway and the gateway reports this refusal after accepting
+init, the refusal is the `startup_error` (TypeScript: `startupError`) of
+`GatewayStartupCleanupError`. From 0.9.17 the SDK raises the reported
+refusal directly. An exact retry returns the already committed successor
+revision and converges its checked projection.
 
 This is a cold-activation ceremony, not a hot reload. Fully shut down the prior
 runtime before issuing the update: an already-running `MobHandle` keeps the

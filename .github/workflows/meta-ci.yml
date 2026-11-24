@@ -405,8 +405,10 @@ jobs:
       # log. Readings only: nothing is cleaned, retried or resized, and no
       # cause is claimed; a gap in the lines is missing evidence, not a
       # diagnosis. The sampler's failures are ignored and the step's exit
-      # status is the test command's (scripts/test_ci_workflow.py runs this
-      # script).
+      # status is the test command's. The sampler waits in one-second
+      # slices and leaves as soon as its parent is no longer this step's
+      # shell, so it outlives that shell by about a second at most
+      # (scripts/test_ci_workflow.py runs this script).
       - name: Lib tests
         working-directory: .
         env:
@@ -427,7 +429,6 @@ jobs:
               distinct=yes
             fi
             for ((sample = 1; sample <= 200; sample++)); do
-              kill -0 "$$" || exit 0
               total="" available="" swap_total="" swap_free=""
               while read -r key value _; do
                 case "${key}" in
@@ -491,9 +492,14 @@ jobs:
               printf -v now '%(%H:%M:%SZ)T' -1
               printf 'resource reading [%s] %d: memory %s; swap %s; memory pressure full avg10 %s; root filesystem %s%s; resident: %s\n' \
                 "${now}" "${sample}" "${memory}" "${swap}" "${pressure}" "${root}" "${target}" "${sums}"
-              sleep 30 &
-              nap=$!
-              wait "${nap}" || exit 0
+              for ((slice = 0; slice < 30; slice++)); do
+                parent=""
+                read -r _ _ _ parent _ < "/proc/${BASHPID}/stat"
+                if [[ "${parent:-$$}" != "$$" ]] || ! kill -0 "$$"; then exit 0; fi
+                sleep 1 &
+                nap=$!
+                wait "${nap}" || exit 0
+              done
             done
           ) 2>/dev/null &
           sampler=$!

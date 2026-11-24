@@ -10,9 +10,11 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import tomllib
 import unittest
 from pathlib import Path
@@ -1085,8 +1087,21 @@ class CiWorkflowTests(unittest.TestCase):
             self.assertIsNone(re.search(r"(?:^|[\s(])(du|df|ps|find|ls|cat|env|printenv)(\s|$)", line),
                               f"the sampler walks no directory and lists no process arguments or environment: {line}")
         self.assertIn("for ((sample = 1; sample <= 200; sample++)); do", sampler)
-        self.assertIn("sleep 30 &", sampler)
-        self.assertIn('wait "${nap}" || exit 0', sampler)
+        # Between two samples the sampler waits thirty one-second slices and,
+        # before each, leaves when its parent is no longer the step's shell:
+        # it outlives that shell by about a second at most.
+        self.assertEqual(sampler[-9:], [
+            "for ((slice = 0; slice < 30; slice++)); do",
+            'parent=""',
+            'read -r _ _ _ parent _ < "/proc/${BASHPID}/stat"',
+            'if [[ "${parent:-$$}" != "$$" ]] || ! kill -0 "$$"; then exit 0; fi',
+            "sleep 1 &",
+            "nap=$!",
+            'wait "${nap}" || exit 0',
+            "done",
+            "done",
+        ])
+        self.assertEqual(sum(line.startswith("sleep ") for line in sampler), 1)
         # A process name is compared with fixed names and never printed: the
         # variable that holds it is set from the process's status file and
         # used once, in the `case` whose arms are literal names; the lines
@@ -1168,6 +1183,51 @@ class CiWorkflowTests(unittest.TestCase):
                     self.assertEqual(len(readings), 1, result.stdout)
                     self.assertRegex(readings[0], reading)
                     self.assertEqual(result.stderr, "", "the sampler writes nothing to the step's error output")
+
+        # The step's shell ended alone, as by a signal sent to it only: the
+        # shell ends by that signal, as a one-line step's does, and the
+        # sampler, which was not signalled, is gone about a second later.
+        if not os.path.exists("/proc/self/stat"):
+            return
+        with tempfile.TemporaryDirectory() as tmp:
+            wrapper = Path(tmp) / "scripts/repo-cargo"
+            wrapper.parent.mkdir()
+            wrapper.write_text(program)
+            wrapper.chmod(0o755)
+            script = Path(tmp) / "step.sh"
+            script.write_text(step["run"])
+            env = {"PATH": os.environ.get("PATH", ""), "PARTITION": "3", "CARGO_TARGET_DIR": str(Path(tmp) / "target"),
+                   "STAND_IN_ARGUMENTS": str(Path(tmp) / "arguments"), "STAND_IN_SECONDS": "30", "STAND_IN_STATUS": "0"}
+
+            def of_the_step():
+                found = []
+                for entry in os.listdir("/proc"):
+                    if entry.isdigit():
+                        try:
+                            if str(script).encode() in Path(f"/proc/{entry}/cmdline").read_bytes():
+                                found.append(int(entry))
+                        except OSError:
+                            pass
+                return found
+
+            shell = subprocess.Popen([shutil.which("bash"), "-e", str(script)], cwd=tmp, env=env, text=True,
+                                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True)
+            try:
+                self.assertRegex(shell.stdout.readline().rstrip("\n"), reading)
+                self.assertGreaterEqual(len(of_the_step()), 2, "the step's shell and its sampler")
+                shell.send_signal(signal.SIGTERM)
+                self.assertEqual(shell.wait(timeout=10), -signal.SIGTERM)
+                deadline = time.monotonic() + 3
+                while of_the_step() and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                self.assertEqual(of_the_step(), [], "the sampler left with its parent")
+            finally:
+                try:
+                    os.killpg(shell.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                shell.stdout.close()
+                shell.wait()
 
     def test_the_examples_build_takes_the_bin_tests_profile_on_a_pull_request(self):
         """rust-examples builds every example with one wrapper line whose

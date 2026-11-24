@@ -57,15 +57,16 @@ them.
   description could be read there before a grant and no longer can. The
   deferred-catalog notice and its typed delta do not offer a tool the
   filters do not allow: it is not announced as available, and a tool that
-  was never offered is never named. A tool that was announced and is later
-  disallowed is reported once as no longer available, as a tool its source
-  dropped is. A search whose tool scope cannot be read names no entry: it
-  returns no result and `temporarily_unavailable` as its
-  `empty_result_status`, where it returned one row per deferrable entry.
-  This covers search and notices only. Tool load and call behavior is
-  unchanged. A reader of search results that looked for a
-  `blocked_by_filter` row to learn that a tool is denied finds no row now;
-  read a denial from the host's own tool policy.
+  was never offered is never named. A tool that was announced, is still
+  deferred, and is later disallowed is reported once as no longer
+  available, as a tool its source dropped is. A search whose tool scope
+  cannot be read names no entry: it returns no result and
+  `temporarily_unavailable` as its `empty_result_status`, where it
+  returned one row per deferrable entry. This covers search and notices
+  only. Tool load and call behavior is unchanged. A reader of search
+  results that looked for a `blocked_by_filter` row to learn that a tool
+  is denied finds no row now; read a denial from the host's own tool
+  policy.
 
 ### Added
 

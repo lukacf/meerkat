@@ -418,6 +418,214 @@ async fn durable_boundary_appends_join_the_running_turn_and_every_later_request(
     assert!(before.is_some() && after.is_some() && before != after);
 }
 
+fn durable_notice_appends(token: &str) -> meerkat_core::lifecycle::DurableTurnBoundaryAppends {
+    meerkat_core::lifecycle::DurableTurnBoundaryAppends::try_new(
+        meerkat_core::lifecycle::InputId::new(),
+        vec![meerkat_core::lifecycle::ConversationAppend {
+            runtime_source: None,
+            role: meerkat_core::lifecycle::ConversationAppendRole::SystemNotice,
+            content: meerkat_core::lifecycle::CoreRenderable::SystemNotice {
+                kind: meerkat_core::types::SystemNoticeKind::Generic,
+                body: Some(token.to_string()),
+                blocks: Vec::new(),
+            },
+            identity: None,
+        }],
+        None,
+    )
+    .expect("eligible durable notice")
+}
+
+/// Positions of the notice rows whose body is one of `tokens`, with the
+/// token each carries, in message order.
+fn notice_rows<'a>(messages: &[Message], tokens: &[&'a str]) -> Vec<(usize, &'a str)> {
+    messages
+        .iter()
+        .enumerate()
+        .filter_map(|(index, message)| match message {
+            Message::SystemNotice(notice) => tokens
+                .iter()
+                .find(|token| notice.body.as_deref() == Some(**token))
+                .map(|token| (index, *token)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// One boundary's durable claim can carry the deliveries of several inputs.
+/// The runner writes them in publication order before it builds the next
+/// request: that request and every later one carry each exactly once, in
+/// order; the transcript holds one row per input, adjacent and in order; and
+/// one `BoundaryAppendApplied` per input is published, in order, each naming
+/// its own input and transcript position. A delivery withdrawn from the claim
+/// before publication reaches no request and has no row and no event.
+#[cfg(feature = "workspace-tests")]
+#[tokio::test]
+async fn several_durable_deliveries_published_at_one_boundary_all_join_the_next_request_in_order() {
+    const TOKENS: [&str; 3] = ["JOIN-ONE-1Q", "JOIN-TWO-2R", "JOIN-THREE-3S"];
+    const WITHDRAWN_TOKEN: &str = "JOIN-WITHDRAWN-4T";
+    let all_tokens = [TOKENS[0], TOKENS[1], TOKENS[2], WITHDRAWN_TOKEN];
+
+    let client = Arc::new(RecordingClient::new());
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let mut agent = gated_agent(
+        Arc::clone(&client),
+        Arc::clone(&entered),
+        Arc::clone(&release),
+    )
+    .await;
+    let state = agent.transient_turn_context_state();
+    let (tx, mut rx) = mpsc::channel(256);
+    let run = tokio::spawn(async move {
+        let result = agent.run_with_events("start".to_string().into(), tx).await;
+        (agent, result)
+    });
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
+        .await
+        .expect("the gated tool starts");
+    let run_id = state.active_run_for_test().expect("the run owns the actor");
+    let deliveries = TOKENS.map(durable_notice_appends);
+    let input_ids = deliveries
+        .iter()
+        .map(|appends| appends.input_id().clone())
+        .collect::<Vec<_>>();
+    let [first, second, third] = deliveries;
+    let prepare_state = state.clone();
+    let prepare_run_id = run_id.clone();
+    let prepare = tokio::spawn(async move {
+        prepare_state
+            .prepare_active_turn_boundary(
+                &prepare_run_id,
+                meerkat_core::lifecycle::TurnBoundaryDelivery::DurableAppends(first),
+            )
+            .await
+    });
+    wait_until("durable registration", || {
+        state.has_registered_durable_for_test()
+    })
+    .await;
+    release.notify_one();
+
+    // The runner is parked at the post-tool boundary: the claim's holder
+    // attaches the other inputs' deliveries and publishes them together.
+    let mut stage = tokio::time::timeout(std::time::Duration::from_secs(5), prepare)
+        .await
+        .expect("the runner parks at the post-tool boundary")
+        .expect("prepare task")
+        .expect("durable preparation")
+        .into_stage_output(None);
+    let mut witnesses = vec![stage.delivery_witness().cloned().expect("durable witness")];
+    witnesses.push(
+        stage
+            .attach_durable_delivery(second)
+            .expect("attach the second input's delivery"),
+    );
+    let withdrawn = stage
+        .attach_durable_delivery(durable_notice_appends(WITHDRAWN_TOKEN))
+        .expect("attach a delivery that will not join");
+    witnesses.push(
+        stage
+            .attach_durable_delivery(third)
+            .expect("attach the third input's delivery"),
+    );
+    stage
+        .withdraw_durable_delivery(&withdrawn)
+        .expect("take the unjoined delivery back");
+    assert_eq!(
+        client.requests().len(),
+        1,
+        "no request is made before the claim is published"
+    );
+    stage.commit().expect("publish the claim");
+
+    let (agent, result) = tokio::time::timeout(std::time::Duration::from_secs(5), run)
+        .await
+        .expect("run finishes")
+        .expect("run task");
+    result.expect("run succeeds");
+    for witness in &witnesses {
+        assert_eq!(
+            witness.outcome(),
+            meerkat_core::lifecycle::CoreBoundaryDeliveryOutcome::Applied
+        );
+    }
+    assert_eq!(
+        withdrawn.outcome(),
+        meerkat_core::lifecycle::CoreBoundaryDeliveryOutcome::Withdrawn
+    );
+
+    // The next request after the boundary carries all three, in order, each
+    // exactly once, and so does every later request of the run.
+    let requests = client.requests();
+    assert_eq!(requests.len(), 3, "one run, three model requests");
+    assert!(notice_rows(&requests[0], &all_tokens).is_empty());
+    for (index, request) in requests[1..].iter().enumerate() {
+        assert_eq!(
+            notice_rows(request, &all_tokens)
+                .into_iter()
+                .map(|(_, token)| token)
+                .collect::<Vec<_>>(),
+            TOKENS,
+            "request {} carries the three deliveries once each, in publication order",
+            index + 1
+        );
+    }
+
+    // One transcript row per input, adjacent, in order, after the boundary's
+    // tool results and before the next assistant message.
+    let messages = agent.session().messages();
+    let rows = notice_rows(messages, &all_tokens);
+    assert_eq!(
+        rows.iter().map(|(_, token)| *token).collect::<Vec<_>>(),
+        TOKENS,
+        "one row per input, none for the withdrawn delivery"
+    );
+    let at = rows[0].0;
+    assert_eq!(
+        rows.iter().map(|(index, _)| *index).collect::<Vec<_>>(),
+        vec![at, at + 1, at + 2]
+    );
+    assert!(matches!(messages[at - 1], Message::ToolResults { .. }));
+    assert!(matches!(messages[at + 3], Message::BlockAssistant(_)));
+
+    // One append event per input, in order, each with its own input id and
+    // transcript position.
+    let events = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
+    let applied = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::BoundaryAppendApplied {
+                run_id: event_run,
+                input_id,
+                append_count,
+                transcript_start,
+                ..
+            } => Some((
+                event_run.clone(),
+                input_id.clone(),
+                *append_count,
+                *transcript_start,
+            )),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        applied,
+        input_ids
+            .iter()
+            .enumerate()
+            .map(|(offset, input_id)| (
+                run_id.clone(),
+                input_id.clone(),
+                1,
+                Some((at + offset) as u64)
+            ))
+            .collect::<Vec<_>>()
+    );
+}
+
 #[cfg(feature = "workspace-tests")]
 #[tokio::test]
 async fn request_only_boundary_context_stays_request_local() {

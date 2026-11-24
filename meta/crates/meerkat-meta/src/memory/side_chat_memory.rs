@@ -133,6 +133,16 @@ enum RecorderSourceState {
 
 /// Late-bound recorder source for side chat builds; empty until the
 /// composition's memory stack attaches a recorder.
+///
+/// A launch that hosts mobs beside its launch mob binds a member from the
+/// memory its mob's members are members of: the launch's own for the
+/// launch mob's and for the mobs its members created, a hosted mob's own
+/// for that mob's ([`Self::register_hosted_mob`]). Which it is is asked at
+/// each read of the member's tools, of the launch's record of its mobs
+/// ([`crate::private_owners::PrivateOwners::memory_home_of`]) for the mob
+/// the member's build is bound to: never of a name, a label or an id a
+/// caller supplied. A member of a mob whose members are members of no
+/// memory, or whose memory is not decided, is given none.
 #[derive(Clone, Default)]
 pub(crate) struct SideChatMemorySlot {
     source: Arc<RwLock<RecorderSourceState>>,
@@ -142,7 +152,53 @@ pub(crate) struct SideChatMemorySlot {
     definition: Arc<RwLock<Option<Arc<meerkat_mob::MobDefinition>>>>,
     /// What tells a registered agent's member from every other member.
     entries: Arc<RwLock<IdentityEntriesReader>>,
+    /// What says which memory the members of a mob are members of: the
+    /// launch's record of its mobs. A slot without one binds every member
+    /// from itself.
+    homes: Arc<RwLock<Option<crate::private_owners::PrivateOwners>>>,
+    /// What the members of each mob the launch composes beside its launch
+    /// mob are bound from, by mob id ([`HostedMobSource`]).
+    of_hosted_mobs: Arc<RwLock<BTreeMap<String, HostedMobSource>>>,
 }
+
+/// What the members of a mob the launch composes beside its launch mob are
+/// bound from: the mob's own memory, its own definition and its own
+/// identity entries.
+#[derive(Clone)]
+struct HostedMobSource {
+    /// Which registration of the mob this is. A member's recorder is built
+    /// for one registration and serves no other: a mob that is unloaded
+    /// and loaded again registers anew, with a new memory value.
+    registration: u64,
+    /// Whether the mob's own identity runtime still lives: the registration
+    /// serves while it does and no longer. A member's recorder that was
+    /// built from it is asked through here at every read too, so it serves
+    /// nothing once the mob's entry ended.
+    lives: Arc<dyn Fn() -> bool + Send + Sync>,
+    /// The mob's own provider, held weakly: the mob's composed identity
+    /// plane owns it, and this slot keeps no store value of a mob whose
+    /// entry has ended.
+    provider: std::sync::Weak<dyn AgentMemoryProvider>,
+    config: AgentMemoryConfig,
+    gate: SideChatMemoryGate,
+    /// The mob's definition and its identity entries, in a slot of the
+    /// mob's own that is never filled.
+    of_the_mob: SideChatMemorySlot,
+}
+
+/// Where a member is bound from at one read of its tools.
+struct MemberHome {
+    /// The registration the answer is of: 0 for the launch's own memory.
+    registration: u64,
+    /// The slot whose definition and identity entries answer for the
+    /// member's mob.
+    of_the_mob: SideChatMemorySlot,
+    /// What that memory has said of its recorder.
+    recorder: RecorderSourceState,
+}
+
+static NEXT_HOSTED_MOB_REGISTRATION: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(1);
 
 impl std::fmt::Debug for SideChatMemorySlot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -182,32 +238,190 @@ struct MemberRecorderFacts {
 struct MemberRebinding {
     slot: SideChatMemorySlot,
     member: MemberRecorderFacts,
-    /// The member's recorder, built at the first read that offers it.
-    recorder: OnceLock<MemoryRecorder>,
+    /// The member's recorder, built at the first read that offers it, with
+    /// the registration of the memory it was built from.
+    recorder: OnceLock<(u64, MemoryRecorder)>,
 }
 
 impl ReboundRecorder for MemberRebinding {
     fn memory(&self, inner_holds_memory: bool) -> ReboundMemory<'_> {
-        let source = match self.slot.recorder_state() {
+        // A member of a mob that has no memory, or whose memory is not
+        // decided, is given none: no `memory` tool of the tools it carries
+        // is listed or reached either.
+        let Some(home) = self.slot.home_of(&self.member.mob_id) else {
+            return ReboundMemory::Withheld;
+        };
+        let source = match home.recorder {
             RecorderSourceState::Unbound => return ReboundMemory::Untouched,
             RecorderSourceState::Awaited => return ReboundMemory::Withheld,
             RecorderSourceState::Bound(source) => source,
         };
         if !(inner_holds_memory
-            || self
-                .slot
+            || home
+                .of_the_mob
                 .source_build_has_memory(&source.gate, &self.member))
         {
             return ReboundMemory::Withheld;
         }
-        ReboundMemory::Own(
-            self.recorder
-                .get_or_init(|| self.slot.member_recorder(source, &self.member)),
-        )
+        let (built_from, recorder) = self.recorder.get_or_init(|| {
+            (
+                home.registration,
+                home.of_the_mob.member_recorder(source, &self.member),
+            )
+        });
+        // A recorder serves the registration it was built from and no
+        // other: it keeps that registration's memory value.
+        if *built_from != home.registration {
+            return ReboundMemory::Withheld;
+        }
+        ReboundMemory::Own(recorder)
     }
 }
 
 impl SideChatMemorySlot {
+    /// From now on which memory a member is bound from is asked of
+    /// `owners`, the launch's record of its mobs, for the mob the member's
+    /// build is bound to.
+    pub(crate) fn decide_by(&self, owners: crate::private_owners::PrivateOwners) {
+        *self
+            .homes
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(owners);
+    }
+
+    /// From now on the members of the mob `mob_id`, which the launch
+    /// composes beside its launch mob, are bound from that mob's own
+    /// memory: its provider and configuration, the gate its agents'
+    /// recorders are attached by, its definition and the session bridge of
+    /// its identity runtime, which reads its identity entries. A
+    /// registration of the mob that stands is replaced. The provider and
+    /// the bridge are held weakly: the registration serves while the mob's
+    /// identity runtime lives, and this slot keeps none of the mob's values
+    /// alive.
+    ///
+    /// A configuration whose recorder is off, or a provider without
+    /// authored writes, gives the mob's side chats no recorder, as it gives
+    /// none of its agents one: the mob is then registered with none.
+    pub(crate) fn register_hosted_mob(
+        &self,
+        mob_id: &str,
+        provider: &Arc<dyn AgentMemoryProvider>,
+        config: AgentMemoryConfig,
+        gate: SideChatMemoryGate,
+        definition: &meerkat_mob::MobDefinition,
+        bridge: &Arc<dyn crate::identity_first::SessionBridge>,
+    ) {
+        let of_the_mob = SideChatMemorySlot::default();
+        of_the_mob.bind_definition(definition);
+        of_the_mob.watch_identity_entries(bridge);
+        let bridge = Arc::downgrade(bridge);
+        self.register_hosted_mob_while(
+            mob_id,
+            provider,
+            config,
+            gate,
+            of_the_mob,
+            Arc::new(move || bridge.strong_count() > 0),
+        );
+    }
+
+    /// [`Self::register_hosted_mob`] with the slot that holds the mob's
+    /// definition and identity entries, and what says whether the mob's
+    /// identity runtime still lives.
+    fn register_hosted_mob_while(
+        &self,
+        mob_id: &str,
+        provider: &Arc<dyn AgentMemoryProvider>,
+        config: AgentMemoryConfig,
+        gate: SideChatMemoryGate,
+        of_the_mob: SideChatMemorySlot,
+        lives: Arc<dyn Fn() -> bool + Send + Sync>,
+    ) {
+        if !(config.recorder_tool && provider.supports_authored_writes()) {
+            self.forget_hosted_mob(mob_id);
+            return;
+        }
+        let registration =
+            NEXT_HOSTED_MOB_REGISTRATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.of_hosted_mobs
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                mob_id.to_string(),
+                HostedMobSource {
+                    registration,
+                    lives,
+                    provider: Arc::downgrade(provider),
+                    config,
+                    gate,
+                    of_the_mob,
+                },
+            );
+    }
+
+    /// Forget what the members of the mob `mob_id` are bound from: the mob
+    /// is destroyed, or a mob is created anew under its id.
+    pub(crate) fn forget_hosted_mob(&self, mob_id: &str) {
+        self.of_hosted_mobs
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(mob_id);
+    }
+
+    /// Where a member of the mob `mob_id` is bound from now; `None` for a
+    /// member that is given no memory.
+    ///
+    /// A member of the launch's memory is bound from this slot, and a
+    /// member of a mob with a memory of its own from that mob's
+    /// registration while the mob's memory value lives. A member of a mob
+    /// whose members are members of no memory is given none; so is a
+    /// member of a mob whose memory is not decided, because a `memory` tool
+    /// is access to a store and what cannot be told gives none. The next
+    /// read asks again.
+    fn home_of(&self, mob_id: &str) -> Option<MemberHome> {
+        use crate::private_owners::MemoryHome;
+        let own = || MemberHome {
+            registration: 0,
+            of_the_mob: self.clone(),
+            recorder: self.recorder_state(),
+        };
+        let homes = self
+            .homes
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let Some(homes) = homes else {
+            return Some(own());
+        };
+        match homes.memory_home_of(mob_id) {
+            MemoryHome::Launch => Some(own()),
+            MemoryHome::Hosted(mob) => {
+                let hosted = self
+                    .of_hosted_mobs
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .get(&mob)
+                    .cloned()?;
+                // The mob's identity runtime has ended: its entry has, and
+                // nothing of its memory is served any more.
+                if !(hosted.lives)() {
+                    return None;
+                }
+                let provider = hosted.provider.upgrade()?;
+                Some(MemberHome {
+                    registration: hosted.registration,
+                    of_the_mob: hosted.of_the_mob,
+                    recorder: RecorderSourceState::Bound(SideChatRecorderSource {
+                        provider,
+                        config: hosted.config,
+                        gate: hosted.gate,
+                    }),
+                })
+            }
+            MemoryHome::Nowhere | MemoryHome::NotKnown => None,
+        }
+    }
+
     /// From now on this slot's composition binds a recorder: a side chat
     /// built before the fill is wrapped and offers no `memory` tool until
     /// then. What a composition says before its mob is built when it fills
@@ -2180,5 +2394,199 @@ model = "gpt-5.5"
             failed && text.contains("unsupported") && !text.contains("the otter"),
             "the recall is answered as unsupported: {text}"
         );
+    }
+
+    /// The record of a launch whose mob is `team` and which composes
+    /// `second` beside it, with a mob a member of `second` created and a
+    /// mob no member created.
+    fn a_launch_of_two_mobs() -> crate::private_owners::PrivateOwners {
+        let owners = crate::private_owners::PrivateOwners::default();
+        owners.bind_launch_mob("team");
+        owners.hosted_mobs().name("second");
+        owners.hold_the_creation_in_tests("of-second", Some("second"));
+        owners.hold_the_creation_in_tests("unowned", None);
+        owners
+    }
+
+    /// A memory of a mob's own, in the realm `mob.second`, over `dir`.
+    fn memory_of_the_second_mob(
+        dir: &std::path::Path,
+    ) -> (Arc<dyn AgentMemoryProvider>, AgentMemoryConfig) {
+        let provider: Arc<dyn AgentMemoryProvider> =
+            Arc::new(crate::memory::SqliteAgentMemoryStore::open(dir).unwrap());
+        let config = AgentMemoryConfig {
+            realm: "mob.second".to_string(),
+            ..AgentMemoryConfig::default()
+        };
+        (provider, config)
+    }
+
+    /// Register `provider` as the memory of the mob `second` with `slot`:
+    /// the registration serves while the returned value lives.
+    fn register_the_second_mob(
+        slot: &SideChatMemorySlot,
+        provider: &Arc<dyn AgentMemoryProvider>,
+        config: &AgentMemoryConfig,
+    ) -> Arc<()> {
+        let lives = Arc::new(());
+        let seen = Arc::downgrade(&lives);
+        slot.register_hosted_mob_while(
+            "second",
+            provider,
+            config.clone(),
+            SideChatMemoryGate::AgentProfiles(BTreeMap::new()),
+            SideChatMemorySlot::default(),
+            Arc::new(move || seen.strong_count() > 0),
+        );
+        lives
+    }
+
+    /// The build of the member `alpha-side` of the mob `mob_id`, a side
+    /// chat of `alpha`, over tools that hold a host's `lookup` and a
+    /// `memory` tool of another build, after `slot`. The registry is the
+    /// tools' own and is kept with the build.
+    fn side_chat_in(
+        slot: &SideChatMemorySlot,
+        mob_id: &str,
+        provider: &Arc<dyn AgentMemoryProvider>,
+        config: &AgentMemoryConfig,
+    ) -> (
+        CreateSessionRequest,
+        Arc<crate::identity_first::CustomizerToolRegistry>,
+    ) {
+        let (registry, source, overlay) = unpublished_source("alpha");
+        registry.publish(
+            &source,
+            Some(source_recorder(
+                Some(Arc::new(LookupTool)),
+                &source,
+                provider,
+                config,
+            )),
+        );
+        let mut req = member_build("alpha-side", side_chat_of("alpha"), overlay);
+        if let Some(binding) = req
+            .build
+            .as_mut()
+            .and_then(|build| build.mob_member_binding.as_mut())
+        {
+            binding.mob_id = mob_id.to_string();
+        }
+        slot.bind_side_chat_memory(&mut req);
+        (req, registry)
+    }
+
+    fn offered() -> Vec<String> {
+        vec!["lookup".to_string(), MEMORY_TOOL_NAME.to_string()]
+    }
+
+    fn withheld() -> Vec<String> {
+        vec!["lookup".to_string()]
+    }
+
+    /// A member is bound from the memory its mob's members are members
+    /// of: a side chat of a mob with a memory of its own keeps its notes
+    /// in that memory, one of the launch mob in the launch's, and one of a
+    /// mob with no memory, or whose memory is not decided, is offered no
+    /// `memory` tool and writes nothing, though the tools it carries hold
+    /// one. A mob whose memory comes to be decided is served at the next
+    /// read.
+    #[tokio::test]
+    async fn a_member_is_bound_from_the_memory_its_mobs_members_are_members_of() {
+        let (launch_dir, second_dir) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let (slot, of_the_launch, config) = filled_slot(launch_dir.path());
+        let owners = a_launch_of_two_mobs();
+        slot.decide_by(owners.clone());
+        let (of_the_second, config_of_the_second) = memory_of_the_second_mob(second_dir.path());
+        let _lives = register_the_second_mob(&slot, &of_the_second, &config_of_the_second);
+
+        let (in_the_second, _tools) = side_chat_in(&slot, "second", &of_the_launch, &config);
+        assert_eq!(overlay_tool_names(&in_the_second), offered());
+        assert_eq!(
+            remember_note(&in_the_second, "Second note").await,
+            Ok(false)
+        );
+        let (in_the_launch, _tools) = side_chat_in(&slot, "team", &of_the_launch, &config);
+        assert_eq!(overlay_tool_names(&in_the_launch), offered());
+        assert_eq!(
+            remember_note(&in_the_launch, "Launch note").await,
+            Ok(false)
+        );
+        for mob in ["of-second", "unowned", "never-read"] {
+            let (in_no_memory, _tools) = side_chat_in(&slot, mob, &of_the_launch, &config);
+            assert_eq!(
+                overlay_tool_names(&in_no_memory),
+                withheld(),
+                "a side chat of the mob {mob} is offered no `memory` tool"
+            );
+            assert!(
+                remember_note(&in_no_memory, "No note").await.is_err(),
+                "and a call of `memory` there is served by no tool ({mob})"
+            );
+        }
+
+        assert_eq!(
+            titles_of(&of_the_second, &config_of_the_second, "alpha-side").await,
+            vec!["Second note".to_string()],
+            "the second mob's memory holds its side chat's note and no other"
+        );
+        assert_eq!(
+            titles_of(&of_the_launch, &config, "alpha-side").await,
+            vec!["Launch note".to_string()],
+            "the launch's memory holds the launch mob's side chat's note and no other"
+        );
+
+        // A build made while its mob's memory was not decided is served
+        // once the record holds the mob's creation.
+        let (late, _tools) = side_chat_in(&slot, "late", &of_the_launch, &config);
+        assert_eq!(overlay_tool_names(&late), withheld());
+        owners.hold_the_creation_in_tests("late", Some("team"));
+        assert_eq!(overlay_tool_names(&late), offered());
+    }
+
+    /// A hosted mob's registration serves while the mob's identity runtime
+    /// lives, and a member's recorder serves the registration it was built
+    /// from and no other: after the mob's entry ended its members' builds
+    /// are offered no `memory` tool, a build made before stays so when the
+    /// mob registers anew, and a build made after is served by the new
+    /// registration. A forgotten mob serves none.
+    #[tokio::test]
+    async fn a_hosted_mobs_registration_serves_while_its_mob_lives() {
+        let (launch_dir, second_dir) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let (slot, of_the_launch, config) = filled_slot(launch_dir.path());
+        slot.decide_by(a_launch_of_two_mobs());
+        let (of_the_second, config_of_the_second) = memory_of_the_second_mob(second_dir.path());
+
+        let lives = register_the_second_mob(&slot, &of_the_second, &config_of_the_second);
+        let (built_before, _tools) = side_chat_in(&slot, "second", &of_the_launch, &config);
+        assert_eq!(remember_note(&built_before, "Before").await, Ok(false));
+
+        // The mob's entry ends.
+        drop(lives);
+        assert_eq!(overlay_tool_names(&built_before), withheld());
+        assert!(remember_note(&built_before, "Late").await.is_err());
+
+        // The mob is loaded again: a new memory value over the same store.
+        let (loaded_again, _) = memory_of_the_second_mob(second_dir.path());
+        let _lives = register_the_second_mob(&slot, &loaded_again, &config_of_the_second);
+        assert_eq!(
+            overlay_tool_names(&built_before),
+            withheld(),
+            "a build of the earlier registration is not served by the new one"
+        );
+        let (built_after, _tools) = side_chat_in(&slot, "second", &of_the_launch, &config);
+        assert_eq!(overlay_tool_names(&built_after), offered());
+        assert_eq!(remember_note(&built_after, "After").await, Ok(false));
+        let mut titles = titles_of(&loaded_again, &config_of_the_second, "alpha-side").await;
+        titles.sort();
+        assert_eq!(titles, vec!["After".to_string(), "Before".to_string()]);
+        assert_eq!(
+            titles_of(&of_the_launch, &config, "alpha-side").await,
+            Vec::<String>::new(),
+            "the launch's memory holds none of it"
+        );
+
+        slot.forget_hosted_mob("second");
+        assert_eq!(overlay_tool_names(&built_after), withheld());
     }
 }

@@ -46,7 +46,7 @@ async def main() -> int:
     checks: list[dict[str, Any]] = []
     gateway_bin = os.environ.get("META_RPC_GATEWAY_BIN")
     client_module = sys.modules[MetaAsyncTypedClient.__module__]
-    expected_contract_version = "0.5.0"
+    expected_contract_version = "0.6.0"
 
     async def check(name: str, fn: Callable[[], Awaitable[None]]) -> None:
         try:

@@ -4,6 +4,7 @@ import {
   EMPTY_AGENT_DIRECTORY,
   agentDisplayName,
   agentInitial,
+  agentOpenable,
   type AgentDirectory,
 } from "./agents";
 import { cx } from "./cx";
@@ -87,15 +88,23 @@ export function AgentName({
   const navigation = useConsoleNavigation();
   const resolved = agentDisplayName(id, directory ?? provided) || fallback || "";
   const raw = typeof id === "string" ? id.trim() : "";
-  if (link && raw && navigation?.openAgent) {
+  // A link only to an agent the host could open: a name its directory does
+  // not know is plain words.
+  if (link && raw && navigation?.openAgent && agentOpenable(raw, directory ?? provided)) {
     const openAgent = navigation.openAgent;
+    // Where the host opens only the agents its directory holds, the agent
+    // the directory found for the key is the one opened (a host may read a
+    // key by where it is shown: a name as one team knows it). Else the key
+    // goes to the host as written, as it always did.
+    const held = directory ?? provided;
+    const opened = held.opensKnownOnly ? held.lookup(raw)?.id ?? raw : raw;
     return (
       <button
         type="button"
         className={cx("cc-agent", "cc-agent--link", className)}
         title={raw}
         data-testid={testId}
-        onClick={(event) => openAgent.call(navigation, raw, wantsAlternate(event) ? "chat" : "details")}
+        onClick={(event) => openAgent.call(navigation, opened, wantsAlternate(event) ? "chat" : "details")}
       >
         {avatar ? <AgentAvatar name={resolved} size={avatar} live={live} /> : null}
         <span className="cc-agent__name">{resolved}</span>

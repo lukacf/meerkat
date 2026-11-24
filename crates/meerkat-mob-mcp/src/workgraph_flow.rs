@@ -68,28 +68,33 @@ impl MobMcpState {
         }
     }
 
+    /// The raw handle of the mob a WorkGraph flow addresses, through the
+    /// waiting lookup ([`Self::managed_handle`]): a mob that is known and
+    /// not loaded is loaded for the flow, and one whose idle unload is
+    /// admitted is waited for. The lookup's error is the answer. A mob that
+    /// is known and not served (its load did not end managed, its unload's
+    /// actor has not ended, it is held or quarantined) is never answered as
+    /// [`MobError::MobNotFound`]: the bridge reads that as a missing target
+    /// and records the flow's run as lost, and the run is intact in the
+    /// mob's store.
+    async fn workgraph_flow_mob(&self, mob_id: &MobId) -> Result<meerkat_mob::MobHandle, MobError> {
+        self.ensure_restored().await?;
+        self.managed_handle(mob_id).await?;
+        Ok(self.managed_mob(mob_id).await?.handle)
+    }
+
     async fn workgraph_flow_authority_handle(
         &self,
         authority: &WorkGraphFlowExecutionAuthority,
     ) -> Result<meerkat_mob::MobHandle, MobError> {
-        self.ensure_restored().await?;
+        let handle = self.workgraph_flow_mob(authority.mob_id()).await?;
         let principal = match authority.execution_authority() {
             meerkat::WorkExecutionAuthority::TargetOwner => meerkat_mob::MobControlPrincipal::Owner,
             meerkat::WorkExecutionAuthority::Principal { principal_id } => {
                 meerkat_mob::MobControlPrincipal::External(principal_id.clone())
             }
         };
-        self.mobs
-            .read()
-            .await
-            .get(authority.mob_id())
-            .map(|managed| {
-                managed
-                    .handle
-                    .clone()
-                    .with_command_authority(meerkat_mob::CommandAuthority::principal(principal))
-            })
-            .ok_or_else(|| MobError::MobNotFound(authority.mob_id().clone()))
+        Ok(handle.with_command_authority(meerkat_mob::CommandAuthority::principal(principal)))
     }
 }
 
@@ -208,15 +213,10 @@ impl WorkGraphFlowHost for MobMcpState {
         observation: &WorkGraphFlowObservationAuthority,
         idempotency_key: &str,
     ) -> Result<Option<MobExternalDeliveryRecord>, MobError> {
-        self.ensure_restored().await?;
-        let handle = self
-            .mobs
-            .read()
+        self.workgraph_flow_mob(observation.mob_id())
+            .await?
+            .load_external_delivery(idempotency_key)
             .await
-            .get(observation.mob_id())
-            .map(|managed| managed.handle.clone())
-            .ok_or_else(|| MobError::MobNotFound(observation.mob_id().clone()))?;
-        handle.load_external_delivery(idempotency_key).await
     }
 
     async fn workgraph_flow_run_with_external_identity(
@@ -235,15 +235,10 @@ impl WorkGraphFlowHost for MobMcpState {
         &self,
         observation: &WorkGraphFlowObservationAuthority,
     ) -> Result<Option<MobRun>, MobError> {
-        self.ensure_restored().await?;
-        let handle = self
-            .mobs
-            .read()
+        self.workgraph_flow_mob(observation.mob_id())
+            .await?
+            .flow_status(observation.run_id().clone())
             .await
-            .get(observation.mob_id())
-            .map(|managed| managed.handle.clone())
-            .ok_or_else(|| MobError::MobNotFound(observation.mob_id().clone()))?;
-        handle.flow_status(observation.run_id().clone()).await
     }
 }
 
@@ -346,11 +341,14 @@ impl MobMcpState {
             // recovery snapshot. A change concurrent with the scan then leaves
             // the receiver behind and makes `changed()` return immediately,
             // rather than becoming a permanently lost wakeup.
-            let mut mob_set_changes = state.mob_set_epoch.subscribe();
+            let mut mob_set_changes = state.hosted.managed_changes();
             let mut binding_changes = state.workgraph_flow_reconcile_epoch.subscribe();
+            // The machine changes of every mob whose actor runs are watched,
+            // a mob whose idle unload is admitted included: the question
+            // wakes no observer of the mob set, so that mob must stay in
+            // this set until it closed.
             let handles = state
-                .mobs
-                .read()
+                .loaded_view()
                 .await
                 .values()
                 .map(|managed| managed.handle.clone())

@@ -1796,7 +1796,8 @@ fn origin_access() -> AccessController {
     access
 }
 
-/// A pending gate whose action came from the member `origin`.
+/// A pending gate whose action came from the member `origin` of the
+/// Console's own mob (an origin that names no mob).
 async fn pending_from(console: &ApprovalConsole, origin: &str) -> String {
     let request = json!({
         "action": "Publish the reviewed report",
@@ -1811,6 +1812,7 @@ async fn pending_from(console: &ApprovalConsole, origin: &str) -> String {
         .evaluate_gating_action_with_origin(
             serde_json::from_value(request).expect("gating request"),
             Some(crate::runtime::GatingOrigin {
+                mob_id: None,
                 identity: origin.to_string(),
                 conversation_id: None,
                 interaction_id: None,
@@ -2255,6 +2257,7 @@ fn approval_notification_record(
     crate::runtime::DeliveryRecord {
         delivery_id: delivery_id.to_string(),
         route_id: "route-approvals".to_string(),
+        mob_id: None,
         recipient: "approvals-desk".to_string(),
         sink: "email".to_string(),
         target_module: "delivery".to_string(),
@@ -3105,5 +3108,754 @@ async fn a_delivery_history_page_is_cut_after_withheld_records_are_left_out() {
             "delivery-newest-withheld",
         ],
         "an admin, a page of four"
+    );
+}
+
+/// The Console of the three rows below, named `name`, with the six gating
+/// requests of [`AUDIT_PAGE_ORIGINS`] made in that order, and the pending
+/// id of each. Every request writes one row of the gating audit. A person
+/// who is not an admin is shown the rows of the member the Console knows;
+/// an admin is shown every row.
+async fn audit_page_console(name: &str) -> (ApprovalConsole, Vec<String>) {
+    let console = ApprovalConsole::start(
+        name,
+        enforced_admitting(&[ROOT]),
+        detached(),
+        Some(origin_access()),
+    )
+    .await;
+    let mut pending_ids = Vec::new();
+    for origin in AUDIT_PAGE_ORIGINS {
+        pending_ids.push(pending_from(&console, origin).await);
+    }
+    (console, pending_ids)
+}
+
+/// The origins of the audit rows of [`audit_page_console`], oldest first:
+/// the first, second and fourth are shown to a person, the three others
+/// are withheld from one, and the two newest are withheld.
+const AUDIT_PAGE_ORIGINS: [&str; 6] = [
+    KNOWN_ORIGIN,
+    KNOWN_ORIGIN,
+    UNKNOWN_ORIGIN,
+    KNOWN_ORIGIN,
+    UNKNOWN_ORIGIN,
+    UNKNOWN_ORIGIN,
+];
+
+/// The answer of one read of the gating audit by the holder of `bearer`.
+async fn audit_page(console: &ApprovalConsole, bearer: &str, params: Value) -> Value {
+    let answer = console_rpc_as(&console.app, Some(bearer), "meta/gating/audit", params).await;
+    assert!(answer["error"].is_null(), "an audit read: {answer}");
+    answer["result"].clone()
+}
+
+/// The answer of one read of the gating audit by the holder of `bearer`
+/// after the row `cursor` names, cut to `limit`.
+async fn audit_page_after(
+    console: &ApprovalConsole,
+    bearer: &str,
+    cursor: String,
+    limit: u64,
+) -> Value {
+    audit_page(
+        console,
+        bearer,
+        json!({ "after_audit_id": cursor, "limit": limit }),
+    )
+    .await
+}
+
+/// The pending ids of the rows of an audit page, in the page's order.
+fn audit_page_pending_ids(page: &Value) -> Vec<String> {
+    page["entries"]
+        .as_array()
+        .unwrap_or_else(|| panic!("an audit page: {page}"))
+        .iter()
+        .filter_map(|entry| entry["pending_id"].as_str().map(str::to_string))
+        .collect()
+}
+
+/// The audit id of the row of `page` whose request is `pending_id`.
+fn audit_id_of(page: &Value, pending_id: &str) -> String {
+    page["entries"]
+        .as_array()
+        .and_then(|entries| {
+            entries
+                .iter()
+                .find(|entry| entry["pending_id"].as_str() == Some(pending_id))
+        })
+        .and_then(|entry| entry["audit_id"].as_str())
+        .unwrap_or_else(|| panic!("the row of {pending_id} in {page}"))
+        .to_string()
+}
+
+/// A page of the gating audit read without a cursor is cut to its limit
+/// after the rows withheld from the caller are left out: a person's page
+/// holds the newest rows that person is shown, oldest first, up to the
+/// limit, and its next cursor names the last of them.
+#[tokio::test]
+async fn a_gating_audit_page_without_a_cursor_is_cut_after_withheld_rows_are_left_out() {
+    let (console, pending) = audit_page_console("gating-audit-page-person").await;
+    let person = person_token();
+    let admin = person_token_for(ROOT);
+    let whole = audit_page(&console, &admin, json!({ "limit": 512 })).await;
+    let shown = audit_page(&console, &person, json!({ "limit": 512 })).await;
+    let mut pages = Vec::new();
+    for limit in [1_u64, 2, 3, 5] {
+        pages.push(audit_page(&console, &person, json!({ "limit": limit })).await);
+    }
+    console.stop().await;
+
+    // The scene, read: the audit holds six rows, one of each request in the
+    // order they were made, and the person is shown three of them.
+    assert_eq!(
+        audit_page_pending_ids(&whole),
+        pending,
+        "the rows the audit holds"
+    );
+    let of_the_person = [pending[0].clone(), pending[1].clone(), pending[3].clone()];
+    assert_eq!(
+        audit_page_pending_ids(&shown),
+        of_the_person,
+        "the rows the person is shown"
+    );
+    println!(
+        "the audit holds {} rows; the person is shown {}",
+        audit_page_pending_ids(&whole).len(),
+        audit_page_pending_ids(&shown).len()
+    );
+
+    let newest_shown = audit_id_of(&whole, &pending[3]);
+    for (page, (limit, expected)) in pages.iter().zip([
+        (1, &of_the_person[2..]),
+        (2, &of_the_person[1..]),
+        (3, &of_the_person[..]),
+        (5, &of_the_person[..]),
+    ]) {
+        assert_eq!(
+            audit_page_pending_ids(page),
+            expected,
+            "a person's page of {limit}: {page}"
+        );
+        assert_eq!(
+            page["next_cursor"],
+            json!(newest_shown),
+            "the next cursor of a person's page of {limit} names the last row it holds: {page}"
+        );
+        assert_eq!(page["gap"], json!(false), "a page of {limit}: {page}");
+    }
+}
+
+/// A caller who is shown every row of the gating audit is answered, without
+/// a cursor, the newest rows up to the limit, oldest first, each row as the
+/// whole read holds it, and a next cursor that names the newest row: an
+/// admin over an audit with rows a person is not shown, and a person over
+/// an audit whose every row that person is shown.
+#[tokio::test]
+async fn a_gating_audit_page_without_a_cursor_answers_a_caller_shown_every_row_the_newest_rows() {
+    let (console, pending) = audit_page_console("gating-audit-page-admin").await;
+    let admin = person_token_for(ROOT);
+    let whole = audit_page(&console, &admin, json!({ "limit": 512 })).await;
+    let mut pages = Vec::new();
+    for limit in [1_usize, 2, 4, 6, 50] {
+        pages.push((
+            limit,
+            audit_page(&console, &admin, json!({ "limit": limit })).await,
+        ));
+    }
+    let with_no_params = audit_page(&console, &admin, json!({})).await;
+    console.stop().await;
+
+    let every_shown = ApprovalConsole::start(
+        "gating-audit-page-every-row",
+        enforced_admitting(&[ROOT]),
+        detached(),
+        Some(origin_access()),
+    )
+    .await;
+    let mut of_the_known = Vec::new();
+    for _ in 0..4 {
+        of_the_known.push(pending_from(&every_shown, KNOWN_ORIGIN).await);
+    }
+    let person = person_token();
+    let persons_whole = audit_page(&every_shown, &person, json!({ "limit": 512 })).await;
+    let persons_two = audit_page(&every_shown, &person, json!({ "limit": 2 })).await;
+    every_shown.stop().await;
+
+    let rows = whole["entries"].as_array().expect("the whole audit");
+    assert_eq!(
+        audit_page_pending_ids(&whole),
+        pending,
+        "the rows the audit holds, all shown to an admin"
+    );
+    for (limit, page) in &pages {
+        let newest = &rows[rows.len().saturating_sub(*limit)..];
+        assert_eq!(
+            page["entries"],
+            json!(newest),
+            "an admin's page of {limit} is the newest rows, whole and in order"
+        );
+        assert_eq!(
+            page["next_cursor"],
+            rows[rows.len() - 1]["audit_id"],
+            "an admin's page of {limit}: {page}"
+        );
+        assert_eq!(page["gap"], json!(false), "{page}");
+        assert_eq!(page["retention"], whole["retention"], "{page}");
+    }
+    assert_eq!(
+        with_no_params, whole,
+        "a read with no limit holds up to fifty rows"
+    );
+
+    let persons_rows = persons_whole["entries"]
+        .as_array()
+        .expect("the person's whole audit");
+    assert_eq!(
+        audit_page_pending_ids(&persons_whole),
+        of_the_known,
+        "an audit whose every row the person is shown"
+    );
+    assert_eq!(
+        persons_two["entries"],
+        json!(&persons_rows[2..]),
+        "the person's page of two is the newest two rows"
+    );
+    assert_eq!(
+        persons_two["next_cursor"], persons_rows[3]["audit_id"],
+        "{persons_two}"
+    );
+}
+
+/// A read of the gating audit with a cursor answers the rows after the row
+/// the cursor names that the caller is shown, oldest first, up to the
+/// limit; its next cursor names the last row it holds, or the cursor it was
+/// given when it holds none; a cursor the audit does not hold is answered
+/// from the oldest row with the gap said.
+#[tokio::test]
+async fn a_gating_audit_read_with_a_cursor_answers_the_rows_after_it_that_the_caller_is_shown() {
+    let (console, pending) = audit_page_console("gating-audit-page-cursor").await;
+    let person = person_token();
+    let admin = person_token_for(ROOT);
+    let whole = audit_page(&console, &admin, json!({ "limit": 512 })).await;
+    let after = |pending_id: &str| audit_id_of(&whole, pending_id);
+    let person_one = audit_page_after(&console, &person, after(&pending[0]), 1).await;
+    let person_rest = audit_page_after(&console, &person, after(&pending[0]), 5).await;
+    let person_none = audit_page_after(&console, &person, after(&pending[3]), 5).await;
+    let person_gap =
+        audit_page_after(&console, &person, "gate-audit-never-minted".to_string(), 2).await;
+    let admin_two = audit_page_after(&console, &admin, after(&pending[0]), 2).await;
+    console.stop().await;
+
+    assert_eq!(
+        audit_page_pending_ids(&whole),
+        pending,
+        "the rows the audit holds"
+    );
+    assert_eq!(
+        audit_page_pending_ids(&person_one),
+        [pending[1].clone()],
+        "{person_one}"
+    );
+    assert_eq!(
+        person_one["next_cursor"],
+        json!(after(&pending[1])),
+        "{person_one}"
+    );
+    assert_eq!(
+        audit_page_pending_ids(&person_rest),
+        [pending[1].clone(), pending[3].clone()],
+        "{person_rest}"
+    );
+    assert_eq!(
+        person_rest["next_cursor"],
+        json!(after(&pending[3])),
+        "{person_rest}"
+    );
+    assert_eq!(
+        audit_page_pending_ids(&person_none),
+        Vec::<String>::new(),
+        "{person_none}"
+    );
+    assert_eq!(
+        person_none["next_cursor"],
+        json!(after(&pending[3])),
+        "a read that holds no row keeps its cursor: {person_none}"
+    );
+    for page in [&person_one, &person_rest, &person_none, &admin_two] {
+        assert_eq!(page["gap"], json!(false), "{page}");
+    }
+    assert_eq!(person_gap["gap"], json!(true), "{person_gap}");
+    assert_eq!(
+        audit_page_pending_ids(&person_gap),
+        [pending[0].clone(), pending[1].clone()],
+        "a cursor the audit does not hold is answered from the oldest row: {person_gap}"
+    );
+    assert_eq!(
+        person_gap["next_cursor"],
+        json!(after(&pending[1])),
+        "{person_gap}"
+    );
+    assert_eq!(
+        audit_page_pending_ids(&admin_two),
+        [pending[1].clone(), pending[2].clone()],
+        "{admin_two}"
+    );
+    assert_eq!(
+        admin_two["next_cursor"],
+        json!(after(&pending[2])),
+        "{admin_two}"
+    );
+}
+
+/// An id no pending request has. A decide of a request the Console withholds
+/// from its caller is answered as a decide of this id is.
+const MEMBER_KEYED_NOT_PENDING: &str = "gate-pending-never-minted";
+
+/// A pending gate whose action came from the member `identity` of `mob`
+/// (none for the Console's own mob): what [`pending_from`] files, with the
+/// mob its origin names.
+async fn member_keyed_gate(console: &ApprovalConsole, mob: Option<&str>, identity: &str) -> String {
+    let request = json!({
+        "action": "Publish the reviewed report",
+        "actor_id": "agent:writer",
+        "risk_tier": "r3",
+        "approval_timeout_ms": 600_000,
+    });
+    console
+        .owner
+        .lock()
+        .await
+        .evaluate_gating_action_with_origin(
+            serde_json::from_value(request).expect("gating request"),
+            Some(crate::runtime::GatingOrigin {
+                mob_id: mob.map(meerkat_mob::MobId::from),
+                identity: identity.to_string(),
+                conversation_id: None,
+                interaction_id: None,
+            }),
+        )
+        .pending_id
+        .expect("an R3 gate waits for a decision")
+}
+
+async fn member_keyed_pending_ids(console: &ApprovalConsole, bearer: &str) -> Vec<String> {
+    let listed = console_rpc_as(&console.app, Some(bearer), "meta/gating/pending", json!({})).await;
+    listed["result"]["pending"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a pending list: {listed}"))
+        .iter()
+        .filter_map(|entry| entry["pending_id"].as_str().map(str::to_string))
+        .collect()
+}
+
+/// The Console's gating handlers judge a request as the member it came
+/// from, in that member's own mob. The Console's own `alice` is plain and
+/// another mob's `alice` is private to someone else: the caller is listed
+/// and decides the request of the first, and is not listed the request of
+/// the second: a decide of it by its id is answered as a decide of an id
+/// that is not pending, and the request stays pending.
+#[tokio::test]
+async fn member_keyed_gating_handlers_judge_an_origin_as_its_own_mobs_member() {
+    const NAME: &str = "gating-two-mobs";
+    let default_mob = crate::member_key::DefaultMob::new(meerkat_mob::MobId::from(NAME));
+    let access = AccessController::disabled();
+    access.bind_default_mob(&default_mob);
+    access.record_agent_attributes(AgentResourceAttributes {
+        identity: "alice".to_string(),
+        ..Default::default()
+    });
+    access.record_agent_attributes_in(
+        &meerkat_mob::MobId::from("second"),
+        AgentResourceAttributes {
+            identity: "alice".to_string(),
+            labels: BTreeMap::from([(
+                crate::access::PRIVATE_TO_LABEL.to_string(),
+                "person:dana".to_string(),
+            )]),
+            ..Default::default()
+        },
+    );
+    let console = ApprovalConsole::start(NAME, enforced(), detached(), Some(access)).await;
+    let of_own = member_keyed_gate(&console, None, "alice").await;
+    let of_second = member_keyed_gate(&console, Some("second"), "alice").await;
+    let bearer = person_token();
+    let listed = member_keyed_pending_ids(&console, &bearer).await;
+    let refused = console.approve(Some(&bearer), &of_second).await;
+    let second_still_pending = console.still_pending(&of_second).await;
+    let not_pending = console
+        .approve(Some(&bearer), MEMBER_KEYED_NOT_PENDING)
+        .await;
+    let decided = console.approve(Some(&bearer), &of_own).await;
+    let own_still_pending = console.still_pending(&of_own).await;
+    console.stop().await;
+
+    assert_eq!(listed.as_slice(), std::slice::from_ref(&of_own));
+    assert_eq!(refused, not_pending, "{refused}");
+    assert!(!not_pending["error"].is_null(), "{not_pending}");
+    assert!(second_still_pending, "{refused}");
+    assert!(decided["error"].is_null(), "{decided}");
+    assert!(!own_still_pending, "{decided}");
+}
+
+/// The access configuration of the two rows below, on the Console whose own
+/// mob is `name`: every caller sees and decides gating requests, an allow
+/// names the Console's own mob by its id for `agent.view`, and a deny names
+/// `alice` of that mob. The Console knows the members `known`.
+fn member_keyed_own_mob_by_id_access(name: &str, known: &[&str]) -> AccessController {
+    let rule = |id: &str, effect: crate::access::AccessEffect, actions: &[&str]| AccessRule {
+        id: id.to_string(),
+        effect,
+        actions: actions.iter().map(|action| (*action).to_string()).collect(),
+        ..AccessRule::default()
+    };
+    let access = AccessController::new(crate::access::AccessControlConfig {
+        enabled: true,
+        admins: vec![ROOT.to_string()],
+        rules: vec![
+            rule(
+                "everyone-decides",
+                crate::access::AccessEffect::Allow,
+                &["gating.view", "gating.decide"],
+            ),
+            AccessRule {
+                mobs: vec![name.to_string()],
+                ..rule(
+                    "own-mob-views",
+                    crate::access::AccessEffect::Allow,
+                    &["agent.view"],
+                )
+            },
+            AccessRule {
+                mobs: vec![name.to_string()],
+                agents: vec!["alice".to_string()],
+                ..rule(
+                    "own-alice-hidden",
+                    crate::access::AccessEffect::Deny,
+                    &["agent.view"],
+                )
+            },
+        ],
+        ..crate::access::AccessControlConfig::default()
+    })
+    .expect("controller");
+    access.bind_default_mob(&crate::member_key::DefaultMob::new(
+        meerkat_mob::MobId::from(name),
+    ));
+    for identity in known {
+        access.record_agent_attributes(AgentResourceAttributes {
+            identity: (*identity).to_string(),
+            ..Default::default()
+        });
+    }
+    access
+}
+
+/// The pending ids the gating audit read names for `bearer`.
+async fn member_keyed_audit_pending_ids(
+    console: &ApprovalConsole,
+    bearer: &str,
+) -> BTreeSet<String> {
+    let read = console_rpc_as(&console.app, Some(bearer), "meta/gating/audit", json!({})).await;
+    read["result"]["entries"]
+        .as_array()
+        .unwrap_or_else(|| panic!("an audit read: {read}"))
+        .iter()
+        .filter_map(|entry| entry["pending_id"].as_str().map(str::to_string))
+        .collect()
+}
+
+/// A rule that names the Console's own mob by its id is the same rule for
+/// the gating handlers and for every other check: an allow by id shows the
+/// member's request and the member, a deny by id hides both (a decide of
+/// the hidden request is answered as a decide of an id that is not
+/// pending), whether the request names no mob or the Console's own mob by
+/// its id. The caller is a
+/// person who is not an admin and the Console knows both members, so the
+/// rules decide every answer; a request of an origin the Console does not
+/// know is the next row's.
+#[tokio::test]
+async fn member_keyed_gating_and_plain_views_agree_on_a_rule_naming_the_default_mob() {
+    const NAME: &str = "gating-default-by-id";
+    let access = member_keyed_own_mob_by_id_access(NAME, &["alice", "carol"]);
+    let console = ApprovalConsole::start(NAME, enforced(), detached(), Some(access.clone())).await;
+    let of_alice = member_keyed_gate(&console, None, "alice").await;
+    let of_alice_by_id = member_keyed_gate(&console, Some(NAME), "alice").await;
+    let of_carol = member_keyed_gate(&console, None, "carol").await;
+    let of_carol_by_id = member_keyed_gate(&console, Some(NAME), "carol").await;
+    let bearer = person_token();
+    let listed = member_keyed_pending_ids(&console, &bearer).await;
+    let audited = member_keyed_audit_pending_ids(&console, &bearer).await;
+    let mut refused = Vec::new();
+    for pending_id in [&of_alice, &of_alice_by_id] {
+        let answer = console.approve(Some(&bearer), pending_id).await;
+        refused.push((answer, console.still_pending(pending_id).await));
+    }
+    let not_pending = console
+        .approve(Some(&bearer), MEMBER_KEYED_NOT_PENDING)
+        .await;
+    let mut decided = Vec::new();
+    for pending_id in [&of_carol, &of_carol_by_id] {
+        decided.push(console.approve(Some(&bearer), pending_id).await);
+    }
+    console.stop().await;
+
+    let view = access.view_for_subject(Some(BOB));
+    let by_id = view.in_mob(&meerkat_mob::MobId::from(NAME));
+    assert_eq!(
+        [
+            view.can_view_agent("carol"),
+            view.can_view_agent("alice"),
+            by_id.can_view_agent("carol"),
+            by_id.can_view_agent("alice"),
+        ],
+        [true, false, true, false],
+        "a plain view, and a view of the Console's own mob taken by its id"
+    );
+    let of_carols = BTreeSet::from([of_carol, of_carol_by_id]);
+    assert_eq!(
+        listed.into_iter().collect::<BTreeSet<_>>(),
+        of_carols,
+        "the pending list"
+    );
+    assert_eq!(audited, of_carols, "the audit read");
+    assert!(!not_pending["error"].is_null(), "{not_pending}");
+    for (answer, still_pending) in refused {
+        assert_eq!(answer, not_pending, "{answer}");
+        assert!(still_pending, "{answer}");
+    }
+    for answer in decided {
+        assert!(answer["error"].is_null(), "{answer}");
+    }
+}
+
+/// The row above for a request whose origin the Console does not know (a
+/// member nothing the Console has read names). To a person who is not an
+/// admin the pending list and the audit read show no such request, whether
+/// it names no mob or the Console's own mob by its id and whatever the
+/// allow by id grants, and a plain view refuses that member all the same:
+/// a name the records do not know cannot be ruled out of the deny that
+/// names another agent. An admin is shown every request. A request of a
+/// member the Console knows is read as before, and the plain views see that
+/// member: the allow by id reaches it.
+#[tokio::test]
+async fn member_keyed_gating_and_plain_views_agree_on_an_origin_the_console_does_not_know() {
+    const NAME: &str = "gating-unknown-origin-by-id";
+    const UNKNOWN: &str = "dora";
+    let access = member_keyed_own_mob_by_id_access(NAME, &["carol"]);
+    let console = ApprovalConsole::start(
+        NAME,
+        enforced_admitting(&[ROOT]),
+        detached(),
+        Some(access.clone()),
+    )
+    .await;
+    let of_carol = member_keyed_gate(&console, None, "carol").await;
+    let of_unknown = member_keyed_gate(&console, None, UNKNOWN).await;
+    let of_unknown_by_id = member_keyed_gate(&console, Some(NAME), UNKNOWN).await;
+    let person = person_token();
+    let admin = person_token_for(ROOT);
+    let listed_to_person = member_keyed_pending_ids(&console, &person).await;
+    let audited_to_person = member_keyed_audit_pending_ids(&console, &person).await;
+    let listed_to_admin = member_keyed_pending_ids(&console, &admin).await;
+    let audited_to_admin = member_keyed_audit_pending_ids(&console, &admin).await;
+    console.stop().await;
+
+    let view = access.view_for_subject(Some(BOB));
+    let by_id = view.in_mob(&meerkat_mob::MobId::from(NAME));
+    assert_eq!(
+        [
+            view.can_view_agent(UNKNOWN),
+            by_id.can_view_agent(UNKNOWN),
+            view.withholds_unknown_member(UNKNOWN),
+            by_id.withholds_unknown_member(UNKNOWN),
+            view.in_stored_mob(None).withholds_unknown_member(UNKNOWN),
+        ],
+        [false, false, true, true, true],
+        "a plain view, and views of the Console's own mob: the rules refuse a member the \
+         records do not know, and the Console withholds it"
+    );
+    assert_eq!(
+        [
+            view.can_view_agent("carol"),
+            by_id.can_view_agent("carol"),
+            view.withholds_unknown_member("carol"),
+            by_id.withholds_unknown_member("carol"),
+        ],
+        [true, true, false, false],
+        "a plain view, and a view of the Console's own mob taken by its id: the allow by id \
+         reaches the member the Console knows, and the Console withholds nothing of it"
+    );
+    let root = access.view_for_subject(Some(ROOT));
+    assert!(
+        !root.withholds_unknown_member(UNKNOWN)
+            && !root.in_stored_mob(None).withholds_unknown_member(UNKNOWN),
+        "an admin is withheld nothing"
+    );
+    let known = BTreeSet::from([of_carol.clone()]);
+    let every = BTreeSet::from([of_carol, of_unknown, of_unknown_by_id]);
+    assert_eq!(
+        listed_to_person.into_iter().collect::<BTreeSet<_>>(),
+        known,
+        "the pending list of a person who is not an admin"
+    );
+    assert_eq!(
+        audited_to_person, known,
+        "the audit read of a person who is not an admin"
+    );
+    assert_eq!(
+        listed_to_admin.into_iter().collect::<BTreeSet<_>>(),
+        every,
+        "the pending list of an admin"
+    );
+    assert_eq!(audited_to_admin, every, "the audit read of an admin");
+}
+
+/// The decision is fenced as the member the request came from, in that
+/// member's own mob, at the moment it is applied. The caller may see both
+/// mobs' `alice` when the decide starts; while it waits, the other mob's
+/// `alice` becomes private to someone else. The decide is answered as a
+/// decide of an id that is not pending and the request stays pending: the
+/// Console's own `alice`, whom the caller still sees, is not the member it
+/// came from.
+#[tokio::test]
+async fn member_keyed_gating_decide_is_fenced_as_the_origins_own_mobs_member() {
+    const NAME: &str = "gating-fence-two-mobs";
+    let second = meerkat_mob::MobId::from("second");
+    let attributes = |private: bool| AgentResourceAttributes {
+        identity: "alice".to_string(),
+        labels: if private {
+            BTreeMap::from([(
+                crate::access::PRIVATE_TO_LABEL.to_string(),
+                "person:dana".to_string(),
+            )])
+        } else {
+            BTreeMap::new()
+        },
+        ..Default::default()
+    };
+    let access = AccessController::disabled();
+    access.bind_default_mob(&crate::member_key::DefaultMob::new(
+        meerkat_mob::MobId::from(NAME),
+    ));
+    access.record_agent_attributes(attributes(false));
+    access.record_agent_attributes_in(&second, attributes(false));
+    let console = ApprovalConsole::start(NAME, enforced(), detached(), Some(access.clone())).await;
+    let of_second = member_keyed_gate(&console, Some("second"), "alice").await;
+    let hold = super::console_decide_holds::ConsoleDecideHold::install(&of_second);
+    let decide = tokio::spawn({
+        let app = console.app.clone();
+        let bearer = person_token();
+        let pending_id = of_second.clone();
+        async move {
+            console_rpc_as(
+                &app,
+                Some(&bearer),
+                DECIDE,
+                json!({ "pending_id": pending_id, "decision": "approve" }),
+            )
+            .await
+        }
+    });
+    let reached = tokio::time::timeout(Duration::from_secs(30), hold.reached()).await;
+    access.record_agent_attributes_in(&second, attributes(true));
+    hold.release();
+    let answer = tokio::time::timeout(Duration::from_secs(30), decide).await;
+    let pending = console.still_pending(&of_second).await;
+    let not_pending = console
+        .approve(Some(&person_token()), MEMBER_KEYED_NOT_PENDING)
+        .await;
+    console.stop().await;
+
+    reached.expect("the decide reached the gating owner");
+    let answer = answer
+        .expect("the decide answered")
+        .expect("the decide task");
+    assert_eq!(answer, not_pending, "{answer}");
+    assert!(!not_pending["error"].is_null(), "{not_pending}");
+    assert!(pending, "{answer}");
+}
+
+/// The delivery history judges the request of an approval notification as
+/// the member it came from, in that member's own mob, while the request is
+/// pending and after it is settled. The Console's own `alice` is plain and
+/// another mob's `alice` is private to someone else: a person who is not an
+/// admin reads the records of the first's requests and not of the second's,
+/// and an admin reads every record.
+#[tokio::test]
+async fn member_keyed_delivery_history_judges_a_notifications_request_as_its_own_mobs_member() {
+    const NAME: &str = "delivery-history-two-mobs";
+    let access = AccessController::new(crate::access::AccessControlConfig {
+        enabled: false,
+        admins: vec![ROOT.to_string()],
+        ..crate::access::AccessControlConfig::default()
+    })
+    .expect("controller");
+    access.bind_default_mob(&crate::member_key::DefaultMob::new(
+        meerkat_mob::MobId::from(NAME),
+    ));
+    access.record_agent_attributes(AgentResourceAttributes {
+        identity: "alice".to_string(),
+        ..Default::default()
+    });
+    access.record_agent_attributes_in(
+        &meerkat_mob::MobId::from("second"),
+        AgentResourceAttributes {
+            identity: "alice".to_string(),
+            labels: BTreeMap::from([(
+                crate::access::PRIVATE_TO_LABEL.to_string(),
+                "person:dana".to_string(),
+            )]),
+            ..Default::default()
+        },
+    );
+    let console =
+        ApprovalConsole::start(NAME, enforced_admitting(&[ROOT]), detached(), Some(access)).await;
+    let of_own = member_keyed_gate(&console, None, "alice").await;
+    let of_second = member_keyed_gate(&console, Some("second"), "alice").await;
+    // Two requests that are settled before the history is read: their
+    // origin, with its mob, is then read from the gating audit.
+    let settled_own = member_keyed_gate(&console, None, "alice").await;
+    let settled_second = member_keyed_gate(&console, Some("second"), "alice").await;
+    let admin = person_token_for(ROOT);
+    for pending_id in [&settled_own, &settled_second] {
+        let settled = console.approve(Some(&admin), pending_id).await;
+        assert!(settled["error"].is_null(), "{settled}");
+    }
+    {
+        let mut owner = console.owner.lock().await;
+        for (delivery_id, pending_id) in [
+            ("delivery-own", of_own.as_str()),
+            ("delivery-second", of_second.as_str()),
+            ("delivery-settled-own", settled_own.as_str()),
+            ("delivery-settled-second", settled_second.as_str()),
+        ] {
+            owner.record_delivery_for_test(approval_notification_record(delivery_id, pending_id));
+        }
+    }
+    let to_person = delivery_ids(&console, &person_token()).await;
+    let to_admin = delivery_ids(&console, &admin).await;
+    console.stop().await;
+
+    let ids = |ids: &[&str]| {
+        ids.iter()
+            .map(|id| (*id).to_string())
+            .collect::<BTreeSet<_>>()
+    };
+    assert_eq!(
+        to_person,
+        ids(&["delivery-own", "delivery-settled-own"]),
+        "a person who is not an admin"
+    );
+    assert_eq!(
+        to_admin,
+        ids(&[
+            "delivery-own",
+            "delivery-second",
+            "delivery-settled-own",
+            "delivery-settled-second",
+        ]),
+        "an admin"
     );
 }

@@ -12,7 +12,9 @@
 //!
 //! - never opens `Primary`-profile connections — only
 //!   [`meerkat_sqlite::ConnectionProfile::ReadOnly`] opens and raw `SELECT`s;
-//! - never creates files or directories;
+//! - its own calls create no file or directory; a read-only open of a
+//!   database in WAL mode can create or update that database's `-wal` and
+//!   `-shm` files;
 //! - never runs the schema ledger (versions are read with
 //!   [`meerkat_sqlite::domain_version`], nothing is applied);
 //! - reads **only** the roots named in the [`DiagnoseScope`] — no ambient
@@ -75,8 +77,29 @@
 //! carries counts only, never a session id, an identity or a mob name, so the
 //! census never fails the doctor. The census ignores the identity filter:
 //! these stores carry no identity column it could narrow by.
+//!
+//! One more census belongs to a later rollback target, a release from
+//! before a gateway hosted mobs beside its launch mob:
+//!
+//! - [`FINDING_HOST_CREATED_MOBS`]: the mob stores under `mobs/` whose mob
+//!   the host created (`meerkat_mob::MobStorage::read_creation_provenance`).
+//!   Such a release restores each of them as a plain mob, without Meta's
+//!   identity plane. A mob any host created with no caller session counts:
+//!   one `meta/mobs/create` made, and one an embedding host created itself,
+//!   also in an earlier release. A store whose mob was destroyed holds no
+//!   mob and is not counted. A store that predates creation records (one an
+//!   earlier release wrote that no later one has opened for writing since)
+//!   records nowhere who created its mob: it has a finding of its own that
+//!   says so and makes the total partial.
+//!
+//! It reports the same way: one finding for the state directory with the
+//! total, 0 included, and one for each such store or store that could not
+//! be read, all Info. Its messages carry counts only; a store's finding
+//! has the store's file as its `path`, and that file's name carries the
+//! mob's id.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
@@ -226,6 +249,13 @@ pub const FINDING_OPERATOR_INSTRUCTION_MOB_EVENTS: &str =
 /// docs' rollback census). Info, counts only. Core's code, shared with
 /// `rkat storage doctor`; Core's mob store reader counts the rows.
 pub const FINDING_IDENTITY_STORE_ROWS: &str = meerkat_store::doctor::FINDING_IDENTITY_STORE_ROWS;
+/// The rollback census of the mobs the host created beside its launch mob:
+/// the mob stores under `mobs/` whose creation record names the host. A
+/// release from before a gateway hosted such mobs restores each of them as
+/// a plain mob, without Meta's identity plane (see the module docs'
+/// rollback census). Info, and its messages carry counts only. Core's mob
+/// store reader reads who created each mob.
+pub const FINDING_HOST_CREATED_MOBS: &str = "host-created-mobs";
 /// Internal doctor failure (the sweep task itself failed).
 pub const FINDING_DOCTOR_INTERNAL: &str = "doctor-internal";
 
@@ -320,6 +350,110 @@ pub(crate) const MEMORY_ROOT_SPELLINGS: &[&str] = &["agent-memory", "agent-memor
 /// Ledger domain the per-realm memory databases stamp.
 pub(crate) const MEMORY_LEDGER_DOMAIN: &str = "meta-memory";
 
+/// The name, below a memory root, of the directory that holds the agent
+/// memory of the mobs a launch hosts beside its launch mob: one directory
+/// per mob directly below it, each a store of its own with the realm files
+/// of that mob. A stored contract: a gateway writes it, and the offline
+/// tools must find what it wrote. It is the store's own constant, the one
+/// a gateway makes the directory from: there is no second text of the name.
+pub(crate) use crate::memory::sqlite_store::HOSTED_MOBS_DIR;
+
+/// Whether `name` is the name a gateway gives the directory of a hosted
+/// mob: the mob's id with ASCII lowercase letters, digits, `-` and `_` kept
+/// and every other byte, a capital letter included, written `%xx` (two
+/// lowercase hex digits), so a name holds no capital letter and no `.`.
+///
+/// Only the name the gateway WRITES for an id is one: a `%xx` of a byte
+/// that is kept as it is (`%61` for `a`), or with a capital hex digit
+/// (`%2E`), decodes to an id whose directory has another name, so it is no
+/// mob's directory. Each mob id has exactly one name, and a name that
+/// passes is at most one mob id's (a name whose escapes spell bytes that
+/// are no text is no mob id's). No other name below [`HOSTED_MOBS_DIR`]
+/// is a store's: not what a release of a mob's memory leaves there until
+/// it is removed (its name holds a `.`), and not a directory someone else
+/// made.
+fn is_hosted_mob_dir_name(name: &str) -> bool {
+    fn kept(byte: u8) -> bool {
+        matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_')
+    }
+    fn hex(digit: u8) -> Option<u8> {
+        match digit {
+            b'0'..=b'9' => Some(digit - b'0'),
+            b'a'..=b'f' => Some(digit - b'a' + 10),
+            _ => None,
+        }
+    }
+    let mut bytes = name.bytes();
+    let mut any = false;
+    while let Some(byte) = bytes.next() {
+        any = true;
+        if kept(byte) {
+            continue;
+        }
+        // An escape the gateway would write: of a byte it does not keep.
+        let escaped = (byte == b'%')
+            .then(|| Some((hex(bytes.next()?)? << 4) | hex(bytes.next()?)?))
+            .flatten();
+        if escaped.is_none_or(kept) {
+            return false;
+        }
+    }
+    any
+}
+
+/// The directories of the memory root `root` that each hold the realm files
+/// of one store: the root itself (the launch mob's memory), then each
+/// directory directly below `<root>/hosted-mobs.d` whose name is a hosted
+/// mob's ([`is_hosted_mob_dir_name`]; the memory of one mob the launch
+/// hosts beside its launch mob), sorted. A link is not followed and a file
+/// there is no store; no store lies deeper.
+///
+/// Every place of the offline tools that lists the databases of a memory
+/// root, or what lies beside them, lists through here: a database of a
+/// hosted mob is inventoried, fenced, opened and reported as the ones
+/// directly in the root are.
+pub(crate) fn memory_store_dirs(root: &Path) -> Vec<PathBuf> {
+    let mut dirs = vec![root.to_path_buf()];
+    let hosted = root.join(HOSTED_MOBS_DIR);
+    // The directory's own entry is read without following a link, as each
+    // entry below it is.
+    if !std::fs::symlink_metadata(&hosted).is_ok_and(|metadata| metadata.is_dir()) {
+        return dirs;
+    }
+    let mut of_the_hosted_mobs: Vec<PathBuf> = std::fs::read_dir(&hosted)
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(is_hosted_mob_dir_name)
+        })
+        .map(|entry| entry.path())
+        .collect();
+    of_the_hosted_mobs.sort();
+    dirs.extend(of_the_hosted_mobs);
+    dirs
+}
+
+/// The realm databases (`*.sqlite3` files) directly in the store directory
+/// `store_dir`, sorted. A directory that cannot be read holds none.
+pub(crate) fn realm_databases_in(store_dir: &Path) -> Vec<PathBuf> {
+    let mut databases: Vec<PathBuf> = std::fs::read_dir(store_dir)
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_file() && path.extension().and_then(|ext| ext.to_str()) == Some("sqlite3")
+        })
+        .collect();
+    databases.sort();
+    databases
+}
+
 /// Report-shaping options for the read-only diagnosis. Options change what
 /// is *reported*, never what is read — every mode honors the module safety
 /// contract.
@@ -328,6 +462,196 @@ pub struct DoctorOptions {
     /// Emit one [`FINDING_STORAGE_COMPAT_SESSION`] finding per censused
     /// session in addition to the per-store session-format census.
     pub verbose: bool,
+}
+
+/// The mob stores a diagnosis leaves out: what a caller that may not
+/// address every mob of a host is not answered. A store that is left out is
+/// not swept: it has no inventory row and no finding, and the three
+/// censuses over mob stores do not count it.
+///
+/// A mob's store is named by the name of its file under `mobs/`, and its
+/// agent memory by the name of its directory under a memory root's
+/// [`HOSTED_MOBS_DIR`]: the names a gateway gives them. Whoever hands a
+/// diagnosis this value knows which mobs these are; the diagnosis reads no
+/// record to decide it. The state directory's own mob store, the realm's
+/// two databases under `mobs/` and a memory root's own realm files are
+/// never left out.
+///
+/// The value names what is shown ([`Self::showing_only`]): the stores and
+/// the memory directories of the mobs its caller is answered. Every other
+/// store of one mob under `mobs/` and every other memory directory of a
+/// hosted mob is left out, with what lies beside or in it: so is a store or
+/// a directory of an id under which no mob stands. Beside a store that is
+/// shown its two lock files are shown, and beside a store or a memory
+/// database that is shown a backup or a quarantined copy only when it is
+/// not older than the mob ([`shown_by_its_time`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct MobStoresLeftOut {
+    /// What is shown of the mobs' stores and memory, when not all of it
+    /// is. `None`: no store is left out.
+    shown: Option<MobStoresShown>,
+}
+
+/// The stores and the memory directories a diagnosis shows when it leaves
+/// the others out, each with the time its mob was created at (milliseconds
+/// of the host's clock; `None` where that did not read).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct MobStoresShown {
+    /// By the name of the store's file under `mobs/`.
+    stores: BTreeMap<OsString, Option<u64>>,
+    /// By the name of the mob's directory under [`HOSTED_MOBS_DIR`].
+    memory_dirs: BTreeMap<OsString, Option<u64>>,
+}
+
+impl MobStoresLeftOut {
+    /// No store is left out: the whole diagnosis.
+    pub(crate) fn none() -> Self {
+        Self::default()
+    }
+
+    /// Every store of one mob under `mobs/` and every memory directory of a
+    /// hosted mob is left out.
+    pub(crate) fn every() -> Self {
+        Self {
+            shown: Some(MobStoresShown::default()),
+        }
+    }
+
+    /// Every store of one mob under `mobs/` and every memory directory of a
+    /// hosted mob is left out but those named: `stores` by the names of
+    /// their files and `memory_dirs` by the names of their directories,
+    /// each with the time its mob was created at (milliseconds of the
+    /// host's clock; `None` where it did not read).
+    pub(crate) fn showing_only(
+        stores: impl IntoIterator<Item = (OsString, Option<u64>)>,
+        memory_dirs: impl IntoIterator<Item = (OsString, Option<u64>)>,
+    ) -> Self {
+        Self {
+            shown: Some(MobStoresShown {
+                stores: stores.into_iter().collect(),
+                memory_dirs: memory_dirs.into_iter().collect(),
+            }),
+        }
+    }
+
+    /// Whether the database `database` of the child root is left out: the
+    /// store of one mob (not one of the realm's two databases) that this
+    /// value does not show.
+    fn store(&self, database: &Path) -> bool {
+        crate::child_mob_storage::ChildMobDatabase::classify(database)
+            == crate::child_mob_storage::ChildMobDatabase::MobEventLog
+            && self.shown.as_ref().is_some_and(|shown| {
+                !database
+                    .file_name()
+                    .is_some_and(|name| shown.stores.contains_key(name))
+            })
+    }
+
+    /// Whether the memory directory `dir` of a hosted mob is left out: one
+    /// this value does not show.
+    fn memory_dir(&self, dir: &Path) -> bool {
+        self.shown.as_ref().is_some_and(|shown| {
+            !dir.file_name()
+                .is_some_and(|name| shown.memory_dirs.contains_key(name))
+        })
+    }
+
+    /// Whether the file `artifact` of the child root is left out. Where
+    /// stores are left out, every file is but those of the realm's two
+    /// databases and those beside a store that is shown: a file whose name
+    /// is that store's name followed by `.` and more. Beside such a store
+    /// its two lock files are shown (their names hold no time, and the
+    /// store of the mob keeps those very files), and a backup or a
+    /// quarantined copy by the time in its name ([`shown_by_its_time`]);
+    /// any other file beside it is left out.
+    fn artifact_of_a_store(&self, artifact: &Path) -> bool {
+        let Some(shown) = &self.shown else {
+            return false;
+        };
+        let Some(name) = artifact.file_name().and_then(|name| name.to_str()) else {
+            return true;
+        };
+        let is_of = |database: &str| {
+            name.strip_prefix(database)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
+        };
+        let custody =
+            meerkat_mob_mcp::MobMcpState::persistent_forked_participant_store_path(Path::new(""));
+        if is_of(crate::child_mob_storage::REALM_PROFILE_DATABASE)
+            || custody
+                .file_name()
+                .and_then(|custody| custody.to_str())
+                .is_some_and(is_of)
+        {
+            return false;
+        }
+        let beside_a_shown_store = shown.stores.iter().find_map(|(store, created_at_ms)| {
+            let rest = name.strip_prefix(store.to_str()?)?;
+            (rest.is_empty() || rest.starts_with('.')).then_some((rest, *created_at_ms))
+        });
+        match beside_a_shown_store {
+            Some((rest, created_at_ms)) => {
+                !(matches!(rest, "" | ".mfence" | ".mpresence")
+                    || shown_by_its_time(name, created_at_ms))
+            }
+            None => true,
+        }
+    }
+
+    /// Whether the file `artifact` of the hosted mob's memory directory
+    /// `dir` is left out: where stores are left out, a backup or a
+    /// quarantined copy that is not shown by the time in its name
+    /// ([`shown_by_its_time`]) against the mob of the directory. Every
+    /// other file of a directory that is shown is shown; a directory that
+    /// is left out is not swept at all.
+    fn artifact_of_a_memory_dir(&self, dir: &Path, artifact: &Path) -> bool {
+        let Some(shown) = &self.shown else {
+            return false;
+        };
+        let Some(created_at_ms) = dir.file_name().and_then(|name| shown.memory_dirs.get(name))
+        else {
+            return true;
+        };
+        let Some(name) = artifact.file_name().and_then(|name| name.to_str()) else {
+            return true;
+        };
+        let timed = crate::storage_migrate::is_registered_backup_artifact_name(name)
+            || crate::storage_migrate::is_registered_quarantine_artifact_name(name);
+        timed && !shown_by_its_time(name, *created_at_ms)
+    }
+}
+
+/// Whether the backup or quarantined copy named `name` is shown with what a
+/// mob created at `created_at_ms` keeps (milliseconds of the host's clock;
+/// `None` where that did not read): when the time its name holds
+/// ([`crate::storage_migrate::registered_artifact_time_secs`], in seconds)
+/// is not before the mob's creation, so a file older than that mob is not.
+/// A file whose age cannot be told is not shown: one whose name holds no
+/// such time, and every backup and quarantined copy where the mob's
+/// creation did not read.
+///
+/// Both times are readings of a wall clock: the name's by the process that
+/// wrote the file, the mob's by the host that created the mob.
+fn shown_by_its_time(name: &str, created_at_ms: Option<u64>) -> bool {
+    match (
+        crate::storage_migrate::registered_artifact_time_secs(name),
+        created_at_ms,
+    ) {
+        (Some(written_at_secs), Some(created_at_ms)) => {
+            written_at_secs.saturating_mul(1000) >= created_at_ms
+        }
+        _ => false,
+    }
+}
+
+/// The directories of the memory root `root` a diagnosis sweeps
+/// ([`memory_store_dirs`]): the root itself, and the directory of each
+/// hosted mob that `left_out` does not leave out.
+fn memory_store_dirs_swept(root: &Path, left_out: &MobStoresLeftOut) -> Vec<PathBuf> {
+    memory_store_dirs(root)
+        .into_iter()
+        .filter(|dir| dir.as_path() == root || !left_out.memory_dir(dir))
+        .collect()
 }
 
 /// Read-only diagnosis of Meta state directories, cold (no live runtime;
@@ -355,9 +679,22 @@ pub async fn diagnose_state_dir_with_options(
     resolved: Option<ResolvedStorageSummary>,
     options: DoctorOptions,
 ) -> StorageDiagnosis {
+    diagnose_state_dir_leaving_out(scope, resolved, options, MobStoresLeftOut::none()).await
+}
+
+/// [`diagnose_state_dir_with_options`] without the mob stores `left_out`
+/// names: the diagnosis a door hands a caller that may not address every
+/// mob of its host. Every other caller of the doctor reads the whole
+/// directory.
+pub(crate) async fn diagnose_state_dir_leaving_out(
+    scope: &DiagnoseScope,
+    resolved: Option<ResolvedStorageSummary>,
+    options: DoctorOptions,
+    left_out: MobStoresLeftOut,
+) -> StorageDiagnosis {
     let scope = scope.clone();
     match tokio::task::spawn_blocking(move || {
-        diagnose_state_dir_blocking_with_options(&scope, resolved, options)
+        diagnose_blocking_leaving_out(&scope, resolved, options, &left_out)
     })
     .await
     {
@@ -389,6 +726,17 @@ pub fn diagnose_state_dir_blocking_with_options(
     resolved: Option<ResolvedStorageSummary>,
     options: DoctorOptions,
 ) -> StorageDiagnosis {
+    diagnose_blocking_leaving_out(scope, resolved, options, &MobStoresLeftOut::none())
+}
+
+/// The blocking diagnosis without the mob stores `left_out` names
+/// ([`diagnose_state_dir_leaving_out`]).
+fn diagnose_blocking_leaving_out(
+    scope: &DiagnoseScope,
+    resolved: Option<ResolvedStorageSummary>,
+    options: DoctorOptions,
+    left_out: &MobStoresLeftOut,
+) -> StorageDiagnosis {
     let mut diagnosis = StorageDiagnosis::default();
 
     // Dedup candidate roots by canonical identity while preserving order, so
@@ -405,7 +753,13 @@ pub fn diagnose_state_dir_blocking_with_options(
     }
 
     for root in &roots {
-        sweep_state_dir(root, scope.realm.as_deref(), options, &mut diagnosis);
+        sweep_state_dir(
+            root,
+            scope.realm.as_deref(),
+            options,
+            left_out,
+            &mut diagnosis,
+        );
     }
 
     // Retained-recovery-state coverage statement: nothing meta persists
@@ -554,6 +908,7 @@ fn sweep_state_dir(
     state_dir: &Path,
     identity_filter: Option<&str>,
     options: DoctorOptions,
+    left_out: &MobStoresLeftOut,
     out: &mut StorageDiagnosis,
 ) {
     if !state_dir.is_dir() {
@@ -657,8 +1012,12 @@ fn sweep_state_dir(
 
     // Durable child mobs live in Meerkat's child root under the state dir:
     // per-mob event logs plus realm-scoped profile and custody databases,
-    // all on Meerkat's `mob` schema domain.
-    for db_path in crate::child_mob_storage::child_mob_databases(state_dir) {
+    // all on Meerkat's `mob` schema domain. A mob's store that is left out
+    // is not inspected.
+    for db_path in crate::child_mob_storage::child_mob_databases(state_dir)
+        .into_iter()
+        .filter(|database| !left_out.store(database))
+    {
         entry
             .databases
             .push(inspect_database(&db_path, &["mob"], out));
@@ -673,14 +1032,14 @@ fn sweep_state_dir(
         .collect();
     report_twins("agent-memory", &memory_roots, out);
     for memory_root in &memory_roots {
-        sweep_memory_root(memory_root, &mut entry, out);
+        sweep_memory_root(memory_root, left_out, &mut entry, out);
     }
 
     sweep_blob_root(state_dir, out);
 
     sweep_first_boot_manifest(state_dir, out);
 
-    census_rollback(state_dir, out);
+    census_rollback(state_dir, left_out, out);
 
     // Gateway-home artifacts, reported when materialized inside a scoped
     // root (the meta_gateway XDG home is itself a valid root to pass).
@@ -708,15 +1067,31 @@ fn sweep_state_dir(
     }
 
     // Filesystem artifacts beside the databases (state root plus the memory
-    // realm roots).
-    let mut artifact_dirs = vec![state_dir.to_path_buf()];
-    artifact_dirs.extend(memory_roots);
+    // realm roots, each with the stores of the mobs hosted below it). What
+    // lies beside a store or in a memory directory that is left out is
+    // left out with it, and beside one that is shown a backup or a
+    // quarantined copy is shown by the time in its name.
+    sweep_artifacts(state_dir, |_| false, out);
+    for memory_root in &memory_roots {
+        for dir in memory_store_dirs_swept(memory_root, left_out) {
+            if dir.as_path() == memory_root.as_path() {
+                sweep_artifacts(&dir, |_| false, out);
+            } else {
+                sweep_artifacts(
+                    &dir,
+                    |file| left_out.artifact_of_a_memory_dir(&dir, file),
+                    out,
+                );
+            }
+        }
+    }
     let child_mob_root = crate::child_mob_storage::child_mob_root(state_dir);
     if child_mob_root.is_dir() {
-        artifact_dirs.push(child_mob_root);
-    }
-    for dir in &artifact_dirs {
-        sweep_artifacts(dir, out);
+        sweep_artifacts(
+            &child_mob_root,
+            |file| left_out.artifact_of_a_store(file),
+            out,
+        );
     }
 
     out.inventory.push(entry);
@@ -1963,34 +2338,32 @@ fn count_files_in(dir: &Path) -> usize {
 }
 
 /// Per-realm memory database inventory inside one agent-memory root
-/// (`<root>/<pct-encoded-realm>.sqlite3`, feature-owned relative layout).
+/// (`<root>/<pct-encoded-realm>.sqlite3`, feature-owned relative layout):
+/// the launch mob's realm files, directly in the root, then those of each
+/// mob the launch hosts beside it ([`memory_store_dirs`]).
 fn sweep_memory_root(
     memory_root: &Path,
+    left_out: &MobStoresLeftOut,
     entry: &mut StorageInventoryEntry,
     out: &mut StorageDiagnosis,
 ) {
-    let Ok(entries) = std::fs::read_dir(memory_root) else {
-        return;
-    };
-    let mut realm_dbs: Vec<PathBuf> = entries
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.is_file() && path.extension().and_then(|ext| ext.to_str()) == Some("sqlite3")
-        })
-        .collect();
-    realm_dbs.sort();
-    for db_path in realm_dbs {
-        entry
-            .databases
-            .push(inspect_database(&db_path, &[MEMORY_LEDGER_DOMAIN], out));
+    for store_dir in memory_store_dirs_swept(memory_root, left_out) {
+        for db_path in realm_databases_in(&store_dir) {
+            entry
+                .databases
+                .push(inspect_database(&db_path, &[MEMORY_LEDGER_DOMAIN], out));
+        }
     }
 }
 
 /// Filesystem artifact sweep: `*.mfence` fence locks and their `*.mpresence`
 /// presence locks, the state-directory runtime lock, `*.pre-*` migration
-/// backups, `*.corrupt-*` quarantines (all inventory-grade).
-fn sweep_artifacts(dir: &Path, out: &mut StorageDiagnosis) {
+/// backups, `*.corrupt-*` quarantines (all inventory-grade). A file
+/// `left_out` answers for is not reported: the child root and the memory
+/// directory of a hosted mob are swept with stores left out
+/// ([`MobStoresLeftOut::artifact_of_a_store`],
+/// [`MobStoresLeftOut::artifact_of_a_memory_dir`]).
+fn sweep_artifacts(dir: &Path, left_out: impl Fn(&Path) -> bool, out: &mut StorageDiagnosis) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -1998,6 +2371,7 @@ fn sweep_artifacts(dir: &Path, out: &mut StorageDiagnosis) {
         .filter_map(Result::ok)
         .map(|entry| entry.path())
         .filter(|path| path.is_file())
+        .filter(|path| !left_out(path))
         .collect();
     files.sort();
     for file in files {
@@ -2199,12 +2573,17 @@ const ROLLBACK_TARGET_SENTENCE: &str = "A release on Core 0.9.8 or earlier (Meta
 /// sessions at the operator-instruction envelope, then, over the
 /// directory's own mob store and its child mob journals, the events at the
 /// operator-instruction mob event schema and the identity-store rows of
-/// schema version 2 and later. Read-only, Info, counts only.
-fn census_rollback(state_dir: &Path, out: &mut StorageDiagnosis) {
+/// schema version 2 and later, then the mobs the host created beside its
+/// launch mob. Read-only, Info, counts only. A child mob's journal that
+/// `left_out` names is not among the stores the three censuses over mob
+/// stores read, so each of their totals is of the stores the diagnosis
+/// holds.
+fn census_rollback(state_dir: &Path, left_out: &MobStoresLeftOut, out: &mut StorageDiagnosis) {
     census_operator_instruction_envelope(state_dir, out);
-    let stores = RollbackCensusStores::of(state_dir);
+    let stores = RollbackCensusStores::of(state_dir, left_out);
     census_operator_instruction_mob_events(state_dir, &stores, out);
     census_identity_store_rows(state_dir, &stores, out);
+    census_host_created_mobs(state_dir, &stores, out);
 }
 
 /// The mob stores the rollback census reads.
@@ -2220,7 +2599,7 @@ struct RollbackCensusStores {
 }
 
 impl RollbackCensusStores {
-    fn of(state_dir: &Path) -> Self {
+    fn of(state_dir: &Path, left_out: &MobStoresLeftOut) -> Self {
         Self {
             own: crate::storage_migrate_native::census::state_dir_mob_store(state_dir),
             children: crate::child_mob_storage::child_mob_databases(state_dir)
@@ -2229,6 +2608,7 @@ impl RollbackCensusStores {
                     crate::child_mob_storage::ChildMobDatabase::classify(database)
                         == crate::child_mob_storage::ChildMobDatabase::MobEventLog
                 })
+                .filter(|database| !left_out.store(database))
                 .collect(),
         }
     }
@@ -2542,6 +2922,122 @@ fn count_identity_store_rows(
     )
 }
 
+/// The releases that host no mob beside the launch mob, as the census of
+/// the mobs a host created names them: inside a sentence, and at its start.
+const HOSTED_MOBS_ROLLBACK_TARGET: &str =
+    "a release from before a gateway hosted mobs beside its launch mob";
+const HOSTED_MOBS_ROLLBACK_TARGET_SENTENCE: &str =
+    "A release from before a gateway hosted mobs beside its launch mob";
+
+/// The census of the mobs the host created beside its launch mob: the mob
+/// stores under `mobs/` whose creation record, read by Core's read-only
+/// reader, names the host. The state directory's own mob store holds the
+/// launch mob and is never counted, wherever it lies.
+fn census_host_created_mobs(
+    state_dir: &Path,
+    stores: &RollbackCensusStores,
+    out: &mut StorageDiagnosis,
+) {
+    let own = stores.own.as_ref().ok().and_then(Option::as_ref);
+    let children: Vec<PathBuf> = stores
+        .children
+        .iter()
+        .filter(|child| Some(*child) != own)
+        .cloned()
+        .collect();
+    let creations = match read_mob_creations(children.clone()) {
+        Ok(creations) => creations,
+        Err(error) => children.iter().map(|_| Err(error.clone())).collect(),
+    };
+    let mut total = 0_usize;
+    let mut counted = 0_usize;
+    let mut uncounted = 0_usize;
+    for (store, creation) in children.into_iter().zip(creations) {
+        let message = match creation {
+            Ok(meerkat_mob::StoredMobCreation::Recorded(meerkat_mob::MobProvenance::Host)) => {
+                counted += 1;
+                total += 1;
+                format!(
+                    "this mob store holds a mob the host created beside its launch mob: \
+                     {HOSTED_MOBS_ROLLBACK_TARGET} restores it as a plain mob, without Meta's \
+                     identity plane. To keep it from running there, destroy the mob, or move \
+                     this database out of mobs/, before a rollback to such a release"
+                )
+            }
+            Ok(meerkat_mob::StoredMobCreation::PredatesCreationRecords) => {
+                uncounted += 1;
+                "this mob store predates creation records: who created its mob is recorded \
+                 nowhere, so it is not counted. An earlier release wrote it and no later one \
+                 has opened it for writing since"
+                    .to_string()
+            }
+            // The two answers that count with no finding of their own: a
+            // store that holds no mob, and a mob another creator made.
+            Ok(
+                meerkat_mob::StoredMobCreation::NoMob | meerkat_mob::StoredMobCreation::Recorded(_),
+            ) => {
+                counted += 1;
+                continue;
+            }
+            // The answer is open to additions: one this census does not
+            // know is never counted in silence.
+            Ok(_) => {
+                uncounted += 1;
+                "the creation record of this mob store gave an answer this census does not \
+                 know, so it is not counted"
+                    .to_string()
+            }
+            Err(error) => {
+                uncounted += 1;
+                format!("who created the mob of this mob store could not be read: {error}")
+            }
+        };
+        out.findings.push(
+            StorageFinding::new(FindingSeverity::Info, FINDING_HOST_CREATED_MOBS, message)
+                .with_path(store),
+        );
+    }
+    let mut message = format!(
+        "hosted-mob census: {total} mob(s) the host created beside its launch mob in {counted} \
+         mob store(s) under mobs/"
+    );
+    if total > 0 {
+        message.push_str(&format!(
+            ". {HOSTED_MOBS_ROLLBACK_TARGET_SENTENCE} restores each of them as a plain mob, \
+             without Meta's identity plane; each such store has a finding of its own"
+        ));
+    }
+    message.push_str(&partial_note(uncounted, "mob store(s)"));
+    out.findings.push(
+        StorageFinding::new(FindingSeverity::Info, FINDING_HOST_CREATED_MOBS, message)
+            .with_path(state_dir.to_path_buf()),
+    );
+}
+
+/// What the creation record of each mob store in `stores` says, read by
+/// Core's read-only reader on a thread of its own ([`block_on_core_read`]),
+/// in order: who created its mob, that it holds none, or that it predates
+/// creation records.
+fn read_mob_creations(
+    stores: Vec<PathBuf>,
+) -> Result<Vec<Result<meerkat_mob::StoredMobCreation, String>>, String> {
+    block_on_core_read(
+        "storage-doctor-mob-creations",
+        "the mob creation reader",
+        move || async move {
+            let mut creations = Vec::with_capacity(stores.len());
+            for store in &stores {
+                creations.push(
+                    meerkat_mob::MobStorage::read_creation_provenance(store)
+                        .await
+                        .map_err(|error| error.to_string()),
+                );
+            }
+            Ok(creations)
+        },
+    )
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
@@ -2712,6 +3208,424 @@ mod tests {
         assert!(!codes(&diagnosis).contains(&FINDING_FILE_NAME_TWINS));
         assert!(!diagnosis.has_errors(), "{diagnosis:?}");
         assert_eq!(diagnosis.inventory[0].databases.len(), 2);
+    }
+
+    /// The doctor's inventory holds the realm files of each mob a launch
+    /// hosts beside its launch mob, with their ledger versions, and its
+    /// artifact sweep finds what lies beside them.
+    ///
+    /// A memory root with the launch mob's realm file and one hosted mob's,
+    /// both made through the bundled store (so each carries its ledger and
+    /// the lock file its operations leave), and a quarantined realm file in
+    /// the hosted mob's directory. The inventory names both realm files,
+    /// the hosted mob's at the version the launch mob's is at; the lock
+    /// file and the quarantined file beside the hosted mob's realm file are
+    /// findings, as those in the root are. A file directly in the hosted
+    /// directory is in no store and is not inventoried.
+    #[tokio::test]
+    async fn the_inventory_holds_the_realm_files_of_a_mob_hosted_beside_the_launch_mob() {
+        use crate::memory::sqlite_store::SqliteAgentMemoryStore;
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path();
+        let root = state.join("agent-memory");
+        let second = root.join("hosted-mobs.d").join("second");
+        for (dir, realm) in [(&root, "alpha"), (&second, "mob.second")] {
+            let store = SqliteAgentMemoryStore::open(dir).unwrap();
+            store.open_realm_ledgered(realm).unwrap();
+        }
+        let of_the_launch_mob = root.join("alpha.sqlite3");
+        let of_the_second = second.join("mob%2Esecond.sqlite3");
+        assert!(of_the_launch_mob.is_file() && of_the_second.is_file());
+        // An operation of a store leaves its lock file beside the database.
+        drop(meerkat_sqlite::OperationGuard::for_database(&of_the_second).unwrap());
+        let quarantined = second.join("mob%2Esecond.sqlite3.corrupt-42");
+        std::fs::write(&quarantined, b"quarantined").unwrap();
+        drop(Connection::open(root.join("hosted-mobs.d").join("stray.sqlite3")).unwrap());
+
+        let diagnosis = diagnose_state_dir(&scope(&[state])).await;
+        assert!(!diagnosis.has_errors(), "{diagnosis:?}");
+        let databases = &diagnosis.inventory[0].databases;
+        let version_of = |path: &Path| {
+            databases
+                .iter()
+                .find(|database| database.path == path)
+                .and_then(|database| {
+                    database
+                        .domains
+                        .iter()
+                        .find(|(domain, _)| domain == MEMORY_LEDGER_DOMAIN)
+                        .and_then(|(_, version)| *version)
+                })
+        };
+        assert!(
+            version_of(&of_the_launch_mob).is_some(),
+            "the launch mob's realm file is inventoried, as before"
+        );
+        assert_eq!(
+            version_of(&of_the_second),
+            version_of(&of_the_launch_mob),
+            "the hosted mob's realm file is inventoried, at the same ledger version: {:?}",
+            databases
+                .iter()
+                .map(|database| &database.path)
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            databases
+                .iter()
+                .all(|database| !database.path.ends_with("stray.sqlite3")),
+            "a file directly in the hosted directory is in no store"
+        );
+        let found_beside_the_second: Vec<&Path> = diagnosis
+            .findings
+            .iter()
+            .filter_map(|finding| finding.path.as_deref())
+            .filter(|path| path.parent() == Some(second.as_path()))
+            .collect();
+        assert!(
+            found_beside_the_second.contains(&quarantined.as_path()),
+            "the quarantined file beside the hosted mob's realm file is a finding: \
+             {found_beside_the_second:?}"
+        );
+        assert!(
+            found_beside_the_second
+                .iter()
+                .any(|path| path.to_string_lossy().ends_with(".mfence")),
+            "and so is the lock file its operations left: {found_beside_the_second:?}"
+        );
+    }
+
+    /// A diagnosis leaves out the mob stores it is told to, with what lies
+    /// beside them, and its censuses read the stores it holds. A state
+    /// directory holds, under `mobs/`, the realm's profile database and the
+    /// stores of two mobs, each with the lock file an operation leaves, and
+    /// a memory root with the launch mob's realm file and one mob's own
+    /// directory. Told to show the third mob's store alone, the diagnosis
+    /// has no path of the second mob's store, of its lock file or of its
+    /// memory directory, and its census of the mobs a host created reads
+    /// one store; the third mob's store with its lock file, the realm's
+    /// database and the launch mob's realm file
+    /// stay. Told to leave every mob's store out, it has neither mob's and
+    /// reads none, and still has the realm's database with its lock file.
+    /// Told nothing, it has all of them.
+    #[test]
+    fn a_diagnosis_leaves_out_the_mob_stores_it_is_told_to_and_reads_the_rest() {
+        use crate::memory::sqlite_store::SqliteAgentMemoryStore;
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path();
+        let mobs = crate::child_mob_storage::child_mob_root(state);
+        std::fs::create_dir_all(&mobs).unwrap();
+        let profiles = crate::child_mob_storage::REALM_PROFILE_DATABASE;
+        for database in ["mob--second.db", "mob--third.db", profiles] {
+            let database = mobs.join(database);
+            drop(Connection::open(&database).unwrap());
+            drop(meerkat_sqlite::OperationGuard::for_database(&database).unwrap());
+        }
+        let root = state.join("agent-memory");
+        for (dir, realm) in [
+            (root.clone(), "alpha"),
+            (root.join(HOSTED_MOBS_DIR).join("second"), "beta"),
+        ] {
+            SqliteAgentMemoryStore::open(&dir)
+                .unwrap()
+                .open_realm_ledgered(realm)
+                .unwrap();
+        }
+
+        // Every path the diagnosis holds, and the stores its census of the
+        // mobs a host created has a finding for.
+        let read = |left_out: MobStoresLeftOut| {
+            let diagnosis = diagnose_blocking_leaving_out(
+                &scope(&[state]),
+                None,
+                DoctorOptions::default(),
+                &left_out,
+            );
+            let mut paths: Vec<String> = diagnosis
+                .findings
+                .iter()
+                .filter_map(|finding| finding.path.as_deref())
+                .chain(
+                    diagnosis
+                        .inventory
+                        .iter()
+                        .flat_map(|entry| entry.databases.iter())
+                        .map(|database| database.path.as_path()),
+                )
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect();
+            paths.sort();
+            paths.dedup();
+            let census: Vec<String> = diagnosis
+                .findings
+                .iter()
+                .filter(|finding| finding.code == FINDING_HOST_CREATED_MOBS)
+                .filter_map(|finding| finding.path.as_deref())
+                .filter(|path| *path != state)
+                .filter_map(|path| path.file_name())
+                .map(|name| name.to_string_lossy().into_owned())
+                .collect();
+            (paths, census)
+        };
+        let holds = |paths: &[String], part: &str| paths.iter().any(|path| path.contains(part));
+        let of_the_second_mob = ["mob--second.db", "hosted-mobs.d"];
+        let of_the_others = [
+            "mob--third.db",
+            "mob--third.db.mfence",
+            "realm_profiles.db",
+            "realm_profiles.db.mfence",
+            "alpha.sqlite3",
+        ];
+
+        let (paths, census) = read(MobStoresLeftOut::none());
+        for part in of_the_second_mob.iter().chain(&of_the_others) {
+            assert!(
+                holds(&paths, part),
+                "the whole diagnosis holds {part}: {paths:?}"
+            );
+        }
+        assert!(holds(&paths, "mob--second.db.mfence"), "{paths:?}");
+        assert_eq!(census, ["mob--second.db", "mob--third.db"]);
+
+        let (paths, census) = read(MobStoresLeftOut::showing_only(
+            [(OsString::from("mob--third.db"), None)],
+            std::iter::empty(),
+        ));
+        for part in of_the_second_mob {
+            assert!(
+                !holds(&paths, part),
+                "a mob that is left out is on no path, {part} neither: {paths:?}"
+            );
+        }
+        for part in of_the_others {
+            assert!(holds(&paths, part), "{part} stays: {paths:?}");
+        }
+        assert_eq!(
+            census,
+            ["mob--third.db"],
+            "the census reads the store it holds"
+        );
+
+        let (paths, census) = read(MobStoresLeftOut::every());
+        for part in ["mob--", "hosted-mobs.d"] {
+            assert!(
+                !holds(&paths, part),
+                "with every mob's store left out, {part} is on no path: {paths:?}"
+            );
+        }
+        for part in [
+            "realm_profiles.db",
+            "realm_profiles.db.mfence",
+            "alpha.sqlite3",
+        ] {
+            assert!(holds(&paths, part), "{part} stays: {paths:?}");
+        }
+        assert!(census.is_empty(), "the census reads no store: {census:?}");
+    }
+
+    /// Told which mobs' stores and memory to show, a diagnosis shows those
+    /// alone, and a file beside a store or a memory database by the time in
+    /// its name. A state directory
+    /// holds, under `mobs/`, the realm's profile database with its lock
+    /// file and the stores of three mobs. Beside each store lie its lock
+    /// file, its presence lock file, and a backup, a backup with a purpose
+    /// in its name and a quarantined copy, each named with the second
+    /// before a given moment and with the second of that moment. The
+    /// diagnosis is told that the first mob stands since
+    /// that moment, that the second stands and its creation did not read,
+    /// and nothing of the third. Beside the first store it shows the two
+    /// lock files and the two backups and the quarantined copy that are
+    /// not older than the mob; beside the second the two lock files alone;
+    /// beside the third nothing, and not the third store itself. The
+    /// realm's database with its lock file is shown. A memory root holds
+    /// the directory of the first mob and of the third, each with a realm
+    /// database and a backup of either second beside it: the diagnosis
+    /// shows the first mob's database, the lock file its operations left
+    /// and the backup that is not older than the mob, and nothing of the
+    /// third's directory. Told to leave nothing
+    /// out, it shows every file.
+    #[test]
+    fn a_diagnosis_shows_a_file_beside_a_mob_store_by_the_mob_that_stands_under_its_id() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path();
+        let mobs = crate::child_mob_storage::child_mob_root(state);
+        std::fs::create_dir_all(&mobs).unwrap();
+        let profiles = crate::child_mob_storage::REALM_PROFILE_DATABASE;
+        let stores = ["mob--first.db", "mob--second.db", "mob--third.db"];
+        for database in stores.iter().copied().chain([profiles]) {
+            let database = mobs.join(database);
+            drop(Connection::open(&database).unwrap());
+            drop(meerkat_sqlite::OperationGuard::for_database(&database).unwrap());
+        }
+        // The moment the first mob stands since, in seconds of the clock,
+        // and the second before it.
+        let at: u64 = 1_700_000_100;
+        let before = at - 1;
+        let beside = |store: &str| {
+            [
+                format!("{store}.mfence"),
+                format!("{store}.mpresence"),
+                format!("{store}.pre-0.9.17-{before}"),
+                format!("{store}.pre-0.9.17-{at}"),
+                format!("{store}.pre-0.9.17-{before}.wal"),
+                format!("{store}.pre-0.9.17-{at}.wal"),
+                format!("{store}.corrupt-{before}"),
+                format!("{store}.corrupt-{at}"),
+            ]
+        };
+        for store in stores {
+            for name in beside(store) {
+                if !mobs.join(&name).exists() {
+                    std::fs::write(mobs.join(&name), b"").unwrap();
+                }
+            }
+        }
+
+        // The memory of the first mob and of the third, each in its own
+        // directory below the memory root's directory of the hosted mobs.
+        let hosted = state.join("agent-memory").join(HOSTED_MOBS_DIR);
+        for (segment, realm) in [("first", "alpha"), ("third", "beta")] {
+            let dir = hosted.join(segment);
+            crate::memory::sqlite_store::SqliteAgentMemoryStore::open(&dir)
+                .unwrap()
+                .open_realm_ledgered(realm)
+                .unwrap();
+            // An operation of a store leaves its lock file beside the database.
+            drop(
+                meerkat_sqlite::OperationGuard::for_database(&dir.join(format!("{realm}.sqlite3")))
+                    .unwrap(),
+            );
+            for second in [before, at] {
+                std::fs::write(
+                    dir.join(format!("{realm}.sqlite3.pre-0.9.17-{second}")),
+                    b"",
+                )
+                .unwrap();
+            }
+        }
+
+        // The names of the files under `mobs/` a diagnosis holds a path of,
+        // and, as `<directory>/<file>`, of the files in a hosted mob's
+        // memory directory.
+        let shown = |left_out: MobStoresLeftOut| -> (BTreeSet<String>, BTreeSet<String>) {
+            let diagnosis = diagnose_blocking_leaving_out(
+                &scope(&[state]),
+                None,
+                DoctorOptions::default(),
+                &left_out,
+            );
+            let paths: Vec<&Path> = diagnosis
+                .findings
+                .iter()
+                .filter_map(|finding| finding.path.as_deref())
+                .chain(
+                    diagnosis
+                        .inventory
+                        .iter()
+                        .flat_map(|entry| entry.databases.iter())
+                        .map(|database| database.path.as_path()),
+                )
+                .collect();
+            let name_of = |path: &Path| {
+                path.file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+            };
+            (
+                paths
+                    .iter()
+                    .filter(|path| path.parent() == Some(mobs.as_path()))
+                    .filter_map(|path| name_of(path))
+                    .collect(),
+                paths
+                    .iter()
+                    .filter(|path| path.parent().and_then(Path::parent) == Some(hosted.as_path()))
+                    .filter_map(|path| {
+                        Some(format!("{}/{}", name_of(path.parent()?)?, name_of(path)?))
+                    })
+                    .collect(),
+            )
+        };
+        let names = |names: &[String]| names.iter().cloned().collect::<BTreeSet<String>>();
+        let of_the_stores_and_the_realm: Vec<String> = stores
+            .iter()
+            .copied()
+            .chain([profiles])
+            .map(str::to_string)
+            .chain([format!("{profiles}.mfence")])
+            .collect();
+
+        let mut every_file = of_the_stores_and_the_realm;
+        for store in stores {
+            every_file.extend(beside(store));
+        }
+        let (under_mobs, of_memory) = shown(MobStoresLeftOut::none());
+        assert_eq!(
+            under_mobs,
+            names(&every_file),
+            "told to leave nothing out, the diagnosis shows every file under mobs/"
+        );
+        for part in [
+            "first/alpha.sqlite3".to_string(),
+            format!("first/alpha.sqlite3.pre-0.9.17-{before}"),
+            format!("first/alpha.sqlite3.pre-0.9.17-{at}"),
+            "third/beta.sqlite3".to_string(),
+            format!("third/beta.sqlite3.pre-0.9.17-{at}"),
+        ] {
+            assert!(
+                of_memory.contains(&part),
+                "told to leave nothing out, the diagnosis shows {part}: {of_memory:?}"
+            );
+        }
+
+        let mut by_the_rule: Vec<String> = ["mob--first.db", "mob--second.db", profiles]
+            .into_iter()
+            .map(str::to_string)
+            .chain([format!("{profiles}.mfence")])
+            .collect();
+        by_the_rule.extend([
+            "mob--first.db.mfence".to_string(),
+            "mob--first.db.mpresence".to_string(),
+            format!("mob--first.db.pre-0.9.17-{at}"),
+            format!("mob--first.db.pre-0.9.17-{at}.wal"),
+            format!("mob--first.db.corrupt-{at}"),
+            "mob--second.db.mfence".to_string(),
+            "mob--second.db.mpresence".to_string(),
+        ]);
+        let (under_mobs, of_memory) = shown(MobStoresLeftOut::showing_only(
+            [
+                (OsString::from("mob--first.db"), Some(at * 1000)),
+                (OsString::from("mob--second.db"), None),
+            ],
+            [(OsString::from("first"), Some(at * 1000))],
+        ));
+        assert_eq!(
+            under_mobs,
+            names(&by_the_rule),
+            "a store is shown when it is named, and a file beside it by the time in its name"
+        );
+        for part in [
+            "first/alpha.sqlite3".to_string(),
+            format!("first/alpha.sqlite3.pre-0.9.17-{at}"),
+        ] {
+            assert!(
+                of_memory.contains(&part),
+                "the memory of a mob that is named is shown, {part} too: {of_memory:?}"
+            );
+        }
+        assert!(
+            of_memory
+                .iter()
+                .any(|part| part.starts_with("first/") && part.ends_with(".mfence")),
+            "the lock file in the memory directory of a mob that is named is shown: {of_memory:?}"
+        );
+        assert!(
+            !of_memory.contains(&format!("first/alpha.sqlite3.pre-0.9.17-{before}")),
+            "a backup older than the mob is not shown beside its memory database: {of_memory:?}"
+        );
+        assert!(
+            !of_memory.iter().any(|part| part.starts_with("third/")),
+            "the memory of a mob that is not named is not shown: {of_memory:?}"
+        );
     }
 
     #[tokio::test]
@@ -4037,6 +4951,188 @@ mod tests {
                 assert!(!message.contains(name), "{name} in {message}");
             }
         }
+    }
+
+    /// Give the mob store at `path` the creation record of the mob `mob_id`
+    /// created by `provenance`, as a create writes it.
+    fn record_mob_creation(path: &Path, mob_id: &str, provenance: &meerkat_mob::MobProvenance) {
+        let conn = Connection::open(path).unwrap();
+        conn.execute(
+            "INSERT INTO mob_runtime_incarnations (mob_id, incarnation, origin, provenance, \
+             finalized_at_ms) VALUES (?1, ?2, 'created', ?3, NULL)",
+            rusqlite::params![
+                mob_id,
+                meerkat_core::service::MobIncarnationId::mint().to_string(),
+                serde_json::to_string(provenance).unwrap(),
+            ],
+        )
+        .unwrap();
+    }
+
+    /// Row (RED): the doctor names each mob the host created beside its
+    /// launch mob. Of four mob stores under mobs/ (two whose mob the host
+    /// created, one a session created, one that holds no mob) it reports
+    /// the two, each with what a release from before a gateway hosted such
+    /// mobs does with it, and the total for the directory; the launch mob's
+    /// own store, whose mob the host created too, is not counted. A
+    /// directory without mobs/ counts 0 in one finding. A file under mobs/
+    /// that is no mob store is reported as not read and makes the total
+    /// partial. Every finding is Info and names no mob, and the doctor
+    /// changes no file.
+    ///
+    /// RED on the old tree: the doctor does not read who created a mob.
+    #[test]
+    fn the_doctor_names_each_mob_the_host_created() {
+        const CODE: &str = "host-created-mobs";
+        let host = meerkat_mob::MobProvenance::Host;
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path();
+        let event_log = state.join("event_log.sqlite3");
+        drop(meerkat_mob::MobStorage::persistent(&event_log).unwrap());
+        record_mob_creation(&event_log, "census-launch", &host);
+        let children = state.join("mobs");
+        std::fs::create_dir_all(&children).unwrap();
+        let hosts_first = children.join("mob--hosts-first.db");
+        let hosts_second = children.join("mob--hosts-second.db");
+        let sessions = children.join("mob--sessions.db");
+        let holds_none = children.join("mob--unused.db");
+        for store in [&hosts_first, &hosts_second, &sessions, &holds_none] {
+            drop(meerkat_mob::MobStorage::persistent(store).unwrap());
+        }
+        record_mob_creation(&hosts_first, "census-desk", &host);
+        record_mob_creation(&hosts_second, "census-night-desk", &host);
+        record_mob_creation(
+            &sessions,
+            "census-errand",
+            &meerkat_mob::MobProvenance::Session {
+                session_id: meerkat_core::SessionId::new(),
+            },
+        );
+        let before = file_facts(state);
+
+        let diagnosis = diagnose_state_dir_blocking(&scope(&[state]), None);
+
+        assert_eq!(file_facts(state), before, "the doctor changes no file");
+        let findings = census_findings(&diagnosis, CODE);
+        assert_eq!(findings.len(), 3, "{findings:#?}");
+        for (finding, store) in findings.iter().zip([&hosts_first, &hosts_second]) {
+            assert_eq!(&finding.0, store, "{findings:#?}");
+            assert!(
+                finding.1.starts_with(
+                    "this mob store holds a mob the host created beside its launch mob: a \
+                     release from before a gateway hosted mobs beside its launch mob restores \
+                     it as a plain mob, without Meta's identity plane."
+                ),
+                "{findings:#?}"
+            );
+        }
+        assert_eq!(findings[2].0, state);
+        assert!(
+            findings[2].1.starts_with(
+                "hosted-mob census: 2 mob(s) the host created beside its launch mob in 4 mob \
+                 store(s) under mobs/. A release from before a gateway hosted mobs beside its \
+                 launch mob restores each of them as a plain mob, without Meta's identity plane;"
+            ),
+            "{findings:#?}"
+        );
+        for (_, message) in &findings {
+            for name in [
+                "census-launch",
+                "census-desk",
+                "census-night-desk",
+                "census-errand",
+            ] {
+                assert!(!message.contains(name), "{name} in {message}");
+            }
+        }
+
+        let none = tempfile::tempdir().unwrap();
+        let diagnosis = diagnose_state_dir_blocking(&scope(&[none.path()]), None);
+        let findings = census_findings(&diagnosis, CODE);
+        assert_eq!(
+            findings,
+            vec![(
+                none.path().to_path_buf(),
+                "hosted-mob census: 0 mob(s) the host created beside its launch mob in 0 mob \
+                 store(s) under mobs/"
+                    .to_string()
+            )]
+        );
+
+        let partial = tempfile::tempdir().unwrap();
+        let children = partial.path().join("mobs");
+        std::fs::create_dir_all(&children).unwrap();
+        let hosts = children.join("mob--hosts.db");
+        drop(meerkat_mob::MobStorage::persistent(&hosts).unwrap());
+        record_mob_creation(&hosts, "census-desk", &host);
+        let no_store = children.join("mob--no-store.db");
+        std::fs::write(&no_store, b"this file is not a SQLite database").unwrap();
+        let diagnosis = diagnose_state_dir_blocking(&scope(&[partial.path()]), None);
+        let findings = census_findings(&diagnosis, CODE);
+        assert_eq!(findings.len(), 3, "{findings:#?}");
+        assert_eq!(findings[0].0, hosts);
+        assert_eq!(findings[1].0, no_store);
+        assert!(
+            findings[1]
+                .1
+                .starts_with("who created the mob of this mob store could not be read: "),
+            "{findings:#?}"
+        );
+        assert_eq!(findings[2].0, partial.path());
+        assert!(
+            findings[2].1.starts_with(
+                "hosted-mob census: 1 mob(s) the host created beside its launch mob in 1 mob \
+                 store(s) under mobs/. "
+            ) && findings[2]
+                .1
+                .ends_with("; 1 mob store(s) could not be counted, so the total is partial"),
+            "{findings:#?}"
+        );
+    }
+
+    /// Row: a mob store that predates creation records (one an earlier
+    /// release wrote, whose schema has no table for them) holds no record of
+    /// who created its mob. The doctor says so of that store, in a finding
+    /// of its own, and does not count it: the total is partial. It reads the
+    /// store as it is and migrates nothing.
+    #[test]
+    fn the_doctor_says_of_a_store_that_predates_creation_records_that_its_creator_is_recorded_nowhere()
+     {
+        const CODE: &str = "host-created-mobs";
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path();
+        let children = state.join("mobs");
+        std::fs::create_dir_all(&children).unwrap();
+        let hosts = children.join("mob--hosts.db");
+        drop(meerkat_mob::MobStorage::persistent(&hosts).unwrap());
+        record_mob_creation(&hosts, "census-desk", &meerkat_mob::MobProvenance::Host);
+        let earlier = children.join("mob--earlier.db");
+        meerkat_mob::seed_store_that_predates_creation_records_for_test(&earlier).unwrap();
+        let before = file_facts(state);
+
+        let diagnosis = diagnose_state_dir_blocking(&scope(&[state]), None);
+
+        assert_eq!(file_facts(state), before, "the doctor changes no file");
+        let findings = census_findings(&diagnosis, CODE);
+        assert_eq!(findings.len(), 3, "{findings:#?}");
+        assert_eq!(findings[0].0, earlier, "{findings:#?}");
+        assert!(
+            findings[0].1.starts_with(
+                "this mob store predates creation records: who created its mob is recorded nowhere"
+            ),
+            "{findings:#?}"
+        );
+        assert_eq!(findings[1].0, hosts, "{findings:#?}");
+        assert_eq!(findings[2].0, state);
+        assert!(
+            findings[2].1.starts_with(
+                "hosted-mob census: 1 mob(s) the host created beside its launch mob in 1 mob \
+                 store(s) under mobs/. "
+            ) && findings[2]
+                .1
+                .ends_with("; 1 mob store(s) could not be counted, so the total is partial"),
+            "{findings:#?}"
+        );
     }
 
     /// Row (RED): an empty state directory, and a fresh one whose stores hold

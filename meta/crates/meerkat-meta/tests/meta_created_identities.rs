@@ -3113,6 +3113,7 @@ fn label_decisions(name: &str, seat: &Seat) -> (bool, bool) {
         agent_id: None,
         role: Some(seat.role.as_str()),
         labels: Some(&seat.labels),
+        mob: meerkat_meta::AccessResourceMob::default(),
     };
     let config = label_access();
     let allowed = |action: &str| {

@@ -587,7 +587,7 @@ image_generation = {live_images}
                 }));
                 match request {
                     Ok(request) => {
-                        let origin = value.get("identity").and_then(Value::as_str).map(|identity| meerkat_meta::runtime::GatingOrigin {
+                        let origin = value.get("identity").and_then(Value::as_str).map(|identity| meerkat_meta::runtime::GatingOrigin { mob_id: None,
                             identity: identity.to_owned(),
                             conversation_id: value.get("conversation_id").and_then(Value::as_str).map(str::to_owned),
                             interaction_id: value.get("interaction_id").and_then(Value::as_str).map(str::to_owned),

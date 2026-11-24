@@ -207,13 +207,23 @@ async fn a_drain_at_its_bound_leaves_the_turn_to_the_shutdown() {
     let member = seat_mid_turn(&handle, &calls, "worker-1").await;
 
     assert!(
-        runtime.actor_loop_probe_task.lock().await.is_some(),
+        runtime
+            .default_mob()
+            .actor_loop_probe_task
+            .lock()
+            .await
+            .is_some(),
         "the runtime probes its actor loop"
     );
     let window = Duration::from_millis(500);
     let report = runtime.drain_in_flight_turns(Instant::now() + window).await;
     assert!(
-        runtime.actor_loop_probe_task.lock().await.is_none(),
+        runtime
+            .default_mob()
+            .actor_loop_probe_task
+            .lock()
+            .await
+            .is_none(),
         "the drain stops the actor-loop probe: a long drained turn pages no stall"
     );
 

@@ -50,7 +50,7 @@ fn a_requests_time_is_the_time_of_the_row_that_opens_its_action() {
         // An action of which only a decision is retained.
         row("rejection_decided", "action-decided", 95, json!({})),
     ];
-    let times = GatingRequestTimes::of(&audit);
+    let times = GatingRequestTimes::of(&audit, crate::unified_runtime::OtherMobsServed::NotKnown);
     assert_eq!(times.made_at("action-whole"), Some(10));
     assert_eq!(times.made_at("action-cut"), None);
     assert_eq!(times.made_at("action-held"), Some(80));

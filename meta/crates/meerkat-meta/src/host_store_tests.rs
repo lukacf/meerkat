@@ -1552,6 +1552,196 @@ async fn the_events_cursor_and_idle_opt_ins_survive_a_failover() {
     );
 }
 
+/// The release of a destroyed mob's records removes that mob's documents
+/// of every kind from the realm and no other mob's: a mob whose id begins
+/// with the released mob's keeps its own, a cursor set just before the
+/// release does not come back after it, and a process on another host
+/// reads none of the released mob's records.
+#[tokio::test]
+async fn the_release_of_a_mobs_records_removes_its_documents_and_no_other_mobs() {
+    use crate::runtime::{
+        IdentityRotationIntent, IdentityToolRecord, LifecycleEffectFailure, LifecycleEffectIntent,
+        LifecycleEffectKind, LifecycleEffectVerb, LifecycleProjectionCursor, MobRecordsRelease,
+    };
+    const IDENTITY: &str = "personal:alice";
+    /// What the store keeps under `mob_id`, by kind of record.
+    async fn kept(
+        metadata: &SpiMetadataStore,
+        mob_id: &str,
+    ) -> (bool, usize, bool, usize, bool, usize, usize) {
+        (
+            metadata
+                .get_subscription_cursor(mob_id)
+                .await
+                .expect("the cursor")
+                .is_some(),
+            metadata
+                .load_member_idle_retire_overrides()
+                .await
+                .expect("the opt-ins")
+                .iter()
+                .filter(|record| record.mob_id == mob_id)
+                .count(),
+            metadata
+                .identity_tool_record(mob_id, IDENTITY)
+                .await
+                .expect("the tool record")
+                .is_some(),
+            metadata
+                .load_identity_rotation_intents(mob_id)
+                .await
+                .expect("the rotation intents")
+                .len(),
+            metadata
+                .lifecycle_projection_cursor(mob_id)
+                .await
+                .expect("the lifecycle cursor")
+                .is_some(),
+            metadata
+                .lifecycle_effect_intents(mob_id)
+                .await
+                .expect("the lifecycle intents")
+                .len(),
+            metadata
+                .lifecycle_effect_failures(mob_id, 0, 16)
+                .await
+                .expect("the lifecycle failures")
+                .len(),
+        )
+    }
+    let fixture = Fixture::new();
+    // The second id begins with the first: a release by prefix must not
+    // take it.
+    let mobs = ["mob-gone", "mob-gone-2"];
+    let all = (true, 1, true, 1, true, 1, 2);
+    {
+        let provider = fixture.open(&fixture.process()).await.expect("open");
+        let metadata = SpiMetadataStore::new(provider.realm.documents().clone());
+        for mob_id in mobs {
+            metadata
+                .set_subscription_cursor(mob_id, 41)
+                .await
+                .expect("set the cursor");
+            metadata.cursor_writes_settled(mob_id).await;
+            metadata
+                .set_member_idle_retire_override(&MemberIdleRetireOverrideRecord {
+                    mob_id: mob_id.to_string(),
+                    member_id: "worker-1".to_string(),
+                    session_id: SessionId::new(),
+                    policy: crate::mob_handle_runtime::DelegateIdleRetireOverride::Seconds(600),
+                    recorded_at: chrono::Utc::now(),
+                })
+                .await
+                .expect("record the opt-in");
+            metadata
+                .set_identity_tool_record(&IdentityToolRecord {
+                    mob_id: mob_id.to_string(),
+                    identity: IDENTITY.to_string(),
+                    session_id: SessionId::new(),
+                    tools: vec!["fetch".to_string()],
+                    record_revision: 1,
+                    published_at_ms: 1_700_000_000_000,
+                })
+                .await
+                .expect("the tool record");
+            metadata
+                .set_identity_rotation_intent(&IdentityRotationIntent {
+                    mob_id: mob_id.to_string(),
+                    identity: IDENTITY.to_string(),
+                    verb: "reset".to_string(),
+                    from_generation: Some(3),
+                    recorded_at_ms: 1_700_000_000_000,
+                })
+                .await
+                .expect("the rotation intent");
+            metadata
+                .set_lifecycle_projection_cursor(&LifecycleProjectionCursor::new(
+                    mob_id,
+                    "incarnation-1",
+                    41,
+                    1_700_000_000_000,
+                ))
+                .await
+                .expect("the lifecycle cursor");
+            metadata
+                .set_lifecycle_effect_intent(&LifecycleEffectIntent::new(
+                    mob_id,
+                    "incarnation-1",
+                    IDENTITY,
+                    3,
+                    LifecycleEffectVerb::Reset,
+                    Some(SessionId::new()),
+                    1_700_000_000_003,
+                ))
+                .await
+                .expect("the lifecycle intent");
+            for effect in [
+                LifecycleEffectKind::RetirementHook,
+                LifecycleEffectKind::CompactionHarvest,
+            ] {
+                metadata
+                    .record_lifecycle_effect_failure(&LifecycleEffectFailure::new(
+                        mob_id,
+                        "incarnation-1",
+                        12,
+                        IDENTITY,
+                        3,
+                        effect,
+                        3,
+                        "timed out",
+                        1_700_000_000_001,
+                    ))
+                    .await
+                    .expect("the lifecycle failure");
+            }
+            assert_eq!(kept(&metadata, mob_id).await, all);
+        }
+
+        // A cursor set right before the release: its write may be in
+        // flight or waiting when the release begins.
+        metadata
+            .set_subscription_cursor("mob-gone", 42)
+            .await
+            .expect("set a later cursor");
+        assert_eq!(
+            metadata
+                .release_mob_records("mob-gone")
+                .await
+                .expect("the release"),
+            MobRecordsRelease::Released { records: 8 },
+            "every document of the mob went"
+        );
+        metadata.cursor_writes_settled("mob-gone").await;
+        assert_eq!(
+            kept(&metadata, "mob-gone").await,
+            (false, 0, false, 0, false, 0, 0),
+            "nothing is kept under the released mob's id, and no cursor came back"
+        );
+        assert_eq!(
+            kept(&metadata, "mob-gone-2").await,
+            all,
+            "a mob whose id begins with the released one's keeps its records"
+        );
+        assert_eq!(
+            metadata
+                .release_mob_records("mob-gone")
+                .await
+                .expect("a second release"),
+            MobRecordsRelease::Released { records: 0 }
+        );
+    }
+
+    fixture.lapse();
+    let provider = fixture.open(&fixture.process()).await.expect("failover");
+    let metadata = SpiMetadataStore::new(provider.realm.documents().clone());
+    assert_eq!(
+        kept(&metadata, "mob-gone").await,
+        (false, 0, false, 0, false, 0, 0),
+        "a process on another host reads none of the released mob's records"
+    );
+    assert_eq!(kept(&metadata, "mob-gone-2").await, all);
+}
+
 /// A burst of cursor checkpoints lands in a few batches, not one per event:
 /// each write takes the newest cursor, one at a time. The newest cursor is
 /// the one a restart reads, so no event after it is skipped.

@@ -52,17 +52,57 @@ impl Gateway {
         Self::spawn_with_identity_root(None)
     }
 
+    /// [`Self::spawn`] of the stdio gateway binary at `binary` instead of
+    /// this build's.
+    fn spawn_binary(binary: &std::path::Path) -> Self {
+        Self::spawn_binary_with_identity_root(binary, None)
+    }
+
     /// `spawn`, with the comms identity root at `identity_root` instead of
     /// a directory of this gateway's own. No provider key reaches the
     /// gateway, whichever its test process holds.
     fn spawn_with_identity_root(identity_root: Option<&std::path::Path>) -> Self {
+        Self::spawn_binary_with_identity_root(
+            std::path::Path::new(env!("CARGO_BIN_EXE_rpc_gateway")),
+            identity_root,
+        )
+    }
+
+    /// [`Self::spawn_with_identity_root`] of the stdio gateway binary at
+    /// `binary`.
+    fn spawn_binary_with_identity_root(
+        binary: &std::path::Path,
+        identity_root: Option<&std::path::Path>,
+    ) -> Self {
+        Self::spawn_binary_logging(binary, identity_root, None)
+    }
+
+    /// [`Self::spawn_with_identity_root`], with the gateway's log filter
+    /// set to `log_filter` when one is given.
+    fn spawn_logging(identity_root: Option<&std::path::Path>, log_filter: Option<&str>) -> Self {
+        Self::spawn_binary_logging(
+            std::path::Path::new(env!("CARGO_BIN_EXE_rpc_gateway")),
+            identity_root,
+            log_filter,
+        )
+    }
+
+    /// [`Self::spawn_binary_with_identity_root`], with the gateway's log
+    /// filter (`RUST_LOG`) set to `log_filter` when one is given; else the
+    /// gateway keeps its own default.
+    fn spawn_binary_logging(
+        binary: &std::path::Path,
+        identity_root: Option<&std::path::Path>,
+        log_filter: Option<&str>,
+    ) -> Self {
         let workspace = tempfile::tempdir().expect("workspace tempdir");
         let state = tempfile::tempdir().expect("state tempdir");
         let identity_root = identity_root.map_or_else(
             || workspace.path().join("xdg-state"),
             std::path::Path::to_path_buf,
         );
-        let mut child = Command::new(env!("CARGO_BIN_EXE_rpc_gateway"))
+        let mut command = Command::new(binary);
+        command
             .arg("--persistent")
             .current_dir(workspace.path())
             .env_remove("ANTHROPIC_API_KEY")
@@ -71,9 +111,11 @@ impl Gateway {
             .env("XDG_STATE_HOME", identity_root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("spawn rpc_gateway");
+            .stderr(Stdio::piped());
+        if let Some(log_filter) = log_filter {
+            command.env("RUST_LOG", log_filter);
+        }
+        let mut child = command.spawn().expect("spawn rpc_gateway");
         let stdin = child.stdin.take().expect("stdin");
         let stdout = child.stdout.take().expect("stdout");
         let stderr = child.stderr.take().expect("stderr");
@@ -293,6 +335,8 @@ fn opted_in_init_is_accepted_then_progresses_then_settles_ready() {
 // row seats its roster under the default restore, which builds no member, so
 // the session limit is not reached; a later boot restores the members as its
 // row says. The members answer from the demo model: no provider key is set.
+// The row for a member broken after ready seats its members on a loopback
+// model that holds every answer until the row releases it (`HeldModel`).
 
 /// The mob of the ready-report rows: turn-driven members a roster seats.
 const READY_REPORT_MOB_CONFIG: &str = r#"
@@ -310,6 +354,155 @@ comms = true
 
 /// Core's refusal of a session past `runtime_options.max_sessions = 2`.
 const SESSION_LIMIT_REASON: &str = "Max sessions reached (2/2)";
+
+/// The mob id of [`READY_REPORT_MOB_CONFIG`], for its realm's binding.
+const READY_REPORT_MOB_ID: &str = "gateway-ready-report-test";
+
+/// The model [`HeldModel`] serves.
+const HELD_MODEL: &str = "ready-report-held-model";
+
+/// [`READY_REPORT_MOB_CONFIG`] with its members on [`HELD_MODEL`].
+fn held_model_mob_config() -> String {
+    let config = READY_REPORT_MOB_CONFIG.replace(
+        "model = \"gpt-5.5\"",
+        &format!("model = \"{HELD_MODEL}\"\nprovider = \"self_hosted\""),
+    );
+    assert_ne!(
+        config, READY_REPORT_MOB_CONFIG,
+        "the profile names its model"
+    );
+    config
+}
+
+/// The binding of `realm` to the loopback server of [`HeldModel`].
+fn held_model_realm_binding(realm: &str) -> String {
+    format!(
+        r#"
+[realm."{realm}"]
+default_binding = "loop"
+
+[realm."{realm}".backend.loop]
+provider = "self_hosted"
+backend_kind = "self_hosted"
+
+[realm."{realm}".auth.loop]
+provider = "self_hosted"
+auth_method = "none"
+source = {{ kind = "platform_default" }}
+
+[realm."{realm}".binding.loop]
+backend_profile = "loop"
+auth_profile = "loop"
+default_model = "{HELD_MODEL}"
+provider_default = true
+"#
+    )
+}
+
+/// A streamed answer that ends the turn.
+const HELD_MODEL_REPLY: &str = "data: {\"choices\":[{\"delta\":{\"content\":\"done\"}}]}\n\n\
+                                data: {\"choices\":[{\"finish_reason\":\"stop\"}],\
+                                \"usage\":{\"prompt_tokens\":10,\"completion_tokens\":1}}\n\n\
+                                data: [DONE]\n\n";
+
+/// A loopback chat-completions model that holds every answer until the row
+/// releases it: a member woken onto it holds its session's live work, and
+/// with it a place under `max_sessions`, until then.
+struct HeldModel {
+    /// The host config that binds the ready-report mob's realm to it.
+    host_config: std::path::PathBuf,
+    _dir: TempDir,
+    release: tokio::sync::watch::Sender<bool>,
+}
+
+async fn held_chat_completions(
+    axum::extract::State(mut released): axum::extract::State<tokio::sync::watch::Receiver<bool>>,
+) -> impl axum::response::IntoResponse {
+    let _ = released.wait_for(|released| *released).await;
+    ([("content-type", "text/event-stream")], HELD_MODEL_REPLY)
+}
+
+async fn held_models() -> impl axum::response::IntoResponse {
+    axum::Json(json!({ "data": [] }))
+}
+
+impl HeldModel {
+    fn start() -> Self {
+        let (release, released) = tokio::sync::watch::channel(false);
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .expect("model runtime");
+            runtime.block_on(async move {
+                let app = axum::Router::new()
+                    .route(
+                        "/v1/chat/completions",
+                        axum::routing::post(held_chat_completions),
+                    )
+                    .route(
+                        "/chat/completions",
+                        axum::routing::post(held_chat_completions),
+                    )
+                    .route("/v1/models", axum::routing::get(held_models))
+                    .route("/models", axum::routing::get(held_models))
+                    .with_state(released);
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                    .await
+                    .expect("bind loopback model");
+                tx.send(listener.local_addr().expect("model address"))
+                    .expect("report model address");
+                axum::serve(listener, app)
+                    .await
+                    .expect("serve loopback model");
+            });
+        });
+        let address = rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("loopback model address");
+        let dir = tempfile::tempdir().expect("held model config dir");
+        let host_config = dir.path().join("config.toml");
+        let mut config = format!(
+            r#"
+[self_hosted]
+default_model = "{HELD_MODEL}"
+
+[self_hosted.servers.loop]
+base_url = "http://{address}"
+
+[self_hosted.models."{HELD_MODEL}"]
+server = "loop"
+remote_model = "{HELD_MODEL}"
+display_name = "Ready report held model"
+family = "{HELD_MODEL}"
+"#
+        );
+        config.push_str(&held_model_realm_binding("global"));
+        config.push_str(&held_model_realm_binding(&format!(
+            "mob.{READY_REPORT_MOB_ID}"
+        )));
+        std::fs::write(&host_config, config).expect("write host config");
+        Self {
+            host_config,
+            _dir: dir,
+            release,
+        }
+    }
+
+    /// Answer every held request, and every later one at once.
+    fn release(&self) {
+        self.release.send(true).expect("release the model");
+    }
+}
+
+/// The stdio gateway's default log filter restated, plus the mob crate at
+/// DEBUG: the filter of the second boot of the row for a member broken after
+/// ready. The mob crate writes a member's wake at DEBUG and its retries at
+/// INFO, which the default filter drops; with them a failing run's kept
+/// stderr says what became of each wake.
+const WAKES_LOGGED: &str = "warn,meerkat_meta=info,rpc_gateway=info,meerkat_mob=debug";
 
 /// The gateway's ready-time warning about the members its mob holds broken.
 const READY_LOG_MESSAGE: &str = "the mob's start left members broken";
@@ -367,6 +560,153 @@ fn broken_members(report: &Value) -> std::collections::BTreeMap<String, Value> {
         .unwrap_or_default()
 }
 
+/// What the status looks of a row answered, kept for a failure's text only:
+/// per look the time since the row began to look, and its `broken_members`
+/// answer.
+#[derive(Default)]
+struct StatusLooks {
+    looks: Vec<(Duration, String)>,
+}
+
+impl StatusLooks {
+    /// How many of the last looks a failure's text shows one by one.
+    const SHOWN: usize = 20;
+
+    /// Keep the answer `status` gave `elapsed` after the row began to look.
+    fn record(&mut self, elapsed: Duration, status: &Value) {
+        let answer = match status
+            .get("result")
+            .and_then(|result| result.get("broken_members"))
+        {
+            Some(broken) => broken.to_string(),
+            None if status.get("error").is_some() => format!("error: {}", status["error"]),
+            None => "absent".to_string(),
+        };
+        self.looks.push((elapsed, answer));
+    }
+
+    /// The looks in short: their count, each run of looks that gave one
+    /// answer with its first and last time, and the last [`Self::SHOWN`]
+    /// looks one by one.
+    fn told(&self) -> String {
+        let mut runs: Vec<(Duration, Duration, usize, &str)> = Vec::new();
+        for (elapsed, answer) in &self.looks {
+            match runs.last_mut() {
+                Some((_, last, count, same)) if *same == answer.as_str() => {
+                    *last = *elapsed;
+                    *count += 1;
+                }
+                _ => runs.push((*elapsed, *elapsed, 1, answer.as_str())),
+            }
+        }
+        let runs: Vec<String> = runs
+            .iter()
+            .map(|(first, last, count, answer)| {
+                format!("{count} from {first:.3?} to {last:.3?} answered broken_members {answer}")
+            })
+            .collect();
+        let last: Vec<String> = self
+            .looks
+            .iter()
+            .skip(self.looks.len().saturating_sub(Self::SHOWN))
+            .map(|(elapsed, answer)| format!("{elapsed:.3?}: {answer}"))
+            .collect();
+        format!(
+            "{} look(s); by answer: {runs:?}; the last {}: {last:?}",
+            self.looks.len(),
+            last.len()
+        )
+    }
+}
+
+/// Per request of `requests`, what its response in `answers` accepted: the
+/// completion baseline's epoch and the fencing token, or the error it
+/// answered. For a failure's text only.
+fn accepted_sends(requests: &[(String, &str, Value)], answers: &[Value]) -> Vec<String> {
+    requests
+        .iter()
+        .zip(answers)
+        .map(|((id, _, _), answer)| match answer.get("result") {
+            Some(result) => format!(
+                "{id}: epoch {} token {}",
+                result["completion_baseline"]["epoch"], result["fencing_token"]
+            ),
+            None => format!("{id}: {}", answer["error"]),
+        })
+        .collect()
+}
+
+/// What one read answered, in short: its result, or its error.
+fn answer_of(response: &Value) -> String {
+    match response.get("result") {
+        Some(result) => result.to_string(),
+        None => format!("error: {}", response["error"]),
+    }
+}
+
+/// Per member a request of `requests` names, what the gateway answers now
+/// for its completion cursor and then for its member status: the cursors of
+/// all members first (that read touches no session), the member statuses
+/// after them. A read the gateway does not answer ends the reads, and the
+/// text says so: the reads never replace the failure text they are part of.
+/// For a failure's text only.
+fn member_reads(boot: &mut ReadyReportBoot, requests: &[(String, &str, Value)]) -> String {
+    let identities: Vec<&str> = requests
+        .iter()
+        .filter_map(|(_, _, params)| params["identity"].as_str())
+        .collect();
+    let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let cursors: Vec<String> = identities
+            .iter()
+            .map(|identity| {
+                let answer = boot.call(
+                    &format!("cursor-{identity}"),
+                    "meta/completion_cursor",
+                    json!({ "identity": identity }),
+                );
+                format!("{identity}: {}", answer_of(&answer))
+            })
+            .collect();
+        let statuses: Vec<String> = identities
+            .iter()
+            .map(|identity| {
+                let answer = boot.call(
+                    &format!("member-status-{identity}"),
+                    "meta/member_status",
+                    json!({ "member_id": identity }),
+                );
+                format!("{identity}: {}", answer_of(&answer))
+            })
+            .collect();
+        format!("completion cursors {cursors:?}; member statuses {statuses:?}")
+    }));
+    read.unwrap_or_else(|_| "unknown (the gateway did not answer a read)".to_string())
+}
+
+/// What a failing row keeps of its run, for its failure text only: what
+/// each send was accepted with, where the gateway's whole stderr was written
+/// (in the row's own directory, which is kept for reading after such a
+/// failure; that file can name members and sessions and is not for sharing
+/// as it is), what the gateway answers for each member's completion cursor
+/// and member status, and what the status looks answered. The stderr is
+/// written before the member reads are made, so the kept log ends at the
+/// failure.
+fn kept_of_the_run(
+    home: &mut ReadyReportHome,
+    boot: &mut ReadyReportBoot,
+    requests: &[(String, &str, Value)],
+    answers: &[Value],
+    looks: &StatusLooks,
+) -> String {
+    let stderr = boot.stderr_kept_in(home.kept());
+    let members = member_reads(boot, requests);
+    format!(
+        "accepted sends: {:?}\nmember reads: {members}\nstatus looks: {}\ngateway stderr: {stderr}",
+        accepted_sends(requests, answers),
+        looks.told()
+    )
+}
+
 /// The directories the boots of one ready-report row share.
 struct ReadyReportHome {
     root: TempDir,
@@ -379,6 +719,13 @@ impl ReadyReportHome {
         }
     }
 
+    /// This home's directory, kept after the row ends: a failing row's
+    /// text names a file in it.
+    fn kept(&mut self) -> &std::path::Path {
+        self.root.disable_cleanup(true);
+        self.root.path()
+    }
+
     /// Boot a gateway over this home with a roster of `members` identities
     /// and `runtime_options`, through its ready settlement. With
     /// `customizer` the SDK side also answers the agent customizer, and
@@ -387,17 +734,41 @@ impl ReadyReportHome {
         &self,
         init_id: &str,
         members: usize,
+        runtime_options: Value,
+        customizer: bool,
+    ) -> ReadyReportBoot {
+        self.boot_logging(init_id, members, runtime_options, customizer, None, None)
+    }
+
+    /// [`Self::boot`], with the gateway's log filter set to `log_filter`
+    /// when one is given, and the members on `model` instead of the demo
+    /// model when one is given.
+    fn boot_logging(
+        &self,
+        init_id: &str,
+        members: usize,
         mut runtime_options: Value,
         customizer: bool,
+        log_filter: Option<&str>,
+        model: Option<&HeldModel>,
     ) -> ReadyReportBoot {
         let state = self.root.path().join("state");
         std::fs::create_dir_all(&state).expect("state directory");
-        let gateway = Gateway::spawn_with_identity_root(Some(&self.root.path().join("xdg-state")));
-        runtime_options["demo_llm"] = json!(true);
+        let gateway = Gateway::spawn_logging(Some(&self.root.path().join("xdg-state")), log_filter);
+        let mob_config = match model {
+            Some(model) => {
+                runtime_options["meerkat_config_path"] = json!(model.host_config);
+                held_model_mob_config()
+            }
+            None => {
+                runtime_options["demo_llm"] = json!(true);
+                READY_REPORT_MOB_CONFIG.to_string()
+            }
+        };
         let mut params = json!({
             "init_protocol": "accepted_then_settled",
             "init_id": init_id,
-            "mob_config": READY_REPORT_MOB_CONFIG,
+            "mob_config": mob_config,
             "persistent_state": state,
             "has_roster_provider": true,
             "runtime_options": runtime_options,
@@ -567,6 +938,27 @@ impl ReadyReportBoot {
         }
     }
 
+    /// Write every stderr line the gateway wrote so far to a file in
+    /// `directory` and say where: the line count and the path, or why the
+    /// file could not be written. For a failure's text only.
+    fn stderr_kept_in(&self, directory: &std::path::Path) -> String {
+        let lines = self
+            .gateway
+            .stderr_lines
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let path = directory.join("gateway-stderr.log");
+        match std::fs::write(&path, lines.join("\n")) {
+            Ok(()) => format!("{} line(s) in {}", lines.len(), path.display()),
+            Err(error) => format!(
+                "{} line(s), not written to {}: {error}",
+                lines.len(),
+                path.display()
+            ),
+        }
+    }
+
     /// Shut the gateway down and require an ordinary exit.
     fn stop(mut self) {
         let answer = self.call("bye", "meta/shutdown", json!({}));
@@ -703,13 +1095,35 @@ fn ready_report_of_a_healthy_start_is_unchanged() {
 /// member that breaks later (here: its first wake finds no session left) is
 /// named by `meta/status`, which reads the mob when it is asked; the
 /// settlement written at ready named none.
+///
+/// The members answer from a model that holds every answer until the row
+/// releases it, so the two members woken first hold their sessions' live
+/// work, and the limit's two places, while the third is woken: the limit is
+/// met whatever the order and the pace of the wakes on a loaded host.
 #[test]
 fn a_member_broken_after_ready_is_named_by_status_and_not_by_the_ready_report() {
-    let home = ReadyReportHome::new();
-    home.boot("init-rr3-seat", 3, json!({ "max_sessions": 2 }), false)
-        .stop();
+    let model = HeldModel::start();
+    let mut home = ReadyReportHome::new();
+    home.boot_logging(
+        "init-rr3-seat",
+        3,
+        json!({ "max_sessions": 2 }),
+        false,
+        None,
+        Some(&model),
+    )
+    .stop();
 
-    let mut lazy = home.boot("init-rr3-lazy", 3, json!({ "max_sessions": 2 }), false);
+    // This boot logs each member's wake (see `WAKES_LOGGED`): what a failing
+    // run keeps of the gateway's stderr then names the wakes.
+    let mut lazy = home.boot_logging(
+        "init-rr3-lazy",
+        3,
+        json!({ "max_sessions": 2 }),
+        false,
+        Some(WAKES_LOGGED),
+        Some(&model),
+    );
     assert!(
         lazy.settled.get("broken_members").is_none(),
         "the default restore builds no member, so none is broken at ready: {}",
@@ -733,8 +1147,11 @@ fn a_member_broken_after_ready_is_named_by_status_and_not_by_the_ready_report() 
         .collect();
     let deliveries = lazy.call_all(&requests);
     let start = Instant::now();
+    // What each status look answered: kept for a failure's text only.
+    let mut looks = StatusLooks::default();
     let broken = loop {
         let status = lazy.call("status-after", "meta/status", json!({}));
+        looks.record(start.elapsed(), &status);
         let broken = broken_members(&status["result"]);
         if !broken.is_empty() {
             break broken;
@@ -745,24 +1162,33 @@ fn a_member_broken_after_ready_is_named_by_status_and_not_by_the_ready_report() 
             panic!(
                 "no member read broken after its wake met the session limit\n\
                  deliveries: {deliveries:?}\nmembers: {listed}\n\
-                 gateway log lines naming the limit: {limit_lines:?}"
+                 gateway log lines naming the limit: {limit_lines:?}\n{}",
+                kept_of_the_run(&mut home, &mut lazy, &requests, &deliveries, &looks)
             );
         }
         thread::sleep(Duration::from_millis(100));
     };
-    assert_eq!(broken.len(), 1, "{broken:?}");
+    assert_eq!(
+        broken.len(),
+        1,
+        "{broken:?}\n{}",
+        kept_of_the_run(&mut home, &mut lazy, &requests, &deliveries, &looks)
+    );
     for (member, entry) in &broken {
         assert!(
             entry["error"]
                 .as_str()
                 .is_some_and(|error| error.contains(SESSION_LIMIT_REASON)),
-            "{member}: {entry}"
+            "{member}: {entry}\n{}",
+            kept_of_the_run(&mut home, &mut lazy, &requests, &deliveries, &looks)
         );
     }
     assert!(
         lazy.settled.get("broken_members").is_none(),
         "the settlement is not rewritten"
     );
+    // The held turns end before the gateway is stopped.
+    model.release();
     lazy.stop();
 }
 
@@ -1164,4 +1590,863 @@ fn ordinary_request_during_init_is_refused_at_once_and_served_after_ready() {
         status.get("result").is_some(),
         "served after init settled: {status}"
     );
+}
+
+// What a launch that names no mob shows from outside: the members of its
+// init result, the files it leaves in a fresh state directory, the code and
+// text of an init refusal at each stage, the order of listener bind,
+// directory claim and first store open, and the shutdown answer with the
+// release of the directory. A change to how the runtime is composed inside
+// must leave every one of them as it is.
+
+/// Every file and directory under `root`, as a path relative to it;
+/// directories end in `/`. SQLite's `-wal` and `-shm` companions are left
+/// out: whether one exists at a given moment is the SQLite library's choice.
+fn tree(root: &std::path::Path) -> std::collections::BTreeSet<String> {
+    fn walk(
+        root: &std::path::Path,
+        dir: &std::path::Path,
+        out: &mut std::collections::BTreeSet<String>,
+    ) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let relative = path
+                .strip_prefix(root)
+                .expect("under root")
+                .to_string_lossy()
+                .into_owned();
+            if path.is_dir() {
+                out.insert(format!("{relative}/"));
+                walk(root, &path, out);
+            } else if !relative.ends_with("-wal") && !relative.ends_with("-shm") {
+                out.insert(relative);
+            }
+        }
+    }
+    let mut out = std::collections::BTreeSet::new();
+    walk(root, root, &mut out);
+    out
+}
+
+/// Ask a served gateway to shut down, check the answer is the completed
+/// shutdown of a stock persistent gateway, and reap it.
+fn shut_down(gateway: &mut Gateway) {
+    gateway.send(json!({ "jsonrpc": "2.0", "id": "bye", "method": "meta/shutdown", "params": {} }));
+    let tail = gateway.read_until("the shutdown answer", |_| None, |m| m["id"] == "bye");
+    let answer = tail.last().unwrap();
+    gateway_shutdown::assert_persistent_shutdown_completed(answer, "a stock persistent gateway");
+    let mut members: Vec<&str> = answer["result"]
+        .as_object()
+        .expect("a shutdown result object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    members.sort_unstable();
+    assert_eq!(
+        members,
+        ["runtime_cleanup_completed", "shutdown"],
+        "{answer}"
+    );
+    let status = gateway.wait_exit();
+    assert!(status.success(), "gateway exit status: {status}");
+}
+
+/// The init result of a fresh persistent launch has exactly these members,
+/// and the ones a launch decides alone have these values.
+#[test]
+fn a_fresh_persistent_init_result_has_exactly_these_members() {
+    let mut gateway = Gateway::spawn();
+    gateway.init(json!({}));
+    let response = gateway.next("the legacy init response");
+    assert_eq!(response["id"], "init");
+    let result = response["result"].as_object().expect("an init result");
+    let mut members: Vec<&str> = result.keys().map(String::as_str).collect();
+    members.sort_unstable();
+    assert_eq!(
+        members,
+        [
+            "contract_version",
+            "control_listen_address",
+            "http_base_url",
+            "http_public_base_url",
+            "identity_bootstrap",
+            "loaded_modules",
+            "member_restore",
+            "runtime_fingerprint",
+            "runtime_origin",
+            "stdio_shutdown_handshake",
+            "stdio_shutdown_horizon_ms",
+        ],
+        "{response}"
+    );
+    let result = &response["result"];
+    assert!(
+        result["http_base_url"]
+            .as_str()
+            .is_some_and(|url| url.starts_with("http://127.0.0.1:")),
+        "{response}"
+    );
+    assert!(result["contract_version"].is_string(), "{response}");
+    assert!(
+        result["runtime_fingerprint"]
+            .as_str()
+            .is_some_and(|fingerprint| fingerprint.len() == 64
+                && fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit())),
+        "{response}"
+    );
+    assert!(
+        result["stdio_shutdown_horizon_ms"]
+            .as_u64()
+            .is_some_and(|horizon| horizon > 0),
+        "{response}"
+    );
+    let decided_alone = json!({
+        "control_listen_address": result["control_listen_address"],
+        "http_public_base_url": result["http_public_base_url"],
+        "identity_bootstrap": result["identity_bootstrap"],
+        "loaded_modules": result["loaded_modules"],
+        "member_restore": result["member_restore"],
+        "runtime_origin": result["runtime_origin"],
+        "stdio_shutdown_handshake": result["stdio_shutdown_handshake"],
+    });
+    assert_eq!(
+        decided_alone,
+        json!({
+            "control_listen_address": null,
+            "http_public_base_url": null,
+            "identity_bootstrap": null,
+            "loaded_modules": [],
+            "member_restore": { "boot_set": "observed" },
+            "runtime_origin": "workspace_config",
+            "stdio_shutdown_handshake": true,
+        }),
+        "{response}"
+    );
+    shut_down(&mut gateway);
+}
+
+/// A fresh persistent launch that is served and then shut down leaves
+/// exactly these files in its state directory.
+#[test]
+fn a_fresh_persistent_launch_leaves_exactly_these_files() {
+    let mut gateway = Gateway::spawn();
+    gateway.init(json!({}));
+    let response = gateway.next("the legacy init response");
+    assert!(
+        response["result"]["http_base_url"].is_string(),
+        "{response}"
+    );
+    let served = tree(gateway.state.path());
+    shut_down(&mut gateway);
+    let left = tree(gateway.state.path());
+    let expected: std::collections::BTreeSet<String> = [
+        "blobs/",
+        "council.sqlite3",
+        "council.sqlite3.mfence",
+        "event_log.sqlite3",
+        "event_log.sqlite3.composition.json",
+        "event_log.sqlite3.incarnation-custody",
+        "event_log.sqlite3.mfence",
+        "meta-runtime.lock",
+        "meta/",
+        "meta/delivery/",
+        "meta/delivery/cold-delivery.lock",
+        "meta/jobs.sqlite3",
+        "meta/jobs.sqlite3.mfence",
+        "meta_console.sqlite3",
+        "meta_console.sqlite3.mfence",
+        "meta_metadata.sqlite3",
+        "meta_metadata.sqlite3.mfence",
+        "mobs/",
+        "mobs/child-mobs.lock",
+        "mobs/realm_profiles.db",
+        "mobs/realm_profiles.db.mfence",
+        "peer_key.ed25519",
+        "runtime.sqlite",
+        "runtime.sqlite.execution-custody",
+        "runtime.sqlite.execution-custody-admission",
+        "runtime.sqlite.mfence",
+        "runtime.sqlite.mpresence",
+        "schedule.sqlite",
+        "schedule.sqlite.mfence",
+        "workgraph.sqlite3",
+        "workgraph.sqlite3.mfence",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect();
+    assert_eq!(served, expected, "while served");
+    assert_eq!(left, expected, "after shutdown");
+}
+
+/// The answer to a refused `meta/init`: the settled failure of an opted-in
+/// init, or the plain error response of one refused before acceptance.
+fn init_refusal(gateway: &mut Gateway) -> (i64, String) {
+    let first = gateway.next("the init answer");
+    let refusal = if first.get("error").is_some() {
+        first["error"].clone()
+    } else {
+        assert_eq!(first["result"]["init_state"], "accepted", "{first}");
+        let seen = gateway.read_until("the init settlement", |_| None, is_settled);
+        let settled = seen.last().unwrap()["params"].clone();
+        assert_eq!(settled["outcome"], "failed", "{settled}");
+        settled
+    };
+    (
+        refusal["code"].as_i64().expect("a refusal code"),
+        refusal["message"]
+            .as_str()
+            .expect("a refusal message")
+            .to_string(),
+    )
+}
+
+/// Each stage of init refuses with its own code and text: the option
+/// parse, the mob definition, the listener bind, the directory claim and
+/// the check of the launch mob's store.
+#[test]
+fn init_refusals_keep_their_code_and_text_at_each_stage() {
+    let opted_in = || json!({ "init_protocol": "accepted_then_settled", "init_id": "init-guard" });
+
+    // The option parse.
+    let mut gateway = Gateway::spawn();
+    let mut params = opted_in();
+    params["runtime_options"] = json!({ "no_such_option": true, "nor_this_one": 1 });
+    gateway.init(params);
+    assert_eq!(
+        init_refusal(&mut gateway),
+        (
+            -32602,
+            "unsupported runtime_options fields: no_such_option, nor_this_one".to_string()
+        )
+    );
+    assert_eq!(gateway.wait_exit().code(), Some(1));
+
+    // The mob definition.
+    let mut gateway = Gateway::spawn();
+    let state = gateway.state.path().to_path_buf();
+    gateway.send(json!({
+        "jsonrpc": "2.0", "id": "init", "method": "meta/init",
+        "params": {
+            "init_protocol": "accepted_then_settled", "init_id": "init-guard",
+            "mob_config": "this is [not valid toml",
+            "persistent_state": state,
+        },
+    }));
+    let (code, message) = init_refusal(&mut gateway);
+    assert_eq!(code, -32602, "{message}");
+    assert!(
+        message.starts_with("Invalid mob_config TOML: "),
+        "{message}"
+    );
+    assert_eq!(gateway.wait_exit().code(), Some(1));
+    assert_eq!(tree(&state), Default::default(), "nothing was created");
+
+    // The listener bind.
+    let holder = std::net::TcpListener::bind("127.0.0.1:0").expect("hold a loopback port");
+    let taken = holder.local_addr().expect("held address");
+    let mut gateway = Gateway::spawn();
+    let mut params = opted_in();
+    params["runtime_options"] = json!({ "http_listen": taken.to_string() });
+    gateway.init(params);
+    let (code, message) = init_refusal(&mut gateway);
+    assert_eq!(code, -32603, "{message}");
+    assert!(
+        message.starts_with(&format!("failed to bind HTTP listener {taken}: ")),
+        "{message}"
+    );
+    assert_eq!(gateway.wait_exit().code(), Some(1));
+    drop(holder);
+
+    // The directory claim.
+    let mut gateway = Gateway::spawn();
+    let state = gateway.state.path().to_path_buf();
+    let claim = meerkat_meta::state_dir_claim::StateDirClaim::acquire(&state).expect("claim");
+    gateway.init(opted_in());
+    assert_eq!(
+        init_refusal(&mut gateway),
+        (
+            -32014,
+            format!(
+                "state directory {} is in use by another Meta runtime",
+                state.display()
+            )
+        )
+    );
+    assert_eq!(gateway.wait_exit().code(), Some(1));
+    drop(claim);
+
+    // The launch mob's store: one this build cannot read refuses the launch
+    // at the storage check, after the claim and before any store is created.
+    let mut gateway = Gateway::spawn();
+    let state = gateway.state.path().to_path_buf();
+    let store = state.join("event_log.sqlite3");
+    std::fs::write(&store, b"not a database").expect("plant a store");
+    gateway.init(opted_in());
+    assert_eq!(
+        init_refusal(&mut gateway),
+        (
+            -32014,
+            format!(
+                "cannot check state directory {} before startup ({}): {} is not a mob store \
+                 this build reads: the file is not a SQLite database",
+                state.display(),
+                store.display(),
+                store.display()
+            )
+        )
+    );
+    assert_eq!(gateway.wait_exit().code(), Some(1));
+    let left: Vec<String> = tree(&state).into_iter().collect();
+    assert_eq!(left, ["event_log.sqlite3", "meta-runtime.lock"]);
+}
+
+/// Init binds its listener, then claims the state directory, then opens
+/// its first store: a taken port refuses a launch on a held directory as a
+/// bind failure, and a held directory refuses a launch before it creates
+/// anything there.
+#[test]
+fn init_binds_its_listener_then_claims_the_directory_then_opens_stores() {
+    let opted_in = || json!({ "init_protocol": "accepted_then_settled", "init_id": "init-order" });
+    let state = tempfile::tempdir().expect("state tempdir");
+    let claim = meerkat_meta::state_dir_claim::StateDirClaim::acquire(state.path()).expect("claim");
+    let held = tree(state.path());
+    assert_eq!(held.len(), 1, "the claim's own file: {held:?}");
+
+    // Bind before claim.
+    let holder = std::net::TcpListener::bind("127.0.0.1:0").expect("hold a loopback port");
+    let taken = holder.local_addr().expect("held address");
+    let mut gateway = Gateway::spawn();
+    let mut params = opted_in();
+    params["runtime_options"] = json!({ "http_listen": taken.to_string() });
+    gateway.init_at(params, state.path());
+    let (code, message) = init_refusal(&mut gateway);
+    assert_eq!(code, -32603, "the bind refuses first: {message}");
+    assert_eq!(gateway.wait_exit().code(), Some(1));
+    drop(holder);
+    assert_eq!(tree(state.path()), held);
+
+    // Claim before the first store open.
+    let mut gateway = Gateway::spawn();
+    gateway.init_at(opted_in(), state.path());
+    let (code, message) = init_refusal(&mut gateway);
+    assert_eq!(code, -32014, "{message}");
+    assert_eq!(gateway.wait_exit().code(), Some(1));
+    assert_eq!(
+        tree(state.path()),
+        held,
+        "a refused claim created nothing in the directory"
+    );
+    drop(claim);
+}
+
+/// A served gateway holds its state directory; a clean shutdown answers
+/// with the completed shutdown and nothing else, and once the gateway has
+/// exited the directory is free.
+#[test]
+fn a_clean_shutdown_answers_completed_and_frees_the_state_directory() {
+    let mut gateway = Gateway::spawn();
+    gateway.init(json!({}));
+    let response = gateway.next("the legacy init response");
+    assert!(
+        response["result"]["http_base_url"].is_string(),
+        "{response}"
+    );
+    let state = gateway.state.path().to_path_buf();
+    let refused = meerkat_meta::state_dir_claim::StateDirClaim::acquire(&state)
+        .expect_err("a served gateway holds its state directory");
+    assert_eq!(
+        refused.to_string(),
+        format!(
+            "state directory {} is in use by another Meta runtime",
+            state.display()
+        )
+    );
+    shut_down(&mut gateway);
+    meerkat_meta::state_dir_claim::StateDirClaim::acquire(&state)
+        .expect("the directory is free after the gateway exits");
+}
+
+// Two more launch shapes, pinned from outside before the launch mob is
+// built by the mob set like any other mob: a launch that brings no mob
+// definition, and an identity-first launch over a fresh state directory and
+// again over the state it left.
+
+/// A launch that brings no mob definition serves the built-in mob: the same
+/// init result members as a launch with a definition, the origin that says
+/// no definition was given, a running mob, and the launch mob's store at its
+/// fixed place.
+#[test]
+fn a_launch_without_a_mob_definition_serves_the_built_in_mob() {
+    let mut gateway = Gateway::spawn();
+    let state = gateway.state.path().to_path_buf();
+    gateway.send(json!({
+        "jsonrpc": "2.0", "id": "init", "method": "meta/init",
+        "params": { "persistent_state": state },
+    }));
+    let response = gateway.next("the legacy init response");
+    assert_eq!(response["id"], "init");
+    let result = response["result"].as_object().expect("an init result");
+    let mut members: Vec<&str> = result.keys().map(String::as_str).collect();
+    members.sort_unstable();
+    assert_eq!(
+        members,
+        [
+            "contract_version",
+            "control_listen_address",
+            "http_base_url",
+            "http_public_base_url",
+            "identity_bootstrap",
+            "loaded_modules",
+            "member_restore",
+            "runtime_fingerprint",
+            "runtime_origin",
+            "stdio_shutdown_handshake",
+            "stdio_shutdown_horizon_ms",
+        ],
+        "{response}"
+    );
+    assert_eq!(
+        response["result"]["runtime_origin"], "fallback_minimal",
+        "{response}"
+    );
+    assert_eq!(
+        response["result"]["identity_bootstrap"],
+        Value::Null,
+        "{response}"
+    );
+
+    gateway
+        .send(json!({ "jsonrpc": "2.0", "id": "status", "method": "meta/status", "params": {} }));
+    let seen = gateway.read_until("the status answer", |_| None, |m| m["id"] == "status");
+    let status = seen.last().unwrap();
+    assert_eq!(status["result"]["mob_state"], "Some(Running)", "{status}");
+
+    let served = tree(&state);
+    assert!(served.contains("event_log.sqlite3"), "{served:?}");
+    assert!(served.contains("mobs/"), "{served:?}");
+    shut_down(&mut gateway);
+    assert_eq!(
+        tree(&state),
+        served,
+        "a clean shutdown leaves the same files"
+    );
+}
+
+/// The mob of the identity-first launch row: one profile whose members can
+/// message their peers, which a member of a mob needs.
+const IDENTITY_FIRST_MOB_CONFIG: &str = r#"
+[mob]
+id = "gateway-init-protocol-identity-first"
+
+[profiles.default]
+model = "gpt-5.5"
+external_addressable = true
+
+[profiles.default.tools]
+comms = true
+"#;
+
+/// Launch an identity-first gateway over `state` with one identity on the
+/// default profile, until its init settles. Returns the settlement.
+fn identity_first_init(gateway: &mut Gateway, state: &std::path::Path, init_id: &str) -> Value {
+    identity_first_init_with(
+        gateway,
+        state,
+        init_id,
+        json!([{ "identity": "keeper", "profile": "default" }]),
+    )
+}
+
+/// [`identity_first_init`] with the roster its roster provider answers.
+fn identity_first_init_with(
+    gateway: &mut Gateway,
+    state: &std::path::Path,
+    init_id: &str,
+    roster: Value,
+) -> Value {
+    gateway.send(json!({
+        "jsonrpc": "2.0", "id": "init", "method": "meta/init",
+        "params": {
+            "init_protocol": "accepted_then_settled",
+            "init_id": init_id,
+            "mob_config": IDENTITY_FIRST_MOB_CONFIG,
+            "persistent_state": state,
+            "has_roster_provider": true,
+            "runtime_options": { "demo_llm": true },
+        },
+    }));
+    let accepted = gateway.next("the init acceptance");
+    assert_eq!(accepted["result"]["init_state"], "accepted", "{accepted}");
+    let seen = gateway.read_until(
+        "the identity-first init settlement",
+        |method| (method == "callback/roster_provider/roster").then(|| roster.clone()),
+        is_settled,
+    );
+    seen.last().unwrap().clone()
+}
+
+/// The roster of the rollback row: its one identity runs turn by turn, so
+/// that a send to it is a turn the gateway reports the end of.
+fn turn_driven_roster() -> Value {
+    json!([{
+        "identity": "keeper", "profile": "default", "runtime_mode_override": "turn_driven"
+    }])
+}
+
+/// Ask a served gateway to shut down and reap it, whatever its shutdown
+/// answer carries beside the completed shutdown.
+fn shut_down_served(gateway: &mut Gateway) {
+    gateway.send(json!({ "jsonrpc": "2.0", "id": "bye", "method": "meta/shutdown", "params": {} }));
+    let tail = gateway.read_until("the shutdown answer", |_| None, |m| m["id"] == "bye");
+    let answer = tail.last().unwrap();
+    assert_eq!(answer["result"]["shutdown"], true, "{answer}");
+    let status = gateway.wait_exit();
+    assert!(status.success(), "gateway exit status: {status}");
+}
+
+/// The identity bootstrap an identity-first init settled with: complete,
+/// ready, the one identity of the roster reported and none broken.
+fn assert_identity_bootstrap_ready(settled: &Value) {
+    assert_eq!(settled["params"]["outcome"], "ready", "{settled}");
+    let bootstrap = &settled["params"]["identity_bootstrap"];
+    assert!(
+        bootstrap.is_object(),
+        "an identity-first launch reports its identity bootstrap: {settled}"
+    );
+    assert_eq!(bootstrap["complete"], true, "{settled}");
+    assert_eq!(bootstrap["ready"], true, "{settled}");
+    assert_eq!(bootstrap["counts"]["broken"], 0, "{settled}");
+    assert!(bootstrap["identities"]["keeper"].is_object(), "{settled}");
+}
+
+/// An identity-first launch settles ready with its identity bootstrap
+/// reported, over a fresh state directory and again over the state that
+/// launch left: the second launch finds the launch mob stopped by the first
+/// one's shutdown and runs it again.
+#[test]
+fn an_identity_first_launch_settles_ready_fresh_and_again_over_its_own_state() {
+    let mut first = Gateway::spawn();
+    let state = first.state.path().to_path_buf();
+    let settled = identity_first_init(&mut first, &state, "identity-first-fresh");
+    assert_identity_bootstrap_ready(&settled);
+    assert_eq!(
+        settled["params"]["runtime_origin"], "workspace_config",
+        "{settled}"
+    );
+    shut_down_served(&mut first);
+
+    let mut second = Gateway::spawn();
+    let settled = identity_first_init(&mut second, &state, "identity-first-again");
+    assert_identity_bootstrap_ready(&settled);
+    second.send(json!({ "jsonrpc": "2.0", "id": "status", "method": "meta/status", "params": {} }));
+    let seen = second.read_until(
+        "the status answer",
+        |method| {
+            (method == "callback/roster_provider/roster")
+                .then(|| json!([{ "identity": "keeper", "profile": "default" }]))
+        },
+        |m| m["id"] == "status",
+    );
+    let status = seen.last().unwrap();
+    assert_eq!(status["result"]["mob_state"], "Some(Running)", "{status}");
+    shut_down_served(&mut second);
+}
+
+/// An identity-first init over `state` that lists the profiles `names`
+/// their own memory only, read to its settlement.
+fn init_listing_own_memory_only(
+    gateway: &mut Gateway,
+    state: &std::path::Path,
+    init_id: &str,
+    names: Value,
+) -> Value {
+    gateway.send(json!({
+        "jsonrpc": "2.0", "id": "init", "method": "meta/init",
+        "params": {
+            "init_protocol": "accepted_then_settled",
+            "init_id": init_id,
+            "mob_config": IDENTITY_FIRST_MOB_CONFIG,
+            "persistent_state": state,
+            "has_roster_provider": true,
+            "runtime_options": {
+                "demo_llm": true,
+                "agent_memory": { "own_memory_only_profiles": names },
+            },
+        },
+    }));
+    let accepted = gateway.next("the init acceptance");
+    assert_eq!(accepted["result"]["init_state"], "accepted", "{accepted}");
+    let seen = gateway.read_until(
+        "the init settlement",
+        |method| {
+            (method == "callback/roster_provider/roster")
+                .then(|| json!([{ "identity": "keeper", "profile": "default" }]))
+        },
+        is_settled,
+    );
+    seen.last().unwrap().clone()
+}
+
+/// The profiles a launch lists their own memory only are profiles of its
+/// launch mob. An init that lists a name the launch mob's definition does
+/// not have is refused with the option's code and a text that names the
+/// option, the name and the mob's profiles, and the gateway exits; an init
+/// that lists a profile the definition has settles ready.
+#[test]
+fn an_init_that_lists_a_profile_its_own_memory_only_is_checked_against_the_launch_mob() {
+    let mut refused = Gateway::spawn();
+    let state = refused.state.path().to_path_buf();
+    let settled = init_listing_own_memory_only(
+        &mut refused,
+        &state,
+        "own-memory-only-unknown",
+        json!(["visitor"]),
+    );
+    assert_eq!(settled["params"]["outcome"], "failed", "{settled}");
+    assert_eq!(settled["params"]["code"], -32602, "{settled}");
+    let message = settled["params"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.starts_with(
+            "runtime_options.agent_memory.own_memory_only_profiles names \"visitor\", which is \
+             no profile of the mob"
+        ) && message.ends_with("(its profiles: default)"),
+        "{message}"
+    );
+    assert_eq!(refused.wait_exit().code(), Some(1));
+
+    let mut taken = Gateway::spawn();
+    let state = taken.state.path().to_path_buf();
+    let settled = init_listing_own_memory_only(
+        &mut taken,
+        &state,
+        "own-memory-only-listed",
+        json!(["default"]),
+    );
+    assert_identity_bootstrap_ready(&settled);
+    shut_down_served(&mut taken);
+}
+
+/// A launch store that passes the check of the state directory before
+/// startup and cannot then be opened refuses init with the storage code and
+/// this text, which names the store. The store here is the one a first
+/// launch left, made read-only: the check reads it, and opening it for the
+/// launch's mob has to write. The row runs in every ordinary run. As root
+/// the permission does not bind and the store opens all the same, so there
+/// the row says that it was not exercised and asserts nothing.
+#[cfg(unix)]
+#[test]
+fn a_launch_store_that_cannot_be_opened_refuses_init_with_its_code_and_text() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut first = Gateway::spawn();
+    first.init(json!({}));
+    let response = first.next("the legacy init response");
+    assert!(
+        response["result"]["http_base_url"].is_string(),
+        "{response}"
+    );
+    let state = first.state.path().to_path_buf();
+    shut_down(&mut first);
+    let store = state.join("event_log.sqlite3");
+    std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o444))
+        .expect("a read-only store");
+    if std::fs::OpenOptions::new().write(true).open(&store).is_ok() {
+        eprintln!("NOT EXERCISED: running as root");
+        return;
+    }
+
+    let mut second = Gateway::spawn();
+    second.init_at(
+        json!({ "init_protocol": "accepted_then_settled", "init_id": "init-guard" }),
+        &state,
+    );
+    assert_eq!(
+        init_refusal(&mut second),
+        (
+            -32014,
+            format!(
+                "failed to open the persistent mob storage at {}: storage error: Internal \
+                 error: attempt to write a readonly database (adopted identity declarations \
+                 and mob events would not survive gateway restart)",
+                store.display()
+            )
+        )
+    );
+    assert_eq!(second.wait_exit().code(), Some(1));
+}
+
+/// The environment variable that names the stdio gateway binary of the
+/// published release a state directory is taken back to.
+const ROLLBACK_GATEWAY: &str = "META_ROLLBACK_RPC_GATEWAY";
+
+/// One tracked turn of the identity `keeper` on a served identity-first
+/// gateway, sent and waited for to its end.
+fn run_one_turn(gateway: &mut Gateway) {
+    gateway.send(json!({
+        "jsonrpc": "2.0", "id": "send", "method": "meta/send",
+        "params": { "identity": "keeper", "content": "hello", "track_turn": true },
+    }));
+    let seen = gateway.read_until(
+        "the answer to the send",
+        |method| (method == "callback/roster_provider/roster").then(turn_driven_roster),
+        |m| m["id"] == "send",
+    );
+    let sent = seen.last().unwrap();
+    let ticket = sent["result"]["turn"]["ticket"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a tracked send answers its turn's ticket: {sent}"))
+        .to_string();
+    gateway.send(json!({
+        "jsonrpc": "2.0", "id": "wait", "method": "meta/wait_for_turn",
+        "params": { "identity": "keeper", "ticket": ticket, "timeout_ms": 60_000 },
+    }));
+    let seen = gateway.read_until(
+        "the end of the turn",
+        |method| (method == "callback/roster_provider/roster").then(turn_driven_roster),
+        |m| m["id"] == "wait",
+    );
+    let waited = seen.last().unwrap();
+    assert!(waited.get("error").is_none(), "{waited}");
+}
+
+/// The way back to the published release. A state directory this gateway
+/// wrote, with one identity served and one turn run to its end, is launched
+/// again by the stdio gateway binary of the published release, named by
+/// `META_ROLLBACK_RPC_GATEWAY`: its init settles ready with the identity
+/// bootstrap complete, and its launch mob runs. The published binary is
+/// built from its release tag outside this workspace, so the row is ignored
+/// by default and reads as skipped; run it with the variable set and
+/// `--run-ignored only`. Run without the variable it fails: it never passes
+/// without having run the published binary.
+#[test]
+#[ignore = "needs META_ROLLBACK_RPC_GATEWAY: the path of the published release's rpc_gateway"]
+fn a_published_gateway_serves_a_state_directory_this_gateway_wrote() {
+    let published = std::env::var_os(ROLLBACK_GATEWAY).unwrap_or_else(|| {
+        panic!(
+            "{ROLLBACK_GATEWAY} is not set (the path of the published release's rpc_gateway \
+             binary)"
+        )
+    });
+    let mut first = Gateway::spawn();
+    let state = first.state.path().to_path_buf();
+    let settled =
+        identity_first_init_with(&mut first, &state, "rollback-written", turn_driven_roster());
+    assert_identity_bootstrap_ready(&settled);
+    run_one_turn(&mut first);
+    shut_down_served(&mut first);
+
+    let mut second = Gateway::spawn_binary(std::path::Path::new(&published));
+    let settled = identity_first_init_with(
+        &mut second,
+        &state,
+        "rollback-published",
+        turn_driven_roster(),
+    );
+    assert_identity_bootstrap_ready(&settled);
+    second.send(json!({ "jsonrpc": "2.0", "id": "status", "method": "meta/status", "params": {} }));
+    let seen = second.read_until(
+        "the status answer of the published gateway",
+        |method| (method == "callback/roster_provider/roster").then(turn_driven_roster),
+        |m| m["id"] == "status",
+    );
+    let status = seen.last().unwrap();
+    assert_eq!(status["result"]["mob_state"], "Some(Running)", "{status}");
+    shut_down_served(&mut second);
+}
+
+/// Remove from the launch store under `state` the events that carry the
+/// mob's definition, leaving a store that holds events and no definition.
+fn remove_the_definition_events(state: &std::path::Path) {
+    let store = rusqlite::Connection::open(state.join("event_log.sqlite3"))
+        .expect("the store the first launch left");
+    let kind = "json_extract(CAST(event_json AS TEXT), '$.event.kind.type')";
+    let removed = store
+        .execute(
+            &format!(
+                "DELETE FROM mob_events WHERE {kind} IN ('mob_created', 'mob_definition_updated')"
+            ),
+            [],
+        )
+        .expect("remove the events that carry the definition");
+    assert!(removed >= 1, "the store held the mob's creation");
+    let left: u32 = store
+        .query_row("SELECT COUNT(*) FROM mob_events", [], |row| row.get(0))
+        .expect("count the events left");
+    assert!(left >= 1, "the store still holds events");
+}
+
+/// A launch store that holds events and no definition of the launch's mob
+/// refuses init with the internal error code and this text, the text of
+/// every release: the launch judges the resume from its own open of the
+/// store before its mob set exists. The store here is the one a first
+/// launch left, with the events that carry the mob's definition removed.
+#[test]
+fn a_launch_store_with_events_and_no_definition_refuses_init_with_its_code_and_text() {
+    let mut first = Gateway::spawn();
+    first.init(json!({}));
+    let response = first.next("the legacy init response");
+    assert!(
+        response["result"]["http_base_url"].is_string(),
+        "{response}"
+    );
+    let state = first.state.path().to_path_buf();
+    shut_down(&mut first);
+    remove_the_definition_events(&state);
+
+    let mut second = Gateway::spawn();
+    second.init_at(
+        json!({ "init_protocol": "accepted_then_settled", "init_id": "init-guard" }),
+        &state,
+    );
+    assert_eq!(
+        init_refusal(&mut second),
+        (
+            -32603,
+            "Runtime bootstrap failed: failed to bootstrap mob runtime: internal error: non-empty \
+             mob storage has no canonical definition"
+                .to_string()
+        )
+    );
+    assert_eq!(second.wait_exit().code(), Some(1));
+}
+
+/// The same store under a launch with a roster provider, which judges the
+/// resume from its own open before the bootstrap, where the launch above
+/// judges at the start of the bootstrap: the same code and the same text,
+/// and the roster provider is never asked.
+#[test]
+fn a_roster_launch_over_a_store_with_events_and_no_definition_refuses_init_with_its_code_and_text()
+{
+    let mut first = Gateway::spawn();
+    let state = first.state.path().to_path_buf();
+    let settled = identity_first_init(&mut first, &state, "roster-fresh");
+    assert_identity_bootstrap_ready(&settled);
+    shut_down_served(&mut first);
+    remove_the_definition_events(&state);
+
+    let mut second = Gateway::spawn();
+    second.send(json!({
+        "jsonrpc": "2.0", "id": "init", "method": "meta/init",
+        "params": {
+            "init_protocol": "accepted_then_settled",
+            "init_id": "roster-guard",
+            "mob_config": IDENTITY_FIRST_MOB_CONFIG,
+            "persistent_state": state,
+            "has_roster_provider": true,
+            "runtime_options": { "demo_llm": true },
+        },
+    }));
+    assert_eq!(
+        init_refusal(&mut second),
+        (
+            -32603,
+            "Runtime bootstrap failed: failed to bootstrap mob runtime: internal error: non-empty \
+             mob storage has no canonical definition"
+                .to_string()
+        )
+    );
+    assert_eq!(second.wait_exit().code(), Some(1));
 }

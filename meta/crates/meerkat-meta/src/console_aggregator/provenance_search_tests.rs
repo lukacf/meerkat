@@ -293,11 +293,14 @@ fn delegate_witness(session: &str) -> ConsoleFrameMemberProvenance {
     ]);
     provenance.identity.labels = provenance.member.labels.clone();
     provenance.identity.visibility = ConsoleVisibility::RetiredReadable;
+    // A capture names a nested mob's member by its mob and name.
+    provenance.identity.runtime_member_id = format!("{}/{IDENTITY}", provenance.source_mob_id);
     provenance
 }
 
 fn history_row(key: &str, session: &str) -> NewConsoleFrame {
     NewConsoleFrame {
+        mob_id: None,
         id: None,
         dedupe_key: key.into(),
         timestamp_ms: 1,

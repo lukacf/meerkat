@@ -17617,6 +17617,7 @@ pub mod inputs {
         pub runtime_peer_response_terminal_apply_intent:
             Option<RecoveredPeerResponseTerminalApplyIntent>,
         pub is_prompt: bool,
+        pub live_boundary_delivery: Option<LiveBoundaryDelivery>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct QueueAccepted {

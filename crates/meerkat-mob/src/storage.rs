@@ -130,6 +130,127 @@ pub enum MobDefinitionSnapshotReadError {
     Read(#[from] crate::store::MobStoreError),
 }
 
+/// One page of a mob's journal: the structural events after a cursor, in
+/// cursor order, and the journal's latest cursor at the same read.
+#[derive(Debug, Clone)]
+pub struct MobEventsPage {
+    mob_id: Option<crate::MobId>,
+    events: Vec<MobEvent>,
+    latest_cursor: u64,
+}
+
+impl MobEventsPage {
+    /// A page that holds `events`, in cursor order, of a journal whose
+    /// latest cursor is `latest_cursor`. It names no mob
+    /// ([`Self::with_mob_id`]).
+    #[must_use]
+    pub const fn new(events: Vec<MobEvent>, latest_cursor: u64) -> Self {
+        Self {
+            mob_id: None,
+            events,
+            latest_cursor,
+        }
+    }
+
+    /// This page, naming `mob_id` as the mob its journal belongs to.
+    #[must_use]
+    pub fn with_mob_id(mut self, mob_id: crate::MobId) -> Self {
+        self.mob_id = Some(mob_id);
+        self
+    }
+
+    /// The mob the journal belongs to, whatever the page holds: for a page
+    /// read from a store file ([`MobStorage::read_stored_events`]), the mob
+    /// the journal's first event names, and `None` for a journal that holds
+    /// no event.
+    #[must_use]
+    pub const fn mob_id(&self) -> Option<&crate::MobId> {
+        self.mob_id.as_ref()
+    }
+
+    /// The page's events, in cursor order.
+    #[must_use]
+    pub fn events(&self) -> &[MobEvent] {
+        &self.events
+    }
+
+    /// The page's events, in cursor order.
+    #[must_use]
+    pub fn into_events(self) -> Vec<MobEvent> {
+        self.events
+    }
+
+    /// The latest cursor of the journal when the page was read: 0 for a
+    /// journal that holds no event. A page that ends below it is not the
+    /// last one.
+    #[must_use]
+    pub const fn latest_cursor(&self) -> u64 {
+        self.latest_cursor
+    }
+}
+
+/// Why [`MobStorage::read_stored_events`] refused or failed to read a mob
+/// store's journal. The read never creates, migrates or otherwise writes a
+/// store file, whatever the outcome.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum MobStoredEventsReadError {
+    /// No store exists at the path.
+    #[error("no mob store exists at {}", path.display())]
+    StoreMissing { path: std::path::PathBuf },
+    /// The file is not a mob store this build reads: it carries no mob
+    /// schema, a schema from a newer build, or a schema this build does not
+    /// recognize.
+    #[error("{} is not a mob store this build reads: {detail}", path.display())]
+    ForeignSchema {
+        path: std::path::PathBuf,
+        detail: String,
+    },
+    /// The store could not be read.
+    #[error("mob store read failed: {0}")]
+    Read(#[from] crate::store::MobStoreError),
+}
+
+/// Why [`MobStorage::read_stored_creator`] refused or failed to read a mob
+/// store's creation record. The read never creates, migrates or otherwise
+/// writes a store file, whatever the outcome.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum MobStoredCreationReadError {
+    /// No store exists at the path.
+    #[error("no mob store exists at {}", path.display())]
+    StoreMissing { path: std::path::PathBuf },
+    /// The file is not a mob store this build reads: it carries no mob
+    /// schema, a schema from a newer build, or a schema this build does not
+    /// recognize.
+    #[error("{} is not a mob store this build reads: {detail}", path.display())]
+    ForeignSchema {
+        path: std::path::PathBuf,
+        detail: String,
+    },
+    /// The store could not be read, or its creation record could not be
+    /// decoded.
+    #[error("mob store read failed: {0}")]
+    Read(#[from] crate::store::MobStoreError),
+}
+
+/// What [`MobStorage::read_creation_provenance`] found in a mob store file:
+/// who created its mob, or which of two different facts leaves that
+/// unanswered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum StoredMobCreation {
+    /// The store holds a mob, and its creation record says who created it.
+    Recorded(crate::MobProvenance),
+    /// The store keeps creation records and holds no mob: none was created
+    /// in it, or a finished destroy finalized its record.
+    NoMob,
+    /// An earlier release wrote the store and this build has not opened it
+    /// for writing since: its schema has no table for creation records. It
+    /// may hold a mob, and who created that mob is recorded nowhere.
+    PredatesCreationRecords,
+}
+
 /// Storage bundle for a mob.
 ///
 /// Contains both the mob event store (structural state) and session
@@ -333,6 +454,28 @@ impl MobStorage {
         Ok(self.events.latest_cursor().await? == 0)
     }
 
+    /// The lifecycle phase this store's mob resumes in: the phase its event
+    /// log records, as a resume replays it. A completed stop reads
+    /// `Stopped`; an actor's shutdown alone records no stop, so a mob that
+    /// ran when its actor ended reads `Running`.
+    ///
+    /// This is a pre-actuation read: it builds no runtime and emits no
+    /// event. `None` for a store whose log holds no mob.
+    pub async fn recorded_phase(
+        &self,
+    ) -> Result<Option<crate::MobState>, crate::store::MobStoreError> {
+        let events = self.events.replay_all().await?;
+        if !events
+            .iter()
+            .any(|event| matches!(event.kind, MobEventKind::MobCreated { .. }))
+        {
+            return Ok(None);
+        }
+        Ok(Some(crate::runtime::recovered_public_phase_from_events(
+            &events,
+        )))
+    }
+
     /// Read the definition that the persistent mob storage was created for.
     ///
     /// This is a pre-actuation read: it does not build a runtime, resume
@@ -346,6 +489,36 @@ impl MobStorage {
             .created_definition_snapshot()
             .await?
             .map(|snapshot| snapshot.definition))
+    }
+
+    /// The definition this store's mob had at `revision`: the one its create
+    /// recorded for revision 1, and for a later revision the one the
+    /// definition update that committed it recorded
+    /// ([`Self::update_definition`]). `None` for revision 0, for a revision
+    /// the mob has not reached, and for a store whose log holds no mob.
+    ///
+    /// This is a pre-actuation read: it builds no runtime and emits no
+    /// event.
+    pub async fn definition_at_revision(
+        &self,
+        revision: u64,
+    ) -> Result<Option<MobDefinition>, crate::store::MobStoreError> {
+        let events = self.events.replay_all().await?;
+        let Some((_, current)) = Self::current_definition_authority_for_log(&events)? else {
+            return Ok(None);
+        };
+        if revision == 0 || revision > current {
+            return Ok(None);
+        }
+        Ok(events.iter().find_map(|event| match &event.kind {
+            MobEventKind::MobCreated { definition } if revision == 1 => {
+                Some(definition.as_ref().clone())
+            }
+            MobEventKind::MobDefinitionUpdated { epoch, definition } if *epoch == revision => {
+                Some(definition.as_ref().clone())
+            }
+            _ => None,
+        }))
     }
 
     /// Read the owner bridge-session binding this persistent mob records,
@@ -427,6 +600,51 @@ impl MobStorage {
             .map(|record| record.mob_id))
     }
 
+    /// Who created the mob `mob_id` ([`crate::MobProvenance`]), as the
+    /// creation record of the store file at `path` says, read with no
+    /// running mob and without building a runtime. It is what
+    /// [`crate::MobHandle::provenance`] reads for a running mob, for a mob
+    /// that is not loaded.
+    ///
+    /// `None` when the record proves nothing about `mob_id`: the store
+    /// holds no creation record (an empty store; a mob created before
+    /// creation records existed that no later runtime has resumed; a store
+    /// an earlier release wrote that this build has not opened for writing
+    /// since, whose schema holds no creation record yet), the record is
+    /// finalized (a finished destroy whose files are not removed yet), or
+    /// the record names another mob than `mob_id` (a store file under
+    /// another mob's name). A mob created before creation records existed
+    /// that a later runtime has resumed answers
+    /// [`crate::MobProvenance::Unrecorded`]: that resume recorded its
+    /// creator as not known.
+    ///
+    /// It opens the file read-only and never creates, migrates or otherwise
+    /// writes the store file, as [`Self::read_definition_snapshot`] does: no
+    /// store is made for a missing path, no fence, lease or write lock is
+    /// taken, and the process registers no observer for the path. What that
+    /// reader says of the store's `-wal` and `-shm` files holds here too. A
+    /// missing file is [`MobStoredCreationReadError::StoreMissing`]; a file
+    /// that is not a mob store this build reads is
+    /// [`MobStoredCreationReadError::ForeignSchema`].
+    ///
+    /// The store may be one a mob runs on, in this process or another: the
+    /// read sees the record as it was committed when the read began.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn read_stored_creator(
+        path: impl AsRef<Path>,
+        mob_id: &crate::MobId,
+    ) -> Result<Option<crate::MobProvenance>, MobStoredCreationReadError> {
+        let record = crate::store::read_stored_creation_at(path.as_ref().to_path_buf()).await?;
+        match record {
+            crate::store::StoredCreationRecord::Record(record)
+                if !record.is_finalized() && record.mob_id == *mob_id =>
+            {
+                Ok(Some(record.provenance()?))
+            }
+            _ => Ok(None),
+        }
+    }
+
     /// Test support: delete the event log of the persistent store at `path`
     /// without the destroy's clear, so its creation record stays as it was.
     #[cfg(all(any(test, feature = "test-support"), not(target_arch = "wasm32")))]
@@ -450,6 +668,47 @@ impl MobStorage {
             .map(|record| record.provenance())
             .transpose()
             .map_err(Into::into)
+    }
+
+    /// Who created the mob of the persistent mob store at `path`
+    /// ([`crate::MobProvenance`]), read with no running mob and without
+    /// opening the store for writing: what [`Self::creation_provenance`]
+    /// reads from an open store. It is [`Self::read_stored_creator`]
+    /// without the check of the mob's id, for a caller that walks store
+    /// files and has no id to name: one read of the record, one error type.
+    ///
+    /// It answers which of three things the store says
+    /// ([`StoredMobCreation`]): who created its mob; that it holds no mob
+    /// (a store that keeps creation records and has none, or one whose
+    /// record a finished destroy finalized); or that it predates creation
+    /// records (a store an earlier release wrote that this build has not
+    /// opened for writing since, whose schema has no table for them), so
+    /// that it may hold a mob whose creator is recorded nowhere.
+    /// [`Self::read_stored_creator`] answers `None` for both of the last
+    /// two.
+    ///
+    /// It opens the file read-only and never creates, migrates or otherwise
+    /// writes it, as [`Self::read_identity_record_rows`] does, so it is
+    /// safe on the store of a running mob. A missing file is
+    /// [`MobStoredCreationReadError::StoreMissing`]; a file that is not a
+    /// mob store this build reads (no mob schema, a schema from a newer
+    /// build, an unrecognized schema) is
+    /// [`MobStoredCreationReadError::ForeignSchema`].
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn read_creation_provenance(
+        path: impl AsRef<Path>,
+    ) -> Result<StoredMobCreation, MobStoredCreationReadError> {
+        use crate::store::StoredCreationRecord;
+        let record = crate::store::read_stored_creation_at(path.as_ref().to_path_buf()).await?;
+        match record {
+            StoredCreationRecord::Record(record) if !record.is_finalized() => {
+                Ok(StoredMobCreation::Recorded(record.provenance()?))
+            }
+            StoredCreationRecord::Record(_) | StoredCreationRecord::NoRecord => {
+                Ok(StoredMobCreation::NoMob)
+            }
+            StoredCreationRecord::PredatesRecords => Ok(StoredMobCreation::PredatesCreationRecords),
+        }
     }
 
     /// The member of this store's roster whose bridge session is
@@ -682,6 +941,54 @@ impl MobStorage {
     ) -> Result<Option<MobDefinitionSnapshot>, MobDefinitionSnapshotReadError> {
         let events = crate::store::read_definition_journal_at(path.as_ref().to_path_buf()).await?;
         Ok(Self::current_definition_snapshot_for_log(&events)?)
+    }
+
+    /// Read one page of the journal of the persistent mob store at `path`
+    /// with no running mob: the structural events whose cursor is greater
+    /// than `after_cursor`, in cursor order, at most `limit` of them, and
+    /// the journal's latest cursor, read together in one read transaction.
+    /// It is the page a running mob's events view
+    /// ([`crate::MobHandle::events`]) answers with its `poll` and its
+    /// `latest_cursor`, read from the same journal. The page is not
+    /// filtered: it holds every
+    /// kind of event, and a caller that wants some kinds keeps those.
+    ///
+    /// It opens the file read-only and never creates, migrates or otherwise
+    /// writes the store file, as [`Self::read_definition_snapshot`] does: no
+    /// store is made for a missing path, a store an older release wrote is
+    /// read as it is, no fence, lease or write lock is taken, and the
+    /// process registers no observer for the path. What that reader says of
+    /// the store's `-wal` and `-shm` files holds here too. A missing file is
+    /// [`MobStoredEventsReadError::StoreMissing`]; a file that is not a mob
+    /// store this build reads (no mob schema, a schema from a newer build,
+    /// an unrecognized schema) is
+    /// [`MobStoredEventsReadError::ForeignSchema`]. A store that holds no
+    /// event answers an empty page with the latest cursor 0.
+    ///
+    /// The page names the mob the journal belongs to
+    /// ([`MobEventsPage::mob_id`]): the mob the journal's first event names,
+    /// read in the same read transaction, so a caller knows whose journal
+    /// it read whatever the page holds (a page past the journal's end
+    /// names it too). A journal that holds no event names none.
+    ///
+    /// The store may be one a mob runs on, in this process or another: the
+    /// read sees the journal as it was committed when the read began, never
+    /// a part of an append, and does not wait for a writer or make one
+    /// wait. Events appended after it are on a later page.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn read_stored_events(
+        path: impl AsRef<Path>,
+        after_cursor: u64,
+        limit: usize,
+    ) -> Result<MobEventsPage, MobStoredEventsReadError> {
+        let (mob_id, events, latest_cursor) =
+            crate::store::read_stored_events_at(path.as_ref().to_path_buf(), after_cursor, limit)
+                .await?;
+        let page = MobEventsPage::new(events, latest_cursor);
+        Ok(match mob_id {
+            Some(mob_id) => page.with_mob_id(mob_id),
+            None => page,
+        })
     }
 
     /// Replay structural events together with their authoritative definition.
@@ -1663,6 +1970,153 @@ mod tests {
         let cursor_before = storage.events.latest_cursor().await.unwrap();
         assert_eq!(storage.created_definition().await.unwrap(), Some(latest));
         assert_eq!(storage.events.latest_cursor().await.unwrap(), cursor_before);
+    }
+
+    /// The definition of each revision is read back from the log: the
+    /// create's for revision 1, each update's for the revision it committed,
+    /// none for revision 0 or one the mob has not reached, and the read
+    /// appends nothing.
+    #[tokio::test]
+    async fn definition_at_revision_reads_each_revision_the_log_recorded() {
+        let storage = MobStorage::in_memory();
+        assert_eq!(storage.definition_at_revision(1).await.unwrap(), None);
+
+        let first = valid_definition("definition-at-revision");
+        storage
+            .events
+            .append(NewMobEvent {
+                mob_id: first.id.clone(),
+                timestamp: None,
+                kind: MobEventKind::MobCreated {
+                    definition: Box::new(first.clone()),
+                },
+            })
+            .await
+            .unwrap();
+        storage
+            .specs
+            .put_spec(&first.id, &first, None)
+            .await
+            .unwrap();
+        let mut second = first.clone();
+        second.image_generation_provider = Some(meerkat_core::Provider::OpenAI);
+        storage.update_definition(1, second.clone()).await.unwrap();
+        let mut third = second.clone();
+        third.image_generation_provider = Some(meerkat_core::Provider::Gemini);
+        storage.update_definition(2, third.clone()).await.unwrap();
+
+        let cursor_before = storage.events.latest_cursor().await.unwrap();
+        assert_eq!(storage.definition_at_revision(0).await.unwrap(), None);
+        assert_eq!(
+            storage.definition_at_revision(1).await.unwrap(),
+            Some(first)
+        );
+        assert_eq!(
+            storage.definition_at_revision(2).await.unwrap(),
+            Some(second)
+        );
+        assert_eq!(
+            storage.definition_at_revision(3).await.unwrap(),
+            Some(third.clone())
+        );
+        assert_eq!(storage.definition_at_revision(4).await.unwrap(), None);
+        assert_eq!(storage.created_definition().await.unwrap(), Some(third));
+        assert_eq!(storage.events.latest_cursor().await.unwrap(), cursor_before);
+    }
+
+    /// Who created a store's mob is read by the store's path, without
+    /// opening the store for writing: no mob for a store that holds none;
+    /// the provenance its creation recorded once it holds one, as the open
+    /// store reads it, and the file is left as it was; no mob again once a
+    /// destroy finalized the record. A store an earlier release wrote,
+    /// whose schema has no table for creation records, is told apart from a
+    /// store with no mob, and is left as it was. A missing file is refused
+    /// typed and is not created.
+    #[tokio::test]
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn the_creation_of_a_store_file_is_read_by_its_path_and_writes_nothing() {
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("missing.db");
+        let refused = MobStorage::read_creation_provenance(&missing).await;
+        assert!(
+            matches!(
+                &refused,
+                Err(MobStoredCreationReadError::StoreMissing { path }) if path == &missing
+            ),
+            "a missing store is refused typed: {refused:?}"
+        );
+        assert!(!missing.exists(), "the reader never creates a store");
+
+        let database = directory.path().join("mob.db");
+        let storage = MobStorage::persistent(&database).unwrap();
+        assert_eq!(
+            MobStorage::read_creation_provenance(&database)
+                .await
+                .unwrap(),
+            StoredMobCreation::NoMob,
+            "a store that holds no mob"
+        );
+
+        let definition = valid_definition("creation-by-path");
+        storage
+            .events
+            .append_creation(
+                NewMobEvent {
+                    mob_id: definition.id.clone(),
+                    timestamp: None,
+                    kind: MobEventKind::MobCreated {
+                        definition: Box::new(definition.clone()),
+                    },
+                },
+                meerkat_core::service::MobIncarnationId::mint(),
+                &crate::MobProvenance::Host,
+            )
+            .await
+            .unwrap();
+        let facts = |path: &Path| {
+            (
+                std::fs::read(path).unwrap(),
+                std::fs::metadata(path).unwrap().modified().unwrap(),
+            )
+        };
+        let before = facts(&database);
+        assert_eq!(
+            MobStorage::read_creation_provenance(&database)
+                .await
+                .unwrap(),
+            StoredMobCreation::Recorded(crate::MobProvenance::Host)
+        );
+        assert_eq!(facts(&database), before, "the read left the file as it was");
+        assert_eq!(
+            storage.creation_provenance().await.unwrap(),
+            Some(crate::MobProvenance::Host),
+            "the open store reads the same"
+        );
+
+        storage.events.clear().await.unwrap();
+        assert_eq!(
+            MobStorage::read_creation_provenance(&database)
+                .await
+                .unwrap(),
+            StoredMobCreation::NoMob,
+            "a destroyed mob's store holds no mob"
+        );
+
+        let earlier = directory.path().join("earlier.db");
+        crate::store::seed_store_that_predates_creation_records_for_test(&earlier).unwrap();
+        let before = facts(&earlier);
+        assert_eq!(
+            MobStorage::read_creation_provenance(&earlier)
+                .await
+                .unwrap(),
+            StoredMobCreation::PredatesCreationRecords,
+            "a store that predates creation records is not a store with no mob"
+        );
+        assert_eq!(
+            facts(&earlier),
+            before,
+            "the read migrated nothing and left the file as it was"
+        );
     }
 
     #[tokio::test]
@@ -2759,5 +3213,77 @@ model = "test"
                 ..
             }) if epoch_highwater == expected_epoch
         ));
+    }
+
+    /// The phase a store records for its mob is read from its event log
+    /// alone: none for a store that holds no mob, running once the mob is
+    /// created, stopped after a completed stop, running again after the
+    /// resume that ends the stop, completed after a completion. A read
+    /// appends nothing.
+    #[tokio::test]
+    async fn recorded_phase_reads_the_phase_the_log_records_without_mutating_storage() {
+        let storage = MobStorage::in_memory();
+        assert_eq!(storage.recorded_phase().await.unwrap(), None);
+
+        let definition = valid_definition("recorded-phase-test");
+        let record = |kind: MobEventKind| NewMobEvent {
+            mob_id: definition.id.clone(),
+            timestamp: None,
+            kind,
+        };
+        storage
+            .events
+            .append(record(MobEventKind::MobCreated {
+                definition: Box::new(definition.clone()),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(
+            storage.recorded_phase().await.unwrap(),
+            Some(crate::MobState::Running),
+            "a mob that was created and never stopped"
+        );
+
+        storage
+            .events
+            .append(record(MobEventKind::MobStopped))
+            .await
+            .unwrap();
+        let cursor_before = storage.events.latest_cursor().await.unwrap();
+        assert_eq!(
+            storage.recorded_phase().await.unwrap(),
+            Some(crate::MobState::Stopped),
+            "a completed stop"
+        );
+        assert_eq!(
+            storage.events.latest_cursor().await.unwrap(),
+            cursor_before,
+            "the read appended nothing"
+        );
+
+        storage
+            .events
+            .append(record(
+                MobEventKind::PlacedCompletionLifecycleQuiesceEnded {
+                    intent: crate::machines::mob_machine::PlacedCompletionLifecycleIntentKind::Stop,
+                },
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            storage.recorded_phase().await.unwrap(),
+            Some(crate::MobState::Running),
+            "the resume that ends the stop"
+        );
+
+        storage
+            .events
+            .append(record(MobEventKind::MobCompleted))
+            .await
+            .unwrap();
+        assert_eq!(
+            storage.recorded_phase().await.unwrap(),
+            Some(crate::MobState::Completed)
+        );
     }
 }

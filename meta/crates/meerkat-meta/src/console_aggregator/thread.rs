@@ -242,7 +242,11 @@ impl MetaConsoleAggregator {
         // The reply is shown as its request is: by the request's own witness.
         let witness =
             super::FrameWitness::of_source_frame(thread.record.source.member_provenance.as_ref());
-        let outcome = super::append_frame(&self.inner, frame, witness).await?;
+        // A reply appended to a send's thread is of the send's family: its
+        // writer is the send's.
+        let outcome =
+            super::append_frame(&self.inner, frame, witness, super::FrameWriter::SendOrMark)
+                .await?;
         if outcome.disposition == AppendDisposition::Existing {
             return Ok(PrivateReplyAppend::Existing(outcome.frame));
         }
@@ -287,6 +291,7 @@ impl MetaConsoleAggregator {
         text: &str,
     ) -> ConsoleLogResult<NewConsoleFrame> {
         let mut frame = NewConsoleFrame {
+            mob_id: record.mob_id.clone(),
             id: None,
             dedupe_key,
             timestamp_ms: super::current_time_ms(),
@@ -349,7 +354,7 @@ impl MetaConsoleAggregator {
         KeptReplyServing {
             view: self,
             audience,
-            identity_records: self.inner.identity_read_model.current().await,
+            identity_records: self.inner.identity_read_model.current_with_mobs().await,
             read: FrameVisibilityRead::default(),
         }
     }
@@ -396,6 +401,7 @@ impl KeptReplyServing<'_> {
 /// The frame a kept reply stands for, under `id`: as it would be stored.
 fn kept_frame(id: &str, kept: NewConsoleFrame) -> ConsoleFrame {
     ConsoleFrame {
+        mob_id: kept.mob_id,
         id: id.to_string(),
         cursor: ConsoleCursor::from_seq(0),
         dedupe_key: kept.dedupe_key,
@@ -439,4 +445,46 @@ fn thread_reference_of(record: &ConsoleFrame) -> Option<ConsoleThreadReference> 
             .map(str::to_string),
         requester: addressee.map(|addressee| addressee.requester.clone()),
     })
+}
+
+#[cfg(test)]
+mod member_keyed_frame_tests {
+    use super::*;
+    use crate::console_aggregator::{ConsoleFrameSource, ConsoleFrameSourceKind};
+
+    /// A kept reply stands for the frame it would be stored as: the member
+    /// it belongs to stays that member, mob and identity.
+    #[test]
+    fn member_keyed_frames_a_kept_reply_keeps_the_mob_of_its_frame() {
+        let kept = NewConsoleFrame {
+            id: None,
+            dedupe_key: "kept".to_string(),
+            timestamp_ms: 1,
+            runtime_key: "runtime-a".to_string(),
+            identity: "alice".to_string(),
+            mob_id: Some(meerkat_mob::MobId::from("second")),
+            conversation_id: None,
+            session_id: None,
+            kind: "private_reply".to_string(),
+            status: ConsoleFrameStatus::Completed,
+            payload: serde_json::json!({ "text": "hello" }),
+            source: ConsoleFrameSource {
+                member_provenance: None,
+                kind: ConsoleFrameSourceKind::Synthetic,
+                source_cursor: None,
+            },
+            source_event_id: None,
+            interaction_id: None,
+            turn_id: None,
+            run_id: None,
+            parent_frame_id: None,
+            caused_by_frame_id: None,
+        };
+        let frame = kept_frame("kept-1", kept);
+        assert_eq!(frame.identity, "alice");
+        assert_eq!(
+            frame.mob_id.as_ref().map(meerkat_mob::MobId::as_str),
+            Some("second")
+        );
+    }
 }

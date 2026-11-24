@@ -431,7 +431,9 @@ pub(crate) struct AcceptedDurableTurnAppends {
 #[derive(Default)]
 pub(crate) struct TakenBoundaryDelivery {
     pub(crate) request_only: Vec<TurnRequestContext>,
-    pub(crate) durable: Option<AcceptedDurableTurnAppends>,
+    /// The durable deliveries of the boundary's one durable claim, in the
+    /// order the runner applies them.
+    pub(crate) durable: Vec<AcceptedDurableTurnAppends>,
 }
 
 #[cfg(test)]

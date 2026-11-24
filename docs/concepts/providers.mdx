@@ -27,7 +27,7 @@ self-hosted aliases appear beside built-in models.
 |----------|-----------------|
 | Anthropic | `claude-opus-5-5` |
 | OpenAI | `gpt-6-astra` |
-| Gemini | `gemini-4-argon` from 0.9.1 through 0.9.17; `gemini-4-neon` in the unreleased catalog |
+| Gemini | `gemini-4-argon` from 0.9.1 through 0.9.17; `gemini-4-neon` from 0.9.18 |
 | Global catalog default | `gpt-6-astra` |
 
 <Warning>
@@ -35,8 +35,8 @@ A catalog entry describes Meerkat's supported capability contract, not the
 entitlement of a particular API organization, ChatGPT workspace, cloud
 deployment, or OAuth account. If `gpt-6-astra` is unavailable to the active
 OpenAI account, explicitly select `gpt-5.5` or set a compatible binding
-`default_model`. Both the shipped `gemini-4-argon` default and the unreleased
-`gemini-4-neon` default require paid Gemini API tiers; on
+`default_model`. Both the `gemini-4-argon` default through 0.9.17 and the
+`gemini-4-neon` default from 0.9.18 require paid Gemini API tiers; on
 the free tier, select `gemini-3.8-flash` or, from 0.9.15,
 `gemini-4-hydrogen` explicitly (`--model gemini-3.8-flash`) or keep one as
 the Gemini default with `[models] gemini = "gemini-3.8-flash"` in config.
@@ -149,8 +149,8 @@ Use `rkat models` for every supported ID and its current limits.
     | Model | Context | Max output | Positioning |
     |-------|---------|------------|-------------|
     | `gemini-4-carbon` | 1M (shared by input, thinking, and output) | 64K | Google's strongest Gemini 4 reasoning model; paid Gemini API tiers only; thinking levels `low`/`medium`/`high` (default `medium`), no sampling parameters |
-    | `gemini-4-argon` | 1M (shared by input, thinking, and output) | 64K | Gemini default from 0.9.1 through 0.9.17; still selectable in the unreleased catalog; paid Gemini API tiers only; thinking levels `low`/`medium`/`high` (default `medium`), no sampling parameters |
-    | `gemini-4-neon` | 1M (shared by input, thinking, and output) | 64K | Unreleased Meerkat catalog entry and Gemini default; stable upstream; paid Gemini API tiers; Meerkat thinking levels `low`/`medium`/`high` (Google defaults to `high`; `xhigh` is not yet supported by Meerkat) |
+    | `gemini-4-argon` | 1M (shared by input, thinking, and output) | 64K | Gemini default from 0.9.1 through 0.9.17; still selectable in 0.9.18; paid Gemini API tiers only; thinking levels `low`/`medium`/`high` (default `medium`), no sampling parameters |
+    | `gemini-4-neon` | 1M (shared by input, thinking, and output) | 64K | Meerkat catalog entry and Gemini default from 0.9.18; stable upstream; paid Gemini API tiers; Meerkat thinking levels `low`/`medium`/`high` (Google defaults to `high`; `xhigh` is not yet supported by Meerkat) |
     | `gemini-4-hydrogen` | 1M (shared by input, thinking, and output) | 64K | Google's fast Gemini 4 model, in the catalog from 0.9.15; on the free tier and the paid Gemini API tiers; thinking levels `low`/`medium`/`high` (Google's default for it is `high`) |
     | `gemini-3.8-flash` | 1M | 64K | Recommended Flash model; also available on the free tier |
     | `gemini-3.7-flash` | 1M | 64K | Deprecated upstream; Google serves it with `gemini-3.8-flash` |
@@ -768,7 +768,7 @@ typed `provider_params.provider_tag` envelope for provider-specific fields:
     ```
 
     Consult `rkat models` for the selected model's effective parameter schema.
-    Neon catalog and thinking-level support below is unreleased in Meerkat.
+    Neon catalog and thinking-level support below is in Meerkat from 0.9.18.
     The catalog records the thinking levels each model accepts. A level the
     selected model's catalog row does not list, such as `minimal` on
     `gemini-4-argon`, `gemini-4-hydrogen`, `gemini-4-neon`, `gemini-3.8-flash` or

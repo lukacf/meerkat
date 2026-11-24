@@ -5,7 +5,7 @@ by name: the one who announces names a topic, and every agent subscribed to
 that topic is delivered the announcement. Python and TypeScript, the same
 six steps, the same output.
 
-**Needs Meta 0.9.15 or later, gateway and SDKs.** `examples.sh` builds a
+**Needs Meta 0.9.17 or later, gateway and SDKs.** `examples.sh` builds a
 gateway from this repository when `META_GATEWAY_BIN` names none.
 
 The page it follows: [Mob announcements](../../docs/concepts/mob-announcements.mdx).

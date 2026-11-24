@@ -32,7 +32,7 @@
 //! file). They commit session state through genuinely different store
 //! authorities, and the handoff must cross both.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
 
 use async_trait::async_trait;
@@ -203,6 +203,7 @@ struct ProviderCall {
     model: String,
 }
 
+#[derive(Clone)]
 struct DeferredBrainSwapClient {
     requested_calls: Arc<StdMutex<Vec<ProviderCall>>>,
     /// The provider this exact client was built for. Cross-provider routes
@@ -213,13 +214,27 @@ struct DeferredBrainSwapClient {
     /// The route this client reports for the provider-neutral reasoning
     /// effort option; `None` (the default) reports no route.
     reasoning_route: ScriptedReasoningRoute,
+    /// The model `build_text_client` built this client for; `None` for a
+    /// client built for a connection alone. A route scripted for one model
+    /// is reported by that model's clients and by no other.
+    built_for_model: Option<String>,
     /// Whether calls 4 to 6 are scripted: the model asks to switch back to
     /// A. Off (the default), a call past call 3 is unscripted.
     switch_back: ScriptedSwitchBack,
 }
 
-/// A route observation a row scripts for every client of its environment.
-type ScriptedReasoningRoute = Arc<StdMutex<Option<meerkat_core::ReasoningRouteObservation>>>;
+/// The route observations a row scripts: one for every client of its
+/// environment and, where a row sets one, one for the clients built for a
+/// single model, which report it instead. Both are read at each call, so a
+/// row can change what one model's route states while the other model's
+/// client keeps stating what it stated.
+#[derive(Default)]
+struct ScriptedReasoningRoutes {
+    every_client: Option<meerkat_core::ReasoningRouteObservation>,
+    for_model: BTreeMap<String, Option<meerkat_core::ReasoningRouteObservation>>,
+}
+
+type ScriptedReasoningRoute = Arc<StdMutex<ScriptedReasoningRoutes>>;
 
 /// Whether a row scripted the switch back to A for every client of its
 /// environment.
@@ -258,10 +273,18 @@ fn done_event(stop_reason: StopReason) -> LlmEvent {
 #[async_trait]
 impl LlmClient for DeferredBrainSwapClient {
     fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
-        self.reasoning_route
+        let routes = self
+            .reasoning_route
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match self
+            .built_for_model
+            .as_deref()
+            .and_then(|model| routes.for_model.get(model))
+        {
+            Some(for_this_model) => for_this_model.clone(),
+            None => routes.every_client.clone(),
+        }
     }
 
     fn project_replay_messages(
@@ -381,7 +404,7 @@ impl LlmClient for DeferredBrainSwapClient {
 /// instead of an HTTP one.
 struct DeferredBrainSwapProviderRuntime {
     provider: Provider,
-    client: Arc<dyn LlmClient>,
+    client: Arc<DeferredBrainSwapClient>,
     availability: Arc<ModelAvailability>,
     client_build_models: Arc<StdMutex<Vec<String>>>,
     resolved_auth_bindings: Arc<StdMutex<Vec<AuthBindingRef>>>,
@@ -447,7 +470,7 @@ impl ProviderRuntime for DeferredBrainSwapProviderRuntime {
         &self,
         _connection: ResolvedConnection,
     ) -> Result<Arc<dyn LlmClient>, ProviderClientError> {
-        Ok(Arc::clone(&self.client))
+        Ok(Arc::new(self.client.as_ref().clone()))
     }
 
     fn build_text_client(
@@ -464,7 +487,10 @@ impl ProviderRuntime for DeferredBrainSwapProviderRuntime {
                 "model '{model}' is unavailable in the fake provider runtime"
             )));
         }
-        Ok(Arc::clone(&self.client))
+        Ok(Arc::new(DeferredBrainSwapClient {
+            built_for_model: Some(model),
+            ..self.client.as_ref().clone()
+        }))
     }
 }
 
@@ -570,6 +596,7 @@ fn brain_swap_discovery_requires_configured_routes_without_foreign_auth() {
                 provider: route.provider_b,
                 route,
                 reasoning_route: ScriptedReasoningRoute::default(),
+                built_for_model: None,
                 switch_back: ScriptedSwitchBack::default(),
             }),
             availability,
@@ -695,13 +722,39 @@ struct AbEnvironment {
 }
 
 impl AbHarness {
-    /// The route every client of this environment reports from now on.
+    /// The route every client of this environment reports from now on,
+    /// but for a model that has a route of its own
+    /// ([`Self::set_reasoning_route_for_model`]).
     fn set_reasoning_route(&self, route: Option<meerkat_core::ReasoningRouteObservation>) {
-        *self
-            .environment
+        self.environment
             .reasoning_route
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = route;
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .every_client = route;
+    }
+
+    /// The route the clients built for `model` report from now on, whatever
+    /// the other clients of this environment report.
+    fn set_reasoning_route_for_model(
+        &self,
+        model: &str,
+        route: Option<meerkat_core::ReasoningRouteObservation>,
+    ) {
+        self.environment
+            .reasoning_route
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .for_model
+            .insert(model.to_string(), route);
+    }
+
+    /// How many clients were built for `model` since the build list was
+    /// last cleared.
+    fn client_builds_for(&self, model: &str) -> usize {
+        self.client_build_models()
+            .iter()
+            .filter(|built| built.as_str() == model)
+            .count()
     }
 
     /// From now on every client of this environment answers calls 4 to 6:
@@ -964,11 +1017,12 @@ async fn try_attach_harness(
         .into_iter()
         .filter(|provider| route.serves(*provider, environment.availability.as_ref()))
     {
-        let scripted: Arc<dyn LlmClient> = Arc::new(DeferredBrainSwapClient {
+        let scripted = Arc::new(DeferredBrainSwapClient {
             requested_calls: Arc::clone(&environment.requested_calls),
             provider,
             route,
             reasoning_route: Arc::clone(&environment.reasoning_route),
+            built_for_model: None,
             switch_back: Arc::clone(&environment.switch_back),
         });
         registry = registry.with_runtime(Arc::new(DeferredBrainSwapProviderRuntime {
@@ -1618,6 +1672,17 @@ async fn head_canonical_cold_restart_outlasts_the_unregister_caller_grace() {
     cold_restart_outlasts_the_unregister_caller_grace(PersistenceProfile::HeadCanonical).await;
 }
 
+/// What the caller of an input gets today when a committed handoff is held
+/// at that input: its wait ends with the runtime stopped, not with a
+/// completion. Pinned here so that a change of it is seen; no row promises
+/// the caller more than this.
+fn assert_the_held_callers_runtime_stopped(outcome: &CompletionOutcome) {
+    let CompletionOutcome::RuntimeTerminated { reason, .. } = outcome else {
+        panic!("a held handoff ends its caller's wait with the runtime stopped: {outcome:?}");
+    };
+    assert_eq!(reason, "runtime stopped");
+}
+
 async fn unavailable_b_holds_the_real_next_input(profile: PersistenceProfile) {
     let harness = build_harness(profile).await;
     let proof = commit_brain_swap_request(&harness).await;
@@ -1630,6 +1695,7 @@ async fn unavailable_b_holds_the_real_next_input(profile: PersistenceProfile) {
         !matches!(outcome, CompletionOutcome::Completed(_)),
         "an unavailable target must not report a successful completion: {outcome:?}"
     );
+    assert_the_held_callers_runtime_stopped(&outcome);
     assert_eq!(
         harness.requested_models(),
         vec![MODEL_A.to_string(), MODEL_A.to_string()],
@@ -2189,25 +2255,28 @@ fn level_request(
     }
 }
 
-/// A committed `brain_swap` handoff is not judged against the session's
-/// reasoning effort level; only a caller's reconfiguration is.
-///
-/// The session takes a level its route accepts while a handoff to B is
-/// committed. A caller's hot swap to B is refused typed (B's route does not
-/// accept the level) and leaves the session whole. The handoff to the same
-/// model is then realized at the next input as before, keeping the level, and
-/// that input's request is refused before it reaches the provider. Clearing
-/// the level makes the next request run on B.
-#[tokio::test]
-async fn a_brain_swap_keeps_the_level_and_requests_are_refused_until_it_is_cleared() {
+/// An account route whose model list is not loaded: what the route accepts
+/// for the model cannot be read now, and can be read later.
+fn account_route_with_its_list_unloaded() -> meerkat_core::ReasoningRouteObservation {
+    meerkat_core::ReasoningRouteObservation {
+        account: meerkat_core::AccountLevelStatement::ListUnavailable,
+        ..account_route_stating(&[])
+    }
+}
+
+/// Commit a `brain_swap` handoff to B, then let the session take `high`,
+/// which the route of every client accepts at that moment. The level is
+/// taken after the handoff was committed, so nothing decided when the
+/// handoff was staged can know it. Returns the handoff's proof and the
+/// identity the session then holds, live and stored.
+async fn commit_a_swap_then_take_the_high_level(
+    harness: &AbHarness,
+) -> (CommittedHandoffProof, SessionLlmIdentity) {
     use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
     use meerkat_core::model_profile::capabilities::EffortLevel;
 
-    let harness = build_harness(PersistenceProfile::WholeBlob).await;
     let route = harness.environment.route;
-    let _committed = commit_brain_swap_request(&harness).await;
-
-    // A's entry of the account's list states `high`: the session takes it.
+    let proof = commit_brain_swap_request(harness).await;
     harness.set_reasoning_route(Some(account_route_stating(&[EffortLevel::High])));
     harness
         .adapter
@@ -2216,22 +2285,51 @@ async fn a_brain_swap_keeps_the_level_and_requests_are_refused_until_it_is_clear
             level_request(None, Some(TurnMetadataOverride::Set(EffortLevel::High))),
         )
         .await
-        .unwrap_or_else(|error| panic!("a level the route accepts is applied: {error}"));
-    let before_durable = harness.durable_identity().await;
-    let before_live = harness.live_identity().await;
-    assert_eq!(before_live, before_durable);
-    assert_eq!(before_live.model, route.model_a);
+        .unwrap_or_else(|error| panic!("a level A's route accepts is applied: {error}"));
+    let held = harness.live_identity().await;
+    assert_eq!(held, harness.durable_identity().await);
+    assert_eq!(held.model, route.model_a);
     assert_eq!(
-        before_live
-            .provider_params
+        held.provider_params
             .as_ref()
             .and_then(|params| params.reasoning_effort),
         Some(EffortLevel::High)
     );
+    assert_eq!(
+        harness.requested_models(),
+        vec![route.model_a.to_string(), route.model_a.to_string()]
+    );
+    (proof, held)
+}
 
-    // B's entry states only `low`. A caller's hot swap to B is refused typed
-    // and changes nothing, live or stored.
-    harness.set_reasoning_route(Some(account_route_stating(&[EffortLevel::Low])));
+/// A committed `brain_swap` handoff is judged, where it is decided, against
+/// the reasoning effort level the session holds then.
+///
+/// The session takes a level A's route accepts while a handoff to B is
+/// committed; B's route does not accept it. A caller's own swap to B is
+/// refused typed and leaves the session whole. At the next input the handoff
+/// ends Denied: the session keeps its model and its level, live and stored,
+/// and that input completes on A. The denial is final and durable: clearing
+/// the level afterwards does not apply the denied switch. The row then drops
+/// the session's service and store handles and opens the same store files
+/// again in the same process: a later input runs on A too, with B not looked
+/// at again. No process restart is exercised.
+async fn a_brain_swap_to_a_target_that_refuses_the_held_level_is_denied_and_the_input_runs_on_a(
+    profile: PersistenceProfile,
+) {
+    use meerkat_core::model_profile::capabilities::EffortLevel;
+
+    let harness = build_harness(profile).await;
+    let route = harness.environment.route;
+    let (proof, held) = commit_a_swap_then_take_the_high_level(&harness).await;
+
+    // B's entry of the account's list states only `low`; A's keeps stating
+    // `high`. A caller's own swap to B is refused typed and changes nothing,
+    // live or stored.
+    harness.set_reasoning_route_for_model(
+        route.model_b,
+        Some(account_route_stating(&[EffortLevel::Low])),
+    );
     let error = harness
         .adapter
         .reconfigure_session_llm_identity(
@@ -2251,58 +2349,298 @@ async fn a_brain_swap_keeps_the_level_and_requests_are_refused_until_it_is_clear
             "reason": "unsupported_level", "supported": ["low"], "facts": "account",
         })
     );
-    assert_eq!(harness.durable_identity().await, before_durable);
-    assert_eq!(harness.live_identity().await, before_live);
+    assert_eq!(harness.durable_identity().await, held);
+    assert_eq!(harness.live_identity().await, held);
     assert_eq!(harness.realized_terminal_count().await, 0);
-    let calls_before = harness.requested_models();
     assert_eq!(
-        calls_before,
+        harness.requested_models(),
         vec![route.model_a.to_string(), route.model_a.to_string()]
     );
+    harness.clear_client_build_models();
 
-    // The committed handoff to the same model is realized at the next input,
-    // not judged: the session moves to B and keeps its level. The input's
-    // own request is then refused before any provider call.
-    let refused = harness.run_prompt("the next input, after the swap").await;
+    // The committed handoff to the same model is decided at the next input:
+    // B refuses the level the session holds, so the handoff ends Denied and
+    // the input runs on the model and the level the session keeps.
+    let next = harness.run_prompt("the next input, after the swap").await;
+    assert!(
+        matches!(next, CompletionOutcome::Completed(ref run) if run.text == NEXT_TURN_TEXT),
+        "a handoff whose target refuses the held level is denied, and the pending input \
+         completes on A: {next:?}"
+    );
+    assert_eq!(
+        harness.requested_calls().last(),
+        Some(&ProviderCall {
+            provider: route.provider_a,
+            model: route.model_a.to_string(),
+        })
+    );
+    assert_eq!(
+        harness.requested_models(),
+        vec![route.model_a.to_string(); 3],
+        "the input's one request went to A"
+    );
     assert_eq!(
         harness.realized_terminal_count().await,
-        1,
-        "the handoff is realized as before: {refused:?}"
+        0,
+        "a denied handoff is not realized"
     );
-    let swapped = harness.live_identity().await;
-    assert_eq!(swapped.model, route.model_b);
+    assert_eq!(harness.live_identity().await, held);
+    assert_eq!(harness.durable_identity().await, held);
+    let records = harness.durable_routing_records().await;
     assert_eq!(
-        swapped
+        records.len(),
+        2,
+        "the request and its one durable terminal: {records:?}"
+    );
+    assert_eq!(records[1].request_id(), &proof.request_id);
+    assert!(
+        matches!(
+            &records[1],
+            SessionModelRoutingControlRecord::ModelRoutingIntentDenied {
+                originating_run_id,
+                reason: meerkat_core::image_generation::SwitchTurnDenialReason::CapabilityPolicy,
+                ..
+            } if originating_run_id == &proof.origin_run
+        ),
+        "the handoff ends Denied for the target's capability, under its originating run: \
+         {records:?}"
+    );
+    assert!(
+        harness
+            .adapter
+            .committed_model_routing_handoffs_awaiting_decision(&harness.session_id)
+            .await
+            .expect("read the handoffs awaiting a decision")
+            .is_empty(),
+        "a denied handoff holds no later input"
+    );
+    assert_eq!(
+        harness.client_builds_for(route.model_b),
+        1,
+        "the target is looked at once: one client build proves it buildable and judges \
+         the level"
+    );
+
+    // The denied switch is not applied later: the level that B refused is
+    // cleared, and the session stays on A. A switch to B is asked for again.
+    harness
+        .adapter
+        .reconfigure_session_llm_identity(
+            &harness.session_id,
+            level_request(
+                None,
+                Some(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear),
+            ),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("clearing the level is applied: {error}"));
+    let cleared = harness.live_identity().await;
+    assert_eq!(cleared.model, route.model_a);
+    assert_eq!(
+        cleared
             .provider_params
             .as_ref()
             .and_then(|params| params.reasoning_effort),
-        Some(EffortLevel::High),
-        "the handoff keeps the session's level"
+        None
     );
-    assert_eq!(harness.durable_identity().await, swapped);
+    assert_eq!(harness.durable_identity().await, cleared);
+
+    // The denial is the durable answer: the session's service and store
+    // handles are dropped and the same store files are opened again in the
+    // same process (no process restart is exercised). The runtime built over
+    // them reads it, runs a later input on the model the session kept and
+    // does not look at B again.
+    let harness = harness.cold_restart().await;
+    assert_eq!(harness.durable_routing_records().await, records);
+    let later = harness.run_prompt("a later input, after a restart").await;
+    assert!(
+        matches!(later, CompletionOutcome::Completed(ref run) if run.text == SECOND_NEXT_TURN_TEXT),
+        "the denied handoff is not decided again, with the level cleared: {later:?}"
+    );
     assert_eq!(
         harness.requested_models(),
-        calls_before,
-        "the refused request reached no provider"
+        vec![route.model_a.to_string(); 4]
     );
-    // The per-request check refuses it typed and names the level and the
-    // route: no other outcome passes.
-    let CompletionOutcome::AbandonedWithError { error, .. } = &refused else {
-        panic!("a request whose level the route refuses must fail typed: {refused:?}");
+    assert_eq!(harness.realized_terminal_count().await, 0);
+    assert_eq!(harness.live_identity().await, cleared);
+    assert_eq!(harness.durable_identity().await, cleared);
+    assert_eq!(harness.durable_routing_records().await, records);
+    assert_eq!(
+        harness.client_builds_for(route.model_b),
+        1,
+        "no later input builds a client for the denied target"
+    );
+}
+
+#[tokio::test]
+async fn whole_blob_a_brain_swap_to_a_target_that_refuses_the_held_level_is_denied_and_the_input_runs_on_a()
+ {
+    a_brain_swap_to_a_target_that_refuses_the_held_level_is_denied_and_the_input_runs_on_a(
+        PersistenceProfile::WholeBlob,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn head_canonical_a_brain_swap_to_a_target_that_refuses_the_held_level_is_denied_and_the_input_runs_on_a()
+ {
+    a_brain_swap_to_a_target_that_refuses_the_held_level_is_denied_and_the_input_runs_on_a(
+        PersistenceProfile::HeadCanonical,
+    )
+    .await;
+}
+
+/// The typed refusal the caller of an input gets when its request is
+/// refused, before any provider call, for the level the session holds.
+fn the_level_refusal_of(outcome: &CompletionOutcome) -> &meerkat_core::ReasoningEffortRefusal {
+    let CompletionOutcome::AbandonedWithError { error, .. } = outcome else {
+        panic!("a request whose level the route does not take fails typed: {outcome:?}");
     };
     let Some(meerkat_core::event::AgentErrorReason::ReasoningEffortRefused { refusal }) =
         &error.reason
     else {
-        panic!("the request must be refused for its level, typed: {refused:?}");
+        panic!("the request is refused for its level, typed: {outcome:?}");
     };
+    refusal
+}
+
+/// A target whose levels cannot be read now (an account's model list that
+/// is not loaded) is not a target that refuses the level, and it is not held
+/// either: the handoff is carried out, as it always was, and the session
+/// keeps its level on the new model. Its runtime goes on serving: the input
+/// that met the switch is refused typed, with the one reason that is
+/// retryable in meaning, before any provider call, and once the list is
+/// read and states the level the next input runs on B.
+async fn a_brain_swap_to_a_target_whose_levels_cannot_be_read_now_is_carried_out(
+    profile: PersistenceProfile,
+) {
+    use meerkat_core::model_profile::capabilities::EffortLevel;
+
+    let harness = build_harness(profile).await;
+    let route = harness.environment.route;
+    let (_proof, held) = commit_a_swap_then_take_the_high_level(&harness).await;
+    harness
+        .set_reasoning_route_for_model(route.model_b, Some(account_route_with_its_list_unloaded()));
+
+    let refused = harness.run_prompt("the next input, after the swap").await;
+    assert_eq!(
+        harness.realized_terminal_count().await,
+        1,
+        "a target whose levels cannot be read now is switched to, as before: {refused:?}"
+    );
+    let refusal = the_level_refusal_of(&refused);
+    assert_eq!(
+        refusal.reason,
+        meerkat_core::ReasoningEffortRefusalReason::SupportedLevelsUnavailable
+    );
+    assert!(
+        refusal.reason.is_transient(),
+        "the refusal is the one that is retryable in meaning"
+    );
     assert_eq!(refusal.requested, EffortLevel::High);
     assert_eq!(refusal.model, route.model_b);
     assert_eq!(
-        refusal.route.as_ref().map(ToString::to_string).as_deref(),
-        Some("copilot/responses")
+        harness.requested_models(),
+        vec![route.model_a.to_string(), route.model_a.to_string()],
+        "the refused request reached no provider"
+    );
+    let swapped = harness.live_identity().await;
+    assert_eq!(swapped.model, route.model_b);
+    assert_eq!(
+        swapped.provider_params, held.provider_params,
+        "the handoff keeps the session's level"
+    );
+    assert_eq!(harness.durable_identity().await, swapped);
+    assert!(
+        harness
+            .adapter
+            .committed_model_routing_handoffs_awaiting_decision(&harness.session_id)
+            .await
+            .expect("read the handoffs awaiting a decision")
+            .is_empty(),
+        "a handoff that was carried out holds no later input"
     );
 
-    // Clearing the level makes the next request run, on B.
+    // The list is read and states the level: the same runtime serves the
+    // next input, on B.
+    harness.set_reasoning_route_for_model(
+        route.model_b,
+        Some(account_route_stating(&[EffortLevel::High])),
+    );
+    let next = harness.run_prompt("the input after the list is read").await;
+    assert!(
+        matches!(next, CompletionOutcome::Completed(ref run) if run.text == NEXT_TURN_TEXT),
+        "the request runs once the target's levels can be read: {next:?}"
+    );
+    assert_eq!(
+        harness.requested_calls().last(),
+        Some(&ProviderCall {
+            provider: route.provider_b,
+            model: route.model_b.to_string(),
+        })
+    );
+    assert_eq!(harness.realized_terminal_count().await, 1);
+    assert_eq!(harness.live_identity().await, swapped);
+}
+
+#[tokio::test]
+async fn whole_blob_a_brain_swap_to_a_target_whose_levels_cannot_be_read_now_is_carried_out() {
+    a_brain_swap_to_a_target_whose_levels_cannot_be_read_now_is_carried_out(
+        PersistenceProfile::WholeBlob,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn head_canonical_a_brain_swap_to_a_target_whose_levels_cannot_be_read_now_is_carried_out() {
+    a_brain_swap_to_a_target_whose_levels_cannot_be_read_now_is_carried_out(
+        PersistenceProfile::HeadCanonical,
+    )
+    .await;
+}
+
+/// The limit of the row above, stated as it stands: a target whose levels
+/// could not be read when the handoff was decided, and that refuses the
+/// level once they are read, keeps the session: each request is refused,
+/// before it reaches the provider, until the level is changed or cleared.
+#[tokio::test]
+async fn a_target_unreadable_at_the_switch_that_refuses_once_read_keeps_the_session_until_the_level_changes()
+ {
+    use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
+    use meerkat_core::model_profile::capabilities::EffortLevel;
+
+    let harness = build_harness(PersistenceProfile::WholeBlob).await;
+    let route = harness.environment.route;
+    let (_proof, _held) = commit_a_swap_then_take_the_high_level(&harness).await;
+    harness
+        .set_reasoning_route_for_model(route.model_b, Some(account_route_with_its_list_unloaded()));
+    let carried_out = harness.run_prompt("the next input, after the swap").await;
+    assert_eq!(
+        harness.realized_terminal_count().await,
+        1,
+        "the handoff is carried out: {carried_out:?}"
+    );
+
+    // The list is read, and B's entry states only `low`.
+    harness.set_reasoning_route_for_model(
+        route.model_b,
+        Some(account_route_stating(&[EffortLevel::Low])),
+    );
+    let refused = harness.run_prompt("the input after the list is read").await;
+    let refusal = the_level_refusal_of(&refused);
+    assert_eq!(
+        refusal.reason,
+        meerkat_core::ReasoningEffortRefusalReason::UnsupportedLevel
+    );
+    assert_eq!(refusal.model, route.model_b);
+    assert_eq!(harness.live_identity().await.model, route.model_b);
+    assert_eq!(
+        harness.requested_models(),
+        vec![route.model_a.to_string(), route.model_a.to_string()],
+        "no refused request reached a provider"
+    );
+
+    // Clearing the level lets the next request run, on B.
     harness
         .adapter
         .reconfigure_session_llm_identity(
@@ -2325,14 +2663,101 @@ async fn a_brain_swap_keeps_the_level_and_requests_are_refused_until_it_is_clear
             model: route.model_b.to_string(),
         })
     );
+}
+
+/// A target that cannot be built is held, whatever can or cannot be read of
+/// its levels: carrying a switch out for unreadable levels never moves a
+/// session onto a target whose client cannot be built. The input's caller
+/// gets what the caller of any held input gets, and the request stays owed.
+async fn an_unbuildable_target_whose_levels_cannot_be_read_is_held_not_carried_out(
+    profile: PersistenceProfile,
+) {
+    let harness = build_harness(profile).await;
+    let route = harness.environment.route;
+    let (proof, held) = commit_a_swap_then_take_the_high_level(&harness).await;
+    harness
+        .set_reasoning_route_for_model(route.model_b, Some(account_route_with_its_list_unloaded()));
+    harness.set_available(route.model_b, false);
+
+    let (_input_id, completion) = harness.accept_prompt("must remain unattempted").await;
+    let outcome = AbHarness::wait_completion(completion).await;
     assert_eq!(
-        harness
-            .live_identity()
-            .await
-            .provider_params
-            .and_then(|params| params.reasoning_effort),
-        None
+        harness.realized_terminal_count().await,
+        0,
+        "a target that cannot be built is not switched to: {outcome:?}"
     );
+    assert_the_held_callers_runtime_stopped(&outcome);
+    assert_eq!(
+        harness.requested_models(),
+        vec![route.model_a.to_string(), route.model_a.to_string()],
+        "the held input makes no provider call"
+    );
+    let records = harness.durable_routing_records().await;
+    assert_eq!(records.len(), 1, "nothing is decided: {records:?}");
+    assert_eq!(records[0].request_id(), &proof.request_id);
+    assert_eq!(
+        records[0].disposition(),
+        ModelRoutingIntentRecordDisposition::Requested,
+        "a hold leaves the request waiting"
+    );
+    assert_eq!(harness.durable_identity().await, held);
+}
+
+#[tokio::test]
+async fn whole_blob_an_unbuildable_target_whose_levels_cannot_be_read_is_held_not_carried_out() {
+    an_unbuildable_target_whose_levels_cannot_be_read_is_held_not_carried_out(
+        PersistenceProfile::WholeBlob,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn head_canonical_an_unbuildable_target_whose_levels_cannot_be_read_is_held_not_carried_out()
+{
+    an_unbuildable_target_whose_levels_cannot_be_read_is_held_not_carried_out(
+        PersistenceProfile::HeadCanonical,
+    )
+    .await;
+}
+
+/// A target whose route accepts the level the session holds is switched to
+/// as before, and the session keeps the level on it.
+#[tokio::test]
+async fn a_brain_swap_to_a_target_that_accepts_the_held_level_is_realized_with_the_level() {
+    use meerkat_core::model_profile::capabilities::EffortLevel;
+
+    let harness = build_harness(PersistenceProfile::WholeBlob).await;
+    let route = harness.environment.route;
+    let (_proof, held) = commit_a_swap_then_take_the_high_level(&harness).await;
+    // B's own entry states `high` among its levels.
+    harness.set_reasoning_route_for_model(
+        route.model_b,
+        Some(account_route_stating(&[
+            EffortLevel::Low,
+            EffortLevel::High,
+        ])),
+    );
+
+    let next = harness.run_prompt("the next input, after the swap").await;
+    assert!(
+        matches!(next, CompletionOutcome::Completed(ref run) if run.text == NEXT_TURN_TEXT),
+        "the input runs once the handoff is realized: {next:?}"
+    );
+    assert_eq!(harness.realized_terminal_count().await, 1);
+    assert_eq!(
+        harness.requested_calls().last(),
+        Some(&ProviderCall {
+            provider: route.provider_b,
+            model: route.model_b.to_string(),
+        })
+    );
+    let swapped = harness.live_identity().await;
+    assert_eq!(swapped.model, route.model_b);
+    assert_eq!(
+        swapped.provider_params, held.provider_params,
+        "the handoff keeps the session's level"
+    );
+    assert_eq!(harness.durable_identity().await, swapped);
 }
 
 /// A session's fallback client is built for the level the session holds at

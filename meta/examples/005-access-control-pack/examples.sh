@@ -94,7 +94,7 @@ if [[ "$MODE" == "--serve" ]]; then
   # kill the entire cargo/server tree via kill -- -PID.
   set -m
   (cd "$ROOT" && ACCESS_CONTROL_LISTEN_ADDR="$LISTEN_ADDR" \
-    cargo run -p meerkat-meta --example access_control_console) &
+    "$ROOT/../scripts/repo-cargo" run -p meerkat-meta --example access_control_console) &
   SERVER_PID=$!
   set +m
   wait_for_server "http://${LISTEN_ADDR}"
@@ -111,7 +111,7 @@ fi
 echo "[access-control-pack] starting example server"
 set -m
 (cd "$ROOT" && ACCESS_CONTROL_LISTEN_ADDR="127.0.0.1:0" \
-  cargo run -p meerkat-meta --example access_control_console > "$WORK_DIR/server.log" 2>&1) &
+  "$ROOT/../scripts/repo-cargo" run -p meerkat-meta --example access_control_console > "$WORK_DIR/server.log" 2>&1) &
 SERVER_PID=$!
 set +m
 LISTEN_ADDR="$(bound_addr "$WORK_DIR/server.log" "$SERVER_PID")"

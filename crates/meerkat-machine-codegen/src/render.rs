@@ -712,6 +712,18 @@ const MEERKAT_TRANSITION_ENUM_LATE_TAIL: &[&str] = &[
     "ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierRunning",
     "ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierRetired",
     "ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierStopped",
+    // The routing denial of a switch onto a target that refuses the
+    // reasoning effort level the session holds: declared beside
+    // its siblings in the catalog, emitted here after every variant 0.9.17
+    // published. Both inputs are declared before the appended-input
+    // section, so nothing but this list keeps these arms off the middle of
+    // the enum.
+    "RequestFiniteSwitchTurnReasoningEffortRefusedIdle",
+    "RequestFiniteSwitchTurnReasoningEffortRefusedAttached",
+    "RequestFiniteSwitchTurnReasoningEffortRefusedRunning",
+    "RequestUntilChangedSwitchTurnReasoningEffortRefusedIdle",
+    "RequestUntilChangedSwitchTurnReasoningEffortRefusedAttached",
+    "RequestUntilChangedSwitchTurnReasoningEffortRefusedRunning",
 ];
 
 /// One published `TransitionId` variant whose transition no longer exists.

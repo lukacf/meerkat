@@ -55,74 +55,55 @@ Meerkat is pre-1.0, and patch releases can carry declared breaking changes.
 - `rkat storage doctor` reports no new problems.
 - An SDK `connect()` succeeds.
 
-## Upgrading to the release after 0.9.17
+## Unreleased
 
-The release after 0.9.17 is not published yet; what is said here describes
-the coming release.
+### A changed operator instruction and a rollback
+
+A changed operator instruction takes effect at a session's next run on
+every model that carries one. That now includes a model that takes System
+rows only ahead of the conversation: one whose capability row
+`supports_mid_conversation_system_messages` is `false` (see the
+[capability matrix](/reference/capability-matrix)), or one the catalog does
+not know. Nothing stored takes a new form, and a change that was waiting
+for a compaction applies at the session's first fresh run after the
+upgrade. For a Meerkat Meta agent this is the answer `applies_at_next_run`
+to an update of its instructions.
+
+**Rolling back with the same state.** An earlier release reads every
+session. It cannot serve a session of such a model in which this release
+applied a change while the transcript already held a conversation row,
+until a compaction has folded that change, nor a session that this release
+switched onto such a model with such a row. After the restart of a
+rollback the earlier release refuses to resume the session, before any
+request is built:
+
+```text
+model '<model>' cannot represent the operator-instruction entries already applied in session <id>: an entry row stands after a conversation row, and the target carries System rows only before the first one
+```
+
+**Before going back, count them.** `rkat storage doctor` reports, per
+database, the sessions that hold their own operator-instruction entry after
+a conversation row (`operator-instruction-entry-after-conversation`), each
+with the model its stored metadata names. The store records no model capability:
+of the listed sessions an earlier release refuses those whose model takes
+System rows only ahead of the conversation, and serves the others.
+
+Sessions of other models, and sessions of such a model whose instructions
+did not change under this release, are served as before. **Do:** upgrade
+again, which serves the session as it is; or give that session up and start
+a new one, whose first prompt is built from the current instructions (for a
+Meerkat Meta agent, `meta/reset`).
+
+**Mixed versions.** Upgrade a gateway and its member hosts together, as
+"How to upgrade" says. A mob member whose host still runs an earlier
+release applies a change as that release does: on such a model the change
+waits for a compaction, also when a gateway of this release answered the
+update `applies_at_next_run`.
+
+## Upgrading to 0.9.18
 
 This section is for systems running 0.9.17. The full list of changes is in
-the CHANGELOG under `## [Unreleased]`.
-
-### Meta after 0.9.17
-
-The full list is in `meta/CHANGELOG.md` under `## [Unreleased]`.
-
-- Console: the console the stock gateways serve now lists the mobs nested
-  under the gateway's own mob (the mobs its agents create with the mob
-  tools) with their members.
-  Through 0.9.17 it hid every member of every such mob. After the upgrade
-  those members are listed, and can be inspected, read and sent to, by
-  every caller the access rules let see them: every caller of a console
-  with no access configuration (a member private to a person stays
-  private to that person), an access admin, and under a configuration any
-  caller a rule allows. A nested member is decided as an agent of its
-  own: by its identity `<mob id>/<name>`, its role in its mob, its labels
-  (`source_mob_id` names its mob) and its spawn ancestors. So an allow
-  rule that matches by role, by label, by `"*"` or on the member that
-  spawned it now also shows the nested members it matches, and a deny
-  rule hides them the same way. **Do:** before the upgrade, read the
-  allow rules that match by role, by label or by `"*"`; to grant one
-  nested mob's members alone, select them with `match_labels = {
-  source_mob_id = "<mob id>" }`, a label only the console writes. To
-  keep nested mobs hidden as in 0.9.17, launch `rpc_gateway` with
-  `runtime_options.console_list_nested_mobs = false` (Python
-  `.console_list_nested_mobs(False)`, TypeScript
-  `.consoleListNestedMobs(false)`), or `meta_gateway` with the
-  `meta/init` param `console_list_nested_mobs: false` or the environment
-  variable `META_CONSOLE_LIST_NESTED_MOBS=false`. A Rust host that builds
-  the stock console itself passes
-  `stock_console_visibility_policy(NestedMobListing::Hidden)`; the
-  Upgrade section of `meta/CHANGELOG.md` names each call.
-- Spawns into a mob an agent created: Meta refuses a spawn while it cannot
-  say for certain who that mob is private to. The caller (an agent's spawn
-  tool, an SDK or RPC spawn, a schedule delivery) gets the spawn's wiring
-  error. When nothing says for certain who the agent that
-  created the mob is private to (its own mob did not restore and is
-  quarantined, say), the error reads `who mob '<id>' is private to is not
-  known: nothing says for certain who the member that created it is private
-  to (its mob cannot be read here, or that mob's records no longer name the
-  member); the spawn can be made again once they do`. It clears when Meta
-  can read that agent's mob again and its records name the agent, with no
-  restart: Meta then reads the created mob again by itself, and a spawn
-  made after that read is seated. A spawn Meta refuses with `who mob
-  '<id>' is private to is not known yet (the private-owner record is
-  still being read); retry the spawn` is made again. **Do:** bring the mob
-  of the agent that created the mob back (`meta/status` lists a mob that
-  did not restore), then make the spawn again, and once more if it is
-  still refused.
-  When the mob of the agent that created it will not be hosted again,
-  destroy the created mob and create it again.
-- The upgrade relabels no member: a member of a mob an agent created keeps
-  the `console.private_to` label it was seated with, or none, and the
-  label is decided only for spawns made after the upgrade. Where the agent
-  that created a mob carries the label and a member of the mob does not,
-  the Console lists that member to the mob's owner and the access admins
-  only: a member of a mob that is private to a person is that person's on
-  the Console, whatever its own row says. **Do:** to have a member's label
-  decided anew, retire it and have it spawned again, or destroy the mob
-  and have it created again.
-
-## Unreleased
+the CHANGELOG under `## [0.9.18]`.
 
 ### Gemini provider default: Argon to Neon
 
@@ -163,7 +144,7 @@ change does not establish Neon availability in that installer.
 
 ### A custom `gemini-4-neon` entry
 
-The unreleased catalog includes `gemini-4-neon`. Model IDs must be unique across
+The 0.9.18 catalog includes `gemini-4-neon`. Model IDs must be unique across
 built-in, custom and self-hosted entries. Remove any custom
 `[models.gemini-4-neon]` entry from realm/project configurations and mob
 definitions before upgrading, or validation refuses the duplicate ID.
@@ -244,48 +225,64 @@ fresh turn applies, and a directed delivery, never join a running turn. The
 contract and its two cutoffs are in
 [Durable steer](/reference/session-contracts#durable-steer).
 
-### A changed operator instruction and a rollback
+### Meta 0.9.18
 
-A changed operator instruction takes effect at a session's next run on
-every model that carries one. That now includes a model that takes System
-rows only ahead of the conversation: one whose capability row
-`supports_mid_conversation_system_messages` is `false` (see the
-[capability matrix](/reference/capability-matrix)), or one the catalog does
-not know. Nothing stored takes a new form, and a change that was waiting
-for a compaction applies at the session's first fresh run after the
-upgrade. For a Meerkat Meta agent this is the answer `applies_at_next_run`
-to an update of its instructions.
+The full list is in `meta/CHANGELOG.md` under `## [0.9.18]`.
 
-**Rolling back with the same state.** An earlier release reads every
-session. It cannot serve a session of such a model in which this release
-applied a change while the transcript already held a conversation row,
-until a compaction has folded that change, nor a session that this release
-switched onto such a model with such a row. After the restart of a
-rollback the earlier release refuses to resume the session, before any
-request is built:
-
-```text
-model '<model>' cannot represent the operator-instruction entries already applied in session <id>: an entry row stands after a conversation row, and the target carries System rows only before the first one
-```
-
-**Before going back, count them.** `rkat storage doctor` reports, per
-database, the sessions that hold their own operator-instruction entry after
-a conversation row (`operator-instruction-entry-after-conversation`), each
-with the model its stored metadata names. The store records no model capability:
-of the listed sessions an earlier release refuses those whose model takes
-System rows only ahead of the conversation, and serves the others.
-
-Sessions of other models, and sessions of such a model whose instructions
-did not change under this release, are served as before. **Do:** upgrade
-again, which serves the session as it is; or give that session up and start
-a new one, whose first prompt is built from the current instructions (for a
-Meerkat Meta agent, `meta/reset`).
-
-**Mixed versions.** Upgrade a gateway and its member hosts together, as
-"How to upgrade" says. A mob member whose host still runs an earlier
-release applies a change as that release does: on such a model the change
-waits for a compaction, also when a gateway of this release answered the
-update `applies_at_next_run`.
+- Console: the console the stock gateways serve now lists the mobs nested
+  under the gateway's own mob (the mobs its agents create with the mob
+  tools) with their members.
+  Through 0.9.17 it hid every member of every such mob. After the upgrade
+  those members are listed, and can be inspected, read and sent to, by
+  every caller the access rules let see them: every caller of a console
+  with no access configuration (a member private to a person stays
+  private to that person), an access admin, and under a configuration any
+  caller a rule allows. A nested member is decided as an agent of its
+  own: by its identity `<mob id>/<name>`, its role in its mob, its labels
+  (`source_mob_id` names its mob) and its spawn ancestors. So an allow
+  rule that matches by role, by label, by `"*"` or on the member that
+  spawned it now also shows the nested members it matches, and a deny
+  rule hides them the same way. **Do:** before the upgrade, read the
+  allow rules that match by role, by label or by `"*"`; to grant one
+  nested mob's members alone, select them with `match_labels = {
+  source_mob_id = "<mob id>" }`, a label only the console writes. To
+  keep nested mobs hidden as in 0.9.17, launch `rpc_gateway` with
+  `runtime_options.console_list_nested_mobs = false` (Python
+  `.console_list_nested_mobs(False)`, TypeScript
+  `.consoleListNestedMobs(false)`), or `meta_gateway` with the
+  `meta/init` param `console_list_nested_mobs: false` or the environment
+  variable `META_CONSOLE_LIST_NESTED_MOBS=false`. A Rust host that builds
+  the stock console itself passes
+  `stock_console_visibility_policy(NestedMobListing::Hidden)`; the
+  Upgrade section of `meta/CHANGELOG.md` names each call.
+- Spawns into a mob an agent created: Meta refuses a spawn while it cannot
+  say for certain who that mob is private to. The caller (an agent's spawn
+  tool, an SDK or RPC spawn, a schedule delivery) gets the spawn's wiring
+  error. When nothing says for certain who the agent that
+  created the mob is private to (its own mob did not restore and is
+  quarantined, say), the error reads `who mob '<id>' is private to is not
+  known: nothing says for certain who the member that created it is private
+  to (its mob cannot be read here, or that mob's records no longer name the
+  member); the spawn can be made again once they do`. It clears when Meta
+  can read that agent's mob again and its records name the agent, with no
+  restart: Meta then reads the created mob again by itself, and a spawn
+  made after that read is seated. A spawn Meta refuses with `who mob
+  '<id>' is private to is not known yet (the private-owner record is
+  still being read); retry the spawn` is made again. **Do:** bring the mob
+  of the agent that created the mob back (`meta/status` lists a mob that
+  did not restore), then make the spawn again, and once more if it is
+  still refused.
+  When the mob of the agent that created it will not be hosted again,
+  destroy the created mob and create it again.
+- The upgrade relabels no member: a member of a mob an agent created keeps
+  the `console.private_to` label it was seated with, or none, and the
+  label is decided only for spawns made after the upgrade. Where the agent
+  that created a mob carries the label and a member of the mob does not,
+  the Console lists that member to the mob's owner and the access admins
+  only: a member of a mob that is private to a person is that person's on
+  the Console, whatever its own row says. **Do:** to have a member's label
+  decided anew, retire it and have it spawned again, or destroy the mob
+  and have it created again.
 
 ## Upgrading to 0.9.17
 
@@ -5590,9 +5587,8 @@ mode with leading zeros (`'0755'`; unquoted it reads as `755.0`).
   by exactly one follow-up turn. 0.9.3 showed peer and text-only prompt
   steers to one model request and never stored them. History now holds their
   rows, `boundary_append_applied` reports them, and each incoming comms
-  notice publishes one `peer_content_ingested`. In the unreleased line after
-  0.9.17 the eligible steers waiting at a boundary with a registered claim
-  join it together: see
+  notice publishes one `peer_content_ingested`. From 0.9.18 the eligible
+  steers waiting at a boundary with a registered claim join it together: see
   [Steers join the next model request](#steers-join-the-next-model-request).
 - **Replies name what they answer:** the model's peer message notice gains a
   `Delivery ID: <id>` line and, for a reply, an `In reply to: <id>` line.

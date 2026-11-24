@@ -2,25 +2,32 @@
 # Bounded TLC audit of the settlement of an until-changed switch-turn: the
 # withdrawal of a failed one (AbortUntilChangedSwitchTurnReconfigure), the
 # refusal of a second one while one is pending, the refusal of a finite one
-# while a switch is pending, and the completion in every phase the session
-# can reach in the reconfigure gap.
+# while a switch is pending, the completion in every phase the session
+# can reach in the reconfigure gap, and the evidence a switch request
+# carries about its target and the reasoning effort level the session holds
+# (a request is staged only on admitting evidence; a target that refuses
+# the level is denied, and only on that evidence).
 #
 # usage: switch_turn_withdrawal_audit.sh <max-steps> [--mutants] [extra tlc args...]
 #
 # Derives the TLC config from the generated ci.cfg next to this script (every
 # generated constant and invariant, unchanged), then adds the audit's finite
 # model values (one session, one input, two requests, the model names and the
-# stop reason), its invariant, its four action properties and its step bound,
+# stop reason), its invariant, its six action properties and its step bound,
 # and checks them over the whole bounded space. It then reruns the same space
 # once per reachability witness, with that witness's negation as an extra
 # action property, and requires TLC to report exactly that violation, so the
-# properties are not vacuous. With --mutants it then seeds eight defects into
+# properties are not vacuous. With --mutants it then seeds fifteen defects into
 # a copy of the generated model (an abort that records a terminal, an abort
 # that erases the inputs' phases, an abort without its pending-request guard,
 # an abort that keeps its request's approval entry, an accept without its
 # pending-switch guard, a completion that keeps the old baseline, an accept
 # without its denied-request guard, a finite refusal without its
-# pending-request guard) and requires TLC to refuse each with the property
+# pending-request guard, an accept without each of its three evidence
+# guards, a level denial without its refusal guard, without its identity
+# witness guard and without its pending-request guard, a level denial that
+# fires on unreadable levels as on a refusal) and requires TLC to
+# refuse each with the property
 # or invariant it breaks. An anchor this script expects but cannot find fails
 # the run. Each TLC run is held to the canonical lane's per-run cap
 # (tlc_run_cap.sh) and fails closed as TLC INCOMPLETE.
@@ -73,7 +80,9 @@ write_cfg() {
   AuditAbortWithdrawsOnlyTheRequest
   AuditAbortOnlyForThePendingRequest
   AuditPendingSwitchEndsOnlyWithItsRequest
-  AuditCompleteSettlesTheRequest${extra}
+  AuditCompleteSettlesTheRequest
+  AuditStagedOnlyOnAdmittingEvidence
+  AuditEffortDenialOnlyOnARefusal${extra}
 INVARIANTS
   AuditNoDenialUnderThePendingSwitch" "${cfg}"
   replace_exact_line "  CiStateConstraint" "  AuditStateConstraint" "${cfg}"
@@ -119,7 +128,7 @@ if [[ "${safety_status}" != "0" ]] \
   exit 1
 fi
 
-for witness in QueuedInputKept StoppedWithdrawn ConflictRefused FiniteConflictRefused StoppedCompleted; do
+for witness in QueuedInputKept StoppedWithdrawn ConflictRefused FiniteConflictRefused StoppedCompleted EffortRefusedWhilePending UnreadableLevelsStaged; do
   cfg="${work_dir}/witness-${witness}.cfg"
   write_cfg "${cfg}" "
   NotAuditWitness${witness}"
@@ -152,6 +161,9 @@ ACCEPT_ARMS = ["RequestUntilChangedSwitchTurnAccepted" + phase
                for phase in ("Idle", "Attached", "Running")]
 FINITE_CONFLICT_ARMS = ["RequestFiniteSwitchTurnScopedConflict" + phase
                         for phase in ("Idle", "Attached", "Running")]
+EFFORT_REFUSAL_ARMS = [request + "ReasoningEffortRefused" + phase
+                       for request in ("RequestFiniteSwitchTurn", "RequestUntilChangedSwitchTurn")
+                       for phase in ("Idle", "Attached", "Running")]
 
 def _replace_body(arm, edit):
     global text
@@ -186,6 +198,18 @@ def keep_var(var, arms=ABORT_ARMS):
         hits = [i for i, line in enumerate(lines) if line.startswith("    /\\ " + var + "' = ")]
         assert len(hits) == 1, f"expected one update of {var}, found {len(hits)}"
         lines[hits[0]] = "    /\\ " + var + "' = " + var
+        return "\n".join(lines)
+    for arm in arms:
+        _replace_body(arm, edit)
+
+def replace_guard(needle, replacement, arms=ABORT_ARMS):
+    """Put `replacement` in place of the one guard of every arm that contains `needle`."""
+    def edit(body):
+        lines = body.split("\n")
+        hits = [i for i, line in enumerate(lines)
+                if line.startswith("    /\\ ") and "'" not in line and needle in line]
+        assert len(hits) == 1, f"expected one guard with {needle!r}, found {len(hits)}"
+        lines[hits[0]] = "    /\\ " + replacement
         return "\n".join(lines)
     for arm in arms:
         _replace_body(arm, edit)
@@ -273,5 +297,43 @@ PY
   mutate finite_refusal_denies_pending_request \
     "Error: Invariant AuditNoDenialUnderThePendingSwitch is violated" \
     'drop_guard("model_routing_pending_switch_request_id # Some(request_id)", FINITE_CONFLICT_ARMS)' "$@"
+  # An accept without its guard that the evidence is not a refusal: a
+  # request onto a target that refuses the held level would be staged, and
+  # the session would be switched to a model that refuses its requests.
+  mutate accept_stages_a_refused_level \
+    "Error: Action property AuditStagedOnlyOnAdmittingEvidence is violated" \
+    'drop_guard("target_reasoning_effort # Some(\"Refused\")", ACCEPT_ARMS)' "$@"
+  # An accept without its guard that evidence is present: a request whose
+  # target nobody looked at would be staged.
+  mutate accept_stages_without_evidence \
+    "Error: Action property AuditStagedOnlyOnAdmittingEvidence is violated" \
+    'drop_guard("target_reasoning_effort # None", ACCEPT_ARMS)' "$@"
+  # An accept without its identity witness guard: evidence taken on an
+  # identity the session no longer holds would stage the request.
+  mutate accept_stages_on_another_identity \
+    "Error: Action property AuditStagedOnlyOnAdmittingEvidence is violated" \
+    'drop_guard("inspected_current_identity = None", ACCEPT_ARMS)' "$@"
+  # A level denial without its refusal guard: a request whose target takes
+  # the level would be denied for its capability.
+  mutate effort_denial_without_a_refusal \
+    "Error: Action property AuditEffortDenialOnlyOnARefusal is violated" \
+    'drop_guard("target_reasoning_effort = Some(\"Refused\")", EFFORT_REFUSAL_ARMS)' "$@"
+  # A level denial without its identity witness guard: a refusal taken on
+  # an identity the session no longer holds would deny the request.
+  mutate effort_denial_on_another_identity \
+    "Error: Action property AuditEffortDenialOnlyOnARefusal is violated" \
+    'drop_guard("inspected_current_identity = None", EFFORT_REFUSAL_ARMS)' "$@"
+  # A level denial without its pending-request guard: a refusal that names
+  # the pending switch's id would record a denial under it, and the retry
+  # that finishes the switch would be answered as denied.
+  mutate effort_denial_denies_pending_request \
+    "Error: Invariant AuditNoDenialUnderThePendingSwitch is violated" \
+    'drop_guard("model_routing_pending_switch_request_id # Some(request_id)", EFFORT_REFUSAL_ARMS)' "$@"
+  # A level denial that fires on unreadable levels as on a refusal: a
+  # target whose levels cannot be read now would be denied for good, where
+  # the levels may turn out to include the session's.
+  mutate effort_denial_on_unreadable_levels \
+    "Error: Action property AuditEffortDenialOnlyOnARefusal is violated" \
+    'replace_guard("target_reasoning_effort = Some(\"Refused\")", "((target_reasoning_effort = Some(\"Refused\")) \\/ (target_reasoning_effort = Some(\"LevelsUnreadable\")))", EFFORT_REFUSAL_ARMS)' "$@"
 fi
 echo "switch-turn withdrawal audit passed at model_step_count <= ${max_steps}"

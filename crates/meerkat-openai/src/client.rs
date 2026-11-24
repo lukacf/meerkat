@@ -1783,9 +1783,12 @@ impl OpenAiClient {
                 .tools
                 .iter()
                 .map(|t| -> Result<Value, LlmError> {
-                    let parameters = crate::tool_schema::normalize_openai_tool_parameters_schema(
-                        &t.name,
-                        &t.input_schema,
+                    let parameters = crate::tool_schema::openai_tool_parameters(
+                        t,
+                        matches!(
+                            self.continuity_identity,
+                            ContinuityIdentity::SelfHosted { .. }
+                        ),
                     )?;
                     // Responses may otherwise normalize optional parameters into
                     // required fields. Preserve the authored ToolDef contract;

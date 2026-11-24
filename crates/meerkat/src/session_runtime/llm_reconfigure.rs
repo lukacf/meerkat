@@ -27,7 +27,7 @@ use meerkat_core::{
 use meerkat_runtime::{
     HydratedSessionLlmState, ResolvedSessionLlmReconfigure, RuntimeDriverError,
     SessionLlmCapabilitySurface, SessionLlmCapabilitySurfaceStatus, SessionLlmReconfigureHost,
-    SessionLlmReconfigureRequest,
+    SessionLlmReconfigureRequest, TargetSessionLlmInspection,
 };
 use meerkat_session::{EphemeralSessionService, PersistentSessionService};
 
@@ -1037,6 +1037,21 @@ impl SessionRuntimeLlmReconfigureHost {
         identity: &SessionLlmIdentity,
         preferred_realm: Option<&meerkat_core::RealmId>,
     ) -> Result<(Arc<dyn AgentLlmClient>, Option<LlmCredentialSelection>), RuntimeDriverError> {
+        self.build_adapter_for_llm_identity_in_realm_with(identity, preferred_realm, None)
+            .await
+    }
+
+    /// [`Self::build_adapter_for_llm_identity_in_realm`] on a configuration
+    /// the caller already read. A caller that also judges the built client
+    /// against that configuration's catalog passes it, so the client and the
+    /// catalog row come from one read. `None` reads the configuration here,
+    /// and only when no client is injected.
+    async fn build_adapter_for_llm_identity_in_realm_with(
+        &self,
+        identity: &SessionLlmIdentity,
+        preferred_realm: Option<&meerkat_core::RealmId>,
+        config: Option<&Config>,
+    ) -> Result<(Arc<dyn AgentLlmClient>, Option<LlmCredentialSelection>), RuntimeDriverError> {
         let default_llm_client = self
             .default_llm_client
             .read()
@@ -1045,11 +1060,18 @@ impl SessionRuntimeLlmReconfigureHost {
         let (raw_client, selection) = if let Some(default) = default_llm_client {
             (default, None)
         } else {
-            let config = self.load_config_for_hot_swap().await?;
+            let read_here;
+            let config = match config {
+                Some(config) => config,
+                None => {
+                    read_here = self.load_config_for_hot_swap().await?;
+                    &read_here
+                }
+            };
             let built = self
                 .factory
                 .build_llm_client_with_selection_for_identity_in_realm(
-                    &config,
+                    config,
                     identity,
                     Some(self.auth_lease.clone()),
                     preferred_realm,
@@ -1085,6 +1107,37 @@ impl SessionRuntimeLlmReconfigureHost {
                 ))
             })?;
         Ok((adapter, selection))
+    }
+
+    /// Judge the reasoning effort level `target_identity` carries against
+    /// the route of the client built for it and the catalog row of the
+    /// target's model in `config`, as a build judges it. A level the route
+    /// does not accept is the typed refusal.
+    fn judge_level_on_built_client(
+        target_identity: &SessionLlmIdentity,
+        adapter: &dyn AgentLlmClient,
+        selection: Option<LlmCredentialSelection>,
+        config: &Config,
+    ) -> Result<(), RuntimeDriverError> {
+        // The catalog row is read through the binding the client resolved
+        // with, as the apply names it.
+        let mut identity = target_identity.clone();
+        LlmCredentialSelection::bind_unselected(selection, &mut identity);
+        let registry = config
+            .model_registry(meerkat_models::canonical())
+            .map_err(|e| {
+                RuntimeDriverError::Internal(format!("Failed to resolve model registry: {e}"))
+            })?;
+        crate::factory::validate_reasoning_effort_for_route(
+            identity.provider,
+            &identity.model,
+            identity.provider_params.as_ref(),
+            adapter.reasoning_route().as_ref(),
+            registry
+                .profile_witness_for_identity(config, &identity)
+                .and_then(|witness| witness.catalog_capabilities()),
+        )
+        .map_err(RuntimeDriverError::ReasoningEffortRefused)
     }
 
     async fn load_config_for_hot_swap(&self) -> Result<Config, RuntimeDriverError> {
@@ -1384,11 +1437,13 @@ impl SessionLlmReconfigureHost for SessionRuntimeLlmReconfigureHost {
         self.resolved_reconfigure_target(target_identity).await
     }
 
-    /// Proves the target buildable now. The routing realization asks
-    /// `switch_target_carries_session_transcript` first and calls
-    /// this only for a target that can carry the session's transcript: one
-    /// that cannot is a permanent refusal, which generated authority denies,
-    /// and a failure here is a retriable hold.
+    /// Proves the target buildable now. The routing realization does not
+    /// call it on this host: it asks `switch_target_carries_session_transcript`
+    /// first and then looks once at a target that can carry the session's
+    /// transcript (`inspect_target_session_llm_identity`), which proves the
+    /// same for a target without a level by the same build. A target that
+    /// cannot carry the transcript is a permanent refusal, which generated
+    /// authority denies, and a failure here is a retriable hold.
     async fn preflight_target_session_llm_identity(
         &self,
         session_id: &SessionId,
@@ -1434,26 +1489,51 @@ impl SessionLlmReconfigureHost for SessionRuntimeLlmReconfigureHost {
         let (adapter, selection) = self
             .build_adapter_for_llm_identity_in_realm(target_identity, preferred_realm.as_ref())
             .await?;
-        // The catalog row is read through the binding the client resolved
-        // with, as the apply names it.
-        let mut identity = target_identity.clone();
-        LlmCredentialSelection::bind_unselected(selection, &mut identity);
         let config = self.load_config_for_hot_swap().await?;
-        let registry = config
-            .model_registry(meerkat_models::canonical())
-            .map_err(|e| {
-                RuntimeDriverError::Internal(format!("Failed to resolve model registry: {e}"))
-            })?;
-        crate::factory::validate_reasoning_effort_for_route(
-            identity.provider,
-            &identity.model,
-            identity.provider_params.as_ref(),
-            adapter.reasoning_route().as_ref(),
-            registry
-                .profile_witness_for_identity(&config, &identity)
-                .and_then(|witness| witness.catalog_capabilities()),
+        Self::judge_level_on_built_client(target_identity, adapter.as_ref(), selection, &config)
+    }
+
+    /// One look at the target of a switch, where the switch is decided: the
+    /// client the apply would build for the session is built once, and the
+    /// level the target carries is judged against that client's route and
+    /// the catalog row of the configuration the client was built from. A
+    /// target without a level is proven buildable exactly as the preflight
+    /// proves it, and reads no configuration when a client is injected.
+    async fn inspect_target_session_llm_identity(
+        &self,
+        session_id: &SessionId,
+        target_identity: &SessionLlmIdentity,
+    ) -> Result<TargetSessionLlmInspection, RuntimeDriverError> {
+        if target_identity
+            .provider_params
+            .as_ref()
+            .is_none_or(|params| params.reasoning_effort.is_none())
+        {
+            self.build_adapter_for_session_llm_identity(session_id, target_identity)
+                .await?;
+            return Ok(TargetSessionLlmInspection::NoHeldEffort);
+        }
+        // The session's realm is read live, as the preflight and the apply
+        // read it. A committed switch is decided under the session's turn
+        // boundary. A direct finite request of a session whose identity the
+        // runtime already holds is not: there this read is ordered behind a
+        // running turn, as the transcript check's reads on that road are.
+        let preferred_realm = preferred_hot_swap_realm(
+            self.service()?.as_ref(),
+            session_id,
+            self.inheritance_head_realm(),
         )
-        .map_err(RuntimeDriverError::ReasoningEffortRefused)
+        .await?;
+        let config = self.load_config_for_hot_swap().await?;
+        let (adapter, selection) = self
+            .build_adapter_for_llm_identity_in_realm_with(
+                target_identity,
+                preferred_realm.as_ref(),
+                Some(&config),
+            )
+            .await?;
+        Self::judge_level_on_built_client(target_identity, adapter.as_ref(), selection, &config)?;
+        Ok(TargetSessionLlmInspection::HeldEffortAccepted)
     }
 
     async fn switch_target_carries_session_transcript(
@@ -1695,6 +1775,210 @@ mod tests {
             "dropping the returned boundary must release its final service owner"
         );
         assert!(matches!(host.service(), Err(RuntimeDriverError::Destroyed)));
+    }
+
+    /// A client that reports one account route and must never be sent a
+    /// request: looking at a target sends nothing to its provider.
+    struct RouteOnlyClient(meerkat_core::AccountLevelStatement);
+
+    #[async_trait::async_trait]
+    impl LlmClient for RouteOnlyClient {
+        fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+            Some(meerkat_core::ReasoningRouteObservation {
+                backend: meerkat_core::ReasoningBackend::OpenAi(
+                    meerkat_core::provider_matrix::OpenAiBackendKind::Copilot,
+                ),
+                api: meerkat_core::ModelApi::Responses,
+                account: self.0.clone(),
+                operator_levels: None,
+            })
+        }
+
+        fn stream<'a>(
+            &'a self,
+            _request: &'a meerkat_client::LlmRequest,
+        ) -> std::pin::Pin<
+            Box<
+                dyn futures::Stream<
+                        Item = Result<meerkat_client::LlmEvent, meerkat_client::LlmError>,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            panic!("looking at a target sends no provider request")
+        }
+
+        fn provider(&self) -> Provider {
+            Provider::OpenAI
+        }
+
+        async fn health_check(&self) -> Result<(), meerkat_client::LlmError> {
+            panic!("looking at a target does not probe the provider")
+        }
+    }
+
+    /// The stock host's one look at a switch target. Without a level it
+    /// proves the target buildable and reads no configuration when a client
+    /// is injected, so a configuration that is missing or cannot be read
+    /// changes nothing for it. With a level it answers from the route of the
+    /// one client it builds: accepted, or the typed refusal a caller's own
+    /// set of that level on that target gets: definite for a level the
+    /// route does not state, for a route that states no levels and for a
+    /// level beside another reasoning setting; transient only for a list
+    /// that cannot be read now. It never answers with the host's own trust.
+    #[tokio::test]
+    async fn the_stock_inspection_answers_from_the_route_of_the_client_it_builds() {
+        use meerkat_core::lifecycle::run_primitive::ProviderParamsOverride;
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+        use meerkat_core::{AccountLevelStatement, ReasoningEffortRefusalReason};
+
+        // A session with no realm of its own is still a session the host
+        // answers for.
+        let service: Arc<dyn SessionRuntimeLlmReconfigureService> =
+            Arc::new(RealmOnlyService { realm_id: None });
+        let machine = meerkat_runtime::MeerkatMachine::ephemeral();
+        let injected: Arc<std::sync::RwLock<Option<Arc<dyn LlmClient>>>> =
+            Arc::new(std::sync::RwLock::new(None));
+        let inject = |account: AccountLevelStatement| {
+            let client: Arc<dyn LlmClient> = Arc::new(RouteOnlyClient(account));
+            *injected
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(client);
+        };
+        let host = SessionRuntimeLlmReconfigureHost {
+            service: Arc::downgrade(&service),
+            staged_sessions: Arc::new(StagedSessionRegistry::new()),
+            factory: AgentFactory::minimal(),
+            auth_lease: machine.generated_auth_lease_handle(),
+            default_llm_client: Arc::clone(&injected),
+            agent_llm_client_decorator: Arc::new(std::sync::RwLock::new(None)),
+            config_runtime: Arc::new(std::sync::RwLock::new(None)),
+            realm_inheritance: Arc::new(std::sync::RwLock::new(None)),
+        };
+        let session_id = SessionId::new();
+        let without_level = SessionLlmIdentity {
+            model: "gpt-5.5".to_string(),
+            provider: Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        };
+        let with_level = SessionLlmIdentity {
+            provider_params: Some(ProviderParamsOverride {
+                reasoning_effort: Some(EffortLevel::High),
+                ..Default::default()
+            }),
+            ..without_level.clone()
+        };
+
+        // No level: buildable, whatever the route states, and with no
+        // configuration read: a configuration file that is missing, and one
+        // that cannot be parsed, change nothing.
+        inject(AccountLevelStatement::Stated(vec![EffortLevel::Low]));
+        assert_eq!(
+            host.inspect_target_session_llm_identity(&session_id, &without_level)
+                .await
+                .expect("a target without a level is buildable"),
+            TargetSessionLlmInspection::NoHeldEffort
+        );
+        let directory = tempfile::tempdir().expect("tempdir");
+        let config_path = directory.path().join("config.toml");
+        let unreadable = Arc::new(meerkat_core::ConfigRuntime::new(
+            Arc::new(meerkat_core::FileConfigStore::new(
+                config_path.clone(),
+                meerkat_models::canonical(),
+            )),
+            directory.path().join("config_state.json"),
+        ));
+        *host
+            .config_runtime
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&unreadable));
+        std::fs::write(&config_path, "this is = [not a configuration").expect("write the file");
+        assert!(
+            unreadable.get().await.is_err(),
+            "the fixture's configuration cannot be read"
+        );
+        assert_eq!(
+            host.inspect_target_session_llm_identity(&session_id, &without_level)
+                .await
+                .expect("no configuration is read for a target without a level"),
+            TargetSessionLlmInspection::NoHeldEffort
+        );
+        // With a level the configuration is read: one that cannot be read
+        // fails the look, which decides nothing.
+        inject(AccountLevelStatement::Stated(vec![EffortLevel::High]));
+        let unread = host
+            .inspect_target_session_llm_identity(&session_id, &with_level)
+            .await
+            .expect_err("a level is judged with the configuration's catalog");
+        assert!(
+            !matches!(unread, RuntimeDriverError::ReasoningEffortRefused(_)),
+            "a configuration that cannot be read is not a refusal of the level: {unread:?}"
+        );
+        *host
+            .config_runtime
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+
+        // A level the route states.
+        assert_eq!(
+            host.inspect_target_session_llm_identity(&session_id, &with_level)
+                .await
+                .expect("a level the route states is accepted"),
+            TargetSessionLlmInspection::HeldEffortAccepted
+        );
+
+        // The typed refusals, by reason.
+        let with_level_and_budget = SessionLlmIdentity {
+            provider_params: Some(ProviderParamsOverride {
+                reasoning_effort: Some(EffortLevel::High),
+                thinking_budget_tokens: Some(1024),
+                ..Default::default()
+            }),
+            ..without_level.clone()
+        };
+        for (account, target, reason, transient) in [
+            (
+                AccountLevelStatement::Stated(vec![EffortLevel::Low]),
+                &with_level,
+                ReasoningEffortRefusalReason::UnsupportedLevel,
+                false,
+            ),
+            (
+                AccountLevelStatement::NotStated,
+                &with_level,
+                ReasoningEffortRefusalReason::SupportedLevelsUnknown,
+                false,
+            ),
+            (
+                AccountLevelStatement::Stated(vec![EffortLevel::High]),
+                &with_level_and_budget,
+                ReasoningEffortRefusalReason::ConflictingThinkingBudget,
+                false,
+            ),
+            (
+                AccountLevelStatement::ListUnavailable,
+                &with_level,
+                ReasoningEffortRefusalReason::SupportedLevelsUnavailable,
+                true,
+            ),
+        ] {
+            inject(account);
+            let error = host
+                .inspect_target_session_llm_identity(&session_id, target)
+                .await
+                .expect_err("the route does not take the level");
+            let RuntimeDriverError::ReasoningEffortRefused(refusal) = &error else {
+                panic!("expected the typed refusal for {reason:?}, got: {error:?}");
+            };
+            assert_eq!(refusal.reason, reason);
+            assert_eq!(
+                refusal.reason.is_transient(),
+                transient,
+                "{reason:?}: only a list that cannot be read now is not a definite refusal"
+            );
+        }
     }
 
     struct RealmOnlyService {
@@ -2233,6 +2517,12 @@ mod tests {
         );
         assert!(
             host.hydrate_session_llm_state(&session_id)
+                .await
+                .err()
+                .is_some_and(destroyed)
+        );
+        assert!(
+            host.inspect_target_session_llm_identity(&session_id, &anthropic_identity())
                 .await
                 .err()
                 .is_some_and(destroyed)

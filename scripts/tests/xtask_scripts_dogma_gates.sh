@@ -362,7 +362,7 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # runner's coverage parsing stays pinned to that form.
 # empty_resume_residency_audit.sh requires its four witnesses violated, and
 # with --mutants each seeded defect's invariant or property violated.
-# switch_turn_withdrawal_audit.sh requires its five witnesses violated, and
+# switch_turn_withdrawal_audit.sh requires its seven witnesses violated, and
 # with --mutants each seeded defect's property or invariant violated.
 # durable_tail_classification_audit.sh requires its Ready witness violated,
 # and with --mutants each seeded defect's target invariant violated.
@@ -826,6 +826,10 @@ printf '%s\n' \
   'echo "Error: Action property AuditCompleteSettlesTheRequest is violated."' \
   'echo "Error: Action property NotAuditWitnessFiniteConflictRefused is violated."' \
   'echo "Error: Invariant AuditNoDenialUnderThePendingSwitch is violated."' \
+  'echo "Error: Action property AuditStagedOnlyOnAdmittingEvidence is violated."' \
+  'echo "Error: Action property AuditEffortDenialOnlyOnARefusal is violated."' \
+  'echo "Error: Action property NotAuditWitnessEffortRefusedWhilePending is violated."' \
+  'echo "Error: Action property NotAuditWitnessUnreadableLevelsStaged is violated."' \
   'echo "Error: Action property NotAuditWitnessBuildPreparationRetryRecorded is violated."' \
   'echo "Error: Action property NotAuditWitnessBuildPreparationRetryRefusedWake is violated."' \
   'echo "Error: Action property NotAuditWitnessBuildPreparationRetryResolved is violated."' \
@@ -1463,7 +1467,7 @@ lane_part_output() {
 audit_lines() {
   grep -E '^running (bounded .* TLC audit|member [a-z]+ TLC audit|MobMachine arm coverage gate)$' | sort
 }
-audit_shards="audits-a audits-b audits-c audits-d audits-e audits-f audits-g audits-h audits-i audits-j audits-k audits-l audits-m audits-n audits-o audits-q audits-r audits-s audits-t audits-u audits-v audits-w audits-x audits-y"
+audit_shards="audits-a audits-b audits-c audits-d audits-e audits-f audits-g audits-h audits-i audits-j audits-k audits-l audits-m audits-n audits-o audits-q audits-r audits-s audits-t audits-u audits-v audits-w audits-x audits-y audits-z audits-aa audits-ab"
 shard_outputs="$(mktemp -d)"
 failed_parts=""
 idle_shards=""
@@ -1517,6 +1521,53 @@ if [ "$created_whole_rc" = 0 ] && [ -n "$created_whole_runs" ] \
 else
   bad "TLC lane parts drop or repeat a created identity run (whole runner rc=$created_whole_rc; its runs:$(printf ' %s' $created_whole_runs); the shards':$(printf ' %s' $created_shard_runs))"
   [ "$created_whole_rc" = 0 ] || show_tail created-identity-whole "$created_whole_out"
+fi
+
+# The durable decision runner's runs reach three shards by its --part names,
+# under one "running bounded" line per part, so a run dropped from every
+# part would leave the lines above unchanged: by the runner's own per-run
+# lines, the shards together must run its whole-space run, each witness and
+# each seeded defect the runner checks whole (--mutants, no --part) exactly
+# once, each defect refused by the same invariant. A shard's lines are read
+# from the runner's own section of its output: other runners print witness
+# and mutant lines of the same form.
+durable_decision_section() {
+  awk '/^running bounded durable decision [a-z-]+ TLC audit$/ { on = 1; next }
+       /^durable decision audit [a-z]+ part passed at / { on = 0 }
+       on'
+}
+durable_decision_runs() {
+  sed -nE \
+    -e 's/^(safety) distinct states: [0-9]+ .*$/\1/p' \
+    -e 's/^(witness [A-Za-z]+) reached in [0-9]+ states$/\1/p' \
+    -e 's/^(mutant [a-z_]+ refused by [A-Za-z_]+) in [0-9]+ states$/\1/p' | sort
+}
+decision_whole_rc=0
+decision_whole_out="$(PATH="$tlc_env_tmp:$PATH" \
+  TLC_JAVA_OPTIONS_CAPTURE="$capture" \
+  TLC_JDK_JAVA_OPTIONS_CAPTURE="$jdk_capture" \
+  TLC_WORKERS=1 bash specs/machines/durable_decision/durable_decision_audit.sh 6 --mutants 2>&1)" || decision_whole_rc=$?
+decision_whole_runs="$(printf '%s\n' "$decision_whole_out" | durable_decision_runs || true)"
+decision_shard_runs="$(for shard in $audit_shards; do
+  durable_decision_section < "$shard_outputs/$shard" | durable_decision_runs || true
+done | sort)"
+decision_unknown_part_rc=0
+PATH="$tlc_env_tmp:$PATH" \
+  TLC_JAVA_OPTIONS_CAPTURE="$capture" \
+  TLC_JDK_JAVA_OPTIONS_CAPTURE="$jdk_capture" \
+  bash specs/machines/durable_decision/durable_decision_audit.sh 6 --part everything >/dev/null 2>&1 \
+  || decision_unknown_part_rc=$?
+if [ "$decision_whole_rc" = 0 ] \
+  && [ "$(printf '%s\n' "$decision_whole_runs" | grep -cx 'safety')" -eq 1 ] \
+  && printf '%s\n' "$decision_whole_runs" | grep -q '^witness ' \
+  && printf '%s\n' "$decision_whole_runs" | grep -q '^mutant ' \
+  && [ -z "$(printf '%s\n' "$decision_shard_runs" | uniq -d)" ] \
+  && [ "$decision_shard_runs" = "$decision_whole_runs" ] \
+  && [ "$decision_unknown_part_rc" = 2 ]; then
+  ok "TLC lane parts: the audit shards run the durable decision runner's whole-space run, each witness and each seeded defect exactly once, and the runner refuses an unknown part"
+else
+  bad "TLC lane parts drop or repeat a durable decision run, or the runner accepts an unknown part (whole runner rc=$decision_whole_rc, unknown part rc=$decision_unknown_part_rc; runs only the whole runner has:$(comm -23 <(printf '%s\n' "$decision_whole_runs") <(printf '%s\n' "$decision_shard_runs") | tr '\n' ';'); runs only the shards have or repeat:$(comm -13 <(printf '%s\n' "$decision_whole_runs" | sort -u) <(printf '%s\n' "$decision_shard_runs") | tr '\n' ';'))"
+  [ "$decision_whole_rc" = 0 ] || show_tail durable-decision-whole "$decision_whole_out"
 fi
 
 # The member residency runner counts an arm printed with TLC's location

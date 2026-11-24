@@ -65,6 +65,12 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$id" ]] || { echo "--id is required" >&2; usage; exit 2; }
+# Do not let a target use the directory reserved for cached Cargo output.
+# Keep fetch/stop available for a target created with an older launcher.
+if [[ "$command" == start && "$id" == cargo-target ]]; then
+  echo 'target ID cargo-target is reserved for the build cache; choose another ID' >&2
+  exit 2
+fi
 name="${name:-$id}"
 : "${GCP_PROJECT:?GCP_PROJECT is required}"
 : "${GCP_ZONE:?GCP_ZONE is required}"

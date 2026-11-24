@@ -65,14 +65,16 @@ For a GCP target:
 
 The launcher uploads build inputs from the **committed `HEAD`** of the unified
 repository, not your working tree. Commit source changes you want to test.
-Staged, modified and untracked files are not uploaded. The archive includes the workspace lockfile, the target source, and the
+There is no warning for uncommitted changes: staged, modified and untracked
+files are not uploaded. The archive includes the workspace lockfile, the target source, and the
 assets its crates embed; it excludes Git history and local files such as
-`.env.gcp` and target bindings. The separate environment-forwarding step is
-unchanged. On the VM, Cargo builds the locked `mdm_mob_target` example for
+`.env.gcp` and target bindings. The allowlist is maintained by hand: update it when the build
+needs a new tracked input. The separate environment-forwarding step is unchanged. On the VM, Cargo builds the locked `mdm_mob_target` example for
 the Rust host target without requiring a Git checkout. `--locked` preserves the
 lockfile; it does **not** make VM setup or Cargo offline. The VM may download
 tools and registry dependencies. Its build cache stays under
 `~/.cache/mdm-mob-target/cargo-target`, outside the replaced source tree.
+The target ID `cargo-target` is reserved for that cache.
 
 To check the package locally, run `./scripts/test-gcp-source.sh` from this
 pack in a committed checkout. It extracts outside Git, resolves the locked

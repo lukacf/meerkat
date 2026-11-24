@@ -71,6 +71,18 @@
 //!   version 2 and later in the same mob stores
 //!   (`meerkat_mob::MobStorage::read_identity_record_rows`).
 //!
+//! And what a host counts before going back to any earlier release:
+//!
+//! - [`FINDING_OPERATOR_INSTRUCTION_ENTRY_AFTER_CONVERSATION`]: the sessions
+//!   of `runtime.sqlite` whose stored transcript holds the session's own
+//!   operator-instruction entry after a conversation row
+//!   (`meerkat_store::doctor::operator_instruction_entry_after_conversation_sessions`),
+//!   with the models their stored metadata names. An earlier release refuses
+//!   to resume such a session when its model takes a system instruction only
+//!   ahead of the conversation. The store records no model capability, so
+//!   the count names the models and cannot tell which of the sessions such
+//!   a release refuses.
+//!
 //! Each census reports one finding for the state directory (its `path`) with
 //! the total, 0 included, and one more for each file that counts above 0 or
 //! could not be counted (its `path` is that file). Every finding is Info and
@@ -236,6 +248,15 @@ pub const FINDING_CONSOLE_SESSION_RECORD_UNREADABLE: &str = "console-session-rec
 /// only. Core's code and census rule, shared with `rkat storage doctor`.
 pub const FINDING_OPERATOR_INSTRUCTION_ENVELOPE: &str =
     meerkat_store::doctor::FINDING_OPERATOR_INSTRUCTION_ENVELOPE;
+/// The count of the sessions in `runtime.sqlite` whose stored transcript
+/// holds the session's own operator-instruction entry after a conversation
+/// row, with the models their stored metadata names. An earlier release
+/// refuses to resume such a session when its model takes a system
+/// instruction only ahead of the conversation, so a host counts them before
+/// going back (see the module docs). Info, counts only. Core's code and
+/// census rule, shared with `rkat storage doctor`.
+pub const FINDING_OPERATOR_INSTRUCTION_ENTRY_AFTER_CONVERSATION: &str =
+    meerkat_store::doctor::FINDING_OPERATOR_INSTRUCTION_ENTRY_AFTER_CONVERSATION;
 /// The rollback census of the mob events at the operator-instruction mob
 /// event schema in the state directory's own mob journal and its child mob
 /// journals, which a release on Core 0.9.8 or earlier refuses (see the
@@ -2570,16 +2591,21 @@ const ROLLBACK_TARGET: &str = "a release on Core 0.9.8 or earlier (Meta 0.9.7 or
 const ROLLBACK_TARGET_SENTENCE: &str = "A release on Core 0.9.8 or earlier (Meta 0.9.7 or earlier)";
 
 /// The rollback census of one state directory (see the module docs): the
-/// sessions at the operator-instruction envelope, then, over the
-/// directory's own mob store and its child mob journals, the events at the
-/// operator-instruction mob event schema and the identity-store rows of
-/// schema version 2 and later, then the mobs the host created beside its
-/// launch mob. Read-only, Info, counts only. A child mob's journal that
-/// `left_out` names is not among the stores the three censuses over mob
-/// stores read, so each of their totals is of the stores the diagnosis
-/// holds.
+/// sessions at the operator-instruction envelope and the sessions of the
+/// runtime store that hold their own operator-instruction entry after a
+/// conversation row, then, over the directory's own mob store and its
+/// child mob journals, the events at the operator-instruction mob event
+/// schema and the identity-store rows of schema version 2 and later, then
+/// the mobs the host created beside its launch mob. Read-only, Info, counts
+/// only. The census of entries after a conversation row gives its count
+/// and, per model the sessions' stored metadata names, the count over all
+/// those sessions; it names no member, mob or session. A child mob's
+/// journal that `left_out` names is not among the stores the three censuses
+/// over mob stores read, so each of their totals is of the stores the
+/// diagnosis holds.
 fn census_rollback(state_dir: &Path, left_out: &MobStoresLeftOut, out: &mut StorageDiagnosis) {
     census_operator_instruction_envelope(state_dir, out);
+    census_operator_instruction_late_entries(state_dir, out);
     let stores = RollbackCensusStores::of(state_dir, left_out);
     census_operator_instruction_mob_events(state_dir, &stores, out);
     census_identity_store_rows(state_dir, &stores, out);
@@ -2717,6 +2743,83 @@ fn count_operator_instruction_sessions(db_path: &Path) -> Result<usize, String> 
     meerkat_store::doctor::operator_instruction_envelope_sessions(&snapshot)
         .map(|sessions| sessions.len())
         .map_err(|error| error.to_string())
+}
+
+/// The count of the sessions in `runtime.sqlite` that hold their own
+/// operator-instruction entry after a conversation row, by Core's census
+/// rule: one finding on the runtime store when it holds any, with the
+/// count and the count per recorded model, and one when the store could not
+/// be read. A directory without such a session, or without a runtime store,
+/// gets no finding.
+fn census_operator_instruction_late_entries(state_dir: &Path, out: &mut StorageDiagnosis) {
+    let runtime = state_dir.join(crate::storage_layout::RUNTIME_DB_FILE_NAME);
+    if !runtime.is_file() {
+        return;
+    }
+    let message = match late_entry_sessions_by_model(&runtime) {
+        Ok(models) if models.is_empty() => return,
+        Ok(models) => {
+            let sessions: usize = models.values().sum();
+            format!(
+                "{sessions} session(s) of this runtime store hold their own \
+                 operator-instruction entry after a conversation row ({}): an earlier release, \
+                 one that does not place such an entry ahead of the conversation in the model \
+                 request, refuses to resume each of them whose model takes a system \
+                 instruction only ahead of the conversation (the model's capability \
+                 `supports_mid_conversation_system_messages` is false, or the catalog does \
+                 not know the model), so its identity does not run there; it serves the \
+                 others. The store records no model capability, so this count cannot tell \
+                 which of them such a release refuses",
+                census_map_display(&models)
+            )
+        }
+        Err(error) => format!(
+            "the sessions of this runtime store that hold their own operator-instruction entry \
+             after a conversation row could not be counted: {error}"
+        ),
+    };
+    out.findings.push(
+        StorageFinding::new(
+            FindingSeverity::Info,
+            FINDING_OPERATOR_INSTRUCTION_ENTRY_AFTER_CONVERSATION,
+            message,
+        )
+        .with_path(runtime),
+    );
+}
+
+/// The sessions of the runtime store at `db_path` that hold their own
+/// operator-instruction entry after a conversation row, counted per model
+/// their heads or documents record (a gateway's sessions are heads of the
+/// co-tenant session store, with their metadata out of line), in one read
+/// snapshot. By Core's census rule a session is counted from its current
+/// record: a kept document is counted only for a session that has no
+/// current record and no authority row. Where the live rows of a session
+/// cannot be read as the session store serves them, Core's census counts
+/// nothing for the store and names the session; this finding names no
+/// session, so the error says that a session could not be read and keeps
+/// its id and its strand out.
+fn late_entry_sessions_by_model(db_path: &Path) -> Result<BTreeMap<String, usize>, String> {
+    let conn = meerkat_sqlite::open(db_path, meerkat_sqlite::ConnectionProfile::ReadOnly)
+        .map_err(|error| error.to_string())?;
+    let snapshot = conn
+        .unchecked_transaction()
+        .map_err(|error| error.to_string())?;
+    let sessions =
+        meerkat_store::doctor::operator_instruction_entry_after_conversation_sessions(&snapshot)
+            .map_err(|error| match error {
+                meerkat_store::doctor::LateEntryCensusError::Sql(error) => error.to_string(),
+                meerkat_store::doctor::LateEntryCensusError::UnresolvedLiveRows { .. } => {
+                    "the live rows of one session cannot be read as the session store serves \
+                     them, so no session of the store is counted"
+                        .to_string()
+                }
+            })?;
+    let mut models = BTreeMap::new();
+    for model in sessions.into_values() {
+        *models.entry(model.label().to_string()).or_insert(0) += 1;
+    }
+    Ok(models)
 }
 
 /// The census of the mob events at the operator-instruction mob event
@@ -4822,6 +4925,336 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    /// Before going back to an earlier release a host counts the sessions
+    /// such a release may refuse to resume. The doctor reports, by Core's
+    /// census rule, the sessions of runtime.sqlite whose stored transcript
+    /// holds the session's OWN operator-instruction entry after a
+    /// conversation row: one finding on the runtime store, Info, with the
+    /// count, the models their stored metadata names and how many sessions
+    /// of each, and the sentence that the store cannot tell which of them
+    /// such a release refuses. It names no session. A session whose entry
+    /// stands ahead of the conversation and a session that holds another
+    /// session's entry are not counted; a directory without such a session
+    /// has no such finding; and the doctor changes no file.
+    #[test]
+    fn the_doctor_counts_the_sessions_with_their_own_late_instruction_entry() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("with");
+        std::fs::create_dir_all(&state).unwrap();
+        let runtime = state.join("runtime.sqlite");
+        let id = || Session::new().id().to_string();
+        let (late, unnamed, leading, copied, other) = (id(), id(), id(), id(), id());
+        let prompt =
+            || serde_json::json!({"role": "system", "content": "You are a careful assistant."});
+        let question = || serde_json::json!({"role": "user", "content": "hello"});
+        let entry = |origin: &str| {
+            serde_json::json!({
+                "role": "system",
+                "content": "[meerkat-operator-instructions-v1]",
+                "instruction_entry": {
+                    "render_version": 1,
+                    "origin_session_id": origin,
+                    "entry_sequence": 1,
+                    "kind": "delta",
+                    "target_generation": 1,
+                },
+            })
+        };
+        let document = |rows: Vec<serde_json::Value>, metadata: serde_json::Value| {
+            serde_json::json!({
+                "version": census_envelope(),
+                "messages": rows,
+                "metadata": metadata,
+            })
+            .to_string()
+            .into_bytes()
+        };
+        let naming = |provider: &str, model: &str| serde_json::json!({"session_metadata": {"provider": provider, "model": model}});
+        {
+            let conn = create_census_runtime_tables(&runtime);
+            // Head-less documents: one with its own late entry on a named
+            // model, one with its entry ahead of the conversation.
+            for (session, body) in [
+                (
+                    &late,
+                    document(
+                        vec![prompt(), question(), entry(&late)],
+                        naming("gemini", "gemini-3.5-flash"),
+                    ),
+                ),
+                (
+                    &leading,
+                    document(
+                        vec![prompt(), entry(&leading), question()],
+                        naming("gemini", "gemini-3.5-flash"),
+                    ),
+                ),
+            ] {
+                conn.execute(
+                    "INSERT INTO sessions (session_id, session_json) VALUES (?1, ?2)",
+                    rusqlite::params![session, body],
+                )
+                .unwrap();
+            }
+            // WholeBlob bodies: one with its own late entry and no model in
+            // its metadata, one that holds another session's late entry.
+            for (session, blob, body) in [
+                (
+                    &unnamed,
+                    "body-unnamed",
+                    document(
+                        vec![prompt(), question(), entry(&unnamed)],
+                        serde_json::json!({}),
+                    ),
+                ),
+                (
+                    &copied,
+                    "body-copied",
+                    document(
+                        vec![prompt(), question(), entry(&other)],
+                        naming("gemini", "gemini-3.5-flash"),
+                    ),
+                ),
+            ] {
+                conn.execute(
+                    "INSERT INTO runtime_whole_blob_bodies (blob_sha256, session_snapshot) \
+                     VALUES (?1, ?2)",
+                    rusqlite::params![blob, body],
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO runtime_whole_blob_authority (runtime_id, session_id, \
+                     blob_sha256) VALUES (?1, ?2, ?3)",
+                    rusqlite::params![format!("rt:session:{session}"), session, blob],
+                )
+                .unwrap();
+            }
+        }
+        let before = file_facts(&state);
+
+        let diagnosis = diagnose_state_dir_blocking(&scope(&[&state]), None);
+
+        assert_eq!(file_facts(&state), before, "the doctor changes no file");
+        let findings = census_findings(
+            &diagnosis,
+            FINDING_OPERATOR_INSTRUCTION_ENTRY_AFTER_CONVERSATION,
+        );
+        assert_eq!(findings.len(), 1, "{findings:#?}");
+        assert_eq!(findings[0].0, runtime);
+        let message = &findings[0].1;
+        assert!(
+            message.starts_with(
+                "2 session(s) of this runtime store hold their own operator-instruction entry \
+                 after a conversation row (gemini/gemini-3.5-flash: 1, model not recorded: 1): "
+            ),
+            "{message}"
+        );
+        for said in [
+            "refuses to resume",
+            "supports_mid_conversation_system_messages",
+            "cannot tell",
+        ] {
+            assert!(
+                message.contains(said),
+                "the finding says {said:?}: {message}"
+            );
+        }
+        for session in [&late, &unnamed, &leading, &copied, &other] {
+            assert!(
+                !message.contains(session.as_str()),
+                "the finding names no session: {message}"
+            );
+        }
+
+        // A directory whose sessions hold no late entry of their own.
+        let quiet = temp.path().join("without");
+        std::fs::create_dir_all(&quiet).unwrap();
+        write_census_runtime_store(&quiet.join("runtime.sqlite"));
+        let diagnosis = diagnose_state_dir_blocking(&scope(&[&quiet]), None);
+        assert!(
+            census_findings(
+                &diagnosis,
+                FINDING_OPERATOR_INSTRUCTION_ENTRY_AFTER_CONVERSATION
+            )
+            .is_empty(),
+            "no such session, no such finding"
+        );
+    }
+
+    /// On a gateway a member's session stands in runtime.sqlite as a head of
+    /// the co-tenant session store: `open_native_session_pair` opens the
+    /// session store on that file and the runtime store head-canonical on the
+    /// same file, so such a session is neither a head-less document nor a
+    /// WholeBlob body (the forms the row above writes by hand). A head keeps
+    /// its row's own metadata map empty and holds the session's metadata out
+    /// of line, so the model is read from the head's metadata cells. This row
+    /// writes one session through the store's head path after a real run
+    /// start applied a change behind a conversation row, and the doctor
+    /// counts it under its model, without its session id.
+    #[tokio::test]
+    async fn the_doctor_names_the_model_of_a_session_written_through_the_head_path() {
+        use meerkat_core::session_store::{IncrementalSessionStore, PreparedHeadCanonicalMutation};
+        use meerkat_core::types::{InstructionKey, InstructionNamespace};
+
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("gateway");
+        std::fs::create_dir_all(&state).unwrap();
+        let runtime = state.join(crate::storage_layout::RUNTIME_DB_FILE_NAME);
+        let mut session = Session::new();
+        session
+            .set_session_metadata(meerkat_core::SessionMetadata {
+                model_fallback: None,
+                schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
+                model: "claude-haiku-4-5".to_string(),
+                max_tokens: 8_192,
+                structured_output_retries: 2,
+                provider: meerkat_core::Provider::Anthropic,
+                self_hosted_server_id: None,
+                provider_params: None,
+                tooling: meerkat_core::SessionTooling::default(),
+                keep_alive: false,
+                comms_name: None,
+                peer_meta: None,
+                realm_id: None,
+                instance_id: None,
+                backend: None,
+                config_generation: None,
+                auth_binding: None,
+                mob_member_binding: None,
+            })
+            .unwrap();
+        session.append_system_message("You are a careful assistant.");
+        session.push(Message::User(UserMessage::text("hello")));
+        session
+            .set_session_instruction(meerkat_core::SessionInstructionWrite {
+                slot: meerkat_core::InstructionSlot {
+                    namespace: InstructionNamespace::new("app.example").unwrap(),
+                    key: InstructionKey::new("tone").unwrap(),
+                },
+                revision: meerkat_core::InstructionRevision::new(1).unwrap(),
+                change: meerkat_core::SessionInstructionChange::Activate {
+                    body: "Answer formally.".to_string(),
+                    content_sha256: None,
+                },
+            })
+            .unwrap();
+        let outcome = session
+            .apply_run_start_instructions(
+                meerkat_core::InstructionRunStart::FreshRun,
+                meerkat_core::InstructionLowering::LeadingPrefixOnly,
+                None,
+            )
+            .unwrap();
+        assert!(
+            matches!(
+                outcome,
+                meerkat_core::RunStartInstructionOutcome::Applied { .. }
+            ),
+            "the run start applies the change: {outcome:?}"
+        );
+        session.push(Message::User(UserMessage::text("next")));
+        {
+            let store = meerkat_store::SqliteSessionStore::open(runtime.clone()).unwrap();
+            let root = PreparedHeadCanonicalMutation::prepare_root(&session).unwrap();
+            store
+                .apply_prepared_head_canonical_mutation(&root)
+                .await
+                .unwrap();
+        }
+
+        let diagnosis = diagnose_state_dir(&scope(&[&state])).await;
+
+        let findings = census_findings(
+            &diagnosis,
+            FINDING_OPERATOR_INSTRUCTION_ENTRY_AFTER_CONVERSATION,
+        );
+        assert_eq!(findings.len(), 1, "{findings:#?}");
+        assert_eq!(findings[0].0, runtime);
+        let message = &findings[0].1;
+        assert!(
+            message.starts_with(
+                "1 session(s) of this runtime store hold their own operator-instruction entry \
+                 after a conversation row (anthropic/claude-haiku-4-5: 1): "
+            ),
+            "the count, and the model read from the head's out-of-line metadata: {message}"
+        );
+        assert!(
+            !message.contains(&session.id().to_string()),
+            "the finding names no session: {message}"
+        );
+    }
+
+    /// A head of the runtime store counts three live rows and its strand holds
+    /// two, so whether the session holds its own late entry is not known.
+    /// Core's census counts nothing for the store and names the session;
+    /// this finding names no session, so it says that the sessions could not
+    /// be counted because one session's rows cannot be read, and keeps that
+    /// session's id out.
+    #[test]
+    fn the_doctor_says_a_session_could_not_be_read_without_naming_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("gateway");
+        std::fs::create_dir_all(&state).unwrap();
+        let runtime = state.join(crate::storage_layout::RUNTIME_DB_FILE_NAME);
+        let id = Session::new().id().to_string();
+        {
+            let conn = Connection::open(&runtime).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE session_heads (
+                     session_id TEXT PRIMARY KEY, version INTEGER, strand TEXT,
+                     message_count INTEGER, metadata_json TEXT, head_json BLOB);
+                 CREATE TABLE session_strand_messages (
+                     session_id TEXT, strand TEXT, seq INTEGER, message_json BLOB);",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO session_heads (session_id, version, strand, message_count, \
+                 metadata_json, head_json) VALUES (?1, ?2, 'root', 3, '{}', '{}')",
+                rusqlite::params![id, census_envelope()],
+            )
+            .unwrap();
+            for (seq, row) in [
+                serde_json::json!({"role": "system", "content": "You are a careful assistant."}),
+                serde_json::json!({"role": "user", "content": "hello"}),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                conn.execute(
+                    "INSERT INTO session_strand_messages (session_id, strand, seq, message_json) \
+                     VALUES (?1, 'root', ?2, ?3)",
+                    rusqlite::params![
+                        id,
+                        i64::try_from(seq).unwrap(),
+                        row.to_string().into_bytes()
+                    ],
+                )
+                .unwrap();
+            }
+        }
+
+        let diagnosis = diagnose_state_dir_blocking(&scope(&[&state]), None);
+
+        let findings = census_findings(
+            &diagnosis,
+            FINDING_OPERATOR_INSTRUCTION_ENTRY_AFTER_CONVERSATION,
+        );
+        assert_eq!(findings.len(), 1, "{findings:#?}");
+        assert_eq!(findings[0].0, runtime);
+        let message = &findings[0].1;
+        assert!(
+            message.contains(
+                "could not be counted: the live rows of one session cannot be read as the \
+                 session store serves them"
+            ),
+            "the finding says that a session could not be read: {message}"
+        );
+        assert!(
+            !message.contains(&id),
+            "the finding names no session: {message}"
+        );
     }
 
     /// Row (RED): the rollback census of a state directory counts, by Core's

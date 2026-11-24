@@ -2674,6 +2674,76 @@ fn a_retired_transition_variant_is_an_enum_name_and_nothing_else() {
     }
 }
 
+/// SessionDocumentMachine's retired `TransitionId` variant: the deferral of
+/// a run start on a model that carries System rows only inside the leading
+/// System prefix. Its transition no longer exists (such a run start applies
+/// its entry, and the model request places it); the variant keeps the index
+/// it was published at, so no published discriminant moves, and it is an
+/// enum name and nothing else.
+#[test]
+fn session_document_retired_transition_variant_keeps_its_published_index() {
+    const RETIRED: &str = "ResolveRunStartInstructionsDeferredLeadingPrefix";
+    let schema = session_document_machine();
+    let coverage = canonical_machine_coverage_manifests()
+        .into_iter()
+        .find(|coverage| coverage.machine == schema.machine)
+        .expect("session document coverage manifest");
+    let kernel = render_machine_kernel_module(&schema);
+    let variants = transition_id_variants(&kernel);
+    let index = |name: &str| variants.iter().position(|variant| variant == name);
+    assert_eq!(index("ResolveRunStartInstructionsNoChange"), Some(147));
+    assert_eq!(index(RETIRED), Some(148));
+    assert_eq!(
+        index("ResolveRunStartInstructionsDeferredUnavailable"),
+        Some(149)
+    );
+    assert_eq!(index("AuthorizeInstructionFoldAtRunStart"), Some(150));
+    let unique: BTreeSet<&String> = variants.iter().collect();
+    assert_eq!(
+        unique.len(),
+        variants.len(),
+        "every TransitionId variant is in the enum once"
+    );
+
+    assert!(
+        schema
+            .transitions
+            .iter()
+            .all(|transition| transition.name.as_ref() != RETIRED),
+        "{RETIRED} is no transition of the schema"
+    );
+    let mentions: Vec<&str> = kernel
+        .lines()
+        .filter(|line| mentions_identifier(line, RETIRED))
+        .collect();
+    assert_eq!(
+        mentions,
+        vec![format!("    {RETIRED},").as_str()],
+        "the kernel names {RETIRED} once, as an enum member"
+    );
+    assert!(
+        kernel.contains(&format!(
+            "    /// Retired: never fired. No transition has this id any more; the\n    \
+             /// variant keeps its place so that no published discriminant moves.\n    \
+             {RETIRED},"
+        )),
+        "the kernel documents {RETIRED} as retired"
+    );
+    let model = render_machine_semantic_model(&schema).expect("render machine semantic model");
+    let contract = render_machine_contract_markdown(&schema, &coverage);
+    let mapping = render_machine_mapping_coverage(&schema, &coverage);
+    for (document, text) in [
+        ("model", &model),
+        ("contract", &contract),
+        ("mapping", &mapping),
+    ] {
+        assert!(
+            !mentions_identifier(text, RETIRED),
+            "the machine's {document} does not name the retired variant {RETIRED}"
+        );
+    }
+}
+
 /// A retired name is never given to a transition again: rendering refuses a
 /// schema that still has a transition of that name.
 #[test]

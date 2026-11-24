@@ -200,11 +200,21 @@ the ephemeral service refuses `durability_unavailable`. A write changes only
 the recorded target. The pending changes apply at the session's next fresh
 run start as one System entry appended before the run's own input, naming the
 run; a resumed run applies nothing, and a run that never starts takes its
-entry back, so the changes stay pending. A model that lowers System rows only
-in its leading prompt defers them (`leading_prefix_only`) until a compaction
-at a run's first request carries them in its snapshot, and a backend whose
-wire carries only one leading System row keeps them pending
-(`lowering_unavailable`). A compaction folds every entry row into one
+entry back, so the changes stay pending. The entry is appended at the
+transcript tail on every model, and the transcript is never rewritten for
+it. What differs is the model request: a model that lowers System rows only
+in its leading prompt (`leading_prefix_only`) is asked with the session's
+own entries placed at the end of the leading System prefix, in their order,
+so it takes a change at its next fresh run start like any other model
+(earlier releases deferred the change on such a model until a compaction
+at a run's first request carried it in its snapshot). A backend whose
+wire carries only one leading System row keeps the changes pending
+(`lowering_unavailable`). A model change of such a session is judged
+accordingly: a target that lowers System rows only in its leading prompt
+carries the session's own entries, a target whose wire carries one leading
+System row does not, and a per-request model fallback, which hands its
+target the request as it stands, skips a target that cannot carry an entry
+after a conversation row. A compaction folds every entry row into one
 snapshot of the instructions in effect after the leading System prefix, and
 no summary request, host curator window or compactor input carries an
 instruction body. Each applied entry is published as an

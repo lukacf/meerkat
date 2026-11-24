@@ -2291,12 +2291,6 @@ impl Gateway {
     }
 }
 
-/// The state of a slot whose change waits on a model that takes a system
-/// instruction only ahead of the conversation.
-fn pending_for_the_prefix() -> Value {
-    json!({"state": "pending", "reason": "leading_prefix_only_lowering"})
-}
-
 /// The state of a slot whose change the agent's next run puts in effect.
 fn pending_for_the_next_run() -> Value {
     json!({"state": "pending", "reason": "awaiting_run_start"})
@@ -2309,11 +2303,13 @@ fn in_effect() -> Value {
 
 /// An agent on a model that takes a system instruction only ahead of the
 /// conversation, with a conversation: an update of its instructions through
-/// `meta/identity/update` answers `applies_after_compaction`, which is what
+/// `meta/identity/update` answers `applies_at_next_run`, which is what
 /// `meta/instruction_status` says of the same agent's slot (`pending`,
-/// `leading_prefix_only_lowering`), and a further run leaves the slot so.
+/// `awaiting_run_start`), and the agent's next run puts the change in
+/// effect, on the same conversation and with no compaction: the gateway's
+/// own request for that model carries the entry ahead of the conversation.
 #[test]
-fn an_instructions_update_of_a_prefix_only_agent_with_a_conversation_answers_after_compaction_as_its_status_reads()
+fn an_instructions_update_of_a_prefix_only_agent_with_a_conversation_answers_next_run_and_its_next_run_applies_it()
  {
     let scratch = tempfile::tempdir().unwrap();
     let mut gateway = Gateway::launched_with_keeper_on(scratch.path(), "prefix");
@@ -2323,17 +2319,17 @@ fn an_instructions_update_of_a_prefix_only_agent_with_a_conversation_answers_aft
     assert_eq!(
         (answered, slot),
         (
-            json!({"kind": "applies_after_compaction"}),
-            pending_for_the_prefix(),
+            json!({"kind": "applies_at_next_run"}),
+            pending_for_the_next_run(),
         ),
         "the update's answer and the status read's slot state agree: the change is recorded \
-         and waits for a compaction"
+         and waits for the agent's next run"
     );
     gateway.turn(KEEPER, "SECOND-TURN");
     assert_eq!(
         gateway.keeper_slot_state_once_recorded(),
-        pending_for_the_prefix(),
-        "a further run does not put the change in effect"
+        in_effect(),
+        "the agent's next run put the change in effect"
     );
 }
 
@@ -2341,21 +2337,22 @@ fn an_instructions_update_of_a_prefix_only_agent_with_a_conversation_answers_aft
 /// depend on how the agent's runs start. An autonomous agent starts itself,
 /// so its create answered once its session existed and it has a
 /// conversation when the update arrives. The status read never contradicts
-/// the answer: the slot waits for the prefix, or is in effect already when
-/// the record reached the session before the agent's first run started.
+/// the answer: the slot waits for the agent's next run, or is in effect
+/// already when a run of the agent started after the record reached its
+/// session.
 #[test]
-fn an_instructions_update_of_an_autonomous_prefix_only_agent_answers_after_compaction() {
+fn an_instructions_update_of_an_autonomous_prefix_only_agent_answers_next_run() {
     let scratch = tempfile::tempdir().unwrap();
     let mut gateway = Gateway::launched_with_keeper_on(scratch.path(), "prefix_autonomous");
     let answered = gateway.update_keeper_instructions();
     let slot = gateway.keeper_slot_state_once_recorded();
     assert_eq!(
         answered,
-        json!({"kind": "applies_after_compaction"}),
+        json!({"kind": "applies_at_next_run"}),
         "the update's answer for an autonomous agent on such a model; its slot reads {slot}"
     );
     assert!(
-        slot == pending_for_the_prefix() || slot == in_effect(),
+        slot == pending_for_the_next_run() || slot == in_effect(),
         "the status read does not contradict the answer: {slot}"
     );
 }
@@ -2364,19 +2361,15 @@ fn an_instructions_update_of_an_autonomous_prefix_only_agent_answers_after_compa
 /// first message and updated at once. A create with a first message answers
 /// once the agent's session exists, so the agent has a conversation when
 /// the update arrives, and the update answers by its model: on a model that
-/// takes a system instruction only ahead of the conversation
-/// `applies_after_compaction`, on one that takes it after conversation rows
-/// `applies_at_next_run`. The status read never contradicts the answer: the
-/// slot waits as the answer says, or is in effect already when the record
-/// reached the session before the first run started.
+/// takes a system instruction only ahead of the conversation and on one
+/// that takes it after conversation rows alike, `applies_at_next_run`. The
+/// status read never contradicts the answer: the slot waits as the answer
+/// says, or is in effect already when the record reached the session before
+/// the first run started.
 #[test]
 fn an_instructions_update_right_after_a_create_with_a_first_message_answers_by_the_agents_model() {
     for (profile, expected, waiting) in [
-        (
-            "prefix",
-            "applies_after_compaction",
-            pending_for_the_prefix(),
-        ),
+        ("prefix", "applies_at_next_run", pending_for_the_next_run()),
         ("worker", "applies_at_next_run", pending_for_the_next_run()),
     ] {
         let scratch = tempfile::tempdir().unwrap();
@@ -2396,31 +2389,32 @@ fn an_instructions_update_right_after_a_create_with_a_first_message_answers_by_t
     }
 }
 
-/// What brings a waiting change into effect on a model that takes a system
-/// instruction only ahead of the conversation. A respawn does not: it keeps
-/// the agent's conversation, and the slot still waits after the next run. A
-/// reset does: the agent starts a new conversation, and after its next run
-/// the slot is in effect.
+/// A change on a model that takes a system instruction only ahead of the
+/// conversation needs nothing but the agent's next run. A respawn keeps the
+/// agent's conversation: the run after it puts the change in effect, as any
+/// next run does. A reset starts a new conversation, built from the current
+/// text, and the slot is in effect after its first run too.
 #[test]
-fn an_instructions_update_that_waits_takes_effect_after_a_reset_and_not_after_a_respawn() {
+fn an_instructions_update_takes_effect_at_the_next_run_after_a_respawn_and_after_a_reset() {
     let scratch = tempfile::tempdir().unwrap();
     let mut gateway = Gateway::launched_with_keeper_on(scratch.path(), "prefix");
     gateway.turn(KEEPER, "FIRST-TURN");
     assert_eq!(
         gateway.update_keeper_instructions(),
-        json!({"kind": "applies_after_compaction"})
+        json!({"kind": "applies_at_next_run"})
     );
     assert_eq!(
         gateway.keeper_slot_state_once_recorded(),
-        pending_for_the_prefix()
+        pending_for_the_next_run()
     );
 
     let respawned = gateway.ok("meta/respawn", json!({"identity": KEEPER}));
     gateway.turn(KEEPER, "AFTER-THE-RESPAWN");
     assert_eq!(
         gateway.keeper_slot_state_once_recorded(),
-        pending_for_the_prefix(),
-        "a respawn keeps the conversation, and the change still waits: {respawned:#}"
+        in_effect(),
+        "a respawn keeps the conversation, and its next run puts the change in effect: \
+         {respawned:#}"
     );
 
     let reset = gateway.ok("meta/reset", json!({"identity": KEEPER}));

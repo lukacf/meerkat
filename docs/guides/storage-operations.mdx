@@ -120,6 +120,19 @@ The report covers:
   in total
   (`operator-instruction-mob-totals`, with both totals; see
   [Rolling back to 0.9.14](/guides/upgrading#rolling-back-to-0-9-14))
+- the sessions an earlier release may refuse to resume after a rollback, as
+  an informational finding: each session whose stored transcript holds its
+  own operator-instruction entry after a conversation row, with the model
+  its stored metadata names
+  (`operator-instruction-entry-after-conversation`, with the count and the
+  count per model over all of them; the sessions themselves are listed up
+  to fifty). Where the metadata names no model the finding says
+  `model not recorded`; where a session's metadata rows are not the metadata
+  its head commits to it says `model unreadable` and does not guess. The
+  store records no model capability, so the finding cannot tell which of
+  them such a release refuses: it refuses the session only on a model that
+  takes System rows only ahead of the conversation (see
+  [A changed operator instruction and a rollback](/guides/upgrading#a-changed-operator-instruction-and-a-rollback))
 - what a rollback to a release before 0.9.9 does not read in each per-mob
   database: its identity-store rows of schema version 2 or later, the rows
   of store-owned identities and the tombstones of removed names

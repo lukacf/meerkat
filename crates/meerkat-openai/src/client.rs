@@ -780,6 +780,40 @@ fn openai_continuation_plan(
         .filter(|plan| plan.replay_from_message_index < request.messages.len())
 }
 
+/// Whether a continuation from the assistant step before
+/// `replay_from_message_index` would leave out a System row that step never
+/// saw. A continuation sends only the rows after the step, so every row
+/// before it must have been in the request the step answered.
+///
+/// A System row among the conversation rows stands where it was appended,
+/// so the transcript's own order says it was. A row inside the leading
+/// System prefix has no order against the conversation: an
+/// operator-instruction entry the request places there, a compaction
+/// fold's snapshot and a prompt update's new version all enter it after
+/// steps that stand behind them. Rows carry no sequence that orders a
+/// System row against a step, so their times decide: the step saw a leading
+/// System row only when that row is strictly older. A tie is not proof, and
+/// neither is a row stored without its time, which reads as written when it
+/// was loaded. A step that cannot be read proves nothing either.
+fn openai_leading_system_row_follows_step(
+    messages: &[Message],
+    replay_from_message_index: usize,
+) -> bool {
+    let step = replay_from_message_index
+        .checked_sub(1)
+        .and_then(|index| messages.get(index));
+    let Some(Message::BlockAssistant(step)) = step else {
+        return true;
+    };
+    messages
+        .iter()
+        .map_while(|message| match message {
+            Message::System(system) => Some(system),
+            _ => None,
+        })
+        .any(|system| system.created_at >= step.created_at)
+}
+
 /// Project one assistant step for an OpenAI-wire target. `admission` says
 /// whether the target is sent the step's continuity material
 /// ([`meerkat_core::ReplayStepAdmission`]). A step that is not admitted
@@ -1952,12 +1986,37 @@ impl OpenAiClient {
         self.build_request_body_with_continuation_for(request, &self.continuity_target())
     }
 
+    /// The continuation this client asks for `request`, if any: the plan of
+    /// [`openai_continuation_plan`], unless it would leave out a leading
+    /// System row the step never saw
+    /// ([`openai_leading_system_row_follows_step`]). Such a request is
+    /// replayed in full; the step it produces has seen the row, and the
+    /// next request continues from that step. The ChatGPT backend's wire
+    /// sends its one leading System row with every request, a continuation
+    /// included, so nothing is left out there.
+    fn continuation_plan(
+        &self,
+        request: &LlmRequest,
+        continuity: &meerkat_core::OpenAiContinuityTarget,
+    ) -> Option<OpenAiContinuationPlan> {
+        let plan = openai_continuation_plan(request, Some(continuity))?;
+        if !self.is_chatgpt_backend_wire()
+            && openai_leading_system_row_follows_step(
+                &request.messages,
+                plan.replay_from_message_index,
+            )
+        {
+            return None;
+        }
+        Some(plan)
+    }
+
     fn build_request_body_with_continuation_for(
         &self,
         request: &LlmRequest,
         continuity: &meerkat_core::OpenAiContinuityTarget,
     ) -> Result<(Value, Option<OpenAiContinuationPlan>), LlmError> {
-        let Some(plan) = openai_continuation_plan(request, Some(continuity)) else {
+        let Some(plan) = self.continuation_plan(request, continuity) else {
             return self
                 .lower_request_body(request, Some(continuity))
                 .map(|body| (body, None));
@@ -4277,7 +4336,7 @@ impl OpenAiClient {
         // A previous_response_id request lowers only a replay suffix and may
         // fall back to full replay after provider rejection. It has no single
         // authored rendered prefix, so cache inheritance is unavailable.
-        if openai_continuation_plan(request, Some(continuity)).is_some() {
+        if self.continuation_plan(request, continuity).is_some() {
             return Ok(Vec::new());
         }
 
@@ -8727,6 +8786,337 @@ mod tests {
         assert_eq!(body["store"], false);
         assert!(body.get("previous_response_id").is_none());
         assert_eq!(body["input"].as_array().expect("input array").len(), 3);
+    }
+
+    // -----------------------------------------------------------------------
+    // A `store: true` continuation sends only the rows after the transcript's
+    // last assistant step. A System row that entered the leading System
+    // prefix after that step (an operator-instruction entry the request
+    // places there, a fold's snapshot, a prompt update's new version) stands
+    // before the step, so a continuation would never send it. Such a request
+    // is replayed in full; the step it produces has seen the row, and the
+    // chain resumes from there.
+    // -----------------------------------------------------------------------
+
+    fn continuation_time(seconds: u64) -> meerkat_core::types::MessageTimestamp {
+        chrono::DateTime::<chrono::Utc>::UNIX_EPOCH
+            + std::time::Duration::from_secs(1_700_000_000 + seconds)
+    }
+
+    fn system_row_at(text: &str, seconds: u64) -> Message {
+        let mut row = meerkat_core::SystemMessage::new(text.to_string());
+        row.created_at = continuation_time(seconds);
+        Message::System(row)
+    }
+
+    fn stored_step_at(text: &str, response_id: &str, seconds: u64) -> Message {
+        let mut step = BlockAssistantMessage::new(
+            vec![AssistantBlock::Text {
+                text: text.to_string(),
+                meta: Some(Box::new(ProviderMeta::OpenAiResponse {
+                    response_id: response_id.to_string(),
+                })),
+            }],
+            StopReason::EndTurn,
+        );
+        step.created_at = continuation_time(seconds);
+        Message::BlockAssistant(step)
+    }
+
+    /// The body and the plan of a `store: true` request over `messages`, on
+    /// a client that received every step of them from its service.
+    fn stored_continuation(
+        client: OpenAiClient,
+        messages: Vec<Message>,
+    ) -> (Value, Option<OpenAiContinuationPlan>) {
+        let request =
+            LlmRequest::new("gpt-5.5", messages).with_openai_tag_merge(|t| t.store = Some(true));
+        client
+            .having_received(&request.messages)
+            .build_request_body_with_continuation(&request)
+            .expect("build request")
+    }
+
+    fn assert_replayed_in_full(
+        what: &str,
+        body: &Value,
+        plan: Option<&OpenAiContinuationPlan>,
+        texts: &[&str],
+    ) {
+        assert!(plan.is_none(), "{what}: a continuation was asked");
+        assert!(body.get("previous_response_id").is_none(), "{what}: {body}");
+        let rendered = body.to_string();
+        for text in texts {
+            assert!(
+                rendered.contains(text),
+                "{what}: the request does not carry {text:?}: {rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn openai_continuation_is_not_asked_when_a_placed_entry_is_newer_than_the_last_step() {
+        // An entry applied at this run's start stands in the leading System
+        // prefix of the request, after the prompt.
+        let (body, plan) = stored_continuation(
+            OpenAiClient::new("test-key".to_string()),
+            vec![
+                system_row_at("You are a careful assistant.", 0),
+                system_row_at("operator instructions: answer formally", 20),
+                Message::User(UserMessage::text("old question".to_string())),
+                stored_step_at("old answer", "resp_previous", 10),
+                Message::User(UserMessage::text("new question".to_string())),
+            ],
+        );
+        assert_replayed_in_full(
+            "a placed entry",
+            &body,
+            plan.as_ref(),
+            &[
+                "You are a careful assistant.",
+                "operator instructions: answer formally",
+                "old question",
+                "new question",
+            ],
+        );
+    }
+
+    #[test]
+    fn openai_continuation_is_not_asked_when_a_folds_snapshot_is_newer_than_the_last_step() {
+        // A compaction keeps the most recent turns as they were, puts its
+        // summary before them and the snapshot of the instructions in effect
+        // after the leading System rows.
+        let (body, plan) = stored_continuation(
+            OpenAiClient::new("test-key".to_string()),
+            vec![
+                system_row_at("You are a careful assistant.", 0),
+                system_row_at("operator instructions snapshot: answer formally", 20),
+                Message::User(UserMessage::compaction_summary(
+                    "summary of the earlier conversation".to_string(),
+                )),
+                Message::User(UserMessage::text("kept question".to_string())),
+                stored_step_at("kept answer", "resp_previous", 10),
+                Message::User(UserMessage::text("new question".to_string())),
+            ],
+        );
+        assert_replayed_in_full(
+            "a fold's snapshot",
+            &body,
+            plan.as_ref(),
+            &[
+                "operator instructions snapshot: answer formally",
+                "summary of the earlier conversation",
+                "kept question",
+                "new question",
+            ],
+        );
+    }
+
+    #[test]
+    fn openai_continuation_is_not_asked_when_a_prompt_updates_version_is_newer_than_the_last_step()
+    {
+        // The real prompt update: the new version is a new row inside the
+        // leading System prefix, and the request carries the latest version.
+        let mut session = meerkat_core::Session::new();
+        session.push(system_row_at("version one", 0));
+        session.push(Message::User(UserMessage::text("old question".to_string())));
+        session.push(stored_step_at("old answer", "resp_previous", 10));
+        session
+            .update_system_prompt(meerkat_core::SystemPromptUpdateRequest {
+                key: meerkat_core::SystemPromptKey::new("primary").expect("key"),
+                expected_version: None,
+                target_message_index: Some(0),
+                content: "version two".to_string(),
+                actor: None,
+                expected_parent_revision: None,
+            })
+            .expect("the prompt update commits");
+        let mut messages = session
+            .messages_for_model_boundary()
+            .expect("the model boundary projection");
+        messages.push(Message::User(UserMessage::text("new question".to_string())));
+        assert!(
+            matches!(&messages[0], Message::System(system) if system.content == "version two"),
+            "{messages:?}"
+        );
+
+        let (body, plan) = stored_continuation(OpenAiClient::new("test-key".to_string()), messages);
+        assert_replayed_in_full(
+            "a prompt update's new version",
+            &body,
+            plan.as_ref(),
+            &["version two", "old question", "new question"],
+        );
+    }
+
+    #[test]
+    fn openai_continuation_is_not_asked_on_a_tie_or_an_unread_row_time() {
+        // A leading System row as old as the step: not proven older.
+        let (body, plan) = stored_continuation(
+            OpenAiClient::new("test-key".to_string()),
+            vec![
+                system_row_at("a prompt as old as the step", 10),
+                Message::User(UserMessage::text("old question".to_string())),
+                stored_step_at("old answer", "resp_previous", 10),
+                Message::User(UserMessage::text("new question".to_string())),
+            ],
+        );
+        assert_replayed_in_full(
+            "a tie",
+            &body,
+            plan.as_ref(),
+            &["a prompt as old as the step"],
+        );
+
+        // A row stored without its time reads as written now.
+        let undated: Message = serde_json::from_value(serde_json::json!({
+            "role": "system",
+            "content": "a prompt stored without its time"
+        }))
+        .expect("a System row without a created_at");
+        let (body, plan) = stored_continuation(
+            OpenAiClient::new("test-key".to_string()),
+            vec![
+                undated,
+                Message::User(UserMessage::text("old question".to_string())),
+                stored_step_at("old answer", "resp_previous", 10),
+                Message::User(UserMessage::text("new question".to_string())),
+            ],
+        );
+        assert_replayed_in_full(
+            "a row without its time",
+            &body,
+            plan.as_ref(),
+            &["a prompt stored without its time"],
+        );
+    }
+
+    #[test]
+    fn openai_continuation_resumes_from_the_step_that_saw_the_newer_system_row() {
+        // The request that was replayed in full produced a step; that step
+        // is newer than every leading System row.
+        let (body, plan) = stored_continuation(
+            OpenAiClient::new("test-key".to_string()),
+            vec![
+                system_row_at("You are a careful assistant.", 0),
+                system_row_at("operator instructions: answer formally", 20),
+                Message::User(UserMessage::text("old question".to_string())),
+                stored_step_at("old answer", "resp_previous", 10),
+                Message::User(UserMessage::text("new question".to_string())),
+                stored_step_at("new answer", "resp_after_the_replay", 30),
+                Message::User(UserMessage::text("next question".to_string())),
+            ],
+        );
+        assert_eq!(
+            plan.expect("the chain resumes").previous_response_id,
+            "resp_after_the_replay"
+        );
+        assert_eq!(body["previous_response_id"], "resp_after_the_replay");
+        let input = body["input"].as_array().expect("input array");
+        assert_eq!(input.len(), 1);
+        assert_eq!(input[0]["content"], "next question");
+    }
+
+    #[test]
+    fn openai_continuation_is_asked_when_every_leading_system_row_is_older_than_the_last_step() {
+        let (body, plan) = stored_continuation(
+            OpenAiClient::new("test-key".to_string()),
+            vec![
+                system_row_at("You are a careful assistant.", 0),
+                system_row_at("operator instructions: answer formally", 5),
+                Message::User(UserMessage::text("old question".to_string())),
+                stored_step_at("old answer", "resp_previous", 10),
+                Message::User(UserMessage::text("new question".to_string())),
+            ],
+        );
+        assert_eq!(
+            plan.expect("continuation plan").previous_response_id,
+            "resp_previous"
+        );
+        let input = body["input"].as_array().expect("input array");
+        assert_eq!(input.len(), 1, "only what followed the step: {body}");
+        assert_eq!(input[0]["content"], "new question");
+    }
+
+    /// The rule's cost for a leading System row the request itself authors.
+    /// A session without a system prompt whose request carries a projected
+    /// output-schema section gets that section as a new leading System row
+    /// when the request is built (`project_output_schema_instructions`), so
+    /// the row is never older than the last step and every such request is
+    /// replayed in full. A continuation would leave the section out.
+    #[test]
+    fn openai_continuation_is_not_asked_for_a_leading_system_row_the_request_authors() {
+        let mut messages = vec![
+            Message::User(UserMessage::text("old question".to_string())),
+            stored_step_at("old answer", "resp_previous", 10),
+            Message::User(UserMessage::text("new question".to_string())),
+        ];
+        meerkat_core::structured_output::project_output_schema_instructions(
+            &mut messages,
+            "answer as the output schema says",
+        );
+        assert!(
+            matches!(messages.first(), Some(Message::System(_))),
+            "the projection authors a leading System row for a session without a prompt"
+        );
+        let (body, plan) = stored_continuation(OpenAiClient::new("test-key".to_string()), messages);
+        assert_replayed_in_full(
+            "a leading System row the request authors",
+            &body,
+            plan.as_ref(),
+            &[
+                "answer as the output schema says",
+                "old question",
+                "new question",
+            ],
+        );
+    }
+
+    #[test]
+    fn openai_continuation_orders_a_system_row_among_the_conversation_by_the_transcript() {
+        // A System row among the conversation rows stands where it was
+        // appended: one before the step was sent with it, whatever its time
+        // reads, and one after it follows in the continuation.
+        let (body, plan) = stored_continuation(
+            OpenAiClient::new("test-key".to_string()),
+            vec![
+                system_row_at("You are a careful assistant.", 0),
+                Message::User(UserMessage::text("old question".to_string())),
+                system_row_at("an instruction among the conversation rows", 40),
+                stored_step_at("old answer", "resp_previous", 10),
+                system_row_at("an instruction after the step", 50),
+                Message::User(UserMessage::text("new question".to_string())),
+            ],
+        );
+        assert_eq!(
+            plan.expect("continuation plan").previous_response_id,
+            "resp_previous"
+        );
+        let rendered = body.to_string();
+        assert!(rendered.contains("an instruction after the step"));
+        assert!(!rendered.contains("an instruction among the conversation rows"));
+        assert_eq!(body["input"].as_array().expect("input array").len(), 2);
+    }
+
+    #[test]
+    fn chatgpt_backend_continuation_sends_a_newer_prompt_in_its_instructions() {
+        // The ChatGPT backend's one leading System row is sent with every
+        // request, a continuation included: a newer one needs no replay.
+        let (body, plan) = stored_continuation(
+            OpenAiClient::new("test-key".to_string()).with_chatgpt_backend_wire(),
+            vec![
+                system_row_at("the prompt, updated after the step", 20),
+                Message::User(UserMessage::text("old question".to_string())),
+                stored_step_at("old answer", "resp_previous", 10),
+                Message::User(UserMessage::text("new question".to_string())),
+            ],
+        );
+        assert_eq!(
+            plan.expect("continuation plan").previous_response_id,
+            "resp_previous"
+        );
+        assert_eq!(body["instructions"], "the prompt, updated after the step");
+        assert_eq!(body["input"].as_array().expect("input array").len(), 1);
     }
 
     #[tokio::test]

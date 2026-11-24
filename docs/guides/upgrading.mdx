@@ -55,6 +55,51 @@ Meerkat is pre-1.0, and patch releases can carry declared breaking changes.
 - `rkat storage doctor` reports no new problems.
 - An SDK `connect()` succeeds.
 
+## Unreleased
+
+### A changed operator instruction and a rollback
+
+A changed operator instruction takes effect at a session's next run on
+every model that carries one. That now includes a model that takes System
+rows only ahead of the conversation: one whose capability row
+`supports_mid_conversation_system_messages` is `false` (see the
+[capability matrix](/reference/capability-matrix)), or one the catalog does
+not know. Nothing stored takes a new form, and a change that was waiting
+for a compaction applies at the session's first fresh run after the
+upgrade. For a Meerkat Meta agent this is the answer `applies_at_next_run`
+to an update of its instructions.
+
+**Rolling back with the same state.** An earlier release reads every
+session. It cannot serve a session of such a model in which this release
+applied a change while the transcript already held a conversation row,
+until a compaction has folded that change, nor a session that this release
+switched onto such a model with such a row. After the restart of a
+rollback the earlier release refuses to resume the session, before any
+request is built:
+
+```text
+model '<model>' cannot represent the operator-instruction entries already applied in session <id>: an entry row stands after a conversation row, and the target carries System rows only before the first one
+```
+
+**Before going back, count them.** `rkat storage doctor` reports, per
+database, the sessions that hold their own operator-instruction entry after
+a conversation row (`operator-instruction-entry-after-conversation`), each
+with the model its stored metadata names. The store records no model capability:
+of the listed sessions an earlier release refuses those whose model takes
+System rows only ahead of the conversation, and serves the others.
+
+Sessions of other models, and sessions of such a model whose instructions
+did not change under this release, are served as before. **Do:** upgrade
+again, which serves the session as it is; or give that session up and start
+a new one, whose first prompt is built from the current instructions (for a
+Meerkat Meta agent, `meta/reset`).
+
+**Mixed versions.** Upgrade a gateway and its member hosts together, as
+"How to upgrade" says. A mob member whose host still runs an earlier
+release applies a change as that release does: on such a model the change
+waits for a compaction, also when a gateway of this release answered the
+update `applies_at_next_run`.
+
 ## Upgrading to 0.9.18
 
 This section is for systems running 0.9.17. The full list of changes is in

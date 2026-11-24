@@ -102,6 +102,17 @@ impl RouteSpec {
             vec![self.provider_a, self.provider_b]
         }
     }
+
+    /// Whether the realm configures `provider`'s binding and the harness
+    /// registers its runtime. A's provider goes with A when A is made
+    /// unavailable, except on the route onto the ChatGPT backend binding:
+    /// there A's binding stays configured, so a restart fails on A's client
+    /// alone and not on A's binding.
+    fn serves(self, provider: Provider, availability: &ModelAvailability) -> bool {
+        provider == self.provider_b
+            || availability.is_available(self.model_a)
+            || self.binding_b == CHATGPT_BINDING
+    }
 }
 
 const SAME_PROVIDER_ROUTE: RouteSpec = RouteSpec {
@@ -135,6 +146,43 @@ const TO_LEADING_PREFIX_ONLY_ROUTE: RouteSpec = RouteSpec {
     model_b: "claude-sonnet-4-6",
     provider_b: Provider::Anthropic,
     binding_b: "default_anthropic",
+};
+
+/// A=Anthropic `claude-opus-5`, a model that lowers operator-instruction
+/// entries anywhere, and B=Anthropic `claude-sonnet-4-6`, a model that
+/// lowers them only inside the leading System prefix, on one binding: when
+/// A is unavailable its binding is still configured, so a restart fails on
+/// A's client and not on A's binding.
+const SAME_PROVIDER_TO_LEADING_PREFIX_ONLY_ROUTE: RouteSpec = RouteSpec {
+    model_a: "claude-opus-5",
+    provider_a: Provider::Anthropic,
+    binding_a: "default_anthropic",
+    model_b: "claude-sonnet-4-6",
+    provider_b: Provider::Anthropic,
+    binding_b: "default_anthropic",
+};
+
+/// The binding the test configuration writes as the ChatGPT backend: its
+/// Responses wire carries one leading System row, the session's prompt, and
+/// so no operator-instruction entry. Every other binding of these rows is a
+/// Copilot backend. A ChatGPT sign-in is no credential a binding of another
+/// provider can share, so a route onto this binding has no credential
+/// account: a model-only swap then names no binding, and its target is
+/// judged by the weakest binding its provider may be served through in the
+/// realm, which is this one.
+const CHATGPT_BINDING: &str = "chatgpt_openai";
+
+/// A=Anthropic `claude-opus-5`, a model that lowers operator-instruction
+/// entries anywhere, and B=OpenAI `gpt-5.5` served through the ChatGPT
+/// backend, the realm's one OpenAI binding, whose wire takes no entry. The
+/// bindings share no credential account.
+const TO_ONE_SYSTEM_ROW_WIRE_ROUTE: RouteSpec = RouteSpec {
+    model_a: "claude-opus-5",
+    provider_a: Provider::Anthropic,
+    binding_a: "default_anthropic",
+    model_b: MODEL_B,
+    provider_b: Provider::OpenAI,
+    binding_b: CHATGPT_BINDING,
 };
 
 const AUTHORING_TEXT: &str = "staged the swap";
@@ -462,19 +510,26 @@ fn ab_test_config(route: RouteSpec, availability: &ModelAvailability) -> Config 
     let account =
         meerkat_core::CredentialAccountId::parse("shared_test_account").expect("valid account");
     let mut section = RealmConfigSection::default();
-    for provider in route.providers().into_iter().filter(|provider| {
-        *provider == route.provider_b || availability.is_available(route.model_a)
-    }) {
+    for provider in route
+        .providers()
+        .into_iter()
+        .filter(|provider| route.serves(*provider, availability))
+    {
         let binding = if provider == route.provider_a {
             route.binding_a
         } else {
             route.binding_b
         };
+        let (backend_kind, auth_method) = if binding == CHATGPT_BINDING {
+            ("chatgpt_backend", "managed_chatgpt_oauth")
+        } else {
+            ("copilot", "github_copilot_oauth")
+        };
         section.backend.insert(
             binding.to_string(),
             meerkat_core::BackendProfileConfig {
                 provider: provider.as_str().to_string(),
-                backend_kind: "copilot".to_string(),
+                backend_kind: backend_kind.to_string(),
                 base_url: None,
                 options: serde_json::Value::Null,
                 server: None,
@@ -484,7 +539,7 @@ fn ab_test_config(route: RouteSpec, availability: &ModelAvailability) -> Config 
             binding.to_string(),
             meerkat_core::AuthProfileConfig {
                 provider: provider.as_str().to_string(),
-                auth_method: "github_copilot_oauth".to_string(),
+                auth_method: auth_method.to_string(),
                 source: meerkat_core::CredentialSourceSpec::ManagedStore,
                 constraints: Default::default(),
                 metadata_defaults: Default::default(),
@@ -495,7 +550,7 @@ fn ab_test_config(route: RouteSpec, availability: &ModelAvailability) -> Config 
             meerkat_core::ProviderBindingConfig {
                 backend_profile: binding.to_string(),
                 auth_profile: binding.to_string(),
-                credential_account: Some(account.clone()),
+                credential_account: (route.binding_b != CHATGPT_BINDING).then(|| account.clone()),
                 default_model: None,
                 policy: Default::default(),
                 provider_default: false,
@@ -957,9 +1012,11 @@ async fn try_attach_harness(
     // shared through `requested_calls`, so a cross-provider swap still reads
     // as one ordered sequence of provider calls.
     let mut registry = ProviderRuntimeRegistry::empty();
-    for provider in route.providers().into_iter().filter(|provider| {
-        *provider == route.provider_b || environment.availability.is_available(route.model_a)
-    }) {
+    for provider in route
+        .providers()
+        .into_iter()
+        .filter(|provider| route.serves(*provider, environment.availability.as_ref()))
+    {
         let scripted = Arc::new(DeferredBrainSwapClient {
             requested_calls: Arc::clone(&environment.requested_calls),
             provider,
@@ -987,7 +1044,7 @@ async fn try_attach_harness(
             auth_binding: Some(expected_auth_binding_named(route.binding_b)),
         }];
     }
-    if environment.availability.is_available(route.model_a) {
+    if route.serves(route.provider_a, environment.availability.as_ref()) {
         meerkat_core::resolve_explicit_auth_binding_target(
             &config,
             &expected_auth_binding_named(route.binding_a),
@@ -1832,20 +1889,20 @@ fn conversed_seed(route: RouteSpec) -> Session {
     session
 }
 
-/// A seeded harness on [`TO_LEADING_PREFIX_ONLY_ROUTE`] whose authoring run
-/// applied an operator-instruction entry after the conversation and
-/// committed a `brain_swap` request for B.
-async fn harness_with_an_entry_b_cannot_carry(
+/// A seeded harness on `route`. Its authoring run applied an
+/// operator-instruction entry after the conversation and committed a
+/// `brain_swap` request for B. The rows as the transcript holds them are
+/// not what a B that lowers System rows only inside the leading System
+/// prefix can be asked with; the session's request places its own entry for
+/// such a B. A B whose wire carries one leading System row takes no entry
+/// at all.
+async fn harness_with_a_late_entry_and_a_swap_request(
     profile: PersistenceProfile,
+    route: RouteSpec,
 ) -> (AbHarness, CommittedHandoffProof) {
     use meerkat_core::service::SessionServiceInstructionExt as _;
 
-    let harness = build_harness_seeded(
-        profile,
-        TO_LEADING_PREFIX_ONLY_ROUTE,
-        conversed_seed(TO_LEADING_PREFIX_ONLY_ROUTE),
-    )
-    .await;
+    let harness = build_harness_seeded(profile, route, conversed_seed(route)).await;
     Arc::clone(&harness.service)
         .set_session_instruction(
             &harness.session_id,
@@ -1865,30 +1922,114 @@ async fn harness_with_an_entry_b_cannot_carry(
         .await
         .expect("the session records the operator instruction");
     let proof = commit_brain_swap_request(&harness).await;
+    let session = harness.authoritative_session().await;
+    assert_eq!(
+        meerkat_core::InstructionEntryPlacement::of_request(
+            &session
+                .messages_for_model_boundary()
+                .expect("the transcript projects")
+        )
+        .refusal(meerkat_core::InstructionLowering::LeadingPrefixOnly),
+        Some(meerkat_core::InstructionEntryLoweringRefusal::AfterConversationRow),
+        "the authoring run applied its entry after the conversation"
+    );
+    assert_eq!(
+        session
+            .own_operator_instruction_entry_placement()
+            .expect("the transcript projects")
+            .refusal(meerkat_core::InstructionLowering::LeadingPrefixOnly),
+        None,
+        "the session's request places its own entry inside the leading System prefix"
+    );
+    (harness, proof)
+}
+
+/// A committed `brain_swap` onto a model that lowers System rows only inside
+/// the leading System prefix, from a session whose own operator-instruction
+/// entry stands after the conversation, is realized when the next input
+/// arrives: the session's request places the entry inside B's leading
+/// prefix, so B carries it, a client is built for B and B serves that
+/// input. (Such a swap was denied while the entry had to be carried where
+/// it stood.)
+async fn a_swap_onto_a_prefix_only_model_with_a_late_entry_is_realized_and_b_serves_the_next_input(
+    profile: PersistenceProfile,
+) {
+    let (harness, proof) =
+        harness_with_a_late_entry_and_a_swap_request(profile, TO_LEADING_PREFIX_ONLY_ROUTE).await;
+    let route = proof.route;
+    harness.clear_client_build_models();
+
+    let next = harness.run_prompt("continue after the swap").await;
+    assert!(
+        matches!(next, CompletionOutcome::Completed(ref run) if run.text == NEXT_TURN_TEXT),
+        "the next input must complete on B: {next:?}"
+    );
+    assert_eq!(
+        harness.requested_calls().last(),
+        Some(&ProviderCall {
+            provider: route.provider_b,
+            model: route.model_b.to_string(),
+        }),
+        "B serves the next input"
+    );
+    assert!(
+        harness
+            .client_build_models()
+            .iter()
+            .any(|model| model == route.model_b),
+        "a client is built for a target that carries the entry: {:?}",
+        harness.client_build_models()
+    );
+    assert_eq!(
+        harness.realized_terminal_count().await,
+        1,
+        "the request is realized once"
+    );
+    assert_exact_realized_terminal(&harness.durable_routing_records().await, &proof);
+    assert_eq!(harness.live_identity().await.model, route.model_b);
+    assert_eq!(harness.durable_identity().await.model, route.model_b);
+}
+
+#[tokio::test]
+async fn whole_blob_a_swap_onto_a_prefix_only_model_with_a_late_entry_is_realized() {
+    a_swap_onto_a_prefix_only_model_with_a_late_entry_is_realized_and_b_serves_the_next_input(
+        PersistenceProfile::WholeBlob,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn head_canonical_a_swap_onto_a_prefix_only_model_with_a_late_entry_is_realized() {
+    a_swap_onto_a_prefix_only_model_with_a_late_entry_is_realized_and_b_serves_the_next_input(
+        PersistenceProfile::HeadCanonical,
+    )
+    .await;
+}
+
+/// A committed `brain_swap` onto a target that cannot carry the session's own
+/// operator-instruction entry is denied by the routing machine, typed, when
+/// the next input realizes it: no client is built for B, the request ends
+/// Denied, and the next input runs on A. A hold would leave that input, and
+/// every later one, unattempted for good. B is an OpenAI model served
+/// through the ChatGPT backend, whose wire carries one leading System row
+/// and takes no entry; a model that lowers System rows only inside the
+/// leading prefix is not such a target any more (the rows above).
+async fn a_swap_the_target_cannot_carry_is_denied_and_the_next_input_runs_on_a(
+    profile: PersistenceProfile,
+) {
+    let (harness, proof) =
+        harness_with_a_late_entry_and_a_swap_request(profile, TO_ONE_SYSTEM_ROW_WIRE_ROUTE).await;
+    let route = proof.route;
     assert_eq!(
         harness
             .authoritative_session()
             .await
             .own_operator_instruction_entry_placement()
             .expect("the transcript projects")
-            .refusal(meerkat_core::InstructionLowering::LeadingPrefixOnly),
+            .refusal(meerkat_core::InstructionLowering::Unavailable),
         Some(meerkat_core::InstructionEntryLoweringRefusal::AfterConversationRow),
-        "the authoring run applied its entry after the conversation"
+        "a wire that carries one leading System row takes no entry of the session"
     );
-    (harness, proof)
-}
-
-/// A committed `brain_swap` onto a model that cannot carry the session's own
-/// operator-instruction entry where it stands (after the conversation) is
-/// denied by the routing machine, typed, when the next input realizes it:
-/// no client is built for B, the request ends Denied, and the next input
-/// runs on A. A hold would leave that input, and every later one,
-/// unattempted for good.
-async fn a_swap_the_target_cannot_carry_is_denied_and_the_next_input_runs_on_a(
-    profile: PersistenceProfile,
-) {
-    let (harness, proof) = harness_with_an_entry_b_cannot_carry(profile).await;
-    let route = proof.route;
     harness.clear_client_build_models();
 
     let next = harness.run_prompt("continue on the current model").await;
@@ -1946,15 +2087,20 @@ async fn head_canonical_a_swap_the_target_cannot_carry_is_denied_and_the_next_in
     .await;
 }
 
-/// A restart that cannot build A bootstraps a client for the committed
-/// request's target only when that target can carry the session's own
-/// operator-instruction entries where they stand. B cannot, so no client is
-/// built for it and the restart fails on A's own error: a bootstrap client
-/// for B would serve a transcript its wire refuses.
-async fn a_restart_bootstraps_no_client_for_a_target_that_cannot_carry_own_entries(
+/// A restart that cannot build A's client bootstraps a client for the
+/// committed request's target when that target can carry the session's own
+/// operator-instruction entries. A model that lowers System rows only
+/// inside the leading System prefix can: the session's request places them
+/// there. So the restart bootstraps from B. A and B share one binding here,
+/// so A's binding still resolves and the restart fails on A's client alone.
+async fn a_restart_bootstraps_a_client_for_a_prefix_only_target_with_a_late_entry(
     profile: PersistenceProfile,
 ) {
-    let (harness, proof) = harness_with_an_entry_b_cannot_carry(profile).await;
+    let (harness, proof) = harness_with_a_late_entry_and_a_swap_request(
+        profile,
+        SAME_PROVIDER_TO_LEADING_PREFIX_ONLY_ROUTE,
+    )
+    .await;
     let route = proof.route;
     harness.set_available(route.model_a, false);
     harness.clear_client_build_models();
@@ -1971,12 +2117,88 @@ async fn a_restart_bootstraps_no_client_for_a_target_that_cannot_carry_own_entri
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone();
     assert!(
+        built.iter().any(|model| model == route.model_b),
+        "a bootstrap client is built for a target that carries the entries: {built:?}"
+    );
+    assert!(
+        restarted.is_ok(),
+        "with A unavailable the restart bootstraps from B: {:?}",
+        restarted.as_ref().err()
+    );
+}
+
+#[tokio::test]
+async fn whole_blob_a_restart_bootstraps_a_client_for_a_prefix_only_target_with_a_late_entry() {
+    a_restart_bootstraps_a_client_for_a_prefix_only_target_with_a_late_entry(
+        PersistenceProfile::WholeBlob,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn head_canonical_a_restart_bootstraps_a_client_for_a_prefix_only_target_with_a_late_entry() {
+    a_restart_bootstraps_a_client_for_a_prefix_only_target_with_a_late_entry(
+        PersistenceProfile::HeadCanonical,
+    )
+    .await;
+}
+
+/// A restart that cannot build A's client builds no client for a committed
+/// request's target that cannot carry the session's own operator-instruction
+/// entries, and fails with A's own client error. B is an OpenAI model served
+/// through the ChatGPT backend, whose wire carries one leading System row
+/// and takes no entry; A is an Anthropic model whose binding is still
+/// configured, so the restart fails on A's client alone.
+///
+/// Two judgments of the resumed build stand between such a target and a
+/// bootstrap client, and this row holds while either does. A bootstrap
+/// client is built only for a target of A's own provider (the temporary
+/// client runs under A's identity until the request is realized), and only
+/// for a target that carries the session's entries. Only a binding refuses
+/// a session's own entries now (the rows above), and a target of A's
+/// provider keeps A's binding, so on a route within one provider the second
+/// judgment refuses nothing the build did not refuse for A already. On this
+/// route the first decides, and the second stands behind it: without the
+/// first alone the row still holds, without both a client is built for B.
+async fn a_restart_bootstraps_no_client_for_a_target_that_cannot_carry_own_entries(
+    profile: PersistenceProfile,
+) {
+    let (harness, proof) =
+        harness_with_a_late_entry_and_a_swap_request(profile, TO_ONE_SYSTEM_ROW_WIRE_ROUTE).await;
+    let route = proof.route;
+    harness.set_available(route.model_a, false);
+    harness.clear_client_build_models();
+    let (environment, session_id) = harness.detach().await;
+
+    let restarted = try_attach_harness(
+        Arc::clone(&environment),
+        HarnessSession::Retained(session_id),
+    )
+    .await;
+    let built = environment
+        .client_build_models
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    assert!(
+        built.iter().any(|model| model == route.model_a),
+        "the restart reaches A's client, which is unavailable: {built:?}"
+    );
+    assert!(
         !built.iter().any(|model| model == route.model_b),
         "no bootstrap client is built for a target that cannot carry the entries: {built:?}"
     );
+    let error = match restarted {
+        Ok(_) => panic!("with A unavailable and no bootstrap target the restart fails"),
+        Err(error) => error,
+    };
     assert!(
-        restarted.is_err(),
-        "with A unavailable and no bootstrap the restart fails on A's error"
+        !error.contains("cannot represent the operator-instruction entries"),
+        "the restart fails on A's client, not on a refusal of A's own entries: {error}"
+    );
+    assert!(
+        error.contains(route.model_a),
+        "the restart fails with A's client error: {error}"
     );
 }
 

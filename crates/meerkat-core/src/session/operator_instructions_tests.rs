@@ -928,3 +928,192 @@ fn update_system_prompt_refuses_an_entry_target_as_an_operator_instruction_entry
         "a refusal changes nothing"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The model request of a model that carries System rows only inside the
+// leading System prefix: the session's own entries are placed there.
+// ---------------------------------------------------------------------------
+
+fn assistant_row(text: &str) -> Message {
+    Message::BlockAssistant(crate::BlockAssistantMessage::new(
+        vec![crate::AssistantBlock::Text {
+            text: text.to_string(),
+            meta: None,
+        }],
+        crate::StopReason::EndTurn,
+    ))
+}
+
+/// A prompt, an exchange, an own entry, an exchange, a second own entry and
+/// a pending question.
+fn session_with_two_late_entries() -> Session {
+    let mut session = Session::new();
+    session.append_system_message("You are a careful assistant.");
+    session.push(Message::User(UserMessage::text("hello")));
+    session.push(assistant_row("hi"));
+    session
+        .append_operator_instruction_activation_for_test("app.example", "tone", 1, "Formal.")
+        .unwrap();
+    session.push(Message::User(UserMessage::text("more")));
+    session.push(assistant_row("sure"));
+    session
+        .append_operator_instruction_activation_for_test("app.example", "units", 1, "Metric.")
+        .unwrap();
+    session.push(Message::User(UserMessage::text("now")));
+    session
+}
+
+/// One word per row: what kind of row stands where.
+fn row_kinds(messages: &[Message]) -> Vec<String> {
+    messages
+        .iter()
+        .map(|message| match message {
+            Message::System(system) => match system.instruction_entry.as_ref() {
+                Some(identity) => format!("entry{}", identity.entry_sequence()),
+                None => "system".to_string(),
+            },
+            Message::User(user) => format!("user:{}", user.text_content()),
+            Message::BlockAssistant(_) => "assistant".to_string(),
+            _ => "other".to_string(),
+        })
+        .collect()
+}
+
+#[test]
+fn a_prefix_only_request_carries_the_sessions_own_entries_inside_the_leading_prefix() {
+    let session = session_with_two_late_entries();
+    let stored = session.messages().to_vec();
+    assert_eq!(
+        row_kinds(&stored),
+        [
+            "system",
+            "user:hello",
+            "assistant",
+            "entry1",
+            "user:more",
+            "assistant",
+            "entry2",
+            "user:now"
+        ]
+    );
+
+    let request = session
+        .messages_for_model_request(crate::InstructionLowering::LeadingPrefixOnly)
+        .unwrap();
+    assert_eq!(
+        row_kinds(&request),
+        [
+            "system",
+            "entry1",
+            "entry2",
+            "user:hello",
+            "assistant",
+            "user:more",
+            "assistant",
+            "user:now"
+        ],
+        "the own entries follow the leading System rows, in their order, and the conversation \
+         rows keep theirs"
+    );
+    // Every row is carried, with its stored bytes.
+    let mut carried = request;
+    let mut held = session.messages_for_model_boundary().unwrap();
+    let key = |message: &Message| serde_json::to_string(message).unwrap();
+    carried.sort_by_key(key);
+    held.sort_by_key(key);
+    assert_eq!(carried, held, "no row is added, dropped or changed");
+    // The transcript itself is as it was.
+    assert_eq!(session.messages(), stored.as_slice());
+
+    // A model that carries System rows anywhere is asked with the rows where
+    // they stand.
+    assert_eq!(
+        session
+            .messages_for_model_request(crate::InstructionLowering::MidConversation)
+            .unwrap(),
+        session.messages_for_model_boundary().unwrap()
+    );
+    // A wire that carries one leading System row takes no entry: nothing is
+    // placed for it.
+    assert_eq!(
+        session
+            .messages_for_model_request(crate::InstructionLowering::Unavailable)
+            .unwrap(),
+        session.messages_for_model_boundary().unwrap()
+    );
+}
+
+/// What a release that does not place answers for such a session. It judges
+/// the rows as the transcript holds them, which is the judgment a request
+/// keeps here ([`crate::InstructionEntryPlacement::of_request`]), and its
+/// build refuses to resume the session with these words before any request
+/// is built. The upgrade notes quote them, so they are pinned.
+#[test]
+fn the_unplaced_rows_of_such_a_session_are_refused_with_the_words_the_upgrade_notes_quote() {
+    let session = session_with_two_late_entries();
+    let unplaced = session.messages_for_model_boundary().unwrap();
+    let refusal = crate::InstructionEntryPlacement::of_request(&unplaced)
+        .refusal(crate::InstructionLowering::LeadingPrefixOnly);
+    assert_eq!(
+        refusal,
+        Some(crate::InstructionEntryLoweringRefusal::AfterConversationRow)
+    );
+    assert_eq!(
+        refusal.unwrap().to_string(),
+        "an entry row stands after a conversation row, and the target carries System rows \
+         only before the first one"
+    );
+    // The session's own judgment, which knows its request places the rows,
+    // refuses nothing.
+    assert_eq!(
+        session
+            .own_operator_instruction_entry_placement()
+            .unwrap()
+            .refusal(crate::InstructionLowering::LeadingPrefixOnly),
+        None
+    );
+}
+
+/// A row a fork copied is history: it is not placed. Where it stands after a
+/// conversation row the request of such a model leaves it out, as before,
+/// and the child's own entry is placed.
+#[test]
+fn a_prefix_only_request_places_own_entries_and_leaves_copied_late_rows_out() {
+    let parent = session_with_two_late_entries();
+    let mut child = parent.fork();
+    child.push(assistant_row("in the fork"));
+    child
+        .append_operator_instruction_activation_for_test("app.example", "tone", 1, "Casual.")
+        .unwrap();
+    child.push(Message::User(UserMessage::text("child question")));
+
+    let request = child
+        .messages_for_model_request(crate::InstructionLowering::LeadingPrefixOnly)
+        .unwrap();
+    assert_eq!(
+        row_kinds(&request),
+        [
+            "system",
+            "entry1",
+            "user:hello",
+            "assistant",
+            "user:more",
+            "assistant",
+            "user:now",
+            "assistant",
+            "user:child question"
+        ],
+        "only the child's own entry is carried, inside the leading prefix"
+    );
+    let entries = entry_rows(&request);
+    assert_eq!(entries.len(), 1);
+    assert!(entries[0].content.contains("Casual."));
+    assert_eq!(
+        entries[0]
+            .instruction_entry
+            .as_ref()
+            .unwrap()
+            .origin_session_id(),
+        child.id()
+    );
+}

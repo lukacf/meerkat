@@ -367,7 +367,6 @@ pub enum InstructionWriteRefusal {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum InstructionDeferReason {
     #[default]
-    LeadingPrefixOnly,
     LoweringUnavailable,
 }
 
@@ -779,7 +778,6 @@ pub enum SessionDocumentInput {
         session_id: SessionDocumentKey,
         run_start: InstructionRunStart,
         lowering: InstructionLowering,
-        transcript_is_system_prefix: bool,
     },
     AuthorizeInstructionFold {
         session_id: SessionDocumentKey,
@@ -1257,7 +1255,6 @@ enum SessionDocumentTransition {
     ReleaseInstructionTargetOwnedBySession,
     ResolveRunStartInstructionsApply,
     ResolveRunStartInstructionsNoChange,
-    ResolveRunStartInstructionsDeferredLeadingPrefix,
     ResolveRunStartInstructionsDeferredUnavailable,
     AuthorizeInstructionFoldAtRunStart,
     AuthorizeInstructionFoldEffective,
@@ -7797,7 +7794,6 @@ impl SessionDocumentMachineAuthority {
                 session_id,
                 run_start,
                 lowering,
-                transcript_is_system_prefix,
             } => {
                 let mut matches = Vec::new();
                 if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
@@ -7834,7 +7830,7 @@ impl SessionDocumentMachineAuthority {
                             self.session_instruction_effective_digest_value(&session_id)?,
                         )))
                     && (run_start == InstructionRunStart::FreshRun)
-                    && (instruction_entry_lowers(lowering, transcript_is_system_prefix))
+                    && (instruction_entry_lowers(lowering))
                 {
                     matches.push(SessionDocumentTransition::ResolveRunStartInstructionsApply);
                 }
@@ -7883,48 +7879,6 @@ impl SessionDocumentMachineAuthority {
                                 ) == false))))
                 {
                     matches.push(SessionDocumentTransition::ResolveRunStartInstructionsNoChange);
-                }
-                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && (((!(run_start == InstructionRunStart::FreshRun))
-                        || ((((((self
-                            .state
-                            .session_instruction_target_revision
-                            .contains_key(&session_id))
-                            && (self
-                                .state
-                                .session_instruction_target_effect
-                                .contains_key(&session_id)))
-                            && (self
-                                .state
-                                .session_instruction_target_digest
-                                .contains_key(&session_id)))
-                            && (self
-                                .state
-                                .session_instruction_effective_revision
-                                .contains_key(&session_id)))
-                            && (self
-                                .state
-                                .session_instruction_effective_effect
-                                .contains_key(&session_id)))
-                            && (self
-                                .state
-                                .session_instruction_effective_digest
-                                .contains_key(&session_id))))
-                        && ((run_start == InstructionRunStart::FreshRun)
-                            && (instruction_change_pending(
-                                self.session_instruction_target_revision_value(&session_id)?,
-                                self.session_instruction_target_effect_value(&session_id)?,
-                                self.session_instruction_target_digest_value(&session_id)?,
-                                self.session_instruction_effective_revision_value(&session_id)?,
-                                self.session_instruction_effective_effect_value(&session_id)?,
-                                self.session_instruction_effective_digest_value(&session_id)?,
-                            ))
-                            && (lowering == InstructionLowering::LeadingPrefixOnly)
-                            && (transcript_is_system_prefix == false)))
-                {
-                    matches.push(
-                        SessionDocumentTransition::ResolveRunStartInstructionsDeferredLeadingPrefix,
-                    );
                 }
                 if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
                     && (((!(run_start == InstructionRunStart::FreshRun))
@@ -8017,14 +7971,6 @@ impl SessionDocumentMachineAuthority {
                     SessionDocumentTransition::ResolveRunStartInstructionsNoChange => {
                         self.state.lifecycle_phase = SessionDocumentPhase::Ready;
                         Ok(vec![SessionDocumentEffect::InstructionEntryNotNeeded])
-                    }
-                    SessionDocumentTransition::ResolveRunStartInstructionsDeferredLeadingPrefix => {
-                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
-                        Ok(vec![
-                            SessionDocumentEffect::InstructionApplicationDeferred {
-                                reason: InstructionDeferReason::LeadingPrefixOnly,
-                            },
-                        ])
                     }
                     SessionDocumentTransition::ResolveRunStartInstructionsDeferredUnavailable => {
                         self.state.lifecycle_phase = SessionDocumentPhase::Ready;
@@ -9162,13 +9108,11 @@ impl SessionDocumentMachineAuthority {
         session_id: SessionDocumentKey,
         run_start: InstructionRunStart,
         lowering: InstructionLowering,
-        transcript_is_system_prefix: bool,
     ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
         self.apply_input(SessionDocumentInput::ResolveRunStartInstructions {
             session_id,
             run_start,
             lowering,
-            transcript_is_system_prefix,
         })
     }
 
@@ -9420,12 +9364,8 @@ fn instruction_change_pending(
     }))
 }
 
-fn instruction_entry_lowers(
-    lowering: InstructionLowering,
-    transcript_is_system_prefix: bool,
-) -> bool {
-    (lowering == InstructionLowering::MidConversation)
-        || ((lowering == InstructionLowering::LeadingPrefixOnly) && (transcript_is_system_prefix))
+fn instruction_entry_lowers(lowering: InstructionLowering) -> bool {
+    lowering != InstructionLowering::Unavailable
 }
 
 fn activation_body_maps_consistent(

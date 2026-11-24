@@ -864,9 +864,18 @@ impl std::fmt::Display for InstructionEntryLoweringRefusal {
     }
 }
 
-/// Where operator-instruction entry rows stand in a model request: what a
-/// model change must carry. [`Self::refusal`] says whether a target that
-/// lowers entries as an [`InstructionLowering`] carries them there.
+/// Where operator-instruction entry rows stand: what a model change must
+/// carry. [`Self::refusal`] says whether a target that lowers entries as an
+/// [`InstructionLowering`] carries them.
+///
+/// There are two judgments. A REQUEST's placement ([`Self::of_request`])
+/// judges the rows a model is asked with, as they stand: a per-request
+/// model fallback hands the same rows to its target. A SESSION's placement
+/// ([`Session::own_operator_instruction_entry_placement`]) judges the rows
+/// the session wrote, whose request the session builds anew for the target
+/// ([`Session::messages_for_model_request`]): on a target that lowers
+/// System rows only inside the leading System prefix that request places
+/// them there, so an entry after a conversation row is carried.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct InstructionEntryPlacement {
     /// The entry rows judged.
@@ -876,11 +885,15 @@ pub struct InstructionEntryPlacement {
     /// Whether a judged entry row stands after a conversation row (a row
     /// that is not a System row).
     after_conversation_row: bool,
+    /// Whether the rows are a session's own, which its model request places
+    /// inside the leading System prefix where the target lowers System rows
+    /// only there.
+    placed_by_the_session: bool,
 }
 
 impl InstructionEntryPlacement {
     /// The placement of every operator-instruction entry row in `request`,
-    /// the rows a model is asked with.
+    /// the rows a model is asked with, as they stand.
     #[must_use]
     pub fn of_request(request: &[Message]) -> Self {
         Self::of(request, |_| true)
@@ -911,6 +924,15 @@ impl InstructionEntryPlacement {
         placement
     }
 
+    /// This placement as a session's own: its model request places the rows
+    /// ([`Session::messages_for_model_request`]).
+    fn placed_by_the_session(self) -> Self {
+        Self {
+            placed_by_the_session: true,
+            ..self
+        }
+    }
+
     /// Whether the placement holds no entry row: every target carries it.
     #[must_use]
     pub fn is_empty(self) -> bool {
@@ -929,10 +951,13 @@ impl InstructionEntryPlacement {
 
     /// Why a target that lowers operator-instruction entries as `lowering`
     /// cannot carry entry rows placed so, or `None` when it can. A target
-    /// that lowers them anywhere carries every placement; one that lowers
-    /// them only inside the leading System prefix cannot carry an entry
-    /// after a conversation row; a wire that carries one leading System row
-    /// cannot carry that either, nor an entry beside another System row.
+    /// that lowers them anywhere carries every placement. One that lowers
+    /// them only inside the leading System prefix carries a session's own
+    /// rows, which the session's request places there, and cannot carry a
+    /// request's entry after a conversation row as it stands. A wire that
+    /// carries one leading System row takes no placed row: it cannot carry
+    /// an entry after a conversation row, nor one beside another System
+    /// row.
     #[must_use]
     pub fn refusal(self, lowering: InstructionLowering) -> Option<InstructionEntryLoweringRefusal> {
         if self.is_empty() {
@@ -940,8 +965,8 @@ impl InstructionEntryPlacement {
         }
         match lowering {
             InstructionLowering::MidConversation => None,
-            InstructionLowering::LeadingPrefixOnly => self
-                .after_conversation_row
+            InstructionLowering::LeadingPrefixOnly => (self.after_conversation_row
+                && !self.placed_by_the_session)
                 .then_some(InstructionEntryLoweringRefusal::AfterConversationRow),
             InstructionLowering::Unavailable => {
                 if self.after_conversation_row {
@@ -1549,26 +1574,40 @@ impl Session {
 
     /// The model boundary projection ([`Self::messages_for_model_boundary`])
     /// for a model that carries operator-instruction rows as `lowering`
-    /// says. A row a fork copied is history the session never applies; where
-    /// the model cannot lower it (after the leading System prefix of a model
-    /// that lowers System rows only there, anywhere on a wire that carries
-    /// no System row besides its prompt) the request leaves it out, and the
-    /// transcript keeps it. The session's own rows are always lowerable: a
-    /// run start and a compaction fold place them for the lowering in force.
+    /// says. It is the one place that decides where an entry row stands in
+    /// a model request; the transcript itself is never rewritten for it.
+    ///
+    /// - A model that lowers System rows anywhere is asked with every row
+    ///   where it stands.
+    /// - A model that lowers System rows only inside the leading System
+    ///   prefix is asked with the session's own entry rows placed at the end
+    ///   of that prefix, in their order: a run start appends its entry at
+    ///   the transcript tail on every model, and this is where such a model
+    ///   takes it. A row a fork copied is history the session never
+    ///   applies: where it stands after a conversation row the request
+    ///   leaves it out, and the transcript keeps it.
+    /// - A wire that carries no System row besides its prompt takes no
+    ///   entry: nothing is placed for it, and the request leaves a copied
+    ///   row out wherever it stands.
     pub fn messages_for_model_request(
         &self,
         lowering: InstructionLowering,
     ) -> Result<Vec<Message>, ModelBoundaryProjectionError> {
         let mut messages = self.messages_for_model_boundary()?;
         retain_lowerable_inherited_entry_rows(self.id(), &mut messages, lowering);
+        if lowering == InstructionLowering::LeadingPrefixOnly {
+            place_own_entry_rows_in_leading_prefix(self.id(), &mut messages);
+        }
         Ok(messages)
     }
 
     /// Where the operator-instruction entry rows this session wrote itself
-    /// stand in its model requests ([`Self::messages_for_model_boundary`]).
-    /// Every request carries them there, whatever the lowering
-    /// ([`Self::messages_for_model_request`] leaves out only rows a fork
-    /// copied), so a model change must carry them there
+    /// stand in its transcript ([`Self::messages_for_model_boundary`]), as a
+    /// model change judges them: its request
+    /// ([`Self::messages_for_model_request`]) carries them where they stand
+    /// on a model that lowers System rows anywhere, and inside the leading
+    /// System prefix on one that lowers them only there, so the judgment
+    /// knows the session places them
     /// ([`InstructionEntryPlacement::refusal`]). A copied row is neither the
     /// session's own nor another System row: a request on a wire that
     /// carries no System row besides its prompt leaves it out. A session
@@ -1587,7 +1626,8 @@ impl Session {
         let projection = self.messages_for_model_boundary()?;
         Ok(InstructionEntryPlacement::of(&projection, |identity| {
             identity.origin_session_id == self.id
-        }))
+        })
+        .placed_by_the_session())
     }
 
     /// A fork child that copied operator-instruction entry rows, or an
@@ -1770,6 +1810,35 @@ fn retain_lowerable_inherited_entry_rows(
         }
         InstructionLowering::Unavailable => messages.retain(|message| !copied(message)),
     }
+}
+
+/// Place the operator-instruction rows `session_id` wrote itself that stand
+/// after a conversation row at the end of the leading System prefix of a
+/// model request, in their order
+/// ([`Session::messages_for_model_request`]). Every other row keeps its
+/// place and every row its bytes: the request holds the rows it held, and
+/// the transcript is not touched.
+fn place_own_entry_rows_in_leading_prefix(session_id: &SessionId, messages: &mut Vec<Message>) {
+    let own = |message: &Message| {
+        matches!(
+            message,
+            Message::System(system)
+                if system
+                    .instruction_entry
+                    .as_ref()
+                    .is_some_and(|identity| &identity.origin_session_id == session_id)
+        )
+    };
+    let leading = messages
+        .iter()
+        .position(|message| !matches!(message, Message::System(_)))
+        .unwrap_or(messages.len());
+    if !messages.iter().skip(leading).any(own) {
+        return;
+    }
+    let (placed, kept): (Vec<Message>, Vec<Message>) = messages.drain(leading..).partition(own);
+    messages.extend(placed);
+    messages.extend(kept);
 }
 
 #[cfg(any(test, feature = "test-support"))]

@@ -2353,9 +2353,11 @@ mod tests {
     /// answers with a typed `Destroyed`; none panics.
     /// A session staged before its first build has no live actor; its staged
     /// build carries the session it resumes, so a model change is judged on
-    /// that session's own operator-instruction entries. A target that cannot
-    /// carry the entry where it stands (after the conversation) is refused at
-    /// the plan step, typed, rather than by the build that would resume it.
+    /// that session's own operator-instruction entries. A target whose wire
+    /// carries no entry is refused at the plan step, typed, rather than by
+    /// the build that would resume it; a target that lowers System rows only
+    /// inside the leading prefix carries the entry, which the session's
+    /// request places there.
     #[tokio::test]
     async fn a_staged_session_is_judged_on_the_session_its_build_resumes() {
         let service: Arc<dyn SessionRuntimeLlmReconfigureService> =
@@ -2403,6 +2405,21 @@ mod tests {
             .expect("stage the session");
         let temp = tempfile::tempdir().expect("tempdir");
         let mut config = Config::default();
+        let mut chatgpt_realm =
+            meerkat_core::RealmConfigSection::from_inline_api_keys(&[("openai", "test-key")]);
+        chatgpt_realm
+            .backend
+            .get_mut("default_openai")
+            .expect("OpenAI backend")
+            .backend_kind = "chatgpt_backend".to_string();
+        chatgpt_realm
+            .auth
+            .get_mut("default_openai")
+            .expect("OpenAI auth")
+            .auth_method = "managed_chatgpt_oauth".to_string();
+        config
+            .realm
+            .insert("chatgpt_realm".to_string(), chatgpt_realm);
         config.models.custom.insert(
             "custom-prefix-model".to_string(),
             meerkat_core::config::CustomModelConfig {
@@ -2435,10 +2452,18 @@ mod tests {
             realm_inheritance: Arc::new(std::sync::RwLock::new(None)),
         };
 
+        // A wire that carries one leading System row takes no entry: the
+        // target is refused on the session the staged build resumes.
+        let chatgpt_binding = AuthBindingRef {
+            realm: RealmId::parse("chatgpt_realm").expect("realm"),
+            binding: meerkat_core::BindingId::parse("default_openai").expect("binding"),
+            profile: None,
+            origin: meerkat_core::BindingOrigin::Configured,
+        };
         let error = host
             .resolve_target_session_llm_identity_for_session(
                 &session_id,
-                &reconfigure_request(Some("custom-prefix-model"), None, None),
+                &reconfigure_request(None, None, Some(TurnMetadataOverride::Set(chatgpt_binding))),
                 &current,
             )
             .await
@@ -2451,6 +2476,18 @@ mod tests {
             ),
             "unexpected refusal: {error:?}"
         );
+
+        // A model that lowers System rows only inside the leading prefix
+        // carries the entry: the session's request places it there.
+        let target = host
+            .resolve_target_session_llm_identity_for_session(
+                &session_id,
+                &reconfigure_request(Some("custom-prefix-model"), None, None),
+                &current,
+            )
+            .await
+            .expect("a leading-prefix-only target carries the staged session's own entry");
+        assert_eq!(target.target_identity.model, "custom-prefix-model");
     }
 
     #[tokio::test]

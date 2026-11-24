@@ -601,12 +601,15 @@ An outcome is `IdentityDone` (`operation_id`, `agents`),
 is a normal answer. The SDK does not poll: read `operation` when you want the
 state. Each `AgentOutcome` carries the agent's `spec_digest` afterwards, a
 create's `seat` (`seated` or `owed`) and an update's `instructions`
-(`InstructionOutcome`: `applies_at_next_run`, `applies_after_compaction`,
+(`InstructionOutcome`: `applies_at_next_run`,
 `applies_at_next_session` with a `reason`, or `unchanged`).
-`applies_after_compaction` is a change that waits: the agent's model takes a
-system instruction only ahead of the conversation, and a short conversation
-may never reach the compaction that brings it into effect. `rt.reset(name)`
-does, and gives the agent's conversation up. `rt.instruction_status` is the
+`applies_at_next_run` is the answer on every model that takes a system
+instruction. The vocabulary also holds `applies_after_compaction`, which
+only an earlier gateway answers: there the change of an agent whose
+model takes a system instruction only ahead of the conversation waits for a
+compaction, which a short conversation may never reach, and
+`rt.reset(name)` brings it into effect and gives the agent's conversation
+up. `rt.instruction_status` is the
 authority for whether a change is in effect; see
 [Changing an agent's instructions](/concepts/roster#changing-an-agent%E2%80%99s-instructions).
 
@@ -781,10 +784,11 @@ result["messages_before"], result["messages_after"]
 await rt.compact_member("triage:main", floor_tokens=256, timeout=180)
 ```
 
-A changed instruction that waits for a compaction takes effect with it: an
-update whose `instructions` outcome is `applies_after_compaction`, because
-the member's model takes a system instruction only ahead of the
-conversation.
+Against an earlier gateway a changed instruction that waits for a
+compaction takes effect with it: an update whose `instructions` outcome is
+`applies_after_compaction`, because the member's model takes a system
+instruction only ahead of the conversation. The gateway now applies such a
+change at the member's next run and needs no compaction for it.
 
 `floor_tokens` is the member's compaction threshold for that one turn
 (gateway default 1024 tokens). A conversation shorter than the floor is left

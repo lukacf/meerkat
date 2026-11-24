@@ -297,25 +297,23 @@ decision of an SDK host renders without them.
 
 ## 4. Create, update, archive and remove
 
-One limit to know before you change an agent's instructions. On a model that
-takes a system instruction only ahead of the conversation, a changed
-instruction reaches an agent that already has a conversation only when that
-conversation is compacted at the start of a run. Those models are every
-Gemini model, the Anthropic models up to and including `claude-opus-4-7`,
-`claude-sonnet-5` and `claude-haiku-4-5`, and the OpenAI models `gpt-live-1`
-and `gpt-live-1-codex`. Newer Anthropic models and the other OpenAI models
-take a changed instruction in mid-conversation, except an OpenAI model
-served through the ChatGPT backend (`chatgpt_backend`), whose requests carry
-no system instruction besides the prompt: there a change applies only from a
-new conversation. A model the catalog does not know is treated as taking it
-only ahead of the conversation. The instruction status tells for a given
-agent. That compaction may never happen by itself: a conversation is
-compacted only when it reaches its compaction threshold (by default about
-four fifths of the model's context window), never after a time or a number
-of turns. Until then the agent goes
-on following its earlier instructions. To bring the change into effect,
-reset the agent, which discards its conversation; **Instructions** below has
-it.
+A changed instruction reaches an agent at its next run, on every model of
+the catalog and on a model the catalog does not know: the agent keeps its
+conversation, and nothing has to be compacted, reset or respawned. One limit
+remains. An OpenAI model served through the ChatGPT backend
+(`chatgpt_backend`) is asked with no system instruction besides the prompt:
+there a change applies only from a new conversation, and the update says so
+(`applies_at_next_session`, with the reason `lowering_unavailable`). The
+instruction status tells for a given agent; **Instructions** below has it.
+
+An earlier gateway did not do this for a model that takes a system
+instruction only ahead of the conversation: there a change waited for a
+compaction at the start of a run, which a short conversation never reaches,
+and the update answered `applies_after_compaction`. Which kind a model is,
+is its catalog capability `supports_mid_conversation_system_messages`
+(`false` for such a model; `claude-haiku-4-5` and `gemini-3.5-flash` are two,
+for instance), not its provider. Upgrade the gateway; an agent whose change
+was waiting takes it at its first run afterwards.
 
 One thing to know before you archive or remove an agent: an archive and a
 removal of an agent that still owns mobs it created are refused
@@ -353,7 +351,7 @@ updated = await identities.update(
 if isinstance(updated, IdentityDone):
     agent = updated.agents[0]
     if agent.instructions:
-        # "applies_at_next_run", "applies_after_compaction", ...
+        # "applies_at_next_run", "applies_at_next_session", ...
         agent.instructions.kind
     digest = agent.spec_digest or digest
 
@@ -385,7 +383,7 @@ const updated = await identities.update("editor", {
 });
 if (updated.outcome === "done") {
   const agent = updated.agents[0];
-  // "applies_at_next_run", "applies_after_compaction", ...
+  // "applies_at_next_run", "applies_at_next_session", ...
   agent.instructions?.kind;
   digest = agent.specDigest!;
 }
@@ -451,34 +449,29 @@ is already in the agent's record.
   that starts within moments of the change may still use the earlier
   instructions); an agent that has no conversation yet takes the current
   instructions in its first run, unless that run was already being started
-  when the update arrived. `applies_after_compaction`: the limit above; the
-  sample above answers it on such a model, because the agent's first message
-  has given it a conversation. `applies_at_next_session` (with a `reason`):
-  from the agent's next new conversation. `unchanged`: the update left the
-  instructions as they were. The instruction status
+  when the update arrived. `applies_at_next_session` (with a `reason`):
+  from the agent's next new conversation; with the reason
+  `lowering_unavailable` it is the limit above, and also the answer when how
+  the agent's model takes a system instruction could not be read.
+  `unchanged`: the update left the instructions as they were.
+  `applies_after_compaction` is not answered any more: an earlier gateway
+  answered it on a model that takes a system instruction only ahead of the
+  conversation. The instruction status
   (`runtime.instruction_status(namespace="meerkat.identity.instructions", key="editor", identity="editor")`)
   shows where a change stands, in `status["members"][0]["slots"][0]["state"]`:
-  `{"state": "pending", "reason": "leading_prefix_only_lowering"}` is
-  recorded and not yet followed; `{"state": "effective"}` is followed. Right
+  `{"state": "pending", "reason": "awaiting_run_start"}` is recorded and
+  waits for the agent's next run; `{"state": "effective"}` is followed. Right
   after the update the reason is `delivery_owed` for a moment: the change is
   not in the agent's conversation yet (the other values are on the
-  [roster page](/concepts/roster#changing-an-agent%E2%80%99s-instructions)). A reset
+  [roster page](/concepts/roster#changing-an-agent%E2%80%99s-instructions)). A
+  respawn, and an archive followed by an unarchive, keep the conversation:
+  the agent's next run after either follows the change. Where a change
+  applies only from a new conversation, a reset
   (`runtime.reset("editor")`; in the Console, the roster's reset action where
   the console configuration shows it, `show_reset`, and the viewer may reset
-  the agent) starts a new conversation led by the current instructions, and
+  the agent) starts one, led by the current instructions, and
   the earlier conversation is lost. The call is available for every agent
-  that is not archived. The change
-  also takes effect at the agent's next compaction at the start of a run. A
-  respawn does not bring the change into effect, and neither does an archive
-  followed by an unarchive.
-  The SDKs can also compact the agent's conversation, which brings a waiting
-  instruction into effect on the same conversation:
-  `runtime.compact_member("editor")` in Python,
-  `runtime.compactMember("editor")` in TypeScript; before you use it on an
-  agent that created mobs, read the SDK reference
-  ([Python](/sdks/python#compacting-a-member%E2%80%99s-conversation),
-  [TypeScript](/sdks/typescript#compacting-a-member%E2%80%99s-conversation)):
-  against a gateway before 0.9.15 the call costs the agent those mobs.
+  that is not archived.
 - **Archive and unarchive.** An archived agent keeps its name, record,
   conversation and memory, and messages to it are refused. Like any agent
   that leaves, it is owed the harvest and distillation of its last

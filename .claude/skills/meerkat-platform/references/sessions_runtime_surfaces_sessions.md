@@ -291,8 +291,11 @@ settings before the turn, so REST can change build settings that RPC refuses.
   (`InstructionSetErrorCode`, on the wire `error.data.instruction_set_code`).
   A governed runtime refuses every write `prepared_authorization_required`.
   A model that lowers System rows only in its
-  leading prompt defers them (`leading_prefix_only`), and a backend whose
-  wire carries one leading System row keeps them pending
+  leading prompt (`leading_prefix_only`) takes them at its next fresh run
+  start too: its request carries the session's own entries ahead of the
+  conversation, and the transcript keeps each entry where its run started
+  (earlier releases deferred them on such a model until a compaction). A backend
+  whose wire carries one leading System row keeps them pending
   (`lowering_unavailable`). A mob member's session belongs to its mob
   (`MobHandle::set_operator_instruction`, `mob/set_instruction`), and its own
   host's writes are refused `owned_by_mob`. Instruction activations

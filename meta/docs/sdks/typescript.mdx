@@ -305,10 +305,11 @@ result.messages_before, result.messages_after;
 await rt.compactMember("triage:main", { floorTokens: 256, timeoutMs: 180_000 });
 ```
 
-A changed instruction that waits for a compaction takes effect with it: an
-update whose `instructions` outcome is `applies_after_compaction`, because
-the member's model takes a system instruction only ahead of the
-conversation.
+Against an earlier gateway a changed instruction that waits for a
+compaction takes effect with it: an update whose `instructions` outcome is
+`applies_after_compaction`, because the member's model takes a system
+instruction only ahead of the conversation. The gateway now applies such a
+change at the member's next run and needs no compaction for it.
 
 `floorTokens` is the member's compaction threshold for that one turn (gateway
 default 1024 tokens). A conversation shorter than the floor is left as it is,
@@ -647,11 +648,13 @@ poll: read `operation` when you want the state; it also resolves `refused`
 (the operation ended refused) and `unknown`. Each `AgentOutcome` carries the
 agent's `specDigest` afterwards, a create's `seat` (`seated` or `owed`) and
 an update's `instructions` (`applies_at_next_run`,
-`applies_after_compaction`, `applies_at_next_session` with a `reason`, or
-`unchanged`). `applies_after_compaction` is a change that waits: the
-agent's model takes a system instruction only ahead of the conversation, and
-a short conversation may never reach the compaction that brings it into
-effect. `rt.reset(name)` does, and gives the agent's conversation up.
+`applies_at_next_session` with a `reason`, or
+`unchanged`). `applies_at_next_run` is the answer on every model that takes
+a system instruction. The vocabulary also holds `applies_after_compaction`,
+which only an earlier gateway answers: there the change of an agent
+whose model takes a system instruction only ahead of the conversation waits
+for a compaction, which a short conversation may never reach, and
+`rt.reset(name)` brings it into effect and gives the agent's conversation up.
 `rt.instructionStatus` is the authority for whether a change is in
 effect; see
 [Changing an agent's instructions](/concepts/roster#changing-an-agent%E2%80%99s-instructions).

@@ -61,9 +61,9 @@ pub struct SessionInstructionRead {
     pub effective: EffectiveOperatorInstructions,
     /// How entries lower for the model and binding the session records, as
     /// its service resolves them (`ModelRegistry::instruction_lowering_for_identity`);
-    /// `None` when the service cannot tell. A pending change waits for a
-    /// run start that can apply it: one inside the leading System prefix
-    /// for `LeadingPrefixOnly`, none for `Unavailable`.
+    /// `None` when the service cannot tell. A pending change waits for
+    /// the next fresh run start on every lowering that carries an entry,
+    /// and for none on `Unavailable`.
     pub lowering: Option<crate::InstructionLowering>,
 }
 

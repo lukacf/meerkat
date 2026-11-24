@@ -4,6 +4,12 @@ All notable changes to the Python SDK are documented here.
 
 ## Unreleased
 
+- `InstructionOutcome`: a gateway of this release answers
+  `applies_at_next_run` for an agent on every model that takes a system
+  instruction, and does not answer `applies_after_compaction` any more. The
+  value stays in the vocabulary for an earlier gateway. The docstrings say
+  so; no type changes.
+
 ## 0.9.18
 
 - `PersistedEvent` gains `mob_id` and `mob_incarnation` (both `None` by

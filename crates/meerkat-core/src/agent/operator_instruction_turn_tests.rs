@@ -362,7 +362,7 @@ fn incapable_anthropic_lowering() -> InstructionLowering {
 }
 
 #[tokio::test]
-async fn incapable_anthropic_model_defers_with_leading_prefix_reason() {
+async fn incapable_anthropic_model_takes_the_entry_in_its_leading_prefix() {
     let lowering = incapable_anthropic_lowering();
     assert_eq!(lowering, InstructionLowering::LeadingPrefixOnly);
     let client = Arc::new(RecordingClient::default());
@@ -374,15 +374,21 @@ async fn incapable_anthropic_model_defers_with_leading_prefix_reason() {
     let outcome = agent
         .apply_run_start_operator_instructions(InstructionRunStart::FreshRun, None)
         .unwrap();
-    assert_eq!(
+    assert!(matches!(
         outcome,
-        RunStartInstructionOutcome::Deferred(InstructionDeferReason::LeadingPrefixOnly)
-    );
+        RunStartInstructionOutcome::Applied { .. }
+    ));
     agent.run("next".into()).await.unwrap();
     let requests = client.requests();
+    let request = &requests[0];
+    let first_non_system = request
+        .iter()
+        .position(|message| !matches!(message, Message::System(_)))
+        .unwrap();
+    let entry_index = request.iter().position(is_entry).unwrap();
     assert!(
-        entry_rows(&requests[0]).is_empty(),
-        "no entry reaches a model that cannot lower it here"
+        entry_index < first_non_system,
+        "the entry reaches the model inside the leading System prefix: {request:?}"
     );
 }
 
@@ -797,11 +803,14 @@ async fn a_hot_swap_onto_a_chatgpt_backend_binding_defers_operator_instructions(
     );
 }
 
-/// Every request carries the entry rows a session wrote itself where they
-/// stand; a fork child's copied rows are left out wherever its model cannot
-/// lower them. A recorded target is no row; an entry applied after the
-/// conversation is carried only by a model that lowers System rows anywhere;
-/// a fork child that copied it holds none of its own.
+/// The entry rows a session wrote itself are the ones its model change
+/// judges; a fork child's copied rows are left out wherever its model cannot
+/// lower them. A recorded target is no row. An entry applied after the
+/// conversation is carried by a model that lowers System rows anywhere, and
+/// by one that lowers them only inside the leading System prefix, where the
+/// session's request places it; a wire that carries one leading System row
+/// takes none, and a request's rows as they stand are judged unplaced. A
+/// fork child that copied the entry holds none of its own.
 #[tokio::test]
 async fn own_operator_instruction_entries_are_the_rows_the_session_wrote() {
     let client = Arc::new(RecordingClient::default());
@@ -839,14 +848,28 @@ async fn own_operator_instruction_entries_are_the_rows_the_session_wrote() {
         placement.refusal(InstructionLowering::MidConversation),
         None
     );
+    assert_eq!(
+        placement.refusal(InstructionLowering::LeadingPrefixOnly),
+        None,
+        "the session's request places its own entry inside the leading System prefix"
+    );
+    assert_eq!(
+        placement.refusal(InstructionLowering::Unavailable),
+        Some(meerkat_core::InstructionEntryLoweringRefusal::AfterConversationRow),
+        "a wire that carries one leading System row takes no placed entry"
+    );
+    // The same rows as a request holds them, unplaced: a per-request model
+    // fallback hands them to its target as they stand.
+    let request = meerkat_core::InstructionEntryPlacement::of_request(agent.session().messages());
+    assert_eq!(request.refusal(InstructionLowering::MidConversation), None);
     for lowering in [
         InstructionLowering::LeadingPrefixOnly,
         InstructionLowering::Unavailable,
     ] {
         assert_eq!(
-            placement.refusal(lowering),
+            request.refusal(lowering),
             Some(meerkat_core::InstructionEntryLoweringRefusal::AfterConversationRow),
-            "an entry after the conversation is not carried by a {lowering:?} model"
+            "a request's entry after the conversation is not carried by a {lowering:?} model"
         );
     }
 
@@ -983,4 +1006,605 @@ fn an_entry_beside_another_system_row_is_carried_only_where_the_wire_takes_them_
         None,
         "a copied row is neither an own entry nor another System row"
     );
+}
+
+// ---------------------------------------------------------------------------
+// A model that carries System rows only inside the leading System prefix
+// takes a changed instruction at its next run, as every other model does.
+// The entry is appended at the transcript tail (nothing the session already
+// holds is rewritten or moved), and the model request places the session's
+// own entries inside the leading System prefix.
+// ---------------------------------------------------------------------------
+
+/// How many rows the leading System prefix of `messages` holds.
+fn leading_system_rows(messages: &[Message]) -> usize {
+    messages
+        .iter()
+        .position(|message| !matches!(message, Message::System(_)))
+        .unwrap_or(messages.len())
+}
+
+/// Every System row of `request` stands inside its leading System prefix:
+/// what a model that carries System rows only there can be asked with.
+fn assert_system_rows_lead(request: &[Message]) {
+    let leading = leading_system_rows(request);
+    for (index, message) in request.iter().enumerate() {
+        assert!(
+            index < leading || !matches!(message, Message::System(_)),
+            "a System row stands after a conversation row at {index}: {request:?}"
+        );
+    }
+}
+
+fn in_effect(session: &Session, key: &str) -> Option<(u64, String)> {
+    let effective = session.effective_operator_instruction_set().unwrap();
+    effective.slot(&slot(key)).and_then(|state| {
+        state
+            .body()
+            .map(|body| (state.revision().get(), body.to_string()))
+    })
+}
+
+fn holds_a_compaction_summary(messages: &[Message]) -> bool {
+    messages.iter().any(
+        |message| matches!(message, Message::User(user) if user.transcript_role.is_compaction_summary()),
+    )
+}
+
+#[tokio::test]
+async fn a_prefix_only_model_with_a_conversation_takes_a_change_at_its_next_run() {
+    let client = Arc::new(RecordingClient::default());
+    let mut agent = build_agent(
+        conversed_session(),
+        &client,
+        Some(InstructionLowering::LeadingPrefixOnly),
+    )
+    .await;
+    agent
+        .session_mut()
+        .set_session_instruction(write("tone", 1, "Answer formally."))
+        .unwrap();
+    let before = agent.session().messages().to_vec();
+    let outcome = agent
+        .apply_run_start_operator_instructions(InstructionRunStart::FreshRun, None)
+        .unwrap();
+    assert_eq!(
+        outcome,
+        RunStartInstructionOutcome::Applied {
+            entry_sequence: 1,
+            target_generation: 1,
+        },
+        "the change applies at the next fresh run start, with conversation rows in the transcript"
+    );
+    agent.run("next".into()).await.unwrap();
+
+    // What the model was asked with: the entry inside the leading System
+    // prefix, the conversation after it, the run's own input last.
+    let requests = client.requests();
+    assert_eq!(requests.len(), 1);
+    let request = &requests[0];
+    let entries = entry_rows(request);
+    assert_eq!(entries.len(), 1);
+    let Message::System(entry) = entries[0] else {
+        unreachable!()
+    };
+    assert!(entry.content.contains("Answer formally."));
+    assert_system_rows_lead(request);
+    assert_eq!(
+        leading_system_rows(request),
+        2,
+        "the prompt, then the entry"
+    );
+    assert_eq!(last_user_text(request).as_deref(), Some("next"));
+
+    // What the session holds: every earlier row as it was, the entry
+    // appended after them, and no compaction.
+    let stored = agent.session().messages();
+    assert_eq!(
+        request_json(&stored[..before.len()]),
+        request_json(&before),
+        "no row the session already held is rewritten or moved"
+    );
+    assert!(
+        is_entry(&stored[before.len()]),
+        "the entry is appended at the transcript tail, before the run's input"
+    );
+    assert!(!holds_a_compaction_summary(stored));
+    assert_eq!(
+        in_effect(agent.session(), "tone"),
+        Some((1, "Answer formally.".to_string()))
+    );
+}
+
+#[tokio::test]
+async fn two_changes_in_a_row_on_a_prefix_only_model_each_apply_at_the_next_run() {
+    let client = Arc::new(RecordingClient::default());
+    let mut agent = build_agent(
+        conversed_session(),
+        &client,
+        Some(InstructionLowering::LeadingPrefixOnly),
+    )
+    .await;
+    for (revision, body, input) in [
+        (1, "Answer formally.", "first"),
+        (2, "Answer warmly.", "second"),
+    ] {
+        agent
+            .session_mut()
+            .set_session_instruction(write("tone", revision, body))
+            .unwrap();
+        let outcome = agent
+            .apply_run_start_operator_instructions(InstructionRunStart::FreshRun, None)
+            .unwrap();
+        assert!(
+            matches!(outcome, RunStartInstructionOutcome::Applied { .. }),
+            "revision {revision}: {outcome:?}"
+        );
+        agent.run(input.into()).await.unwrap();
+        agent.conclude_run_start_operator_instructions().unwrap();
+    }
+    let requests = client.requests();
+    let second = requests.last().unwrap();
+    assert_system_rows_lead(second);
+    let entries = entry_rows(second);
+    assert_eq!(
+        entries.len(),
+        2,
+        "one entry per change, both in the request"
+    );
+    let sequences: Vec<u64> = entries
+        .iter()
+        .map(|entry| {
+            let Message::System(entry) = entry else {
+                unreachable!()
+            };
+            entry.instruction_entry.as_ref().unwrap().entry_sequence()
+        })
+        .collect();
+    assert_eq!(sequences, [1, 2], "the entries keep their order");
+    assert_eq!(
+        in_effect(agent.session(), "tone"),
+        Some((2, "Answer warmly.".to_string()))
+    );
+
+    // Two more changes before one run are one entry, as on every model.
+    for (key, revision, body) in [
+        ("tone", 3, "Answer briefly."),
+        ("units", 1, "Use metric units."),
+    ] {
+        agent
+            .session_mut()
+            .set_session_instruction(write(key, revision, body))
+            .unwrap();
+    }
+    assert!(matches!(
+        agent
+            .apply_run_start_operator_instructions(InstructionRunStart::FreshRun, None)
+            .unwrap(),
+        RunStartInstructionOutcome::Applied { .. }
+    ));
+    agent.run("third".into()).await.unwrap();
+    let requests = client.requests();
+    let third = requests.last().unwrap();
+    assert_system_rows_lead(third);
+    assert_eq!(
+        entry_rows(third).len(),
+        3,
+        "two changes coalesced into one entry"
+    );
+    assert_eq!(
+        in_effect(agent.session(), "tone"),
+        Some((3, "Answer briefly.".to_string()))
+    );
+    assert_eq!(
+        in_effect(agent.session(), "units"),
+        Some((1, "Use metric units.".to_string()))
+    );
+    // The transcript holds each entry where its run started.
+    let stored = agent.session().messages();
+    let stored_entries: Vec<usize> = stored
+        .iter()
+        .enumerate()
+        .filter_map(|(index, message)| is_entry(message).then_some(index))
+        .collect();
+    assert_eq!(stored_entries, [3, 6, 9], "{stored:?}");
+}
+
+/// A resumed run applies nothing, on this model as on every other; the next
+/// fresh run start applies the change, also in a session a new process read
+/// back from its store.
+#[tokio::test]
+async fn a_resumed_prefix_only_session_takes_a_change_at_its_next_fresh_run() {
+    let client = Arc::new(RecordingClient::default());
+    let mut agent = build_agent(
+        conversed_session(),
+        &client,
+        Some(InstructionLowering::LeadingPrefixOnly),
+    )
+    .await;
+    agent
+        .session_mut()
+        .set_session_instruction(write("tone", 1, "Answer formally."))
+        .unwrap();
+    for run_start in [InstructionRunStart::ResumeRun, InstructionRunStart::NoRun] {
+        assert_eq!(
+            agent
+                .apply_run_start_operator_instructions(run_start, None)
+                .unwrap(),
+            RunStartInstructionOutcome::NotNeeded,
+            "{run_start:?}"
+        );
+    }
+    assert!(entry_rows(agent.session().messages()).is_empty());
+
+    // The session as a store keeps it, read back by a new process.
+    let bytes = agent.session().to_persisted_bytes().unwrap();
+    let reloaded = Session::from_persisted_bytes(&bytes).unwrap();
+    let resumed_client = Arc::new(RecordingClient::default());
+    let mut resumed = build_agent(
+        reloaded,
+        &resumed_client,
+        Some(InstructionLowering::LeadingPrefixOnly),
+    )
+    .await;
+    assert!(
+        matches!(
+            resumed
+                .apply_run_start_operator_instructions(InstructionRunStart::FreshRun, None)
+                .unwrap(),
+            RunStartInstructionOutcome::Applied { .. }
+        ),
+        "the reloaded session's next fresh run start applies the pending change"
+    );
+    resumed.run("after the restart".into()).await.unwrap();
+    let request = &resumed_client.requests()[0];
+    assert_system_rows_lead(request);
+    assert_eq!(entry_rows(request).len(), 1);
+    assert_eq!(
+        in_effect(resumed.session(), "tone"),
+        Some((1, "Answer formally.".to_string()))
+    );
+
+    // Read back once more, the applied entry is not applied again and the
+    // request is the same.
+    let bytes = resumed.session().to_persisted_bytes().unwrap();
+    let again = Session::from_persisted_bytes(&bytes).unwrap();
+    let again_client = Arc::new(RecordingClient::default());
+    let mut again = build_agent(
+        again,
+        &again_client,
+        Some(InstructionLowering::LeadingPrefixOnly),
+    )
+    .await;
+    assert_eq!(
+        again
+            .apply_run_start_operator_instructions(InstructionRunStart::FreshRun, None)
+            .unwrap(),
+        RunStartInstructionOutcome::NotNeeded
+    );
+    again.run("once more".into()).await.unwrap();
+    let request = &again_client.requests()[0];
+    assert_system_rows_lead(request);
+    assert_eq!(entry_rows(request).len(), 1);
+}
+
+/// A fork child copies its parent's entry row as history: the row is not in
+/// effect in the child and its request leaves it out. The child's own change
+/// applies at the child's next run and is placed like any own entry.
+#[tokio::test]
+async fn a_fork_of_a_prefix_only_session_takes_its_own_change_at_its_next_run() {
+    let client = Arc::new(RecordingClient::default());
+    let mut parent = build_agent(
+        conversed_session(),
+        &client,
+        Some(InstructionLowering::LeadingPrefixOnly),
+    )
+    .await;
+    parent
+        .session_mut()
+        .set_session_instruction(write("tone", 1, "Answer formally."))
+        .unwrap();
+    assert!(matches!(
+        parent
+            .apply_run_start_operator_instructions(InstructionRunStart::FreshRun, None)
+            .unwrap(),
+        RunStartInstructionOutcome::Applied { .. }
+    ));
+    parent.run("first".into()).await.unwrap();
+    let parent_rows = request_json(parent.session().messages());
+
+    let child = parent.session().fork();
+    assert_eq!(entry_rows(child.messages()).len(), 1, "the copied row");
+    assert_eq!(
+        in_effect(&child, "tone"),
+        None,
+        "a copied row is not in effect in the child"
+    );
+    let child_client = Arc::new(RecordingClient::default());
+    let mut child = build_agent(
+        child,
+        &child_client,
+        Some(InstructionLowering::LeadingPrefixOnly),
+    )
+    .await;
+    child
+        .session_mut()
+        .set_session_instruction(write("tone", 1, "Answer briefly."))
+        .unwrap();
+    assert!(matches!(
+        child
+            .apply_run_start_operator_instructions(InstructionRunStart::FreshRun, None)
+            .unwrap(),
+        RunStartInstructionOutcome::Applied { .. }
+    ));
+    child.run("in the fork".into()).await.unwrap();
+
+    let request = &child_client.requests()[0];
+    assert_system_rows_lead(request);
+    let entries = entry_rows(request);
+    assert_eq!(
+        entries.len(),
+        1,
+        "the child's own entry; the copied row is left out: {request:?}"
+    );
+    let Message::System(entry) = entries[0] else {
+        unreachable!()
+    };
+    assert!(entry.content.contains("Answer briefly."));
+    assert!(!request_json(request).contains("Answer formally."));
+    assert_eq!(
+        in_effect(child.session(), "tone"),
+        Some((1, "Answer briefly.".to_string()))
+    );
+    assert_eq!(
+        request_json(parent.session().messages()),
+        parent_rows,
+        "the parent is untouched"
+    );
+}
+
+/// A rewind is a fork of the session at an earlier boundary. The child takes
+/// no recorded target from its source, neither the revision the source had
+/// applied nor the one it still held pending: the source's target is session
+/// authority, which a fork does not copy. What the child applies is what its
+/// owner records in it afterwards.
+#[tokio::test]
+async fn a_rewind_child_takes_no_recorded_target_and_applies_what_is_recorded_in_it() {
+    let mut source = conversed_session();
+    source
+        .set_session_instruction(write("tone", 1, "Answer formally."))
+        .unwrap();
+    assert!(matches!(
+        source
+            .apply_run_start_instructions(
+                InstructionRunStart::FreshRun,
+                InstructionLowering::MidConversation,
+                None,
+            )
+            .unwrap(),
+        RunStartInstructionOutcome::Applied { .. }
+    ));
+    source.push(Message::User(UserMessage::text("later")));
+    source
+        .set_session_instruction(write("tone", 2, "Answer warmly."))
+        .unwrap();
+    let source_state = source.instruction_target_state().unwrap().unwrap();
+    assert_eq!(source_state.target_generation(), 2);
+    assert!(source_state.slots()[0].pending_body.is_some());
+
+    // Before the entry: the child copies no entry row and records no state.
+    let before_the_entry = source.fork_at_complete_boundary(3).unwrap();
+    assert!(entry_rows(before_the_entry.messages()).is_empty());
+    assert_eq!(before_the_entry.instruction_target_state().unwrap(), None);
+    assert_eq!(in_effect(&before_the_entry, "tone"), None);
+
+    // After the entry: the child copies the row and records an unowned,
+    // empty target; nothing is pending and nothing is in effect.
+    let after_the_entry = source.fork_at_complete_boundary(4).unwrap();
+    assert_eq!(entry_rows(after_the_entry.messages()).len(), 1);
+    let state = after_the_entry
+        .instruction_target_state()
+        .unwrap()
+        .expect("a child that copied an entry row records the state key");
+    assert_eq!(
+        state.owner(),
+        &meerkat_core::InstructionTargetOwner::Unowned
+    );
+    assert_eq!(state.target_generation(), 0);
+    assert!(
+        state.slots().is_empty(),
+        "no recorded target, pending or applied"
+    );
+    assert_eq!(in_effect(&after_the_entry, "tone"), None);
+
+    // The child's own target is the one recorded in it; on a model that
+    // carries System rows only in the leading prefix it applies at the
+    // child's next run.
+    for child in [before_the_entry, after_the_entry] {
+        let client = Arc::new(RecordingClient::default());
+        let mut agent =
+            build_agent(child, &client, Some(InstructionLowering::LeadingPrefixOnly)).await;
+        agent
+            .session_mut()
+            .set_session_instruction(write("tone", 1, "Answer warmly."))
+            .unwrap();
+        assert!(matches!(
+            agent
+                .apply_run_start_operator_instructions(InstructionRunStart::FreshRun, None)
+                .unwrap(),
+            RunStartInstructionOutcome::Applied { .. }
+        ));
+        agent.run("after the rewind".into()).await.unwrap();
+        let request = &client.requests()[0];
+        assert_system_rows_lead(request);
+        assert_eq!(entry_rows(request).len(), 1, "{request:?}");
+        assert!(!request_json(request).contains("Answer formally."));
+        assert_eq!(
+            in_effect(agent.session(), "tone"),
+            Some((1, "Answer warmly.".to_string()))
+        );
+    }
+}
+
+/// The stored form of a session of such a model after an application is the
+/// form a model that carries System rows anywhere has always left: the same
+/// rows in the same order and the same recorded state. No stored byte takes
+/// a new form; only the model request differs. An older release reads the
+/// session, and its request, which is the unplaced projection, holds the
+/// entry after the conversation rows.
+#[tokio::test]
+async fn the_stored_form_of_an_applied_change_is_the_one_every_model_leaves() {
+    let source = conversed_session();
+    let mut stored = Vec::new();
+    for lowering in [
+        InstructionLowering::MidConversation,
+        InstructionLowering::LeadingPrefixOnly,
+    ] {
+        // Two sessions with the same rows: the same bytes, read twice.
+        let session = Session::from_persisted_bytes(&source.to_persisted_bytes().unwrap()).unwrap();
+        let client = Arc::new(RecordingClient::default());
+        let mut agent = build_agent(session, &client, Some(lowering)).await;
+        agent
+            .session_mut()
+            .set_session_instruction(write("tone", 1, "Answer formally."))
+            .unwrap();
+        assert!(
+            matches!(
+                agent
+                    .apply_run_start_operator_instructions(InstructionRunStart::FreshRun, None)
+                    .unwrap(),
+                RunStartInstructionOutcome::Applied { .. }
+            ),
+            "{lowering:?}"
+        );
+        let bytes = agent.session().to_persisted_bytes().unwrap();
+        let read_back = Session::from_persisted_bytes(&bytes).unwrap();
+        let document: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        stored.push((lowering, read_back, document));
+    }
+    let (_, mid, mid_document) = &stored[0];
+    let (_, prefix_only, prefix_only_document) = &stored[1];
+
+    // The same document shape: version and top-level keys.
+    assert_eq!(mid_document["version"], prefix_only_document["version"]);
+    let keys = |document: &serde_json::Value| {
+        document
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(keys(mid_document), keys(prefix_only_document));
+    // The same rows in the same order: the entry is the last row of both.
+    let shape = |session: &Session| {
+        session
+            .messages()
+            .iter()
+            .map(|message| match message {
+                Message::System(system) => match system.instruction_entry.as_ref() {
+                    Some(identity) => {
+                        format!("entry {} {}", identity.entry_sequence(), system.content)
+                    }
+                    None => format!("system {}", system.content),
+                },
+                Message::User(user) => format!("user {}", user.text_content()),
+                other => format!("{:?}", std::mem::discriminant(other)),
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(shape(mid), shape(prefix_only));
+    assert!(is_entry(prefix_only.messages().last().unwrap()));
+    // The same recorded state.
+    assert_eq!(
+        mid.instruction_target_state().unwrap(),
+        prefix_only.instruction_target_state().unwrap()
+    );
+    // What a release that does not place entries builds its request from.
+    let unplaced = prefix_only.messages_for_model_boundary().unwrap();
+    let entry_index = unplaced.iter().position(is_entry).unwrap();
+    assert!(
+        entry_index >= leading_system_rows(&unplaced),
+        "the stored order is the transcript's: the entry follows the conversation rows"
+    );
+    assert_eq!(
+        in_effect(prefix_only, "tone"),
+        Some((1, "Answer formally.".to_string()))
+    );
+}
+
+/// A session that applied a change on a model that carries System rows
+/// anywhere can be switched to one that carries them only in the leading
+/// prefix: the request places the session's own entries there. A wire that
+/// carries one leading System row still cannot take them.
+#[tokio::test]
+async fn a_model_change_to_a_prefix_only_target_carries_the_sessions_own_entries() {
+    let config = backend_realms_config();
+    let registry = Arc::new(backend_test_registry(&config));
+    let client = Arc::new(RecordingClient::default());
+    let mut agent = AgentBuilder::new()
+        .resume_session(conversed_session_served_by(&openai_identity(Some(
+            configured_binding("public_realm", "default_openai"),
+        ))))
+        .with_turn_state_handle(Arc::new(
+            crate::agent::test_turn_state_handle::TestTurnStateHandle::new(),
+        ))
+        .with_effective_model_registry(Arc::clone(&registry))
+        .with_operator_instruction_lowering(InstructionLowering::MidConversation)
+        .build_standalone(Arc::clone(&client), Arc::new(NoTools), Arc::new(NoopStore))
+        .await;
+    agent
+        .session_mut()
+        .set_session_instruction(write("tone", 1, "Answer formally."))
+        .unwrap();
+    assert!(matches!(
+        agent
+            .apply_run_start_operator_instructions(InstructionRunStart::FreshRun, None)
+            .unwrap(),
+        RunStartInstructionOutcome::Applied { .. }
+    ));
+    agent.run("first".into()).await.unwrap();
+    agent.conclude_run_start_operator_instructions().unwrap();
+
+    let swap = |agent: &mut TestAgent, identity: meerkat_core::SessionLlmIdentity| {
+        let request_policy = meerkat_core::SessionLlmRequestPolicy {
+            model: identity.model.clone(),
+            credential_identity: None,
+            provider_params: None,
+            provider_tool_defaults: None,
+            provider_native_tools: meerkat_core::ProviderNativeToolPolicy::Inherit,
+            operator_instruction_lowering: registry
+                .instruction_lowering_for_identity(&config, &identity),
+        };
+        agent.hot_swap_llm_identity(Arc::clone(&client), identity, request_policy)
+    };
+
+    // A wire that carries one leading System row: refused, as before.
+    let refused = swap(&mut agent, openai_identity(Some(chatgpt_binding())));
+    assert!(
+        refused.is_err(),
+        "an entry beside the prompt is not carried by a one-row wire"
+    );
+
+    // A model that carries System rows only in the leading prefix: carried.
+    let anthropic = llm_identity(
+        meerkat_core::Provider::Anthropic,
+        crate::model_profile::test_catalog::ANTHROPIC_MODEL,
+        Some(configured_binding("public_realm", "default_anthropic")),
+    );
+    let swapped = swap(&mut agent, anthropic);
+    assert!(
+        swapped.is_ok(),
+        "a prefix-only target carries the session's own entries: {swapped:?}"
+    );
+    assert_eq!(
+        agent.operator_instruction_lowering(),
+        InstructionLowering::LeadingPrefixOnly
+    );
+    agent.run("second".into()).await.unwrap();
+    let requests = client.requests();
+    let request = requests.last().unwrap();
+    assert_system_rows_lead(request);
+    assert_eq!(entry_rows(request).len(), 1);
+    assert_eq!(last_user_text(request).as_deref(), Some("second"));
 }

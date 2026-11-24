@@ -3416,25 +3416,41 @@ compiling. A Meta probe that must keep the earlier rule checks
 
   **If the configured identity created no mobs or delegates:** on 0.9.14,
   `meta/respawn` cleared the threshold and kept the conversation, with or
-  without a later gateway restart. A separate tested remedy was to restart
-  the gateway and then complete a second `meta/compact_member` with a floor
-  above the conversation size. It cleared the threshold without compacting.
-  `meta/reset` also cleared it, but ended the conversation.
+  without a later gateway restart (one run each). Another remedy was to
+  restart and complete a second `meta/compact_member` with `floor_tokens`
+  well above the conversation size (50000 in the run). It returned
+  `compaction_applied: false` and cleared the threshold. `meta/reset` also
+  cleared it but ended the conversation. The wider affected version range
+  is from the released source, not runs on every release.
 
-  **If the identity created mobs or delegates:** first check whether it
-  still lists the mobs it created and needs to keep managing them. No
-  remedy was shown to preserve that management after this failure. After a
-  completed respawn on these releases, the identity no longer listed a
-  mob it created, even though its store remained and its members could
-  keep running. A completed `meta/compact_member` had the same cost. If you
-  proceed, use `meta/respawn` only while the provider is available. Wait
-  for the respawn to return without an error **and** for the identity to
-  answer one message before stopping or restarting the gateway. If the gateway
-  stops before the identity wakes successfully on the same session, its next
-  start can permanently remove the stores of mobs that session owns. Do not
-  use a second compact call or a reset for this case. This order is read
-  from the source, not tested on a creator with this failure. See the
-  [Meta 0.9.14 release note](https://github.com/lukacf/meerkat/releases/tag/meta-v0.9.14).
+  **If the identity created mobs or delegates (Meta 0.9.9 through 0.9.14 inclusive):**
+  First check whether the identity still lists the mobs it created. The failed
+  call already rebuilt the identity before its maintenance turn, so it may
+  already have lost management (source reading). If it still lists a mob it
+  must keep managing, do not respawn it: none of these remedies was shown to
+  preserve that management. On the published 0.9.14 gateway, after a
+  completed respawn or a completed `meta/compact_member`, the identity
+  no longer listed its mob although its store remained. Members of an
+  unlisted mob can keep running.
+
+  If you choose to proceed on these releases, first have the identity destroy
+  any mob it created that has members acting on their own, while it can still
+  manage that mob. On 0.9.14, `mob_destroy` removed the mob; retiring its
+  members did not remove the mob. This avoids leaving a running mob the
+  creator can no longer manage. It is not a general upgrade step.
+
+  Use `meta/respawn` only while the provider is available. If it returns an
+  error, retry the respawn before stopping the gateway. Wait for the call to
+  succeed **and** for the identity to answer one message before any stop or
+  restart. If the gateway stops before the identity wakes successfully on the
+  same session, its next start can permanently remove the stores of mobs that
+  session owns.
+
+  Do not issue a second `meta/compact_member`: it rebuilds the identity twice.
+  Do not use `meta/reset`: it ends the session, and the mobs that session owns
+  end no later than the next gateway start. This order is read from the
+  source, not tested on a creator with this failure.
+  See the [Meta 0.9.14 release note](https://github.com/lukacf/meerkat/releases/tag/meta-v0.9.14).
 
   **Management from 0.9.15.** From 0.9.15 a respawn of a member the same-session step
   serves (every member but a placed one, one wired to a placed member, and

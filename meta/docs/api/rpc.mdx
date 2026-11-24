@@ -5207,20 +5207,37 @@ remedies. Otherwise, what clears the threshold depends on the agent:
 - either kind: `meta/reset`, which ends the conversation.
 
 On 0.9.14, a configured identity that created no mobs or delegates was
-respawned with and without a later restart; both cleared the threshold.
+respawned with and without a later restart (one run each); both cleared
+the threshold. The wider affected version range is from the released source.
 Restarting first was needed for the separate second-compact remedy, not
 for the respawn.
 
-**An identity that created mobs or delegates, on 0.9.9 through 0.9.14:**
-first check whether it still lists its mobs and must keep managing them.
-No remedy was shown to preserve that management after this failure. If
-you proceed, use `meta/respawn` only while the provider is available.
-Wait for a successful return **and** one answered message from the
-identity before any stop or restart. If the gateway stops before the identity
-wakes successfully on the same session, its next start can permanently remove
-the stores of mobs that session owns. Do not use a second compact call or
-reset for this case. This order is read from the source; the failed-call
-remedies were tested on an identity without mobs or delegates.
+**If the identity created mobs or delegates (Meta 0.9.9 through 0.9.14 inclusive):**
+First check whether the identity still lists the mobs it created. The failed
+call already rebuilt the identity before its maintenance turn, so it may
+already have lost management (source reading). If it still lists a mob it
+must keep managing, do not respawn it: none of these remedies was shown to
+preserve that management. A mob that is no longer listed can still have
+running members.
+
+If you choose to proceed on these releases, first have the identity destroy
+any mob it created that has members acting on their own, while it can still
+manage that mob. On 0.9.14, `mob_destroy` removed the mob; retiring its
+members did not remove the mob. This avoids leaving a running mob the
+creator can no longer manage. It is not a general upgrade step.
+
+Use `meta/respawn` only while the provider is available. If it returns an
+error, retry the respawn before stopping the gateway. Wait for the call to
+succeed **and** for the identity to answer one message before any stop or
+restart. If the gateway stops before the identity wakes successfully on the
+same session, its next start can permanently remove the stores of mobs that
+session owns.
+
+Do not issue a second `meta/compact_member`: it rebuilds the identity twice.
+Do not use `meta/reset`: it ends the session, and the mobs that session owns
+end no later than the next gateway start. This order is read from the
+source, not tested on a creator with this failure.
+See the [Meta 0.9.14 release note](https://github.com/lukacf/meerkat/releases/tag/meta-v0.9.14).
 
 The effect on management is separate from the threshold:
 

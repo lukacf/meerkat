@@ -584,6 +584,23 @@ class HoldTests(GuardTest):
         self.assertIn("1 allow entries", out)
         self.assertEqual((self.repo.root / "connect/README.md").read_text(), self.HELD)
 
+    def test_a_waiting_hold_covers_nothing(self):
+        # A hold covers its pins at its version only. While it waits, a pin already below
+        # the tree is reported as it is without the entry, and the entry that finds it is
+        # not stale; at its version the same entry covers the same pin.
+        page = ("Install [Demo Core 1.4.1](https://github.com/lukacf/meerkat/releases/tag/v1.4.1), the Core release\n"
+                "Connect 1.4.1 was released with, for the agent.\n")
+        hold = {"match": r"^lukacf/meerkat release v1\.4\.1$",
+                "context": r"\[Demo Core 1\.4\.1\]\([^)]*/tag/v1\.4\.1\), "
+                           r"the Core release Connect 1\.4\.1 was released with\b"}
+        self.tree("1.4.2", page, **hold)
+        err = self.assertFindings("connect/README.md:1: release lukacf/meerkat release v1.4.1: pins core 1.4.1, "
+                                  "below its version 1.4.2 in this tree")
+        self.assertIn("1 pin(s) below", err)
+        self.assertIn("0 stale allow entries", err)
+        self.tree("1.4.3", page, **hold)
+        self.assertIn("1 allow entries", self.assertClean())
+
     def test_a_waiting_hold_needs_the_words_beside_the_link(self):
         # A hold whose context holds no pin covers nothing at its version: the bump it was
         # written for would stop on the pin and on the entry. It is stale while it waits,
@@ -1327,12 +1344,17 @@ class CommandTests(unittest.TestCase):
     def test_the_help_says_what_keeps_a_waiting_hold_from_being_stale(self):
         text = self.help_text()
         for sentence in (
-                "the entry waits for its release:",
-                "it is not stale as long as it finds a pin it will cover then: one its path and `match` find and, "
-                "where it has a `context`, one that stands inside the text the `context` matches.",
+                "the entry waits for its release and covers nothing: a pin that names the version in this tree is "
+                "no finding with or without it, and a pin already below that version is reported while the entry "
+                "waits.",
+                "A waiting entry is not stale as long as it finds a pin it will cover at its version: one its path "
+                "and `match` find and, where it has a `context`, one that stands inside the text the `context` "
+                "matches.",
                 "A waiting entry whose `context` holds no such pin is stale at once"):
             with self.subTest(sentence=sentence):
                 self.assertIn(sentence, text)
+        # A waiting hold makes no pin a non-finding: the text does not say it does.
+        self.assertNotIn("are no findings yet", text)
 
 
 if __name__ == "__main__":

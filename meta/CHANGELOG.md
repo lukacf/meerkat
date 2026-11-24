@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Python identity results can be narrowed by their `outcome` string. For
+  example, after `if state.outcome == "refused":`, mypy and pyright know
+  that `state.refusal` is available on the result of `identities.operation()`.
+  The other outcome strings narrow to their corresponding result types.
+
+### Upgrade notes
+
+- Type checkers can now report mistakes that a `str` annotation
+  previously hid, such as comparing against an impossible outcome. The outcome
+  strings, returned objects and behavior at run time are unchanged.
+
 ## [0.9.18] - 2026-11-22
 
 Records that name a member carry the member's mob, so that one host can keep

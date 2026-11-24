@@ -535,7 +535,7 @@ fn default_delivery_target_module() -> String {
 }
 
 pub fn incident_model() -> String {
-    std::env::var("RKAT_INCIDENT_MODEL").unwrap_or_else(|_| "gpt-6-astra".to_string())
+    std::env::var("RKAT_INCIDENT_MODEL").unwrap_or_else(|_| "gpt-6.2-astra".to_string())
 }
 
 pub fn incident_image_model() -> String {

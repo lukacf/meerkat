@@ -25,7 +25,9 @@ Pins it finds in every tracked text file:
     and npm dependency entries outside package.json;
   - release URLs and `{"repository", "tag"}` release selections, of the
     monorepo by their tag, and of the retired standalone repositories always
-    (their releases predate the monorepo);
+    (their releases predate the monorepo); a URL's tag ends where its
+    fragment or its query starts (`.../releases/tag/vX.Y.Z#assets` names
+    the release vX.Y.Z);
   - versioned release asset names (`meerkat_meta-0.9.3-py3-none-any.whl`,
     `meta-rpc-gateway-0.9.10-...`), and tracked files named like them;
   - version constants whose name names a product (`CORE_REQUIREMENT =
@@ -39,9 +41,9 @@ X.Y.Z release page`), the page of that product's release X.Y.Z
 (`.../releases/tag/meta-vX.Y.Z`). It tells the reader of a later version what
 an earlier release's page says, so it keeps its target whatever the version
 of the tree. The text and the target make the form together: any other
-text, a target of another product or version, a download URL, and a release
-URL outside such a link are pins as before, and so is everything else on the
-link's line.
+text, a target of another product or version, a target with a fragment or a
+query, a download URL, and a release URL outside such a link are pins as
+before, and so is everything else on the link's line.
 
 The allowlist covers upgrade-test fixtures and recorded history, each entry
 with its reason. An entry without `match`, `key` or `context` covers whole
@@ -67,11 +69,16 @@ entry is stale and goes.
 An entry with `at` (a version; beside `match` or `context`, never `key`) is a
 hold decided for one release: it covers its pins only while the package they
 pin is at exactly that version in this tree. While that package is still
-below the version the entry waits: its pins are no findings yet, and it is
-not stale as long as its path and `match` still find such a pin. Once the
-package is past the version the entry covers nothing: its pins are findings
-again and the entry is stale, so the next version bump stops on both and the
-hold is decided again.
+below the version the entry waits for its release: the pins it will cover
+name the version in this tree and are no findings yet, and it is not stale as
+long as it finds a pin it will cover then: one its path and `match` find and,
+where it has a `context`, one that stands inside the text the `context`
+matches. A waiting entry whose `context` holds no such pin is stale at once,
+as it will be at its version, so the entry or the page is put right before
+the version bump the hold was written for and not during it. Once the package
+is past the version the entry covers nothing: its pins are findings again and
+the entry is stale, so the next version bump stops on both and the hold is
+decided again.
 
 Published release inputs (`published_release_inputs` in the configuration,
 with its reason) are files that record a published release of an in-repo
@@ -547,6 +554,9 @@ class Scanner:
         self.published = list(published)
         # The allow entries with `at`: each waits on the pins of a package still below its version.
         self.holds = list(holds)
+        # The pins a waiting hold with a context may hold, each with that hold: whether the pin
+        # stands inside the text the context matches is read once the scan is over (settle_waiting).
+        self.waiting: list[tuple[AllowEntry, Finding]] = []
         # The place in its line of the pin scan_line is reading (start, end); None for a pin read
         # from a structure or a file name.
         self.span = None
@@ -569,8 +579,10 @@ class Scanner:
         crates = alternatives({p.name for p in packages if p.ecosystem == "cargo"})
         self.cargo_line_re = re.compile(rf'^[ \t]*({crates})[ \t]*=[ \t]*(?:"([^"\n]*)"|\{{([^}}\n]*)\}})')
         repositories = alternatives((MONOREPO, *RETIRED_REPOSITORIES))
+        # The tag ends at the next part of the path, at the end of the URL, and where a fragment or
+        # a query starts.
         self.release_re = re.compile(
-            rf"github\.com/{OWNER}/({repositories})/releases/(?:download|tag)/([^/\s\"'`)<>\]\\]+)")
+            rf"github\.com/{OWNER}/({repositories})/releases/(?:download|tag)/([^/\s\"'`)<>\]\\#?]+)")
         self.retired_git_re = re.compile(
             rf"git\+https://github\.com/{OWNER}/({alternatives(RETIRED_REPOSITORIES)})(?:\.git)?\b")
         self.asset_re = re.compile(
@@ -590,9 +602,15 @@ class Scanner:
         name, expected = self.inventory.expected(key)
         for hold in self.holds:
             # A hold for a later version of this package waits on the pin: it is no finding
-            # of the hold's yet, and the entry is not stale while the pin is there.
+            # of the hold's yet, and the entry is not stale while the pin is there. A hold with
+            # a context waits only on a pin inside the text its context matches, as it covers
+            # only such a pin at its version.
             if below(expected, hold.at) and hold.path.match(path) and (hold.match is None or hold.match.search(pin)):
-                hold.used += 1
+                if hold.context is None:
+                    hold.used += 1
+                else:
+                    self.waiting.append((hold, Finding(path, line, shape, pin, name, pinned or "", expected,
+                                                       span=span)))
         published = next((entry for entry in self.published if entry.applies(path, pin)), None)
         if published is not None:
             published.used += 1
@@ -1086,6 +1104,20 @@ def inside(pattern: re.Pattern, finding: Finding) -> bool:
         position = match.start() + 1
 
 
+def settle_waiting(root: Path, scanner: Scanner, allowlist: list[AllowEntry]) -> None:
+    """Count, for each waiting hold with a `context`, the pins that stand inside the text it matches.
+
+    A hold that waits for its release is in use while it finds a pin it will cover at its
+    version. With a context that is a pin inside the matched text, the test `covering` applies
+    then: a pin its path and `match` find elsewhere, and a pin read from a structure, keep no
+    such hold waiting, and the entry is stale before the bump it was written for.
+    """
+    attach_context(root, [pin for _, pin in scanner.waiting], allowlist)
+    for hold, pin in scanner.waiting:
+        if inside(hold.context, pin):
+            hold.used += 1
+
+
 def move_version(text: str, pinned: str, expected: str) -> str:
     return re.sub(rf"(?<![0-9.]){re.escape(pinned)}(?![0-9]|\.[0-9])", expected, text, count=1)
 
@@ -1207,6 +1239,7 @@ def run(root: Path, config_path: Path, write: bool, out=sys.stdout, err=sys.stde
             scanner = scan(root, inventory, tracked, allowlist, published, constants)
             attach_keys(root, scanner.findings + scanner.published_pins, allowlist)
             attach_context(root, scanner.findings + scanner.published_pins, allowlist)
+        settle_waiting(root, scanner, allowlist)
         findings = scanner.findings
     except (PinError, OSError, ValueError, tomllib.TOMLDecodeError, re.error) as error:
         print(f"check_inrepo_version_pins: {error}", file=err)

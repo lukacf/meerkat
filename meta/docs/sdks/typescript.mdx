@@ -1449,14 +1449,20 @@ the persistent mob storage was created. Its `kind` names the refusal
 lists the diverged definition fields as dotted paths, so a host can show what
 changed without parsing the message.
 
-If the SDK starts the gateway and the gateway accepts the init request but
-then reports a refusal, the SDK version determines which error you catch:
+If a gateway that the TypeScript SDK starts accepts init, reports a refusal
+and exits:
 
-- In 0.9.15 and 0.9.16, `builder.build()` rejects with `GatewayStartupCleanupError`,
-  a transport error. Its `startupError` is the underlying refusal.
-- From 0.9.17, `builder.build()` rejects with the refusal itself. If the gateway
-  exits without reporting the startup outcome, the SDK can still wrap that
-  failure in `GatewayStartupCleanupError`.
+- In 0.9.15 and 0.9.16, Node can exit on an unhandled `write EPIPE` even if
+  `build()` is inside a `try`/`catch`. See the [0.9.16 limitation and workaround](https://github.com/lukacf/meerkat/blob/v0.9.17/meta/CHANGELOG.md#L793).
+  When `build()` does reject, the refusal is the `startupError` of
+  `GatewayStartupCleanupError`, a transport error.
+- From 0.9.17, `builder.build()` rejects with the refusal itself when it
+  reads the failed settlement. If it writes a host callback reply after the
+  gateway exits but before it reads the settlement, it can instead reject
+  with `InitOutcomeUnknownError` (source reading, not a run).
+
+This distinction does not describe a failure before acceptance or a gateway
+that exits without reporting a settlement.
 
 To support both forms, check for the underlying refusal as below. Do not
 retry a start just because a typed refusal arrived inside a transport error.

@@ -1414,14 +1414,15 @@ lists the diverged definition fields as dotted paths, so a host can show what
 changed without parsing the message. Revert the edit, or move the stored
 definition with `declare_spec_update(expected_revision=...)`.
 
-If the SDK starts the gateway and the gateway accepts the init request but
-then reports a refusal, the SDK version determines which error you catch:
+If a gateway that the Python SDK starts or adopts **accepts** init and the
+SDK then reads a failed settlement:
 
 - In 0.9.15 and 0.9.16, `builder.build()` raises `GatewayStartupCleanupError`,
   a transport error. Its `startup_error` is the underlying refusal.
-- From 0.9.17, `builder.build()` raises the refusal itself. If the gateway
-  exits without reporting the startup outcome, the SDK can still wrap that
-  failure in `GatewayStartupCleanupError`.
+- From 0.9.17, `builder.build()` raises the refusal itself.
+
+This distinction is about a reported refusal, not a failure before acceptance
+or an exit without a settlement.
 
 To support both forms, check for the underlying refusal as below. Do not
 retry a start just because a typed refusal arrived inside a transport error.

@@ -1295,14 +1295,34 @@ jobs:
   # compiles them, and ci.yml only checks their lock files. This job builds
   # both against the checkout's crates with their committed locks and runs
   # their tests (the examples Makefile's `standalone` target is exactly
-  # these two targets), then example 035's script fixtures. It is here and
-  # not in ci.yml, and no gate reads it: a failing example test opens the
-  # nightly failures issue and cannot hold a release. Its first purpose is
-  # to MEASURE: no hosted run of these builds exists (one job once ran
-  # example 035's tests alone in 1909 s), so the step writes each target's
-  # seconds, Cargo's own "Finished" lines and its total into the job
-  # summary. Both targets run even when the first fails; the step then
-  # fails.
+  # these two targets), then example 035's script fixtures.
+  #
+  # It is here and not in ci.yml, and no gate reads it: it cannot hold a
+  # pull request, a push or a release, and a pull request that changes one
+  # of these examples gets no result of these tests before it merges.
+  #
+  # Its first purpose is to MEASURE: no hosted run of these builds exists
+  # (one job once ran example 035's tests alone in 1909 s). The step writes
+  # into the job summary when it started and ended, each target's seconds
+  # with its build and the rest apart, Cargo's own "Finished" lines, and
+  # the compiler cache's hit and miss counts when sccache reports them
+  # ("unknown" when it does not: the summary calls no build cold or warm).
+  # Queue time cannot be printed from inside a job: it is the job record's
+  # created to started. Both targets run even when the first fails; the
+  # step then fails.
+  #
+  # A failure reaches the "Nightly failures" issue through
+  # nightly-failure-issue.yml, which writes one line: the run's address and
+  # the names of the jobs that failed (not the commit, not the assertion:
+  # those are in the run). Who answers it: a failing test or assertion of
+  # example 034, 035 or the Meta example pack 006 is the Examples owner's;
+  # a runner, workflow or environment failure of these two jobs is the CI
+  # owner's. That workflow names no one: nothing but a subscription to the
+  # issue tells either owner.
+  #
+  # Not run here: a locked all-target Clippy of either example (example
+  # 035's Makefile has no lint target) and the examples Makefile's other
+  # targets.
   example-standalone:
     name: Standalone examples
     needs: meta-docs-lag
@@ -1354,32 +1374,68 @@ jobs:
           mdm() {
             make -C examples mdm
           }
+          plain() {
+            printf '%s' "$1" | sed -e 's/\x1b\[[0-9;]*m//g' -e 's/^ *//'
+          }
           status=0
           timed() {
-            local name="$1" begun="${SECONDS}" result=passed
-            "${name}" 2>&1 | tee "${RUNNER_TEMP}/standalone-${name}.log" || { result=failed; status=1; }
-            printf '| make -C examples %s | %s | %s |\n' "${name}" "$((SECONDS - begun))" "${result}" >> "${GITHUB_STEP_SUMMARY}"
-            sed -e 's/\x1b\[[0-9;]*m//g' "${RUNNER_TEMP}/standalone-${name}.log" \
-              | grep -E 'Finished .* target\(s\) in ' \
-              | while IFS= read -r line; do
-                  printf '| Cargo, in %s: %s | | |\n' "${name}" "$(echo ${line})" >> "${GITHUB_STEP_SUMMARY}"
-                done || true
+            local name="$1" begun="${SECONDS}" mark="${SECONDS}" phase=build build=0 rest=0 result=passed cargo="" line
+            while IFS= read -r line; do
+              printf '%s\n' "${line}"
+              if [[ "${line}" == *"Finished"*" target(s) in "* ]]; then
+                build=$((build + SECONDS - mark))
+                mark="${SECONDS}"
+                phase=rest
+                cargo+="| Cargo, in ${name}: $(plain "${line}") | | |"$'\n'
+              elif [[ "${phase}" == rest && "${line}" == *"Compiling"* ]]; then
+                rest=$((rest + SECONDS - mark))
+                mark="${SECONDS}"
+                phase=build
+              fi
+            done < <("${name}" 2>&1)
+            wait "$!" || { result=failed; status=1; }
+            if [[ "${phase}" == build ]]; then build=$((build + SECONDS - mark)); else rest=$((rest + SECONDS - mark)); fi
+            {
+              printf '| make -C examples %s | %s | %s |\n' "${name}" "$((SECONDS - begun))" "${result}"
+              printf '| make -C examples %s: build | %s | |\n' "${name}" "${build}"
+              printf '| make -C examples %s: tests and the rest | %s | |\n' "${name}" "${rest}"
+              printf '%s' "${cargo}"
+            } >> "${GITHUB_STEP_SUMMARY}"
           }
-          printf '%s\n' '### Standalone examples' '' '| part | seconds | result |' '| --- | --- | --- |' >> "${GITHUB_STEP_SUMMARY}"
+          {
+            printf '%s\n' '### Standalone examples' ''
+            printf 'started %s (UTC); queue time is not printed here: read it from the job record (created to started)\n\n' "$(date -u +%H:%M:%SZ)"
+            printf '%s\n' '| part | seconds | result |' '| --- | --- | --- |'
+          } >> "${GITHUB_STEP_SUMMARY}"
           timed codemob
           timed mdm
-          printf '| both targets | %s | |\n' "${SECONDS}" >> "${GITHUB_STEP_SUMMARY}"
+          hits="" misses=""
+          while IFS= read -r line; do
+            if [[ -z "${hits}" && "${line}" == "Cache hits "* ]]; then hits="${line##* }"; fi
+            if [[ -z "${misses}" && "${line}" == "Cache misses "* ]]; then misses="${line##* }"; fi
+          done < <(sccache --show-stats 2>/dev/null || true)
+          cache=unknown
+          if [[ "${hits}" =~ ^[0-9]+$ && "${misses}" =~ ^[0-9]+$ ]]; then cache="hits ${hits}, misses ${misses}"; fi
+          {
+            printf '| both targets | %s | |\n' "${SECONDS}"
+            printf '| compiler cache, the whole job | %s | |\n\n' "${cache}"
+            printf 'ended %s (UTC)\n' "$(date -u +%H:%M:%SZ)"
+          } >> "${GITHUB_STEP_SUMMARY}"
           exit "${status}"
 
       - name: Example 035 script fixtures
         working-directory: examples/035-mdm-tux-rs
         run: python3 scripts/test-scripts.py
 
-  # Meta's example pack 006 (long-term agents): its keyless script builds
-  # rpc_gateway through the root wrapper, runs the pack's Python and
-  # TypeScript programs twice each against it and checks what they print.
-  # No workflow ran it. Here and not in Meta CI, for the same reason as the
-  # job above; its seconds go to the job summary too.
+  # Meta's example pack 006 (long-term agents): its keyless script runs the
+  # pack's Python program and its TypeScript program, twice each on one
+  # state directory, against rpc_gateway, and checks what each run prints
+  # and that the two languages print the same lines. No workflow ran it.
+  # Here and not in Meta CI, for the reasons of the job above, with the same
+  # failure route and the same two owners. The gateway is built first, in a
+  # timed part of its own, through the root wrapper with the script's own
+  # flags (so the script's build of it compiles nothing); the summary holds
+  # that build's seconds and the script's apart.
   meta-example-006:
     name: Meta long-term agents example (keyless)
     needs: example-standalone
@@ -1433,10 +1489,28 @@ jobs:
       - name: Long-term agents example (keyless), timed
         shell: bash
         run: |
+          gateway() {
+            ./scripts/repo-cargo build --locked -p meerkat-meta --bin rpc_gateway
+          }
           example() {
             meta/examples/006-long-term-agents/examples.sh
           }
           status=0
-          example || status=1
-          printf '%s\n' '### Meta long-term agents example' '' "seconds: ${SECONDS}; result: $([[ "${status}" == 0 ]] && echo passed || echo failed)" >> "${GITHUB_STEP_SUMMARY}"
+          started="$(date -u +%H:%M:%SZ)"
+          built=passed
+          gateway || { built=failed; status=1; }
+          build="${SECONDS}"
+          ran="not run"
+          if [[ "${status}" == 0 ]]; then
+            ran=passed
+            example || { ran=failed; status=1; }
+          fi
+          {
+            printf '%s\n' '### Meta long-term agents example' ''
+            printf 'started %s (UTC); queue time is not printed here: read it from the job record (created to started)\n\n' "${started}"
+            printf '%s\n' '| part | seconds | result |' '| --- | --- | --- |'
+            printf '| gateway build | %s | %s |\n' "${build}" "${built}"
+            printf '| the script: Python and TypeScript, twice each | %s | %s |\n\n' "$((SECONDS - build))" "${ran}"
+            printf 'ended %s (UTC)\n' "$(date -u +%H:%M:%SZ)"
+          } >> "${GITHUB_STEP_SUMMARY}"
           exit "${status}"

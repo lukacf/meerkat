@@ -417,7 +417,7 @@ class ShapeTests(GuardTest):
         # The pin is the release and its place ends with the tag: an entry written for the
         # release, with a context that ends where the tag ends, covers the link.
         self.repo.allow(path="docs/get.md", match=r"^lukacf/meerkat release v1\.4\.1$",
-                        context=r"The archives are on \S+/releases/tag/v1\.4\.1(?=\.$)",
+                        context=r"The archives are on \S+/releases/tag/v1\.4\.1(?=\. Open )",
                         reason="Recorded history of earlier releases.")
         err = self.assertFindings("docs/get.md:8: lukacf/meerkat-meta release v1.0.0: a release of the retired")
         self.assertIn(f"{len(lines) - 1} pin(s) below", err)
@@ -428,7 +428,8 @@ class ShapeTests(GuardTest):
         self.repo.config["allow"] = []
         self.repo.save_config()
         self.repo.write("docs/get.md", f"See {releases}/tag/v1.4.2. Or {releases}/tag/meta-v1.4.2, as you like.\n"
-                        f"See {releases}/tag/mirror-v1.0.0.\nSee {releases}/tag/v1.4.1.5 and {releases}/tag/v1.4.1-rc.1.\n")
+                        f"See {releases}/tag/mirror-v1.0.0.\n"
+                        f"See {releases}/tag/v1.4.1.5 and {releases}/tag/v1.4.1-rc.1.\n")
         self.assertClean()
 
     def test_an_entry_covers_a_release_link_with_a_fragment_by_its_tag(self):

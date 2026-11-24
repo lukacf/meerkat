@@ -27,7 +27,8 @@ Pins it finds in every tracked text file:
     monorepo by their tag, and of the retired standalone repositories always
     (their releases predate the monorepo); a URL's tag ends where its
     fragment or its query starts (`.../releases/tag/vX.Y.Z#assets` names
-    the release vX.Y.Z);
+    the release vX.Y.Z), and before the mark that ends a sentence on it
+    (`.`, `,`, `;`, `:`, `!`);
   - versioned release asset names (`meerkat_meta-0.9.3-py3-none-any.whl`,
     `meta-rpc-gateway-0.9.10-...`), and tracked files named like them;
   - version constants whose name names a product (`CORE_REQUIREMENT =
@@ -580,9 +581,11 @@ class Scanner:
         self.cargo_line_re = re.compile(rf'^[ \t]*({crates})[ \t]*=[ \t]*(?:"([^"\n]*)"|\{{([^}}\n]*)\}})')
         repositories = alternatives((MONOREPO, *RETIRED_REPOSITORIES))
         # The tag ends at the next part of the path, at the end of the URL, and where a fragment or
-        # a query starts.
+        # a query starts; a mark that ends the sentence after it (`.`, `,`, `;`, `:`, `!`) is not
+        # its last character.
         self.release_re = re.compile(
-            rf"github\.com/{OWNER}/({repositories})/releases/(?:download|tag)/([^/\s\"'`)<>\]\\#?]+)")
+            rf"github\.com/{OWNER}/({repositories})/releases/(?:download|tag)/"
+            r"([^/\s\"'`)<>\]\\#?]*[^/\s\"'`)<>\]\\#?.,;:!])")
         self.retired_git_re = re.compile(
             rf"git\+https://github\.com/{OWNER}/({alternatives(RETIRED_REPOSITORIES)})(?:\.git)?\b")
         self.asset_re = re.compile(

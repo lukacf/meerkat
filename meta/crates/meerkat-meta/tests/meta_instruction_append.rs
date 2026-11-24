@@ -715,9 +715,14 @@ impl Rig {
     /// Shut down before a reopen over the same state directory in this
     /// process: stand the durable child root down, bounded, until it is
     /// released; then drop this lifetime's handles and wait, bounded, until
-    /// its execution custody is released (`support/custody_wait.rs`).
+    /// its execution custody is released (`support/custody_wait.rs`). The
+    /// shutdown's report must say the teardown settled: the mob's part
+    /// before the root is stood down again, the whole report, with the
+    /// root's last outcome, before the wait.
     async fn shutdown_for_reopen(mut self) {
-        let mut outcome = self.runtime.shutdown().await.child_mob_stand_down;
+        let mut report = self.runtime.shutdown().await;
+        custody_wait::mob_teardown_settled(&report);
+        let mut outcome = report.child_mob_stand_down.clone();
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
         while !child_root_released(&outcome) && std::time::Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -731,6 +736,8 @@ impl Rig {
             child_root_released(&outcome),
             "the durable child root is released before the reopen: {outcome:?}"
         );
+        report.child_mob_stand_down = outcome;
+        custody_wait::teardown_settled(&report);
         let state = std::mem::take(&mut self.state);
         drop(self);
         custody_wait::predecessor_custody_released(&state).await;
@@ -802,6 +809,83 @@ async fn a_reopen_waits_until_the_execution_custody_is_released() {
     assert!(
         waited < Duration::from_secs(1),
         "with no holder the wait took {waited:?}"
+    );
+}
+
+/// The check a reopen makes of its predecessor's shutdown report
+/// (`support/custody_wait.rs`) takes the report of a teardown that settled
+/// and fails the row on one that did not. The first report is the real one
+/// of an agent that ran a turn. Each refused report is that report with one
+/// outcome set to a value the product writes for such a teardown: durable
+/// child mobs held until the process exits, a member the terminal shutdown
+/// could not settle, and a mob that did not stop.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reopen_refuses_a_shutdown_report_that_did_not_settle() {
+    fn refusal(check: impl FnOnce()) -> Option<String> {
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(check)).err()?;
+        Some(
+            caught
+                .downcast::<String>()
+                .map_or_else(|_| String::new(), |message| *message),
+        )
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let roster = vec![configured_spec(&["Answer in ALPHA style."])];
+    let mut rig = boot(temp.path(), &fresh_mob_id(), roster).await;
+    rig.turn(CONFIGURED, "FIRST-TURN").await;
+    let mut report = rig.runtime.shutdown().await;
+    assert_eq!(
+        refusal(|| custody_wait::mob_teardown_settled(&report)),
+        None,
+        "the mob of a runtime whose agent ran a turn and is idle settles"
+    );
+
+    report.child_mob_stand_down =
+        meerkat_meta::ChildMobStandDownOutcome::HeldUntilProcessExit { child_mobs: 0 };
+    assert_eq!(
+        refusal(|| custody_wait::mob_teardown_settled(&report)),
+        None,
+        "the durable child mobs are not the mob's part"
+    );
+    let refused = refusal(|| custody_wait::teardown_settled(&report));
+    assert!(
+        refused
+            .as_deref()
+            .is_some_and(|message| message.contains("did not complete its cleanup")),
+        "a child root held until the process exits is no completed cleanup: {refused:?}"
+    );
+
+    let meerkat_meta::MobTerminalShutdownOutcome::Completed(mob) =
+        &mut report.mob_terminal_shutdown
+    else {
+        panic!("the terminal shutdown completed: {report:?}");
+    };
+    mob.members.insert(
+        meerkat_meta::member_comms_id::mob_member_id(CONFIGURED),
+        meerkat_mob::MemberShutdownOutcome::EffectCustodyRetained {
+            context: "set by this row",
+        },
+    );
+    let refused = refusal(|| custody_wait::teardown_settled(&report));
+    assert!(
+        refused
+            .as_deref()
+            .is_some_and(|message| message.contains("did not settle every member")),
+        "a member the terminal shutdown could not settle is refused: {refused:?}"
+    );
+
+    report.mob_stop = Err(meerkat_meta::MobRuntimeError::InvalidInput(
+        "set by this row",
+    ));
+    report.mob_terminal_shutdown = meerkat_meta::MobTerminalShutdownOutcome::SkippedMobStopFailed;
+    report.child_mob_stand_down = meerkat_meta::ChildMobStandDownOutcome::SkippedMobStopFailed;
+    let refused = refusal(|| custody_wait::teardown_settled(&report));
+    assert!(
+        refused
+            .as_deref()
+            .is_some_and(|message| message.contains("did not stop its mob")),
+        "a mob that did not stop is refused: {refused:?}"
     );
 }
 

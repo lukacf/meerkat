@@ -10,9 +10,12 @@
 //!
 //! # The contract
 //!
-//! A test that reopens a state directory in its own process calls
+//! A test that reopens a state directory in its own process reads the first
+//! lifetime's shutdown report with [`teardown_settled`], and calls
 //! [`predecessor_custody_released`] after it dropped the first lifetime's
-//! handles and before the next boot.
+//! handles and before the next boot. The wait is for a release that comes
+//! late after a teardown that settled. A teardown that failed or did not
+//! settle fails the row at its report, before any wait.
 //!
 //! # What the wait reads
 //!
@@ -81,6 +84,40 @@ pub async fn predecessor_custody_released(state_dir: &Path) {
             started.elapsed()
         );
     }
+}
+
+/// Fail the row unless `report` is that of a teardown that settled: the mob
+/// stopped, its terminal shutdown completed with every member unregistered
+/// ([`mob_teardown_settled`]), and the runtime's cleanup completed, which for
+/// a runtime with durable child mobs means their root was released. Call it
+/// on the report of the shutdown a reopen follows, before the wait: a member
+/// the teardown could not settle keeps the execution custody until it ends,
+/// and the wait must not turn that into a passing row.
+#[track_caller]
+pub fn teardown_settled(report: &meerkat_meta::UnifiedRuntimeShutdownReport) {
+    mob_teardown_settled(report);
+    assert!(
+        report.cleanup_completed(),
+        "the shutdown before a reopen did not complete its cleanup: {report:?}"
+    );
+}
+
+/// The mob's part of [`teardown_settled`], for a rig that stands its durable
+/// child root down again before it reads the whole report: the mob stopped,
+/// and its terminal shutdown completed with every member unregistered.
+#[track_caller]
+pub fn mob_teardown_settled(report: &meerkat_meta::UnifiedRuntimeShutdownReport) {
+    assert!(
+        report.mob_stop.is_ok(),
+        "the shutdown before a reopen did not stop its mob: {report:?}"
+    );
+    assert!(
+        matches!(
+            &report.mob_terminal_shutdown,
+            meerkat_meta::MobTerminalShutdownOutcome::Completed(mob) if mob.is_clean()
+        ),
+        "the shutdown before a reopen did not settle every member: {report:?}"
+    );
 }
 
 /// Whether the kernel's lock table names a holder of `custody`: `None` when

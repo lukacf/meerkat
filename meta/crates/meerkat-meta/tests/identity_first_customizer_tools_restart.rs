@@ -533,7 +533,7 @@ async fn first_boot(mob_id: &str, state: &Path) -> FirstBoot {
         .to_string();
     // The build's report is written off Core's actor once the member is live.
     sleep(Duration::from_millis(500)).await;
-    runtime.shutdown().await;
+    custody_wait::teardown_settled(&runtime.shutdown().await);
     FirstBoot { session_id, tools }
 }
 
@@ -613,7 +613,7 @@ async fn a_clean_restart_builds_no_member_and_answers_resolved_tools_from_its_re
         // The build's report is written off Core's actor once the member is
         // live.
         sleep(Duration::from_millis(500)).await;
-        runtime.shutdown().await;
+        custody_wait::teardown_settled(&runtime.shutdown().await);
     }
 
     let capture = CaptureClient::default();
@@ -1027,7 +1027,7 @@ async fn an_identity_never_built_answers_no_build_recorded_until_its_first_deliv
         // The build's report is written off Core's actor once the member is
         // live.
         sleep(Duration::from_millis(500)).await;
-        runtime.shutdown().await;
+        custody_wait::teardown_settled(&runtime.shutdown().await);
         (session_id, built)
     };
 
@@ -1876,10 +1876,12 @@ async fn durable_workers_spawned_at_runtime_continue_after_a_graceful_shutdown()
     const MOB_ID: &str = "customizer-tools-restart-j";
     let temp = tempfile::TempDir::new().expect("temp dir");
     let state = temp.path().join("state");
-    boot_with_running_workers(MOB_ID, &state)
-        .await
-        .shutdown()
-        .await;
+    custody_wait::teardown_settled(
+        &boot_with_running_workers(MOB_ID, &state)
+            .await
+            .shutdown()
+            .await,
+    );
     workers_continue_at_the_restart(MOB_ID, &state).await;
 }
 
@@ -1970,10 +1972,12 @@ async fn runs_resumed_at_boot_reach_the_event_log_from_resume_to_terminal_once()
     const MOB_ID: &str = "customizer-tools-restart-p";
     let temp = tempfile::TempDir::new().expect("temp dir");
     let state = temp.path().join("state");
-    boot_with_running_workers(MOB_ID, &state)
-        .await
-        .shutdown()
-        .await;
+    custody_wait::teardown_settled(
+        &boot_with_running_workers(MOB_ID, &state)
+            .await
+            .shutdown()
+            .await,
+    );
 
     let log = RecordedEventLog::default();
     let model = WorkerModel::default();
@@ -2460,7 +2464,7 @@ async fn m5_a_member_an_agent_spawned_into_its_own_mob_is_messaged_by_its_creato
         .expect("the spawned helper has an endpoint");
     *model.helper_peer_id.lock().unwrap() = Some(endpoint.descriptor.peer_id.to_string());
     creator_messages_helper(&runtime, &model, BEFORE_RESTART).await;
-    runtime.shutdown().await;
+    custody_wait::teardown_settled(&runtime.shutdown().await);
     drop(runtime);
 
     let runtime = boot_agent_spawn(MOB_ID, &state, model.clone()).await;
@@ -2556,7 +2560,7 @@ async fn a_child_mob_restores_its_members_as_the_hosts_member_restore_says() {
         )
         .await
         .expect("seat the child mob's worker");
-        runtime.shutdown().await;
+        custody_wait::teardown_settled(&runtime.shutdown().await);
         child_id
     };
 
@@ -2834,7 +2838,7 @@ async fn a_respawn_whose_wake_fails_keeps_the_mobs_its_session_owns_across_a_res
             (true, true, true),
             "after the failed respawn, in the same process, the session's mobs are managed"
         );
-        runtime.shutdown().await;
+        custody_wait::teardown_settled(&runtime.shutdown().await);
         (owned, seat_after_refused_wake)
     };
     let (owned, seat_after_refused_wake) = owned;
@@ -2941,7 +2945,7 @@ async fn a_respawn_refused_at_its_seats_build_changes_nothing() {
                 .expect("the creator's status")
                 .generation,
         );
-        runtime.shutdown().await;
+        custody_wait::teardown_settled(&runtime.shutdown().await);
         (owned, after_refusal, generation_before)
     };
 
@@ -3009,7 +3013,7 @@ async fn a_respawn_whose_wake_fails_and_a_later_wake_keep_the_mobs_its_session_o
             Some(owned.owner.clone()),
             "the creator runs on the session it had"
         );
-        runtime.shutdown().await;
+        custody_wait::teardown_settled(&runtime.shutdown().await);
         owned
     };
 
@@ -3066,7 +3070,7 @@ async fn a_respawn_that_completes_keeps_the_mobs_its_session_owns_across_a_resta
             (true, true, true),
             "after the respawn, in the same process"
         );
-        runtime.shutdown().await;
+        custody_wait::teardown_settled(&runtime.shutdown().await);
         owned
     };
 
@@ -4400,7 +4404,7 @@ async fn a_governed_input_after_a_clean_restart_makes_one_customize_build_and_no
         // The build's report is written off Core's actor once the member is
         // live.
         sleep(Duration::from_millis(500)).await;
-        runtime.shutdown().await;
+        custody_wait::teardown_settled(&runtime.shutdown().await);
         (status, tools, build)
     };
     assert!(
@@ -5294,7 +5298,7 @@ async fn a_respawned_identity_keeps_managing_the_mob_it_created_across_a_restart
             "after the respawn, in the same process",
         )
         .await;
-        runtime.shutdown().await;
+        custody_wait::teardown_settled(&runtime.shutdown().await);
         after
     };
 
@@ -6350,7 +6354,7 @@ async fn an_archived_agents_mob_ends_at_the_next_start_and_an_unarchive_does_not
             "after the archive, in the same process, the mob is still hosted and its member \
              is still active"
         );
-        runtime.shutdown().await;
+        custody_wait::teardown_settled(&runtime.shutdown().await);
         before
     };
 
@@ -6453,7 +6457,7 @@ async fn an_agent_unarchived_before_the_next_start_manages_nothing_of_the_mob_th
             hosted_with_its_active_member(),
             "in the same process the mob is still hosted and its member is still active"
         );
-        runtime.shutdown().await;
+        custody_wait::teardown_settled(&runtime.shutdown().await);
         (before, after)
     };
 

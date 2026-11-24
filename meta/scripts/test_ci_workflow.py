@@ -1213,6 +1213,17 @@ class CiWorkflowTests(unittest.TestCase):
         # skipped, pass on a failure or run under another shell.
         for key in ("continue-on-error", "if", "shell"):
             self.assertNotIn(key, step)
+        # The same for the rest of the lane: no other step of the build or
+        # of a leg can be skipped or fail without failing its job, and
+        # neither job can fail without failing the run. Only the build's
+        # three measurement steps carry a condition or continue-on-error
+        # (test_the_four_compile_paths_are_measured_in_steps_of_their_own).
+        for owner in (build, job):
+            self.assertNotIn("continue-on-error", owner)
+            for each in steps_of(owner):
+                if each.get("name") not in (MEASURE_BEFORE, MEASURE_AFTER, MEASURE_UPLOAD):
+                    for key in ("continue-on-error", "if"):
+                        self.assertNotIn(key, each, each.get("name") or uses_of(each))
         # A partition that selects no test is a failure, said in the command
         # and not left to nextest's default. The command is the step's whole
         # script: a leg holds no resource sampler (the readings are printed

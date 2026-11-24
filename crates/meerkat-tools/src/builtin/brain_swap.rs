@@ -27,6 +27,10 @@
 //! effect on the next turn only if this run completes. Overstating it would be
 //! a lie in the failure case: a run that errors, is interrupted, or is denied
 //! by a hook commits nothing, and the next turn continues on the current model.
+//! The tool's description also says that a staged switch is denied when the
+//! target route is known to reject the reasoning effort level the session
+//! holds: the runtime decides that before the next input, and the session
+//! stays on the current model.
 //!
 //! # Input surface
 //!
@@ -54,7 +58,7 @@ pub const BRAIN_SWAP_TOOL_NAME: &str = "brain_swap";
 
 const BRAIN_SWAP_TOOL_DOCUMENTATION: &str = r#"Request that this session switch to a different model for subsequent turns.
 
-The switch does NOT take effect during the current turn or anywhere else in this run: every remaining model call in this run, including the one that reads this result, uses the current model. The request is staged now and applied before the next input is processed, and only if this run finishes cleanly. A run that fails, is interrupted, or is denied changes nothing.
+The switch does NOT take effect during the current turn or anywhere else in this run: every remaining model call in this run, including the one that reads this result, uses the current model. The request is staged now and applied before the next input is processed, and only if this run finishes cleanly. A run that fails, is interrupted, or is denied changes nothing. If the session holds a reasoning effort level and the target route is known to reject the held level, the switch is denied: the session then stays on the current model, and nothing in a later turn says so.
 
 Choose only the target model. Provider routing, provider parameters, account selection, and credentials are resolved behind the runtime and cannot be supplied here.
 

@@ -9,7 +9,9 @@ import importlib.util
 import json
 import os
 import re
+import shutil
 import subprocess
+import sys
 import tempfile
 import tomllib
 import unittest
@@ -1030,8 +1032,99 @@ class CiWorkflowTests(unittest.TestCase):
         self.assertEqual(job["name"], f"rust-unit (${{{{ matrix.partition }}}}/{len(legs)})")
         step = next(step for step in steps_of(job) if step.get("name") == "Lib tests")
         self.assertEqual(step["env"]["PARTITION"], "${{ matrix.partition }}")
-        self.assertEqual(step["run"].strip(), "./scripts/repo-cargo nextest run -p meerkat-meta --lib "
-                         f'--partition "count:${{PARTITION}}/{len(legs)}" --no-fail-fast')
+        command = ("./scripts/repo-cargo nextest run -p meerkat-meta --lib "
+                   f'--partition "count:${{PARTITION}}/{len(legs)}" --no-fail-fast')
+        lines = [line.strip() for line in step["run"].splitlines()]
+        self.assertEqual([line for line in lines if "repo-cargo" in line or "nextest" in line], [command])
+
+    def test_the_unit_step_exits_with_its_test_commands_status(self):
+        """The "Lib tests" step prints resource readings from a background
+        sampler while its one test command runs. The readings must never
+        decide the step: errexit is off from the first line, the sampler is
+        one subshell whose status nobody reads, the test command stands on a
+        line of its own with nothing appended, and the step ends with that
+        command's exit status. Only the sampler holds a trap, so a signal
+        ends the step's shell as it ends a one-line step. The step's script
+        is also run here, the way the runner starts a step that names no
+        shell (`bash -e`), with a stand-in for the repository's wrapper."""
+        job = load(CI_WORKFLOW)["jobs"]["rust-unit"]
+        step = next(step for step in steps_of(job) if step.get("name") == "Lib tests")
+        self.assertNotIn("shell", step)
+        self.assertNotIn("continue-on-error", step)
+        self.assertNotIn("if", step)
+        lines = [line.strip() for line in step["run"].splitlines() if line.strip()]
+        command = next(line for line in lines if line.startswith("./scripts/repo-cargo "))
+        begin, end, at = lines.index("("), lines.index(") 2>/dev/null &"), lines.index(command)
+        self.assertEqual(lines[:begin + 1], ["set +e", "("])
+        self.assertEqual(lines[end:at], [") 2>/dev/null &", "sampler=$!"])
+        self.assertEqual(lines[at + 1:], [
+            "status=$?",
+            'kill "${sampler}" 2>/dev/null',
+            'pkill -P "${sampler}" 2>/dev/null',
+            'wait "${sampler}" 2>/dev/null',
+            'exit "${status}"',
+        ])
+        sampler = lines[begin + 1:end]
+        outside = lines[:begin] + lines[end:]
+        self.assertFalse([line for line in outside if "trap" in line or "exec" in line], "only the sampler traps")
+        self.assertEqual(sum("status" in line for line in outside), 2, "the status is set once and used once")
+        for line in sampler:
+            self.assertNotIn("status", line)
+            self.assertNotIn("GITHUB_", line, "the sampler writes no workflow command file")
+            self.assertIsNone(re.search(r"(^|[^<])>[^&]|>>", line.replace("2>/dev/null", "")),
+                              f"the sampler writes to its output only: {line}")
+            for exit_code in re.findall(r"\bexit\b\s*(\S*)", line):
+                self.assertIn(exit_code.rstrip(";'"), ("0",), line)
+            for tool in re.findall(r"(?:^|[\s(])(df|ps|du) -", line):
+                self.assertRegex(line, rf"timeout \d+ {tool} -", f"{tool} runs under a time limit")
+        self.assertIn("for ((sample = 1; sample <= 200; sample++)); do", sampler)
+        self.assertIn("sleep 30 &", sampler)
+        self.assertIn('wait "${nap}" || exit 0', sampler)
+
+        program = "\n".join((
+            f"#!{sys.executable}",
+            "import os, sys, time",
+            "open(os.environ['STAND_IN_ARGUMENTS'], 'w').write('\\n'.join(sys.argv[1:]))",
+            "time.sleep(float(os.environ['STAND_IN_SECONDS']))",
+            "sys.exit(int(os.environ['STAND_IN_STATUS']))",
+            "",
+        ))
+        reading = re.compile(r"^resource reading \[[0-9:Z]*\] 1: memory .+; swap .+; memory pressure full avg10 .+; "
+                             r"root file system .+; largest resident: .+$")
+        cases = (
+            ("the command passes", 0, os.environ.get("PATH", ""), None),
+            ("the command fails", 1, os.environ.get("PATH", ""), None),
+            ("the build fails", 101, os.environ.get("PATH", ""), None),
+            ("no tool of the sampler exists", 3, "/nonexistent", None),
+            ("the step's output cannot be written", 4, os.environ.get("PATH", ""), "/dev/full"),
+        )
+        for name, status, path, output in cases:
+            with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
+                wrapper = Path(tmp) / "scripts/repo-cargo"
+                wrapper.parent.mkdir()
+                wrapper.write_text(program)
+                wrapper.chmod(0o755)
+                script = Path(tmp) / "step.sh"
+                script.write_text(step["run"])
+                arguments = Path(tmp) / "arguments"
+                env = {"PATH": path, "PARTITION": "3", "CARGO_TARGET_DIR": str(Path(tmp) / "target"),
+                       "STAND_IN_ARGUMENTS": str(arguments), "STAND_IN_SECONDS": "2", "STAND_IN_STATUS": str(status)}
+                sink = open(output, "w") if output else None
+                try:
+                    result = subprocess.run([shutil.which("bash"), "-e", str(script)], cwd=tmp, env=env, text=True,
+                                            timeout=60, stdout=sink or subprocess.PIPE, stderr=subprocess.PIPE)
+                finally:
+                    if sink:
+                        sink.close()
+                self.assertEqual(result.returncode, status, result.stderr)
+                self.assertEqual(arguments.read_text().split("\n"),
+                                 ["nextest", "run", "-p", "meerkat-meta", "--lib", "--partition", "count:3/4",
+                                  "--no-fail-fast"])
+                if output is None:
+                    readings = [line for line in result.stdout.splitlines() if line.startswith("resource reading")]
+                    self.assertEqual(len(readings), 1, result.stdout)
+                    self.assertRegex(readings[0], reading)
+                    self.assertNotIn(tmp, result.stdout, "no line holds a path of the environment")
 
     def test_the_examples_build_takes_the_bin_tests_profile_on_a_pull_request(self):
         """rust-examples builds every example with one wrapper line whose

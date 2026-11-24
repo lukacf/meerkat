@@ -21484,7 +21484,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     /// [`meerkat_core::service::SessionServiceInstructionExt::read_session_instructions`]
     /// reads one: the lowering of each model and binding the sessions record
     /// is resolved once for the pass, not once per session. A mob's status
-    /// read asks for one page of its members this way. Wakes nothing.
+    /// read asks for one page of its members this way. Wakes nothing. A
+    /// session whose own run holds a round commit ahead of its boundary
+    /// answers its last committed state, as every answer here does.
     pub async fn read_sessions_instructions(
         &self,
         ids: &[SessionId],
@@ -21505,6 +21507,27 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         reads
     }
 
+    /// One session's committed operator-instruction state: the recorded
+    /// target, the effective set and the model's lowering, all three from
+    /// the one committed session this reads.
+    ///
+    /// An observation, so it reads as a public reader does
+    /// ([`Self::load_committed_session_tolerating_tail`]): while the
+    /// session's own durable run holds a round commit ahead of its boundary
+    /// (from its first tool round to its boundary commit) the strict read
+    /// refuses the boundary by contract, and this answers the committed
+    /// snapshot the round's tail sits on, read whole in one store
+    /// transaction. That snapshot is the session's last committed state and
+    /// carries nothing of the run: an operator-instruction write never lands
+    /// inside a run (it commits under the turn-finalization boundary), so
+    /// the target is the one every reader saw at the run's start, and the
+    /// entry the run's start appended is in the run's tail, so a change the
+    /// open run applied reads pending until the run's boundary commit, as
+    /// it does between the run's start and its first round commit.
+    ///
+    /// It decides nothing and settles nothing: the read takes no turn
+    /// boundary, and an ended run's tail is left to the strict readers, the
+    /// session's next start, attach or archive.
     async fn read_session_instructions_with(
         &self,
         id: &SessionId,
@@ -21514,7 +21537,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         meerkat_core::service::SessionInstructionError,
     > {
         let session = self
-            .load_authoritative_session(id)
+            .load_committed_session_tolerating_tail(id)
             .await?
             .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
         let target = session.instruction_target_state()?;

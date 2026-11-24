@@ -393,6 +393,44 @@ class ShapeTests(GuardTest):
                         f"See {releases}/tag/mirror-v1.0.0#notes\n")
         self.assertClean()
 
+    def test_a_release_link_that_ends_a_sentence_is_a_pin(self):
+        # Prose ends a sentence, a clause or a question on a link: the mark after the tag
+        # is the sentence's, not the tag's.
+        releases = "https://github.com/lukacf/meerkat/releases"
+        lines = [
+            (f"The archives are on {releases}/tag/v1.4.1.", "release lukacf/meerkat release v1.4.1: pins core 1.4.1"),
+            (f"Open {releases}/tag/meta-v1.4.1, then pick an archive.",
+             "release lukacf/meerkat release meta-v1.4.1: pins meta 1.4.1"),
+            (f"First {releases}/tag/connect-v1.4.1; then the rest.",
+             "release lukacf/meerkat release connect-v1.4.1: pins connect 1.4.1"),
+            (f"From {releases}/tag/v1.4.0: the checksums.", "release lukacf/meerkat release v1.4.0: pins core 1.4.0"),
+            (f"It is all on {releases}/tag/v1.3.0!", "release lukacf/meerkat release v1.3.0: pins core 1.3.0"),
+            (f"Did you read {releases}/tag/v1.2.0?", "release lukacf/meerkat release v1.2.0: pins core 1.2.0"),
+            (f"More on {releases}/tag/v1.1.0...", "release lukacf/meerkat release v1.1.0: pins core 1.1.0"),
+            ("It was https://github.com/lukacf/meerkat-meta/releases/tag/v1.0.0.",
+             "lukacf/meerkat-meta release v1.0.0: a release of the retired"),
+        ]
+        self.repo.write("docs/get.md", "\n".join(line for line, _ in lines) + "\n")
+        err = self.assertFindings(*(f"docs/get.md:{number}: {finding}"
+                                    for number, (_, finding) in enumerate(lines, 1)))
+        self.assertIn(f"{len(lines)} pin(s) below", err)
+        # The pin is the release and its place ends with the tag: an entry written for the
+        # release, with a context that ends where the tag ends, covers the link.
+        self.repo.allow(path="docs/get.md", match=r"^lukacf/meerkat release v1\.4\.1$",
+                        context=r"The archives are on \S+/releases/tag/v1\.4\.1(?=\.$)",
+                        reason="Recorded history of earlier releases.")
+        err = self.assertFindings("docs/get.md:8: lukacf/meerkat-meta release v1.0.0: a release of the retired")
+        self.assertIn(f"{len(lines) - 1} pin(s) below", err)
+        self.assertNotIn("docs/get.md:1:", err)
+        self.assertNotIn("covers nothing", err)
+        # The mark makes no pin of a link that is none without it: the version in this tree,
+        # a tag of no product, and a tag that goes on after the version.
+        self.repo.config["allow"] = []
+        self.repo.save_config()
+        self.repo.write("docs/get.md", f"See {releases}/tag/v1.4.2. Or {releases}/tag/meta-v1.4.2, as you like.\n"
+                        f"See {releases}/tag/mirror-v1.0.0.\nSee {releases}/tag/v1.4.1.5 and {releases}/tag/v1.4.1-rc.1.\n")
+        self.assertClean()
+
     def test_an_entry_covers_a_release_link_with_a_fragment_by_its_tag(self):
         # The pin an entry matches is the release, without the fragment: an entry written for
         # the plain link covers the same link to a section of the page, and its context holds it.

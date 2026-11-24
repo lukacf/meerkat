@@ -2849,7 +2849,7 @@ impl Rig {
     ) {
         let deadline = tokio::time::Instant::now() + TURN_BOUND;
         loop {
-            let unsettled = match self.turn_committed(marker, session).await {
+            let unsettled = match self.turn_committed(name, marker, session).await {
                 Ok(()) => return,
                 Err(unsettled) => unsettled,
             };
@@ -2870,9 +2870,13 @@ impl Rig {
     /// not before.
     ///
     /// Only this yes or no leaves the read: the session it reads is dropped
-    /// here, and no assertion of a row reads it.
+    /// here, and no assertion of a row reads it. Only a transcript that does
+    /// not hold the turn yet answers no: a read that fails, a session that is
+    /// not stored and a row that does not render fail the row at once, as
+    /// they do in `meta_instruction_append.rs`.
     async fn turn_committed(
         &self,
+        name: &str,
         marker: &str,
         session: &meerkat_core::types::SessionId,
     ) -> Result<(), String> {
@@ -2885,13 +2889,25 @@ impl Rig {
             session,
         )
         .await
-        .map_err(|error| format!("the committed session does not read: {error}"))?
-        .ok_or_else(|| "no committed session is stored".to_string())?;
+        .unwrap_or_else(|error| {
+            panic!(
+                "{name}: the committed session {session} does not read while the turn \
+                 {marker:?} settles: {error:?}"
+            )
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "{name}: no committed session {session} is stored while the turn {marker:?} \
+                 settles"
+            )
+        });
         let rows = committed.messages();
         let asked = rows
             .iter()
             .position(|row| {
-                serde_json::to_string(row).is_ok_and(|rendered| rendered.contains(marker))
+                serde_json::to_string(row)
+                    .expect("a transcript row renders")
+                    .contains(marker)
             })
             .ok_or_else(|| {
                 format!(

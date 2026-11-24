@@ -74,7 +74,8 @@ WIRE_METHODS = frozenset(
     """
     live/webrtc/answer
     meta/agent_definitions/list
-    meta/agent_memory/forget meta/agent_memory/manifest meta/agent_memory/recall
+    meta/agent_memory/forget meta/agent_memory/forget_in_scope
+    meta/agent_memory/manifest meta/agent_memory/purge meta/agent_memory/recall
     meta/agent_memory/remember meta/agent_memory/update
     meta/attach_existing_session
     meta/blob/get meta/blob/upload
@@ -654,7 +655,7 @@ async def test_every_wire_method_leaves_through_the_one_seam(
 
     assert by_multipart == MULTIPART_ALWAYS | MULTIPART_WITH_ATTACHMENTS
     assert through_seam == (WIRE_METHODS | IDENTITY_FIRST_WIRE_METHODS) - MULTIPART_ALWAYS
-    assert len(WIRE_METHODS) == 161
+    assert len(WIRE_METHODS) == 163
     assert len(IDENTITY_FIRST_WIRE_METHODS) == 29
     assert not WIRE_METHODS & IDENTITY_FIRST_WIRE_METHODS
 
@@ -1827,7 +1828,7 @@ def test_a_report_that_is_not_an_object_is_not_read_as_none(report: Any) -> None
 # of them takes a ``mob_id`` of its own. The same agent name under two handles
 # is two agents, each with its own memory.
 
-# The five memory calls: what each is given here, its wire method, and the
+# The seven memory calls: what each is given here, its wire method, and the
 # params that leave besides the mob.
 MEMORY_CALLS: dict[str, tuple[dict[str, Any], str, dict[str, Any]]] = {
     "remember_agent_memory": (
@@ -1848,6 +1849,16 @@ MEMORY_CALLS: dict[str, tuple[dict[str, Any], str, dict[str, Any]]] = {
     "forget_agent_memory": (
         {"identity": "scribe", "memory_id": "m-1"},
         "meta/agent_memory/forget",
+        {"identity": "scribe", "memory_id": "m-1"},
+    ),
+    "forget_agent_memory_in_scope": (
+        {"scope_kind": "mob", "memory_id": "m-1", "scope_key": "shared"},
+        "meta/agent_memory/forget_in_scope",
+        {"scope": {"kind": "mob", "key": "shared"}, "memory_id": "m-1"},
+    ),
+    "purge_agent_memory": (
+        {"scope_kind": "identity", "memory_id": "m-1", "scope_key": "scribe"},
+        "meta/agent_memory/purge",
         {"identity": "scribe", "memory_id": "m-1"},
     ),
     "manifest_agent_memory": (
@@ -1874,8 +1885,8 @@ NO_IDENTITY_CONTEXT = {
 }
 
 
-def test_the_memory_calls_are_the_handles_five_and_take_no_mob_of_their_own() -> None:
-    on_the_handle = {name for name in _public_names() if name.endswith("_agent_memory")}
+def test_the_memory_calls_are_the_handles_seven_and_take_no_mob_of_their_own() -> None:
+    on_the_handle = {name for name in _public_names() if "_agent_memory" in name}
 
     assert on_the_handle == set(MEMORY_CALLS)
     for name in MEMORY_CALLS:

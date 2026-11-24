@@ -14,7 +14,7 @@ exec git -C "$root" archive --format=tar.gz HEAD -- \
   ':(glob)connect/crates/*/src/bin/*.rs' connect/crates/meerkat-connect/tests/mobkit_setup_member.rs \
   ':(glob)connect/crates/meerkat-connect/tests/support/*.rs' ':(glob)tests/integration/tests/*.rs' \
   meta/examples/004-mdm-console-pack/scripts/build-gcp-target.sh \
-  Cargo.toml Cargo.lock rust-toolchain.toml .cargo/config.toml \
+  crates/meerkat-core/tests/fixtures/hooks/run_override.json Cargo.toml Cargo.lock rust-toolchain.toml .cargo/config.toml \
   ':(glob)crates/*/Cargo.toml' ':(glob)crates/*/build.rs' ':(glob)crates/*/src/**' \
   ':(glob)crates/*/skills/**' crates/meerkat/embedded_skills crates/meerkat-sandbox/third_party \
   ':(glob)meta/crates/*/Cargo.toml' ':(glob)meta/crates/*/src/**' \

@@ -65,11 +65,25 @@ For a GCP target:
 
 The launcher uploads build inputs from the **committed `HEAD`** of the unified
 repository, not your working tree. Commit source changes you want to test.
-The archive includes the workspace lockfile, the target source, and the
+Staged, modified and untracked files are not uploaded. The archive includes the workspace lockfile, the target source, and the
 assets its crates embed; it excludes Git history and local files such as
 `.env.gcp` and target bindings. The separate environment-forwarding step is
 unchanged. On the VM, Cargo builds the locked `mdm_mob_target` example for
-the Rust host target without requiring a Git checkout.
+the Rust host target without requiring a Git checkout. `--locked` preserves the
+lockfile; it does **not** make VM setup or Cargo offline. The VM may download
+tools and registry dependencies. Its build cache stays under
+`~/.cache/mdm-mob-target/cargo-target`, outside the replaced source tree.
+
+To check the package locally, run `./scripts/test-gcp-source.sh` from this
+pack in a committed checkout. It extracts outside Git, resolves the locked
+example offline, and checks its binary path with a stand-in, not a compiler.
+For a real compile and link, use an environment without credentials, with the
+pinned toolchain and all registry dependencies already installed. Set
+`MDM_GCP_CARGO_TARGET_DIR` to an absolute, dedicated writable build cache
+(warmed for that Rust host triple and example), then run
+`./scripts/test-gcp-source.sh --build`. It uses real Cargo in offline mode;
+it neither runs the compiled target nor contacts GCP. A registry cache or
+standalone executable alone is not a warm target directory.
 
 ```bash
 cd examples/004-mdm-console-pack

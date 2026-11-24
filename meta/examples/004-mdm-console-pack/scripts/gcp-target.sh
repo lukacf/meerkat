@@ -112,7 +112,7 @@ sync_repo() {
       set -euo pipefail
       rm -rf ~/meerkat-meta.next
       mkdir -p ~/meerkat-meta.next
-      tar -xzf - -C ~/meerkat-meta.next
+      tar -xmzf - -C ~/meerkat-meta.next
       rm -rf ~/meerkat-meta
       mv ~/meerkat-meta.next ~/meerkat-meta
     "

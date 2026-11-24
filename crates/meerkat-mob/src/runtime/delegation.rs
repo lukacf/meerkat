@@ -926,13 +926,21 @@ struct SeatedHelper {
 /// It is no lifecycle state: what the helper is, is MobMachine's to say.
 struct RunSeat {
     caller: Option<AgentIdentity>,
+    /// When the run's caller stops waiting for the helper's result: the
+    /// bound on the helper's own tool calls counts down to it. `None` for a
+    /// wait too long to name a moment.
+    wait_ends: Option<meerkat_core::time_compat::Instant>,
     seated: std::sync::Mutex<Option<SeatedHelper>>,
 }
 
 impl RunSeat {
-    fn new(caller: Option<AgentIdentity>) -> Self {
+    fn new(
+        caller: Option<AgentIdentity>,
+        wait_ends: Option<meerkat_core::time_compat::Instant>,
+    ) -> Self {
         Self {
             caller,
+            wait_ends,
             seated: std::sync::Mutex::new(None),
         }
     }
@@ -1079,6 +1087,13 @@ impl DelegationExecutionService {
     /// hears a truthful busy answer. The fork's store IO is outside the
     /// bound.
     pub const SOURCE_TURN_BOUNDARY_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
+
+    /// What a bounded run ([`Self::execute_within`]) keeps back of its
+    /// caller's wait for the helper's report: a tool call of the helper may
+    /// run what the caller has left less this much (less a quarter of what
+    /// is left when that is shorter), so a slow tool ends inside the helper
+    /// with time for the helper to say so.
+    pub const HELPER_REPORT_RESERVE: std::time::Duration = std::time::Duration::from_secs(30);
 
     fn source_turn_boundary_wait(&self) -> std::time::Duration {
         #[cfg(test)]
@@ -1680,6 +1695,18 @@ impl DelegationExecutionService {
     /// A turn that completed before the cancel landed is answered as the
     /// completed delegation, limit or not. With nobody left to answer, the
     /// way the delegation settled is logged.
+    ///
+    /// The helper's own tool calls are bounded by what the caller has left
+    /// of `bounds.max_run`, less [`Self::HELPER_REPORT_RESERVE`]: a slow tool
+    /// ends inside the helper and the helper reports it, where the run
+    /// would otherwise reach its limit. The narrowest deadline wins, so a
+    /// tool with a shorter configured deadline keeps it. A `delegate` the
+    /// helper makes itself reads the same bound as its call's deadline, so a
+    /// nested run waits what this one has left. The bound is set on this
+    /// host's runtime for the helper's session: a helper placed on another
+    /// host, and a mob without the runtime adapter, run without it. It
+    /// bounds tool calls only: a helper's long model call still ends with
+    /// the run's limit, cancelled, with no partial result.
     pub async fn execute_within(
         &self,
         request: DelegationExecutionRequest,
@@ -1742,7 +1769,10 @@ impl DelegationExecutionService {
         // its steps; an actor that never answers the cancel or the
         // retirement holds the task, and cannot answer an idle close either.
         let owner = self.handle.acquire_owner().ok();
-        let seat = Arc::new(RunSeat::new(bounds.caller));
+        // The caller's wait counts from here, as the limit's timer does. A
+        // wait too long to name a moment bounds nothing.
+        let wait_ends = meerkat_core::time_compat::Instant::now().checked_add(bounds.max_run);
+        let seat = Arc::new(RunSeat::new(bounds.caller, wait_ends));
         let lost = EndHelperOfLostRun::arm(
             self.clone(),
             request.identity.clone(),
@@ -1946,12 +1976,57 @@ impl DelegationExecutionService {
             .ok()
             .flatten()
             .map(|scope| scope.session_id().clone());
+        if let (Some(session_id), Some(wait_ends)) = (session_id.as_ref(), seat.wait_ends) {
+            self.bound_helper_tool_calls(identity, session_id, wait_ends)
+                .await;
+        }
         seat.note(|seated| {
             seated.hidden_from_caller = Some(hidden);
             seated.session_id = session_id;
         });
         #[cfg(any(test, feature = "test-support"))]
         hold_run_if_requested(identity, RunHoldPoint::Seated).await;
+    }
+
+    /// Bound the tool calls of the helper a bounded run just seated by what
+    /// the run's caller has left: the helper's session, on this host's
+    /// runtime, gets an outer bound that ends when the caller stops waiting
+    /// (`wait_ends`) and keeps [`Self::HELPER_REPORT_RESERVE`] back. The
+    /// helper's agent loop then cuts a slow tool inside the helper, early
+    /// enough for the helper to report, and a `delegate` the helper makes
+    /// itself reads the same bound as its call's deadline.
+    ///
+    /// Set before the helper's turn is admitted, so its first tool call
+    /// runs under it. A helper whose session this host's runtime does not
+    /// hold (one placed on another host), or a mob that runs without the
+    /// runtime adapter, gets no bound: its tools run under their own
+    /// deadlines alone, as before.
+    async fn bound_helper_tool_calls(
+        &self,
+        identity: &AgentIdentity,
+        session_id: &meerkat_core::SessionId,
+        wait_ends: meerkat_core::time_compat::Instant,
+    ) {
+        #[cfg(feature = "runtime-adapter")]
+        let slot = match self.handle.runtime_adapter.as_ref() {
+            Some(runtime) => runtime.session_tool_call_outer_bound(session_id).await,
+            None => None,
+        };
+        #[cfg(not(feature = "runtime-adapter"))]
+        let slot: Option<Arc<meerkat_core::ToolCallOuterBoundSlot>> = None;
+        match slot {
+            Some(slot) => slot.set(meerkat_core::ToolCallOuterBound::new(
+                wait_ends,
+                Self::HELPER_REPORT_RESERVE,
+            )),
+            None => tracing::debug!(
+                mob_id = %self.handle.mob_id(),
+                member = %identity,
+                session_id = %session_id,
+                "a delegation's helper runs without an inner deadline: this host's runtime \
+                 holds no bindings for its session"
+            ),
+        }
     }
 
     /// The delivery scope MobMachine holds for `identity` now, if it names

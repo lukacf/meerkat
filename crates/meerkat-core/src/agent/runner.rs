@@ -3896,6 +3896,7 @@ impl Agent<dyn AgentLlmClient, dyn AgentToolDispatcher, dyn AgentSessionStore> {
             auth_lease_handle: None,
             auth_credential_identity: self.auth_credential_identity.clone(),
             mcp_server_lifecycle_handle: None,
+            tool_call_outer_bound: self.tool_call_outer_bound.clone(),
             cancel_after_boundary_tx,
             cancel_after_boundary_rx,
             model_defaults_resolver: self.model_defaults_resolver.clone(),

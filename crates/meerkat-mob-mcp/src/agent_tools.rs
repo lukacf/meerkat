@@ -117,16 +117,29 @@ const DELEGATE_UNBOUNDED_CALL_MAX_RUN: std::time::Duration = std::time::Duration
 /// bound when that is shorter.
 const DELEGATE_SETTLE_MARGIN: std::time::Duration = std::time::Duration::from_secs(15);
 
+/// The least wait a nested `delegate` is started with. A `delegate` made by
+/// a helper of another `delegate` runs under what that caller has left (the
+/// helper's session carries it as an outer bound on its tool calls). A wait
+/// under this floor leaves too little to seat a helper, run it and hear its
+/// report, so the call is refused before anything is started. Only a wait
+/// narrowed by the caller's bound is held to it: a caller's own short
+/// `max_run_secs`, or an operator's short deadline, stands as given.
+const DELEGATE_NESTED_WAIT_FLOOR: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// What the agent loop resolved for one `delegate` call: when the call
 /// entered the tool, the bound the call runs under from outside, which is
 /// the narrowest deadline of its resolved plan (the loop's tool deadline, an
-/// operator's `tools.tool_timeouts.delegate`, a host's own bound), and when
-/// the dispatcher started the timer that bound counts from, if it said so.
+/// operator's `tools.tool_timeouts.delegate`, a host's own bound, what the
+/// delegate that waits for the calling session has left), when the
+/// dispatcher started the timer that bound counts from, if it said so, and
+/// what the calling session's own caller allows the call, if the session
+/// runs for one.
 #[derive(Debug, Clone, Copy)]
 struct DelegateCallBound {
     entered: meerkat_core::time_compat::Instant,
     outside: Option<std::time::Duration>,
     dispatch_started: Option<meerkat_core::time_compat::Instant>,
+    caller_bound: Option<std::time::Duration>,
 }
 
 impl DelegateCallBound {
@@ -139,6 +152,16 @@ impl DelegateCallBound {
             .map_or(std::time::Duration::ZERO, |started| {
                 self.entered.saturating_duration_since(started)
             })
+    }
+
+    /// Whether the call's outside bound is what the calling session's own
+    /// caller has left: the session is a helper of a `delegate`, and that
+    /// bound is the narrowest deadline of the call.
+    fn narrowed_by_caller(&self) -> bool {
+        match (self.caller_bound, self.outside) {
+            (Some(caller), Some(outside)) => caller <= outside,
+            _ => false,
+        }
     }
 }
 
@@ -156,6 +179,28 @@ struct DelegateWait {
 }
 
 impl DelegateWait {
+    /// The margin a call under the outside bound `outside` keeps for ending
+    /// its helper and answering.
+    fn settle_margin(outside: Option<std::time::Duration>) -> std::time::Duration {
+        outside.map_or(DELEGATE_SETTLE_MARGIN, |outside| {
+            DELEGATE_SETTLE_MARGIN.min(outside / 4)
+        })
+    }
+
+    /// The longest wait the outside bound `outside` allows a call that had
+    /// used `spent` of it when it entered the tool: the bound less its
+    /// settle margin, less `spent`. `None` with no outside bound.
+    fn allowed(
+        outside: Option<std::time::Duration>,
+        spent: std::time::Duration,
+    ) -> Option<std::time::Duration> {
+        outside.map(|outside| {
+            outside
+                .saturating_sub(Self::settle_margin(Some(outside)))
+                .saturating_sub(spent)
+        })
+    }
+
     /// With an outside bound, the call waits what that bound still allows
     /// at the call's entry (the bound less its settle margin, less what the
     /// call had used of it before it reached the tool, `spent`), or the
@@ -172,11 +217,9 @@ impl DelegateWait {
         outside: Option<std::time::Duration>,
         spent: std::time::Duration,
     ) -> Option<Self> {
-        let margin = outside.map_or(DELEGATE_SETTLE_MARGIN, |outside| {
-            DELEGATE_SETTLE_MARGIN.min(outside / 4)
-        });
+        let margin = Self::settle_margin(outside);
         let end_within = margin / 4 * 3;
-        let allowed = outside.map(|outside| outside.saturating_sub(margin).saturating_sub(spent));
+        let allowed = Self::allowed(outside, spent);
         if allowed.is_some_and(|allowed| allowed.is_zero()) {
             return None;
         }
@@ -257,12 +300,31 @@ struct DelegateHelperEnded<'a> {
     /// caller: the helper's addressable ref and its session are written
     /// only then.
     shown: bool,
+    /// Whether the calling session holds manage scope over the helper's mob
+    /// at its live incarnation: what the member tools admit on. The answer
+    /// carries it as `session_manages_mob` and words what the caller can do
+    /// about the helper by it. It reports the scope; it grants none.
+    session_manages_mob: bool,
     session_id: Option<&'a SessionId>,
     /// Texts of the mob's own failures. They are written only for a mob
     /// with no member tool audience.
     error: Option<String>,
     cancel_error: Option<String>,
     retirement_error: Option<String>,
+}
+
+/// Whether the member tools (`mob_check_member`, `mob_retire_member`) reach
+/// the helper of a `delegate` for the calling session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MemberToolsReach {
+    /// The session manages the mob, and the helper is shown to it.
+    Reach,
+    /// The session holds no manage scope over the mob: the tools are
+    /// refused for a helper that is a member.
+    NoScope,
+    /// The host's member tool audience hides the helper from the session:
+    /// the tools answer as for a name the mob does not hold.
+    Hidden,
 }
 
 #[inline(never)]
@@ -1684,13 +1746,25 @@ impl AgentMobToolSurface {
             None => None,
         };
         let outside = bound.and_then(|bound| bound.outside);
-        let Some(wait) = DelegateWait::derive(
-            requested_max_run,
-            outside,
-            bound.map_or(std::time::Duration::ZERO, |bound| {
-                bound.spent_before_entry()
-            }),
-        ) else {
+        let spent = bound.map_or(std::time::Duration::ZERO, |bound| {
+            bound.spent_before_entry()
+        });
+        // A nested call: this session is itself a delegate's helper, and
+        // what that delegate has left is the narrowest bound of this call.
+        // When it leaves this call less than the floor, the call is refused
+        // here, before a mob is made or a helper is seated: its own helper
+        // would have no room to do work and report.
+        if let Some(left) = DelegateWait::allowed(outside, spent)
+            && left < DELEGATE_NESTED_WAIT_FLOOR
+            && bound.is_some_and(|bound| bound.narrowed_by_caller())
+        {
+            return Err(Self::delegate_refused_under_caller(
+                call.name,
+                &AgentIdentity::from(member_id),
+                left,
+            ));
+        }
+        let Some(wait) = DelegateWait::derive(requested_max_run, outside, spent) else {
             // The call reached the tool with nothing of its outside bound
             // left to wait in. Like a call admitted after its deadline, it
             // times out here, before any helper or mob is made.
@@ -1803,7 +1877,11 @@ impl AgentMobToolSurface {
             if let Some(objective_id) = objective_id {
                 self.bind_objective_owner_boxed(&handle, objective_id)
                     .await
-                    .map_err(|error| Self::map_mob_refusal(call, &handle, &[], error))?;
+                    .map_err(|error| match error {
+                        // A permission refusal names no id, as at the seat.
+                        MobError::ScopeDenied(_) => ToolError::access_denied(call.name),
+                        error => Self::map_mob_refusal(call, &handle, &[], error),
+                    })?;
             }
 
             let session_effects = self.implicit_mob_grant_effects(call.name, mob_id, &handle)?;
@@ -1947,7 +2025,21 @@ impl AgentMobToolSurface {
             }
         };
         let session_id = helper_session_id.as_ref();
+        // Whether this session may check and retire a member of the mob:
+        // the read the member tools admit on. An error returns no grant, so
+        // a session none of whose delegates returned a result holds none.
+        let session_manages_mob = self
+            .authority_over(mob_id, handle)
+            .await
+            .can_manage_mob(mob_id.as_str(), handle.incarnation());
         match error {
+            // A permission refusal carries no ids: the mob refused the
+            // helper's seat because the caller's principal lacks the control
+            // scope. Answered as the tool's own access denial, which names
+            // no mob and no member, like a mob that is not the session's own.
+            DelegationExecutionError::Spawn(MobError::ScopeDenied(_)) => {
+                ToolError::access_denied(call.name)
+            }
             DelegationExecutionError::Spawn(error) => {
                 Self::map_mob_refusal(call, handle, &[identity], error)
             }
@@ -1978,6 +2070,7 @@ impl AgentMobToolSurface {
                         message,
                         wait: None,
                         shown,
+                        session_manages_mob,
                         session_id,
                         error: Some(error.to_string()),
                         cancel_error: None,
@@ -2012,6 +2105,7 @@ impl AgentMobToolSurface {
                         message,
                         wait: None,
                         shown,
+                        session_manages_mob,
                         session_id,
                         error: Some(error.to_string()),
                         cancel_error: None,
@@ -2027,7 +2121,9 @@ impl AgentMobToolSurface {
                     .map(|session_id| format!(" (session `{session_id}`)"))
                     .unwrap_or_default();
                 // The texts here are the tool's own: they name the member id
-                // the call gave and the session's own implicit mob.
+                // the call gave and the session's own implicit mob. What the
+                // caller can do about the helper is said once for every
+                // answer, by what became of it ([`Self::delegate_recovery`]).
                 let became = match ended.end {
                     meerkat_mob::DelegationHelperEnd::CancelledAndRetired => {
                         "was cancelled and retired".to_string()
@@ -2037,22 +2133,17 @@ impl AgentMobToolSurface {
                          was cancelled or retired"
                             .to_string()
                     }
-                    meerkat_mob::DelegationHelperEnd::MobNotRunning => format!(
-                        "could not be ended: mob `{mob_id}` no longer takes commands. If that \
-                         mob runs again and still holds the helper, retire it with \
-                         mob_retire_member"
-                    ),
-                    meerkat_mob::DelegationHelperEnd::RetirementFailed => format!(
-                        "could not be retired: it is still a member of mob `{mob_id}`; retire \
-                         it with mob_retire_member"
-                    ),
-                    meerkat_mob::DelegationHelperEnd::EndPending => format!(
+                    meerkat_mob::DelegationHelperEnd::MobNotRunning => {
+                        format!("could not be ended: mob `{mob_id}` no longer takes commands")
+                    }
+                    meerkat_mob::DelegationHelperEnd::RetirementFailed => {
+                        format!("could not be retired: it is still a member of mob `{mob_id}`")
+                    }
+                    meerkat_mob::DelegationHelperEnd::EndPending => {
                         "was not ended yet when this answer had to be given: its cancel and \
-                         retirement go on without this call. mob_check_member with mob \
-                         `{mob_id}` answers member_retired once it is gone, and \
-                         member_not_found if it never was seated; if it stays, retire it \
-                         with mob_retire_member"
-                    ),
+                         retirement go on without this call"
+                            .to_string()
+                    }
                     // A way a helper ends that this tool does not know yet.
                     _ => format!("ended ({})", ended.end.as_str()),
                 };
@@ -2073,6 +2164,7 @@ impl AgentMobToolSurface {
                         message,
                         wait: Some(wait),
                         shown,
+                        session_manages_mob,
                         session_id,
                         error: None,
                         cancel_error: ended.cancel_error,
@@ -2093,15 +2185,13 @@ impl AgentMobToolSurface {
                     helper: meerkat_mob::DelegationHelperEnd::Unknown,
                     message: format!(
                         "tool '{}' lost the run of helper `{identity}` in mob `{mob_id}` \
-                         before it answered, and does not know what became of the helper. If \
-                         it was seated, its cancel and retirement go on without this call: \
-                         mob_check_member with that mob answers member_retired once it is \
-                         gone, and member_not_found if it never was seated; if it stays, \
-                         retire it with mob_retire_member",
+                         before it answered. If the helper was seated, its cancel and \
+                         retirement go on without this call",
                         call.name
                     ),
                     wait: None,
                     shown,
+                    session_manages_mob,
                     session_id,
                     error: None,
                     cancel_error: None,
@@ -2133,6 +2223,12 @@ impl AgentMobToolSurface {
     /// written only when the host's member tool audience shows the helper
     /// to the caller (`ended.shown`), as `mob_check_member` would; the mob's
     /// own failure texts only for a mob with no such audience.
+    ///
+    /// Every answer ends with what the caller can do about the helper
+    /// ([`Self::delegate_recovery`]) and carries, as `session_manages_mob`,
+    /// whether the calling session may use the member tools on the mob. The
+    /// ids of the answer give no right: the manage scope leaves only with a
+    /// delegate's result.
     fn delegate_helper_ended(
         tool_name: &str,
         handle: &MobHandle,
@@ -2147,6 +2243,7 @@ impl AgentMobToolSurface {
             "mob_id": mob_id.as_str(),
             "member_id": identity.as_str(),
             "retryable": false,
+            "session_manages_mob": ended.session_manages_mob,
         });
         if ended.shown {
             data["member_ref"] = json!(meerkat_contracts::WireMemberRef::encode(
@@ -2181,7 +2278,107 @@ impl AgentMobToolSurface {
                  member tool audience is answered the outcome without these texts"
             );
         }
-        ToolError::execution_failed_with_data(ended.message, data)
+        let reach = match (ended.session_manages_mob, ended.shown) {
+            (false, _) => MemberToolsReach::NoScope,
+            (true, false) => MemberToolsReach::Hidden,
+            (true, true) => MemberToolsReach::Reach,
+        };
+        let recovery = Self::delegate_recovery(ended.helper, mob_id, identity, reach);
+        ToolError::execution_failed_with_data(
+            format!("{}. {recovery}", ended.message.trim_end_matches('.')),
+            data,
+        )
+    }
+
+    /// What the caller of a `delegate` that ended without its helper's
+    /// result can do about the helper, by what became of it:
+    ///
+    /// - gone (cancelled and retired, retired, already gone, never seated):
+    ///   nothing, and the ids are for the record;
+    /// - still a member (its retirement failed, its mob takes no commands):
+    ///   the check and retire tools with the ids when they reach the helper
+    ///   for this session; when the session holds no manage scope, that
+    ///   those tools are refused for it and that the ids are for the host;
+    ///   when the host's member tool audience hides the helper from it,
+    ///   that the tools do not reach the helper;
+    /// - not known to the call (its end was still under way, the run was
+    ///   lost, an end this tool does not know): that, and the same three.
+    ///
+    /// A check of a member that is gone is answered for every caller
+    /// (`member_retired`, `member_not_found`), so the text of an unknown
+    /// outcome names it for a caller with no manage scope too.
+    fn delegate_recovery(
+        helper: meerkat_mob::DelegationHelperEnd,
+        mob_id: &MobId,
+        identity: &AgentIdentity,
+        reach: MemberToolsReach,
+    ) -> String {
+        use meerkat_mob::DelegationHelperEnd as End;
+        match helper {
+            End::CancelledAndRetired | End::Retired | End::AlreadyGone => {
+                "Nothing is left to do: the helper is gone, and `mob_id` and `member_id` are for \
+                 the record"
+                    .to_string()
+            }
+            End::NotSeated => "Nothing is left to do: no helper was seated, and `mob_id` and \
+                               `member_id` are for the record"
+                .to_string(),
+            End::RetirementFailed | End::MobNotRunning => {
+                let lead = if matches!(helper, End::MobNotRunning) {
+                    "The helper stays a member of a mob that takes no commands: nothing can be \
+                     done about it until that mob runs again. Then: "
+                } else {
+                    "The helper is still a member. "
+                };
+                match reach {
+                    MemberToolsReach::Reach => format!(
+                        "{lead}This session manages mob `{mob_id}`: mob_check_member with mob_id \
+                         `{mob_id}` and member_id `{identity}` reads the helper, and \
+                         mob_retire_member with the same ids retires it"
+                    ),
+                    MemberToolsReach::NoScope => format!(
+                        "{lead}mob_check_member and mob_retire_member are refused for this \
+                         session while the helper is a member: the session holds no manage scope \
+                         over mob `{mob_id}` (a delegate of its own that returns a result brings \
+                         one). `mob_id` and `member_id` are for the host, which can retire the \
+                         helper"
+                    ),
+                    MemberToolsReach::Hidden => format!(
+                        "{lead}mob_check_member and mob_retire_member do not reach the helper \
+                         for this session: the host's member tool audience does not show it the \
+                         helper. `mob_id` and `member_id` are for the host, which can retire the \
+                         helper"
+                    ),
+                }
+            }
+            // Its end was still under way, its run was lost, or it ended in
+            // a way this tool does not know yet.
+            _ => match reach {
+                MemberToolsReach::Reach => format!(
+                    "What became of the helper is not known to this call. This session manages \
+                     mob `{mob_id}`: mob_check_member with mob_id `{mob_id}` and member_id \
+                     `{identity}` answers member_retired once the helper is gone \
+                     (member_not_found if it never was seated); if it stays, mob_retire_member \
+                     with the same ids retires it"
+                ),
+                MemberToolsReach::NoScope => format!(
+                    "What became of the helper is not known to this call. mob_check_member with \
+                     mob_id `{mob_id}` and member_id `{identity}` answers member_retired once \
+                     the helper is gone (member_not_found if it never was seated). While the \
+                     helper is a member, that tool and mob_retire_member are refused for this \
+                     session: it holds no manage scope over mob `{mob_id}` (a delegate of its \
+                     own that returns a result brings one), and `mob_id` and `member_id` are \
+                     for the host, which can retire the helper"
+                ),
+                MemberToolsReach::Hidden => "What became of the helper is not known to this \
+                                             call. mob_check_member and mob_retire_member do \
+                                             not reach the helper for this session: the host's \
+                                             member tool audience does not show it the helper. \
+                                             `mob_id` and `member_id` are for the host, which \
+                                             can retire the helper"
+                    .to_string(),
+            },
+        }
     }
 
     /// The answer of a `delegate` whose steps before the helper's run used
@@ -2207,8 +2404,44 @@ impl AgentMobToolSurface {
         ToolError::execution_failed_with_data(
             format!(
                 "tool '{tool_name}' ended after {} s before helper `{identity}` was seated in \
-                 mob `{mob_id}`: no helper was started, and nothing is left to cancel or retire",
+                 mob `{mob_id}`: no helper was started, and nothing is left to cancel or retire. \
+                 Nothing is left to do: `mob_id` and `member_id` are for the record",
                 wait.secs(),
+            ),
+            data,
+        )
+    }
+
+    /// The refusal of a nested `delegate` whose caller's own delegate has
+    /// too little left ([`DELEGATE_NESTED_WAIT_FLOOR`]): the calling session
+    /// is a helper, `left` is the wait its caller's bound would leave this
+    /// call, and that is not enough to start a helper and hear its report.
+    /// Nothing was started (no mob, no helper), so the answer names the
+    /// member id the call gave and no mob. The existing typed form of a call
+    /// that started no helper, with the wait that was left.
+    fn delegate_refused_under_caller(
+        tool_name: &str,
+        identity: &AgentIdentity,
+        left: std::time::Duration,
+    ) -> ToolError {
+        let left_secs = left.as_secs().max(1);
+        let data = json!({
+            "kind": "delegate_helper_ended",
+            "reason": "not_started",
+            "helper": meerkat_mob::DelegationHelperEnd::NotSeated.as_str(),
+            "member_id": identity.as_str(),
+            "retryable": false,
+            "max_run_secs": left_secs,
+            "max_run_limited_by": "call_deadline",
+        });
+        ToolError::execution_failed_with_data(
+            format!(
+                "tool '{tool_name}' did not start helper `{identity}`: this session runs for a \
+                 delegate of its own caller, and what that caller still waits leaves this call \
+                 about {left_secs} s, under the {} s a nested delegate needs to start a helper \
+                 and hear its report. Nothing was started: no mob, no helper. Do the work in \
+                 this turn, or report what is left to do",
+                DELEGATE_NESTED_WAIT_FLOOR.as_secs(),
             ),
             data,
         )
@@ -3925,6 +4158,7 @@ impl AgentToolDispatcher for AgentMobToolSurface {
                     entered: meerkat_core::time_compat::Instant::now(),
                     outside: plan.deadlines().effective_timeout(),
                     dispatch_started: context.dispatch_started(),
+                    caller_bound: context.outer_call_bound(),
                 };
                 self.dispatch_with_context_stack_bounded(call, context, Some(bound))
                     .await
@@ -4088,15 +4322,33 @@ fn build_tool_defs_with_profile_support(
              delegate_helper_ended, reason (max_run_elapsed, turn_failed, not_started, \
              run_lost), helper (cancelled_and_retired, retired, already_gone, not_seated, \
              end_pending, mob_not_running, retirement_failed, unknown), mob_id, member_id, \
-             member_ref, session_id and max_run_secs. After cancelled_and_retired, retired, \
-             already_gone or not_seated (the wait was used up before a helper was started) \
-             there is no helper left to look for. end_pending and unknown mean \
+             member_ref, session_id, max_run_secs and session_manages_mob. After \
+             cancelled_and_retired, retired, already_gone or not_seated (no helper was \
+             started) there is no helper left to look for, and nothing is left to do: the ids \
+             are for the record. end_pending and unknown mean \
              the cancel and retirement go on without this call: mob_check_member with the \
              mob_id and member_id the error names answers member_retired once the helper is \
-             gone, and member_not_found if it never was seated. If the helper stays, or helper \
-             is retirement_failed or mob_not_running, \
-             retire it with mob_retire_member. A helper that should outlive the call is not a \
+             gone, and member_not_found if it never was seated. A helper that stays (after \
+             end_pending or unknown, or with retirement_failed or mob_not_running) is yours to \
+             check and retire with mob_check_member and mob_retire_member only when \
+             session_manages_mob is true (your session manages its implicit mob once one of \
+             its delegates has returned a result). When it is false those two tools are \
+             refused for a helper that is still a member, the ids give you no right, and the \
+             host retires the helper: the error's text says which of the two applies. \
+             A helper that should outlive the call is not a \
              delegate helper: use mob_spawn_member.\n\n\
+             THE HELPER'S OWN TOOL CALLS, AND NESTING:\n\
+             A tool call your helper makes is bounded by what this call still waits, less \
+             room for the helper to report (30 seconds, or a quarter of what is left when that \
+             is shorter): a slow tool ends inside the helper and the helper tells you, and the \
+             timeout it reports can be shorter than the tool's configured deadline. A tool \
+             with a shorter deadline of its own keeps it. A delegate your helper makes itself \
+             waits what this call has left; if you are such a helper and your caller's wait \
+             leaves your delegate under 30 seconds, the delegate is refused before anything is \
+             started (reason not_started, helper not_seated, no mob_id): do the work yourself \
+             or report. A helper's long model call is not bounded this way: it ends with this \
+             call's wait, cancelled. A helper placed on another host runs under that host's \
+             tool deadlines.\n\n\
              WHERE THE HELPER LIVES:\n\
              A helper is a member of your session's implicit mob, not of the mob you are a \
              member of. The result names that mob (mob_id), and so does every error from the \
@@ -8226,6 +8478,96 @@ mod tests {
         assert_eq!(wait(None, 600, secs(585)), None);
         assert_eq!(wait(Some(5), 600, secs(590)), None);
         assert_eq!(wait(None, 600, secs(900)), None);
+    }
+
+    /// A nested delegate waits what the delegate above it has left. A
+    /// helper's tool call gets the wait less the report reserve, a
+    /// `delegate` the helper makes reads that as its call's deadline, and so
+    /// each level waits less than the one above: 585 s, 540 s, 495 s under
+    /// the engine's defaults. A call is held to the nested floor only when
+    /// its caller's bound is the narrowest of its deadlines.
+    #[test]
+    fn a_nested_delegates_wait_is_what_the_delegate_above_it_has_left() {
+        use std::time::Duration;
+        let secs = Duration::from_secs;
+        let now = meerkat_core::time_compat::Instant::now();
+        let helper_tool = |wait: Duration| {
+            meerkat_core::ToolCallOuterBound::new(
+                now + wait,
+                DelegationExecutionService::HELPER_REPORT_RESERVE,
+            )
+            .allows_from(now)
+        };
+        let wait_under = |outside: Duration| {
+            DelegateWait::derive(None, Some(outside), Duration::ZERO)
+                .expect("a wait")
+                .max_run
+        };
+
+        let first = wait_under(secs(600));
+        assert_eq!(first, secs(585));
+        assert_eq!(helper_tool(first), secs(555));
+        let second = wait_under(helper_tool(first));
+        assert_eq!(second, secs(540));
+        assert_eq!(helper_tool(second), secs(510));
+        let third = wait_under(helper_tool(second));
+        assert_eq!(third, secs(495));
+        // The order holds at every level: a helper's tool ends before the
+        // wait above it, and that wait before its call's deadline.
+        for wait in [first, second, third, secs(40), secs(8), secs(1)] {
+            assert!(helper_tool(wait) < wait, "{wait:?}");
+        }
+
+        let bound = |outside: u64, caller: Option<u64>| DelegateCallBound {
+            entered: now,
+            outside: Some(secs(outside)),
+            dispatch_started: None,
+            caller_bound: caller.map(secs),
+        };
+        assert!(bound(555, Some(555)).narrowed_by_caller());
+        assert!(
+            !bound(555, None).narrowed_by_caller(),
+            "a session nobody waits for is not a nested caller"
+        );
+        assert!(
+            !bound(20, Some(555)).narrowed_by_caller(),
+            "an operator's shorter deadline is the narrowest: the call is not held to the floor"
+        );
+        let left = |outside: u64| {
+            DelegateWait::allowed(Some(secs(outside)), Duration::ZERO).expect("an outside bound")
+        };
+        assert!(left(22) < DELEGATE_NESTED_WAIT_FLOOR);
+        assert!(left(39) < DELEGATE_NESTED_WAIT_FLOOR);
+        assert!(left(40) >= DELEGATE_NESTED_WAIT_FLOOR);
+        assert_eq!(DelegateWait::allowed(None, Duration::ZERO), None);
+    }
+
+    /// The refusal of a nested delegate with too little left is the typed
+    /// answer of a call that started no helper: it names the member id the
+    /// call gave, the wait that was left, and no mob.
+    #[test]
+    fn a_nested_delegate_under_the_floor_is_refused_in_the_typed_form_with_no_mob() {
+        let refused = AgentMobToolSurface::delegate_refused_under_caller(
+            "delegate",
+            &AgentIdentity::from("inner"),
+            std::time::Duration::from_millis(16_600),
+        );
+        assert_eq!(
+            refused.structured_data(),
+            Some(json!({
+                "kind": "delegate_helper_ended",
+                "reason": "not_started",
+                "helper": "not_seated",
+                "member_id": "inner",
+                "retryable": false,
+                "max_run_secs": 16,
+                "max_run_limited_by": "call_deadline",
+            }))
+        );
+        let text = refused.to_string();
+        for needle in ["did not start helper `inner`", "Nothing was started"] {
+            assert!(text.contains(needle), "{needle} missing from: {text}");
+        }
     }
 
     /// The helper's end is waited for less than the settle margin, so that

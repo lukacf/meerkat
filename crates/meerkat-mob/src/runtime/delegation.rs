@@ -890,6 +890,19 @@ impl DelegationRunFailure {
             helper_hidden_from_caller,
         }
     }
+
+    /// The failure of a run whose helper the mob refused to seat with
+    /// `error`, as a surface's test hands it to the surface's answer. Test
+    /// builds only.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn spawn_refused_for_test(error: MobError) -> Self {
+        Self {
+            error: DelegationExecutionError::Spawn(error),
+            helper_session_id: None,
+            helper_hidden_from_caller: None,
+        }
+    }
 }
 
 /// The helper one run seated, as that run's own spawn named it: the

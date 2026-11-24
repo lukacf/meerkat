@@ -8331,6 +8331,184 @@ mod tests {
         }
     }
 
+    /// The recovery text of a delegate that ended without its helper's
+    /// result, by what became of the helper and by what the calling session
+    /// may do. A helper that is gone leaves nothing to do, and its ids are
+    /// for the record. A helper that is or may still be a member is the
+    /// caller's to check and retire only when the caller's session manages
+    /// the mob: then the answer names the two tools with the ids; otherwise
+    /// it says that those tools are refused for this session and that the
+    /// ids are for the host. Where the call cannot tell what became of the
+    /// helper, it says so. `session_manages_mob` carries the same fact as a
+    /// flag, and nothing in the answer grants anything.
+    #[tokio::test]
+    async fn a_delegate_helper_ended_answer_says_what_the_caller_can_do_by_state() {
+        use meerkat_mob::DelegationHelperEnd as End;
+
+        const GONE: &[&str] = &["Nothing is left to do", "for the record"];
+        const NO_TOOLS: &[&str] = &[
+            "mob_check_member",
+            "mob_retire_member",
+            "are refused for this session",
+            "This session manages mob",
+        ];
+        const MANAGES: &[&str] = &[
+            "This session manages mob",
+            "mob_check_member",
+            "mob_retire_member",
+        ];
+        const REFUSED: &[&str] = &["are refused for this session", "for the host"];
+        const NOT_KNOWN: &str = "is not known";
+
+        let state = MobMcpState::new_in_memory();
+        let mob = host_mob_with_kept_members(&state, "ended-states", &[]).await;
+        let surface_holding = |authority| {
+            AgentMobToolSurface::new(
+                Arc::clone(&state),
+                None,
+                authority,
+                "claude-sonnet-4-5".to_string(),
+                SessionId::new(),
+                None,
+                None,
+                None,
+            )
+        };
+        let unscoped = surface_holding(create_only_authority());
+        let managing = surface_holding(create_and_manage_authority(&mob));
+        let raw = serde_json::value::RawValue::from_string("{}".to_string()).expect("raw args");
+        let call = ToolCallView {
+            id: "test-1",
+            name: "delegate",
+            args: &raw,
+        };
+        let mob_id = mob.mob_id().clone();
+        let identity = AgentIdentity::from("helper");
+        let wait = DelegateWait::derive(
+            Some(std::time::Duration::from_secs(5)),
+            Some(std::time::Duration::from_mins(10)),
+            std::time::Duration::ZERO,
+        )
+        .expect("a wait");
+
+        for end in [
+            End::CancelledAndRetired,
+            End::AlreadyGone,
+            End::RetirementFailed,
+            End::MobNotRunning,
+            End::EndPending,
+        ] {
+            for manages in [false, true] {
+                let surface = if manages { &managing } else { &unscoped };
+                let error = surface
+                    .delegate_run_failure(
+                        call,
+                        &mob,
+                        &mob_id,
+                        &identity,
+                        &wait,
+                        meerkat_mob::DelegationRunFailure::max_run_elapsed_for_test(
+                            end,
+                            None,
+                            None,
+                            Some(false),
+                        ),
+                    )
+                    .await;
+                let data = error.structured_data().expect("typed data");
+                let whole = format!("{error} | {}", error.to_error_payload());
+                assert_eq!(data["helper"], end.as_str(), "{data}");
+                assert_eq!(
+                    data["session_manages_mob"], manages,
+                    "the flag says what the session may do ({end:?}): {data}"
+                );
+                let gone = matches!(end, End::CancelledAndRetired | End::AlreadyGone);
+                let (present, absent): (&[&str], &[&str]) = match (gone, manages) {
+                    (true, _) => (GONE, NO_TOOLS),
+                    (false, true) => (MANAGES, &["are refused for this session"]),
+                    (false, false) => (REFUSED, &["This session manages mob"]),
+                };
+                for needle in present {
+                    assert!(
+                        whole.contains(needle),
+                        "{end:?}, manages {manages}: `{needle}` missing from: {whole}"
+                    );
+                }
+                for needle in absent {
+                    assert!(
+                        !whole.contains(needle),
+                        "{end:?}, manages {manages}: `{needle}` in: {whole}"
+                    );
+                }
+                assert_eq!(
+                    whole.contains(NOT_KNOWN),
+                    end == End::EndPending,
+                    "only an end the call did not see is not known ({end:?}): {whole}"
+                );
+            }
+        }
+    }
+
+    /// A permission refusal carries no ids. A mob that refuses the helper's
+    /// seat because the caller's principal lacks the control scope answers
+    /// the tool's `access_denied`, as a mob that is not the session's own
+    /// does: the answer names no mob and no member.
+    #[tokio::test]
+    async fn a_delegate_refused_for_want_of_control_scope_names_no_id() {
+        let state = MobMcpState::new_in_memory();
+        let mob = host_mob_with_kept_members(&state, "scope-refused", &[]).await;
+        let surface = AgentMobToolSurface::new(
+            Arc::clone(&state),
+            None,
+            create_only_authority(),
+            "claude-sonnet-4-5".to_string(),
+            SessionId::new(),
+            None,
+            None,
+            None,
+        );
+        let raw = serde_json::value::RawValue::from_string("{}".to_string()).expect("raw args");
+        let call = ToolCallView {
+            id: "test-1",
+            name: "delegate",
+            args: &raw,
+        };
+        let mob_id = mob.mob_id().clone();
+        let identity = AgentIdentity::from("seat-under-test");
+        let wait = DelegateWait::derive(
+            Some(std::time::Duration::from_secs(5)),
+            Some(std::time::Duration::from_mins(10)),
+            std::time::Duration::ZERO,
+        )
+        .expect("a wait");
+        let refused = surface
+            .delegate_run_failure(
+                call,
+                &mob,
+                &mob_id,
+                &identity,
+                &wait,
+                meerkat_mob::DelegationRunFailure::spawn_refused_for_test(MobError::ScopeDenied(
+                    meerkat_mob::ScopeDenial {
+                        required: meerkat_mob::ControlScope::SendCommand,
+                        presented: std::collections::BTreeSet::new(),
+                    },
+                )),
+            )
+            .await;
+        // As the call answers it: every error of a delegate whose mob exists
+        // passes this.
+        let answered = AgentMobToolSurface::with_delegate_ids(refused, &mob_id, &identity);
+        assert_eq!(answered, ToolError::access_denied("delegate"));
+        let payload = answered.to_error_payload().to_string();
+        for id in [mob_id.as_str(), identity.as_str()] {
+            assert!(
+                !payload.contains(id),
+                "a permission refusal names no id (`{id}`): {payload}"
+            );
+        }
+    }
+
     /// An error of a delegate whose mob exists names that mob and the
     /// member id the call gave. A key the error already holds stays, and an
     /// error whose form carries no data is passed on as it is.

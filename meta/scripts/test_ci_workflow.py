@@ -1209,6 +1209,10 @@ class CiWorkflowTests(unittest.TestCase):
         self.assertEqual(run_at, len(steps_of(job)) - 1)
         self.assertEqual(step["working-directory"], ".")
         self.assertEqual(step["env"], {"RUST_MIN_STACK": stack, "PARTITION": "${{ matrix.partition }}"})
+        # The step that runs the tests decides its leg: nothing lets it be
+        # skipped, pass on a failure or run under another shell.
+        for key in ("continue-on-error", "if", "shell"):
+            self.assertNotIn(key, step)
         # A partition that selects no test is a failure, said in the command
         # and not left to nextest's default. The command is the step's whole
         # script: a leg holds no resource sampler (the readings are printed

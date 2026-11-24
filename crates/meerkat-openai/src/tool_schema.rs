@@ -33,7 +33,7 @@
 //! allocation per tool per request.
 //!
 //! One rewrite below the root exists, and only for a self-hosted server
-//! ([`openai_tool_parameters`]): the closed string choices of a tool the
+//! (`openai_tool_parameters`): the closed string choices of a tool the
 //! engine itself authors are sent as a plain typed `enum`, in place of the
 //! untyped union schemars writes for an enum (a `oneOf` of constants, joined
 //! with `null` when the parameter is optional). The typed form states its

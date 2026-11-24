@@ -145,8 +145,19 @@ pub(super) async fn sidebar(app: &Router, bearer: Option<&str>) -> Vec<Value> {
         .unwrap_or_default()
 }
 
+/// The sidebar row of `member`: the row under that member id.
 pub(super) fn row<'a>(rows: &'a [Value], member: &str) -> Option<&'a Value> {
     rows.iter().find(|row| row["member_id"] == json!(member))
+}
+
+/// The sidebar row a member is shown as: the row under that member id, or,
+/// for a member of a mob other than the console's own (whose member id
+/// holds its mob), the row of a nested mob shown under that name.
+pub(super) fn row_shown_as<'a>(rows: &'a [Value], member: &str) -> Option<&'a Value> {
+    rows.iter().find(|row| {
+        row["member_id"] == json!(member)
+            || (row["label"] == json!(member) && row["labels"].get("source_mob_id").is_some())
+    })
 }
 
 /// `POST /console/send` to `identity` as the holder of `bearer`.
@@ -677,6 +688,7 @@ async fn a_private_owner_label_hides_a_member_on_every_surface() -> TestResult {
     let frame = aggregator
         .store()
         .append_if_absent(NewConsoleFrame {
+            mob_id: None,
             id: None,
             dedupe_key: "private-side-chat-frame".to_string(),
             timestamp_ms: 2_000,

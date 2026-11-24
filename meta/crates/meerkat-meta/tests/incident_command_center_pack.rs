@@ -411,7 +411,7 @@ async fn incident_pack_exposes_seeded_stock_console_state() {
     )
     .await;
 
-    assert_eq!(experience["contract_version"], json!("0.5.0"));
+    assert_eq!(experience["contract_version"], json!("0.6.0"));
     let agents = experience["agent_sidebar"]["live_snapshot"]["agents"]
         .as_array()
         .expect("agent rows");

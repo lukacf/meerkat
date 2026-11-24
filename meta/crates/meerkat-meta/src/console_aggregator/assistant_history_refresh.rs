@@ -195,14 +195,15 @@ async fn read_member_status(
         {
             (primary, member)
         } else {
-            // Alias and source labels cannot distinguish identical
-            // member names in different mobs. Recover the handle from
-            // the existing member resolver and its runtime binding.
+            // A bare name cannot tell identical member names in different
+            // mobs apart: the record names its member as the console does
+            // (a nested mob's member by its mob and name). Recover the
+            // handle from the member resolver and its runtime binding.
             let mut owner = None;
             for resolved in Box::pin(super::member_sources_for_entry_including_hidden(entry)).await
             {
-                if resolved.member.agent_identity != member
-                    && resolved.runtime_identity != record.runtime_member_id
+                if resolved.console_name().as_deref() != Some(record.runtime_member_id.as_str())
+                    && (resolved.nested() || resolved.member.agent_identity != member)
                 {
                     continue;
                 }
@@ -591,6 +592,8 @@ mob = true
             .default_llm_client(std::sync::Arc::new(
                 meerkat_client::TestClient::for_provider(meerkat_core::Provider::OpenAI),
             ))
+            // The row makes its second mob by a host's create, in the place
+            // of an agent's.
             .build()
             .await
             .expect("runtime with agent mob control builds");

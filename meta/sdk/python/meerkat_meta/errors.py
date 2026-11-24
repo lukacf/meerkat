@@ -241,6 +241,23 @@ IDENTITY_REFUSAL_KINDS: frozenset[str] = frozenset(
         "construction_refused",
     }
 )
+# A hosting call (``meta/mobs/*``) refused a request of its own; nothing of
+# it was done. The error data is the typed refusal: ``{"kind", "mob_id",
+# "retryable", "detail"}``.
+MOB_HOSTING_REFUSED_CODE: int = -32059
+# The hosting refusal kinds, a closed vocabulary: a new kind is a breaking
+# change. ``mob_exists``: a create under an id a mob of this host has,
+# loaded or not. ``invalid_mob_id``: a create whose definition names an id no
+# mob of this host can have. ``default_mob``: a destroy, a redefinition, a
+# stop or a resume of the mob the launch names. ``mob_not_stopped``: a
+# redefinition of a mob that is not stopped (a definition is changed on a
+# stopped mob). ``mob_busy``: a redefinition of a stopped mob that does not
+# close for the change; the one kind with ``retryable`` true, and its detail
+# ends with ``held: `` and one closed word for each thing held (``work``,
+# ``roster``, ``owner``), or the word ``unanswered``.
+MOB_HOSTING_REFUSAL_KINDS: frozenset[str] = frozenset(
+    {"mob_exists", "invalid_mob_id", "default_mob", "mob_not_stopped", "mob_busy"}
+)
 # A wake Core holds until an operator acts rides JSON-RPC's internal-error
 # code with structured data; the data ``kind`` names the hold.
 IDENTITY_WAKE_HELD_KINDS: frozenset[str] = frozenset(
@@ -1086,6 +1103,129 @@ class IdentityRefusedError(RpcError):
         return self.refusal.details
 
 
+# The members of a hosting refusal that are not the kind's own details.
+_MOB_HOSTING_REFUSAL_MEMBERS: frozenset[str] = frozenset(
+    {"kind", "mob_id", "retryable", "detail"}
+)
+
+
+@dataclasses.dataclass(frozen=True)
+class MobHostingRefusal:
+    """Why a hosting call (``meta/mobs/*``) was refused.
+
+    ``kind`` is one of :data:`MOB_HOSTING_REFUSAL_KINDS`. ``mob_id`` is the
+    mob the refusal is about. ``detail`` says what was wrong, in one
+    sentence. ``retryable`` says whether the same request may succeed later
+    unchanged (``None`` when the gateway did not say). ``details`` holds any
+    other member the gateway sent.
+
+    The vocabulary is closed, and a gateway newer than this SDK may still
+    send a kind this SDK does not list. It reaches you as the same type with
+    its token in ``kind`` and :attr:`known_kind` false: handle it as a
+    refusal you do not know, by ``retryable`` and ``detail``.
+    """
+
+    kind: str
+    mob_id: str | None = None
+    detail: str | None = None
+    retryable: bool | None = None
+    details: Mapping[str, Any] = dataclasses.field(default_factory=dict)
+
+    @property
+    def known_kind(self) -> bool:
+        """Whether ``kind`` is one of :data:`MOB_HOSTING_REFUSAL_KINDS`."""
+        return self.kind in MOB_HOSTING_REFUSAL_KINDS
+
+    @classmethod
+    def from_dict(cls, data: Any) -> MobHostingRefusal | None:
+        """The refusal ``data`` carries; ``None`` unless it is an object
+        whose ``kind`` is text."""
+        if not isinstance(data, dict):
+            return None
+        kind = data.get("kind")
+        if not isinstance(kind, str):
+            return None
+        mob_id = data.get("mob_id")
+        detail = data.get("detail")
+        retryable = data.get("retryable")
+        return cls(
+            kind=kind,
+            mob_id=mob_id if isinstance(mob_id, str) else None,
+            detail=detail if isinstance(detail, str) else None,
+            retryable=retryable if isinstance(retryable, bool) else None,
+            details={
+                key: value
+                for key, value in data.items()
+                if key not in _MOB_HOSTING_REFUSAL_MEMBERS
+            },
+        )
+
+
+class MobHostingRefusedError(RpcError):
+    """Raised when a hosting call (``meta/mobs/*``) was refused; nothing of
+    it was done.
+
+    This is the one refusal error of those calls: ``MetaRuntime.mobs``
+    raises it for each of their own refusals. The gateway answers
+    :data:`MOB_HOSTING_REFUSED_CODE` with the typed refusal as the error
+    data; both must match, and any other answer stays a plain
+    :class:`RpcError`. ``refusal`` is the :class:`MobHostingRefusal`;
+    ``kind``, ``mob_id``, ``detail``, ``retryable`` and ``details`` read it.
+    ``kind`` is one of :data:`MOB_HOSTING_REFUSAL_KINDS`; a kind newer than
+    this SDK is still this error, with its token in ``kind`` and
+    ``known_kind`` false.
+
+    Other answers of those calls keep the form they have elsewhere: a mob
+    the host does not have is a plain :class:`RpcError` (``-32602``, data
+    ``kind`` ``foreign_mob_target``), and a mob definition that does not
+    parse is JSON-RPC invalid params.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        refusal: MobHostingRefusal,
+        request_id: str = "",
+        method: str = "",
+        data: Any | None = None,
+    ):
+        super().__init__(
+            MOB_HOSTING_REFUSED_CODE,
+            message,
+            request_id=request_id,
+            method=method,
+            data=data,
+        )
+        self.refusal = refusal
+
+    @property
+    def kind(self) -> str:
+        return self.refusal.kind
+
+    @property
+    def known_kind(self) -> bool:
+        return self.refusal.known_kind
+
+    @property
+    def mob_id(self) -> str | None:
+        return self.refusal.mob_id
+
+    @property
+    def detail(self) -> str:
+        """What was wrong: the refusal's sentence, or the error's message
+        when the gateway sent none."""
+        return self.refusal.detail if self.refusal.detail is not None else str(self)
+
+    @property
+    def retryable(self) -> bool | None:
+        return self.refusal.retryable
+
+    @property
+    def details(self) -> Mapping[str, Any]:
+        return self.refusal.details
+
+
 class RealmMcpRefusedError(RpcError):
     """Raised when a ``meta/realm_mcp/*`` request was refused; nothing was written.
 
@@ -1595,7 +1735,15 @@ def announcement_error_from_rpc(
 
 
 class ContractMismatchError(MetaError):
-    """Raised when the SDK and runtime contract versions are incompatible."""
+    """Raised when the gateway and this SDK do not speak the same contract.
+
+    That is the case when their contract versions are incompatible, and when
+    an answer or a callback is not in a form this SDK reads (a result
+    without a part it must have, a member of another kind). When raised
+    while reading a gateway answer, the request was sent. It can also
+    reject a stored value with an unknown contract version without sending
+    a request.
+    """
 
 
 class NotConnectedError(MetaError):

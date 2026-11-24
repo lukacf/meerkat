@@ -598,6 +598,13 @@ impl AgentBuilder {
         }
         let mut session = self.session.unwrap_or_default();
         let transient_turn_context_state = crate::session::TransientTurnContextStateHandle::new();
+        if let Some(admissions) = self
+            .turn_state_handle
+            .as_ref()
+            .and_then(|handle| handle.pending_boundary_admissions())
+        {
+            transient_turn_context_state.bind_pending_boundary_admissions(admissions);
+        }
 
         // An explicitly supplied prompt is an ordinary ordered System append,
         // including on resume, unless it is exactly the newest prompt row the

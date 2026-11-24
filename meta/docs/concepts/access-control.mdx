@@ -40,11 +40,11 @@ There are no roles. Every check evaluates the caller's attributes (subject, grou
 | `gating.view` / `gating.decide` | Read and decide approval gates. From 0.9.15, `gating.view` also reads the open [question sets](/concepts/gating#question-sets) (`meta/gating/questions`), and `gating.decide` answers or dismisses them; both only for agents the caller may view |
 | `decisions.view` | Read the durable decisions the caller may see on the Console: `meta/decisions/list`, `get` and `rendering` (see [durable decision methods](/api/rpc#durable-decision-methods)) |
 | `decisions.decide` | Reserved for deciding durable decisions on the Console; the Console decides none yet |
-| `decisions.admin` | Read every durable decision whole on the Console, and withdraw one (`meta/decisions/withdraw`). From 0.9.15 a question set (kind `ask_user.questions`) is read, and withdrawn, only by a caller who may view its asking agent; to anyone else, an administrator included, it is a decision that is not there |
+| `decisions.admin` | Read every durable decision whole on the Console, and withdraw one (`meta/decisions/withdraw`). A held change of an agent (the `identity.*` kinds) of a mob beside the launch mob is read, and withdrawn, only by a caller who may address that mob; a caller who addresses it by an access rule reads and withdraws it only while the mob the change is held for stands under that mob's id. From 0.9.15 a question set (kind `ask_user.questions`) is read, and withdrawn, only by a caller who may view its asking agent; to anyone else, an administrator included, it is a decision that is not there |
 | `workgraph.view` | Read WorkGraph snapshots, items, attention, events, and facts; observe the wake stream |
 | `workgraph.manage` | Mutate WorkGraph items, goals, links, and attention bindings |
 | `mob.observe` | Subscribe to whole-mob raw event streams |
-| `runtime.admin` | Routing tables, labels, wiring, reconcile, mob announcements; from 0.9.15, for the mob's long-term agents, the hold of their changes (`meta/identity/changes_hold`), a read of another requester's operation (`meta/identity/operation`), and the list of an agent's schedules that its archive, unarchive and removal and their plan answer (see [agent changes](/api/rpc#agent-changes)) |
+| `runtime.admin` | Routing tables, labels, wiring, reconcile, mob announcements; the methods over the mobs of the host (`meta/mobs/*`), each for the launch mob and the mobs the caller may address (see [the hosting methods on the Console](/api/rpc#the-hosting-methods-on-the-console)); from 0.9.15, for the mob's long-term agents, the hold of their changes (`meta/identity/changes_hold`), a read of another requester's operation (`meta/identity/operation`), and the list of an agent's schedules that its archive, unarchive and removal and their plan answer (see [agent changes](/api/rpc#agent-changes)) |
 | `topology.view` | Inspect topology state for an agent; also requires `agent.view` |
 | `topology.connect` / `topology.disconnect` / `topology.reconnect` | Plan or apply the corresponding edge action; required independently on both endpoints |
 | `topology.bulk` | Submit more than one explicit topology operation in a bounded transaction |
@@ -55,7 +55,8 @@ There are no roles. Every check evaluates the caller's attributes (subject, grou
 | `audit.view` | Read the console audit log (`meta/console/audit`): who made each console change, when, and how it ended |
 | `access.admin` | Read and edit this configuration |
 
-- **Rule** — matches principals (`subjects`, `groups`), actions (exact, `agent.*`, or `*`), and resources (`agents`, `roles`, `match_labels`). Resource selectors AND together; values within a list OR together. Empty selectors leave a dimension unconstrained.
+- **Rule** — matches principals (`subjects`, `groups`), actions (exact, `agent.*`, or `*`), and resources (`mobs`, `agents`, `roles`, `match_labels`). Resource selectors AND together; values within a list OR together. An empty `mobs` list has the effect-specific scope described below.
+- **Mobs** - a rule selects agents by their mob too. Identities are names inside a mob, so a rule selects an agent through the agent's mob as well as its name, role and labels. Without `mobs` an allow rule is the default mob's (the mob the launch names): it grants nothing on an agent of any other mob, so a configuration written before rules could list mobs grants what it granted. A deny rule without `mobs` holds in every mob: a deny never stops applying because another mob appears. `mobs = ["<mob id>"]` selects the agents of the listed mobs, the default mob by its id like any other, and `mobs = ["*"]` the agents of every mob. An entry that is no mob's id selects nothing. A host that uses an access controller without a Meta runtime tells it the default mob (`AccessController::bind_default_mob`); until it does, an allow that lists mobs grants nothing on the default mob's agents and a deny that lists mobs holds on them. One controller belongs to one host: it keeps the first default mob it is told, so a controller installed on runtimes that serve different mobs reads the agents of all of them as agents of that one mob. A rule with `mobs` constrains its resource: it matches no check without an agent, such as `gating.decide`. The Console's rule editor shows the mobs a rule lists as the rule's teams and saves the rule with them; it has no field to change them, so set `mobs` in the access file or over the RPC. A Meta release that does not know `mobs` ignores the selector and reads the rule as one without it: an allow written for another mob then grants on the default mob's agents, and the first Console edit there saves the rule without its `mobs`. Before going back to such a release, remove every rule that lists `mobs`, or rewrite it as the rule you want for the default mob.
 
 Evaluation is **deny-by-default with deny-overrides**: a matching `deny` rule always wins, then a matching `allow` rule allows, otherwise the check denies. Subjects listed in `admins` bypass rules entirely. A disabled config allows everything.
 
@@ -116,6 +117,8 @@ On a Console with sign-in, a side chat is **private to the person who opened it*
 
 The members a private side chat creates are private to the same person: a member its own turn spawns into its own mob or into a mob it creates (a `mob_create` mob, the implicit mob `delegate` runs its helpers in, and every member of those mobs), a member it forks off, and a helper forked from it (`meta/fork_helper`) each get its owner in their own `console.private_to` label when they are created, and are seated outside the shared topology (exempt from their mob definition's wiring rules, so no role-wide flow step reaches them either; a fork Meerkat makes of a member seated exempt is seated exempt too). So they stay private after the side chat is closed and after a restart, without a lineage walk, and so do the members they create in turn. A private member is built without WorkGraph tools, its `memory` tool proposes nothing to its mob, and it convenes no council: its `council` call is refused as a policy denial (`private_member_council`), since the council's participants would carry the person's question into forks of shared members. No WorkGraph goal, reassignment or supervisor names a private member, since no binding can serve a member without WorkGraph tools: to a caller who may see the member (its owner, an admin) the target is refused as such (`-32602`, `private_member_workgraph_target`), and to anyone else it names an agent that does not exist. An agent's own WorkGraph tools refuse a reassignment onto a private member, and an escalation naming one as supervisor, as a policy denial (`private_member_workgraph_target`).
 
+After 0.9.17, a Console that lists the mobs beside its own decides every member of a mob by the mob's owner as well as by the member's own label. A mob that a member private to a person created is that person's with all its members: a member of it whose own row names no private owner is shown to the mob's owner and the admins and to no other person, and stays so after it ended: while its mob exists, after a restart too, and after the mob was destroyed for as long as the gateway runs and no other mob takes the mob's id. An ended member of a mob beside the Console's own whose owner the Console cannot tell (neither its own record nor its mob's says) is shown to an admin only, and to the one operator of a Console that can identify nobody and has no access control. A mob whose owner the Console cannot tell (its creation record names several rosters, or the record of who each mob is private to has not read the mob yet) is shown, with its members that have no owner of their own, to an admin only, and to that one operator. That record reads the mobs the gateway holds when it starts, and a mob an agent or the host creates through the gateway is recorded at its creation. A mob that reaches the gateway in neither way (a host puts its handle into the gateway's mobs after the start's read is done) is read when a Console first lists a member seated in it or a member is first spawned into it: it is an admin's alone, and that one operator's, until that read has landed. A listing starts no read of a mob in which no member is seated: the ended members of such a mob that have no owner of their own stay an admin's, and that one operator's, until a spawn into the mob has it read. A frame the Console stored for a member while its mob's owner was not read yet (the member's own frame, and one of a member it spawned) keeps what it was stored with: it is shown to an admin and to that one operator after the read too, whoever the mob is then read as private to.
+
 From 0.9.15: an agent's member lists leave out an agent private to another person, and whom a member is private to is read from its roster row; a Console that can identify a person includes one where sign-in is optional and that has an access controller and a trusted OIDC configuration to verify a token against; an agent for which no member is seated is decided on its own record. In 0.9.14 these three do not hold. Each such statement below says "from 0.9.15".
 
 An agent's own tools keep to the same audience. Its `mob_check_member` and `mob_retire_member`, and Meerkat's member tools (`member_status`, `retire_member`, `force_cancel_member`), answer an agent private to a person it does not act for as an agent that does not exist, and do nothing to it. From 0.9.15 its member lists (`mob_list_members`, `list_members`) also leave such an agent out, with manage scope over the mob too, and whom a member is private to is read from its own roster row, so this holds for a member the host has not started since its launch. Its schedule tools leave a schedule aimed at such an agent out of its list, answer every verb that names one by its id (read, occurrences, update, pause, resume, delete) exactly as they answer an id no schedule holds, and refuse a create or update whose target names one as they refuse every target out of the agent's reach (`schedule_target_not_a_peer`, a policy denial in the same words a name no agent holds gets, so the refusal does not tell that such an agent exists; in earlier releases the refusal was `access_denied`); a schedule aimed at an agent that has since ended stays hidden. A private agent's own schedule tools write only schedules aimed at itself: a create or update aimed at any other agent, in any form of the target, and an update of a schedule aimed at another agent, are refused as a policy denial (`private_member_schedule_target`), so nothing of the person's conversation runs in another agent's turns.
@@ -148,6 +151,32 @@ This paragraph applies from 0.9.15. An agent for which no member is seated (one 
 <Warning>
 Upgrading changes what existing rules grant: an operator holding `agent.view`/`agent.send` on a coordinator now also holds those actions on every member that coordinator spawns. This is the intended default — agent-spawned workers are part of the parent's work — but deployments with tight per-agent rules should review coordinator grants, and can add member-specific `deny` rules where inheritance is unwanted.
 </Warning>
+
+### Nested mobs
+
+A member of a mob nested under the console's own mob (a mob one of its agents created with the mob tools, or one the host created for that agent's session) is decided as an agent of its own, under the identity the console gives it: its mob and its name, `<mob id>/<name>`. Its role is its role in that mob, and its labels carry `source_mob_id`, the id of the mob it sits in. Only the console writes that label, from the roster the member was read from: a value a roster row or a spawn carries under it is dropped, and no member of the console's own mob has it, so `match_labels = { source_mob_id = "<mob id>" }` selects exactly the members of one mob. Address a nested member by its `identity`: a rule `agents = ["<bare name>"]`, and a request that names a bare name, match a member of the console's own mob only. A member an agent spawned also follows its spawner (see [Spawn-lineage inheritance](#spawn-lineage-inheritance)): a `deny` on the member that created a mob hides the members it spawned into it, and an `allow` on that member shows them. A caller allowed a nested mob's members and not the member that created the mob is listed the mob without its creator (`host_identity` and the `delegate_host_identity` label are left out); the members' `spawned_by` label still names the agent that spawned them. A mob whose creation record does not say which member created it has an owner no one can read. With access control on, it and its members that have no owner of their own are listed to the admins the configuration names and to no one else, so an operator who wants to see such a mob names an admin (an enabled configuration always names one). On a console with neither access control nor sign-in, the anonymous caller is the console's operator and is listed them. On a console with sign-in and access control off no one is listed them: enable access control and name an admin to see and manage such a mob. A member of such a mob that has an owner of its own stays that person's and the admins'. After Meta 0.9.17 the stock console lists nested mobs by default; through Meta 0.9.17 it hid every member of one, so an allow rule written for those releases that matches by role, by label or by `"*"` now also matches the nested members with that role or label. An `rpc_gateway` launched with `runtime_options.console_list_nested_mobs = false`, or a `meta_gateway` launched with the `meta/init` param `console_list_nested_mobs: false`, keeps every nested mob and its members off every console read.
+
+### Mobs the gateway hosts
+
+A gateway can host mobs beside its launch mob. Every caller the Console
+lets in addresses the launch mob. A caller addresses another hosted mob
+when access control is not enforced, when the caller is an administrator,
+or when an allow rule that applies to the caller lists that mob in `mobs`;
+an allow rule that lists no mob holds in the launch mob only, and a deny
+holds in every mob. What the caller sees and does in a mob it may address
+is decided by the same actions as in the launch mob, on the members of
+that mob: two mobs' members of one name are different members.
+
+An access preview about a member of a hosted mob names the member by its
+row key (`<mob id>/<name>`) and is judged in that member's own mob. A key
+that is the whole name of a member the launch mob's door knows names that
+member, also when the name begins with a hosted mob's id.
+
+A mob a caller may not address is not listed to that caller, not counted,
+and not served: a request that names it is answered like a request that
+names an id no mob has. The host's own lists (approvals, questions,
+decisions, attention, the audit) stay one list each, and each entry is
+shown to those who may see its member in the mob it came from.
 
 ## Configuration
 
@@ -229,6 +258,75 @@ meta = await (
     .build()
 )
 ```
+
+### Keys
+
+These are the access configuration fields in Meta 0.9.18. The file and the
+Console access methods use the same field names.
+
+The configuration itself:
+
+| Key | Value | Meaning |
+|-----|-------|---------|
+| `enabled` | `true` or `false`; `false` when left out | Enables access-rule enforcement. Turning it off does not disable Console authentication. |
+| `admins` | List of subjects | The subjects with full access, who also edit this configuration. At least one while `enabled` is `true`. |
+| `groups` | Table, one entry per group name | Named sets of subjects. |
+| `rules` | List of rules | The rules. They are judged as a set; their order does not matter. |
+| `approvers` | Table, one entry per approver id | Who holds each approver id (see [Approver identities](#approver-identities)). |
+
+A group, `[groups.<name>]`:
+
+| Key | Value | Meaning |
+|-----|-------|---------|
+| `description` | Text, optional | A note for people. No check reads it. |
+| `members` | List of subjects | The subjects in the group. |
+
+A rule, one `[[rules]]` table:
+
+| Key | Value | Meaning |
+|-----|-------|---------|
+| `id` | Text, required | The rule's name. It is not empty, and no two rules have the same one. |
+| `description` | Text, optional | A note for people; the Console's Access panel shows it as the rule's title. No check reads it. |
+| `effect` | `"allow"` or `"deny"`; `"allow"` when left out | Whether a matching rule allows or denies. |
+| `subjects` | List of subjects | Selects callers: the subjects the rule applies to. `"*"` is every signed-in subject. |
+| `groups` | List of group names | Selects callers: the members of any listed group. Each name must be a group the configuration defines. |
+| `actions` | List, required, not empty | The actions the rule is about: exact names, a family such as `agent.*`, or `*`. A name that is no action is refused. |
+| `agents` | List of agent names | Selects agents by name (see the paragraph on `agents` above). `"*"` is every agent. |
+| `roles` | List of role names | Selects agents by role. An agent's role is the role of its member in the mob, which is the name of the profile it is built from. `"*"` is every agent whose role is known. |
+| `match_labels` | Table of label and value | Selects agents by label: every label written must have the value written. |
+| `mobs` | List of mob IDs | Selects members of any listed mob; `"*"` selects every mob. When omitted or empty, an allow selects members of the default (launch) mob only; a deny selects members of every mob. |
+
+For an agent to match a rule directly, its mob, name, role and labels must
+satisfy all the resource selectors the rule sets. The caller and action must
+also match. For example, an allow with
+`mobs = ["research"]` and `roles = ["worker"]` selects workers in `research`,
+not every worker or every member of that mob. All specified labels must match.
+See [The model](#the-model) and [spawn-lineage inheritance](#spawn-lineage-inheritance)
+for how inherited grants and denies apply. A check that names no agent, such
+as `gating.decide`, cannot match a rule with any nonempty resource selector,
+including `mobs = ["*"]`. [Addressing a hosted mob](#mobs-the-gateway-hosts)
+is separate from permission to perform an action in it.
+
+An empty `subjects` list and an empty `groups` list together impose no caller
+restriction. Otherwise a signed-in caller can match by subject **or** by group.
+For anonymous callers, see [Relationship to authentication](#relationship-to-authentication).
+
+An approver, `[approvers."<approver id>"]`, has `subjects`, `groups`,
+`ingress_subjects` and `people`; an entry of `people` has `subjects` and
+`ingress_subjects`; an entry of `ingress_subjects` has `ingress` and `subject`
+(see [Approver identities](#approver-identities)).
+
+Check the effective configuration after loading a file: a successful start
+is not proof that every key was recognized. In checks on the released **Meta
+0.9.16** gateway, a misspelt caller or agent selector was silently dropped;
+a misspelt `effect` left the rule at its default of `allow`, and a misspelt
+`enabled` left access control off. Those observations were on 0.9.16, not a
+0.9.18 gateway run. See the access-file loader limitation and verification
+steps in the [tagged Meta 0.9.16 changelog](https://github.com/lukacf/meerkat/blob/meta-v0.9.16/meta/CHANGELOG.md).
+Do not assume a file load behaves like a Console write: `meta/access/set`,
+`meta/access/rules/upsert` and `meta/access/groups/set` reject unknown
+configuration keys. The typed entries under `people` and `ingress_subjects`
+also reject unknown fields when parsed from a file.
 
 ### Approver identities
 
@@ -377,6 +475,8 @@ upsert a rule using the owner instance and revision returned by the read
 | `meta/access/groups/set` | `name`, `group` |
 | `meta/access/groups/delete` | `name` |
 
+A write replaces what it names whole: `rules/upsert` the rule, `groups/set` the group, `set` the configuration. Send back every field of what you read, also a field your client does not know (a rule's `mobs`, for example): a field left out is removed, and a rule saved without its `mobs` becomes a rule of the default mob. There is no create-only write: `rules/upsert` under the ID of an existing rule replaces that rule. A client that creates a rule checks the ID against the configuration its write is made against (the `expected_revision` it sends); the Console's New rule form refuses the ID of an existing rule.
+
 Successful writes return the new `revision`; refresh before starting a new edit.
 Malformed, mixed or unknown checked envelopes fail without falling back to an
 unchecked write. Every write needs `checked_v1`: one without it (the payload
@@ -461,7 +561,7 @@ the composed Console bundle; discovery alone is not an E2E result.
 
 ## What gets enforced
 
-- `/console/experience`: agents the caller can't view vanish from the sidebar, roster, topology, identity status; per-agent affordances (`can_send_message`, `can_retire`, `can_respawn`, and `can_manage_schedules`, which needs `agent.send` and `schedule.manage` on the agent) and runtime capabilities are intersected with the caller's grants, so the stock console UI degrades invisibly. Affordances are resolved per agent: a caller who can view and retire an agent but not message it gets a disabled composer on that agent while keeping the retire action, since having no send grant anywhere does not flip the whole console to deployment read-only; a caller who may message an agent but not manage its schedules sees its schedules read-only.
+- `/console/experience`: agents the caller can't view vanish from the sidebar, roster, topology, identity status; per-agent affordances (`can_send_message`, `can_retire`, `can_respawn`, `can_reset`, which needs `agent.reset`, `can_stop_run`, which needs `agent.retire`, and `can_manage_schedules`, which needs `agent.send` and `schedule.manage` on the agent) and runtime capabilities are intersected with the caller's grants, so the stock console UI degrades invisibly. Affordances are resolved per agent: a caller who can view and retire an agent but not message it gets a disabled composer on that agent while keeping the retire action, since having no send grant anywhere does not flip the whole console to deployment read-only; a caller who may message an agent but not manage its schedules sees its schedules read-only.
 - `/console/timeline`, timeline streams, and `meta/console/query_timeline` — frames for hidden identities are filtered out.
 - `meta/console/send` and `/console/send` — require `agent.send` on the target.
 - `meta/schedule/list` (an agent's console schedules) - requires `agent.view` on the agent; `meta/schedule/create`, `update`, `pause`, `resume` and `delete` require `agent.send` and `schedule.manage` on it, since a console schedule is a deferred send. A configuration that names no schedule action grants `schedule.manage` wherever it grants `agent.send` (see the migration note below), so a deployment restricts who changes schedules by writing `schedule.manage` rules. Each fire is a console send by the schedule's sender, judged when it fires: the Console admits the sender as it admits a live request by it (sign-in, allowlist, trusted issuer, revoked sessions), and the send needs `agent.send` for the sender under the policy at that time, so withdrawing the grant stops the schedule's later sends.
@@ -470,7 +570,9 @@ the composed Console bundle; discovery alone is not an E2E result.
 - `meta/memory/quarantine/decide` (the operator quarantine decision) requires `memory.quarantine.review`, `agent.view` and `agent.memory.read` on the identity, and `agent.memory.write` to release or `agent.memory.delete` to tombstone (any other verdict needs both, then fails validation). Every effect is one the same caller could already cause through `remember`, `update` or `forget` (a released update supersedes its prior, as `update` does); the decision adds the lineage, the trust ceiling, the content binding and the audit trail. The caller must also be a signed-in person; any other caller is refused with `approver_unauthenticated`. Right before the decision is applied the console reads the caller's grants again, so a grant withdrawn while the decision waited is honored (`access_denied`). The capabilities list advertises it only to a signed-in person holding `memory.quarantine.review`.
 - `meta/workgraph/*` - reads require `workgraph.view` and every change `workgraph.manage`, with no resource. A console claim is owned by its caller, and its release is the owner's or an access admin's (a named admin, or a subject granted `access.admin` while enforcement is on): the work graph's Released event records an admin's release of someone else's claim with the admin and the released claim. A goal confirmation is a signed-in person's and, like the quarantine decision and the release, reads the caller's grants again right before it is applied. The capabilities list advertises the goal confirmation only to a signed-in person, and the claim, the release and `attention/break_glass_reassign` (which records its caller) only to a caller with a principal.
 - Lifecycle and runtime RPCs — mapped to `agent.retire` / `agent.respawn` / `agent.reset` / `agent.spawn` / `runtime.admin` per method.
-- `meta/mob_announcements/*` on `/console/rpc` - every method, the reads included, requires `runtime.admin` with no resource: they list announcements, subscriptions and deliveries across members and mobs with no per-agent filter. A read-only console refuses the ones that change state (`announce`, `subscriptions/put`, `pause`, `resume`, `cancel` and `deliveries/reconcile`) with the `read_only` error. The capabilities list names the family only while the runtime has mob announcements.
+- `meta/mob_announcements/*` on `/console/rpc` - every method, the reads included, requires `runtime.admin` with no resource: they list announcements, subscriptions and deliveries across members with no per-agent filter. Every mob a request of the family names (the `mob_id` of a method, of a member or of a role selector, an entry of `mobs`, an audience grant, a declaration) is judged as the `mob_id` of any other request: a mob other than the launch mob is the caller's to address when access is not enforced, when the caller is an administrator, or when an allow rule that applies to the caller lists that mob in `mobs`; for any other caller the request is answered the `foreign_mob_target` refusal, like an id no mob has, and a member of such a mob, with every record of one, is hidden from that caller as a member private to another person is, and what that caller is shown of a member it may see names no such mob. To let a caller who is no administrator work with another mob there (a mob a member created, or the mob of a member on a peer gateway), give the caller a separate allow rule that lists that mob in `mobs` and leave the rule that gives `runtime.admin` without `mobs`: a rule with `mobs` matches no check without an agent. A read-only console refuses the ones that change state (`announce`, `subscriptions/put`, `pause`, `resume`, `cancel` and `deliveries/reconcile`) with the `read_only` error. The capabilities list names the family only while the runtime has mob announcements.
+- `meta/mobs/*` on `/console/rpc` - every method, the reads included, requires `runtime.admin` with no resource, and the mob a request names (the `mob_id` of `get`, `lifecycle`, `redefine` and `destroy`, the `[mob] id` of the definition `create` carries) is judged as the `mob_id` of any other request: a mob other than the launch mob is the caller's to address when access is not enforced, when the caller is an administrator, or when an allow rule that applies to the caller lists that mob in `mobs`; for any other caller the request is answered the `foreign_mob_target` refusal, like an id no mob has, and nothing of the mob is read or loaded. `list` answers the launch mob and the mobs the caller may address. A change reads the caller's grants and the mobs its rules list again right before it is made. As for the announcement methods, the rule that lists a mob in `mobs` is a separate rule from the one that gives `runtime.admin`. A deny rule that lists the mob does not withdraw the address: it refuses checks on the mob's agents, and these methods make none.
+- `meta/storage/doctor` and `meta/routing/routes/list` on `/console/rpc` - each requires `runtime.admin` with no resource and reads records of the host that name its mobs: the stores of a state directory, the routes of the routing table. What is of a mob the host created beside its launch mob, or of a mob made under one, is answered to a caller who may address the mob the host created (access not enforced, an administrator, or an allow rule that applies to the caller lists that mob in `mobs`) and is left out for any other caller, and the diagnosis's three counts of mob stores count the stores in the answer. On a host whose launch declares its mob to a mob set, a caller who may not address every mob is shown a file beside a mob's store (a lock file, a backup, a quarantined copy) only when a mob stands under the store's id and that store is shown to the caller, and a backup or a quarantined copy only when the time its name holds is not before that mob's creation. A store or a memory directory of an id the host's mob set lists no mob under is shown to no such caller either: it is on no inventory row and in none of the three counts of that caller's answer. A backup or a quarantined copy beside a memory database follows the rule of one beside a store. What is of the launch mob is answered to every caller who holds the grant, and so is what is of a mob a member of the launch mob made, of a mob a session created and of a mob whose store predates creation records and has been resumed since, while the host's records say so. When the host's own records of its mobs cannot be read, a caller who may not address every mob is answered for the launch mob alone.
 - Topology control — query visibility requires `agent.view` and
   `topology.view` per endpoint. Connect, disconnect, and reconnect require the
   matching `topology.*` grant on both endpoint identities for planning as well
@@ -500,7 +602,7 @@ Label- and role-based rules resolve against an attribute cache the runtime refre
 
 ### `/blobs/{id}` is a capability surface
 
-`/blobs/{id}` serves content-addressed (`sha256:…`) blobs. Blobs are deduplicated by content hash and have no single owning agent, so they are gated by console authentication plus hash unguessability rather than per-agent ACL. A 256-bit content hash is only learnable through a surface the caller is already allowed to see (e.g. a visible agent's timeline frame), so a denied caller cannot enumerate another agent's images. Do not treat blob URLs as a per-agent confidentiality boundary; treat them as capability URLs.
+`/blobs/{id}` serves content-addressed (`sha256:…`) blobs. Blobs are deduplicated by content hash and have no single owning agent, so they are gated by console authentication plus hash unguessability rather than per-agent ACL. A 256-bit content hash is only learnable through a surface the caller is already allowed to see (e.g. a visible agent's timeline frame), so a denied caller cannot enumerate another agent's images. Do not treat blob URLs as a per-agent confidentiality boundary; treat them as capability URLs. This holds for the blobs of a nested mob's members too, also with the listing of nested mobs off: the console then names none of their frames, and a blob whose id a caller already holds is still served.
 
 ## Relationship to authentication
 
@@ -561,13 +663,15 @@ announcements use to reach members of a mob on a peer gateway:
 
 They too must be named explicitly in a grant (see [Keyed inject](#keyed-inject)).
 
-A **control grant** binds one calling gateway - identified by its Ed25519 pubkey, the same one `meta/peer_pubkey` reports - to the verbs it may use and, for member-plane operations, the members it may reach. Anything outside the grant is refused before the request reaches your mob, so an ungranted caller never learns whether the member it named exists.
+A **control grant** binds one calling gateway - identified by its Ed25519 pubkey, the same one `meta/peer_pubkey` reports - to the verbs it may use and, for member-plane operations, the members it may reach and the mob they are in. Anything outside the grant is refused before the request reaches your mob, so an ungranted caller never learns whether the member it named exists.
 
 ### How a caller is identified
 
-Callers sign every control request with their gateway keypair. The signature covers the request's semantic fields plus the audience (the mob id the caller dialed), so it cannot be re-pointed at another member, another verb, or another gateway. The receiving side matches the verified pubkey against its grant table.
+Callers sign every control request with their gateway keypair. The signature covers the request's semantic fields plus the audience (the mob id the caller dialed), so it cannot be re-pointed at another member, another verb, another mob, or another gateway. The receiving side matches the verified pubkey against its grant table.
 
 This is independent of the response signing you may already be using: `pubkey` on a contact entry authenticates the *answers you receive*, a control grant authorizes the *requests you serve*. They compose, and either can be used alone.
+
+A gateway does not serve a control request made with its own key: one whose caller envelope names that key and whose signature verifies against it. Such a request is refused with the code `host_own_key` before the grant table is read, on a listener with grants and on one without, and whatever its verb: the read-only host verbs and `lookup_member` are refused too, so a health or lookup probe has to sign with a key of its own (and hold a grant for it). A gateway's own control listener is therefore not a way to connect two mobs it hosts. A grant filed for the gateway's own key admits nothing, and a wider grant is not the remedy: every gateway needs a key of its own, and two gateways that share one key refuse each other. A request that only claims the gateway's key, without a signature that verifies, is answered like any other unverified claim. One case is outside the rule: a gateway with no key installed has no key to recognise, so on a listener without grants it still serves its own unsigned requests; neither stock gateway runs that way.
 
 ### Configuring grants
 
@@ -591,9 +695,15 @@ An unknown verb, a missing or empty `verbs` list, an undecodable pubkey, or two
 labels sharing one pubkey are all config errors - the table refuses to load
 rather than granting something the operator did not write.
 
-A caller entry accepts only `pubkey`, `verbs`, and `members`; any other key is a config error too. That is deliberate rather than pedantic: `member = ["bob"]` (singular) would otherwise leave `members` absent, and an absent `members` means *every* member - the typo would quietly widen a one-member grant to the whole mob. Put notes in `#` comments.
+A grant reaches the gateway's default mob (the mob its launch names) unless it lists `mobs`, so a grant table written before grants could list mobs means what it meant. `mobs = ["<mob id>"]` reaches the members of the listed mobs, the default mob by its id like any other, and `mobs = ["*"]` the members of every mob of the gateway. (A grant's `mobs` names mobs this gateway hosts; the `[mobs]` table of `config/contacts.toml` is the other direction, the remote mobs this gateway can dial.) The mob a request is for is the audience its caller signed: the mob id of the contact entry the caller dialed. The audience has to be a mob the grant reaches and the gateway serves. Anything else is refused with `audience_mismatch`, and a mob outside the grant is refused exactly as a mob the gateway does not have: the two answers are the same, so a caller learns nothing about a mob its grant does not reach, the default mob included (the refusal names the gateway's default mob only to a caller whose grant reaches it, and so does the `host_label` of `host_describe`, which is the mob the request was signed for otherwise). The host verbs name no member, and they need an audience the grant reaches like every other verb. `member_not_granted` therefore says one thing: the mob is in the grant's reach and the member is outside `members`. A mob id is matched exactly. An empty `mobs` list, an empty id in it, or an id with whitespace around it is a config error: omit the key for the default mob. While a gateway hosts only its default mob, a grant whose `mobs` does not list that mob's id (or `*`) reaches no member.
 
-Refusals come back with a stable code: `unauthenticated_caller`, `invalid_caller_credential`, `invalid_caller_signature`, `caller_not_granted`, `verb_not_granted`, `member_not_granted`, `audience_mismatch`. On the calling side they surface as a distinct error from an ordinary rejection, because the remedy is different: nothing about the request is malformed and retrying will not help until the peer operator widens the grant.
+On a gateway that serves more than one mob, a request is served on the mob its audience names: that mob's members, its identities and its sessions, so a member name two mobs have reaches the member of the mob the request was signed for and no other. The mobs a peer gateway can reach are the default mob and the mobs the gateway itself serves requests for on its other surfaces; a mob one of its members created is not among them, also under `mobs = ["*"]`. Checking a grant loads no mob: a request that names a member loads its mob when the mob is not loaded, and the host verbs and every refused request load nothing. The gateway still has one key and one grant table for all its mobs, and keyed injects for another mob are served when the gateway serves keyed injects and that mob has durable identities.
+
+A Meta release that does not know `mobs` fails to load a grant table that has it, and a gateway given such a table does not start, so going back to such a release never widens a grant: remove the key first.
+
+A caller entry accepts only `pubkey`, `verbs`, `members`, and `mobs`; any other key is a config error too. That is deliberate rather than pedantic: `member = ["bob"]` (singular) would otherwise leave `members` absent, and an absent `members` means *every* member - the typo would quietly widen a one-member grant to the whole mob. Put notes in `#` comments.
+
+Refusals come back with a stable code: `unauthenticated_caller`, `invalid_caller_credential`, `invalid_caller_signature`, `caller_not_granted`, `verb_not_granted`, `member_not_granted`, `audience_mismatch`, `grants_required`. On the calling side a refusal surfaces as a rejection that carries the peer's code and message as text. Error answers are not signed, so the caller reports the code and does not act on it. Nothing about a refused request is malformed, and retrying will not help until the peer operator widens the grant. `host_own_key` (above) is not one of them: no grant admits it.
 
 <Warning>
 **A control listener without grants authorizes nothing.** `start_control_listener`, the Rust builder's `control_listen`, and the gateway `--control-listen` path bind with an empty table and refuse every request until scoped grants are installed. An **empty** table is not the same as an explicitly open authorizer: empty refuses everyone, while `ControlAuthorizer::open()` is a lower-level compatibility choice an embedder must name deliberately.
@@ -619,7 +729,7 @@ let advertised = runtime
     .await?;
 ```
 
-Use `ControlAuthorizer::with_grants_for_audience(table, "my-mob-id")` when one caller holds grants on several of your gateways and a captured request must not be replayable across them; the mob id is the one peers use for this gateway in their contact directories.
+Use `ControlAuthorizer::with_grants_for_audience(table, "my-mob-id")` when one caller holds grants on several of your gateways and a captured request must not be replayable across them; the mob id is the one peers use for this gateway in their contact directories. It is also what tells the authorizer its default mob: `ControlGrant::with_mobs(ControlMobScope::mobs(["my-mob-id"]))` matches by that id, and under `ControlAuthorizer::with_grants`, which knows no mob id, a grant that lists mob ids reaches nothing (a grant without mobs, or with `ControlMobScope::All`, is unaffected). `ControlAuthorizer::from_toml` builds such an authorizer, so it refuses a `[control_grants]` entry that lists mob ids as a config error; parse the table with `ControlGrantTable::from_toml` and bind it with `with_grants_for_audience` instead.
 
 <Note>
 The SDK-driven `rpc_gateway` accepts the same TOML under `runtime_options.control_grants_toml`; the conventional `meta_gateway` reads `[control_grants]` beside `[mobs]` in `config/contacts.toml`. The Rust builder accepts a `ControlGrantTable` through `control_grants`. Every configured-listener path binds the table to the runtime's mob id as the signed audience. `ControlAuthorizer::from_toml` still distinguishes an absent section from an empty section for embedders that explicitly choose compatibility behavior.
@@ -650,19 +760,24 @@ own keys only. Both need:
   a field of the signed refusal: `outside_window`, `issued_before_start`
   (a request issued before the serving process started, as when it
   restarted while the request was on its way) or `deadline_passed`;
-- an identity-first serving gateway that serves keyed injects. Every gateway
-  that binds a control listener (`rpc_gateway`, `meta_gateway`, and a
-  runtime the builder composes) seals what the plane serves once its runtime
-  is composed, whether or not it enables mob announcements itself. Until
-  then the verbs answer `keyed_inject_unavailable`: the gateway is starting.
-  A gateway that is not identity-first, or whose configuration turns serving
-  off (`runtime_options.serve_keyed_inject: false` on `rpc_gateway`),
-  answers `not_served` with its typed cause, `not_identity_first` or
-  `runtime_disabled`, in a field of the signed refusal. `meta_gateway` has
-  no such switch: its listener serves keyed injects whenever its runtime is
-  identity-first (its default), with the default window,
-  `DEFAULT_KEYED_INJECT_WINDOW_MS` (five minutes), so the grants that name
-  the verbs are what decide who may call them.
+- a serving gateway that serves keyed injects, and a mob with durable
+  identities. Every gateway that binds a control listener (`rpc_gateway`,
+  `meta_gateway`, and a runtime the builder composes) seals what the plane
+  serves once its runtime is composed, whether or not it enables mob
+  announcements itself. Until then the verbs answer
+  `keyed_inject_unavailable`: the gateway is starting. A gateway whose
+  configuration turns serving off
+  (`runtime_options.serve_keyed_inject: false` on `rpc_gateway`) answers
+  `not_served` with the typed cause `runtime_disabled` for every mob. On a
+  gateway that serves, each mob answers for itself when a request arrives:
+  a mob that is not identity-first has no durable identities to deliver to
+  and answers `not_served` with the cause `not_identity_first`, after the
+  plane's checks of the request's time and member, and a mob that gets its
+  identities while the gateway runs is served from then on. The cause is a
+  field of the signed refusal. `meta_gateway` has no such switch: its
+  listener serves keyed injects for every identity-first mob (its default),
+  with the default window, `DEFAULT_KEYED_INJECT_WINDOW_MS` (five minutes),
+  so the grants that name the verbs are what decide who may call them.
 
 Every answer is signed with the serving gateway's key, and the caller treats
 only an answer its pinned key verifies as evidence. A signed refusal says

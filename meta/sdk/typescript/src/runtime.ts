@@ -22,6 +22,7 @@ import type { MetaBuilderConfig } from "./builder.js";
 import {
   CallbackDispatcher,
   type DecisionNoticeHandler,
+  type ScheduleFireHandler,
   type SessionAgentBuilder,
 } from "./agent-builder.js";
 import {
@@ -99,8 +100,12 @@ import {
   IDENTITY_REFUSED_CODE,
   IdentityRefusedError,
   parseIdentityRefusal,
+  MOB_HOSTING_REFUSED_CODE,
+  MobHostingRefusedError,
+  parseMobHostingRefusal,
   CapabilityUnavailableError,
   CompositionProvenanceError,
+  ContractMismatchError,
   FlowRoleTargetsNotAppliedError,
   FlowRoleTargetsRefusedError,
   FlowRunIdempotencyConflictError,
@@ -439,6 +444,16 @@ import {
   supportsFlowRoleTargets,
   FLOW_RUN_IDEMPOTENCY_KEY,
   supportsFlowRunIdempotencyKey,
+  HOSTED_MOBS,
+  MOB_ADDRESSING,
+  parseHostedMob,
+  parseMobDestroyResult,
+  parseMobLifecycleResult,
+  parseMobRedefineResult,
+  type HostedMob,
+  type MobDestroyResult,
+  type MobLifecycleResult,
+  type MobRedefineResult,
 } from "./types.js";
 
 // -- Request ID counter ---------------------------------------------------
@@ -1131,6 +1146,155 @@ export class JobsHandle {
   }
 }
 
+/**
+ * The mobs of the host this runtime talks to (`meta/mobs/*`).
+ *
+ * `create` adds a mob to the host, `list` and `get` read what the host has,
+ * `lifecycle` stops or resumes one, `redefine` replaces its definition and
+ * `destroy` removes it. Each call asks the gateway: nothing is kept between
+ * calls, so an entry is what the gateway said when it was asked. To work
+ * with one of the mobs, name it: `runtime.mob(entry.mobId)`.
+ *
+ * The gateway must advertise the `hosted_mobs` feature capability: without
+ * it every call here rejects with {@link CapabilityUnavailableError} and
+ * sends nothing. A refusal of the calls' own rejects with
+ * {@link MobHostingRefusedError}; a mob the host does not have is a plain
+ * `RpcError` (data `kind` `foreign_mob_target`).
+ */
+export class MobsHandle {
+  /** @internal */
+  constructor(private readonly runtime: MetaRuntime) {}
+
+  private async call(method: string, params?: Record<string, unknown>): Promise<unknown> {
+    await this.runtime._requireFeature(
+      HOSTED_MOBS,
+      method,
+      "this gateway does not serve the mobs of a host (meta/mobs/*)",
+    );
+    return this.runtime._rpc(method, params);
+  }
+
+  /**
+   * Create a mob on this host from its definition and resolve its entry.
+   *
+   * `mobConfig` is the mob definition as TOML text, the form a launch
+   * takes; the new mob's id is the definition's `[mob] id`. An id a mob of
+   * the host already has rejects with {@link MobHostingRefusedError}
+   * (`mob_exists`).
+   */
+  async create(mobConfig: string): Promise<HostedMob> {
+    if (typeof mobConfig !== "string") {
+      throw new TypeError("mobConfig must be the mob definition as TOML text");
+    }
+    const raw = await this.call("meta/mobs/create", { mob_config: mobConfig });
+    return parseHostedMob(asWireRecord(raw).mob);
+  }
+
+  /**
+   * Every mob of the host, the launch's own mob first. Loads no mob: it
+   * answers from the host's records, so a mob that is not loaded is listed
+   * as `stopped` when the records keep its stop and as `dormant` otherwise.
+   */
+  async list(): Promise<HostedMob[]> {
+    const mobs = asWireRecord(await this.call("meta/mobs/list")).mobs;
+    if (!Array.isArray(mobs)) {
+      throw new ContractMismatchError("meta/mobs/list returned no list of mobs");
+    }
+    return mobs.map(parseHostedMob);
+  }
+
+  /**
+   * The entry of one mob of the host. Loads the mob when the host created it
+   * and it is not loaded, as its store has it (a stopped mob loads stopped
+   * and nothing is started); a mob one of the host's agents created is
+   * answered from the host's records and not loaded. A load that fails
+   * rejects with what {@link lifecycle} would reject with for that mob,
+   * unless the host's records show the mob quarantined: the entry then says
+   * so.
+   */
+  async get(mobId: string): Promise<HostedMob> {
+    if (typeof mobId !== "string") throw new TypeError("mobId must be a string");
+    const raw = await this.call("meta/mobs/get", { mob_id: mobId });
+    return parseHostedMob(asWireRecord(raw).mob);
+  }
+
+  /**
+   * Stop or resume a mob of the host (`meta/mobs/lifecycle`).
+   *
+   * `action` is `"stop"` or `"resume"`: the mob's own stop and resume.
+   * Resolves the mob's entry and, for a stop, its stop report; a stop
+   * answered without one rejects with {@link ContractMismatchError}. The
+   * launch's own mob is not stopped or resumed through this call: it
+   * rejects with {@link MobHostingRefusedError} (`default_mob`).
+   */
+  async lifecycle(mobId: string, action: "stop" | "resume"): Promise<MobLifecycleResult> {
+    if (typeof mobId !== "string") throw new TypeError("mobId must be a string");
+    if (action !== "stop" && action !== "resume") {
+      throw new TypeError('action must be "stop" or "resume"');
+    }
+    const result = parseMobLifecycleResult(
+      await this.call("meta/mobs/lifecycle", { mob_id: mobId, action }),
+    );
+    if (action === "stop" && result.stopReport === null) {
+      // The wire answers a stop with the mob's stop report.
+      throw new ContractMismatchError(
+        "meta/mobs/lifecycle answered a stop without its stop_report",
+      );
+    }
+    return result;
+  }
+
+  /**
+   * Replace the definition of a mob of the host (`meta/mobs/redefine`).
+   *
+   * `mobConfig` is the new definition as TOML text; `expectedRevision` is
+   * the revision the update is made against, so an update against a
+   * definition that moved is refused (with the revision the host found).
+   * Read it from `(await get(mobId)).revision`; a dormant mob has none until
+   * a call of its handle that reads the mob (`rt.mob(mobId).status()`, for
+   * one) has loaded it. Resolves the mob's entry and the receipt of the
+   * update.
+   *
+   * A definition is changed on a stopped mob: stop the mob, redefine it,
+   * resume it. A mob that is not stopped rejects with
+   * {@link MobHostingRefusedError} (`mob_not_stopped`), and so does the
+   * launch's own mob (`default_mob`): its definition is the launch's. A
+   * stopped mob that still holds something rejects with `mob_busy` and
+   * `retryable` true: repeat the call once what its detail names has ended.
+   */
+  async redefine(
+    mobId: string,
+    mobConfig: string,
+    expectedRevision: number,
+  ): Promise<MobRedefineResult> {
+    if (typeof mobId !== "string") throw new TypeError("mobId must be a string");
+    if (typeof mobConfig !== "string") {
+      throw new TypeError("mobConfig must be the mob definition as TOML text");
+    }
+    if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) {
+      throw new TypeError("expectedRevision must be a non-negative integer");
+    }
+    return parseMobRedefineResult(
+      await this.call("meta/mobs/redefine", {
+        mob_id: mobId,
+        mob_config: mobConfig,
+        expected_revision: expectedRevision,
+      }),
+    );
+  }
+
+  /**
+   * Destroy a mob of the host and remove its storage (`meta/mobs/destroy`).
+   *
+   * The launch's own mob cannot be destroyed while the launch names it: that
+   * rejects with {@link MobHostingRefusedError} (`default_mob`).
+   */
+  async destroy(mobId: string): Promise<MobDestroyResult> {
+    if (typeof mobId !== "string") throw new TypeError("mobId must be a string");
+    return parseMobDestroyResult(await this.call("meta/mobs/destroy", { mob_id: mobId }));
+  }
+}
+
 /** Durable monitor convenience surface; lifecycle remains job-owned. */
 export class MonitorsHandle {
   /** @internal */
@@ -1396,6 +1560,12 @@ function rpcErrorFromPayload(
       return new IdentityRefusedError(message, refusal, rid, method, err.data);
     }
   }
+  if (code === MOB_HOSTING_REFUSED_CODE) {
+    const refusal = parseMobHostingRefusal(err.data);
+    if (refusal !== null) {
+      return new MobHostingRefusedError(message, refusal, rid, method, err.data);
+    }
+  }
   if (code === IDENTITY_UNRESUMABLE_CODE) {
     return new IdentityUnresumableError(message, rid, method, err.data);
   }
@@ -1457,16 +1627,27 @@ export class MetaRuntime {
   private _stopPending = false;
   // The transport this runtime last bootstrapped, for its termination record.
   private _lastGatewayTransport: PersistentTransport | null = null;
+  // What the gateway behind a transport advertises, kept while that
+  // transport is the runtime's (see `_featureCapabilities`).
+  private _featureCapabilitiesRead: {
+    readonly transport: PersistentTransport;
+    readonly features: ReadonlySet<string>;
+  } | null = null;
   readonly jobs = new JobsHandle(this);
   readonly monitors = new MonitorsHandle(this);
   /** Long-term agents from host code (`meta/identity/*`). */
   readonly identities = new IdentitiesHandle(this);
+  /** The mobs of this host: `create`, `list`, `get`, `lifecycle`, `redefine`, `destroy`. */
+  readonly mobs = new MobsHandle(this);
 
   /** @internal */
   constructor(config: MetaBuilderConfig, transport?: PersistentTransport) {
     this._config = config;
     this._transport = transport ?? null;
     this._injectedTransport = transport ?? null;
+    for (const [name, handler] of config.scheduleFireHandlers ?? []) {
+      this._dispatcher.registerScheduleFireHandler(name, handler);
+    }
   }
 
   /** @internal */
@@ -1548,6 +1729,9 @@ export class MetaRuntime {
     this._stopPending = true;
     await transport.stop();
     if (this._transport === transport) this._transport = null;
+    // A transport object can start another gateway process later: what the
+    // stopped one advertised is not carried over to it.
+    this._featureCapabilitiesRead = null;
     this._stopPending = false;
   }
 
@@ -1834,6 +2018,9 @@ export class MetaRuntime {
     if (this._config.routingConfigPath) {
       runtimeOptions.routing_config_path = this._config.routingConfigPath;
     }
+    if (this._config.hostRunnables?.length) {
+      runtimeOptions.host_runnables = [...this._config.hostRunnables];
+    }
     if (this._config.workgraphEnabled !== null) {
       runtimeOptions.workgraph = this._config.workgraphEnabled;
     }
@@ -1897,6 +2084,10 @@ export class MetaRuntime {
     }
     if (this._config.consoleReadOnly !== null) {
       runtimeOptions.console_read_only = this._config.consoleReadOnly;
+    }
+    if (this._config.consoleListNestedMobs !== null) {
+      runtimeOptions.console_list_nested_mobs =
+        this._config.consoleListNestedMobs;
     }
     if (this._config.httpListen) {
       runtimeOptions.http_listen = this._config.httpListen;
@@ -2034,8 +2225,75 @@ export class MetaRuntime {
     return this._dispatcher.registerLiveOutputConsumer(channelId, consumer);
   }
 
+  /**
+   * The feature capabilities of the gateway behind the current transport,
+   * read once per started transport.
+   *
+   * A gateway process does not change what it serves, so its answer is kept
+   * for as long as its transport is the runtime's; a transport started later
+   * is asked again. This is the gateway's build, not a fact of any mob.
+   *
+   * @internal
+   */
+  async _featureCapabilities(): Promise<ReadonlySet<string>> {
+    const transport = this._transport;
+    const kept = this._featureCapabilitiesRead;
+    if (kept !== null && kept.transport === transport) return kept.features;
+    const raw = await this._rpc("meta/capabilities");
+    const listed =
+      typeof raw === "object" && raw !== null
+        ? (raw as Record<string, unknown>).feature_capabilities
+        : undefined;
+    const features = new Set<string>(
+      Array.isArray(listed)
+        ? listed.filter((feature): feature is string => typeof feature === "string")
+        : [],
+    );
+    if (transport !== null) this._featureCapabilitiesRead = { transport, features };
+    return features;
+  }
+
+  /**
+   * Refuse `method`, typed, on a gateway that does not advertise
+   * `capability`; `without` says what such a gateway would do.
+   *
+   * @internal
+   */
+  async _requireFeature(capability: string, method: string, without: string): Promise<void> {
+    if (!(await this._featureCapabilities()).has(capability)) {
+      throw new CapabilityUnavailableError(
+        `capability ${capability} is not available: ${without}`,
+        "",
+        method,
+        { capability },
+      );
+    }
+  }
+
+  /** The handle of the mob the launch names. Its requests name no mob. */
   mobHandle(): MobHandle {
     return new MobHandle(this);
+  }
+
+  /**
+   * The handle of the mob of this host with the id `mobId`.
+   *
+   * The same {@link MobHandle} as {@link mobHandle} returns, for a mob named
+   * by its id: every call it makes carries `mob_id`. Obtaining it sends
+   * nothing and loads nothing, and nothing says here whether the host has
+   * such a mob: a call on a mob the host does not have rejects with
+   * `RpcError` (`-32602`, data `kind` `foreign_mob_target`). {@link mobs}
+   * lists and creates the mobs of the host.
+   *
+   * The gateway must advertise the `mob_addressing` feature capability: an
+   * earlier gateway ignores `mob_id` and answers for its own mob, so without
+   * the capability every call of the handle rejects with
+   * {@link CapabilityUnavailableError} and sends nothing. The capability is
+   * read once per started gateway.
+   */
+  mob(mobId: string): MobHandle {
+    if (typeof mobId !== "string") throw new TypeError("mobId must be a string");
+    return new MobHandle(mobView(this, mobId));
   }
 
   /**
@@ -2046,6 +2304,21 @@ export class MetaRuntime {
    */
   onDecisionNotice(handler: DecisionNoticeHandler): void {
     this._dispatcher.registerDecisionNoticeHandler(handler);
+  }
+
+  /**
+   * Register or replace a named host runnable's handler. Registration survives
+   * reconnecting this runtime. For a fresh process, use
+   * `MetaBuilder.onScheduleFire` before `build()` starts the initial connection.
+   * Pairs with `MetaBuilder.hostRunnables`. The handler receives
+   * the raw occurrence (`schedule_id`, `occurrence_id`, `due_at`, optional
+   * `payload`) and may be sync or async; throwing or rejecting fails the
+   * durable occurrence attempt. Register before an existing schedule can
+   * fire. Return values cross the callback bridge but are not stored as
+   * schedule results; a handler returning nothing acknowledges completion.
+   */
+  onScheduleFire(name: string, handler: ScheduleFireHandler): void {
+    this._dispatcher.registerScheduleFireHandler(name, handler);
   }
 
   sseBridge(): SseBridge {
@@ -3529,9 +3802,73 @@ function settledTurn(
  * await handle.send(members[0].agentIdentity, "Hello!");
  * ```
  */
+const WITHOUT_MOB_ADDRESSING =
+  "this gateway does not honour mob_id: it would ignore it and answer for its own mob";
+
+/** The runtime and the mob of each view {@link mobView} made. */
+const MOB_VIEWS = new WeakMap<
+  MetaRuntime,
+  { readonly runtime: MetaRuntime; readonly mobId: string }
+>();
+
+/** `params` naming `mobId`, unless they name a mob already. */
+async function addressedParams(
+  runtime: MetaRuntime,
+  mobId: string,
+  method: string,
+  params?: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  await runtime._requireFeature(MOB_ADDRESSING, method, WITHOUT_MOB_ADDRESSING);
+  const addressed: Record<string, unknown> = { ...(params ?? {}) };
+  if (addressed.mob_id === undefined || addressed.mob_id === null) {
+    addressed.mob_id = mobId;
+  }
+  return addressed;
+}
+
+/**
+ * A runtime as one mob of its host sees it: every request names the mob.
+ *
+ * The view of `runtime` for the mob `mobId` sends through the runtime's own
+ * paths and adds `mob_id` on each of them: the JSON-RPC requests, the
+ * multipart upload and the event streams. Before the first of them it has
+ * the runtime read the gateway's `mob_addressing` capability (once per
+ * started transport) and refuses, typed, without it. A request that names a
+ * mob already (a method's own `mobId`) is sent as the caller wrote it.
+ *
+ * It holds no state: everything it reads is the runtime's, live (the runtime
+ * is its prototype), and it is frozen, so it refuses every write. It is how
+ * a {@link MobHandle} for a named mob reaches the wire; it is never handed
+ * out.
+ */
+function mobView(runtime: MetaRuntime, mobId: string): MetaRuntime {
+  const view = Object.create(runtime, {
+    _rpc: {
+      value: async (
+        method: string,
+        params?: Record<string, unknown>,
+        options: { transportTimeoutMs?: number } = {},
+      ): Promise<unknown> =>
+        runtime._rpc(method, await addressedParams(runtime, mobId, method, params), options),
+    },
+    sseBridge: { value: (): SseBridge => new SseBridge(runtime, mobId) },
+  }) as MetaRuntime;
+  MOB_VIEWS.set(view, { runtime, mobId });
+  Object.freeze(view);
+  return view;
+}
+
 export class MobHandle {
   /** @internal */
   constructor(private readonly _runtime: MetaRuntime) {}
+
+  /**
+   * The id of the mob this handle names; `null` for the handle of the mob
+   * the launch names, whose requests name no mob.
+   */
+  get mobId(): string | null {
+    return MOB_VIEWS.get(this._runtime)?.mobId ?? null;
+  }
 
   // -- Status & capabilities ----------------------------------------------
 
@@ -3842,8 +4179,34 @@ export class MobHandle {
     }
   }
 
+  /**
+   * Query the operational events the gateway's event log keeps.
+   *
+   * `query.mobId` names the mob whose events are read, as on
+   * {@link queryMobEvents}: the value you pass is sent as given; without
+   * one the handle of a named mob sends its own id, and the handle of the
+   * launch's own mob names no mob.
+   *
+   * A query that names a mob needs the gateway's `mob_addressing` feature
+   * capability, on the handle of the launch's own mob too: an earlier
+   * gateway would answer it without an error and for its own mob, so
+   * without the capability the call rejects with
+   * {@link CapabilityUnavailableError} and the query is not sent. A query
+   * that names no mob on that handle reads no capability.
+   *
+   * A gateway with no event log configured answers an empty list: an empty
+   * result does not show that no event happened.
+   */
   async queryEvents(query?: EventQuery): Promise<PersistedEvent[]> {
     const params = query ? eventQueryToDict(query) : {};
+    if (query?.mobId !== undefined && this.mobId === null) {
+      // A named handle asks through its view; the launch's handle asks here.
+      await this._runtime._requireFeature(
+        MOB_ADDRESSING,
+        "meta/query_events",
+        WITHOUT_MOB_ADDRESSING,
+      );
+    }
     const raw = await this._runtime._rpc("meta/query_events", params);
     let events = raw;
     if (typeof raw === "object" && raw !== null) {
@@ -3958,6 +4321,151 @@ export class MobHandle {
   /** Alias for {@link send}. */
   sendMessage = this.send.bind(this);
 
+  // -- The identity-first calls, for this handle's mob --------------------
+  //
+  // The runtime's calls by identity (`runtime.send`, `dispatch`,
+  // `grantTool`, ...) address the mob the launch names. A handle offers
+  // the same calls for its own mob, under the runtime's names and with the
+  // runtime's own signatures. Two of those names the handle has already
+  // for its mob-member calls (`send`, `status`), so the runtime's two are
+  // here as `sendIdentity` and `statusIdentity`. `realmMcp*` are the
+  // host's and stay on the runtime.
+
+  /** A call of the runtime, made on this handle's runtime when it is called. */
+  private _forward<K extends keyof MetaRuntime>(name: K): MetaRuntime[K] {
+    return ((...args: unknown[]): unknown =>
+      Reflect.apply(
+        this._runtime[name] as (...given: unknown[]) => unknown,
+        this._runtime,
+        args,
+      )) as MetaRuntime[K];
+  }
+
+  /**
+   * Long-term agents of this handle's mob (`meta/identity/*`):
+   * `MetaRuntime.identities`.
+   */
+  get identities(): IdentitiesHandle {
+    return new IdentitiesHandle(this._runtime);
+  }
+
+  /**
+   * Send to an identity of this handle's mob: `MetaRuntime.send`
+   * (`meta/send`). The handle's own {@link send} is the mob-member send
+   * (`meta/send_message`), so the runtime's call has this name here.
+   */
+  readonly sendIdentity = this._forward("send");
+
+  /**
+   * The status of an identity of this handle's mob: `MetaRuntime.status`
+   * (`meta/status_identity`). The handle's own {@link status} is the
+   * runtime status (`meta/status`), so the runtime's call has this name
+   * here.
+   */
+  readonly statusIdentity = this._forward("status");
+
+  /** The member snapshot of an identity, in this handle's mob: `MetaRuntime.agent`. */
+  readonly agent = this._forward("agent");
+
+  /** The state of an input a keyed send admitted, in this handle's mob: `MetaRuntime.sendStatus`. */
+  readonly sendStatus = this._forward("sendStatus");
+
+  /** Dispatch typed input to an identity, in this handle's mob: `MetaRuntime.dispatch`. */
+  readonly dispatch = this._forward("dispatch");
+
+  /** Recover the reply of a scope-bound dispatch, in this handle's mob: `MetaRuntime.recoverDelivery`. */
+  readonly recoverDelivery = this._forward("recoverDelivery");
+
+  /** The result of a tracked turn, in this handle's mob: `MetaRuntime.turnResult`. */
+  readonly turnResult = this._forward("turnResult");
+
+  /** Wait for a tracked turn, in this handle's mob: `MetaRuntime.waitForTurn`. */
+  readonly waitForTurn = this._forward("waitForTurn");
+
+  /** An identity's completion cursor, in this handle's mob: `MetaRuntime.completionCursor`. */
+  readonly completionCursor = this._forward("completionCursor");
+
+  /** Wait for an identity's next completion, in this handle's mob: `MetaRuntime.waitForCompletion`. */
+  readonly waitForCompletion = this._forward("waitForCompletion");
+
+  /** Wait until identities completed their kickoff turn, in this handle's mob: `MetaRuntime.waitUntilReady`. */
+  readonly waitUntilReady = this._forward("waitUntilReady");
+
+  /** Send and wait for the turn's output, in this handle's mob: `MetaRuntime.sendAndWait`. */
+  readonly sendAndWait = this._forward("sendAndWait");
+
+  /** Send and wait for the turn's outcome, in this handle's mob: `MetaRuntime.sendAndWaitOutcome`. */
+  readonly sendAndWaitOutcome = this._forward("sendAndWaitOutcome");
+
+  /** Dispatch and wait for the turn's output, in this handle's mob: `MetaRuntime.dispatchAndWait`. */
+  readonly dispatchAndWait = this._forward("dispatchAndWait");
+
+  /** Dispatch and wait for the turn's outcome, in this handle's mob: `MetaRuntime.dispatchAndWaitOutcome`. */
+  readonly dispatchAndWaitOutcome = this._forward("dispatchAndWaitOutcome");
+
+  /** Subscribe to an identity's events, in this handle's mob: `MetaRuntime.subscribe`. */
+  readonly subscribe = this._forward("subscribe");
+
+  /** The registered spec of an identity, in this handle's mob: `MetaRuntime.registeredSpec`. */
+  readonly registeredSpec = this._forward("registeredSpec");
+
+  /** Inspect an identity, in this handle's mob: `MetaRuntime.inspectIdentity`. */
+  readonly inspectIdentity = this._forward("inspectIdentity");
+
+  /** Respawn an identity, in this handle's mob: `MetaRuntime.respawn`. */
+  readonly respawn = this._forward("respawn");
+
+  /** Retire an identity, in this handle's mob: `MetaRuntime.retire`. */
+  readonly retire = this._forward("retire");
+
+  /** Reset an identity, in this handle's mob: `MetaRuntime.reset`. */
+  readonly reset = this._forward("reset");
+
+  /** Delete an identity, in this handle's mob: `MetaRuntime.deleteIdentity`. */
+  readonly deleteIdentity = this._forward("deleteIdentity");
+
+  /** Compact a member's conversation now, in this handle's mob: `MetaRuntime.compactMember`. */
+  readonly compactMember = this._forward("compactMember");
+
+  /** Reconcile the identities with the roster, in this handle's mob: `MetaRuntime.reconcileIdentity`. */
+  readonly reconcileIdentity = this._forward("reconcileIdentity");
+
+  /** The identity bootstrap's status, in this handle's mob: `MetaRuntime.identityBootstrapStatus`. */
+  readonly identityBootstrapStatus = this._forward("identityBootstrapStatus");
+
+  /** Wait for the identity bootstrap, in this handle's mob: `MetaRuntime.waitIdentityBootstrap`. */
+  readonly waitIdentityBootstrap = this._forward("waitIdentityBootstrap");
+
+  /** Activate an instruction for a member, in this handle's mob: `MetaRuntime.activateMemberInstruction`. */
+  readonly activateMemberInstruction = this._forward("activateMemberInstruction");
+
+  /** A member's instruction activations, in this handle's mob: `MetaRuntime.memberInstructionActivations`. */
+  readonly memberInstructionActivations = this._forward("memberInstructionActivations");
+
+  /** Set an operator instruction, in this handle's mob: `MetaRuntime.setInstruction`. */
+  readonly setInstruction = this._forward("setInstruction");
+
+  /** Revoke an operator instruction, in this handle's mob: `MetaRuntime.revokeInstruction`. */
+  readonly revokeInstruction = this._forward("revokeInstruction");
+
+  /** The operator instructions' status, in this handle's mob: `MetaRuntime.instructionStatus`. */
+  readonly instructionStatus = this._forward("instructionStatus");
+
+  /** Prune a member's system rows, in this handle's mob: `MetaRuntime.pruneMemberSystemRows`. */
+  readonly pruneMemberSystemRows = this._forward("pruneMemberSystemRows");
+
+  /** Grant an identity a tool, in this handle's mob: `MetaRuntime.grantTool`. */
+  readonly grantTool = this._forward("grantTool");
+
+  /** Revoke a tool grant, in this handle's mob: `MetaRuntime.revokeToolGrant`. */
+  readonly revokeToolGrant = this._forward("revokeToolGrant");
+
+  /** An identity's tool grants, in this handle's mob: `MetaRuntime.listToolGrants`. */
+  readonly listToolGrants = this._forward("listToolGrants");
+
+  /** The audit of an identity's tool grants, in this handle's mob: `MetaRuntime.toolGrantAudit`. */
+  readonly toolGrantAudit = this._forward("toolGrantAudit");
+
   async getBlob(blobId: string): Promise<BlobGetResult> {
     return parseBlobGetResult(
       await this._runtime._rpc("meta/blob/get", { blob_id: blobId }),
@@ -3997,11 +4505,16 @@ export class MobHandle {
         "multipart RPC requires rustHttpBaseUrl — start the gateway or call runtime.setRustHttpBase(...)",
       );
     }
+    const view = MOB_VIEWS.get(this._runtime);
+    const sent =
+      view === undefined
+        ? params
+        : await addressedParams(view.runtime, view.mobId, method, params);
     const id = nextRequestId(method);
     const form = new FormData();
     form.append(
       "payload",
-      JSON.stringify(buildJsonRpcRequest(id, method, params)),
+      JSON.stringify(buildJsonRpcRequest(id, method, sent)),
     );
     for (const upload of uploads) {
       const blob =
@@ -6769,10 +7282,35 @@ export class ToolCaller {
 // -- SseBridge ------------------------------------------------------------
 
 /**
+ * `value` as the value of a URL query parameter, every reserved character
+ * percent-encoded: `encodeURIComponent`, and the five characters it leaves
+ * (`! * ' ( )`). Both SDKs write the same bytes for one id.
+ */
+function escapedQueryValue(value: string): string {
+  return encodeURIComponent(value).replace(
+    /[!*'()]/g,
+    (reserved) => `%${reserved.charCodeAt(0).toString(16).toUpperCase()}`,
+  );
+}
+
+/**
  * Bridge for streaming SSE from the Rust backend's HTTP server.
  */
 export class SseBridge {
-  constructor(private readonly _runtime: MetaRuntime) {}
+  /**
+   * With `mobId` the two streams are the named mob's: their URLs carry
+   * `?mob_id=`, after the gateway's `mob_addressing` capability was read.
+   */
+  constructor(
+    private readonly _runtime: MetaRuntime,
+    private readonly _mobId: string | null = null,
+  ) {}
+
+  private async _mobQuery(route: string): Promise<string> {
+    if (this._mobId === null) return "";
+    await this._runtime._requireFeature(MOB_ADDRESSING, route, WITHOUT_MOB_ADDRESSING);
+    return `?mob_id=${escapedQueryValue(this._mobId)}`;
+  }
 
   private _baseUrl(): string {
     const base = this._runtime.rustHttpBaseUrl;
@@ -6790,12 +7328,12 @@ export class SseBridge {
     agentId: string,
   ): AsyncGenerator<SseEvent, void, undefined> {
     const url = `${this._baseUrl()}/agents/${agentId}/events`;
-    yield* this._streamSse(url);
+    yield* this._streamSse(url + (await this._mobQuery("GET /agents/{agent_id}/events")));
   }
 
   async *mobEvents(): AsyncGenerator<SseEvent, void, undefined> {
     const url = `${this._baseUrl()}/mob/events`;
-    yield* this._streamSse(url);
+    yield* this._streamSse(url + (await this._mobQuery("GET /mob/events")));
   }
 
   private async *_streamSse(

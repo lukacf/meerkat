@@ -38,7 +38,6 @@ use std::time::Duration;
 
 use crate::contact_directory::ContactDirectory;
 use crate::identity_first::gateway_bridges::SDK_CALLBACK_SOURCE_ID;
-use crate::memory_wiring::attach_memory_engines_with_provider_auth;
 use crate::runtime::cross_mob_control::{ControlAuthorizer, ControlGrantTable, ControlListenAddr};
 use crate::shutdown_signal::ShutdownSignal;
 use crate::unified_runtime::EventLogError;
@@ -84,15 +83,11 @@ struct GatewayGatingConfig {
     escalation: crate::GatingEscalationRoutes,
 }
 
+/// The options of a gateway launch that are the process's: one value each
+/// whatever the number of mobs the process hosts. The options the launch
+/// decides for its mob are in [`GatewayMobOptions`].
 struct GatewayRuntimeOptions {
     runtime_options: RuntimeOptions,
-    /// Presence is identity-first intent. `None` preserves the classic gateway
-    /// when no roster is configured; a roster still defaults to the
-    /// `eager_materialize` mode name.
-    identity_bootstrap_mode: Option<crate::IdentityBootstrapMode>,
-    /// `runtime_options.member_restore`: how the mob materializes its seated
-    /// members when it starts. Absent, on demand.
-    member_restore: crate::identity_first::MemberRestore,
     /// Exclusive root for session comms identities, when the launch declares
     /// one.
     ///
@@ -124,6 +119,10 @@ struct GatewayRuntimeOptions {
     console_require_app_auth: Option<bool>,
     console_read_only: Option<bool>,
     console_fetch_timeout_ms: Option<u64>,
+    /// `runtime_options.console_list_nested_mobs`: whether the console this
+    /// gateway serves lists the mobs nested under its own mob. Absent, it
+    /// does.
+    console_nested_mobs: crate::console_aggregator::NestedMobListing,
     access: Option<crate::AccessController>,
     /// `runtime_options.decisions`: the decision ingresses whose attested
     /// people decide durable decisions on this stdio host.
@@ -178,22 +177,6 @@ struct GatewayRuntimeOptions {
     /// launch (M4). Without it, a failed `runtime.sqlite` open is a startup
     /// error — the former silent `InMemoryRuntimeStore` fallback is gone.
     runtime_store_ephemeral: bool,
-    /// Declared in-memory mob storage. Persistent SQLite is the default on a
-    /// persistent_state launch, so this exists for launches that would rather
-    /// keep an editable mob_config than durable mob state: a persistent mob
-    /// storage pins the definition, because Meerkat refuses a definition that
-    /// disagrees with the canonical event-log definition.
-    mob_storage_ephemeral: bool,
-    /// `runtime_options.declare_spec_update = {"expected_revision": N}`: an
-    /// explicit operator declaration that advances the canonical mob definition
-    /// to the definition this launch supplies.
-    ///
-    /// The door through the pinned-`mob_config` refusal. Present only on the
-    /// activation that intends to move the pin - it is a declared transition, not
-    /// a mode. Compare-and-swapped on `expected_revision`, so an activation that
-    /// names a revision the store has moved past is refused rather than
-    /// overwriting a definition the operator never saw.
-    declare_spec_update: Option<u64>,
     /// `runtime_options.mob_composition = {"authority": "candidate"}`: this
     /// launch does NOT speak for the durable composition, so it neither creates
     /// the composition pin nor is refused by one.
@@ -203,16 +186,6 @@ struct GatewayRuntimeOptions {
     /// deliberately-restricted composition and the promoted boot is refused -
     /// which in one production incident cost 929 supervisor respawns and a rollback.
     composition_authority: crate::mob_composition_manifest::CompositionAuthority,
-    /// `runtime_options.mob_composition.candidate_definition`: `"stored"` lets
-    /// a candidate boot the stored mob definition when the supplied one
-    /// differs (logged, degraded health). Absent, such a candidate refuses.
-    candidate_definition: crate::mob_composition_manifest::CandidateDefinition,
-    /// `runtime_options.fork_instruction_policy`: what a fork of a member
-    /// with activated host instructions does with them:
-    /// `"require_explicit_activation"` (absent: Meerkat's default),
-    /// `"reactivate_inherited"` or `"refuse"`. Applied to the gateway's mob
-    /// on every build and resume.
-    fork_instruction_policy: meerkat_core::ForkInstructionPolicy,
     /// `runtime_options.compaction = {"auto_compact_threshold": 120000, ...}`:
     /// the host-level session-compaction policy for every agent this gateway
     /// builds. Absent, the gateway inherits meerkat's model-aware default
@@ -278,6 +251,55 @@ struct GatewayRuntimeOptions {
     /// serves peers' keyed injects (default true). Off, both keyed inject
     /// verbs answer `not_served` with the cause `runtime_disabled`.
     serve_keyed_inject: bool,
+    /// What the launch decides for its mob.
+    mob: GatewayMobOptions,
+}
+
+/// The options of a gateway launch that are its mob's: what the gateway
+/// hands to the mob's own build (its storage, its definition pin, its
+/// members' restore and its identity bootstrap). A gateway has no wire
+/// form for them apart from `runtime_options`.
+///
+/// They are of two kinds. `identity_bootstrap_mode`, `member_restore` and
+/// `fork_instruction_policy` are what any mob the host builds would be
+/// built with. `declare_spec_update` and `candidate_definition` are
+/// statements about the launch mob's own definition and are never another
+/// mob's. `mob_storage_ephemeral` applies to the launch mob; how another
+/// mob's storage is decided is not settled here.
+struct GatewayMobOptions {
+    /// Presence is identity-first intent. `None` preserves the classic gateway
+    /// when no roster is configured; a roster still defaults to the
+    /// `eager_materialize` mode name.
+    identity_bootstrap_mode: Option<crate::IdentityBootstrapMode>,
+    /// `runtime_options.member_restore`: how the mob materializes its seated
+    /// members when it starts. Absent, on demand.
+    member_restore: crate::identity_first::MemberRestore,
+    /// Declared in-memory mob storage. Persistent SQLite is the default on a
+    /// persistent_state launch, so this exists for launches that would rather
+    /// keep an editable mob_config than durable mob state: a persistent mob
+    /// storage pins the definition, because Meerkat refuses a definition that
+    /// disagrees with the canonical event-log definition.
+    mob_storage_ephemeral: bool,
+    /// `runtime_options.declare_spec_update = {"expected_revision": N}`: an
+    /// explicit operator declaration that advances the canonical mob definition
+    /// to the definition this launch supplies.
+    ///
+    /// The door through the pinned-`mob_config` refusal. Present only on the
+    /// activation that intends to move the pin - it is a declared transition, not
+    /// a mode. Compare-and-swapped on `expected_revision`, so an activation that
+    /// names a revision the store has moved past is refused rather than
+    /// overwriting a definition the operator never saw.
+    declare_spec_update: Option<u64>,
+    /// `runtime_options.mob_composition.candidate_definition`: `"stored"` lets
+    /// a candidate boot the stored mob definition when the supplied one
+    /// differs (logged, degraded health). Absent, such a candidate refuses.
+    candidate_definition: crate::mob_composition_manifest::CandidateDefinition,
+    /// `runtime_options.fork_instruction_policy`: what a fork of a member
+    /// with activated host instructions does with them:
+    /// `"require_explicit_activation"` (absent: Meerkat's default),
+    /// `"reactivate_inherited"` or `"refuse"`. Applied to the gateway's mob
+    /// on every build and resume.
+    fork_instruction_policy: meerkat_core::ForkInstructionPolicy,
 }
 
 /// `runtime_options.live` wire forms: `true` mounts the live WebSocket
@@ -352,6 +374,11 @@ struct GatewayAgentMemoryOptions {
     /// default; enablement is the application's call (mechanism from
     /// Meta, policy from the app).
     steward: crate::memory::steward::StewardConfig,
+    /// `agent_memory.own_memory_only_profiles`: the profiles whose agents
+    /// are listed their own memory only
+    /// ([`crate::memory::own_memory_only`]), as the host wrote them. None
+    /// by default.
+    own_memory_only_profiles: Vec<String>,
 }
 
 /// Which bundled store backs agent memory. SQLite is the default now that
@@ -470,8 +497,6 @@ impl Default for GatewayRuntimeOptions {
     fn default() -> Self {
         Self {
             runtime_options: RuntimeOptions::default(),
-            identity_bootstrap_mode: None,
-            member_restore: crate::identity_first::MemberRestore::default(),
             session_identity_config_root: None,
             provider_credentials_root: None,
             max_sessions: 16,
@@ -484,6 +509,7 @@ impl Default for GatewayRuntimeOptions {
             console_require_app_auth: None,
             console_read_only: None,
             console_fetch_timeout_ms: None,
+            console_nested_mobs: crate::console_aggregator::NestedMobListing::default(),
             access: None,
             decision_ingresses: None,
             mcp_accounts: None,
@@ -502,11 +528,7 @@ impl Default for GatewayRuntimeOptions {
             console_voice: None,
             host_runnables: Vec::new(),
             runtime_store_ephemeral: false,
-            mob_storage_ephemeral: false,
-            declare_spec_update: None,
             composition_authority: crate::mob_composition_manifest::CompositionAuthority::default(),
-            candidate_definition: crate::mob_composition_manifest::CandidateDefinition::default(),
-            fork_instruction_policy: meerkat_core::ForkInstructionPolicy::default(),
             compaction: None,
             host_config: None,
             named_config_files: Vec::new(),
@@ -520,6 +542,15 @@ impl Default for GatewayRuntimeOptions {
             identity_creation: crate::identity_creation::RuntimeOptionPolicy::Absent,
             control_request_window_ms: crate::runtime::keyed_inject::DEFAULT_KEYED_INJECT_WINDOW_MS,
             serve_keyed_inject: true,
+            mob: GatewayMobOptions {
+                identity_bootstrap_mode: None,
+                member_restore: crate::identity_first::MemberRestore::default(),
+                mob_storage_ephemeral: false,
+                declare_spec_update: None,
+                candidate_definition: crate::mob_composition_manifest::CandidateDefinition::default(
+                ),
+                fork_instruction_policy: meerkat_core::ForkInstructionPolicy::default(),
+            },
         }
     }
 }
@@ -571,6 +602,21 @@ fn parse_mob_config(mob_config_toml: &str) -> Result<MobDefinition, String> {
             crate::gateway_composition::describe_mob_definition_error(&error)
         )
     })
+}
+
+/// The definition a `mob_config` text describes, checked as this gateway
+/// checks the one its launch is given, in the launch's order and with the
+/// launch's own text for each fault: the text parses, it carries no host
+/// table at its top level, and every profile's model resolves. A mob the
+/// host creates beside its launch mob is checked with it.
+pub(crate) fn mob_definition_of_config(mob_config_toml: &str) -> Result<MobDefinition, String> {
+    let definition = parse_mob_config(mob_config_toml)?;
+    crate::gateway_composition::refuse_host_config_tables_in_mob_toml(mob_config_toml)
+        .map_err(|table| table.to_string())?;
+    match unknown_model_init_error(&definition) {
+        Some(message) => Err(message),
+        None => Ok(definition),
+    }
 }
 
 /// The init-time model check, delegated to meerkat-mob's `validate_definition`
@@ -896,6 +942,13 @@ struct InMemoryEventLogStore {
     events: std::sync::Mutex<Vec<PersistedEvent>>,
 }
 
+/// The event log store a stock gateway keeps in memory, for a row that
+/// reads `meta/query_events` over it.
+#[cfg(test)]
+pub(crate) fn stock_event_log_store_in_tests() -> Box<dyn EventLogStore> {
+    Box::new(InMemoryEventLogStore::default())
+}
+
 impl EventLogStore for InMemoryEventLogStore {
     fn append_batch(
         &self,
@@ -919,10 +972,17 @@ impl EventLogStore for InMemoryEventLogStore {
     > {
         Box::pin(async move {
             let mut events = self.events.lock().unwrap().clone();
+            // The rows of the query's mob are selected before the limit
+            // cuts the answer: a query that names a mob is answered the
+            // rows that name it at the incarnation the query names, a
+            // query that names none the rows that name none, and a page
+            // holds `limit` rows of that selection while it has them.
             events.retain(|event| {
-                query
-                    .since_ms
-                    .is_none_or(|since| event.timestamp_ms >= since)
+                event.mob_id.as_ref().map(meerkat_mob::MobId::as_str) == query.mob_id.as_deref()
+                    && event.mob_incarnation == query.mob_incarnation
+                    && query
+                        .since_ms
+                        .is_none_or(|since| event.timestamp_ms >= since)
                     && query
                         .until_ms
                         .is_none_or(|until| event.timestamp_ms < until)
@@ -933,13 +993,15 @@ impl EventLogStore for InMemoryEventLogStore {
                         .member_id
                         .as_ref()
                         .is_none_or(|member_id| event.member_id.as_ref() == Some(member_id))
+                    // A query's event types select among agent events and
+                    // module events alike, each by its own type.
                     && (query.event_types.is_empty()
-                        || query.event_types.iter().any(|event_type| {
-                            matches!(
-                                &event.event,
-                                crate::UnifiedEvent::Module(module)
-                                    if &module.event_type == event_type
-                            )
+                        || query.event_types.iter().any(|asked| {
+                            let of_the_row = match &event.event {
+                                crate::UnifiedEvent::Agent { event_type, .. } => event_type,
+                                crate::UnifiedEvent::Module(module) => &module.event_type,
+                            };
+                            of_the_row == asked
                         }))
             });
             events.sort_by_key(|event| event.seq);
@@ -1348,7 +1410,7 @@ mod tests {
         )
         .expect("declare_spec_update must pass the allowlist");
         assert_eq!(
-            declared.declare_spec_update,
+            declared.mob.declare_spec_update,
             Some(7),
             "the declared revision must reach the parsed options"
         );
@@ -1374,7 +1436,7 @@ mod tests {
             quiet.composition_authority,
             crate::mob_composition_manifest::CompositionAuthority::Authoritative
         );
-        assert_eq!(quiet.declare_spec_update, None);
+        assert_eq!(quiet.mob.declare_spec_update, None);
     }
 
     /// `runtime_options.fork_instruction_policy` reaches the parsed options;
@@ -1385,7 +1447,7 @@ mod tests {
         let quiet = parse_gateway_runtime_options(&json!({ "runtime_options": {} }), None)
             .expect("empty options");
         assert_eq!(
-            quiet.fork_instruction_policy,
+            quiet.mob.fork_instruction_policy,
             ForkInstructionPolicy::RequireExplicitActivation
         );
         for (name, policy) in [
@@ -1404,7 +1466,7 @@ mod tests {
                 None,
             )
             .expect("a policy name parses");
-            assert_eq!(parsed.fork_instruction_policy, policy, "{name}");
+            assert_eq!(parsed.mob.fork_instruction_policy, policy, "{name}");
         }
         let unknown = parse_gateway_runtime_options(
             &json!({ "runtime_options": { "fork_instruction_policy": "inherit" } }),
@@ -1428,7 +1490,7 @@ mod tests {
             None,
         )
         .expect("a candidate may acknowledge the stored definition");
-        assert_eq!(stored.candidate_definition, CandidateDefinition::Stored);
+        assert_eq!(stored.mob.candidate_definition, CandidateDefinition::Stored);
 
         let candidate = parse_gateway_runtime_options(
             &json!({ "runtime_options": { "mob_composition": { "authority": "candidate" } } }),
@@ -1436,7 +1498,7 @@ mod tests {
         )
         .expect("candidate");
         assert_eq!(
-            candidate.candidate_definition,
+            candidate.mob.candidate_definition,
             CandidateDefinition::RequireMatch,
             "a candidate that says nothing must still refuse a divergent definition"
         );
@@ -3120,6 +3182,88 @@ default_binding = "local"
             blobs,
         )
         .with_runtime_delivery(&delivery)
+    }
+
+    /// One request on the job door, with the jobs runtime of the fixture.
+    /// `None` when the door did not take the line.
+    async fn job_door(
+        runtime: &DetachedCallbackJobRuntime,
+        bridge: &StdioCallbackBridge,
+        method: &str,
+        params: Value,
+    ) -> Option<Value> {
+        let line =
+            json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).to_string();
+        let answer = handle_callback_job_rpc(&line, Some(runtime), bridge, true).await?;
+        serde_json::from_str(&answer).ok()
+    }
+
+    /// The six job callbacks address a job by its authority and no mob. The
+    /// job door answers them before the addressing seam: it takes no
+    /// `mob_id` and ignores one. Each callback answers a request that
+    /// carries a `mob_id`, here one no mob of any host has, exactly as the
+    /// same request without it: the member is no parse error, and the
+    /// answer is never the refusal of a mob.
+    #[tokio::test]
+    async fn a_job_callback_takes_no_mob_id_and_ignores_one() {
+        let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+        let runtime = detached_runtime_over(runtime_store);
+        let bridge = test_callback_bridge();
+        let authority = json!({"job_id": "job-of-no-mob", "attempt_id": "attempt-1", "fence": 1});
+        let callbacks = [
+            (
+                "meta/jobs/heartbeat",
+                json!({"authority": authority, "heartbeat_at_ms": 1, "lease_expires_at_ms": 2}),
+            ),
+            (
+                "meta/jobs/progress",
+                json!({"authority": authority, "cursor": 1, "detail": "half", "observed_at_ms": 1}),
+            ),
+            (
+                "meta/jobs/checkpoint",
+                json!({"authority": authority, "checkpoint_ref": "ref", "observed_at_ms": 1}),
+            ),
+            (
+                "meta/jobs/complete",
+                json!({"authority": authority, "completed_at_ms": 1}),
+            ),
+            (
+                "meta/jobs/fail",
+                json!({"authority": authority, "failed_at_ms": 1, "code": "failed"}),
+            ),
+            (
+                "meta/jobs/cancel_ack",
+                json!({"authority": authority, "acknowledged_at_ms": 1}),
+            ),
+        ];
+        let mut asked = Vec::new();
+        for (method, params) in callbacks {
+            let mut with_a_mob = params.clone();
+            with_a_mob["mob_id"] = json!("a-mob-no-host-has");
+            let plain = job_door(&runtime, &bridge, method, params).await;
+            let named = job_door(&runtime, &bridge, method, with_a_mob).await;
+            assert!(plain.is_some(), "{method}: the job door takes the method");
+            assert_eq!(named, plain, "{method}: a mob_id changed the answer");
+            let text = named.map(|answer| answer.to_string()).unwrap_or_default();
+            assert!(
+                !text.contains("foreign_mob_target") && !text.contains("unknown field"),
+                "{method}: {text}"
+            );
+            // The answer is the job's own: the params parsed, and the door
+            // went on to the job the authority names.
+            assert!(text.contains("job-of-no-mob"), "{method}: {text}");
+            asked.push(method);
+        }
+        assert_eq!(
+            asked,
+            crate::rpc::mob_addressing::JOB_DOOR_METHODS
+                .iter()
+                .copied()
+                .filter(|method| method.starts_with("meta/"))
+                .collect::<Vec<_>>(),
+            "the job callbacks of the job door's own list"
+        );
     }
 
     /// The shell job projector and the detached-job delivery runtime share
@@ -7277,6 +7421,75 @@ comms = true
         );
     }
 
+    /// `agent_memory.own_memory_only_profiles`: absent it names none; it is
+    /// a list of distinct profile names, kept in the host's order; every
+    /// other shape is refused by name.
+    #[test]
+    fn gateway_runtime_options_agent_memory_own_memory_only_profiles_parse_matrix() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+
+        // Absent: none, as before.
+        let params = json!({ "runtime_options": { "agent_memory": true } });
+        let options =
+            parse_gateway_runtime_options(&params, Some(tmp.path())).expect("defaults parse");
+        assert!(
+            options
+                .agent_memory
+                .expect("agent memory")
+                .own_memory_only_profiles
+                .is_empty()
+        );
+
+        // A list of profile names, in the host's order; an empty list is none.
+        for (value, expected) in [
+            (json!([]), Vec::<String>::new()),
+            (json!(["guest"]), vec!["guest".to_string()]),
+            (
+                json!(["guest", "visitor"]),
+                vec!["guest".to_string(), "visitor".to_string()],
+            ),
+        ] {
+            let params = json!({
+                "runtime_options": { "agent_memory": { "own_memory_only_profiles": value } }
+            });
+            let options = parse_gateway_runtime_options(&params, Some(tmp.path()))
+                .expect("own_memory_only_profiles parses");
+            assert_eq!(
+                options
+                    .agent_memory
+                    .expect("agent memory")
+                    .own_memory_only_profiles,
+                expected
+            );
+        }
+
+        // Fail-loud on every other shape: nothing is guessed.
+        for value in [
+            json!("guest"),
+            json!(true),
+            json!({ "profiles": ["guest"] }),
+            json!(["guest", 7]),
+            json!([""]),
+            json!(["  "]),
+            json!(["guest", "guest"]),
+        ] {
+            let params = json!({
+                "runtime_options": { "agent_memory": { "own_memory_only_profiles": value } }
+            });
+            let err = match parse_gateway_runtime_options(&params, Some(tmp.path())) {
+                Ok(_) => panic!("expected fail-loud parse for {params}"),
+                Err(err) => err,
+            };
+            assert!(
+                err.contains(
+                    "runtime_options.agent_memory.own_memory_only_profiles must be a list of \
+                     distinct profile names"
+                ),
+                "{err}"
+            );
+        }
+    }
+
     // §7.2 mob-scope binding: the exact resolver the gateway installs on the
     // customizer and injector. The hosting mob composes only for the
     // configured realm — a foreign realm gets no mob scope.
@@ -7615,7 +7828,7 @@ comms = true
         use crate::IdentityBootstrapMode;
 
         let defaults = parse_gateway_runtime_options(&json!({}), None).expect("defaults");
-        assert_eq!(defaults.identity_bootstrap_mode, None);
+        assert_eq!(defaults.mob.identity_bootstrap_mode, None);
 
         for (wire, expected) in [
             (
@@ -7643,7 +7856,7 @@ comms = true
                 None,
             )
             .expect("valid bootstrap mode");
-            assert_eq!(options.identity_bootstrap_mode, Some(expected));
+            assert_eq!(options.mob.identity_bootstrap_mode, Some(expected));
         }
 
         for invalid in [
@@ -9896,6 +10109,7 @@ fn parse_gateway_runtime_options(
         "console_require_app_auth",
         "console_read_only",
         "console_fetch_timeout_ms",
+        "console_list_nested_mobs",
         "demo_llm",
         "member_comms_address",
         "contacts_toml",
@@ -9953,10 +10167,10 @@ fn parse_gateway_runtime_options(
 
     let mut parsed = GatewayRuntimeOptions::default();
     if let Some(value) = runtime_options.get("identity_bootstrap_mode") {
-        parsed.identity_bootstrap_mode = Some(parse_gateway_identity_bootstrap_mode(value)?);
+        parsed.mob.identity_bootstrap_mode = Some(parse_gateway_identity_bootstrap_mode(value)?);
     }
     if let Some(value) = runtime_options.get("member_restore") {
-        parsed.member_restore = parse_gateway_member_restore(value)?;
+        parsed.mob.member_restore = parse_gateway_member_restore(value)?;
     }
     if let Some(value) = runtime_options.get("session_identity_config_root") {
         let root = value.as_str().ok_or_else(|| {
@@ -10155,6 +10369,12 @@ fn parse_gateway_runtime_options(
             Some(value.as_bool().ok_or_else(|| {
                 "runtime_options.console_read_only must be a boolean".to_string()
             })?);
+    }
+    if let Some(value) = runtime_options.get("console_list_nested_mobs") {
+        parsed.console_nested_mobs =
+            crate::console_aggregator::NestedMobListing::from_listed(value.as_bool().ok_or_else(
+                || "runtime_options.console_list_nested_mobs must be a boolean".to_string(),
+            )?);
     }
     if let Some(value) = runtime_options.get("console_fetch_timeout_ms") {
         if !value.is_null() {
@@ -10366,18 +10586,18 @@ fn parse_gateway_runtime_options(
         parsed.runtime_store_ephemeral = parse_gateway_runtime_store_config(runtime_store)?;
     }
     if let Some(mob_storage) = runtime_options.get("mob_storage") {
-        parsed.mob_storage_ephemeral = parse_gateway_mob_storage_config(mob_storage)?;
+        parsed.mob.mob_storage_ephemeral = parse_gateway_mob_storage_config(mob_storage)?;
     }
     if let Some(composition) = runtime_options.get("mob_composition") {
         parsed.composition_authority = parse_gateway_composition_authority(composition)?;
-        parsed.candidate_definition =
+        parsed.mob.candidate_definition =
             parse_gateway_candidate_definition(composition, parsed.composition_authority)?;
     }
     if let Some(policy) = runtime_options.get("fork_instruction_policy") {
-        parsed.fork_instruction_policy = parse_gateway_fork_instruction_policy(policy)?;
+        parsed.mob.fork_instruction_policy = parse_gateway_fork_instruction_policy(policy)?;
     }
     if let Some(declare) = runtime_options.get("declare_spec_update") {
-        parsed.declare_spec_update = Some(parse_gateway_declare_spec_update(declare)?);
+        parsed.mob.declare_spec_update = Some(parse_gateway_declare_spec_update(declare)?);
     }
     if let Some(compaction) = runtime_options.get("compaction") {
         parsed.compaction = Some(
@@ -10433,7 +10653,7 @@ fn parse_gateway_runtime_options(
     if let Some(decisions) = parsed.decisions.as_mut() {
         decisions.console.ui = parsed.console_ui.clone();
     }
-    if parsed.declare_spec_update.is_some()
+    if parsed.mob.declare_spec_update.is_some()
         && !parsed.composition_authority.speaks_for_composition()
     {
         return Err(
@@ -10442,7 +10662,7 @@ fn parse_gateway_runtime_options(
                 .to_string(),
         );
     }
-    if parsed.declare_spec_update.is_some() {
+    if parsed.mob.declare_spec_update.is_some() {
         if persistent_state.is_none() {
             return Err(
                 "runtime_options.declare_spec_update requires persistent_state so the canonical \
@@ -10450,7 +10670,7 @@ fn parse_gateway_runtime_options(
                     .to_string(),
             );
         }
-        if parsed.mob_storage_ephemeral {
+        if parsed.mob.mob_storage_ephemeral {
             return Err(
                 "runtime_options.declare_spec_update requires persistent mob storage; in-memory \
                  mob storage pins no definition to update"
@@ -10499,7 +10719,7 @@ fn refuse_in_memory_stores_under_persistent_state(
                 .to_string(),
         );
     }
-    if options.mob_storage_ephemeral && has_roster_provider {
+    if options.mob.mob_storage_ephemeral && has_roster_provider {
         return Err(
             "runtime_options.mob_storage declares in-memory mob storage while a roster \
              provider is registered and persistent_state is set: the roster's identity \
@@ -10598,8 +10818,15 @@ fn parse_gateway_routing_config_path(path: &str) -> Result<Vec<RuntimeRoute>, St
         .get("routes")
         .cloned()
         .unwrap_or_else(|| value.clone());
-    serde_json::from_value(routes_value)
-        .map_err(|err| format!("runtime_options.routing_config_path routes are invalid: {err}"))
+    let mut routes: Vec<RuntimeRoute> = serde_json::from_value(routes_value)
+        .map_err(|err| format!("runtime_options.routing_config_path routes are invalid: {err}"))?;
+    // The file names no mob: its routes are the default mob's, whatever
+    // `mob_id` an entry carries, as they were before a route could name
+    // a mob.
+    for route in &mut routes {
+        route.mob_id = None;
+    }
+    Ok(routes)
 }
 
 fn parse_gateway_gating_config_path(path: &str) -> Result<GatewayGatingConfig, String> {
@@ -11043,6 +11270,7 @@ fn parse_gateway_agent_memory_config(
             store: GatewayAgentMemoryStoreKind::default(),
             distiller: crate::memory::distiller::DistillerConfig::default(),
             steward: crate::memory::steward::StewardConfig::default(),
+            own_memory_only_profiles: Vec::new(),
         }));
     }
 
@@ -11068,6 +11296,7 @@ fn parse_gateway_agent_memory_config(
         "steward",
         "operator_scope",
         "hygienist",
+        "own_memory_only_profiles",
     ];
     let unsupported = object
         .keys()
@@ -11263,6 +11492,30 @@ fn parse_gateway_agent_memory_config(
             }
         },
     };
+    // The profiles whose agents are listed their own memory only: a list
+    // of distinct names, kept as the host wrote them. Whether each is a
+    // profile of the launch mob is checked where the mob's definition is
+    // in hand, at the start.
+    let own_memory_only_profiles = match object.get("own_memory_only_profiles") {
+        None => Vec::new(),
+        Some(value) => {
+            let malformed = || {
+                format!(
+                    "runtime_options.agent_memory.own_memory_only_profiles must be a list of \
+                     distinct profile names (got {value})"
+                )
+            };
+            let mut names: Vec<String> = Vec::new();
+            for name in value.as_array().ok_or_else(malformed)? {
+                let name = name.as_str().ok_or_else(malformed)?;
+                if name.trim().is_empty() || names.iter().any(|listed| listed == name) {
+                    return Err(malformed());
+                }
+                names.push(name.to_string());
+            }
+            names
+        }
+    };
     // §8.3 selector switch: RETIRED. The LLM Selector stage shipped behind
     // this knob and was never activated (default off, in config and in the
     // META_AGENT_MEMORY_SELECTOR env fallback alike), so it is gone and
@@ -11410,6 +11663,7 @@ fn parse_gateway_agent_memory_config(
         store,
         distiller,
         steward,
+        own_memory_only_profiles,
     }))
 }
 
@@ -12583,7 +12837,41 @@ impl InitProgress {
 /// that exists by then is shut down here and nowhere else, so this is also
 /// its executor-exit boundary: its member MCP closes are waited for until
 /// their native outcomes report, and the report carries that settlement.
-async fn abort_init_for_shutdown(
+///
+/// Its future is placed on the heap. The gateway's run function stops an
+/// init at several points, and an unoptimized build keeps room for the
+/// future of every such call in that function's own poll frame, whether or
+/// not the call is ever made: the whole of this future, which holds the
+/// runtime's shutdown, at each of them. Boxed, each call keeps a pointer
+/// there, and a gateway's start needs that much less stack. The call is
+/// awaited where it is made, as before, and is dropped as before.
+fn abort_init_for_shutdown<'a>(
+    runtime: Option<&'a crate::UnifiedRuntime>,
+    rpc_rx: &'a mut mpsc::Receiver<String>,
+    progress: InitProgress,
+    stdio: &'a Option<GatewayStdioObservation>,
+) -> InitAbortedForShutdown<'a> {
+    Box::pin(abort_init_for_shutdown_inner(
+        runtime, rpc_rx, progress, stdio,
+    ))
+}
+
+/// The future of [`abort_init_for_shutdown`]: the shutdown request it found,
+/// if any, and the runtime's shutdown report, if a runtime existed.
+type InitAbortedForShutdown<'a> = Pin<
+    Box<
+        dyn std::future::Future<
+                Output = (
+                    Option<GatewayShutdownRequest>,
+                    Option<UnifiedRuntimeShutdownReport>,
+                ),
+            > + Send
+            + 'a,
+    >,
+>;
+
+/// The body of [`abort_init_for_shutdown`].
+async fn abort_init_for_shutdown_inner(
     runtime: Option<&crate::UnifiedRuntime>,
     rpc_rx: &mut mpsc::Receiver<String>,
     progress: InitProgress,
@@ -14945,28 +15233,9 @@ async fn handle_callback_job_rpc(
     bridge: &StdioCallbackBridge,
     speaks_for_composition: bool,
 ) -> Option<String> {
-    const METHODS: &[&str] = &[
-        "jobs/get",
-        "jobs/list",
-        "jobs/cancel",
-        "jobs/progress",
-        "jobs/result",
-        "jobs/artifacts",
-        "jobs/retry",
-        "jobs/health",
-        "jobs/subscribe",
-        "jobs/unsubscribe",
-        "monitors/start",
-        "meta/jobs/heartbeat",
-        "meta/jobs/progress",
-        "meta/jobs/checkpoint",
-        "meta/jobs/complete",
-        "meta/jobs/fail",
-        "meta/jobs/cancel_ack",
-    ];
     let request: Value = serde_json::from_str(request_line).ok()?;
     let method = request.get("method").and_then(Value::as_str)?;
-    if !METHODS.contains(&method) {
+    if !crate::rpc::mob_addressing::JOB_DOOR_METHODS.contains(&method) {
         return None;
     }
     let id = request.get("id").cloned().unwrap_or(Value::Null);
@@ -16277,7 +16546,9 @@ fn mount_host_app_routes(
 
 /// The console app this gateway serves: the runtime's reference router and
 /// the host's routes, if any, under [`HOST_APP_ROUTES_PREFIX`], all under one
-/// `request_bound`.
+/// `request_bound`. The stock console lists the mobs nested under the
+/// gateway's own mob or not as `nested_mobs`, the launch's
+/// `runtime_options.console_list_nested_mobs`, says.
 fn gateway_console_app(
     runtime: &UnifiedRuntime,
     decisions: RuntimeDecisionState,
@@ -16285,10 +16556,11 @@ fn gateway_console_app(
     viewer: crate::http_console::ConsoleViewerResolver,
     send_precheck: crate::http_console::ConsoleSendPrecheck,
     request_bound: &crate::unified_runtime::http::ReferenceAppRequestBound,
+    nested_mobs: crate::console_aggregator::NestedMobListing,
 ) -> Result<axum::Router, GatewayHostError> {
     let posture = crate::gateway_composition::ConsoleAuthPosture::of(&decisions);
     mount_host_app_routes(
-        runtime.reference_app_router_under(decisions, request_bound),
+        runtime.reference_app_router_under(decisions, request_bound, nested_mobs),
         host,
         viewer,
         send_precheck,
@@ -16868,6 +17140,40 @@ async fn select_prepared_application(
     }
 }
 
+/// The customizer that builds the stdio launch's launch mob's agents with
+/// the launch mob's agent memory: `base` wrapped with the memory `provider`
+/// keeps under `config`, listing the shared memory of `launch_mob`.
+///
+/// `own_memory_only_profiles` are the profiles the launch listed their own
+/// memory only, as its start checked them against the launch mob's
+/// definition. Who of the launch mob they cover is read from the launch
+/// mob's own records, through `identities`, the launch mob's identity
+/// runtime.
+pub(crate) fn launch_mob_memory_customizer(
+    base: Option<Arc<dyn crate::identity_first::contracts::AgentCustomizer>>,
+    provider: Arc<dyn crate::identity_first::agent_memory::AgentMemoryProvider>,
+    config: crate::identity_first::agent_memory::AgentMemoryConfig,
+    own_memory_only_profiles: std::collections::BTreeSet<meerkat_mob::ProfileName>,
+    launch_mob: &meerkat_mob::MobHandle,
+    identities: &Arc<crate::identity_first::IdentityRuntime>,
+) -> crate::identity_first::AgentMemoryCustomizer {
+    // The launch mob's agents are built with the launch mob's memory by
+    // the one constructor of that customizer; the mobs hosted beside it get
+    // theirs from the same one, each over its own store and its own
+    // records.
+    crate::gateway_wiring::mob_memory_customizer(
+        base,
+        provider,
+        config,
+        std::collections::BTreeMap::new(),
+        Some(launch_mob),
+        crate::memory::own_memory_only::OwnMemoryOnly::listing(
+            own_memory_only_profiles,
+            crate::memory::own_memory_only::RecordedLineage::of(identities),
+        ),
+    )
+}
+
 /// The identity runtime's retirement hook for a host-composed gateway: each
 /// retired incarnation goes to the host's
 /// [`GatewayHostComposition::identity_member_retired`].
@@ -16888,7 +17194,7 @@ fn host_retired_member_observer(
 /// composes it ([`GatewayHostComposition::compose_agent_customizer`]). Without
 /// a host it is the composed one unchanged. A host answer that adds or drops a
 /// customizer is refused, as a host error is.
-fn host_composed_agent_customizer(
+pub(crate) fn host_composed_agent_customizer(
     host: Option<&Arc<dyn GatewayHostComposition>>,
     composed: Option<Arc<dyn crate::identity_first::AgentCustomizer>>,
 ) -> Result<Option<Arc<dyn crate::identity_first::AgentCustomizer>>, String> {
@@ -16909,6 +17215,29 @@ fn host_composed_agent_customizer(
                 .to_string(),
         ),
     }
+}
+
+/// How the gateway makes the customizer of each mob it hosts beside its
+/// launch mob: the launch's callback bridge made for that mob's identity
+/// runtime
+/// ([`for_runtime_services`](crate::identity_first::gateway_bridges::GatewayAgentCustomizer::for_runtime_services)),
+/// composed by the host as the launch's own was
+/// ([`host_composed_agent_customizer`]), so a host's wrapper stands around
+/// every mob's bridge. The host's hook is therefore asked once more each
+/// time such a mob gets its identity plane, which is when the mob is
+/// loaded: never for a mob that is not loaded. A host answer that drops the
+/// customizer, or a host error, composes nothing for that mob.
+pub(crate) fn customizer_of_each_hosted_mob(
+    launch_bridge: Arc<crate::identity_first::gateway_bridges::GatewayAgentCustomizer>,
+    host: Option<Arc<dyn GatewayHostComposition>>,
+) -> crate::gateway_wiring::CustomizerOfAMob {
+    Arc::new(
+        move |runtime_services: &crate::identity_first::AgentRuntimeServices| {
+            let of_the_mob: Arc<dyn crate::identity_first::AgentCustomizer> =
+                Arc::new(launch_bridge.for_runtime_services(runtime_services.clone()));
+            host_composed_agent_customizer(host.as_ref(), Some(of_the_mob))
+        },
+    )
 }
 
 /// The gateway's roster provider: the SDK callback, with the prepared
@@ -17343,6 +17672,25 @@ fn gateway_bootstrap_init_error(
         ),
         None => fail_init(request_id, -32603, message),
     }
+}
+
+/// The launch mob's store as storage resolution leaves it. Storage
+/// resolution opens the store of a launch with a state directory itself, as
+/// every release did, and what follows differs by launch: a launch that
+/// declares a spec update is built over that opened storage; every other
+/// launch declares the store's place to its mob set, which opens the store
+/// when the bootstrap prepares the mob, and keeps its own open only for what
+/// init reads of the store before the bootstrap. A store in memory is
+/// declared and has nothing to open.
+enum LaunchMobStore {
+    Declared(
+        crate::mob_composition_manifest::DeclaredMobStore,
+        Option<MobStorage>,
+    ),
+    Opened(
+        MobStorage,
+        crate::mob_composition_manifest::MobStorageProvenance,
+    ),
 }
 
 /// [`fail_init`] with the error's `data`: the refusal as structured data for
@@ -18608,7 +18956,7 @@ external_addressable = true
         // durable one composed below, unless mob storage is declared
         // in-memory.
         let mob_store =
-            (!gateway_options.mob_storage_ephemeral).then(|| storage_layout.event_log_db());
+            (!gateway_options.mob.mob_storage_ephemeral).then(|| storage_layout.event_log_db());
         crate::native_startup::refuse_unready_state_dir(state_path, mob_store.as_deref())
             .await
             .map_err(|error| fail_init(&request_id, STORAGE_RESOLUTION_CODE, error.to_string()))?;
@@ -18644,7 +18992,7 @@ external_addressable = true
         })
         .transpose()?;
     validate_gateway_identity_bootstrap_intent(
-        gateway_options.identity_bootstrap_mode.as_ref(),
+        gateway_options.mob.identity_bootstrap_mode.as_ref(),
         has_roster_provider,
     )
     .map_err(|error| fail_init(&request_id, -32602, error))?;
@@ -18925,12 +19273,22 @@ external_addressable = true
         // was never given the same treatment. In-memory here means every
         // adopted identity declaration is gone on restart while sessions
         // survive.
-        let (mob_storage, mob_storage_provenance) = if gateway_options.mob_storage_ephemeral {
+        //
+        // The launch opens its mob's store here, as every release did: a
+        // store that cannot be opened refuses init here, with the storage
+        // failure that names it. A launch that declares a spec update is
+        // built over that opened storage, through which the update is
+        // committed before the mob is built. Every other launch declares
+        // where the store is and keeps its own open only for what init
+        // reads of the store before the bootstrap: the mob set it declares
+        // its mob to opens the store when the bootstrap prepares the mob,
+        // creates the mob there or loads it.
+        let launch_mob_store = if gateway_options.mob.mob_storage_ephemeral {
             // Declared, not silent. This launch keeps mob state in memory even
             // though it has a persistent state dir, which is the only way to
             // keep editing mob_config across restarts: a persistent mob
             // storage pins the definition.
-            if gateway_options.declare_spec_update.is_some() {
+            if gateway_options.mob.declare_spec_update.is_some() {
                 // Nothing is pinned on in-memory mob storage, so there is no
                 // spec to move. Silently ignoring the declaration would let an
                 // activation log "spec updated" against a store that has none.
@@ -18943,9 +19301,9 @@ external_addressable = true
                         .to_string(),
                 ));
             }
-            (
-                MobStorage::in_memory(),
-                crate::mob_composition_manifest::MobStorageProvenance::declared_ephemeral(),
+            LaunchMobStore::Declared(
+                crate::mob_composition_manifest::DeclaredMobStore::in_memory(),
+                None,
             )
         } else {
             let pair = match crate::mob_composition_manifest::persistent_mob_storage(
@@ -18969,7 +19327,7 @@ external_addressable = true
             // THIS activation declares it. Runs before the mob is built and
             // advances Meerkat's canonical definition epoch through the same
             // MobStorage instance that will resume below.
-            if let Some(expected_revision) = gateway_options.declare_spec_update {
+            if let Some(expected_revision) = gateway_options.mob.declare_spec_update {
                 match crate::spec_update_ceremony::declare_spec_update(
                     &pair.0,
                     definition.id.as_str(),
@@ -19001,7 +19359,16 @@ external_addressable = true
                     }
                 }
             }
-            pair
+            if gateway_options.mob.declare_spec_update.is_some() {
+                LaunchMobStore::Opened(pair.0, pair.1)
+            } else {
+                LaunchMobStore::Declared(
+                    crate::mob_composition_manifest::declared_mob_store(
+                        storage_layout.event_log_db(),
+                    ),
+                    Some(pair.0),
+                )
+            }
         };
         let binary_blob_store: Arc<dyn BinaryBlobStore> =
             match ObjectStoreBlobStore::local(storage_layout.blob_root()) {
@@ -19349,19 +19716,31 @@ external_addressable = true
             Arc::clone(&concrete_service) as _;
         gateway_transcript_edit_service = Some(Arc::clone(&concrete_service) as _);
         let session_service: Arc<dyn meerkat_mob::MobSessionService> = concrete_service;
-        let mut spec = MobBootstrapSpec::new(definition, mob_storage, session_service)
+        let spec = match launch_mob_store {
+            LaunchMobStore::Declared(store, opened) => {
+                let spec = MobBootstrapSpec::declared(definition, store, session_service);
+                match opened {
+                    Some(opened) => spec.with_declared_store_opened(opened),
+                    None => spec,
+                }
+            }
+            LaunchMobStore::Opened(storage, provenance) => {
+                MobBootstrapSpec::new(definition, storage, session_service)
+                    .with_mob_storage_provenance(provenance)
+            }
+        };
+        let mut spec = spec
             .with_member_model_config(Arc::new(member_agent_config))
             .with_member_mcp_custody(Arc::clone(&member_mcp_custody))
             .with_host_default_agent_llm_client_decorator(host_default_decorator)
-            .with_mob_storage_provenance(mob_storage_provenance)
             // Agent-created child mobs default to durable under this layout.
             .with_meta_storage_layout(storage_layout.clone())
             // A parsed option that never reaches the spec is the same defect as
             // an unreachable API, one layer down.
             .with_composition_authority(gateway_options.composition_authority)
-            .with_candidate_definition(gateway_options.candidate_definition)
-            .with_fork_instruction_policy(gateway_options.fork_instruction_policy)
-            .with_member_restore(gateway_options.member_restore)
+            .with_candidate_definition(gateway_options.mob.candidate_definition)
+            .with_fork_instruction_policy(gateway_options.mob.fork_instruction_policy)
+            .with_member_restore(gateway_options.mob.member_restore)
             .with_optional_tool_consequence_policy_registry(
                 tool_consequence_policy_registry.clone(),
             )
@@ -19406,6 +19785,15 @@ external_addressable = true
         // without it.
         if schedule_host_inputs.is_some() {
             spec = spec.with_mob_schedules_declared();
+        }
+        // The launch keeps agent memory, and each mob it hosts beside its
+        // launch mob keeps its own below the launch's memory root: it says
+        // so before its runtime is built, so that a create under a mob's id
+        // waits for the release of that mob's memory to be bound to the
+        // runtime (below, as soon as the store is open) and never goes on
+        // without it.
+        if gateway_options.agent_memory.is_some() {
+            spec = spec.with_hosted_mob_memory_declared();
         }
         spec.committed_boundary_recoverer = Some(committed_boundary_recoverer);
         if let Some(root) = gateway_options.session_identity_config_root.as_ref() {
@@ -19464,7 +19852,7 @@ external_addressable = true
         // storage on this persistent launch was invisible to healthz and the
         // storage doctor while sessions correctly reported persistent. It now
         // reports whichever this launch actually composed.
-        slots.push(if gateway_options.mob_storage_ephemeral {
+        slots.push(if gateway_options.mob.mob_storage_ephemeral {
             crate::storage_health::StorageSlotSummary::declared_ephemeral(
                 "mob",
                 "MobStorage(in-memory)",
@@ -19723,41 +20111,52 @@ external_addressable = true
             Arc::clone(&concrete) as _;
         let session_service: Arc<dyn meerkat_mob::MobSessionService> = concrete;
 
-        let mut spec = MobBootstrapSpec::new(definition, MobStorage::in_memory(), session_service)
-            .with_member_model_config(Arc::new(member_agent_config))
-            .with_member_mcp_custody(Arc::clone(&member_mcp_custody))
-            .with_host_default_agent_llm_client_decorator(process_local_host_default_decorator)
-            .with_optional_tool_consequence_policy_registry(
-                tool_consequence_policy_registry.clone(),
+        // A launch without a state directory keeps its mob in memory, and
+        // says so to the mob set it declares its mob to, which creates the
+        // mob there.
+        let mut spec = MobBootstrapSpec::declared(
+            definition,
+            crate::mob_composition_manifest::DeclaredMobStore::in_memory(),
+            session_service,
+        )
+        .with_member_model_config(Arc::new(member_agent_config))
+        .with_member_mcp_custody(Arc::clone(&member_mcp_custody))
+        .with_host_default_agent_llm_client_decorator(process_local_host_default_decorator)
+        .with_optional_tool_consequence_policy_registry(tool_consequence_policy_registry.clone())
+        .with_optional_child_application_tool_policy(child_application_tool_policy.clone())
+        .with_fork_instruction_policy(gateway_options.mob.fork_instruction_policy)
+        .with_member_restore(gateway_options.mob.member_restore)
+        // The SAME store handed to MeerkatMachine::persistent above.
+        .with_durable_runtime_store(&runtime_store)
+        .with_session_runtime_adapter(adapter.clone())
+        .map_err(|error| {
+            fail_init(
+                &request_id,
+                STORAGE_RESOLUTION_CODE,
+                format!("failed to acquire the gateway session runtime owner: {error}"),
             )
-            .with_optional_child_application_tool_policy(child_application_tool_policy.clone())
-            .with_fork_instruction_policy(gateway_options.fork_instruction_policy)
-            .with_member_restore(gateway_options.member_restore)
-            // The SAME store handed to MeerkatMachine::persistent above.
-            .with_durable_runtime_store(&runtime_store)
-            .with_session_runtime_adapter(adapter.clone())
-            .map_err(|error| {
-                fail_init(
-                    &request_id,
-                    STORAGE_RESOLUTION_CODE,
-                    format!("failed to acquire the gateway session runtime owner: {error}"),
-                )
-            })?
-            .with_workgraph_service(workgraph_service.clone())
-            .with_runtime_delivery(runtime_delivery.composition.clone())
-            .with_agent_mob_tools(agent_mob_tools_slot)
-            .map_err(|error| {
-                fail_init(
-                    &request_id,
-                    STORAGE_RESOLUTION_CODE,
-                    format!("failed to install gateway agent mob tools: {error}"),
-                )
-            })?
-            .with_options(MobBootstrapOptions {
-                allow_ephemeral_sessions: true,
-                notify_orchestrator_on_resume: true,
-                default_llm_client: default_llm_client.clone(),
-            });
+        })?
+        .with_workgraph_service(workgraph_service.clone())
+        .with_runtime_delivery(runtime_delivery.composition.clone())
+        .with_agent_mob_tools(agent_mob_tools_slot)
+        .map_err(|error| {
+            fail_init(
+                &request_id,
+                STORAGE_RESOLUTION_CODE,
+                format!("failed to install gateway agent mob tools: {error}"),
+            )
+        })?
+        .with_options(MobBootstrapOptions {
+            allow_ephemeral_sessions: true,
+            notify_orchestrator_on_resume: true,
+            default_llm_client: default_llm_client.clone(),
+        });
+        // A launch without a state directory that keeps agent memory says
+        // what the launch over a state directory says: a create under a
+        // mob's id waits for the release of that mob's memory to be bound.
+        if gateway_options.agent_memory.is_some() {
+            spec = spec.with_hosted_mob_memory_declared();
+        }
         if let Some(root) = gateway_options.session_identity_config_root.as_ref() {
             spec = spec.with_session_identity_config_root(root.clone());
         }
@@ -19986,8 +20385,12 @@ external_addressable = true
     // checked again against the definition this boot runs (which a roster
     // launch reads here anyway), before anything is built.
     let check_booted_definition = gateway_options.member_auth_binding.is_some()
-        && gateway_options.candidate_definition
+        && gateway_options.mob.candidate_definition
             == crate::mob_composition_manifest::CandidateDefinition::Stored;
+    // A launch over a declared store reads here from the storage it opened
+    // at storage resolution, as a launch over an opened storage does:
+    // nothing of its mob set runs before the bootstrap, and the bootstrap
+    // reads the store again itself.
     let launch_definition = if has_roster_provider || check_booted_definition {
         Some(mob_spec.read_launch_definition().await.map_err(|error| {
             gateway_bootstrap_init_error(&request_id, &UnifiedRuntimeBootstrapError::Mob(error))
@@ -20369,21 +20772,35 @@ external_addressable = true
         let roster = gateway_roster_provider(bridge.clone(), prepared.as_ref());
         let mob_definition = runtime.mob_handle().definition().clone();
         irt.set_reset_roster_provider_context(Some(roster.clone()), Some(mob_definition.clone()));
+        // Each bridge is given the services of the identity runtime it
+        // serves, so `compute_edges` and `after_create` name that runtime's
+        // mob as `customize_build` does from each build's context.
         let topology: Option<Arc<dyn crate::identity_first::contracts::TopologyProvider>> =
             if has_topology_provider {
-                Some(Arc::new(GatewayTopologyProvider::new(bridge.clone())))
-            } else {
-                None
-            };
-        let base_customizer: Option<Arc<dyn crate::identity_first::contracts::AgentCustomizer>> =
-            if has_agent_customizer {
                 Some(Arc::new(
-                    GatewayAgentCustomizer::new(bridge.clone())
-                        .with_installed_artifacts(gateway_options.installed_artifacts.clone()),
+                    GatewayTopologyProvider::new(bridge.clone())
+                        .with_runtime_services(irt.runtime_services()),
                 ))
             } else {
                 None
             };
+        // The launch mob's customizer bridge. The mobs hosted beside the
+        // launch mob each get one made from it, with their own services
+        // (`customizer_of_each_hosted_mob`).
+        let launch_customizer_bridge: Option<Arc<GatewayAgentCustomizer>> = if has_agent_customizer
+        {
+            Some(Arc::new(
+                GatewayAgentCustomizer::new(bridge.clone())
+                    .with_runtime_services(irt.runtime_services())
+                    .with_installed_artifacts(gateway_options.installed_artifacts.clone()),
+            ))
+        } else {
+            None
+        };
+        let base_customizer: Option<Arc<dyn crate::identity_first::contracts::AgentCustomizer>> =
+            launch_customizer_bridge.clone().map(|launch_bridge| {
+                launch_bridge as Arc<dyn crate::identity_first::contracts::AgentCustomizer>
+            });
         let mut agent_memory_taint: Option<crate::SessionTaintTracker> = None;
         // Late-bound target for the always-on compaction reset sink: the
         // sink joins the observer before the injector exists, so it calls
@@ -20393,6 +20810,10 @@ external_addressable = true
         > = Arc::new(std::sync::OnceLock::new());
         let mut agent_memory_distiller: Option<Arc<crate::memory::distiller::DistillerEngine>> =
             None;
+        // The launch's own bundled store, kept for the hand-over: each mob
+        // the launch hosts beside its launch mob keeps its agents' memory
+        // in a store of its own below this store's root.
+        let mut agent_memory_bundled_store: Option<crate::SqliteAgentMemoryStore> = None;
         // The agent memory store is opened and its first start's step is run
         // (`crate::memory::set_aside`) before anything takes the store: the
         // engines, the panel, the side chat recorder, the injector and the
@@ -20433,6 +20854,15 @@ external_addressable = true
                                 format!("failed to open agent memory store: {e}"),
                             )
                         })?;
+                    // The release of a hosted mob's memory is this store's:
+                    // the one directory of that mob below the store's root.
+                    // It is bound as soon as the store is open, before
+                    // anything is composed over it, and what an earlier
+                    // start's releases left unfinished is finished with it.
+                    runtime
+                        .mob_runtime()
+                        .mob_memory_release()
+                        .bind(Arc::new(store.clone()));
                     let start = Box::pin(crate::memory::set_aside::memory_start_for(
                         &store,
                         &agent_memory.config.realm,
@@ -20441,10 +20871,13 @@ external_addressable = true
                     ))
                     .await;
                     match start {
-                        crate::memory::set_aside::MemoryStart::Attach => Some((
-                            agent_memory,
-                            Arc::new(store) as Arc<dyn crate::AgentMemoryProvider>,
-                        )),
+                        crate::memory::set_aside::MemoryStart::Attach => {
+                            agent_memory_bundled_store = Some(store.clone());
+                            Some((
+                                agent_memory,
+                                Arc::new(store) as Arc<dyn crate::AgentMemoryProvider>,
+                            ))
+                        }
                         crate::memory::set_aside::MemoryStart::Refuse { message } => {
                             return Err(fail_init(&request_id, STORAGE_RESOLUTION_CODE, message));
                         }
@@ -20484,9 +20917,43 @@ external_addressable = true
                         distiller: agent_memory.distiller.clone(),
                         steward: agent_memory.steward.clone(),
                     };
+                    // The engines read the sessions of the launch's memory
+                    // alone: the gateway's one session store holds the
+                    // sessions of every mob it builds. The launch's record
+                    // of its mobs decides which those are, so it must name
+                    // the launch mob its own.
+                    let memory_transcripts = match memory_transcript_store.clone() {
+                        Some(store) => {
+                            let owners = runtime.mob_runtime().private_owners().clone();
+                            if let Err(e) = crate::memory_wiring::launch_mob_is_bound(
+                                &owners,
+                                &mob_definition.id,
+                            ) {
+                                return Err(fail_init(&request_id, -32602, e));
+                            }
+                            // Which session is one of the launch's own is
+                            // what a mob's journal bound. The storages this
+                            // gateway composes keep that journal; a launch
+                            // whose storage did not would be refused here.
+                            let launch_mob = runtime.mob_runtime().handle();
+                            if let Err(refusal) =
+                                crate::memory_wiring::launch_mob_keeps_a_journal(&launch_mob).await
+                            {
+                                return Err(fail_init(
+                                    &request_id,
+                                    -32602,
+                                    format!("agent memory distiller/steward: {refusal}"),
+                                ));
+                            }
+                            Some(crate::memory_wiring::launch_transcript_source(
+                                store, owners, launch_mob,
+                            ))
+                        }
+                        None => None,
+                    };
                     // The engines resolve provider credentials in the
                     // launch's store, as its members do.
-                    let stack = match attach_memory_engines_with_provider_auth(
+                    let stack = match crate::memory_wiring::assemble_memory_stack(
                         provider.clone(),
                         &agent_memory.config,
                         &engines,
@@ -20509,6 +20976,12 @@ external_addressable = true
                             })),
                         },
                         provider_auth_persistence.clone(),
+                        crate::memory_wiring::MemoryStackOver {
+                            taint: None,
+                            transcripts: memory_transcripts,
+                            #[cfg(test)]
+                            clients: None,
+                        },
                     ) {
                         Ok(stack) => stack,
                         Err(e) => return Err(fail_init(&request_id, -32602, e)),
@@ -20538,13 +21011,19 @@ external_addressable = true
                         // durable host-runnable occurrence (registered at
                         // the schedule-host spawn). Only gateways WITHOUT
                         // a schedule host keep the in-process loop. A
-                        // candidate launch dreams in neither way.
+                        // candidate launch dreams in neither way. Either
+                        // way one occurrence dreams for the launch mob and
+                        // then for each mob the launch hosts beside it that
+                        // is loaded.
                         if schedule_host_inputs.is_none()
                             && gateway_options
                                 .composition_authority
                                 .speaks_for_composition()
                         {
-                            std::mem::forget(engine.spawn_dream_loop());
+                            std::mem::forget(crate::memory_wiring::spawn_host_dream_loop(
+                                Arc::clone(&engine),
+                                Some(runtime.hosted_mob_dreams()),
+                            ));
                         }
                         agent_memory_steward = Some(engine);
                         tracing::info!(
@@ -20664,21 +21143,42 @@ external_addressable = true
                 mob: runtime.mob_handle().mob_id().to_string(),
             }) as Arc<dyn crate::memory::coordinator::MobScopeResolver>
         });
+        // The profiles the host listed as reading their own memory only are
+        // profiles of the launch mob: a name it lacks refuses the start,
+        // before any agent is built.
+        let own_memory_only_profiles = match gateway_options.agent_memory.as_ref() {
+            Some(agent_memory) => crate::memory::own_memory_only::own_memory_only_profiles_of(
+                &mob_definition,
+                &agent_memory.own_memory_only_profiles,
+            )
+            .map_err(|error| {
+                fail_init(
+                    &request_id,
+                    -32602,
+                    format!("runtime_options.agent_memory.{error}"),
+                )
+            })?,
+            None => std::collections::BTreeSet::new(),
+        };
         let customizer: Option<Arc<dyn crate::identity_first::contracts::AgentCustomizer>> =
             if let (Some(agent_memory), Some(provider)) = (
                 gateway_options.agent_memory.as_ref(),
                 agent_memory_provider.clone(),
             ) {
-                Some(Arc::new(
-                    crate::AgentMemoryCustomizer::wrap(
-                        base_customizer,
-                        provider,
-                        agent_memory.config.clone(),
-                    )
-                    .with_mob_resolver(agent_memory_mob_resolver.clone()),
-                ))
+                // The launch mob's agents are built with the launch mob's
+                // memory, and who of them is listed its own memory only is
+                // read from the launch mob's own records, through its
+                // identity runtime.
+                Some(Arc::new(launch_mob_memory_customizer(
+                    base_customizer.clone(),
+                    provider,
+                    agent_memory.config.clone(),
+                    own_memory_only_profiles.clone(),
+                    &runtime.mob_handle(),
+                    &irt,
+                )))
             } else {
-                base_customizer
+                base_customizer.clone()
             };
         // The host composes the final customizer here, once. The same `Arc`
         // is the identity runtime's, the identity context's and the RPC
@@ -20763,6 +21263,7 @@ external_addressable = true
             customizer.clone(),
             Some(runtime.mob_handle().definition().clone()),
             gateway_options
+                .mob
                 .identity_bootstrap_mode
                 .clone()
                 .unwrap_or_default(),
@@ -20781,18 +21282,26 @@ external_addressable = true
         // are served and every change is refused.
         if let Some(policy) = identity_creation.clone() {
             // An agent that asked for a change a person decided is told by
-            // a keyed send to its own name. The route reads the runtime
-            // when a notice is delivered and keeps nothing of it.
+            // a keyed send to its own name, in its own mob. The route reads
+            // the runtime when a notice is delivered and keeps nothing of
+            // it: the launch mob's identity runtime for a change of the
+            // launch mob, and for a change of another mob of the host the
+            // identity runtime of that mob while the host runs it (a
+            // notice for a mob that is not loaded is asked again later,
+            // and loads nothing).
             let notices_runtime = identity_notices_runtime.clone();
             let mut options = crate::identity_creation::IdentityFamilyOptions::new()
-                .with_decision_notices(Arc::new(crate::identity_creation::KeyedSendNotices::new(
-                    move || {
-                        notices_runtime
-                            .get()
-                            .and_then(std::sync::Weak::upgrade)
-                            .and_then(|runtime| runtime.identity_runtime())
-                    },
-                )));
+                .with_decision_notices(Arc::new(
+                    crate::identity_creation::KeyedSendNotices::per_mob(move |mob_id: &str| {
+                        let runtime = notices_runtime.get().and_then(std::sync::Weak::upgrade)?;
+                        runtime
+                            .identity_runtime()
+                            .filter(|identities| {
+                                identities.owner().handle().mob_id().as_str() == mob_id
+                            })
+                            .or_else(|| runtime.identity_runtime_of_host_mob(mob_id))
+                    }),
+                ));
             if let Some(host) = host {
                 options = options.with_host_hooks(Arc::new(HostIdentityHooks(Arc::clone(host))));
             }
@@ -20863,6 +21372,106 @@ external_addressable = true
             ));
         }
 
+        // The launch says how the identity planes of the mobs it hosts
+        // beside its launch mob are composed, with what it gave its launch
+        // mob. Its roster is its launch mob's own: the application's roster
+        // callback is asked for the launch mob alone, and another mob gets
+        // its identity plane with no agent of that roster. So with its
+        // topology provider: none is handed over, and the application's
+        // edges callback is asked for the launch mob alone.
+        //
+        // Agent memory is kept per mob. The launch hands over its bundled
+        // store and the customizer it wrapped its launch mob's memory
+        // around: each other mob is composed with a memory of its own, in
+        // a store of its own below the launch's memory root. A native host
+        // composes the launch's customizer itself, memory included, once:
+        // such a launch's memory is its launch mob's alone, and it hands
+        // nothing over.
+        //
+        // The launch's customizer bridge names the mob of the services it
+        // holds when it tells `after_create`, so each of those mobs gets a
+        // bridge of its own, made when the mob's identity plane is composed
+        // and composed by the host as the launch's was; a mob's own memory
+        // is put around that bridge.
+        let memory_of_the_launch_mob_alone = gateway_options.agent_memory.is_some()
+            && (host.is_some() || agent_memory_bundled_store.is_none());
+        let memory_per_mob = if memory_of_the_launch_mob_alone {
+            None
+        } else {
+            gateway_options
+                .agent_memory
+                .as_ref()
+                .zip(agent_memory_bundled_store.clone())
+                .map(|(agent_memory, store)| {
+                    // Where the launch runs memory engines, each mob it
+                    // hosts beside its launch mob gets a distiller and a
+                    // steward of its own, built with what the launch's are:
+                    // the same configuration, state directory, session
+                    // store and provider credential store.
+                    let engines = persistent_state
+                        .clone()
+                        .zip(gateway_session_store.clone())
+                        .filter(|_| agent_memory.distiller.enabled || agent_memory.steward.enabled)
+                        .map(|(state, sessions)| {
+                            crate::gateway_wiring::HostMobEngines::new(
+                                crate::memory_wiring::MemoryEnginesConfig {
+                                    distiller: agent_memory.distiller.clone(),
+                                    steward: agent_memory.steward.clone(),
+                                },
+                                state,
+                                sessions,
+                            )
+                            .with_provider_auth(provider_auth_persistence.clone())
+                        });
+                    crate::gateway_wiring::HostMobMemory::new(
+                        store,
+                        agent_memory.config.clone(),
+                        runtime.mob_handle().mob_id().clone(),
+                    )
+                    .with_engines(engines)
+                    .with_own_memory_only_profiles(own_memory_only_profiles.clone())
+                })
+        };
+        crate::gateway_wiring::HostMobIdentities::new(roster.clone(), persistent_state.is_some())
+            .with_roster_of_the_launch_mob_alone(runtime.mob_handle().mob_id().clone())
+            .with_customizer(if memory_per_mob.is_some() {
+                base_customizer.clone()
+            } else {
+                customizer.clone()
+            })
+            .with_customizer_of_each_mob(
+                launch_customizer_bridge.map(|launch_bridge| {
+                    customizer_of_each_hosted_mob(launch_bridge, host.cloned())
+                }),
+            )
+            .with_error_hook(Some(gateway_error_hook.clone()))
+            .with_bootstrap_mode(
+                gateway_options
+                    .mob
+                    .identity_bootstrap_mode
+                    .clone()
+                    .unwrap_or_default(),
+            )
+            .with_candidate_launch(!runtime.speaks_for_composition())
+            .with_session_repair_scope(
+                runtime
+                    .resolved_storage()
+                    .as_ref()
+                    .and_then(crate::identity_first::SessionRepairScope::from_resolved_storage),
+            )
+            .with_transcript_edit_service(gateway_transcript_edit_service.clone())
+            .with_agent_memory_of_the_launch_mob(memory_of_the_launch_mob_alone)
+            .with_agent_memory_per_mob(memory_per_mob)
+            .hand_over_to(&*runtime);
+
+        // The default mob's entry offers what a request to its identity
+        // plane needs beside the identity context: the same three values the
+        // handler's context below carries.
+        runtime.set_identity_request_services(crate::unified_runtime::IdentityRequestServices {
+            agent_memory_provider: agent_memory_provider.clone(),
+            transcript_edit_service: gateway_transcript_edit_service.clone(),
+            compaction_floors: Some(Arc::clone(&compaction_floors)),
+        });
         Some(crate::rpc::IdentityFirstContext {
             // Handed to the RPC handler: the owning public view.
             runtime: crate::identity_first::PublicIdentityRuntime::new(
@@ -20955,8 +21564,13 @@ external_addressable = true
                 .map_err(|error| fail_init(&request_id, -32603, error.to_string()))?,
             None => Vec::new(),
         };
-        let runnable_host = match crate::schedule_wiring::gateway_runnable_host_with(
+        // The steward's runnable dreams for the launch mob and then for
+        // each mob the launch hosts beside it that is loaded at the fire.
+        let runnable_host = match crate::schedule_wiring::gateway_runnable_host_over(
             agent_memory_steward.clone(),
+            agent_memory_steward
+                .as_ref()
+                .map(|_| runtime.hosted_mob_dreams()),
             callback_runnables,
             host_runnables,
         ) {
@@ -21201,6 +21815,7 @@ external_addressable = true
         viewer_resolver,
         send_precheck,
         &request_bound,
+        gateway_options.console_nested_mobs,
     )
     .map_err(|error| {
         fail_init(
@@ -24584,6 +25199,7 @@ mod host_app_routes_tests {
             runtime.console_viewer_resolver(&decisions),
             runtime.console_send_precheck(&decisions),
             &ReferenceAppRequestBound::new(LIMIT),
+            crate::console_aggregator::NestedMobListing::default(),
         )
         .expect("console app");
         let (address, server) = serve(app).await;
@@ -24654,6 +25270,7 @@ mod host_app_routes_tests {
             runtime.console_viewer_resolver(&decisions),
             runtime.console_send_precheck(&decisions),
             &request_bound(),
+            crate::console_aggregator::NestedMobListing::default(),
         )
         .expect("console app");
         let binding = crate::gateway_composition::GatewayHttpBinding::bind_loopback()
@@ -24691,6 +25308,10 @@ mod host_app_routes_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "gateway_console_nested_mob_tests.rs"]
+mod gateway_console_nested_mob_tests;
 
 /// The gateway's close order for a held identity bootstrap whose pass ends in
 /// a terminal `Abort`: the host's admission is closed before the gateway
@@ -28873,5 +29494,46 @@ comms = true
             "{listed}"
         );
         let _ = runtime.shutdown().await;
+    }
+}
+
+#[cfg(test)]
+mod member_keyed_routing_config_tests {
+    #![allow(clippy::expect_used)]
+
+    use super::parse_gateway_routing_config_path;
+
+    /// The routing config file takes no mob: a route in it is the default
+    /// mob's, as every route was before routes named a mob, also when the
+    /// file names the gateway's own mob or another.
+    #[test]
+    fn member_keyed_routing_config_file_routes_are_the_default_mobs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("routing.json");
+        let route = |key: &str, mob: Option<&str>| {
+            let mut route = serde_json::json!({
+                "route_key": key,
+                "recipient": "ops",
+                "sink": "email",
+                "target_module": "delivery",
+            });
+            if let Some(mob) = mob {
+                route["mob_id"] = serde_json::json!(mob);
+            }
+            route
+        };
+        let file = serde_json::json!({
+            "routes": [route("plain", None), route("own", Some("launch")), route("other", Some("second"))],
+        });
+        std::fs::write(&path, serde_json::to_vec(&file).expect("json")).expect("write");
+        let routes =
+            parse_gateway_routing_config_path(path.to_str().expect("path")).expect("routes");
+        assert_eq!(
+            routes
+                .iter()
+                .map(|route| (route.route_key.as_str(), route.mob_id.clone()))
+                .collect::<Vec<_>>(),
+            [("plain", None), ("own", None), ("other", None)]
+        );
     }
 }

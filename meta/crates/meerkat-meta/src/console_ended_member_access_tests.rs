@@ -177,7 +177,12 @@ async fn retired(mob: &MobHandle, member: &str) -> TestResult {
 /// stores one a person defined: its text is `scheduled-for-<member>`. The
 /// schedule's id.
 async fn schedule_for(service: &meerkat::ScheduleService, member: &str) -> TestResult<String> {
+    // The send names no mob: it is the default mob's, as the console stores
+    // one for a member of the host's own mob.
+    let default_mob = crate::member_key::DefaultMob::new(meerkat_mob::MobId::from("launch"));
     let send = crate::console_schedules::ConsoleScheduledSend::new(
+        &default_mob,
+        default_mob.mob_id(),
         member.to_string(),
         format!("scheduled-for-{member}"),
         crate::console_schedules::ConsoleScheduleSender::Human {
@@ -2321,10 +2326,12 @@ async fn a_deny_on_the_label_of_the_mob_a_member_sat_in_still_refuses_it_after_i
             ..agent_rule("frank-is-granted-the-team", FRANK)
         },
     ]);
+    // The console names the member by its mob and its name.
+    let named = format!("{TEAM}/{MEMBER}");
     let sees = |access: &AccessController, subject: &str| {
         access
             .view_for_caller(Some(subject), Some(&format!("person:{subject}")))
-            .can_view_agent(MEMBER)
+            .can_view_agent(&named)
     };
     let people = [ALICE, BOB, CAROL, ERIN, FRANK];
     let access = AccessController::new(config.clone())?;
@@ -2342,6 +2349,144 @@ async fn a_deny_on_the_label_of_the_mob_a_member_sat_in_still_refuses_it_after_i
         people.map(|subject| sees(&access, subject)),
         [true, false, false, false, false],
         "the member ended: alice, bob, carol, erin and frank see it"
+    );
+    Ok(())
+}
+
+/// A member of a mob one of the console's members created is granted, while
+/// it lives, by a rule on the label of the mob it sits in, and refused by a
+/// deny on it: the ended member's record holding no such label leaves the
+/// living member's as it is.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_rule_on_the_label_of_the_mob_a_member_sits_in_decides_it_while_it_lives() -> TestResult {
+    const TEAM: &str = "living-mob-team";
+    const FRANK: &str = "frank@example.test";
+    const MEMBER: &str = "helper";
+    let label = |key: &str, value: &str| BTreeMap::from([(key.to_string(), value.to_string())]);
+    let root = tempfile::tempdir()?;
+    let runtime = runtime("living-mob", root.path()).await?;
+    let primary = runtime.handle();
+    seat(&primary, "worker", "planner", BTreeMap::new()).await?;
+    let owner = primary
+        .resolve_bridge_session_id(&AgentIdentity::from("planner"))
+        .await
+        .ok_or("the planner has a session")?;
+    let team = mob_owned_by(&runtime, TEAM, owner).await?;
+    seat(&team, "worker", MEMBER, BTreeMap::new()).await?;
+    let config = alice_drives_every_agent_and(vec![
+        crate::access::AccessRule {
+            agents: vec!["*".to_string()],
+            ..agent_rule("carol-drives-every-agent", CAROL)
+        },
+        crate::access::AccessRule {
+            match_labels: label("source_mob_id", TEAM),
+            ..agent_deny("carol-is-denied-the-team", CAROL)
+        },
+        crate::access::AccessRule {
+            match_labels: label("source_mob_id", TEAM),
+            ..agent_rule("frank-is-granted-the-team", FRANK)
+        },
+    ]);
+    // The console names the member by its mob and its name.
+    let named = format!("{TEAM}/{MEMBER}");
+    let access = AccessController::new(config)?;
+    prime_access_cache_from_runtime(&runtime, &access).await;
+    let sees = |subject: &str| {
+        access
+            .view_for_caller(Some(subject), Some(&format!("person:{subject}")))
+            .can_view_agent(&named)
+    };
+    assert_eq!(
+        [ALICE, CAROL, FRANK].map(sees),
+        [true, false, true],
+        "while the member lives: alice sees it, carol is denied it by its mob, frank is granted \
+         it by its mob"
+    );
+    Ok(())
+}
+
+/// A console that names a runtime's members under an identity namespace
+/// records a member of a mob one of them created among the runtime's own
+/// agents, under the namespace, its mob and its name. Once such a member
+/// ended, its record holds no label of the mob it sat in there either: a
+/// deny on that label still refuses it, and an allow by it shows nothing of
+/// it, as on a console that names the members without a namespace.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_allow_by_the_mob_label_shows_nothing_of_an_ended_member_under_a_namespace() -> TestResult
+{
+    const NAMESPACE: &str = "ops-ended-namespace";
+    const TEAM: &str = "namespaced-mob-team";
+    const FRANK: &str = "frank@example.test";
+    const MEMBER: &str = "helper";
+    let label = |key: &str, value: &str| BTreeMap::from([(key.to_string(), value.to_string())]);
+    let root = tempfile::tempdir()?;
+    let runtime = runtime("namespaced-mob", root.path()).await?;
+    let primary = runtime.handle();
+    seat(&primary, "worker", "planner", BTreeMap::new()).await?;
+    let owner = primary
+        .resolve_bridge_session_id(&AgentIdentity::from("planner"))
+        .await
+        .ok_or("the planner has a session")?;
+    let team = mob_owned_by(&runtime, TEAM, owner).await?;
+    seat(&team, "worker", MEMBER, BTreeMap::new()).await?;
+    let config = alice_drives_every_agent_and(vec![
+        crate::access::AccessRule {
+            agents: vec!["*".to_string()],
+            ..agent_rule("carol-drives-every-agent", CAROL)
+        },
+        crate::access::AccessRule {
+            match_labels: label("source_mob_id", TEAM),
+            ..agent_deny("carol-is-denied-the-team", CAROL)
+        },
+        crate::access::AccessRule {
+            match_labels: label("source_mob_id", TEAM),
+            ..agent_rule("frank-is-granted-the-team", FRANK)
+        },
+    ]);
+    // Under the namespace the console names the member by the namespace,
+    // its mob and its name.
+    let named = format!("{NAMESPACE}/{TEAM}/{MEMBER}");
+    let sees = |access: &AccessController, subject: &str| {
+        access
+            .view_for_caller(Some(subject), Some(&format!("person:{subject}")))
+            .can_view_agent(&named)
+    };
+    let people = [ALICE, CAROL, FRANK];
+    let access = AccessController::new(config.clone())?;
+    prime_access_cache_from_runtime_in_namespace(
+        &runtime,
+        &access,
+        NAMESPACE,
+        PrivateOwnerRecordReader::OwnRuntime,
+        None,
+    )
+    .await;
+    assert_eq!(
+        people.map(|subject| sees(&access, subject)),
+        [true, false, true],
+        "control, while the member lives: alice, carol and frank see it"
+    );
+
+    retired(&team, MEMBER).await?;
+    let access = AccessController::new(config)?;
+    prime_access_cache_from_runtime_in_namespace(
+        &runtime,
+        &access,
+        NAMESPACE,
+        PrivateOwnerRecordReader::OwnRuntime,
+        None,
+    )
+    .await;
+    assert!(
+        access
+            .view_for_caller(Some(ALICE), None)
+            .knows_agent(&named),
+        "the access records know the ended member under the namespace"
+    );
+    assert_eq!(
+        people.map(|subject| sees(&access, subject)),
+        [true, false, false],
+        "the member ended: alice, carol and frank see it"
     );
     Ok(())
 }
@@ -2465,8 +2610,14 @@ async fn the_labels_that_say_where_a_member_sits_are_the_consoles_own_for_access
         ("team-registered", true),
         ("team-stored", true),
     ] {
-        let granted = GRANTED.map(|subject| sees(subject, member));
-        let denied = DENIED.map(|subject| sees(subject, member));
+        // A member of the created mob is named by that mob and its name.
+        let named = if sits_in_the_team {
+            format!("{TEAM}/{member}")
+        } else {
+            member.to_string()
+        };
+        let granted = GRANTED.map(|subject| sees(subject, &named));
+        let denied = DENIED.map(|subject| sees(subject, &named));
         if granted != [sits_in_the_team; 3] || denied != [!sits_in_the_team; 3] {
             wrong.push(format!(
                 "{member} (in the created mob: {sits_in_the_team}): the three granted by \

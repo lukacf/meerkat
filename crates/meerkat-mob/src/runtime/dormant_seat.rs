@@ -532,6 +532,10 @@ pub(in crate::runtime) struct DormantSeatCandidate {
     pub(in crate::runtime) continuity_intent: super::SpawnContinuityIntent,
     /// The spec's creation origin: a host-root seat is a root creation.
     pub(in crate::runtime) creation_origin: crate::member_creation::MemberCreationOrigin,
+    /// Who seats the member, composed at the seat's plan from what the
+    /// runtime observed: the seat's row stores it. A rotation's next
+    /// incarnation keeps its life's record instead.
+    pub(in crate::runtime) seat_record: Option<crate::MemberSeat>,
     pub(in crate::runtime) effective_profile_override: Option<crate::profile::Profile>,
     pub(in crate::runtime) effective_model_override: Option<String>,
     /// Whether the definition's wiring rules apply to the seated member: an

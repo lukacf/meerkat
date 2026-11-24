@@ -44,6 +44,7 @@ fn every_catalog_machine_schema_is_constructed_at_most_once() {
     use dsl::host_store_writer_fence::HostStoreWriterFenceMachineState;
     use dsl::meerkat_machine::MeerkatMachineState;
     use dsl::mob_host_binding_authority::MobHostBindingAuthorityState;
+    use dsl::mob_hosted_set_lifecycle::MobHostedSetLifecycleMachineState;
     use dsl::mob_machine::MobMachineState;
     use dsl::mob_store_restore_lifecycle::MobStoreRestoreLifecycleMachineState;
     use dsl::occurrence_lifecycle::OccurrenceLifecycleMachineState;
@@ -121,6 +122,10 @@ fn every_catalog_machine_schema_is_constructed_at_most_once() {
     assert_construction_is_cached(
         MobStoreRestoreLifecycleMachineState::schema_static,
         "MobStoreRestoreLifecycleMachine",
+    );
+    assert_construction_is_cached(
+        MobHostedSetLifecycleMachineState::schema_static,
+        "MobHostedSetLifecycleMachine",
     );
     assert_construction_is_cached(
         HostStoreWriterFenceMachineState::schema_static,

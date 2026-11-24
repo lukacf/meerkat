@@ -164,6 +164,119 @@ describe("rules, groups and the rule editor", () => {
     expect(screen.queryByRole("option", { name: "Any agent" }) === null).toBe(true);
   });
 
+  it("member_keyed: a rule that lists mobs is edited and saved with the mobs it lists, shown read only", async () => {
+    const listed = {
+      ...CONFIG,
+      rules: [
+        ...(CONFIG.rules ?? []),
+        { id: "harbor-desks", effect: "allow" as const, groups: ["contractors"], actions: ["agent.view"], agents: ["billing"], mobs: ["harbor", "quay"], description: "Contractors see the harbor desks" },
+      ],
+    };
+    const input = props({ config: listed, status: { available: true, enabled: true, revision: 5, owner_instance: "owner", conditional_mutations: "checked_v1", subject: "ops-lead@example.com", can_administer: true, is_admin: true, actions: ACTIONS } });
+    input.onUpsertRule = vi.fn(async () => true);
+    render(<AccessPanel {...input} />);
+    fireEvent.click(screen.getByTestId("access-tab:rules"));
+    const card = screen.getByTestId("access-rule:harbor-desks");
+    expect(within(card).getByText("harbor team").getAttribute("title")).toBe("Team harbor");
+    expect(within(card).getByText("quay team")).toBeTruthy();
+    fireEvent.click(screen.getByTestId("access-rule-edit:harbor-desks"));
+    const teams = screen.getByTestId("access-rule-mobs");
+    expect(teams.textContent).toBe("Teams: harbor, quay. This rule keeps the teams it lists; they are set in the access file, not here.");
+    expect(teams.querySelector("input, textarea, select, button")).toBe(null);
+    fireEvent.click(screen.getByTestId("access-rule-action:agent.send"));
+    await act(async () => { fireEvent.click(screen.getByTestId("access-rule-save")); });
+    const saved = (input.onUpsertRule as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(saved.mobs).toEqual(["harbor", "quay"]);
+    expect(saved.actions).toEqual(["agent.view", "agent.send"]);
+    expect(saved.agents).toEqual(["billing"]);
+  });
+
+  it("member_keyed: a rule card names the teams of a rule that lists only teams", () => {
+    const listed = {
+      ...CONFIG,
+      rules: [
+        { id: "every-team", effect: "allow" as const, actions: ["agent.view"], mobs: ["*"] },
+        { id: "quay-only", effect: "deny" as const, actions: ["agent.send"], mobs: ["quay"] },
+      ],
+    };
+    render(<AccessPanel {...props({ config: listed })} />);
+    fireEvent.click(screen.getByTestId("access-tab:rules"));
+    const every = screen.getByTestId("access-rule:every-team");
+    expect(within(every).getByText("Every team").getAttribute("title")).toBe("Every team");
+    expect(within(every).queryByText("All agents") === null).toBe(true);
+    const quay = screen.getByTestId("access-rule:quay-only");
+    expect(within(quay).getByText("quay team").getAttribute("title")).toBe("Team quay");
+    expect(within(quay).queryByText("All agents") === null).toBe(true);
+  });
+
+  it("member_keyed: a rule of the default mob shows no teams line and is saved without mobs", async () => {
+    const input = props({ status: { available: true, enabled: true, revision: 5, owner_instance: "owner", conditional_mutations: "checked_v1", subject: "ops-lead@example.com", can_administer: true, is_admin: true, actions: ACTIONS } });
+    input.onUpsertRule = vi.fn(async () => true);
+    render(<AccessPanel {...input} />);
+    fireEvent.click(screen.getByTestId("access-tab:rules"));
+    fireEvent.click(screen.getByTestId("access-rule-edit:contractors-domain-desks"));
+    expect(screen.queryByTestId("access-rule-mobs") === null).toBe(true);
+    await act(async () => { fireEvent.click(screen.getByTestId("access-rule-save")); });
+    const saved = (input.onUpsertRule as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect("mobs" in saved).toBe(false);
+    expect(saved.agents).toEqual(["billing"]);
+  });
+
+  it("member_keyed: a new rule cannot take the ID of an existing rule, so it never replaces one that lists mobs", async () => {
+    const listed = {
+      ...CONFIG,
+      rules: [
+        ...(CONFIG.rules ?? []),
+        { id: "harbor-desks", effect: "allow" as const, actions: ["agent.view"], agents: ["billing"], mobs: ["harbor"], description: "Contractors see the harbor desks" },
+      ],
+    };
+    const input = props({ config: listed, status: { available: true, enabled: true, revision: 5, owner_instance: "owner", conditional_mutations: "checked_v1", subject: "ops-lead@example.com", can_administer: true, is_admin: true, actions: ACTIONS } });
+    input.onUpsertRule = vi.fn(async () => true);
+    render(<AccessPanel {...input} />);
+    fireEvent.click(screen.getByTestId("access-tab:rules"));
+    fireEvent.click(screen.getByTestId("access-rule-new"));
+    // The ID as the runtime would store it: without the space around it.
+    for (const taken of ["harbor-desks", "  harbor-desks "]) {
+      fireEvent.change(screen.getByTestId("access-rule-id"), { target: { value: taken } });
+      expect((screen.getByTestId("access-rule-save") as HTMLButtonElement).disabled).toBe(true);
+      expect(screen.getByTestId("access-rule-id-taken").textContent).toBe('The ID "harbor-desks" is the ID of an existing rule. A new rule needs an ID of its own; to change that rule, edit it.');
+      await act(async () => { fireEvent.click(screen.getByTestId("access-rule-save")); });
+    }
+    expect((input.onUpsertRule as ReturnType<typeof vi.fn>).mock.calls.length).toBe(0);
+    // An ID no rule has is saved, as a rule of the default mob.
+    fireEvent.change(screen.getByTestId("access-rule-id"), { target: { value: "harbor-desks-2" } });
+    expect(screen.queryByTestId("access-rule-id-taken") === null).toBe(true);
+    expect((screen.getByTestId("access-rule-save") as HTMLButtonElement).disabled).toBe(false);
+    await act(async () => { fireEvent.click(screen.getByTestId("access-rule-save")); });
+    const calls = (input.onUpsertRule as ReturnType<typeof vi.fn>).mock.calls;
+    expect(calls.length).toBe(1);
+    expect(calls[0][0].id).toBe("harbor-desks-2");
+    expect("mobs" in calls[0][0]).toBe(false);
+  });
+
+  it("member_keyed: a new rule's ID is checked against the rules on screen and the rules its save is made against", () => {
+    const harbor = { id: "harbor-desks", effect: "deny" as const, actions: ["agent.send"], mobs: ["harbor"] };
+    const quay = { id: "quay-desks", effect: "allow" as const, actions: ["agent.view"], mobs: ["quay"] };
+    const status = { available: true, enabled: true, revision: 5, owner_instance: "owner", conditional_mutations: "checked_v1", subject: "ops-lead@example.com", can_administer: true, is_admin: true, actions: ACTIONS };
+    const input = props({ config: { ...CONFIG, rules: [harbor] }, status });
+    const view = render(<AccessPanel {...input} />);
+    fireEvent.click(screen.getByTestId("access-tab:rules"));
+    fireEvent.click(screen.getByTestId("access-rule-new"));
+    // A rule that appears while the form is open takes its ID too.
+    fireEvent.change(screen.getByTestId("access-rule-id"), { target: { value: "quay-desks" } });
+    expect((screen.getByTestId("access-rule-save") as HTMLButtonElement).disabled).toBe(false);
+    view.rerender(<AccessPanel {...input} config={{ ...CONFIG, rules: [quay] }} status={{ ...status, revision: 6 }} />);
+    expect((screen.getByTestId("access-rule-save") as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByTestId("access-rule-id-taken").textContent?.startsWith('The ID "quay-desks" is the ID of an existing rule.')).toBe(true);
+    // The form was opened against the configuration that holds
+    // "harbor-desks": its save is made against that one, whatever is on
+    // screen now.
+    fireEvent.change(screen.getByTestId("access-rule-id"), { target: { value: "harbor-desks" } });
+    expect((screen.getByTestId("access-rule-save") as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.change(screen.getByTestId("access-rule-id"), { target: { value: "wharf-desks" } });
+    expect((screen.getByTestId("access-rule-save") as HTMLButtonElement).disabled).toBe(false);
+  });
+
   it("shows the approvers read only", () => {
     const withApprovers = { ...CONFIG, approvers: { "role:release": { subjects: ["carol@example.com"], groups: ["support-leads"] } } } as ConsoleAccessConfig;
     render(<AccessPanel {...props({ config: withApprovers })} />);

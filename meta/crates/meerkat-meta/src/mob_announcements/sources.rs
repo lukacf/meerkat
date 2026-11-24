@@ -340,17 +340,52 @@ impl MemberFacts {
     }
 }
 
-/// The roster facts the owner read for one store call. A member missing
-/// here has none, so only a member grant can cover it: the store fails
-/// closed on anything it was not told.
+/// What the record of who a gateway's members are private to holds for a
+/// member, whether the member still runs or has ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum MemberPerson {
+    /// Private to the person with this private-owner key.
+    Private(String),
+    /// Private to no one.
+    Shared,
+    /// The record does not hold the member.
+    NotKnown,
+}
+
+/// The roster facts the owner read for one store call, and the members it
+/// asked about. A member missing here has none, so only a member grant can
+/// cover it: the store fails closed on anything it was not told.
+///
+/// What a member announced is judged by its announcer's facts. An announcer
+/// the owner asked about and found no facts for is named by nothing; one it
+/// did not ask about is not judged by that call (see
+/// [`Self::mark_asked`]).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RosterFacts {
     members: BTreeMap<Member, MemberFacts>,
+    /// The members the owner asked about, whatever it found.
+    asked: BTreeSet<Member>,
 }
 
 impl RosterFacts {
     pub fn insert(&mut self, member: Member, facts: MemberFacts) {
         self.members.insert(member, facts);
+    }
+
+    /// Say the owner asked about `member` for this call, whatever it found.
+    /// A seal leaves an item owed whose announcer was not asked about, and
+    /// a replay owes such an item to the new subscription: the owner lists
+    /// the announcers before it reads their facts, and an announcement can
+    /// be captured in between.
+    pub fn mark_asked(&mut self, member: Member) {
+        self.asked.insert(member);
+    }
+
+    /// Whether the owner asked about `member`: it has facts here, or the
+    /// owner said so.
+    pub fn was_asked(&self, member: &Member) -> bool {
+        self.members.contains_key(member) || self.asked.contains(member)
     }
 
     pub fn get(&self, member: &Member) -> Option<&MemberFacts> {
@@ -385,6 +420,9 @@ pub(crate) fn covers(
         agent_id: None,
         role: facts.map(|facts| facts.role.as_str()),
         labels: facts.map(|facts| &facts.labels),
+        // A route's rules select by identity, role and labels; the member's
+        // mob is matched by the route itself.
+        mob: crate::access::AccessResourceMob::default(),
     };
     evaluate_access(
         &config,

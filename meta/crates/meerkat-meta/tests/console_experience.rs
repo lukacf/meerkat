@@ -336,7 +336,7 @@ fn phase8_console_001_capability_driven_rendering_contract() {
 
     assert_eq!(allowed.status, 200);
     assert_eq!(modules_response.status, 200);
-    assert_eq!(allowed.body["contract_version"], json!("0.5.0"));
+    assert_eq!(allowed.body["contract_version"], json!("0.6.0"));
     assert_eq!(
         allowed.body["base_panel"]["panel_id"],
         json!("console.home")

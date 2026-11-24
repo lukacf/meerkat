@@ -3,7 +3,7 @@
 This developer-owned module adds a Results panel to the stock Console sidebar.
 It has no widget renderer, tool metadata or MCP Apps dependency.
 
-Build and preview from the repository root:
+Build and preview from `meta/` in the repository:
 
 ```sh
 npm --prefix console run build

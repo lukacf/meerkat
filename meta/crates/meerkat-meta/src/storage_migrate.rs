@@ -18,7 +18,9 @@
 //!    verification (continuity via `LocalContinuityStore::open`, metadata
 //!    via `SqliteMetadataStore::open`, console via
 //!    `SqliteConsoleLogStore::open`, per-realm agent-memory files via the
-//!    `SqliteAgentMemoryStore` realm-connection path). Dry-run is a
+//!    `SqliteAgentMemoryStore` realm-connection path, for the launch mob's
+//!    store in the memory root and for the store of each mob the launch
+//!    hosts beside it, below the root). Dry-run is a
 //!    read-only version matrix. The workgraph admission sidecar is
 //!    **exempt** (M3 decision: the lock database deliberately carries no
 //!    tables and no ledger); most meerkat-shared databases (sessions, runtime,
@@ -39,7 +41,8 @@
 //! 3. **Twin reconciliation (manual, fail-closed).** Both spellings
 //!    populated → a per-domain divergence report (row-level by primary key +
 //!    content digest for continuity / metadata / console; file-digest for
-//!    the rest) and a typed refusal. Byte-identical twins dedup under plain
+//!    the rest, and for a memory root a digest of every file below it) and
+//!    a typed refusal. Byte-identical twins dedup under plain
 //!    `--apply` (exact-equality dedup, the one auto resolution the plan
 //!    sanctions); divergent twins resolve only with `--apply --adopt
 //!    <path>`: the adopted file keeps its place (renamed to canonical if
@@ -94,7 +97,10 @@ use crate::identity_first::LocalContinuityStore;
 use crate::identity_first::local_store::HeadCanonicalBackfillReport;
 use crate::memory::sqlite_store::SqliteAgentMemoryStore;
 use crate::runtime::SqliteMetadataStore;
-use crate::storage_doctor::{self, DATABASE_FAMILIES, MEMORY_LEDGER_DOMAIN, MEMORY_ROOT_SPELLINGS};
+use crate::storage_doctor::{
+    self, DATABASE_FAMILIES, MEMORY_LEDGER_DOMAIN, MEMORY_ROOT_SPELLINGS, memory_store_dirs,
+    realm_databases_in,
+};
 use crate::storage_layout::{
     DatabaseProvenance, DatabaseSlot, MetaStorageLayout, RUNTIME_REGISTRY_FILE_NAME,
     StorageLayoutError,
@@ -165,6 +171,20 @@ pub fn is_registered_quarantine_artifact_name(name: &str) -> bool {
     !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
 }
 
+/// The time the name of a registered backup or quarantine artifact holds
+/// ([`is_registered_backup_artifact_name`],
+/// [`is_registered_quarantine_artifact_name`]): the seconds of the clock
+/// its writer read when it named the file, as the store's own reader
+/// reads them ([`meerkat_store::migrate::registered_artifact_timestamp`]).
+/// `None` for any other name, and for digits that are no such number.
+pub(crate) fn registered_artifact_time_secs(name: &str) -> Option<u64> {
+    if is_registered_backup_artifact_name(name) || is_registered_quarantine_artifact_name(name) {
+        meerkat_store::migrate::registered_artifact_timestamp(name)
+    } else {
+        None
+    }
+}
+
 /// Case-5 doctor finding codes copied into the migrate report (deprecated
 /// leftovers; report-only).
 const LEFTOVER_FINDING_CODES: &[&str] = &[
@@ -182,7 +202,9 @@ const LEFTOVER_FINDING_CODES: &[&str] = &[
 /// Enumerate every SQLite database file currently materialized under a
 /// Meta state directory: each [`DatabaseSlot`]'s canonical **and** legacy
 /// spellings that exist as files, the inherited canonical jobs database, plus
-/// the per-realm agent-memory databases under both memory-root spellings.
+/// the per-realm agent-memory databases under both memory-root spellings:
+/// the launch mob's, directly in a root, and those of each mob the launch
+/// hosts beside it, below the root (`memory_store_dirs`).
 /// Sorted (deterministic fence order).
 ///
 /// The workgraph admission sidecar is deliberately excluded: it carries no
@@ -221,15 +243,8 @@ pub fn enumerate_state_dir_databases(state_dir: &Path) -> Vec<PathBuf> {
         files.push(announcements);
     }
     for spelling in MEMORY_ROOT_SPELLINGS {
-        let root = state_dir.join(spelling);
-        let Ok(entries) = fs::read_dir(&root) else {
-            continue;
-        };
-        for entry in entries.filter_map(Result::ok) {
-            let path = entry.path();
-            if path.is_file() && path.extension().and_then(|ext| ext.to_str()) == Some("sqlite3") {
-                files.push(path);
-            }
+        for store_dir in memory_store_dirs(&state_dir.join(spelling)) {
+            files.extend(realm_databases_in(&store_dir));
         }
     }
     files.extend(crate::storage_predecessor::realm_jobs_databases(state_dir));
@@ -510,7 +525,9 @@ pub struct TwinReport {
     pub rows_equal: usize,
     /// Divergent / single-copy rows. For continuity / metadata / console
     /// the key is `table/<primary key>`; for the agent-memory directory
-    /// twin the key is the relative realm-database name.
+    /// twin the key is the path of a file below the root (a realm database
+    /// directly in it, or a file of what the root holds below itself, such
+    /// as `hosted-mobs.d/<mob>/<realm database>`).
     #[serde(default)]
     pub rows: Vec<RowDivergenceEntry>,
     /// How the twin was (or was not) resolved.
@@ -528,7 +545,8 @@ pub struct TwinReport {
 #[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RowDivergenceEntry {
-    /// `table/<primary key>` (row-level domains) or a relative file name.
+    /// `table/<primary key>` (row-level domains) or the path of a file below
+    /// a directory twin.
     pub key: String,
     /// Divergence classification.
     pub status: DivergenceStatus,
@@ -1236,20 +1254,10 @@ fn read_ledger_matrix(state_dir: &Path) -> Vec<(PathBuf, String, Option<i64>)> {
         }
     }
     for spelling in MEMORY_ROOT_SPELLINGS {
-        let root = state_dir.join(spelling);
-        let Ok(entries) = fs::read_dir(&root) else {
-            continue;
-        };
-        let mut realm_dbs: Vec<PathBuf> = entries
-            .filter_map(Result::ok)
-            .map(|entry| entry.path())
-            .filter(|path| {
-                path.is_file() && path.extension().and_then(|ext| ext.to_str()) == Some("sqlite3")
-            })
-            .collect();
-        realm_dbs.sort();
-        for db_path in realm_dbs {
-            push_db(db_path, &[MEMORY_LEDGER_DOMAIN]);
+        for store_dir in memory_store_dirs(&state_dir.join(spelling)) {
+            for db_path in realm_databases_in(&store_dir) {
+                push_db(db_path, &[MEMORY_LEDGER_DOMAIN]);
+            }
         }
     }
     for jobs in crate::storage_predecessor::realm_jobs_databases(state_dir) {
@@ -1343,22 +1351,39 @@ fn open_stores_through_ledgered_constructors(
     }
     match layout.agent_memory_root() {
         Ok(resolved) if resolved.path.is_dir() => {
-            match SqliteAgentMemoryStore::open(&resolved.path) {
-                Ok(store) => match store.known_realms() {
-                    Ok(realms) => {
-                        for realm in realms {
-                            if let Err(error) = store.open_realm_ledgered(&realm) {
-                                errors.push(format!(
-                                    "agent-memory realm '{realm}' open failed: {error}"
-                                ));
+            // The launch mob's store, then the store of each mob the launch
+            // hosts beside it: each is the bundled store at its own
+            // directory, and its realm files are opened as the root's are.
+            for store_dir in memory_store_dirs(&resolved.path) {
+                // Where the store is, for an error: nothing for the root
+                // (the launch mob's), the directory below the root for a
+                // hosted mob's.
+                let place = store_dir
+                    .strip_prefix(&resolved.path)
+                    .ok()
+                    .filter(|below| !below.as_os_str().is_empty())
+                    .map(|below| format!(" in {}", below.display()))
+                    .unwrap_or_default();
+                match SqliteAgentMemoryStore::open(&store_dir) {
+                    Ok(store) => match store.known_realms() {
+                        Ok(realms) => {
+                            for realm in realms {
+                                if let Err(error) = store.open_realm_ledgered(&realm) {
+                                    errors.push(format!(
+                                        "agent-memory realm '{realm}'{place} open failed: {error}"
+                                    ));
+                                }
                             }
                         }
-                    }
+                        Err(error) => {
+                            errors
+                                .push(format!("agent-memory realm listing{place} failed: {error}"));
+                        }
+                    },
                     Err(error) => {
-                        errors.push(format!("agent-memory realm listing failed: {error}"));
+                        errors.push(format!("agent-memory store{place} open failed: {error}"));
                     }
-                },
-                Err(error) => errors.push(format!("agent-memory store open failed: {error}")),
+                }
             }
         }
         Ok(_) => {}
@@ -1711,26 +1736,69 @@ fn feed_value(hasher: &mut Sha256, value: rusqlite::types::ValueRef<'_>) {
     hasher.update(&bytes);
 }
 
-/// Per-file digests inside one directory twin (the agent-memory roots),
-/// keyed by relative file name.
+/// Per-file digests of one directory twin (the agent-memory roots), keyed
+/// by each file's path below the directory, with `/` between its parts.
+///
+/// EVERY file below the directory is in the map, not the files directly in
+/// it alone: a twin copy is archived as a unit, so it is compared as a
+/// unit. What a root holds below itself (the memory of the mobs a launch
+/// hosts beside its launch mob, under `hosted-mobs.d`; a realm's markdown
+/// directory) decides with the rest whether two copies are equal, and a
+/// file that differs or that one copy alone holds is named by its path. A
+/// link to a directory is not followed: it is an entry of its own, digested
+/// by where it points.
+///
+/// The map is the only evidence that two copies are equal, so nothing is
+/// left out of it in silence: an entry that cannot be read, one whose path
+/// is not UTF-8 (the map could not name it) and one that is neither a
+/// file, a directory nor a link are this function's error, and a copy
+/// whose digests are an error is equal to no other.
 fn dir_file_digests(dir: &Path) -> Result<RowDigests, String> {
     let mut digests = RowDigests::new();
-    let entries = fs::read_dir(dir).map_err(|error| format!("{}: {error}", dir.display()))?;
-    let mut files: Vec<PathBuf> = entries
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| path.is_file())
-        .collect();
-    files.sort();
-    for file in files {
-        let Some(name) = file.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        // WAL/SHM siblings fold into their database's digest.
-        if name.ends_with("-wal") || name.ends_with("-shm") {
-            continue;
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(current) = pending.pop() {
+        let entries =
+            fs::read_dir(&current).map_err(|error| format!("{}: {error}", current.display()))?;
+        for entry in entries {
+            let entry = entry.map_err(|error| format!("{}: {error}", current.display()))?;
+            let path = entry.path();
+            let Some(key) = path
+                .strip_prefix(dir)
+                .ok()
+                .and_then(|below| below.to_str())
+                .map(|below| below.replace(std::path::MAIN_SEPARATOR, "/"))
+            else {
+                return Err(format!(
+                    "{}: a path that is not UTF-8 cannot be compared",
+                    path.display()
+                ));
+            };
+            // The entry's own kind: a link to a directory is no directory.
+            let kind = entry
+                .file_type()
+                .map_err(|error| format!("{}: {error}", path.display()))?;
+            if kind.is_dir() {
+                pending.push(path);
+            } else if path.is_file() {
+                // WAL/SHM siblings fold into their database's digest.
+                if key.ends_with("-wal") || key.ends_with("-shm") {
+                    continue;
+                }
+                digests.insert(key, file_digest(&path)?);
+            } else if kind.is_symlink() {
+                let target =
+                    fs::read_link(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+                digests.insert(
+                    key,
+                    Sha256::digest(target.to_string_lossy().as_bytes()).into(),
+                );
+            } else {
+                return Err(format!(
+                    "{}: neither a file, a directory nor a link, and cannot be compared",
+                    path.display()
+                ));
+            }
         }
-        digests.insert(name.to_string(), file_digest(&file)?);
     }
     Ok(digests)
 }
@@ -1884,7 +1952,8 @@ fn reconcile_twin(
     }
 
     // Divergence: row-level for the three row-compared domains, per-file for
-    // the memory directory twin, file-digest for everything else.
+    // the memory directory twin (every file below the root), file-digest for
+    // everything else.
     let row_level = matches!(
         slot,
         DatabaseSlot::Continuity | DatabaseSlot::Metadata | DatabaseSlot::Console
@@ -2559,7 +2628,11 @@ fn push_artifacts_in(dir: &Path, dirs_too: bool, artifacts: &mut Vec<MetaPruneAr
 /// Enumerate every registered maintenance artifact under one Meta state
 /// directory: `*.pre-*` backups (files or archived memory-root directories)
 /// and `*.corrupt-*` quarantines at the state-dir root and inside the live
-/// agent-memory roots. Artifacts inside an archived directory belong to the
+/// agent-memory roots: directly in a root (beside the launch mob's realm
+/// files) and directly in the directory of each mob the launch hosts beside
+/// it (`memory_store_dirs`). No directory inside a memory root is ever
+/// returned, and no file that is not directly beside a store's realm files.
+/// Artifacts inside an archived directory belong to the
 /// archive's own entry. Nothing outside these naming patterns is ever
 /// returned — prune's deletion authority is exactly this listing.
 pub fn enumerate_state_dir_artifacts(state_dir: &Path) -> Vec<MetaPruneArtifact> {
@@ -2568,7 +2641,9 @@ pub fn enumerate_state_dir_artifacts(state_dir: &Path) -> Vec<MetaPruneArtifact>
     for spelling in MEMORY_ROOT_SPELLINGS {
         let root = state_dir.join(spelling);
         if root.is_dir() {
-            push_artifacts_in(&root, false, &mut artifacts);
+            for store_dir in memory_store_dirs(&root) {
+                push_artifacts_in(&store_dir, false, &mut artifacts);
+            }
         }
     }
     artifacts
@@ -2756,6 +2831,820 @@ mod tests {
         for database in fence.fenced_databases() {
             assert!(meerkat_sqlite::fence_lock_path(database).is_file());
         }
+    }
+
+    /// The name, below a memory root, of the directory that holds the
+    /// stores of the mobs a launch hosts beside its launch mob. A stored
+    /// contract, pinned here as a literal: the tool must find what a
+    /// gateway wrote.
+    const HOSTED: &str = "hosted-mobs.d";
+
+    /// A realm file of the bundled store in `dir`, made through the store's
+    /// own constructor (so it carries its ledger), holding one row of a
+    /// table of the rows' own with `content`. The path of the file.
+    fn realm_file_in(dir: &Path, realm: &str, content: &str) -> PathBuf {
+        let store = SqliteAgentMemoryStore::open(dir).expect("a memory store");
+        store.open_realm_ledgered(realm).expect("a realm file");
+        let path = store.path_for_realm(realm);
+        drop(store);
+        let conn = Connection::open(&path).expect("the realm file");
+        conn.execute_batch("CREATE TABLE IF NOT EXISTS of_the_rows (content TEXT NOT NULL)")
+            .expect("a table of the rows");
+        conn.execute("INSERT INTO of_the_rows (content) VALUES (?1)", [content])
+            .expect("a row");
+        // The last connection folds the WAL into the file as it closes.
+        drop(conn);
+        path
+    }
+
+    /// The store directory of the hosted mob whose segment is `segment`,
+    /// below the memory root `root`.
+    fn hosted_store(root: &Path, segment: &str) -> PathBuf {
+        root.join(HOSTED).join(segment)
+    }
+
+    /// Copy the directory `from` to `to`, whole.
+    fn copy_whole(from: &Path, to: &Path) {
+        fs::create_dir_all(to).expect("the copy's directory");
+        for entry in fs::read_dir(from)
+            .expect("the directory")
+            .filter_map(Result::ok)
+        {
+            let (path, target) = (entry.path(), to.join(entry.file_name()));
+            if path.is_dir() {
+                copy_whole(&path, &target);
+            } else {
+                fs::copy(&path, &target).expect("a file of the copy");
+            }
+        }
+    }
+
+    /// Every file below `dir` with its bytes, by its path below `dir`,
+    /// without the lock and presence files a maintenance fence leaves
+    /// beside a database and the sidecars an open of a database makes: what
+    /// a run that opens no database for writing leaves as it was.
+    fn content_below(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+        fn walk(root: &Path, dir: &Path, into: &mut BTreeMap<PathBuf, Vec<u8>>) {
+            let Ok(entries) = fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.filter_map(Result::ok) {
+                let path = entry.path();
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if path.is_dir() {
+                    walk(root, &path, into);
+                } else if !(name.ends_with(".mfence")
+                    || name.ends_with(".mpresence")
+                    || name.ends_with("-wal")
+                    || name.ends_with("-shm"))
+                {
+                    let below = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
+                    into.insert(below, fs::read(&path).expect("a file"));
+                }
+            }
+        }
+        let mut files = BTreeMap::new();
+        walk(dir, dir, &mut files);
+        files
+    }
+
+    /// What each realm database below `dir` holds in the rows' own table,
+    /// by the database's path below `dir`: what a run that opens the
+    /// databases through their store, and so may rewrite their pages, must
+    /// leave as it was.
+    fn rows_below(dir: &Path) -> BTreeMap<PathBuf, Vec<String>> {
+        content_below(dir)
+            .into_keys()
+            .filter(|below| below.extension().and_then(|ext| ext.to_str()) == Some("sqlite3"))
+            .map(|below| {
+                let conn = Connection::open(dir.join(&below)).expect("a realm database");
+                let rows = conn
+                    .prepare("SELECT content FROM of_the_rows ORDER BY rowid")
+                    .and_then(|mut statement| {
+                        statement
+                            .query_map([], |row| row.get::<_, String>(0))?
+                            .collect::<Result<Vec<_>, _>>()
+                    })
+                    .expect("the rows of a realm database");
+                (below, rows)
+            })
+            .collect()
+    }
+
+    /// The maintenance fence covers the realm files of every mob a launch
+    /// hosts beside its launch mob, under both spellings of the memory
+    /// root: while the tool renames or archives a root as a unit, no file
+    /// below it is open to a gateway unfenced.
+    ///
+    /// Covered: the realm files directly in a root (the launch mob's, as
+    /// before) and the realm files directly in each directory directly
+    /// below `hosted-mobs.d` whose name is a mob's (lowercase letters,
+    /// digits, `-`, `_`, and `%xx` in lowercase hex for every other byte of
+    /// the mob's id, a capital letter included).
+    /// Not covered, because no store keeps a database there: a file
+    /// directly in `hosted-mobs.d`, a directory there whose name is no
+    /// mob's (what a release of a mob's memory leaves until it is removed),
+    /// a directory below a mob's directory, a file that is no database,
+    /// and what a link below `hosted-mobs.d` names (a link is not
+    /// followed).
+    #[test]
+    fn the_fence_covers_the_realm_files_of_each_mob_hosted_beside_the_launch_mob() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let state = temp.path();
+        let (root, legacy) = (
+            state.join("agent-memory"),
+            state.join("agent-memory-sqlite"),
+        );
+        let of_the_launch_mob = realm_file_in(&root, "alpha", "of the launch mob");
+        let of_the_second = realm_file_in(
+            &hosted_store(&root, "second"),
+            "mob.second",
+            "of the second",
+        );
+        let another_realm_of_the_second =
+            realm_file_in(&hosted_store(&root, "second"), "beta", "of the second, too");
+        let of_the_third =
+            realm_file_in(&hosted_store(&root, "third"), "mob.third", "of the third");
+        let under_the_legacy_spelling = realm_file_in(
+            &hosted_store(&legacy, "fourth"),
+            "mob.fourth",
+            "of the fourth",
+        );
+
+        // What is no database of a store.
+        drop(Connection::open(root.join(HOSTED).join("stray.sqlite3")).expect("a stray file"));
+        let deeper = hosted_store(&root, "second").join("deeper");
+        fs::create_dir_all(&deeper).expect("a directory below a mob's");
+        drop(Connection::open(deeper.join("deep.sqlite3")).expect("a deeper file"));
+        fs::write(hosted_store(&root, "second").join("notes.txt"), b"x").expect("notes");
+        for no_mobs_name in [
+            "second.released",
+            "Upper",
+            "se%2",
+            "se cond",
+            "%61",
+            "se%2Econd",
+        ] {
+            let no_store = root.join(HOSTED).join(no_mobs_name);
+            fs::create_dir_all(&no_store).expect("a directory whose name is no mob's");
+            drop(Connection::open(no_store.join("mob%2Esecond.sqlite3")).expect("its file"));
+        }
+        #[cfg(unix)]
+        {
+            let elsewhere = state.join("elsewhere");
+            fs::create_dir_all(&elsewhere).expect("elsewhere");
+            drop(Connection::open(elsewhere.join("linked.sqlite3")).expect("a file elsewhere"));
+            std::os::unix::fs::symlink(&elsewhere, root.join(HOSTED).join("linked"))
+                .expect("a link below the hosted directory");
+        }
+
+        // A mob whose id holds capital letters and a dot (`Team.A`): its
+        // directory's name writes them as escapes, and it is a store.
+        let of_an_id_with_escapes = realm_file_in(
+            &hosted_store(&root, "%54eam%2e%41"),
+            "mob.Team.A",
+            "of a mob whose id holds capital letters and a dot",
+        );
+
+        let mut expected = vec![
+            of_the_launch_mob,
+            of_the_second,
+            another_realm_of_the_second,
+            of_the_third,
+            of_an_id_with_escapes,
+            under_the_legacy_spelling,
+        ];
+        expected.sort();
+        assert_eq!(
+            enumerate_state_dir_databases(state),
+            expected,
+            "the databases of a state directory hold every hosted mob's realm files"
+        );
+        let fence = MetaMaintenanceFence::acquire(state, Duration::from_secs(1)).expect("fence");
+        assert_eq!(fence.fenced_databases(), expected.as_slice());
+        for database in fence.fenced_databases() {
+            assert!(
+                meerkat_sqlite::fence_lock_path(database).is_file(),
+                "the fence of {} is held",
+                database.display()
+            );
+        }
+        drop(fence);
+        // A dry run reports the same list and takes no fence.
+        let report = migrate_state_dir(state, MigrateMode::DryRun, None);
+        assert!(
+            expected
+                .iter()
+                .all(|database| report.fenced_databases.contains(database)),
+            "a dry run names every hosted mob's realm file among the databases it would \
+             fence: {:?}",
+            report.fenced_databases
+        );
+    }
+
+    /// The offline tools find the directory a gateway makes for a hosted
+    /// mob, whatever the mob's id holds.
+    ///
+    /// For each id of a table (plain; capital letters; a dot; a `%`; a
+    /// space; a letter outside ASCII) the mob's store value is made as a
+    /// gateway makes it, from the launch's own store and the typed mob id,
+    /// and its first open of a realm makes the mob's directory. No row
+    /// text builds a path here: every directory and file is where the
+    /// store's own functions say. Each directory lies directly below the
+    /// ONE directory name the gateway and the tools share, each is one of
+    /// the root's store directories as the tools list them, and each mob's
+    /// realm file is in the databases of the state directory and in the
+    /// fence's list, beside the launch mob's.
+    #[test]
+    fn the_tools_find_the_directory_a_gateway_makes_for_a_hosted_mob_whatever_its_id_holds() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let state = temp.path();
+        let root = state.join("agent-memory");
+        let launch = SqliteAgentMemoryStore::open(&root).expect("the launch's memory store");
+        launch
+            .open_realm_ledgered("alpha")
+            .expect("the launch mob's realm file");
+        let mut files = vec![launch.path_for_realm("alpha")];
+        let mut dirs = Vec::new();
+        for id in [
+            "second",
+            "TeamA",
+            "team.a",
+            "100%",
+            "the team",
+            "\u{e9}quipe",
+        ] {
+            let mob = meerkat_mob::MobId::from(id);
+            let of_the_mob = launch
+                .of_hosted_mob_in_tests(&mob)
+                .expect("the store value of a hosted mob");
+            of_the_mob
+                .open_realm_ledgered("notes")
+                .expect("the mob's first realm file");
+            let dir = launch
+                .root_of_hosted_mob(&mob)
+                .expect("the directory of a mob with an id");
+            assert!(
+                dir.is_dir(),
+                "({id}) the first open made the mob's directory"
+            );
+            assert_eq!(
+                dir.parent(),
+                Some(root.join(crate::storage_doctor::HOSTED_MOBS_DIR).as_path()),
+                "({id}) directly below the directory the tools read"
+            );
+            let file = of_the_mob.path_for_realm("notes");
+            assert_eq!(
+                file.parent(),
+                Some(dir.as_path()),
+                "({id}) its realm file is in it"
+            );
+            assert!(file.is_file(), "({id}) and is there");
+            dirs.push(dir);
+            files.push(file);
+            drop(of_the_mob);
+        }
+        drop(launch);
+        dirs.sort();
+        files.sort();
+
+        let listed = crate::storage_doctor::memory_store_dirs(&root);
+        assert_eq!(
+            listed.first(),
+            Some(&root),
+            "the root itself is the launch mob's store"
+        );
+        assert_eq!(
+            listed.get(1..).unwrap_or_default(),
+            dirs.as_slice(),
+            "every directory the gateway made is a store directory of the root, and no other is"
+        );
+        assert_eq!(
+            enumerate_state_dir_databases(state),
+            files,
+            "the databases of the state directory hold each such mob's realm file"
+        );
+        let fence = MetaMaintenanceFence::acquire(state, Duration::from_secs(1)).expect("fence");
+        assert_eq!(
+            fence.fenced_databases(),
+            files.as_slice(),
+            "and the fence covers each of them"
+        );
+    }
+
+    /// The ledger baseline and its dry-run matrix cover a hosted mob's
+    /// realm files, also when the memory root is renamed as a unit.
+    ///
+    /// A state directory with the legacy spelling of the memory root alone,
+    /// holding the launch mob's realm file and one hosted mob's. A dry run
+    /// names both in its matrix, each with its recorded ledger version, and
+    /// moves nothing. With `--apply` the root is renamed to its canonical
+    /// name as a unit (the hosted mob's store goes with it, holding what it held),
+    /// and the baseline has a row for the hosted mob's realm file at its
+    /// new place, at the version the launch mob's realm file is at. A
+    /// hosted mob's file that the store cannot open is an error of the run
+    /// that names the mob's directory below the root: it was opened.
+    #[test]
+    fn the_ledger_baseline_and_its_matrix_cover_a_hosted_mobs_realm_files() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let state = temp.path();
+        let legacy = state.join("agent-memory-sqlite");
+        realm_file_in(&legacy, "alpha", "of the launch mob");
+        realm_file_in(
+            &hosted_store(&legacy, "second"),
+            "mob.second",
+            "of the second",
+        );
+        let nested = Path::new(HOSTED)
+            .join("second")
+            .join("mob%2Esecond.sqlite3");
+        let before = content_below(&legacy);
+        let held_before = rows_below(&legacy);
+        assert!(before.contains_key(&nested), "{:?}", before.keys());
+
+        let dry = migrate_state_dir(state, MigrateMode::DryRun, None);
+        assert!(!dry.has_errors(), "{:?}", dry.errors);
+        let of_the_launch_mob = ledger_entry(&dry, "alpha.sqlite3", MEMORY_LEDGER_DOMAIN);
+        let of_the_second = dry.ledger.iter().find(|entry| {
+            entry.database.ends_with(&nested) && entry.domain == MEMORY_LEDGER_DOMAIN
+        });
+        assert!(
+            of_the_second.is_some(),
+            "a dry run has a row for the hosted mob's realm file: {:?}",
+            dry.ledger
+                .iter()
+                .map(|entry| &entry.database)
+                .collect::<Vec<_>>()
+        );
+        if let Some(of_the_second) = of_the_second {
+            assert_eq!(of_the_second.action, LedgerBaselineAction::Recorded);
+            assert_eq!(
+                of_the_second.before, of_the_launch_mob.before,
+                "at the version the launch mob's realm file records"
+            );
+            assert!(of_the_second.before.is_some());
+        }
+        assert_eq!(content_below(&legacy), before, "a dry run moves nothing");
+
+        let report = migrate_state_dir(state, MigrateMode::Apply, None);
+        assert!(!report.has_errors(), "{:?}", report.errors);
+        let root = state.join("agent-memory");
+        assert!(!legacy.exists() && root.is_dir(), "the root is renamed");
+        assert_eq!(
+            rows_below(&root),
+            held_before,
+            "as a unit: the hosted mob's store went with it, holding what it held"
+        );
+        let applied = report.ledger.iter().find(|entry| {
+            entry.database == root.join(&nested) && entry.domain == MEMORY_LEDGER_DOMAIN
+        });
+        assert!(
+            applied.is_some_and(|entry| entry.action == LedgerBaselineAction::AlreadyCurrent
+                && entry.after.is_some()
+                && entry.after
+                    == ledger_entry(&report, "agent-memory/alpha.sqlite3", MEMORY_LEDGER_DOMAIN)
+                        .after),
+            "the baseline has a row for the hosted mob's realm file at its new place: {:?}",
+            report.ledger
+        );
+        assert!(
+            report.fenced_databases.contains(&legacy.join(&nested))
+                || report.fenced_databases.contains(&root.join(&nested)),
+            "and the run fenced it: {:?}",
+            report.fenced_databases
+        );
+
+        // A hosted mob's file the store cannot open: the pass opened it.
+        fs::write(
+            hosted_store(&root, "second").join("broken.sqlite3"),
+            b"no database",
+        )
+        .expect("a file that is no database");
+        let again = migrate_state_dir(state, MigrateMode::Apply, None);
+        assert!(
+            again
+                .errors
+                .iter()
+                .any(|error| error.contains("open failed")
+                    && error.contains("broken")
+                    && error.contains("second")),
+            "the pass opens a hosted mob's realm files and names the mob's directory in \
+             its error: {:?}",
+            again.errors
+        );
+    }
+
+    /// Two copies of a memory root that differ only in a hosted mob's
+    /// store are not identical: the run refuses, names the file that
+    /// differs by its path below the root, and moves nothing.
+    ///
+    /// Both spellings of the memory root are populated and equal file for
+    /// file directly in the root. Three ways the copies differ below it:
+    /// one realm file of a hosted mob has other content; one copy holds a
+    /// hosted mob the other does not; one copy has no hosted directory at
+    /// all. In each a dry run reports the twin as not byte-identical, lists
+    /// the hosted mob's file as divergent or as held by one copy, and
+    /// refuses; `--apply` without an adoption refuses too and both copies
+    /// are byte for byte what they were. With `--apply --adopt` of the
+    /// canonical copy that copy keeps its hosted stores, and the other is
+    /// archived as a unit with its own inside.
+    #[test]
+    fn two_memory_roots_that_differ_only_in_a_hosted_mobs_store_are_not_identical_and_nothing_moves()
+     {
+        for differs in ["content", "one mob more", "no hosted directory"] {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let state = temp.path();
+            let (root, legacy) = (
+                state.join("agent-memory"),
+                state.join("agent-memory-sqlite"),
+            );
+            realm_file_in(&root, "alpha", "of the launch mob");
+            realm_file_in(
+                &hosted_store(&root, "second"),
+                "mob.second",
+                "of the second",
+            );
+            copy_whole(&root, &legacy);
+            let nested = Path::new(HOSTED)
+                .join("second")
+                .join("mob%2Esecond.sqlite3");
+            let key = match differs {
+                "content" => {
+                    realm_file_in(&hosted_store(&legacy, "second"), "mob.second", "another");
+                    nested.clone()
+                }
+                "one mob more" => {
+                    realm_file_in(&hosted_store(&legacy, "third"), "mob.third", "of the third");
+                    Path::new(HOSTED).join("third").join("mob%2Ethird.sqlite3")
+                }
+                _ => {
+                    fs::remove_dir_all(legacy.join(HOSTED)).expect("no hosted directory");
+                    nested.clone()
+                }
+            };
+            let key = key.to_string_lossy().replace('\\', "/");
+            let (of_the_root, of_the_legacy) = (content_below(&root), content_below(&legacy));
+            let held_by_the_root = rows_below(&root);
+            assert_ne!(of_the_root, of_the_legacy, "({differs}) the copies differ");
+            assert_eq!(
+                of_the_root.get(Path::new("alpha.sqlite3")),
+                of_the_legacy.get(Path::new("alpha.sqlite3")),
+                "({differs}) and not in the files directly in the root"
+            );
+
+            for mode in [MigrateMode::DryRun, MigrateMode::Apply] {
+                let report = migrate_state_dir(state, mode, None);
+                assert!(
+                    report.has_errors(),
+                    "({differs}) the twin fails the run closed"
+                );
+                let twin = report
+                    .twins
+                    .iter()
+                    .find(|twin| twin.slot == "agent-memory")
+                    .expect("the memory twin");
+                assert!(
+                    !twin.byte_identical,
+                    "({differs}) copies that differ below the hosted directory are not \
+                     byte-identical"
+                );
+                assert!(
+                    twin.rows.iter().any(|row| row.key == key
+                        && match differs {
+                            "content" => matches!(row.status, DivergenceStatus::Divergent),
+                            "one mob more" => matches!(
+                                &row.status,
+                                DivergenceStatus::OnlyIn { location } if location == &legacy
+                            ),
+                            _ => matches!(
+                                &row.status,
+                                DivergenceStatus::OnlyIn { location } if location == &root
+                            ),
+                        }),
+                    "({differs}) the report lists the hosted mob's file by its path below the \
+                     root: {:?}",
+                    twin.rows
+                );
+                assert!(
+                    matches!(
+                        &twin.resolution,
+                        TwinResolution::Refused { reason } if reason.contains("--adopt")
+                    ),
+                    "({differs}) the run refuses and asks for an adoption: {:?}",
+                    twin.resolution
+                );
+                assert_eq!(
+                    content_below(&root),
+                    of_the_root,
+                    "({differs}) nothing moved"
+                );
+                assert_eq!(
+                    content_below(&legacy),
+                    of_the_legacy,
+                    "({differs}) in either"
+                );
+            }
+
+            let adopted = migrate_state_dir(state, MigrateMode::Apply, Some(root.as_path()));
+            assert!(!adopted.has_errors(), "({differs}) {:?}", adopted.errors);
+            assert_eq!(
+                rows_below(&root),
+                held_by_the_root,
+                "({differs}) the adopted copy keeps its hosted stores, holding what they held"
+            );
+            assert!(!legacy.exists(), "({differs}) the other copy is archived");
+            let archive = fs::read_dir(state)
+                .expect("the state directory")
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .find(|path| {
+                    path.is_dir()
+                        && path
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .is_some_and(|name| name.starts_with("agent-memory-sqlite.pre-"))
+                })
+                .expect("the archive of the other copy");
+            assert_eq!(
+                content_below(&archive),
+                of_the_legacy,
+                "({differs}) as a unit, with its own hosted stores inside"
+            );
+        }
+    }
+
+    /// Two copies of a memory root that are equal also below the hosted
+    /// directory dedup under plain `--apply`, as a unit.
+    ///
+    /// A dry run reports the twin byte-identical and asks for `--apply`. A
+    /// second dry run says the same: the first one's read-only opens left
+    /// nothing behind that counts as content. `--apply` keeps the canonical
+    /// copy, with the hosted mobs' stores in it, and archives
+    /// the other copy as a unit.
+    #[test]
+    fn two_memory_roots_equal_also_below_the_hosted_directory_dedup_as_a_unit() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let state = temp.path();
+        let (root, legacy) = (
+            state.join("agent-memory"),
+            state.join("agent-memory-sqlite"),
+        );
+        realm_file_in(&root, "alpha", "of the launch mob");
+        realm_file_in(
+            &hosted_store(&root, "second"),
+            "mob.second",
+            "of the second",
+        );
+        realm_file_in(&hosted_store(&root, "third"), "mob.third", "of the third");
+        copy_whole(&root, &legacy);
+        let whole = content_below(&root);
+        assert_eq!(content_below(&legacy), whole);
+        let held = rows_below(&root);
+
+        for _ in 0..2 {
+            let dry = migrate_state_dir(state, MigrateMode::DryRun, None);
+            let twin = dry
+                .twins
+                .iter()
+                .find(|twin| twin.slot == "agent-memory")
+                .expect("the memory twin");
+            assert!(
+                twin.byte_identical && twin.rows.is_empty(),
+                "copies equal also below the hosted directory are byte-identical: {:?}",
+                twin.rows
+            );
+            assert!(
+                twin.rows_equal >= 3,
+                "and every file below the root was compared: {}",
+                twin.rows_equal
+            );
+        }
+
+        let report = migrate_state_dir(state, MigrateMode::Apply, None);
+        assert!(!report.has_errors(), "{:?}", report.errors);
+        let twin = report
+            .twins
+            .iter()
+            .find(|twin| twin.slot == "agent-memory")
+            .expect("the memory twin");
+        let TwinResolution::Deduped { kept, archived } = &twin.resolution else {
+            panic!("expected dedup, got {:?}", twin.resolution);
+        };
+        assert_eq!(kept, &root);
+        assert_eq!(
+            rows_below(&root),
+            held,
+            "the kept copy holds the hosted mobs' stores, each holding what it held"
+        );
+        assert!(!legacy.exists());
+        assert_eq!(
+            content_below(&archived[0]),
+            whole,
+            "and the other copy is archived as a unit"
+        );
+    }
+
+    /// What the compare of two copies of a memory root cannot name, or does
+    /// not follow, is never left out of it.
+    ///
+    /// The two copies are equal file for file. One copy then gains, below
+    /// its hosted directory: a directory whose name is not UTF-8, with a
+    /// file in it; or a link the other copy has with another target; or a
+    /// link the other copy lacks. For the name the report cannot write, the
+    /// compare of that copy is unavailable (an error of the twin) and the
+    /// twin is not byte-identical: a copy that cannot be compared is equal
+    /// to no other. For the links the twin is not byte-identical either, and
+    /// the link is listed by its path below the root: it is an entry of its
+    /// own, by where it points, and what it points at is not read. In both
+    /// modes the run refuses and moves nothing. The same link in both
+    /// copies leaves them identical.
+    #[cfg(unix)]
+    #[test]
+    fn what_the_compare_of_two_memory_roots_cannot_name_or_follow_is_never_left_out_of_it() {
+        use std::os::unix::ffi::OsStrExt as _;
+        for differs in [
+            "a name that is not text",
+            "a link with another target",
+            "a link one copy lacks",
+            "the same link",
+        ] {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let state = temp.path();
+            let (root, legacy) = (
+                state.join("agent-memory"),
+                state.join("agent-memory-sqlite"),
+            );
+            realm_file_in(&root, "alpha", "of the launch mob");
+            realm_file_in(
+                &hosted_store(&root, "second"),
+                "mob.second",
+                "of the second",
+            );
+            copy_whole(&root, &legacy);
+            // What the links point at lies outside both copies.
+            for target in ["pointed-at-a", "pointed-at-b"] {
+                fs::create_dir_all(state.join(target)).expect("a directory to point at");
+                fs::write(state.join(target).join("inside.txt"), target).expect("its file");
+            }
+            let link = |copy: &Path, target: &str| {
+                std::os::unix::fs::symlink(state.join(target), copy.join(HOSTED).join("linked"))
+                    .expect("a link below the hosted directory");
+            };
+            match differs {
+                "a name that is not text" => {
+                    let odd = legacy
+                        .join(HOSTED)
+                        .join(std::ffi::OsStr::from_bytes(b"th\xffrd"));
+                    fs::create_dir_all(&odd).expect("a directory whose name is not UTF-8");
+                    fs::write(odd.join("mob%2Ethird.sqlite3"), b"only here").expect("its file");
+                }
+                "a link with another target" => {
+                    link(&root, "pointed-at-a");
+                    link(&legacy, "pointed-at-b");
+                }
+                "a link one copy lacks" => link(&legacy, "pointed-at-a"),
+                _ => {
+                    link(&root, "pointed-at-a");
+                    link(&legacy, "pointed-at-a");
+                }
+            }
+            let (of_the_root, of_the_legacy) = (content_below(&root), content_below(&legacy));
+
+            for mode in [MigrateMode::DryRun, MigrateMode::Apply] {
+                // The last case alone is of equal copies; `--apply` would
+                // dedup them, so it is asked as a dry run.
+                if differs == "the same link" && mode == MigrateMode::Apply {
+                    continue;
+                }
+                let report = migrate_state_dir(state, mode, None);
+                let twin = report
+                    .twins
+                    .iter()
+                    .find(|twin| twin.slot == "agent-memory")
+                    .expect("the memory twin");
+                if differs == "the same link" {
+                    assert!(
+                        twin.byte_identical && twin.rows.is_empty(),
+                        "copies with the same link are byte-identical: {:?}",
+                        twin.rows
+                    );
+                    continue;
+                }
+                assert!(
+                    !twin.byte_identical,
+                    "({differs}) the copies are not reported byte-identical"
+                );
+                assert!(
+                    matches!(&twin.resolution, TwinResolution::Refused { .. }),
+                    "({differs}) the run refuses: {:?}",
+                    twin.resolution
+                );
+                match differs {
+                    "a name that is not text" => assert!(
+                        twin.errors
+                            .iter()
+                            .any(|error| error.contains("agent-memory-sqlite")),
+                        "({differs}) the compare of the copy that holds it is unavailable, \
+                         and the twin says so: {:?}",
+                        twin.errors
+                    ),
+                    "a link with another target" => assert!(
+                        twin.rows.iter().any(|row| row.key == "hosted-mobs.d/linked"
+                            && matches!(row.status, DivergenceStatus::Divergent)),
+                        "({differs}) the link is listed as divergent: {:?}",
+                        twin.rows
+                    ),
+                    _ => assert!(
+                        twin.rows.iter().any(|row| row.key == "hosted-mobs.d/linked"
+                            && matches!(
+                                &row.status,
+                                DivergenceStatus::OnlyIn { location } if location == &legacy
+                            )),
+                        "({differs}) the link is listed as held by one copy: {:?}",
+                        twin.rows
+                    ),
+                }
+                assert_eq!(
+                    content_below(&root),
+                    of_the_root,
+                    "({differs}) nothing moved"
+                );
+                assert_eq!(
+                    content_below(&legacy),
+                    of_the_legacy,
+                    "({differs}) in either"
+                );
+            }
+        }
+    }
+
+    /// The registered maintenance artifacts beside a hosted mob's realm
+    /// files are listed, and pruned, as those directly in the memory root
+    /// are; nothing else below a memory root comes under the listing.
+    ///
+    /// Listed: a quarantined realm file and a backup in a hosted mob's
+    /// directory, beside those in the root itself. Not listed, though each
+    /// carries a registered name: a directory below the hosted directory
+    /// (no directory inside a memory root is the listing's to delete), a
+    /// file directly in the hosted directory (it is in no store), and a file
+    /// below a mob's directory. A prune of everything deletes the listed
+    /// files alone: every realm file and every unlisted entry stays.
+    #[test]
+    fn the_registered_artifacts_beside_a_hosted_mobs_realm_files_are_listed_and_pruned() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let state = temp.path();
+        let root = state.join("agent-memory");
+        let of_the_launch_mob = realm_file_in(&root, "alpha", "of the launch mob");
+        let second = hosted_store(&root, "second");
+        let of_the_second = realm_file_in(&second, "mob.second", "of the second");
+        let in_the_root = root.join("alpha.sqlite3.corrupt-41");
+        let quarantined = second.join("mob%2Esecond.sqlite3.corrupt-42");
+        let backup = second.join(backup_artifact_name("mob%2Esecond.sqlite3", "kept"));
+        for artifact in [&in_the_root, &quarantined, &backup] {
+            fs::write(artifact, b"an artifact").expect("an artifact");
+        }
+        // Registered names where the listing has no authority.
+        let a_directory = root
+            .join(HOSTED)
+            .join(backup_artifact_name("third", "twin"));
+        fs::create_dir_all(&a_directory).expect("a directory with a registered name");
+        fs::write(a_directory.join("mob%2Ethird.sqlite3"), b"kept").expect("its file");
+        let in_no_store = root.join(HOSTED).join("stray.sqlite3.corrupt-43");
+        fs::write(&in_no_store, b"kept").expect("a file in no store");
+        let deeper = second.join("deeper");
+        fs::create_dir_all(&deeper).expect("a directory below a mob's");
+        let below_a_store = deeper.join("deep.sqlite3.corrupt-44");
+        fs::write(&below_a_store, b"kept").expect("a file below a store");
+
+        let mut listed: Vec<PathBuf> = enumerate_state_dir_artifacts(state)
+            .into_iter()
+            .map(|artifact| artifact.path)
+            .collect();
+        listed.sort();
+        let mut expected = vec![in_the_root.clone(), quarantined.clone(), backup.clone()];
+        expected.sort();
+        assert_eq!(
+            listed, expected,
+            "the artifacts beside a hosted mob's realm files are listed with the root's, \
+             and nothing else below the root is"
+        );
+
+        let sweep = prune_state_dir(state, 0, MigrateMode::Apply);
+        assert!(!sweep.has_errors(), "{:?}", sweep.errors);
+        assert!(
+            !in_the_root.exists() && !quarantined.exists() && !backup.exists(),
+            "a prune of everything deletes the listed artifacts"
+        );
+        assert!(
+            of_the_launch_mob.is_file() && of_the_second.is_file(),
+            "and no realm file"
+        );
+        assert!(
+            a_directory.join("mob%2Ethird.sqlite3").is_file()
+                && in_no_store.is_file()
+                && below_a_store.is_file(),
+            "and nothing it did not list"
+        );
     }
 
     #[test]

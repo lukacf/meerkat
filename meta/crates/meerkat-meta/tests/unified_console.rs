@@ -486,7 +486,7 @@ async fn phase_h1_req_001_reference_style_router_mounts_console_and_sse() {
         ])
     );
 
-    assert_eq!(console_json["contract_version"], json!("0.5.0"));
+    assert_eq!(console_json["contract_version"], json!("0.6.0"));
     assert_eq!(
         console_json["runtime_capabilities"],
         json!({
@@ -3034,6 +3034,7 @@ rust_bundles = ["parked"]
     loop {
         let page = store
             .query_frames(meerkat_meta::ConsoleTimelineQuery {
+                mob_id: None,
                 identity: None,
                 conversation_id: None,
                 after: after.clone(),
@@ -3281,6 +3282,7 @@ rust_bundles = ["parked"]
     loop {
         let page = store
             .query_frames(meerkat_meta::ConsoleTimelineQuery {
+                mob_id: None,
                 identity: None,
                 conversation_id: None,
                 after: after.clone(),

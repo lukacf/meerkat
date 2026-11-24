@@ -240,6 +240,40 @@ async fn runtime_backed_external_events_stay_queued_without_waking_idle_sessions
         "initial create-session turn should consume exactly one model call"
     );
 
+    // The create answers before the session's runtime loop has parked: the
+    // loop resolves a run's completions and then checks its queue again in
+    // the same lap, so an input admitted without a wake before the park can
+    // still run on that lap. Wait until the loop is parked with no run in
+    // flight, so that the event below reaches an idle session. The park is
+    // the loop's own signal: published as it awaits its next wake with none
+    // buffered, cleared by any wake.
+    let mut parked = runtime_adapter.runtime_loop_parked();
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            parked
+                .wait_for(|sessions| sessions.contains(&parsed_session_id))
+                .await
+                .expect("runtime-loop park watch");
+            if runtime_adapter
+                .current_run(&parsed_session_id)
+                .await
+                .is_none()
+            {
+                break;
+            }
+            runtime_adapter
+                .wait_current_run_settled(&parsed_session_id)
+                .await;
+        }
+    })
+    .await
+    .expect("the session's runtime loop parks with no run in flight");
+    assert_eq!(
+        llm.call_count(),
+        1,
+        "the parked session has made no model call beyond its create turn"
+    );
+
     let event_request = Request::builder()
         .method("POST")
         .uri(format!("/sessions/{session_id}/external-events"))

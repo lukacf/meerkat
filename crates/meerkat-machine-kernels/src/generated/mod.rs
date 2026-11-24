@@ -8,6 +8,7 @@ pub mod grant_authority;
 pub mod host_store_writer_fence;
 pub mod meerkat;
 pub mod mob;
+pub mod mob_hosted_set_lifecycle;
 pub mod mob_store_restore_lifecycle;
 pub mod occurrence_lifecycle;
 pub mod runtime_delivery;

@@ -4,7 +4,7 @@ description: "Why the gateways bind loopback, how to publish them behind a rever
 icon: "server"
 ---
 
-*Mirrored from Meerkat Meta main at [eaf6e375f11c](https://github.com/lukacf/meerkat/commit/eaf6e375f11c0969417c41e0177f87bd436b44ee) on 2026-11-19; Meta version 0.9.17 at that commit.*
+*Mirrored from Meerkat Meta main at [5f09cda4ef4a](https://github.com/lukacf/meerkat/commit/5f09cda4ef4ac96d41b72f5fe7413b7da4c4454c) on 2026-11-24; Meta version 0.9.18 at that commit.*
 
 Both bundled gateways, the console/admin `meta_gateway` and the SDK-facing
 `rpc_gateway`, bind `127.0.0.1` on an ephemeral port unless the launch selects
@@ -299,6 +299,27 @@ or `~/.local/state/meerkat-meta` when that variable is unset or empty):
 the address, the runtime id, the control address and the public base are
 taken from the entry, and the only checks are the resume key and a
 successful answer from the entry's `GET /healthz`.
+
+## Back up or move a gateway state directory
+
+Stop the gateway before copying its state. Copy the **whole state directory**,
+including every SQLite database and its adjacent `-wal` and `-shm` files if
+present. Restore them together from the same copy. A clean shutdown does not
+guarantee that all committed data has moved from the write-ahead log into the
+main database file.
+
+A successful restart is not proof that the backup is complete. After a clean
+SDK shutdown of `rpc_gateway` 0.9.15, a copy without the SQLite side files
+started without warning: the agents, their sessions and the Console timeline
+were present, but **all agent memory records were missing**. A copy of the
+whole directory retained those records. When checking a restored copy, verify
+an agent memory record you expect to find, not just that the gateway starts.
+
+The state directory is only part of a deployment backup. The credentials
+store, the session comms identity directory and any host store realm are kept
+outside it: back them up with it, and move them with it. A gateway started
+without the session comms identity directory brings every restored member up
+broken (see [Keeping a Meta realm in your own database](/meta/guides/unified-runtime#keeping-a-meta-realm-in-your-own-database)).
 
 ## Lifecycle side effects across a restart
 

@@ -35,8 +35,6 @@ them.
 
 ## [Unreleased]
 
-<!-- Draft entries for the mob profile key `tools.web_search`: their wording is not final. -->
-
 ### Breaking
 
 - Behaviour-only (not measured by the gate): `brain_swap` still reports `staged` or `already_staged`, not the outcome. Previously the switch could take effect with an incompatible level and the next input would be refused. Now, before the next input, a target route that refuses the held level, alone or in combination with the session's other reasoning settings, is denied with `CapabilityPolicy`. The session keeps its model and level and runs the input there. The agent gets no later turn notice of the denial; the routing record and a host log warning identify it.
@@ -61,19 +59,36 @@ them.
   tools are governed (a read-only profile, a deny list, a tool access or
   application tool policy, a dispatch admission, a tool grant gate that covers
   `web_search`) has none, since governance turns the provider's own tools off.
-  - Before setting the key, a limit on going back to 0.9.16, as observed
-    there. A JSON mob profile that names the key is accepted without a
-    warning; 0.9.16 has no such key. Do not rely on `web_search=false` in a
-    JSON mob profile to keep search disabled after a downgrade to 0.9.16.
-    A placed member's stored spec written while its profile named the key
-    is refused by 0.9.16: on the member host `rkat mob host` exits with
-    `host binding record serde failed`, naming the unknown field
-    `web_search`, and on the controlling host the mob is held as
-    quarantined (`store_unreadable`). A placed member of a profile without
-    the key is not affected, and after a completed retire of the member
-    0.9.16 starts on both hosts. For an identity adopted through
-    `mob/adopt_member_identity_declaration` while its profile named the
-    key, no recovery on 0.9.16 was demonstrated.
+  - Before setting the key, its limits with the released versions, each
+    by the evidence it rests on.
+    - A profile that does not set the key writes no new key in any stored
+      or wire form (a test of this change asserts it).
+    - By source, for 0.9.15, 0.9.16, 0.9.17 and 0.9.18, whose three
+      deciding source files are byte-identical: the mob profile struct
+      (`ToolConfig`) tolerates unknown keys and does not know this one, so
+      a set key is ignored there and is not preserved when the profile is
+      read into that struct and written again: `web_search = false` is not
+      enforced by that field. Do not rely on `web_search=false` in a JSON
+      mob profile to keep search disabled after a downgrade to 0.9.16. The
+      strict forms reject the unknown key: the portable stored spec of a
+      placed member (`PortableToolConfig`) and the two wire profile structs
+      (`WireMobToolConfig`, `MobToolConfigInput`).
+    - Observed on 0.9.16 only, with a debug build made from the 0.9.16 tag
+      (not the published binary). A hand-written JSON mob profile that
+      names the key is accepted without a warning. Over state written by
+      an older state of this change, with a placed member of a profile that
+      named the key: on the member host `rkat mob host` exits with
+      `host binding record serde failed`, naming the unknown field
+      `web_search`, and on the controlling host the mob is held as
+      quarantined (`store_unreadable`); a placed member of a profile
+      without the key is not affected; after a completed retire of the
+      member that build starts on both hosts. For an identity adopted
+      through `mob/adopt_member_identity_declaration` while its profile
+      named the key, no recovery on 0.9.16 was demonstrated. What another
+      release does after such a rejection is not shown by these
+      observations.
+    - Not verified: state written by this change read by a released 0.9.18
+      runtime.
   - `web_search = true` is the build's explicit enable. Where the provider's
     own search serves the member, it stays the provider's own. Where it does
     not (a model without one, or a governed member), the member gets the

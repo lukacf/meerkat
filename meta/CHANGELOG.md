@@ -7,13 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-<!-- Draft entry for the mob profile key `tools.web_search`: its wording is not final. -->
-
 ### Added
 
-- Before setting the key, read the limit on going back to 0.9.16 in the
-  Meerkat changelog's entry for it. A mob profile's optional
-  `tools.web_search` (see the Meerkat changelog)
+- Before setting the key, read its limits with the released versions in
+  the Meerkat changelog's entry for it: what holds by source for 0.9.15,
+  0.9.16, 0.9.17 and 0.9.18, what was observed on 0.9.16 only, and that
+  state written by this change read by a released 0.9.18 runtime is not
+  verified. No Meta gateway was run for any of them. A mob profile's
+  optional `tools.web_search` (see the Meerkat changelog)
   is shown where a profile's tool configuration is shown: the rendering of a
   held identity request has a `Web search: enabled` or `Web search:
   disabled` line for a profile that states the key, and none for a profile

@@ -523,28 +523,44 @@ profile said `false` keeps no web search after the key is removed: set
 `web_search = true` to give it back. Only a new session of the member returns
 to the unset behaviour.
 
-Before setting the key, note a limit on going back to 0.9.16, as observed
-there:
+Before setting the key, note its limits with the released versions, each by
+the evidence it rests on:
 
-- A JSON mob profile that names the key is accepted without a warning;
-  0.9.16 has no such key. Do not rely on `web_search=false` in a JSON mob
-  profile to keep search disabled after a downgrade to 0.9.16.
-- A placed member's stored spec written while its profile named the key is
-  refused by 0.9.16. The spec is stored on both hosts, in the controlling
-  host's placed spawn record and in the member host's binding record:
-  - on the controlling host the Meerkat CLI starts and holds the mob as
-    quarantined: every command on it answers
+- A profile that does not set the key writes no new key in any stored or wire
+  form (a test asserts it).
+- By source, for 0.9.15, 0.9.16, 0.9.17 and 0.9.18, whose three deciding
+  source files are byte-identical: the mob profile struct (`ToolConfig`)
+  tolerates unknown keys and does not know this one, so a set key is ignored
+  there and is not preserved when the profile is read into that struct and
+  written again: `web_search = false` is not enforced by that field. Do not
+  rely on `web_search=false` in a JSON mob profile to keep search disabled
+  after a downgrade to 0.9.16. The strict forms reject the unknown key: the
+  portable stored spec of a placed member (`PortableToolConfig`) and the two
+  wire profile structs (`WireMobToolConfig`, `MobToolConfigInput`).
+- Observed on 0.9.16 only, with a debug build made from the 0.9.16 tag (not
+  the published binary):
+  - a hand-written JSON mob profile that names the key is accepted without a
+    warning;
+  - over state written by an older state of this feature, with a placed
+    member of a profile that named the key (its spec is stored on both
+    hosts, in the controlling host's placed spawn record and in the member
+    host's binding record): on the controlling host the Meerkat CLI starts
+    and holds the mob as quarantined: every command on it answers
     `mob '<id>' is quarantined (store_unreadable)`, naming the unknown field
     `web_search` (see
     [Quarantined mobs and degraded members](#quarantined-mobs-and-degraded-members));
-  - on the member host `rkat mob host` does not start: it exits with
-    `host binding record serde failed`, naming the same field.
+    on the member host `rkat mob host` does not start: it exits with
+    `host binding record serde failed`, naming the same field. A placed
+    member of a profile without the key is not affected. After a completed
+    retire of the member that build starts on both hosts;
+  - for an identity adopted through the member identity declaration API
+    (`mob/adopt_member_identity_declaration`) while its profile named the
+    key, no recovery on 0.9.16 was demonstrated.
 
-  A placed member of a profile without the key is not affected. After a
-  completed retire of the member, 0.9.16 starts on both hosts.
-- For an identity adopted through the member identity declaration API
-  (`mob/adopt_member_identity_declaration`) while its profile named the key,
-  no recovery on 0.9.16 was demonstrated.
+  What another release does after such a rejection is not shown by these
+  observations.
+- Not verified: state written with the key by this version, read by a
+  released 0.9.18 runtime.
 
 ### Profile model and provider fields
 

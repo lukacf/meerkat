@@ -38384,13 +38384,14 @@ mod tests {
         async fn a_second_host_mob_is_built_with_the_host_composition_at_its_create_and_at_each_load()
          {
             const LAUNCH: &str = row_id!("launch-mob");
+            const HOST_SECOND: &str = row_id!("host-second");
             for policy in [MobRestorePolicy::Eager, MobRestorePolicy::OnDemand] {
                 let svc = Arc::new(MockSessionSvc::new());
                 let dir = tempfile::tempdir().expect("tempdir");
                 let composition = RecordingComposition::new(&svc);
                 let state = host_state(LAUNCH, &svc, dir.path(), &composition, policy);
                 let second = state
-                    .mob_create_definition(explicit_definition("host-second"))
+                    .mob_create_definition(explicit_definition(HOST_SECOND))
                     .await
                     .expect("create a second host mob");
                 assert_eq!(
@@ -39453,6 +39454,7 @@ mod tests {
         #[tokio::test]
         async fn no_pass_of_the_set_loads_the_default_mob() {
             const LAUNCH: &str = row_id!("launch-mob");
+            const HOST_SECOND: &str = row_id!("host-second");
             for policy in [MobRestorePolicy::Eager, MobRestorePolicy::OnDemand] {
                 let svc = Arc::new(MockSessionSvc::new());
                 let dir = tempfile::tempdir().expect("tempdir");
@@ -39465,7 +39467,7 @@ mod tests {
                         .await
                         .expect("the first launch creates the default mob");
                     let second = first
-                        .mob_create_definition(explicit_definition("host-second"))
+                        .mob_create_definition(explicit_definition(HOST_SECOND))
                         .await
                         .expect("create a second host mob");
                     end_process(&first).await;
@@ -40723,6 +40725,7 @@ mod tests {
         #[tokio::test]
         async fn the_default_mob_is_not_destroyed_through_the_set() {
             const LAUNCH: &str = row_id!("launch-mob");
+            const HOST_SECOND: &str = row_id!("host-second");
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
             let composition = RecordingComposition::new(&svc);
@@ -40780,7 +40783,7 @@ mod tests {
             );
             // Another host mob is destroyed as before.
             let second = state
-                .mob_create_definition(explicit_definition("host-second"))
+                .mob_create_definition(explicit_definition(HOST_SECOND))
                 .await
                 .expect("create a second host mob");
             state
@@ -40942,6 +40945,7 @@ mod tests {
         #[tokio::test]
         async fn a_completion_owed_before_the_census_stays_owed_and_starts_no_restore() {
             const LAUNCH: &str = row_id!("launch-mob");
+            const HOST_OTHER: &str = row_id!("host-other");
             use meerkat::ContinuationAddressResolver as _;
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
@@ -40962,7 +40966,7 @@ mod tests {
                     .expect("the first launch creates the default mob");
                 spawn_worker(&first, &launch).await;
                 let other = first
-                    .mob_create_definition(explicit_definition("host-other"))
+                    .mob_create_definition(explicit_definition(HOST_OTHER))
                     .await
                     .expect("create a further host mob");
                 spawn_worker(&first, &other).await;
@@ -41024,6 +41028,7 @@ mod tests {
         #[tokio::test]
         async fn the_first_verb_returns_with_a_child_of_an_archived_default_mob_member() {
             const LAUNCH: &str = row_id!("launch-mob");
+            const MEMBER_CHILD: &str = row_id!("member-child");
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
             let launch = MobId::from(LAUNCH);
@@ -41045,7 +41050,7 @@ mod tests {
                     .await;
                 first
                     .mob_create_definition_with_owner_bridge_session(
-                        explicit_definition("member-child"),
+                        explicit_definition(MEMBER_CHILD),
                         owner.clone(),
                         true,
                         false,
@@ -41101,6 +41106,7 @@ mod tests {
         #[tokio::test]
         async fn the_first_verb_returns_while_the_default_mob_awaits_its_serve() {
             const LAUNCH: &str = row_id!("launch-mob");
+            const MEMBER_CHILD: &str = row_id!("member-child");
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
             let launch = MobId::from(LAUNCH);
@@ -41122,7 +41128,7 @@ mod tests {
                     .await;
                 let child = first
                     .mob_create_definition_with_owner_bridge_session(
-                        explicit_definition("member-child"),
+                        explicit_definition(MEMBER_CHILD),
                         owner,
                         true,
                         false,
@@ -41309,6 +41315,7 @@ mod tests {
         #[tokio::test]
         async fn the_create_hook_is_not_asked_for_the_default_mobs_create() {
             const LAUNCH: &str = row_id!("launch-mob");
+            const HOST_SECOND: &str = row_id!("host-second");
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
             let composition = RecordingComposition::new(&svc);
@@ -41339,7 +41346,7 @@ mod tests {
                     .created
             );
             let second = state
-                .mob_create_definition(explicit_definition("host-second"))
+                .mob_create_definition(explicit_definition(HOST_SECOND))
                 .await
                 .expect_err("the hook refuses every create it is asked for");
             assert!(MobMcpState::is_create_refusal(&second), "{second:?}");
@@ -41347,7 +41354,7 @@ mod tests {
                 *asked
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner),
-                vec![MobId::from("host-second")],
+                vec![MobId::from(HOST_SECOND)],
                 "the hook was asked for the other create only"
             );
             end_process(&state).await;
@@ -41795,6 +41802,7 @@ mod tests {
         #[tokio::test]
         async fn a_composition_that_waits_does_not_hold_the_first_verb() {
             const LAUNCH: &str = row_id!("launch-mob");
+            const HOST_SLOW: &str = row_id!("host-slow");
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
             let slow = {
@@ -41807,7 +41815,7 @@ mod tests {
                     MobRestorePolicy::Eager,
                 );
                 let slow = first
-                    .mob_create_definition(explicit_definition("host-slow"))
+                    .mob_create_definition(explicit_definition(HOST_SLOW))
                     .await
                     .expect("create a host mob");
                 end_process(&first).await;
@@ -43161,12 +43169,13 @@ mod tests {
             end_process(&second).await;
         }
 
-        /// A host mob of an earlier process, whose host declared the
-        /// default mob `launch`, and a state that owns its tasks whose
+        /// A host mob `slow_id` of an earlier process, whose host declared
+        /// the default mob `launch`, and a state that owns its tasks whose
         /// composition waits before it builds that mob: the state, its
         /// composition, what releases the build, and the mob.
         async fn a_host_mob_whose_build_waits(
             launch: &str,
+            slow_id: &str,
             svc: &Arc<MockSessionSvc>,
             dir: &std::path::Path,
         ) -> (
@@ -43179,7 +43188,7 @@ mod tests {
                 let composition = RecordingComposition::new(svc);
                 let first = host_state(launch, svc, dir, &composition, MobRestorePolicy::Eager);
                 let slow = first
-                    .mob_create_definition(explicit_definition("host-slow"))
+                    .mob_create_definition(explicit_definition(slow_id))
                     .await
                     .expect("create a host mob");
                 end_process(&first).await;
@@ -43206,10 +43215,11 @@ mod tests {
         #[tokio::test]
         async fn a_second_pass_does_not_wait_for_a_host_build_left_to_run() {
             const LAUNCH: &str = row_id!("launch-mob");
+            const HOST_SLOW: &str = row_id!("host-slow");
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
             let (state, composition, release, slow) =
-                a_host_mob_whose_build_waits(LAUNCH, &svc, dir.path()).await;
+                a_host_mob_whose_build_waits(LAUNCH, HOST_SLOW, &svc, dir.path()).await;
             assert!(
                 at_once(state.mob_list(), "the first verb")
                     .await
@@ -43254,10 +43264,11 @@ mod tests {
         #[tokio::test]
         async fn a_host_build_left_to_run_holds_the_states_admission() {
             const LAUNCH: &str = row_id!("launch-mob");
+            const HOST_SLOW: &str = row_id!("host-slow");
             let svc = Arc::new(MockSessionSvc::new());
             let dir = tempfile::tempdir().expect("tempdir");
             let (state, composition, release, slow) =
-                a_host_mob_whose_build_waits(LAUNCH, &svc, dir.path()).await;
+                a_host_mob_whose_build_waits(LAUNCH, HOST_SLOW, &svc, dir.path()).await;
             assert!(
                 at_once(state.mob_list(), "the first verb")
                     .await
@@ -43373,6 +43384,7 @@ mod tests {
         #[tokio::test]
         async fn an_outcome_owed_to_a_member_of_a_mob_that_is_not_served_is_not_a_plain_sessions() {
             const LAUNCH: &str = row_id!("launch-mob");
+            const HOST_OTHER: &str = row_id!("host-other");
             fn kind(answer: &Result<DetachedOutcomeOwner, MobError>) -> &'static str {
                 match answer {
                     Ok(DetachedOutcomeOwner::Member(..)) => "a member",
@@ -43399,7 +43411,7 @@ mod tests {
                     .expect("the first launch creates the default mob");
                 let launch_member = spawn_worker(&first, &launch).await;
                 let other = first
-                    .mob_create_definition(explicit_definition("host-other"))
+                    .mob_create_definition(explicit_definition(HOST_OTHER))
                     .await
                     .expect("create a further host mob");
                 let other_member = spawn_worker(&first, &other).await;

@@ -2833,6 +2833,9 @@ impl Rig {
             .unwrap_or_else(|| panic!("{name} is bound to a session"));
         let session_id =
             meerkat_core::types::SessionId::parse(&session).expect("the member's session id");
+        // The strict read below refuses while the turn's own run is not yet
+        // committed: wait for that turn first.
+        self.turn_settled(name, marker, &session_id).await;
         let stored = meerkat_mob::MobSessionService::load_persisted_session(
             &**self
                 .runtime
@@ -2865,6 +2868,125 @@ impl Rig {
             tool: offers_tool(&rendered),
         }
     }
+
+    /// Wait, bounded, until the turn `marker` of `name` settled in
+    /// `session`: its run's boundary commit applied. The wait is the one
+    /// `meta_instruction_append.rs` makes after each turn (`Rig::settled`
+    /// there), copied here because the two rigs share no module.
+    async fn turn_settled(
+        &self,
+        name: &str,
+        marker: &str,
+        session: &meerkat_core::types::SessionId,
+    ) {
+        let deadline = tokio::time::Instant::now() + TURN_BOUND;
+        loop {
+            let unsettled = match self.turn_committed(name, marker, session).await {
+                Ok(()) => return,
+                Err(unsettled) => unsettled,
+            };
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "{name}: the wait for the turn {marker:?} to settle in the session {session} \
+                 ran out after {TURN_BOUND:?}: {unsettled}"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    /// Whether `session`'s committed transcript holds the row that carries
+    /// `marker`, whatever its role, and an assistant row after that row;
+    /// otherwise what it holds. A run's rows stand ahead of the committed
+    /// snapshot until its boundary commit, and this read serves only that
+    /// snapshot, so the answer to `marker` is in it once that turn's run
+    /// committed its boundary, and not before.
+    ///
+    /// Only this yes or no leaves the read: the session it reads is dropped
+    /// here, and no assertion of a row reads it.
+    ///
+    /// Three answers of the read are no answer about the transcript. The
+    /// typed transcript revision conflict is what this read answers when a
+    /// writer of the session commits between its store reads on every
+    /// attempt it makes: the turn is not settled yet, and the wait reads
+    /// again. Any other error fails the row at once, and so does a session
+    /// that is not stored: a created session's first boundary is stored
+    /// before its first turn can run.
+    async fn turn_committed(
+        &self,
+        name: &str,
+        marker: &str,
+        session: &meerkat_core::types::SessionId,
+    ) -> Result<(), String> {
+        let read = meerkat_mob::MobSessionService::load_persisted_session_tolerating_tail(
+            &**self
+                .runtime
+                .mob_runtime()
+                .session_service()
+                .expect("the runtime's session service"),
+            session,
+        )
+        .await;
+        let committed = match read {
+            Ok(Some(committed)) => committed,
+            Ok(None) => panic!(
+                "{name}: no committed session {session} is stored while the turn {marker:?} \
+                 settles"
+            ),
+            Err(error) if is_transcript_revision_conflict(&error) => {
+                return Err(format!(
+                    "the committed read met a writer of the session on every attempt: {error}"
+                ));
+            }
+            Err(error) => panic!(
+                "{name}: the committed session {session} does not read while the turn \
+                 {marker:?} settles: {error:?}"
+            ),
+        };
+        let rows = committed.messages();
+        let asked = rows
+            .iter()
+            .position(|row| {
+                serde_json::to_string(row)
+                    .expect("a transcript row renders")
+                    .contains(marker)
+            })
+            .ok_or_else(|| {
+                format!(
+                    "none of its {} committed rows carries the marker",
+                    rows.len()
+                )
+            })?;
+        if rows[asked + 1..]
+            .iter()
+            .any(|row| matches!(row, meerkat_core::types::Message::BlockAssistant(_)))
+        {
+            Ok(())
+        } else {
+            Err(format!(
+                "its committed row {asked} of {} carries the marker, and no assistant row \
+                 follows it",
+                rows.len()
+            ))
+        }
+    }
+}
+
+/// Whether `error` is the typed transcript revision conflict of the session
+/// store, as the session service itself tells it from its other store
+/// errors: by the type of the boxed source, never by its text.
+fn is_transcript_revision_conflict(error: &meerkat_core::SessionError) -> bool {
+    matches!(
+        error,
+        meerkat_core::SessionError::Store(source)
+            if source
+                .downcast_ref::<meerkat_core::SessionStoreError>()
+                .is_some_and(|source| {
+                    matches!(
+                        source,
+                        meerkat_core::SessionStoreError::TranscriptRevisionConflict { .. }
+                    )
+                })
+    )
 }
 
 /// Fail unless `inputs`, a build of `name`, took every input the host's

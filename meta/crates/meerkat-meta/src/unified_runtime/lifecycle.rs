@@ -493,12 +493,12 @@ impl UnifiedRuntime {
         // Phases 3 and 4 continue either way. A candidate launch stops
         // nothing ([`Self::stop_mob_unless_candidate`]).
         let stop_started = std::time::Instant::now();
-        let stop_attempt = self
+        let mob_stop = self
             .stop_mob_unless_candidate(meerkat_mob::StopOptions::default().leave_runs_running())
             .await;
         let stop_elapsed = stop_started.elapsed();
-        let stop_cut_while_waiting_on = stop_attempt.cut_while_waiting_on;
-        let mob_stop = stop_attempt.result;
+        let stop_cut_while_waiting_on = mob_stop.cut_while_waiting_on;
+        let mob_stop = mob_stop.result;
         // Shutdown is terminal: the delivery owner stops with the mob rather
         // than when the last runtime clone happens to drop. Undelivered rows
         // stay pending in the durable inbox.

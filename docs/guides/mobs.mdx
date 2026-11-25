@@ -104,8 +104,10 @@ The owned wait and the typed error in the rest of this paragraph are not in
 0.9.18: they come with the release that carries this change. From that
 release the call
 owns its wait: what the tool call's time limit allows (ten minutes by
-default), or a shorter `max_run_secs`. A call can end before the helper has
-answered in two ways. When the wait ends while the caller still waits, the
+default), or a shorter `max_run_secs`. While the helper still runs, a call
+can end in two ways (the reference's `reason` row lists the others that end
+a call without the helper's result: a failed or unadmitted turn, a lost
+run). When the wait ends while the caller still waits, the
 call starts the helper's cleanup (a cancel of its run, then its retirement)
 and answers a typed error (`delegate_helper_ended`) that names the helper's
 mob and member id. Read the error's `helper` field for what became of the

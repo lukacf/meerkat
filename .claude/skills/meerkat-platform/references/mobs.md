@@ -1154,7 +1154,7 @@ With generated authority, `AgentMobToolSurface`
 
 | Tool | Purpose |
 |------|---------|
-| `delegate` | Quick helper spawn: creates the session's implicit mob on first use, seats one helper, runs its one task, returns a bounded result and retires the helper. The tool owns its wait (`max_run_secs`, at most the call's tool deadline); a call that ends without the helper's result cancels and retires the helper and answers `delegate_helper_ended` with `mob_id` and `member_id` |
+| `delegate` | Quick helper spawn: creates the session's implicit mob on first use, seats one helper, runs its one task, returns a bounded result and retires the helper. The tool owns its wait (`max_run_secs`, at most the call's tool deadline); a call whose wait ends without the helper's result issues a cancel of the helper's run, starts the helper's retirement and answers `delegate_helper_ended` with `mob_id` and `member_id`; its `helper` field says what became of the helper |
 | `conclude_objective` | Supply only `outcome` to conclude the kickoff objective pre-addressed by the current turn |
 | `mob_create` | Create a mob from a definition |
 | `mob_destroy` | Destroy a mob and archive all members |

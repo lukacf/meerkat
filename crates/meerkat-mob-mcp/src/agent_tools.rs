@@ -733,7 +733,8 @@ impl AgentMobToolSurface {
         "# Agent Delegation & Orchestration\n\n\
          You can delegate work to helper agents and orchestrate multi-agent mobs:\n\n\
          - delegate: Run one exact bounded helper task in an implicit mob, then retire the helper \
-           (also when the wait ends without its result)\n\
+           (a wait that ends without its result starts the helper's cleanup; the error says \
+           what became of the helper)\n\
          - conclude_objective: Publish the final answer for the current pre-addressed kickoff objective\n\
          - mob_create: Create an explicit mob with full control over profiles, wiring, and flows\n\
          - mob_destroy: Destroy an explicit mob (cannot destroy implicit delegation mob)\n\
@@ -4317,8 +4318,10 @@ fn build_tool_defs_with_profile_support(
              The call waits as long as the call itself may run (its tool deadline, less a \
              short margin). max_run_secs sets a shorter wait; a longer one is clamped to what \
              the call may run, and the answer says so (max_run_limited_by). When the wait is \
-             over and the helper has not answered, the helper's run is cancelled and the \
-             helper is retired, and the call answers an error whose data says so: kind \
+             over and the helper has not answered, the call starts the helper's cleanup (a \
+             cancel of its run, then its retirement) and answers an error whose data says \
+             what became of the helper (its cleanup can still be under way or can have \
+             failed): kind \
              delegate_helper_ended, reason (max_run_elapsed, turn_failed, not_started, \
              run_lost), helper (cancelled_and_retired, retired, already_gone, not_seated, \
              end_pending, mob_not_running, retirement_failed, unknown), mob_id, member_id, \
@@ -9025,6 +9028,62 @@ mod tests {
         assert!(
             delegate.description.contains(helper_values.as_str()),
             "the delegate tool's description does not list `{helper_values}`"
+        );
+    }
+
+    /// What the tool tells a model about a wait that ends without the
+    /// helper's result is what the call does: it starts the helper's cleanup
+    /// and its error says what became of the helper. The description does
+    /// not state the retirement as done.
+    #[test]
+    fn the_delegate_description_says_that_an_ended_wait_starts_the_helpers_cleanup() {
+        let defs = build_tool_defs();
+        let delegate = defs.iter().find(|d| d.name == "delegate").unwrap();
+        let text = delegate.description.as_str();
+        for stated_as_done in [
+            "the helper's run is cancelled and the helper is retired",
+            "the helper is retired, and the call answers",
+        ] {
+            assert!(
+                !text.contains(stated_as_done),
+                "the delegate tool's description still says `{stated_as_done}`"
+            );
+        }
+        for needle in [
+            "the call starts the helper's cleanup (a cancel of its run, then its retirement)",
+            "an error whose data says what became of the helper",
+            "its cleanup can still be under way or can have failed",
+        ] {
+            assert!(
+                text.contains(needle),
+                "the delegate tool's description does not say `{needle}`"
+            );
+        }
+    }
+
+    /// The usage text keeps its released line for `delegate` and says the
+    /// same of an ended wait as the description: the cleanup is started,
+    /// not promised.
+    #[test]
+    fn the_usage_text_says_that_an_ended_wait_starts_the_helpers_cleanup() {
+        let text = AgentMobToolSurface::usage_instructions();
+        assert!(
+            text.contains(
+                "- delegate: Run one exact bounded helper task in an implicit mob, then retire \
+                 the helper"
+            ),
+            "the released line for delegate is kept: {text}"
+        );
+        assert!(
+            !text.contains("(also when the wait ends without its result)"),
+            "the usage text still says that an ended wait retires the helper: {text}"
+        );
+        assert!(
+            text.contains(
+                "(a wait that ends without its result starts the helper's cleanup; the error \
+                 says what became of the helper)"
+            ),
+            "the usage text does not say what an ended wait does: {text}"
         );
     }
 

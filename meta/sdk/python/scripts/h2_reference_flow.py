@@ -34,7 +34,7 @@ EXPECTED_CAPABILITY_METHODS = [
     "meta/gating/decide",
     "meta/gating/audit",
 ]
-EXPECTED_CONTRACT_VERSION = "0.5.0"
+EXPECTED_CONTRACT_VERSION = "0.6.0"
 
 
 def _bind_listener() -> socket.socket:

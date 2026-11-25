@@ -6,7 +6,7 @@ PACK_DIR="$ROOT/examples/001-incident-command-center-pack"
 SCENARIO="$PACK_DIR/scenario.yaml"
 
 : "${OPENAI_API_KEY:?Set OPENAI_API_KEY to run the live incident command center pack}"
-export RKAT_INCIDENT_MODEL="${RKAT_INCIDENT_MODEL:-gpt-6-astra}"
+export RKAT_INCIDENT_MODEL="${RKAT_INCIDENT_MODEL:-gpt-6.2-astra}"
 # Meerkat 0.7's machine-authority code allocates huge debug-build stack
 # frames. The example binary sizes its own threads, and the workspace
 # .cargo/config.toml covers cargo-invoked flows; this export is belt and
@@ -70,7 +70,7 @@ start_server() {
   # set -m puts the background job in its own process group so cleanup can
   # kill the entire cargo/server tree via kill -- -PID.
   set -m
-  (cd "$ROOT" && INCIDENT_COMMAND_CENTER_LISTEN_ADDR="127.0.0.1:0" cargo run -p meerkat-meta --example incident_command_center > "$SERVER_LOG" 2>&1) &
+  (cd "$ROOT" && INCIDENT_COMMAND_CENTER_LISTEN_ADDR="127.0.0.1:0" "$ROOT/../scripts/repo-cargo" run -p meerkat-meta --example incident_command_center > "$SERVER_LOG" 2>&1) &
   SERVER_PID=$!
   set +m
   # A server that never became ready ends the leg here. Without the check the
@@ -107,7 +107,7 @@ echo "[incident-pack] ensuring example JS deps"
 # built above, so it is rebuilt after them; done here, the wait for the
 # server of each leg covers its start and not a compile.
 echo "[incident-pack] building the incident example server"
-(cd "$ROOT" && cargo build -p meerkat-meta --example incident_command_center)
+(cd "$ROOT" && "$ROOT/../scripts/repo-cargo" build -p meerkat-meta --example incident_command_center)
 
 echo "[incident-pack] using live model ${RKAT_INCIDENT_MODEL}"
 

@@ -76,7 +76,7 @@ may apply explicit presets of their own.
 | `meerkat_schedule_delete` | Schedule | Yes | `schedule` | Delete a schedule |
 | `meerkat_schedule_occurrences` | Schedule | Yes | `schedule` | List a page of occurrence summaries for a schedule (optional exact id, due range, phase, `limit` / `cursor`, full view) |
 | `workgraph_create` | WorkGraph | No | `work_graph` | Create a work item |
-| `workgraph_get` | WorkGraph | No | `work_graph` | Read one item |
+| `workgraph_get` | WorkGraph | No | `work_graph` | Read one item; optionally page recent evidence with `evidence_limit` and `evidence_cursor` |
 | `workgraph_list` | WorkGraph | No | `work_graph` | List items |
 | `workgraph_ready` | WorkGraph | No | `work_graph` | List ready items |
 | `workgraph_snapshot` | WorkGraph | No | `work_graph` | Read an observability snapshot |
@@ -311,10 +311,29 @@ interrupted, or hook-denied runs do not commit the switch, and later
 realization can still be denied or held. A staging result is not proof that
 the model has changed.
 
-The switch keeps the session's reasoning effort level and is not judged
-against it. After a `brain_swap` to a model whose route does not accept the
-session's level, each request is refused before it reaches the provider
-until the level is changed or cleared.
+The switch keeps the session's reasoning effort level, and is judged against
+it where it is decided, before the next input. A target whose route is known
+to refuse the level (alone, or together with the session's other reasoning
+settings) is denied: the request ends with the denial `CapabilityPolicy`, the
+session keeps its model and its level, and the next input runs on them. A
+target for which no source states the supported levels is denied in the same
+way. The denied switch is not applied later when the level is changed or
+cleared; ask for it again. Nothing in a later turn tells the agent that its
+switch was denied; the routing record and a warning in the host's log say so.
+
+When a source for the target's supported levels exists but cannot currently
+be read (an account's model list that is not loaded), a target whose client
+can be built can still be switched to without a compatibility verdict: the
+switch is carried out, as it was before the level was judged, and each
+request is refused as retryable until the levels can be read. If they then do
+not include the session's level, requests stay refused until the level or the
+model is changed. On the stock host, a target whose client cannot be built is
+held.
+
+A Rust host that implements `SessionLlmReconfigureHost` itself keeps its own
+hooks: for a session that holds a level its judge is asked where the switch
+is decided, and its acceptance is taken as the host's own word until it
+implements `inspect_target_session_llm_identity`.
 
 **Source:** `crates/meerkat-tools/src/builtin/brain_swap.rs`,
 `crates/meerkat-tools/src/builtin/composite.rs`,
@@ -337,6 +356,234 @@ it. A persisted mob whose store did not restore is quarantined and has no
 actor, so `mob_list` never lists it: the check fails closed. Hosts list
 quarantined mobs through `mob/list` and the MCP `meerkat_mob_list` tool (see
 [Quarantined mobs and degraded members](/guides/mobs#quarantined-mobs-and-degraded-members)).
+
+### `delegate`: its wait and how it ends
+
+This section describes `delegate` from the release that carries this change.
+It does not describe 0.9.18: for a `delegate` call that times out in 0.9.18,
+see [Fast Path: Delegate](/guides/mobs#fast-path-delegate).
+
+`delegate` seats a helper in the calling session's implicit mob
+(`implicit-<session id>`), runs the helper's one turn, returns the helper's
+bounded result, and retires the helper. The tool owns its wait:
+
+- **How long it waits.** By default the call waits as long as the call itself
+  may run: the narrowest deadline the agent loop resolved for the call (the
+  loop's tool deadline, `[tools] default_timeout`, 10 minutes by default; an
+  operator's `[tools.tool_timeouts] delegate`; a deadline the host imposes on
+  tool calls), less a short margin (15 seconds, or a quarter of the deadline
+  when that is shorter) in which it ends the helper and answers. That
+  deadline counts from the start of the call's dispatch, so the time a call
+  spent before it reached the tool (waiting for a dispatch slot under
+  `[tools] max_concurrent`, in a host's own checks above the tool) is taken
+  off the wait; a call that reaches the tool with no wait left answers the
+  loop's `timeout` without seating a helper. The optional argument
+  `max_run_secs` (at least 1) sets a shorter wait, counted from the call's
+  entry into the tool. A `max_run_secs` above what the call's deadline allows
+  is clamped to it, and the answer says so
+  (`max_run_limited_by: "call_deadline"`). A call with no deadline at all and
+  no `max_run_secs` waits 30 minutes: that is a call dispatched without the
+  plan the agent loop resolved for it (see the note for embedders below). The
+  result and the error carry the wait that applied as `max_run_secs`, to the
+  nearest second.
+- **How long the helper's end may take.** Ending a helper that is in a model
+  call or a tool call took about two seconds in our tests. The call waits for
+  it three quarters of its margin (about 11 seconds under the default
+  deadline) and then answers either way: a helper whose end is still under way
+  is reported `end_pending`, and the engine goes on ending it without the
+  call. The same holds for a helper whose spawn or turn admission had not
+  returned when the wait elapsed: the call answers at its wait, and the helper
+  is ended once its spawn and its turn's admission have returned (the engine
+  ends nothing before that). The steps before the helper's run count
+  against the wait too. An implicit mob creation that uses it up answers the
+  loop's `timeout`, since no mob exists yet; the creation goes on without
+  the call, and a later `delegate` of the session waits for it instead of
+  starting another. A call that stops waiting for a creation leaves nothing
+  behind that acts for it. When a creation fails, the calls that waited for it
+  do not get its failure: each makes its own attempt in turn. Once the mob
+  exists, the steps that follow (the helper's
+  tooling and policy) answer `delegate_helper_ended` with `helper:
+  not_seated`. So the answer comes before the call's deadline, and the
+  calling turn is never held by a helper that cannot be started or ended.
+- **A helper's own tool calls end before the call's wait.** A tool call the
+  helper makes is bounded by what the `delegate` that waits for it has left,
+  less room for the helper to report: 30 seconds, or a quarter of what is left
+  when that is shorter. A helper's slow tool therefore times out inside the
+  helper, the helper reports the timeout, and the call returns the helper's
+  result. With the defaults the call's deadline is 600 seconds, its wait 585,
+  and a tool the helper starts at once is cut after 555. The bound is one more
+  deadline of the helper's call, and the narrowest deadline wins: a tool with a
+  shorter configured deadline keeps it, and no tool gets longer than its own.
+  The timeout such a tool reports, and the timed-out event of the helper's
+  session, carry the number that applied, which can be shorter than the tool's
+  configured deadline. A helper's `fork_off` and `council` calls, which own
+  their deadline, are bounded the same way. Outside a `delegate` nothing
+  changes.
+- **The one knob for longer delegations** is `[tools.tool_timeouts] delegate`.
+  It sets how long the call may run, and through the call's wait what a
+  helper's tools get. To keep a long tool deadline inside helpers (a shell
+  timeout of 20 minutes, say), set `delegate` above it by more than 45
+  seconds.
+- **What the inner deadline does not cover.**
+  - A helper's long model call. The helper's report is itself a model call, so
+    no deadline can make the helper report a model call that does not return.
+    The call's wait ends first: the call starts the helper's cleanup (below)
+    and answers the typed error with no partial output. (A model's own call
+    timeout, where it is shorter than the wait, fails the helper's turn
+    instead, and the call answers `turn_failed`.)
+  - A helper placed on another host (`placement`). The bound is set in the
+    calling host's process and does not travel: there the helper's tools run
+    under that host's own tool deadlines. The call's wait still ends on the
+    calling host.
+  - A mob that runs without the runtime adapter (a standalone embedding whose
+    sessions are not runtime-backed): its helpers run under their own tool
+    deadlines alone.
+  - Any other case in which the calling host's runtime holds no bound for the
+    helper when its tool call starts. Three are known: the helper's session
+    could not be read right after the helper was seated; the helper's agent
+    was not built yet at that moment, so its session had no bindings to carry
+    the bound; the helper's session is registered anew during the call, and
+    the new registration starts without the bound. The bound fails open in
+    all of them: the helper runs under its own tool deadlines alone, as
+    before, and the call's wait ends first. The host's log has a debug line
+    for the first two.
+- **A call that ends without the helper's result starts the helper's
+  cleanup.** The cleanup is a cancel of the helper's run and then the
+  helper's retirement. When the wait elapses, the call starts it and answers
+  a typed tool error, `execution_failed` with `data.kind`
+  `delegate_helper_ended` (below). Starting the cleanup does not guarantee
+  that it is complete, or that it succeeded, when the call answers:
+  `data.helper` says what became of the helper, and can say that its end was
+  still under way (`end_pending`) or that it could not be retired
+  (`retirement_failed`, `mob_not_running`). When the call itself is dropped
+  (the calling turn is interrupted, a deadline outside the tool cuts the
+  call), the cleanup is started all the same; nobody is left to answer, so
+  no typed error is sent, and the host's log says how the cleanup went. The
+  cancel and the retirement name the
+  exact member the call seated: the caller's other work, the helper of another
+  call, and a later member under the same member id are not touched. A helper
+  whose turn completed before the cancel reached it is answered as a completed
+  call.
+- **Nesting.** A `delegate` that a helper makes inherits what the delegate
+  above it has left: the bound on the helper's tool calls is the deadline its
+  own `delegate` call reads, so each level waits less than the one above it
+  (585, 540 and 495 seconds with the defaults) and ends before it. When that
+  bound leaves a nested call less than 30 seconds, the call is refused before
+  anything is started: no mob is made for the calling helper and no helper is
+  seated. The refusal is `delegate_helper_ended` with `reason: not_started`,
+  `helper: not_seated`, `max_run_secs` (what was left) and
+  `max_run_limited_by: "call_deadline"`; it carries the `member_id` the call
+  gave and no `mob_id`, since no mob is involved. The floor is on what the
+  delegate above leaves, whatever `max_run_secs` the nested call names: a
+  nested call that asks for a short wait is refused too. A call is held to it
+  only when the bound of the delegate above is the narrowest of its deadlines:
+  a call that is not nested, and one under an operator's own shorter deadline,
+  wait what their `max_run_secs` and that deadline allow.
+  When an outer call is dropped (its calling turn is interrupted), its helper's
+  own waiting `delegate` call is dropped with the helper's turn, which ends
+  the inner helper the same way.
+
+`delegate_helper_ended` carries:
+
+| Field | Meaning |
+|-------|---------|
+| `reason` | `max_run_elapsed` (the wait elapsed), `turn_failed` (the helper's turn failed), `not_started` (the helper's turn could not be admitted; or, with `helper: not_seated`, a nested call was refused because the delegate above it has too little left) or `run_lost` (the engine lost the task that ran the call, a defect: see `unknown`). More reasons may be added. |
+| `helper` | What became of the helper: `cancelled_and_retired`; `retired` (after a failed or unadmitted turn); `already_gone` (it had been retired or replaced by another hand when the wait elapsed, and nothing else was cancelled or retired); `not_seated` (no helper was started, because the wait was used up first or because a nested call was refused: there is nothing to cancel or retire, and the answer carries no `member_ref` and no `session_id`); `end_pending` (its cancel and retirement were still under way when the call had to answer, and go on without it); `mob_not_running` (its mob takes no commands any more, for example it was shut down, so the helper could not be ended; a mob that was stopped and can be resumed still retires the helper); `retirement_failed` (it is still a member); `unknown` (with `run_lost`: if a helper was seated, its cancel and retirement go on without the call). More values may be added. |
+| `session_manages_mob` | Whether the calling session may use the member tools on the helper's mob: `true` when it holds manage scope over its implicit mob, which a `delegate` of its own that returned a result brought it. It reports the scope and grants none. |
+| `mob_id` | The mob that holds the helper: the calling session's implicit mob. |
+| `member_id`, `member_ref` | The helper's member id (the one the call gave) and its addressable reference. |
+| `session_id` | The helper's session, when one was bound. |
+| `max_run_secs`, `max_run_limited_by` | The wait that applied, for `max_run_elapsed`; for a refused nested call, the wait that was left. |
+| `error`, `cancel_error`, `retirement_error` | The failure texts, when there are any. |
+
+**What to do about the helper.** The error's text ends with it, by what became
+of the helper and by what the calling session may do:
+
+- The helper is gone (`cancelled_and_retired`, `retired`, `already_gone`,
+  `not_seated`): nothing is left to do, and the ids are for the record.
+- The helper is still a member (`retirement_failed`, `mob_not_running`), and
+  `session_manages_mob` is `true`: `mob_check_member` reads it and
+  `mob_retire_member` retires it, with the `mob_id` and `member_id` of the
+  error (for `mob_not_running`, once the mob runs again).
+- The helper is still a member and `session_manages_mob` is `false`: those two
+  tools are refused for this session (`access_denied`, with no data), and the
+  ids are for the host, which can retire the helper with `mob/retire` or
+  `MobHandle::retire`. A session gets the manage scope with the first result a
+  `delegate` of its own returns; an error brings none, and the ids give no
+  right.
+- The call cannot tell what became of the helper (`end_pending`, `unknown`):
+  the text says so. `mob_check_member` with the ids answers `member_retired`
+  once the helper is gone (`member_not_found` if it never was seated), for
+  every caller; a helper that stays is checked and retired as above.
+
+A session the host's member tool audience hides the helper from is told that
+the two tools do not reach the helper, whatever its scope.
+
+`member_ref` and `session_id` are left out, and the helper's session is not in
+the error's text, for a helper that the host's member tool audience hides
+from the caller. The audience is asked when the helper is seated, with the
+labels of its roster row; a call that seated no helper asks for the member id
+alone. An answer the call gives without hearing from its run (`end_pending`
+when the helper's end outlasts the wait for it, and `run_lost`) carries no
+`session_id` and asks the audience when it is given. The failure texts are
+left out for a mob that has such an audience.
+
+**The mob id on every answer.** From the point the session's implicit mob
+exists, every `delegate` answer names it: the result (`mob_id`) and every
+error (`data.mob_id`, with `data.member_id`), so the model can address the
+helper in the right mob after a call that did not return a result. A refusal
+before that point (an argument error, a missing authority, a child policy
+refusal, a nested call refused for want of time, an implicit mob that could
+not be created because of another mob)
+carries no mob id: no mob is involved yet. Two refusals name a mob in their
+own form instead: an implicit mob that did not restore (quarantined) answers
+as any quarantined mob does, with its id, and a mob registered under the
+implicit id that is not the session's own answers `access_denied` with no
+data. A permission refusal carries no ids at any point: a mob that refuses
+the helper's seat, or the bind of the call's objective to its owner, because
+the caller's principal lacks the control scope answers `access_denied` with no
+data too. (0.9.18 answers `execution_failed` at those two sites, with the
+message `tool 'delegate' failed: control scope denied: requires <scope>` and
+no typed data; a caller that serves both releases treats both answers as the
+scope refusal. A helper whose turn failed or was not admitted is a different
+answer in both: `execution_failed`, here with `data.kind`
+`delegate_helper_ended`.) The
+per-member tools are unchanged:
+a member id looked up in a mob that
+does not hold it still answers `member_not_found` for that mob.
+
+**A helper that should outlive the call** is not a `delegate` helper: seat it
+with `mob_spawn_member` in a mob the agent manages, or use `fork_off`.
+
+**Across a host restart.** A `delegate` call does not survive the host. A
+helper whose call died with the host is restored with its mob and stays
+seated and idle: it does not run its interrupted turn again, and nothing
+retires it until its owner's session is archived. The same call made again is
+refused because a member under that id exists, and its error names the mob
+and the member id. To remove such a helper, retire it: the agent with
+`mob_retire_member` (the `mob_id` and `member_id` of that error, or from
+`mob_list` and `mob_list_members`), a host with `mob/retire` or
+`MobHandle::retire`.
+
+**For embedders: forward the resolved plan.** `delegate` reads its call's
+deadline from the plan the agent loop resolved for the call, which reaches
+the tool through `AgentToolDispatcher::dispatch_resolved_with_context`, and
+the start of the dispatch from the `ToolDispatchContext`. The tool's catalog
+entry says that it owns its deadline, so the loop's default tool deadline no
+longer cuts it. A dispatcher that wraps the mob tools and forwards their
+`tool_catalog` must therefore forward `dispatch_resolved_with_context` too
+(Meta's wrapper does): a wrapper that lowers the call to
+`dispatch_with_context` hands the tool no deadline, and a `delegate` with no
+`max_run_secs` then waits 30 minutes instead of the loop's 10.
+
+**A cancel that waits for a boundary.** The mob's force cancel and
+cancel-all-work take effect at the member's next run boundary, and a turn
+that waits inside `delegate` reaches none until the call returns. Such a
+cancel therefore ends a waiting `delegate` only when the call's own wait
+ends; the call starts the helper's cleanup then and answers, and the turn is
+cancelled after the call has returned. An interrupt of the calling turn (a
+hard cancel) drops the call at once, and the helper's cleanup is started
+without it.
 
 ### `fork_off` and `council` delivery
 
@@ -761,7 +1008,7 @@ attention controls.
 | Tool | Purpose |
 |------|---------|
 | `workgraph_create` | Create a durable work item |
-| `workgraph_get` | Read one item |
+| `workgraph_get` | Read one item in full; opt into recent evidence with `evidence_limit` (1 through 20), then continue with `evidence_cursor` from `evidence_page.next_cursor` |
 | `workgraph_list` | List items with filters |
 | `workgraph_ready` | List machine-derived ready items |
 | `workgraph_snapshot` | Read items, edges, ready ids, timestamp, and event high-water mark |
@@ -779,6 +1026,12 @@ attention controls.
 For operating guidance, load the `workgraph-workflow` companion skill when it
 is available. For the data model and host observability surfaces, see
 [WorkGraph reference](/reference/workgraph-reference).
+
+The public MCP server exposes the same tool definition: its description and
+input schema include these evidence options for every caller. Omitting both
+preserves the full-item answer. Only the returned entry count is bounded;
+any item revision change refuses continuation, so a busy item's caller may
+need to restart or read the whole item. Each page checks access again.
 </Accordion>
 
 ## Task tools

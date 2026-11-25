@@ -94,6 +94,7 @@ fn member_frame(
     provenance: Option<ConsoleFrameMemberProvenance>,
 ) -> NewConsoleFrame {
     NewConsoleFrame {
+        mob_id: None,
         id: None,
         dedupe_key: key.to_string(),
         timestamp_ms: 1,
@@ -520,6 +521,7 @@ async fn provenance_inside_an_ingested_payload_is_never_trusted() {
     let view_controller = controller(Some(secret_label_deny()));
     let view = view_controller.view_for_subject(None);
     let embedded = ConsoleFrame {
+        mob_id: None,
         id: "embedded".to_string(),
         cursor: ConsoleCursor::from_seq(1),
         dedupe_key: "embedded".to_string(),
@@ -605,4 +607,477 @@ async fn runtime_plane_frames_keep_their_identity_decision_under_a_label_deny() 
             crate::console_contracts::CONSOLE_GAP_IDENTITY.to_string(),
         ]
     );
+}
+
+/// A frame is judged as the member it names: its identity in its own mob.
+/// One mob's `alice` is plain and the other's is private to someone else,
+/// so a caller reads the frames of the first and none of the second. A
+/// rule that lists one mob reaches that mob's frames only.
+///
+/// The frames carry the member provenance the console owner captured with
+/// them, as the frames of a served member do, so the decision under test
+/// is the mob's and not what a frame without captured attributes is
+/// answered with.
+#[tokio::test]
+async fn member_keyed_frames_are_judged_as_the_member_of_their_own_mob() {
+    let default_mob = crate::member_key::DefaultMob::new(meerkat_mob::MobId::from("launch"));
+    let second = meerkat_mob::MobId::from("second");
+    let attributes = |private: bool| crate::access::AgentResourceAttributes {
+        identity: "alice".to_string(),
+        labels: if private {
+            BTreeMap::from([(
+                crate::access::PRIVATE_TO_LABEL.to_string(),
+                "person:dana".to_string(),
+            )])
+        } else {
+            BTreeMap::new()
+        },
+        ..Default::default()
+    };
+    let captured = || Some(provenance("runtime-a", "alice", "public", Vec::new()));
+    let store = InMemoryConsoleLogStore::new();
+    let of_launch = store
+        .append_if_absent(member_frame("runtime-a", "launch-1", "alice", captured()))
+        .await
+        .expect("append")
+        .frame;
+    let mut frame = member_frame("runtime-a", "second-1", "alice", captured());
+    frame.mob_id = Some(second.clone());
+    let of_second = store.append_if_absent(frame).await.expect("append").frame;
+    for frame in [&of_launch, &of_second] {
+        assert!(
+            frame.source.member_provenance.is_some(),
+            "the stored frame keeps its captured provenance"
+        );
+    }
+    let everyone_views = |mobs: &[&str]| {
+        AccessController::new(AccessControlConfig {
+            enabled: true,
+            admins: vec![ROOT.to_string()],
+            rules: vec![AccessRule {
+                id: "everyone-views".to_string(),
+                actions: vec!["agent.view".to_string()],
+                agents: vec!["*".to_string()],
+                mobs: mobs.iter().map(|mob| (*mob).to_string()).collect(),
+                ..AccessRule::default()
+            }],
+            ..AccessControlConfig::default()
+        })
+        .expect("controller")
+    };
+    let visible = |access: &AccessController| {
+        let view = access.view_for_subject(Some(CALLER));
+        [
+            timeline_frame_visible_to(&view, &of_launch),
+            timeline_frame_visible_to(&view, &of_second),
+        ]
+    };
+
+    for (launch_private, expected) in [(false, [true, false]), (true, [false, true])] {
+        let access = everyone_views(&["*"]);
+        access.bind_default_mob(&default_mob);
+        access.record_agent_attributes(attributes(launch_private));
+        access.record_agent_attributes_in(&second, attributes(!launch_private));
+        assert_eq!(
+            visible(&access),
+            expected,
+            "the default mob's alice private: {launch_private}"
+        );
+    }
+
+    // No one is private: the mobs the rule lists decide.
+    let listed: [(&[&str], [bool; 2]); 3] = [
+        (&[], [true, false]),
+        (&["launch"], [true, false]),
+        (&["second"], [false, true]),
+    ];
+    for (mobs, expected) in listed {
+        let access = everyone_views(mobs);
+        access.bind_default_mob(&default_mob);
+        access.record_agent_attributes(attributes(false));
+        access.record_agent_attributes_in(&second, attributes(false));
+        assert_eq!(visible(&access), expected, "the rule lists {mobs:?}");
+    }
+}
+
+/// One request decides many frames through one decider, which keeps a
+/// decision per member context. The frame's mob is part of that context:
+/// two mobs' members of one name under one runtime key, with the same
+/// captured provenance, are decided apart, whichever of their frames the
+/// request meets first. The default mob's `alice` is plain and the other
+/// mob's is private to someone else.
+#[tokio::test]
+async fn member_keyed_frames_one_request_decides_two_mobs_members_of_one_name_apart() {
+    let default_mob = crate::member_key::DefaultMob::new(meerkat_mob::MobId::from("launch"));
+    let second = meerkat_mob::MobId::from("second");
+    let captured = || Some(provenance("runtime-a", "alice", "public", Vec::new()));
+    let store = InMemoryConsoleLogStore::new();
+    let of_launch = store
+        .append_if_absent(member_frame("runtime-a", "launch-1", "alice", captured()))
+        .await
+        .expect("append")
+        .frame;
+    let mut frame = member_frame("runtime-a", "second-1", "alice", captured());
+    frame.mob_id = Some(second.clone());
+    let of_second = store.append_if_absent(frame).await.expect("append").frame;
+    assert_eq!(
+        serde_json::to_string(&of_launch.source.member_provenance).expect("provenance"),
+        serde_json::to_string(&of_second.source.member_provenance).expect("provenance"),
+        "the two frames differ in their mob only"
+    );
+    assert_eq!(
+        (of_launch.mob_id.as_ref(), of_second.mob_id.as_ref()),
+        (None, Some(&second))
+    );
+
+    let access = AccessController::new(AccessControlConfig {
+        enabled: true,
+        admins: vec![ROOT.to_string()],
+        rules: vec![AccessRule {
+            id: "everyone-views".to_string(),
+            actions: vec!["agent.view".to_string()],
+            agents: vec!["*".to_string()],
+            mobs: vec!["*".to_string()],
+            ..AccessRule::default()
+        }],
+        ..AccessControlConfig::default()
+    })
+    .expect("controller");
+    access.bind_default_mob(&default_mob);
+    access.record_agent_attributes(crate::access::AgentResourceAttributes {
+        identity: "alice".to_string(),
+        ..Default::default()
+    });
+    access.record_agent_attributes_in(
+        &second,
+        crate::access::AgentResourceAttributes {
+            identity: "alice".to_string(),
+            labels: BTreeMap::from([(
+                crate::access::PRIVATE_TO_LABEL.to_string(),
+                "person:dana".to_string(),
+            )]),
+            ..Default::default()
+        },
+    );
+
+    // Each frame alone, as the decision answers it.
+    let view = access.view_for_subject(Some(CALLER));
+    assert_eq!(
+        [
+            timeline_frame_visible_to(&view, &of_launch),
+            timeline_frame_visible_to(&view, &of_second),
+        ],
+        [true, false]
+    );
+
+    // One request, the default mob's frame first: the private member of the
+    // other mob is not shown on the default mob's answer.
+    let decider = TimelineFrameDecider::new(access.view_for_subject(Some(CALLER)));
+    assert_eq!(
+        [decider.visible(&of_launch), decider.visible(&of_second)],
+        [true, false],
+        "the default mob's frame first"
+    );
+    // The other mob's frame first: the default mob's member is not hidden on
+    // the other mob's answer.
+    let decider = TimelineFrameDecider::new(access.view_for_subject(Some(CALLER)));
+    assert_eq!(
+        [decider.visible(&of_second), decider.visible(&of_launch)],
+        [false, true],
+        "the other mob's frame first"
+    );
+}
+
+/// A frame that names no session and names a console send takes the witness
+/// stored on that send's own frame, when the send was made to the frame's
+/// own member: the member of its name in its mob. Two mobs each have an
+/// `alice` under one runtime key, and one send was made to each. A frame of
+/// one mob's `alice` that names its own send carries that send's witness;
+/// one that names the other mob's send carries none. Both stock stores
+/// hold it alike, a row for each.
+async fn a_send_witnesses_only_frames_of_its_own_mobs_member(
+    aggregator: MetaConsoleAggregator,
+    log: &str,
+) {
+    let runtime = super::tests::build_empty_runtime(&super::tests::unique_console_mob_id(
+        "member-keyed-send-witness",
+    ))
+    .await;
+    let entry = super::tests::runtime_entry_for_test("runtime-a", &runtime);
+    let store = aggregator.inner.store.as_ref();
+    let second = meerkat_mob::MobId::from("second");
+    // The send to each mob's alice, witnessed by a member whose `tier` label
+    // names the mob.
+    for (mob, tier) in [(None, "launch"), (Some(&second), "second")] {
+        let mut send = member_frame(
+            "runtime-a",
+            &format!("send-to-{tier}"),
+            "alice",
+            Some(provenance("runtime-a", "alice", tier, Vec::new())),
+        );
+        send.mob_id = mob.cloned();
+        send.session_id = None;
+        send.kind = "user_input".to_string();
+        send.source.kind = ConsoleFrameSourceKind::Send;
+        send.interaction_id = Some(format!("interaction-of-{tier}"));
+        store.append_if_absent(send).await.expect("append");
+    }
+    let mut witnessed_as = Vec::new();
+    for (mob, interaction) in [
+        (None, "interaction-of-launch"),
+        (Some(&second), "interaction-of-second"),
+        (None, "interaction-of-second"),
+        (Some(&second), "interaction-of-launch"),
+    ] {
+        let mut frame = member_frame("runtime-a", "a-record-of-the-send", "alice", None);
+        frame.mob_id = mob.cloned();
+        frame.session_id = None;
+        frame.kind = "interaction_failed".to_string();
+        frame.interaction_id = Some(interaction.to_string());
+        let witness = witness_named_by_frame(&aggregator.inner, store, &entry, &frame, false)
+            .await
+            .expect("the send the frame names is read");
+        witnessed_as.push(witness.and_then(|witness| witness.identity.labels.get("tier").cloned()));
+    }
+    runtime.shutdown().await;
+    assert_eq!(
+        witnessed_as,
+        [
+            Some("launch".to_string()),
+            Some("second".to_string()),
+            None,
+            None,
+        ],
+        "{log}: a frame takes the witness of a send made to its own mob's member only"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn member_keyed_frames_a_send_witnesses_only_frames_of_its_own_mobs_member() {
+    a_send_witnesses_only_frames_of_its_own_mobs_member(
+        MetaConsoleAggregator::in_memory(),
+        "in memory",
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn member_keyed_frames_a_send_witnesses_only_frames_of_its_own_mobs_member_on_sqlite() {
+    let store = SqliteConsoleLogStore::in_memory().expect("a SQLite log in memory");
+    a_send_witnesses_only_frames_of_its_own_mobs_member(
+        MetaConsoleAggregator::new(Arc::new(store)),
+        "SQLite",
+    )
+    .await;
+}
+
+/// The console's read of one mob answers that mob's frames, whoever their
+/// member, and none of another mob's; the plain read, which names no mob,
+/// answers the default mob's frames alone.
+#[tokio::test]
+async fn member_keyed_frames_the_consoles_read_of_one_mob_answers_that_mob_alone() {
+    let second = meerkat_mob::MobId::from("second");
+    let aggregator = MetaConsoleAggregator::in_memory();
+    for (key, identity, mob) in [
+        ("launch-alice", "alice", None),
+        ("second-alice", "alice", Some(&second)),
+        ("launch-carol", "carol", None),
+        ("second-bob", "bob", Some(&second)),
+    ] {
+        let mut frame = member_frame(
+            "runtime-a",
+            key,
+            identity,
+            Some(provenance("runtime-a", identity, "public", Vec::new())),
+        );
+        frame.mob_id = mob.cloned();
+        aggregator
+            .inner
+            .store
+            .append_if_absent(frame)
+            .await
+            .expect("append");
+    }
+    let members = |page: ConsoleTimelineWindowPage| {
+        let mut members = page
+            .frames
+            .into_iter()
+            .map(|frame| (frame.identity, frame.mob_id))
+            .collect::<Vec<_>>();
+        members.sort();
+        members
+    };
+    let of_mob = |mob: Option<&meerkat_mob::MobId>| ConsoleTimelineWindowQuery {
+        mob_id: mob.cloned(),
+        ..recent(200)
+    };
+    assert_eq!(
+        members(
+            aggregator
+                .query_mob_timeline_windowed_for(of_mob(None), None)
+                .await
+                .expect("the default mob's frames")
+        ),
+        [("alice".to_string(), None), ("carol".to_string(), None)]
+    );
+    assert_eq!(
+        members(
+            aggregator
+                .query_mob_timeline_windowed_for(of_mob(Some(&second)), None)
+                .await
+                .expect("the second mob's frames")
+        ),
+        [
+            ("alice".to_string(), Some(second.clone())),
+            ("bob".to_string(), Some(second.clone())),
+        ]
+    );
+    assert_eq!(
+        members(
+            aggregator
+                .query_timeline_windowed_for(recent(200), None)
+                .await
+                .expect("the plain read")
+        ),
+        [("alice".to_string(), None), ("carol".to_string(), None)],
+        "the plain read names no mob: it reads the default mob's frames alone"
+    );
+}
+
+/// A store that does not read one mob's frames itself (it keeps the store
+/// trait's defaults, as a store written before that read does) serves the
+/// host's default mob alone. The console's read of the default mob answers
+/// that mob's frames, by its scan of the plain pages, and no frame of
+/// another mob, with an identity or without one. The read of another mob
+/// is refused, whether that mob holds frames in the store or none: it is
+/// never answered as a page.
+#[tokio::test]
+async fn member_keyed_frames_a_store_without_the_one_mob_read_serves_the_default_mob_alone() {
+    let second = meerkat_mob::MobId::from("second");
+    let with_no_frame = meerkat_mob::MobId::from("third");
+    let store = Arc::new(super::tests::CountingConsoleLogStore::new());
+    let aggregator = MetaConsoleAggregator::new(store.clone());
+    for (key, identity, mob) in [
+        ("launch-alice", "alice", None),
+        ("second-alice", "alice", Some(&second)),
+        ("launch-carol", "carol", None),
+        ("second-bob", "bob", Some(&second)),
+    ] {
+        let mut frame = member_frame(
+            "runtime-a",
+            key,
+            identity,
+            Some(provenance("runtime-a", identity, "public", Vec::new())),
+        );
+        frame.mob_id = mob.cloned();
+        store.append_if_absent(frame).await.expect("append");
+    }
+    let members = |page: ConsoleTimelineWindowPage| {
+        let mut members = page
+            .frames
+            .into_iter()
+            .map(|frame| (frame.identity, frame.mob_id))
+            .collect::<Vec<_>>();
+        members.sort();
+        members
+    };
+    let of =
+        |mob: Option<&meerkat_mob::MobId>, identity: Option<&str>| ConsoleTimelineWindowQuery {
+            mob_id: mob.cloned(),
+            identity: identity.map(str::to_string),
+            ..recent(200)
+        };
+    assert_eq!(
+        members(
+            aggregator
+                .query_mob_timeline_windowed_for(of(None, None), None)
+                .await
+                .expect("the default mob's frames")
+        ),
+        [("alice".to_string(), None), ("carol".to_string(), None)],
+        "the default mob's read shows no frame of the second mob"
+    );
+    assert_eq!(
+        members(
+            aggregator
+                .query_mob_timeline_windowed_for(of(None, Some("alice")), None)
+                .await
+                .expect("the default mob's alice")
+        ),
+        [("alice".to_string(), None)],
+        "one member's read shows no frame of another mob's member of the name"
+    );
+    for (mob, identity) in [
+        (&second, None),
+        (&second, Some("alice")),
+        (&with_no_frame, None),
+    ] {
+        let answer = aggregator
+            .query_mob_timeline_windowed_for(of(Some(mob), identity), None)
+            .await;
+        match answer {
+            Err(refusal) => {
+                // The refusal is the typed one inside the operational
+                // variant, and it names the mob that was asked for.
+                assert_eq!(
+                    refusal
+                        .store_serves_the_default_mob_alone()
+                        .map(|refusal| &refusal.mob),
+                    Some(mob),
+                    "the refusal is read by its type and names the mob: {refusal:?}"
+                );
+                assert!(
+                    refusal
+                        .to_string()
+                        .contains("does not read one mob's frames"),
+                    "the refusal says what the store lacks: {refusal}"
+                );
+            }
+            Ok(page) => panic!(
+                "the read of the mob {mob} (identity {identity:?}) is refused over a store \
+                 that does not read one mob's frames: {page:?}"
+            ),
+        }
+    }
+}
+
+/// The console events of a mob the host serves beside its default mob are
+/// not registered over a store that does not read one mob's frames: the
+/// registration is refused with what the store lacks, and none is kept, so
+/// no frame of that mob is ever handed to the store.
+#[tokio::test]
+async fn member_keyed_frames_a_store_without_the_one_mob_read_refuses_a_second_mobs_console_events()
+{
+    let second = meerkat_mob::MobId::from(super::tests::unique_console_mob_id(
+        "no-one-mob-read-second",
+    ));
+    let runtime = super::tests::build_empty_runtime(second.as_str()).await;
+    let aggregator =
+        MetaConsoleAggregator::new(Arc::new(super::tests::CountingConsoleLogStore::new()));
+    aggregator.tell_default_mob(crate::member_key::DefaultMob::new(
+        meerkat_mob::MobId::from("no-one-mob-read-launch"),
+    ));
+    let answer = aggregator.register_mob_console_events(
+        &second,
+        runtime.mob_runtime().clone(),
+        runtime.console_events(),
+        Arc::new(AllowAllConsoleVisibilityPolicy),
+    );
+    let kept = mob_registered_under(&aggregator.inner, &format!("mob/{}", second.as_str()));
+    runtime.shutdown().await;
+    let refusal = answer.expect_err("the registration is refused");
+    assert_eq!(
+        refusal
+            .downcast_ref::<StoreServesTheDefaultMobAlone>()
+            .map(|refusal| &refusal.mob),
+        Some(&second),
+        "the refusal is read by its type and names the mob: {refusal:?}"
+    );
+    assert!(
+        refusal
+            .to_string()
+            .contains("does not read one mob's frames"),
+        "the refusal says what the store lacks: {refusal}"
+    );
+    assert_eq!(kept, None, "no registration of the mob is kept");
 }

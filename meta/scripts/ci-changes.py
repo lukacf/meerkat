@@ -85,11 +85,11 @@ from pathlib import Path
 from typing import Callable
 
 # The lanes, each named by the `changes` output its jobs test in meta-ci.yml.
-# rust-unit, rust-conformance, rust-integration, rust-extension-state-lib and
-# rust-voice-lib run on pull requests only: the root CI runs those tests on
-# the push.
+# rust-unit-build and its rust-unit legs, rust-conformance, rust-integration,
+# rust-extension-state-lib and rust-voice-lib run on pull requests only: the
+# root CI runs those tests on the push.
 LANE_JOBS = {
-    "rust": ("rust-unit", "rust-examples", "rust-conformance", "rust-features-check"),
+    "rust": ("rust-unit-build", "rust-unit", "rust-examples", "rust-conformance", "rust-features-check"),
     "integration": ("rust-integration",),
     "voice": ("rust-voice", "rust-voice-lib"),
     "extension_state": ("rust-extension-state", "rust-extension-state-lib"),
@@ -216,11 +216,13 @@ FEATURE_GATES = {
 }
 FEATURE_PATHS = {
     # The transcript fixture the voice modules include_str!, and the runtime
-    # store forwarding probe, a test module only openai-live builds compile.
+    # store forwarding probe and the raw live session rows, test modules only
+    # openai-live builds compile.
     "voice": (
         "crates/meerkat-meta/src/console_voice/",
         "crates/meerkat-meta/tests/fixtures/console_voice_v1.json",
         "crates/meerkat-meta/src/runtime_store_forwarding_probe",
+        "crates/meerkat-meta/src/unified_runtime/live_raw_session_tests",
     ),
     "extension_state": ("crates/meta-extension-state/", "crates/meerkat-meta/src/extension_state"),
 }
@@ -257,6 +259,7 @@ LANE_INPUTS = (
     ("crates/meerkat-meta/src/rpc/identity_methods.rs", {"console"}),
     # Other sources the console and flow editor contract tests read.
     ("crates/meerkat-meta/src/mcp_apps_sandbox.rs", {"console"}),
+    ("crates/meerkat-meta/src/rpc/mob_addressing.rs", {"console"}),
     ("crates/meerkat-meta/src/rpc/topology_methods.rs", {"console"}),
     ("crates/meerkat-meta/src/rpc/workgraph_methods.rs", {"console"}),
     ("crates/meerkat-meta/src/runtime/console_ingress.rs", {"console"}),
@@ -266,6 +269,16 @@ LANE_INPUTS = (
     ("crates/meerkat-meta/assets/release-targets.json", {"console"}),
     ("crates/meerkat-meta/src/adaptive_layer_decision.schema.json", {"flow_editor"}),
     ("crates/meerkat-meta/tests/fixtures/console_voice_v1.json", {"console"}),
+    # The member reference cases the console core package's test parses
+    # beside the crate's own unit test.
+    ("crates/meerkat-meta/src/console_member_ref_cases.json", {"console"}),
+    # The row key cases the console's contract test parses beside the
+    # crate's own unit tests.
+    ("crates/meerkat-meta/src/console_row_key_cases.json", {"console"}),
+    # The gateway sources the console's contract test reads beside the
+    # ones above: the frame type and the console audit page type.
+    ("crates/meerkat-meta/src/console_aggregator/types.rs", {"console"}),
+    ("crates/meerkat-meta/src/console_audit.rs", {"console"}),
     ("crates/meerkat-meta/tests/fixtures/application_tool_policies_init_params.json", {"python"}),
     ("crates/meerkat-meta/tests/fixtures/live_contracts_v1.json", {"python"}),
     ("crates/meerkat-meta/tests/fixtures/role_migrations_init_params.json", {"extension_state", "python"}),

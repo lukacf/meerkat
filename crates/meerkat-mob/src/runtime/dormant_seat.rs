@@ -73,8 +73,10 @@ pub(crate) struct SeatBuildInputs {
     pub(crate) application_tool_policy: Option<meerkat_core::ApplicationToolPolicyBinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) auth_binding: Option<meerkat_core::AuthBindingRef>,
-    /// The spec's web search override (`ToolCategoryOverrides::web_search`):
-    /// the one tool category the seat's profile override does not hold.
+    /// The spec's web search override (`ToolCategoryOverrides::web_search`).
+    /// A seat written before a profile could state web search holds it only
+    /// here; since then the seat's profile override holds it too, and the
+    /// first build applies the same choice from either.
     #[serde(default, skip_serializing_if = "web_search_inherits")]
     pub(crate) web_search: ToolCategoryOverride,
 }
@@ -532,6 +534,10 @@ pub(in crate::runtime) struct DormantSeatCandidate {
     pub(in crate::runtime) continuity_intent: super::SpawnContinuityIntent,
     /// The spec's creation origin: a host-root seat is a root creation.
     pub(in crate::runtime) creation_origin: crate::member_creation::MemberCreationOrigin,
+    /// Who seats the member, composed at the seat's plan from what the
+    /// runtime observed: the seat's row stores it. A rotation's next
+    /// incarnation keeps its life's record instead.
+    pub(in crate::runtime) seat_record: Option<crate::MemberSeat>,
     pub(in crate::runtime) effective_profile_override: Option<crate::profile::Profile>,
     pub(in crate::runtime) effective_model_override: Option<String>,
     /// Whether the definition's wiring rules apply to the seated member: an

@@ -47,16 +47,25 @@ env:
   # Never exit on idle (nightly.yml says why): at the default 600 s the
   # server exits under a long compile, which then starts again uncached.
   SCCACHE_IDLE_TIMEOUT: "0"
+  # The crate whose check has a job of its own (the `isolated` job below).
+  # The census writes its report once, after its last crate, so a runner lost
+  # during one crate's check takes the verdicts of the crates before it with
+  # it. A check that runs for hours is kept apart, so that the other crates'
+  # report does not depend on it. Every other crate stays in the partition
+  # the census's own stride puts it in:
+  # scripts/published_crates_standalone_jobs.py computes each job's crates
+  # from the release list and hands them to the census as `--crate`.
+  STANDALONE_CENSUS_ISOLATED: meerkat-mob
 
 jobs:
   census:
-    name: Standalone census (${{ matrix.shard }}/8)
+    name: Standalone census (${{ matrix.shard }}${{ matrix.shard != 'isolated' && '/8' || '' }})
     runs-on: ${{ fromJSON(vars.MEERKAT_CI_RUNNER || '"ubuntu-24.04"') }}
     timeout-minutes: 330
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+        shard: ["1", "2", "3", "4", "5", "6", "7", "8", isolated]
     env:
       RUSTC_WRAPPER: sccache
       CARGO_BUILD_JOBS: "4"
@@ -84,9 +93,11 @@ jobs:
 
       - name: Standalone census
         run: >-
-          make published-crates-standalone-census
-          STANDALONE_CENSUS_OUT="${{ runner.temp }}/standalone-census"
-          STANDALONE_CENSUS_ARGS="--shard ${{ matrix.shard }}/8"
+          python3 scripts/published_crates_standalone_jobs.py run
+          --job "${{ matrix.shard }}"
+          --partitions 8
+          --isolate "${STANDALONE_CENSUS_ISOLATED}"
+          --out "${{ runner.temp }}/standalone-census"
 
       - name: Upload census report
         if: ${{ always() }}

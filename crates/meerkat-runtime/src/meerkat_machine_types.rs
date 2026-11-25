@@ -192,6 +192,29 @@ pub struct ResolvedSessionLlmReconfigure {
     pub target_capability_surface: SessionLlmCapabilitySurface,
 }
 
+/// What a host found when it looked at the resolved target of a model
+/// switch, where the switch is decided
+/// ([`SessionLlmReconfigureHost::inspect_target_session_llm_identity`]).
+///
+/// It is what the host reports to the runtime, which hands it to the routing
+/// machine as evidence; the machine decides the switch. It is not stored and
+/// has no wire form. A target that definitely refuses the level is not a
+/// value here: the host reports it as the typed
+/// [`RuntimeDriverError::ReasoningEffortRefused`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TargetSessionLlmInspection {
+    /// The target carries no reasoning effort level, and a client for it
+    /// can be built.
+    NoHeldEffort,
+    /// The route of the client built for the target accepts the level the
+    /// target carries.
+    HeldEffortAccepted,
+    /// The host's older hooks (its judge and its preflight) accepted a
+    /// target that carries a level. That is the host's own acceptance, not
+    /// the answer of the target's route.
+    LegacyUnverified,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelRoutingApprovalDisposition {
     NotRequired,
@@ -351,10 +374,13 @@ pub trait SessionLlmReconfigureHost: Send + Sync {
 
     /// Prove that the resolved target can construct a usable turn client now.
     ///
-    /// Committed cross-run handoffs call this before entering the persistent
-    /// reconfigure transaction. A temporary credential or provider outage is a
-    /// retriable hold at that boundary, not permission to consume the pending
-    /// input on the old identity.
+    /// The provided [`Self::inspect_target_session_llm_identity`] calls this
+    /// where a committed cross-run handoff is decided, before the persistent
+    /// reconfigure transaction. A temporary credential or provider outage is
+    /// a retriable hold at that boundary, not permission to consume the
+    /// pending input on the old identity. A host that implements the
+    /// inspection builds its client there, and this is not called for a
+    /// handoff.
     async fn preflight_target_session_llm_identity(
         &self,
         _session_id: &SessionId,
@@ -368,14 +394,22 @@ pub trait SessionLlmReconfigureHost: Send + Sync {
     /// under-boundary form), after the target is resolved and before
     /// anything is staged.
     ///
-    /// It is a pre-stage judgement and nothing more. An `Err` refuses the
-    /// caller's request with nothing staged, applied or persisted: the
-    /// session keeps its identity, its client and its stored params. An `Ok`
-    /// promises nothing about the apply that follows. It decides nothing
-    /// about the lifecycle of a committed model-routing handoff, which the
-    /// routing machine owns: a handoff's realization and a switch-turn
-    /// request do not ask it, and their targets are judged by the checks
-    /// that run before each provider request.
+    /// For a caller's request it is a pre-stage judgement and nothing more.
+    /// An `Err` refuses the request with nothing staged, applied or
+    /// persisted: the session keeps its identity, its client and its stored
+    /// params. An `Ok` promises nothing about the apply that follows.
+    ///
+    /// It decides nothing about the lifecycle of a committed model-routing
+    /// handoff or a switch-turn request, which the routing machine owns. The
+    /// provided [`Self::inspect_target_session_llm_identity`] asks it, where
+    /// such a switch is decided, about a target that carries a reasoning
+    /// effort level, and reports its answer to the runtime as evidence: its
+    /// typed refusal of the level denies the switch; its typed refusal that
+    /// says the levels cannot be read now is handed on only once the
+    /// preflight has passed, and a committed handoff is then carried out as
+    /// it was before the level was judged; any other error of it holds a
+    /// handoff. Each of these errors fails a direct switch request. A target
+    /// that carries no level is not judged there.
     ///
     /// A host that builds real clients judges the target's
     /// `reasoning_effort` level against the route of the client it builds
@@ -388,6 +422,87 @@ pub trait SessionLlmReconfigureHost: Send + Sync {
         _target_identity: &meerkat_core::SessionLlmIdentity,
     ) -> Result<(), RuntimeDriverError> {
         Ok(())
+    }
+
+    /// Look once at the resolved target of a model switch, where the switch
+    /// is decided: at the next input for a committed handoff, and before
+    /// admission for a switch-turn request of a session that holds a
+    /// reasoning effort level. The runtime hands the answer to the routing
+    /// machine as evidence, and the machine decides.
+    ///
+    /// `Ok` says a client for the target can be built now, and how the level
+    /// the target carries was accepted ([`TargetSessionLlmInspection`]). A
+    /// level the target definitely refuses is the typed
+    /// [`RuntimeDriverError::ReasoningEffortRefused`] whose reason is not
+    /// transient: the switch ends Denied and the session keeps its model and
+    /// its level.
+    ///
+    /// The typed refusal whose reason IS transient (the levels cannot be read
+    /// now) says two things: a client for the target can be built, and what
+    /// its route accepts is unreadable at this moment. A host returns it
+    /// only after it built the target's client. A committed handoff is then
+    /// carried out as it was before the level was judged: the session goes
+    /// on serving, and each request is refused, as retryable, until the
+    /// levels can be read. Holding it would stop the session's runtime for a
+    /// condition that passes by itself. A direct request fails with nothing
+    /// staged, and can be made again.
+    ///
+    /// Every other error decides nothing: a handoff is held, as a target
+    /// that cannot be built is, and a direct request fails with nothing
+    /// staged.
+    ///
+    /// A host that builds real clients implements this with one client
+    /// build: it judges the level against the route of that client and
+    /// answers [`TargetSessionLlmInspection::HeldEffortAccepted`]. The
+    /// provided form keeps a host that implements only the older hooks as it
+    /// was for a target without a level (the preflight, once), and for a
+    /// target with a level asks [`Self::judge_requested_target_session_llm_identity`]
+    /// first, then the preflight, and answers
+    /// [`TargetSessionLlmInspection::LegacyUnverified`]; the runtime says so
+    /// in a warning once per session registration. A judge's refusal that
+    /// says the levels cannot be read now is handed back after the preflight
+    /// has passed, never before: a target that cannot be built fails with
+    /// the preflight's error. Such a host may build two clients for one look
+    /// (one in its judge, one in its preflight).
+    async fn inspect_target_session_llm_identity(
+        &self,
+        session_id: &SessionId,
+        target_identity: &meerkat_core::SessionLlmIdentity,
+    ) -> Result<TargetSessionLlmInspection, RuntimeDriverError> {
+        let carries_level = target_identity
+            .provider_params
+            .as_ref()
+            .is_some_and(|params| params.reasoning_effort.is_some());
+        // The judge's refusal that says the levels cannot be read now waits
+        // for the preflight: handed back, it lets a committed handoff be
+        // carried out, and that must be a handoff onto a target whose client
+        // can be built.
+        let levels_unreadable = if carries_level {
+            match self
+                .judge_requested_target_session_llm_identity(session_id, target_identity)
+                .await
+            {
+                Ok(()) => None,
+                Err(RuntimeDriverError::ReasoningEffortRefused(refusal))
+                    if refusal.reason.is_transient() =>
+                {
+                    Some(refusal)
+                }
+                Err(error) => return Err(error),
+            }
+        } else {
+            None
+        };
+        self.preflight_target_session_llm_identity(session_id, target_identity)
+            .await?;
+        if let Some(refusal) = levels_unreadable {
+            return Err(RuntimeDriverError::ReasoningEffortRefused(refusal));
+        }
+        Ok(if carries_level {
+            TargetSessionLlmInspection::LegacyUnverified
+        } else {
+            TargetSessionLlmInspection::NoHeldEffort
+        })
     }
 
     /// Whether every request a switch onto `target_model` would serve can

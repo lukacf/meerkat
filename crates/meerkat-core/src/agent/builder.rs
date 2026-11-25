@@ -115,6 +115,7 @@ pub struct AgentBuilder {
     pub(super) auth_credential_identity: Option<crate::AuthCredentialIdentity>,
     pub(super) mcp_server_lifecycle_handle:
         Option<Arc<dyn crate::handles::McpServerLifecycleHandle>>,
+    pub(super) tool_call_outer_bound: Option<Arc<crate::ToolCallOuterBoundSlot>>,
     pub(super) operator_instruction_lowering: Option<crate::InstructionLowering>,
 }
 
@@ -294,6 +295,7 @@ impl AgentBuilder {
             auth_lease_handle: None,
             auth_credential_identity: None,
             mcp_server_lifecycle_handle: None,
+            tool_call_outer_bound: None,
             operator_instruction_lowering: None,
         }
     }
@@ -598,6 +600,13 @@ impl AgentBuilder {
         }
         let mut session = self.session.unwrap_or_default();
         let transient_turn_context_state = crate::session::TransientTurnContextStateHandle::new();
+        if let Some(admissions) = self
+            .turn_state_handle
+            .as_ref()
+            .and_then(|handle| handle.pending_boundary_admissions())
+        {
+            transient_turn_context_state.bind_pending_boundary_admissions(admissions);
+        }
 
         // An explicitly supplied prompt is an ordinary ordered System append,
         // including on resume, unless it is exactly the newest prompt row the
@@ -843,6 +852,7 @@ impl AgentBuilder {
             auth_lease_handle: self.auth_lease_handle,
             auth_credential_identity: self.auth_credential_identity,
             mcp_server_lifecycle_handle: self.mcp_server_lifecycle_handle,
+            tool_call_outer_bound: self.tool_call_outer_bound,
             cancel_after_boundary_tx,
             cancel_after_boundary_rx,
             model_defaults_resolver: self.model_defaults_resolver,
@@ -1363,6 +1373,21 @@ impl AgentBuilder {
         handle: Arc<dyn crate::handles::McpServerLifecycleHandle>,
     ) -> Self {
         self.mcp_server_lifecycle_handle = Some(handle);
+        self
+    }
+
+    /// Set the slot of the session's outer bound on its tool calls
+    /// ([`crate::ToolCallOuterBoundSlot`]), from the session's runtime
+    /// bindings.
+    ///
+    /// When a host that runs the session for a bounded caller has set a
+    /// bound in the slot, the agent loop bounds every tool call it
+    /// dispatches by what that bound allows, as one more contributor to the
+    /// call's deadline chain: the narrowest deadline wins, so a shorter
+    /// configured deadline stays. Without a slot, or with an empty one,
+    /// nothing changes.
+    pub fn with_tool_call_outer_bound(mut self, slot: Arc<crate::ToolCallOuterBoundSlot>) -> Self {
+        self.tool_call_outer_bound = Some(slot);
         self
     }
 

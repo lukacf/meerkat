@@ -1,4 +1,5 @@
-import { agentDisplayTitle } from "./agent-title";
+import { agentDisplayTitle, identityDisplayTitle } from "./agent-title";
+import { memberNameInMob, nestedMobIdsOfMembers } from "./member-ref";
 import { operationFeedbackFromFrame } from "./operation-feedback";
 import { mcpAppEntryFromFrame } from "./mcp-app-projection";
 import { assistantPresentationEntries, conversationPresentationRows } from "./assistant-presentation";
@@ -191,7 +192,9 @@ export function buildInspectTarget(agent: ConsoleAgent): IdentityInspectTarget {
     identity: agent.identity || agent.member_id,
     memberId: agent.member_id,
     title: `${agentDisplayTitle(agent)} Details`,
-    subtitle: agent.identity || agent.member_id,
+    // The member's own name, never its mob and name: the panel's details
+    // carry the identity.
+    subtitle: memberNameInMob(agent.identity || agent.member_id, agent.mob_id),
     iconName: "i-terminal",
   };
 }
@@ -308,7 +311,7 @@ export function buildSidebarViewState(args: {
       return {
         id: agent.member_id,
         title: agentDisplayTitle(agent),
-        subtitle: agent.identity || agent.member_id,
+        subtitle: memberNameInMob(agent.identity || agent.member_id, agent.mob_id),
         selected: agent.member_id === selectedMemberId,
         pinned: isPinned,
         disabled: !isAddressable,
@@ -4275,7 +4278,9 @@ export function mapFramesToTimelineEntries(
       continue;
     }
 
-    if (HIDDEN_EVENTS.has(frame.event)) {
+    // Per-request reasoning receipts remain in the raw log and activity
+    // rail, but do not add chat rows or split streamed assistant text.
+    if (HIDDEN_EVENTS.has(frame.event) || frame.event === "request_reasoning_effort_resolved") {
       continue;
     }
 
@@ -4803,6 +4808,7 @@ export function buildActivityRailViewState(args: {
     return true;
   });
 
+  const nestedMobs = nestedMobIdsOfMembers(args.agents);
   const pulseItems: ConsoleActivityPulseItem[] = filteredFrames
     .slice(0, 200)
     .map((frame, index) => {
@@ -4813,7 +4819,7 @@ export function buildActivityRailViewState(args: {
         : "";
       return {
         id: `event:${frame.id || index}`,
-        title: agent ? agentDisplayTitle(agent) : frameIdentity ? agentDisplayTitle({ label: frameIdentity, identity: frameIdentity }) : frame.event || "event",
+        title: agent ? agentDisplayTitle(agent) : frameIdentity ? identityDisplayTitle(frameIdentity, nestedMobs) : frame.event || "event",
         line: summarizeFrameData(frame.data).slice(0, 120) || frame.event,
         meta: `${frame.event}${ts ? ` · ${ts}` : ""}`,
         ...(agent ? { focusId: agent.member_id } : {}),

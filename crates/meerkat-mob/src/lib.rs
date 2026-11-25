@@ -233,7 +233,8 @@ pub use operator_instruction::{
 pub use provenance::MobProvenance;
 pub use storage::{
     MobDefinitionProjectionHealth, MobDefinitionRevision, MobDefinitionSnapshot,
-    MobDefinitionSnapshotReadError, MobStorage,
+    MobDefinitionSnapshotReadError, MobEventsPage, MobStorage, MobStoredCreationReadError,
+    MobStoredEventsReadError, StoredMobCreation,
 };
 pub use workgraph_attention::{
     lower_agent_identity_attention_target, lower_agent_identity_owner_key,
@@ -277,6 +278,12 @@ pub mod machine_schema_exports {
             )
     }
 
+    pub fn mob_hosted_set_lifecycle_schema() -> meerkat_machine_schema::MachineSchema {
+        meerkat_machine_schema::catalog::dsl::mob_hosted_set_lifecycle_schema_metadata().attach_to(
+            crate::machines::mob_hosted_set_lifecycle::MobHostedSetLifecycleMachineState::schema(),
+        )
+    }
+
     pub fn mob_store_restore_lifecycle_schema() -> meerkat_machine_schema::MachineSchema {
         meerkat_machine_schema::catalog::dsl::mob_store_restore_lifecycle_schema_metadata()
             .attach_to(
@@ -304,9 +311,9 @@ pub use run::{
     CreateMobAdmission, FailureLedgerEntry, FlowContext, FlowRoleTargets, FlowRoleTargetsError,
     FlowRunConfig, FrameSnapshot, LoopContextHistory, LoopIterationLedgerEntry, LoopSnapshot,
     MobFlowRunPublicResultClass, MobRun, MobRunStatus, ProfileMutationAdmission, StepLedgerEntry,
-    StepRunStatus, mob_machine_create_mob_admission, mob_machine_profile_mutation_admission,
-    mob_machine_run_public_result_class, mob_machine_run_status_is_terminal,
-    mob_machine_step_status_is_terminal,
+    StepRunStatus, mob_machine_create_mob_admission, mob_machine_current_mob_admission,
+    mob_machine_profile_mutation_admission, mob_machine_run_public_result_class,
+    mob_machine_run_status_is_terminal, mob_machine_step_status_is_terminal,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use runtime::ControllerRouteObservation;
@@ -342,9 +349,9 @@ pub use runtime::remote_member_operator_tool_defs_for_test;
 #[cfg(feature = "runtime-adapter")]
 pub use runtime::run_mobpack_callable;
 pub use runtime::stop_report::{
-    HostRunStartHoldReason, MemberRunDrain, MemberRunDrainOutcome, MemberRunStarts,
-    MemberStopOutcome, MemberStopRun, MobRunDrainReport, MobStopReport, NotHoldableReason,
-    StopOptions,
+    HostRunStartHoldReason, MemberPendingResumedRun, MemberRunDrain, MemberRunDrainOutcome,
+    MemberRunStarts, MemberStopOutcome, MemberStopRun, MobRunDrainReport, MobStopReport,
+    NotHoldableReason, StopOptions,
 };
 pub use runtime::{AGENT_MOB_TOOL_NAMES, MemberToolAudience, agent_mob_tool_names};
 pub use runtime::{
@@ -360,7 +367,8 @@ pub use runtime::{
     ControllingAcceptorConfig, CurrentMobAdmission, DEFAULT_BOUNDED_HELPER_RESULT_BYTES,
     DelegationCancellationHandle, DelegationExecutionError, DelegationExecutionHandle,
     DelegationExecutionOutcome, DelegationExecutionRequest, DelegationExecutionService,
-    DelegationExecutionSource, DelegationMemberOptions, DelegationParentContext,
+    DelegationExecutionSource, DelegationHelperEnd, DelegationHelperEnded, DelegationMemberOptions,
+    DelegationParentContext, DelegationRunBounds, DelegationRunFailure,
     DelegationTerminalizedExecution, DelegationTurnTerminal, DurableBoundedMemberState,
     DurableBoundedWorkRecovery, DurableBoundedWorkState, ExternalPeerBindingSpec, FlowRunHandle,
     FlowRunWaitError, FlowTargetProvisioner, ForkBuildInheritance, ForkChildRun,
@@ -407,7 +415,7 @@ pub use runtime::{
     MemberGrantMintRequest, NotAdoptableReason, OwnedEdgeEndOutcome, PurgeRefusedReason,
     StoreOwnedIdentityCreate, StoreOwnedIdentityUpdate,
 };
-pub use runtime::{CloseIfIdleOutcome, MobAdmissionCloseReason, MobBusy};
+pub use runtime::{CloseIfIdleOutcome, MobAdmissionCloseReason, MobBusy, MobIdleObservation};
 pub use runtime::{
     ConstructionEnd, ConstructionFailure, HeldPreparation, IdentityConstructionRequest,
     IdentityPreparationSettle, IdentityPreparationSettled, PreparationSettlement,
@@ -463,11 +471,16 @@ pub use runtime::{
     ForkSupervisorExitForTest, IdentityRecoveryFailStopPoint, MemberStatusDeadlineTestObservation,
     MemberTurnAdmissionTestStage, RestoreTupleFault, arm_identity_recovery_fail_stop_for_test,
     explicit_resume_served_bindings_for_test, fail_stop_next_actor_start_for_test,
-    fault_next_restore_tuple_for_test, member_operator_tool_defs_for_test,
-    member_status_deadline_after_snapshot_wait_for_test,
+    fault_next_restore_tuple_for_test, helper_tool_bound_slot_for_test,
+    hold_delegation_limit_for_test, hold_delegation_start_for_test, lose_delegation_run_for_test,
+    member_operator_tool_defs_for_test, member_status_deadline_after_snapshot_wait_for_test,
 };
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 pub use runtime::{HeldSpawn, HeldSpawnSettlement, HeldSpawnStart, abort_all_held};
+pub use runtime::{
+    LineageClosed, MemberLineageStep, MemberLink, MemberLinkProof, MemberSeat, MemberSeatCreator,
+    MemberSeatKind, MobLineageCause, RecordedSeat, SeatNow, SeatRecorder, SeatSealer,
+};
 pub use runtime::{
     MemberBuildPreparation, MemberBuildPreparationRefusal, MemberBuildPrepared,
     MemberBuildPreparer, MemberBuildReport, MemberWakeRetryBackoff,
@@ -517,6 +530,7 @@ pub use store::{
 pub use store::{
     IDENTITY_CENSUS_TEST_MOB, IDENTITY_CENSUS_TEST_OTHER_MOB, ParkedStoreReadForTest,
     StoreReadReleaseForTest, park_next_store_read_for_test, seed_identity_census_rows_for_test,
+    seed_store_that_predates_creation_records_for_test,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use store::{
@@ -537,5 +551,7 @@ pub type ExternalToolsProvider = std::sync::Arc<
     dyn Fn() -> Option<std::sync::Arc<dyn meerkat_core::agent::AgentToolDispatcher>> + Send + Sync,
 >;
 
+#[cfg(test)]
+mod profile_web_search_rows;
 #[cfg(test)]
 mod tests;

@@ -1070,6 +1070,141 @@ export class IdentityRefusedError extends RpcError {
 }
 
 /**
+ * A hosting call (`meta/mobs/*`) refused a request of its own; nothing of it
+ * was done. The error data is the typed refusal: `{kind, mob_id, retryable,
+ * detail}`.
+ */
+export const MOB_HOSTING_REFUSED_CODE = -32059 as const;
+/**
+ * The hosting refusal kinds, a closed vocabulary: a new kind is a breaking
+ * change. `mob_exists`: a create under an id a mob of this host has, loaded
+ * or not. `invalid_mob_id`: a create whose definition names an id no mob of
+ * this host can have. `default_mob`: a destroy, a redefinition, a stop or a
+ * resume of the mob the launch names. `mob_not_stopped`: a redefinition of
+ * a mob that is not stopped (a definition is changed on a stopped mob).
+ * `mob_busy`: a redefinition of a stopped mob that does not close for the
+ * change; the one kind with `retryable` true, and its detail ends with
+ * `held: ` and one closed word for each thing held (`work`, `roster`,
+ * `owner`), or the word `unanswered`.
+ */
+export const MOB_HOSTING_REFUSAL_KIND_TOKENS = [
+  "mob_exists",
+  "invalid_mob_id",
+  "default_mob",
+  "mob_not_stopped",
+  "mob_busy",
+] as const;
+/** One kind of the closed hosting refusal vocabulary. */
+export type MobHostingRefusalKind = (typeof MOB_HOSTING_REFUSAL_KIND_TOKENS)[number];
+/** The hosting refusal kinds, as a set. */
+export const MOB_HOSTING_REFUSAL_KINDS: ReadonlySet<string> = new Set(
+  MOB_HOSTING_REFUSAL_KIND_TOKENS,
+);
+/** Whether `kind` is one of {@link MOB_HOSTING_REFUSAL_KINDS}. */
+export function isMobHostingRefusalKind(kind: string): kind is MobHostingRefusalKind {
+  return MOB_HOSTING_REFUSAL_KINDS.has(kind);
+}
+
+/**
+ * Why a hosting call (`meta/mobs/*`) was refused.
+ *
+ * `kind` is one of {@link MOB_HOSTING_REFUSAL_KINDS}
+ * ({@link MobHostingRefusalKind}). `mobId` is the mob the refusal is about.
+ * `detail` says what was wrong, in one sentence. `retryable` says whether
+ * the same request may succeed later unchanged (`null` when the gateway did
+ * not say). `details` holds any other member the gateway sent, under the
+ * wire's names.
+ *
+ * The vocabulary is closed, and a gateway newer than this SDK may still send
+ * a kind this SDK does not list. It reaches you as the same type with its
+ * token in `kind` and `knownKind` false: handle it as a refusal you do not
+ * know, by `retryable` and `detail`.
+ */
+export interface MobHostingRefusal {
+  readonly kind: MobHostingRefusalKind | (string & {});
+  /** Whether `kind` is one of {@link MOB_HOSTING_REFUSAL_KINDS}. */
+  readonly knownKind: boolean;
+  readonly mobId: string | null;
+  readonly detail: string | null;
+  readonly retryable: boolean | null;
+  readonly details: Readonly<Record<string, unknown>>;
+}
+
+/** The members of a hosting refusal that are not the kind's own details. */
+const MOB_HOSTING_REFUSAL_MEMBERS: ReadonlySet<string> = new Set([
+  "kind",
+  "mob_id",
+  "retryable",
+  "detail",
+]);
+
+/**
+ * The hosting refusal `data` carries; `null` unless it is an object whose
+ * `kind` is text.
+ */
+export function parseMobHostingRefusal(data: unknown): MobHostingRefusal | null {
+  if (typeof data !== "object" || data === null || Array.isArray(data)) return null;
+  const payload = data as Record<string, unknown>;
+  const kind = payload.kind;
+  if (typeof kind !== "string") return null;
+  const details: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(payload)) {
+    if (!MOB_HOSTING_REFUSAL_MEMBERS.has(key)) details[key] = value;
+  }
+  return {
+    kind,
+    knownKind: MOB_HOSTING_REFUSAL_KINDS.has(kind),
+    mobId: typeof payload.mob_id === "string" ? payload.mob_id : null,
+    detail: typeof payload.detail === "string" ? payload.detail : null,
+    retryable: typeof payload.retryable === "boolean" ? payload.retryable : null,
+    details,
+  };
+}
+
+/**
+ * A hosting call (`meta/mobs/*`) was refused; nothing of it was done.
+ *
+ * This is the one refusal error of those calls: `MetaRuntime.mobs` rejects
+ * with it for each of their own refusals. The gateway answers
+ * {@link MOB_HOSTING_REFUSED_CODE} with the typed refusal as the error data;
+ * both must match, and any other answer stays a plain {@link RpcError}.
+ * `refusal` is the {@link MobHostingRefusal}; `kind`, `knownKind`, `mobId`,
+ * `detail`, `retryable` and `details` read it, and `detail` is the error's
+ * message when the gateway sent no sentence. A kind newer than this SDK is
+ * still this error, with its token in `kind` and `knownKind` false.
+ *
+ * Other answers of those calls keep the form they have elsewhere: a mob the
+ * host does not have is a plain {@link RpcError} (`-32602`, data `kind`
+ * `foreign_mob_target`), and a mob definition that does not parse is
+ * JSON-RPC invalid params.
+ */
+export class MobHostingRefusedError extends RpcError {
+  readonly kind: MobHostingRefusalKind | (string & {});
+  readonly knownKind: boolean;
+  readonly mobId: string | null;
+  readonly detail: string;
+  readonly retryable: boolean | null;
+  readonly details: Readonly<Record<string, unknown>>;
+
+  constructor(
+    message: string,
+    readonly refusal: MobHostingRefusal,
+    requestId = "",
+    method = "",
+    data?: unknown,
+  ) {
+    super(MOB_HOSTING_REFUSED_CODE, message, requestId, method, data);
+    this.name = "MobHostingRefusedError";
+    this.kind = refusal.kind;
+    this.knownKind = refusal.knownKind;
+    this.mobId = refusal.mobId;
+    this.detail = refusal.detail ?? message;
+    this.retryable = refusal.retryable;
+    this.details = refusal.details;
+  }
+}
+
+/**
  * A `meta/realm_mcp/*` request was refused; nothing was written.
  *
  * The stdio gateway answers invalid params (`-32602`) with data `kind`

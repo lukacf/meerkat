@@ -47,6 +47,16 @@ pub(crate) fn apply_tool_category_overrides(
     profile.tools.image_generation = overrides
         .image_generation
         .resolve(profile.tools.image_generation);
+    // Web search may be unset on a profile: a spawn's choice replaces the
+    // profile's, and `Inherit` keeps it, unset included. The resolved value
+    // rides the member's stored profile override, so the spawn's choice
+    // holds at every later build of the member. (A placed member's choice
+    // rides its spec's overlay instead: its resolver keeps the profile's
+    // own value.)
+    profile.tools.web_search = overrides
+        .web_search
+        .to_override()
+        .or(profile.tools.web_search);
     // A spawn that disables a category also drops its families from the
     // member's own grant gate: an explicit disable still means no such
     // tools, where the gate would mount a gated family closed.

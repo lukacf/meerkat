@@ -100,16 +100,16 @@ pub use sources::{
     AdvanceSource, AnnouncementSource, AudienceGrant, AuditAction, AuditQuery, AuditReason,
     AuditRow, BaselineCapability, CollectionPhase, ConnectionKind, Coverage, CoverageGap,
     DeletionCapability, FailureClass, ItemChange, ItemOutcome, ItemOutcomeKind, MemberFacts,
-    ObservationCapability, Observed, OnboardingMode, Principal, PutSource, Rebaseline,
-    RebaselineReason, RecordSourceFailure, RosterFacts, SourceAdvance, SourceChange, SourceConfig,
-    SourceConflictRecord, SourceConnection, SourceCursor, SourceDelivery, SourceFailure,
-    SourceFailureRecord, SourceHealth, SourceHealthPolicy, SourceHealthStatus, SourceIdentity,
-    SourceItem, SourcePage, SourcePriority, SourceQuery, SourceRoute, SourceRunner, SourceScope,
-    SourceStart, SourceState, SourceStream, SourceStreamCounts, SourceTotals, StreamOnboarding,
-    StreamPhase, TopicOwnership, UnhandledPolicy,
+    MemberPerson, ObservationCapability, Observed, OnboardingMode, Principal, PutSource,
+    Rebaseline, RebaselineReason, RecordSourceFailure, RosterFacts, SourceAdvance, SourceChange,
+    SourceConfig, SourceConflictRecord, SourceConnection, SourceCursor, SourceDelivery,
+    SourceFailure, SourceFailureRecord, SourceHealth, SourceHealthPolicy, SourceHealthStatus,
+    SourceIdentity, SourceItem, SourcePage, SourcePriority, SourceQuery, SourceRoute, SourceRunner,
+    SourceScope, SourceStart, SourceState, SourceStream, SourceStreamCounts, SourceTotals,
+    StreamOnboarding, StreamPhase, TopicOwnership, UnhandledPolicy,
 };
 pub use sqlite::{ConnectionGuard, SCHEMA, SCHEMA_V2, SCHEMA_V3, SqliteAnnouncementStore};
-pub use store::{AnnouncementStore, SubmissionCheck};
+pub use store::{AnnouncementStore, MobRelease, SubmissionCheck};
 pub use types::{
     AnnounceOutcome, AnnounceRequest, Announcement, AnnouncementRef, AnnouncementStoreError,
     Announcer, Batch, BatchEvent, BatchEventTag, BatchId, BatchItem, BatchQuery, BatchState,
@@ -376,7 +376,12 @@ impl AnnouncementComposition {
         spec: crate::mob_handle_runtime::MobBootstrapSpec,
     ) -> crate::mob_handle_runtime::MobBootstrapSpec {
         let (name, dispatcher, availability) = self.member_tool_bundle();
+        // The launch composes announcements: said on the spec before the
+        // runtime is built, so that a mob created before the owner is
+        // attached is refused and not created over what an earlier mob of
+        // its id left ([`crate::mob_announcements_release`]).
         spec.register_tool_bundle_with_availability(name, dispatcher, availability)
+            .with_mob_announcements_declared()
     }
 
     /// The member tool bundle's name, dispatcher and availability to child
@@ -497,6 +502,15 @@ impl AnnouncementComposition {
         if !runtime.attach_mob_announcements(service.clone()) {
             return Err("mob announcements are already attached to this runtime".to_string());
         }
+        // The owner is attached: the runtime's release of what the
+        // announcements keep under a mob's id is the owner's from here on,
+        // and a create that was refused while it was owed is admitted. A
+        // candidate launch binds it too: its owner refuses the release, so
+        // a mob is not created over records it may not clear.
+        runtime
+            .mob_runtime()
+            .mob_announcements_release()
+            .bind(Arc::new(ReleaseAtCreate(service.clone())));
         // A non-owning handle: the member tools never keep the mob open.
         let callers = tools::RosterCallerResolver::new(
             own_mob,
@@ -553,6 +567,30 @@ impl AnnouncementComposition {
     }
 }
 
+/// The owner's release of a mob's records, as the runtime asks it when its
+/// mob set creates a mob under an id
+/// ([`crate::mob_announcements_release::MobAnnouncementsRelease`]): one
+/// call of [`AnnouncementService::release_mob`].
+struct ReleaseAtCreate(AnnouncementService);
+
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+impl crate::mob_announcements_release::MobAnnouncementsRelease for ReleaseAtCreate {
+    async fn release_mob(&self, mob_id: &meerkat_mob::MobId) -> Result<(), String> {
+        // The announcements keep nothing under an id they cannot hold (a
+        // mob's id has no length and no rule against control characters,
+        // theirs have both): there is nothing to release for it.
+        let Ok(mob_id) = MobId::new(mob_id.to_string()) else {
+            return Ok(());
+        };
+        self.0
+            .release_mob(&mob_id)
+            .await
+            .map(drop)
+            .map_err(|error| error.to_string())
+    }
+}
+
 /// Where a composition's announcement store lives.
 enum StoreLocation<'a> {
     /// The database in a state directory's layout, opened by the composition.
@@ -561,15 +599,20 @@ enum StoreLocation<'a> {
     HostStore(SqliteAnnouncementStore),
 }
 
-/// The seam to this gateway's own runtime: its identity runtime, its agent
-/// mob tool state and its runtime machine.
-fn local_delivery(
+/// The host's own parts of a delivery seam: the agent mob tool state (the
+/// host's mob set), the runtime machine and the session service. They are
+/// one per host, the same for every mob the host serves; a mob's own parts
+/// are its id and its identity runtime.
+#[derive(Clone)]
+pub(crate) struct HostDeliveryParts {
+    pub(crate) mob_tools: Arc<meerkat_mob_mcp::MobMcpState>,
+    pub(crate) machine: Arc<meerkat_runtime::MeerkatMachine>,
+    pub(crate) sessions: Arc<dyn meerkat_mob::MobSessionService>,
+}
+
+fn host_delivery_parts(
     runtime: &crate::unified_runtime::UnifiedRuntime,
-) -> Result<MobNativeDelivery, String> {
-    let identities = runtime
-        .identity_runtime_ref()
-        .cloned()
-        .ok_or("mob announcements require an identity-first gateway")?;
+) -> Result<HostDeliveryParts, String> {
     let mob_runtime = runtime.mob_runtime();
     let mob_tools = mob_runtime
         .agent_mob_mcp_state()
@@ -580,12 +623,34 @@ fn local_delivery(
         .ok_or("mob announcements require the gateway's session service")?;
     let machine = crate::mob_handle_runtime::observed_runtime_adapter(sessions.as_ref())
         .ok_or("mob announcements require the gateway's runtime machine")?;
+    Ok(HostDeliveryParts {
+        mob_tools,
+        machine,
+        sessions,
+    })
+}
+
+/// The seam to this gateway's own runtime for its default mob: the mob's
+/// identity runtime, and the host's agent mob tool state and runtime
+/// machine.
+fn local_delivery(
+    runtime: &crate::unified_runtime::UnifiedRuntime,
+) -> Result<MobNativeDelivery, String> {
+    let identities = runtime
+        .identity_runtime_ref()
+        .cloned()
+        .ok_or("mob announcements require an identity-first gateway")?;
+    let host = host_delivery_parts(runtime)?;
     let mob_id = MobId::new(runtime.mob_handle().mob_id().to_string())
         .map_err(|error| format!("this gateway's mob id: {error}"))?;
-    Ok(
-        MobNativeDelivery::new(mob_id, identities, mob_tools, machine, sessions)
-            .with_members_apart(mob_runtime.private_owners().clone()),
+    Ok(MobNativeDelivery::new(
+        mob_id,
+        identities,
+        host.mob_tools,
+        host.machine,
+        host.sessions,
     )
+    .with_members_apart(runtime.mob_runtime().private_owners().clone()))
 }
 
 /// How a gateway's configuration has its control channel serve the keyed
@@ -614,10 +679,14 @@ impl Default for KeyedInjectPlane {
 /// `meta_gateway` and the runtime builder) composes it here and nowhere
 /// else.
 ///
-/// An identity-first gateway that serves keyed injects submits what a peer
-/// delivers to one of its members to its own continuation owner, whether or
-/// not it enables mob announcements itself. Any other gateway answers
-/// `not_served` with its typed cause. Until this runs, both verbs answer
+/// A gateway that serves keyed injects submits what a peer delivers to a
+/// member of one of its mobs to that mob's own continuation owner, whether
+/// or not it enables mob announcements itself. The plane is sealed once
+/// with what is the host's; what is a mob's, its identity runtime, is read
+/// when a request arrives, so a mob without durable identities answers
+/// `not_served` (`not_identity_first`) for itself and for no other mob. A
+/// gateway whose configuration turns serving off answers `not_served` with
+/// that cause for every mob. Until this runs, both verbs answer
 /// `keyed_inject_unavailable`: the gateway is starting.
 pub fn compose_keyed_inject_plane(
     runtime: &crate::unified_runtime::UnifiedRuntime,
@@ -628,13 +697,30 @@ pub fn compose_keyed_inject_plane(
         KeyedInjectPlane::Disabled => {
             KeyedInjectServing::NotServed(NotServedCause::RuntimeDisabled)
         }
-        KeyedInjectPlane::Serve { .. } if runtime.identity_runtime_ref().is_none() => {
-            KeyedInjectServing::NotServed(NotServedCause::NotIdentityFirst)
-        }
-        KeyedInjectPlane::Serve { window_ms } => {
-            let local = Arc::new(local_delivery(runtime)?);
-            KeyedInjectServing::Serving(Arc::new(KeyedInjectServer::new(local, window_ms)))
-        }
+        KeyedInjectPlane::Serve { window_ms } => match host_delivery_parts(runtime) {
+            // One plane per host: a delivery signed for a mob the host
+            // serves reaches that mob's own continuation owner. The plane
+            // is part of the runtime's state, so its resolver holds no
+            // public owner of the default mob.
+            Ok(host) => {
+                let hosted = remote::HostedDeliveries {
+                    mobs: runtime.mob_resolver_of_its_own_task(),
+                    host,
+                };
+                KeyedInjectServing::Serving(Arc::new(KeyedInjectServer::of_the_host(
+                    hosted,
+                    runtime.mob_handle().mob_id().clone(),
+                    window_ms,
+                )))
+            }
+            // A runtime without the host's parts of a delivery seam can
+            // deliver to no mob. One that is not identity-first never
+            // could, and says so as before.
+            Err(_) if runtime.identity_runtime_ref().is_none() => {
+                KeyedInjectServing::NotServed(NotServedCause::NotIdentityFirst)
+            }
+            Err(error) => return Err(error),
+        },
     };
     if !runtime.seal_keyed_inject(serving) {
         return Err("the keyed inject plane of this runtime is already sealed".to_string());

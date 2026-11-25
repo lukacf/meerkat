@@ -355,6 +355,19 @@ impl EventLogStore for ReferenceEventLogStore {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let mut rows: Vec<PersistedEvent> = map.values().cloned().collect();
             rows.sort_by_key(|event| event.seq);
+            // The query's mob and its incarnation are selected before the
+            // limit cuts the answer: the rows that name that mob at that
+            // incarnation, or, for a query that names no mob, the rows that
+            // name none. A page then holds `limit` rows of the selection
+            // the caller pages through.
+            rows.retain(|event| {
+                let of_the_mob = match (&event.mob_id, &query.mob_id) {
+                    (Some(row), Some(asked)) => row.as_str() == asked.as_str(),
+                    (None, None) => true,
+                    _ => false,
+                };
+                of_the_mob && event.mob_incarnation == query.mob_incarnation
+            });
             if let Some(after) = query.after_seq {
                 rows.retain(|event| event.seq > after);
             }

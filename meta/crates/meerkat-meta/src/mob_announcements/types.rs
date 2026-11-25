@@ -1260,8 +1260,10 @@ pub enum GapReason {
     /// They waited longer than the retention window for a delivery that
     /// never started.
     Expired,
-    /// Their content was no longer retained when a stranded delivery was
-    /// handed on to a successor.
+    /// Their content was no longer retained when they were to be delivered:
+    /// a stranded delivery was handed on to a successor after retention
+    /// removed them, or their mob was destroyed and its id was released for
+    /// a new mob before they were delivered.
     NotRetained,
     /// Their delivery was neither confirmed nor ruled out: whether it was
     /// committed was never learned. It may still arrive, after later
@@ -1939,7 +1941,7 @@ fn render_header(batch_id: &BatchId, predecessor: Option<&str>, count: usize) ->
 pub fn render_gap(gap: &BatchGap) -> String {
     let why = match gap.reason {
         GapReason::Expired => "they waited longer than the retention window for a delivery",
-        GapReason::NotRetained => "they were no longer retained when this delivery was handed on",
+        GapReason::NotRetained => "they were no longer retained when they were to be delivered",
         GapReason::DeliveryNotConfirmed => {
             "their delivery was neither confirmed nor ruled out, and they may still arrive, \
              after later announcements"

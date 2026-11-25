@@ -258,8 +258,19 @@ function startMockConsoleServer(options = {}) {
   // Fails meta/gating/audit after this many successful calls (null: never).
   const failGatingAuditAfter = Number.isInteger(options.failGatingAuditAfter) ? options.failGatingAuditAfter : null;
   let gatingAuditCalls = 0;
+  // The open question sets agents asked (null: this gateway has no question
+  // sets). A decide that names one of them takes it off the list, as the
+  // gateway does once a person answered or dismissed it.
+  let openQuestionSets = Array.isArray(options.questionSets) ? [...options.questionSets] : null;
   const collapseWorkersSection = options.collapseWorkersSection === true;
   const extraSidebarAgents = Array.isArray(options.extraSidebarAgents) ? options.extraSidebarAgents : [];
+  // The whole roster, in place of the stock rows above and `extraSidebarAgents`
+  // (and of the stock identity rows).
+  const sidebarAgents = Array.isArray(options.sidebarAgents) ? options.sidebarAgents : null;
+  // `topology.live_snapshot` of the experience: nodes, the console's own mob and the mob list.
+  const topologySnapshot = options.topologySnapshot && typeof options.topologySnapshot === "object"
+    ? options.topologySnapshot
+    : null;
   const agentListConfig = options.agentListConfig && typeof options.agentListConfig === "object"
     ? options.agentListConfig
     : null;
@@ -376,7 +387,7 @@ function startMockConsoleServer(options = {}) {
       if (method === "GET" && url === "/console/identities") {
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify({
-          rows: [
+          rows: sidebarAgents ? [] : [
             {
               identity: "identity:luka",
               display_name: "Identity Example",
@@ -431,7 +442,7 @@ function startMockConsoleServer(options = {}) {
             schema_version: "1",
             refresh: { mode: "pull", interval_ms: 5000 },
             live_snapshot: {
-              agents: [
+              agents: sidebarAgents || [
                 {
                   agent_id: "identity:luka",
                   member_id: "identity:luka",
@@ -502,7 +513,7 @@ function startMockConsoleServer(options = {}) {
             panel_id: "console.identity_status",
             schema_version: "1",
             refresh: { mode: "poll", interval_ms: 5000 },
-            rows: [
+            rows: sidebarAgents ? [] : [
               {
                 identity: "identity:luka",
                 display_name: "Identity Example",
@@ -539,6 +550,13 @@ function startMockConsoleServer(options = {}) {
               }] : []),
             ],
           },
+          ...(topologySnapshot ? {
+            topology: {
+              panel_id: "console.topology",
+              schema_version: "1",
+              live_snapshot: topologySnapshot,
+            },
+          } : {}),
           ...(agentListConfig ? { console_config: { agent_list: agentListConfig } } : {}),
           ...(collapseWorkersSection ? {
             console_config: {
@@ -578,6 +596,7 @@ function startMockConsoleServer(options = {}) {
                 "meta/gating/pending",
                 "meta/gating/audit",
                 "meta/gating/decide",
+                ...(openQuestionSets ? ["meta/gating/questions"] : []),
                 ...(topologyControl ? topologyControl.methods || [] : []),
                 ...(identityFamily ? identityFamily.methods : []),
               ],
@@ -786,6 +805,31 @@ function startMockConsoleServer(options = {}) {
                 actor: "console-browser-proof",
                 decided_at_ms: 1717171717,
               }],
+            },
+          }));
+          return;
+        }
+        if (openQuestionSets && payload.method === "meta/gating/questions") {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify({ jsonrpc: "2.0", id: rpcId, result: { question_sets: openQuestionSets } }));
+          return;
+        }
+        if (
+          openQuestionSets &&
+          payload.method === "meta/gating/decide" &&
+          openQuestionSets.some((set) => set.pending_id === payload.params?.pending_id)
+        ) {
+          // A person's reply to a question set: the set is no longer open.
+          openQuestionSets = openQuestionSets.filter((set) => set.pending_id !== payload.params.pending_id);
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify({
+            jsonrpc: "2.0",
+            id: rpcId,
+            result: {
+              pending_id: payload.params.pending_id,
+              kind: "question_set",
+              outcome: payload.params.decision === "approve" ? "answered" : "dismissed",
+              decided_at_ms: Date.now(),
             },
           }));
           return;
@@ -3478,6 +3522,173 @@ async function runGatingAuditRefreshErrorProof() {
   }
 }
 
+// A question set answered in the asking agent's chat leaves the place below
+// the newest turn and stays as one line with the turn it was answered
+// after, which opens to the question with the answer given: not drawn in
+// full again below a later turn, after going to another agent and back, or
+// after a reload. The same chat carries the runtime's record of the
+// reasoning effort a request was sent with: it is never a line of the chat,
+// read on load or arriving on the stream, while another runtime event and
+// a peer's message keep theirs.
+async function runQuestionSetAnsweredPlacementProof() {
+  const identity = "identity:luka";
+  const pendingId = `decision:${"a".repeat(64)}`;
+  const now = Date.now();
+  const effortResolved = (id, turnNumber, interactionId, timestampMs, cursor) => ({
+    id, kind: "request_reasoning_effort_resolved", identity, interaction_id: interactionId, timestamp_ms: timestampMs, cursor,
+    source: { kind: "console_event" },
+    payload: {
+      turn_number: turnNumber,
+      resolution: {
+        requested: "high", level: "high", provider: "openai", model: "gpt-5.5",
+        route: "responses", fields: ["reasoning.effort"], facts: "catalog", decided_by: "request",
+      },
+    },
+  });
+  const laterFrames = [
+    effortResolved("later-effort", 2, `turn-${identity}`, now + 59_000, "console:plan:8"),
+    { id: "later-done", kind: "interaction_complete", identity, interaction_id: `turn-${identity}`, timestamp_ms: now + 60_000, cursor: "console:plan:9", payload: { text: "Europe goes first." } },
+  ];
+  const server = await startMockConsoleServer({
+    questionSets: [{
+      pending_id: pendingId,
+      origin: { identity },
+      title: "Release plan",
+      questions: [{
+        id: "q-region",
+        prompt: "Which region goes first?",
+        choices: [{ id: "c-eu", label: "Europe" }, { id: "c-us", label: "United States" }],
+      }],
+      created_at_ms: now - 60_000,
+      deadline_at_ms: now + 3_600_000,
+      subject_digest: `sha256:${"b".repeat(64)}`,
+    }],
+    timelineFramesByIdentity: {
+      [identity]: [
+        { id: "plan-ask", kind: "user_input", identity, interaction_id: "plan-turn", timestamp_ms: now - 600_000, cursor: "console:plan:1", payload: { content: "Plan the release." } },
+        effortResolved("plan-effort", 1, "plan-turn", now - 599_500, "console:plan:2"),
+        { id: "plan-done", kind: "interaction_complete", identity, interaction_id: "plan-turn", timestamp_ms: now - 599_000, cursor: "console:plan:3", payload: { text: "One thing first: which region?" } },
+        // Controls: a runtime event without a renderer of its own, and a
+        // peer's message as the typed notice the runtime writes for it.
+        { id: "plan-skipped", kind: "requested_compaction_skipped", identity, timestamp_ms: now - 598_000, cursor: "console:plan:4", source: { kind: "console_event" }, payload: { reason: "Nothing to compact yet" } },
+        {
+          id: "plan-peer", kind: "system_notice", identity, timestamp_ms: now - 597_000, cursor: "console:plan:5",
+          payload: { message: {
+            role: "system_notice", kind: "comms", body: "Peer message", blocks: [{
+              type: "comms", direction: "incoming", kind: "message",
+              peer: { id: "reviewer-peer", display_name: "release/reviewer" },
+              content: [{ type: "text", text: "The plan reads well." }],
+            }],
+          } },
+        },
+      ],
+    },
+    // The later turn: the agent's answer to the person's next message. It
+    // reaches the page on the live stream, which this gateway keeps open,
+    // after the record of the effort its request was sent with.
+    holdTimelineStream: true,
+    timelineStreamFramesAfterSendByIdentity: { [identity]: laterFrames },
+    timelineFramesAfterSendByIdentity: { [identity]: laterFrames },
+  });
+  const decides = () => server.requests.filter((request) =>
+    request.url === "/console/rpc" && request.body.includes('"method":"meta/gating/decide"') && request.body.includes(pendingId)).length;
+  let browser;
+  try {
+    browser = await launchBrowser();
+    const page = await browser.newPage();
+    await gotoConsole(page, `${server.baseUrl}/console`);
+    const card = page.getByTestId(`question-set:${pendingId}`);
+    const receipt = page.getByTestId(`question-set-receipt:${pendingId}`);
+    const turn = (index) => page.getByTestId(`chat-turn:${identity}:${index}`);
+    const top = async (locator) => (await locator.boundingBox()).y;
+    const openChat = async () => {
+      await openSidebarAgentChat(page, /Identity Example/i);
+      await turn(0).waitFor({ timeout: 10_000 });
+    };
+    // The words of the chat's transcript, and the three kinds of line the
+    // same frames can make: none for the reasoning effort record, one for
+    // the other runtime event, one for the peer's message.
+    const transcript = page.getByLabel("Conversation transcript").first();
+    const eventLines = async (when) => {
+      await transcript.getByText("Requested compaction skipped").first().waitFor({ timeout: 10_000 });
+      await transcript.getByText("The plan reads well.").first().waitFor({ state: "attached", timeout: 10_000 });
+      const words = await transcript.innerText();
+      assert(!/reasoning effort/i.test(words), `the reasoning effort record is no line of the chat ${when}`);
+      assert(!words.includes("request_reasoning_effort_resolved"), `the reasoning effort record is not named in the chat ${when}`);
+    };
+
+    // The open set is in the chat, below its newest turn, and is answered there.
+    await openChat();
+    await eventLines("read on load");
+    await card.waitFor({ timeout: 10_000 });
+    assert((await top(card)) > (await top(turn(0))), "the open set stands below the newest turn");
+    await card.getByRole("radio", { name: "Europe" }).check();
+    await card.getByRole("button", { name: "Send answers" }).click();
+    await waitForRpcMethod(server, "meta/gating/decide");
+    await receipt.waitFor({ timeout: 10_000 });
+    assert.equal(await card.count(), 0, "the answered card left the chat");
+    assert.equal(await receipt.evaluate((element) => element.tagName === "DETAILS" && !element.open), true, "the receipt is one folded line");
+    const line = await receipt.locator("summary").innerText();
+    assert.match(line, /Answered/);
+    assert.match(line, /Release plan/);
+    // Opened from the keyboard, it reads as the question with the answer
+    // given, a term with its definition, and holds nothing to act on.
+    await receipt.locator("summary").focus();
+    await page.keyboard.press("Enter");
+    assert.equal(await receipt.evaluate((element) => element.open), true, "Enter on the line opens the row");
+    await page.getByTestId(`question-set-receipt-summary:${pendingId}`).waitFor({ state: "visible", timeout: 10_000 });
+    const opened = await receipt.innerText();
+    assert.match(opened, /Which region goes first\?/);
+    assert.match(opened, /Europe/);
+    assert(!opened.includes("United States"), "only the answer given is shown");
+    assert.deepEqual(await receipt.getByRole("term").allInnerTexts(), ["Which region goes first?"]);
+    assert.deepEqual(await receipt.getByRole("definition").allInnerTexts(), ["Europe"]);
+    assert.equal(await receipt.locator("input, textarea, select, button, a[href], [contenteditable]").count(), 0, "the answered row is read-only");
+    await page.keyboard.press("Enter");
+    assert.equal(await receipt.evaluate((element) => element.open), false, "Enter on the line folds the row again");
+
+    // A later turn: the receipt stays above it, and nothing is asked again.
+    await fillComposer(page, "Go on with Europe.");
+    await page.getByTestId(`chat-send:${identity}`).click();
+    await waitForRpcMethod(server, "meta/console/send");
+    await turn(1).waitFor({ timeout: 10_000 });
+    await page.getByText("Europe goes first.").first().waitFor({ timeout: 10_000 });
+    assert.equal(await card.count(), 0, "the answered card is not drawn again below the later turn");
+    assert.equal(await receipt.count(), 1);
+    assert((await top(receipt)) < (await top(turn(1))), "the receipt stays above the later turn");
+    assert.equal(await page.getByRole("button", { name: "Send answers" }).count(), 0);
+    assert.equal((await transcript.evaluate((element) => element.textContent)).split("Which region goes first?").length - 1, 1, "the question stands once in the chat, in its folded row");
+    // The later turn's own reasoning effort record came on the stream
+    // before its answer: no line of it either.
+    await eventLines("after it arrived on the stream");
+
+    // Another agent and back.
+    await openSidebarAgentChat(page, /Legacy Router/i);
+    await turn(0).waitFor({ state: "detached", timeout: 10_000 });
+    await openChat();
+    await receipt.waitFor({ timeout: 10_000 });
+    assert.equal(await card.count(), 0, "the answered card is not drawn again after going to another agent and back");
+
+    // The page loaded again: the answered set is not shown again.
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.waitForSelector('[data-testid="meerkat-console"], .cc-workbench, .cc-conversation-pane', { timeout: 30_000 });
+    await openChat();
+    await waitForRpcMethod(server, "meta/gating/questions", 2);
+    await page.waitForTimeout(500);
+    assert.equal(await card.count(), 0, "the answered card is not drawn again after a reload");
+    assert.equal(await page.getByRole("button", { name: "Send answers" }).count(), 0);
+    // The transcript built again from the frames the page read: the same lines.
+    await eventLines("after a reload");
+    await page.getByText("Europe goes first.").first().waitFor({ timeout: 10_000 });
+    // The reply was sent once.
+    assert.equal(decides(), 1);
+    process.stdout.write("browser question set answered placement ok\n");
+  } finally {
+    if (browser) await browser.close();
+    await server.close();
+  }
+}
+
 async function runTopologyUnavailableBrowserProof() {
   const server = await startMockConsoleServer();
   let browser;
@@ -4944,6 +5155,569 @@ async function runWorkGraphHeaderClickAcrossRefreshProof(width) {
   }
 }
 
+// A console that lists several mobs, in a real browser, seeded as the
+// gateway lists them: a member of a mob other than the console's own has
+// the identity `<mob id>/<member name>`, a mob is named for people and never
+// by its id, and members with one name in several mobs are each their own
+// agent. The roster's mob tree, the mob choice (made from the keyboard, the
+// view options and the topology), the search under a choice, Copy mob ID
+// with its feedback, a choice whose mob goes away, and a mob nested six
+// levels deep at a narrow width.
+async function runSidebarMobsProof() {
+  const PRIMARY = "support-desk";
+  const GENERATED_HOSTED = "0193b2a4-77c1-7d2e-9f10-2b3c4d5e6f70";
+  const IMPLICIT = "implicit-0193c5d6-12ab-7c3d-8e4f-5a6b7c8d9e0f";
+  const GENERATED_A = "6f1c2d3e-4a5b-4c6d-8e7f-9a0b1c2d3e4f";
+  const GENERATED_B = "9b8a7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d";
+  // A member's console identity: its bare name in the console's own mob,
+  // `<mob id>/<member name>` in any other.
+  const identityOf = (mobId, name) => (mobId === PRIMARY ? name : `${mobId}/${name}`);
+  const member = (mobId, name, label, role, host, extra = {}) => {
+    const identity = identityOf(mobId, name);
+    return {
+      agent_id: identity,
+      member_id: identity,
+      identity,
+      ...(label ? { label } : {}),
+      kind: "identity",
+      role,
+      state: "active",
+      addressable: true,
+      response_phase: null,
+      affordances: { can_send_message: true },
+      mob_id: mobId,
+      ...(mobId === PRIMARY ? { group: "Desk" } : {
+        group: "Coordinators",
+        // The creator is named only to a caller who may see it.
+        labels: host ? { delegate_host_identity: host } : {},
+      }),
+      ...extra,
+    };
+  };
+  const activityBase = Date.now() - 45 * 60_000;
+  const team = [
+    member(PRIMARY, "desk-manager", "Desk Manager", "manager", null, { last_activity_ms: activityBase + 40 * 60_000 }),
+    member(PRIMARY, "intake", "Intake", "triage", null, { last_activity_ms: activityBase + 31 * 60_000 }),
+    member(PRIMARY, "reviewer", "Reviewer", "analyst", null, { last_activity_ms: activityBase + 12 * 60_000 }),
+    // The same member name in two more mobs.
+    member("refund-research", "reviewer", "Reviewer", "analyst", "desk-manager", { last_activity_ms: activityBase + 38 * 60_000 }),
+    // No display name on the row: the console names it from its member name.
+    member("refund-research", "policy-reader", null, "researcher", "desk-manager"),
+    member("ledger-audit", "reviewer", "Reviewer", "auditor", "refund-research/policy-reader"),
+    // Four more levels under ledger-audit: six levels under the console's own mob.
+    member("claims-archive", "archivist", "Archivist", "archivist", null),
+    member("claims-index", "indexer", "Indexer", "indexer", null),
+    member("claims-index-east", "sorter", "Sorter", "sorter", null),
+    member("claims-index-east-vault", "keeper", "Keeper", "keeper", null),
+    // A generated mob id with a creator, and the delegate tool's mob.
+    member(GENERATED_HOSTED, "scout", "Scout", "scout", "intake"),
+    member(IMPLICIT, "helper-1", "Helper", "helper", "desk-manager"),
+    // Generated mob ids whose creator the caller may not see.
+    member(GENERATED_A, "curator", "Curator", "curator", null),
+    member(GENERATED_B, "night-watch", "Night Watch", "monitor", null),
+    // Two mob ids that read the same in words.
+    member("night-shift", "porter", "Porter", "porter", null),
+    member("night_shift", "runner", "Runner", "runner", null),
+  ];
+  const wiring = {
+    "desk-manager": ["intake", "reviewer", "refund-research/reviewer"],
+    intake: ["desk-manager"],
+    reviewer: ["desk-manager"],
+    "refund-research/reviewer": ["desk-manager", "refund-research/policy-reader"],
+    "refund-research/policy-reader": ["refund-research/reviewer", "ledger-audit/reviewer"],
+    "ledger-audit/reviewer": ["refund-research/policy-reader"],
+  };
+  const mobs = [
+    { mob_id: PRIMARY, state: "running", member_count: 3 },
+    { mob_id: "refund-research", parent_mob_id: PRIMARY, host_identity: "desk-manager", state: "running", member_count: 2 },
+    { mob_id: "ledger-audit", parent_mob_id: "refund-research", host_identity: "refund-research/policy-reader", state: "running", member_count: 1 },
+    { mob_id: "claims-archive", parent_mob_id: "ledger-audit", state: "running", member_count: 1 },
+    { mob_id: "claims-index", parent_mob_id: "claims-archive", state: "running", member_count: 1 },
+    { mob_id: "claims-index-east", parent_mob_id: "claims-index", state: "running", member_count: 1 },
+    { mob_id: "claims-index-east-vault", parent_mob_id: "claims-index-east", state: "running", member_count: 1 },
+    { mob_id: GENERATED_HOSTED, parent_mob_id: PRIMARY, host_identity: "intake", state: "running", member_count: 1 },
+    { mob_id: IMPLICIT, parent_mob_id: PRIMARY, host_identity: "desk-manager", state: "running", member_count: 1 },
+    { mob_id: GENERATED_A, state: "running", member_count: 1 },
+    { mob_id: GENERATED_B, state: "stopped", member_count: 1 },
+    { mob_id: "night-shift", state: "running", member_count: 1 },
+    { mob_id: "night_shift", state: "unknown", member_count: 1 },
+  ];
+  const nodeOf = (agent) => ({
+    identity: agent.identity,
+    ...(agent.label ? { label: agent.label } : {}),
+    role: agent.role,
+    state: agent.state,
+    wired_to: wiring[agent.identity] || [],
+    addressable: true,
+    mob_id: agent.mob_id,
+  });
+  // The server reads these on every request: a later step takes a mob away.
+  const topologySnapshot = { nodes: team.map(nodeOf), node_count: team.length, mob_id: PRIMARY, mobs };
+  const server = await startMockConsoleServer({ sidebarAgents: team, topologySnapshot });
+  let browser;
+
+  try {
+    browser = await launchBrowser();
+    const page = await browser.newPage({ viewport: { width: 1400, height: 1000 } });
+    await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    const pageErrors = [];
+    page.on("pageerror", (error) => pageErrors.push(error.message));
+    await gotoConsole(page, `${server.baseUrl}/console`);
+    const { eventually } = require("./acceptance-runtime.cjs");
+    const sidebar = page.getByTestId("sidebar-root");
+    const evidenceDir = process.env.META_BROWSER_EVIDENCE || path.join(repoRoot, "output/playwright/console-acceptance");
+    fs.mkdirSync(evidenceDir, { recursive: true });
+    const shot = (name, target = page) => target.screenshot({ path: path.join(evidenceDir, `nf-${name}.png`) });
+    // The roster's mob headers and agent rows, in the order they are listed.
+    // The list shows the rows in view: scroll it through to read them all.
+    const rosterRows = async () => {
+      const seen = [];
+      const list = page.getByTestId("sidebar-agent-list");
+      const height = await list.evaluate((node) => node.scrollHeight);
+      for (let top = 0; top <= height; top += 240) {
+        await list.evaluate((node, y) => { node.scrollTop = y; }, top);
+        await page.waitForTimeout(40);
+        const rows = await sidebar
+          .locator('[data-testid^="sidebar-mob:"], [data-testid^="sidebar-agent:"]')
+          .evaluateAll((nodes) => nodes.map((node) => {
+            const id = node.getAttribute("data-testid");
+            return {
+              row: id.startsWith("sidebar-mob:") ? `mob:${id.slice("sidebar-mob:".length)}` : id.slice("sidebar-agent:".length),
+              top: node.closest(".sidebar__virtual-row").style.transform,
+            };
+          }));
+        for (const entry of rows) if (!seen.some((known) => known.row === entry.row)) seen.push(entry);
+      }
+      await list.evaluate((node) => { node.scrollTop = 0; });
+      const offset = (entry) => Number(/translateY\(([\d.]+)px\)/.exec(entry.top)?.[1] || 0);
+      return seen.sort((a, b) => offset(a) - offset(b)).map((entry) => entry.row);
+    };
+    const expectRoster = async (expected, label) => {
+      // A roster that never settles on `expected` is reported with its rows.
+      await eventually(async () => JSON.stringify(await rosterRows()) === JSON.stringify(expected), label, 10_000)
+        .catch(() => undefined);
+      assert.deepEqual(await rosterRows(), expected, label);
+    };
+    const listedByMob = (rows) => {
+      const mobsListed = [];
+      for (const row of rows) {
+        if (row.startsWith("mob:")) mobsListed.push([row.slice("mob:".length), []]);
+        else mobsListed[mobsListed.length - 1][1].push(row);
+      }
+      return mobsListed;
+    };
+    const scrollToMob = async (mobId) => {
+      const list = page.getByTestId("sidebar-agent-list");
+      const height = await list.evaluate((node) => node.scrollHeight);
+      for (let top = 0; top <= height; top += 200) {
+        await list.evaluate((node, y) => { node.scrollTop = y; }, top);
+        await page.waitForTimeout(40);
+        if (await page.getByTestId(`sidebar-mob:${mobId}`).count()) {
+          // Listed, and in view too: the list keeps rows just outside it.
+          await page.getByTestId(`sidebar-mob:${mobId}`).scrollIntoViewIfNeeded();
+          await page.waitForTimeout(40);
+          return;
+        }
+      }
+      throw new Error(`the roster does not list the mob ${mobId}`);
+    };
+    // The roster view lives in the mast's view options popover.
+    const viewSettled = () => page.waitForFunction(() => {
+      const popover = document.querySelector('[data-testid="sidebar-view-options"]');
+      return !popover || popover.getAttribute("data-state") === "open";
+    }, null, { timeout: 5_000 });
+    const openViewOptions = async () => {
+      await viewSettled();
+      if (!(await page.getByTestId("sidebar-view-options").count())) await page.getByTestId("sidebar-view-menu").click();
+      await viewSettled();
+    };
+    const closeViewOptions = async () => {
+      await page.keyboard.press("Escape");
+      await page.getByTestId("sidebar-view-options").waitFor({ state: "detached", timeout: 5_000 });
+    };
+    const chooseView = async (option) => {
+      await openViewOptions();
+      await page.getByTestId(option).click();
+      assert.equal(await page.getByTestId(option).getAttribute("aria-pressed"), "true", `${option} is pressed`);
+      await closeViewOptions();
+    };
+    const storedMobChoice = () => page.evaluate(() => {
+      const key = Object.keys(localStorage).find((name) => name.startsWith("meta-console-mob-view:"));
+      return key ? JSON.parse(localStorage.getItem(key)).mob_id : undefined;
+    });
+    /** Whether text shows six characters in a row of a generated id. */
+    const showsIdPiece = (text, id) => {
+      const compactText = String(text).toLowerCase().replace(/[^a-z0-9]+/g, "");
+      const compactId = id.replace(/^implicit-/, "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+      for (let start = 0; start + 6 <= compactId.length; start += 1) {
+        if (compactText.includes(compactId.slice(start, start + 6))) return true;
+      }
+      return false;
+    };
+
+    // With several mobs the roster starts grouped by mob: the console's own
+    // mob first, then the other top-level mobs by name, each mob followed by
+    // its agents and then by the mobs nested under it.
+    await page.waitForSelector(`[data-testid="sidebar-mob:${PRIMARY}"]`, { timeout: 30_000 });
+    await eventually(async () => (await rosterRows()).length === mobs.length + team.length, "the roster lists every mob and agent", 15_000);
+    const wholeRoster = await rosterRows();
+    const mobOrder = listedByMob(wholeRoster).map(([mob]) => mob);
+    assert.deepEqual(mobOrder, [
+      PRIMARY,
+      IMPLICIT,                  // Desk Manager's helpers
+      "refund-research",         // Desk Manager's refund research team
+      "ledger-audit",            // Policy reader's ledger audit team
+      "claims-archive",
+      "claims-index",
+      "claims-index-east",
+      "claims-index-east-vault",
+      GENERATED_HOSTED,          // Intake's team
+      "night-shift",             // Night shift team (1 of 2)
+      "night_shift",             // Night shift team (2 of 2)
+      GENERATED_A,               // Team 1
+      GENERATED_B,               // Team 2
+    ], "the mobs are listed as a tree, siblings by name");
+    for (const [mob, agents] of listedByMob(wholeRoster)) {
+      assert.deepEqual([...agents].sort(), team.filter((agent) => agent.mob_id === mob).map((agent) => agent.identity).sort(),
+        `${mob} lists its own members`);
+    }
+    assert.equal(await page.getByTestId("sidebar-agent-count").textContent(), `${team.length} agents`);
+
+    // Every mob has a name for people. A mob a member created reads as that
+    // member's; a generated id with no creator named reads "Team" with an
+    // ordinal; two mobs of one name carry what tells them apart. No header,
+    // label or summary shows an id or a piece of one: the tooltip does.
+    const headerOf = async (mobId) => {
+      await scrollToMob(mobId);
+      const toggle = page.getByTestId(`sidebar-mob-toggle:${mobId}`);
+      return {
+        name: (await toggle.locator(".sidebar__mob-label").textContent()).trim(),
+        detail: (await page.getByTestId(`sidebar-mob-detail:${mobId}`).count())
+          ? (await page.getByTestId(`sidebar-mob-detail:${mobId}`).textContent()).trim() : null,
+        state: (await page.getByTestId(`sidebar-mob-state:${mobId}`).count())
+          ? (await page.getByTestId(`sidebar-mob-state:${mobId}`).textContent()).trim() : null,
+        text: await page.getByTestId(`sidebar-mob:${mobId}`).textContent(),
+        label: await toggle.getAttribute("aria-label"),
+        menuLabel: await page.getByTestId(`sidebar-mob-menu:${mobId}`).getAttribute("aria-label"),
+        tooltip: await toggle.getAttribute("title"),
+        depth: await page.getByTestId(`sidebar-mob:${mobId}`).getAttribute("data-depth"),
+      };
+    };
+    const expectedHeaders = {
+      [PRIMARY]: ["Support desk team", null, null],
+      "refund-research": ["Desk Manager's refund research team", null, null],
+      "ledger-audit": ["Policy reader's ledger audit team", null, null],
+      [GENERATED_HOSTED]: ["Intake's team", null, null],
+      [IMPLICIT]: ["Desk Manager's helpers", null, null],
+      [GENERATED_A]: ["Team 1", null, null],
+      [GENERATED_B]: ["Team 2", null, "Stopped"],
+      "night-shift": ["Night shift team", "1 of 2", null],
+      night_shift: ["Night shift team", "2 of 2", "Status unknown"],
+    };
+    for (const [mobId, [name, detail, state]] of Object.entries(expectedHeaders)) {
+      const header = await headerOf(mobId);
+      assert.deepEqual([header.name, header.detail, header.state], [name, detail, state], `the header of ${mobId}`);
+      assert.match(header.tooltip, new RegExp(`Mob ID ${mobId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`), "the id is in the tooltip");
+      if (/\d{4}/.test(mobId)) {
+        for (const read of [header.text, header.label, header.menuLabel]) {
+          assert.equal(showsIdPiece(read, mobId), false, `no piece of ${mobId} is shown or spoken: ${read}`);
+        }
+      }
+    }
+    assert.match((await headerOf("refund-research")).tooltip, /Created by Desk Manager/);
+    assert.match((await headerOf("ledger-audit")).tooltip, /Created by Policy reader/);
+    assert.match((await headerOf("ledger-audit")).tooltip, /In Desk Manager's refund research team/);
+    assert.equal(/Created by/.test((await headerOf(GENERATED_A)).tooltip), false, "no creator is named where the entry names none");
+    assert.deepEqual(
+      [(await headerOf("ledger-audit")).depth, (await headerOf("claims-index-east-vault")).depth],
+      ["2", "6"],
+      "each mob's depth under the top level",
+    );
+    await page.getByTestId("sidebar-agent-list").evaluate((node) => { node.scrollTop = 0; });
+    await shot("roster-names-desktop");
+    await shot("roster-names-tree", sidebar);
+    await scrollToMob("night_shift");
+    await shot("roster-equal-names-and-ordinals", sidebar);
+    await page.getByTestId("sidebar-agent-list").evaluate((node) => { node.scrollTop = 0; });
+
+    // A nested member is shown by its name everywhere; its identity is the
+    // tooltip. The row without a display name reads by its member name.
+    const rowName = async (identity) =>
+      (await page.getByTestId(`sidebar-agent:${identity}`).locator(".agent__name").textContent()).trim();
+    assert.equal(await rowName("refund-research/policy-reader"), "Policy reader");
+    assert.equal(await rowName("refund-research/reviewer"), "Reviewer");
+    assert.equal(await page.getByTestId("sidebar-agent:refund-research/policy-reader").getAttribute("title"), "Identity: refund-research/policy-reader");
+    const rosterText = await page.getByTestId("sidebar-agent-list").innerText();
+    assert.equal(/refund-research\//.test(rosterText), false, "no identity of a nested member is shown in the roster");
+
+    // Members with one name in three mobs: each has its own row, selection
+    // and chat pane, named "Reviewer", told apart by the mob it is listed in.
+    await page.getByTestId("sidebar-agent:refund-research/reviewer").click();
+    const nestedPane = page.getByTestId("chat-pane:refund-research/reviewer");
+    await nestedPane.waitFor({ timeout: 10_000 });
+    assert.equal((await nestedPane.locator(".conv__title").first().textContent()).trim(), "Reviewer");
+    assert.equal(await nestedPane.locator(".conv__title").first().getAttribute("title"), "refund-research/reviewer");
+    const activeRows = () => sidebar.locator('[data-testid^="sidebar-agent:"].is-active').evaluateAll((nodes) =>
+      nodes.map((node) => node.getAttribute("data-testid").slice("sidebar-agent:".length)));
+    assert.deepEqual(await activeRows(), ["refund-research/reviewer"], "one reviewer is selected, not the three");
+    assert.equal(/refund-research\/reviewer/.test(await nestedPane.innerText()), false, "the chat pane shows the name, not the identity");
+    await shot("same-name-nested-chat");
+    await page.getByTestId("sidebar-agent:reviewer").click();
+    await page.getByTestId("chat-pane:reviewer").waitFor({ timeout: 10_000 });
+    assert.deepEqual(await activeRows(), ["reviewer"], "the primary mob's reviewer is its own agent");
+
+    // The topology: one node per member, the three reviewers included.
+    await page.getByTestId("nav:topology").click();
+    await page.getByTestId("topology-panel").waitFor({ timeout: 10_000 });
+    await page.getByTestId("topology-view:roles").click();
+    const topologyNodes = () => page.locator('[data-testid^="topology-node:"]').evaluateAll((nodes) =>
+      nodes.map((node) => node.getAttribute("data-testid").slice("topology-node:".length)).sort());
+    await eventually(async () => (await topologyNodes()).length === team.length, "the topology shows every member", 10_000);
+    for (const identity of ["reviewer", "refund-research/reviewer", "ledger-audit/reviewer"]) {
+      assert((await topologyNodes()).includes(identity), `${identity} has its own topology node`);
+    }
+    assert.equal(/\w\/reviewer|\/policy-reader/.test(await page.getByTestId("topology-panel").innerText()), false,
+      "the topology shows names, not identities");
+    assert.equal((await page.getByTestId("topology-mob-choice").textContent()).trim(), "All mobs");
+
+    // Collapsing a mob hides its agents and the mobs nested under it.
+    const mobSubtree = (mob) => {
+      const rows = [];
+      const order = listedByMob(wholeRoster);
+      const nested = new Set([mob]);
+      for (const entry of mobs) if (entry.parent_mob_id && nested.has(entry.parent_mob_id)) nested.add(entry.mob_id);
+      // The mob list is in tree order, parents first, so one walk finds every nested mob.
+      for (const [id, agents] of order) if (nested.has(id)) rows.push(`mob:${id}`, ...agents);
+      return rows;
+    };
+    const refundSubtree = mobSubtree("refund-research");
+    assert.equal(refundSubtree.filter((row) => row.startsWith("mob:")).length, 6, "the mob and the five mobs nested under it");
+    const refundHeader = page.getByTestId("sidebar-mob-toggle:refund-research");
+    await refundHeader.click();
+    await expectRoster(wholeRoster.filter((row) => row === "mob:refund-research" || !refundSubtree.includes(row)),
+      "a collapsed mob hides its agents and its nested mobs");
+    assert.equal(await refundHeader.getAttribute("aria-expanded"), "false");
+    await refundHeader.click();
+    await expectRoster(wholeRoster, "the mob expands again");
+
+    // The mob choice from the keyboard alone: Tab from the header to its
+    // "...", Enter opens the menu on its first action, Enter chooses.
+    await refundHeader.focus();
+    await page.keyboard.press("Tab");
+    await eventually(async () => await page.evaluate(() => document.activeElement?.getAttribute("data-testid")) === "sidebar-mob-menu:refund-research",
+      "the mob's menu follows its header in the tab order", 5_000);
+    await page.keyboard.press("Enter");
+    await page.getByTestId("sidebar-mob-only:refund-research").waitFor({ timeout: 5_000 });
+    await eventually(async () => await page.evaluate(() => document.activeElement?.getAttribute("data-testid")) === "sidebar-mob-only:refund-research",
+      "the menu opens on its first action", 5_000);
+    await page.waitForTimeout(400); // the menu's fade-in, for the screenshot
+    await shot("mob-menu-by-keyboard", sidebar);
+    await page.keyboard.press("Enter");
+    await expectRoster(refundSubtree, "the mob choice narrows the roster to the mob and the mobs nested under it");
+    const chosenCount = refundSubtree.filter((row) => !row.startsWith("mob:")).length;
+    assert.equal(await page.getByTestId("sidebar-agent-count").textContent(), `${chosenCount} of ${team.length} agents`);
+    assert.match(await page.getByTestId("sidebar-view-summary").textContent(), /Desk Manager's refund research team/);
+    assert.equal(await storedMobChoice(), "refund-research", "the choice is kept");
+    await eventually(async () => (await topologyNodes()).length === chosenCount, "the topology shows the chosen mob's members", 10_000);
+    assert.equal((await page.getByTestId("topology-mob-choice").textContent()).trim(), "Desk Manager's refund research team");
+    await shot("one-mob-desktop");
+
+    // A search under the choice says which mob it looked in and where the
+    // matches are; "Search all mobs" keeps the search and leaves the choice.
+    await page.getByTestId("sidebar-search").fill("intake");
+    const emptyRoster = page.getByTestId("sidebar-empty-filtered");
+    await emptyRoster.waitFor({ timeout: 5_000 });
+    assert.equal((await emptyRoster.locator("span").first().textContent()).trim(),
+      "No matching agents in Desk Manager's refund research team. 1 in other mobs.");
+    await shot("search-under-mob-choice", sidebar);
+    await page.getByTestId("sidebar-search-all-mobs").click();
+    await expectRoster([`mob:${PRIMARY}`, "intake"], "the search then finds the agent in all mobs");
+    assert.equal(await storedMobChoice(), null, "the choice was left");
+    // A search under a choice finds the mob's own agents and its nested mobs'.
+    await page.getByTestId("sidebar-search").fill("");
+    await openViewOptions();
+    // The view options carry the choice as a select: keyboard users change
+    // it there under any grouping.
+    const mobSelect = page.getByTestId("sidebar-view-mob");
+    assert.equal(await mobSelect.inputValue(), "", "All mobs is the choice");
+    const optionLabels = await mobSelect.locator("option").evaluateAll((nodes) => nodes.map((node) => node.textContent.trim()));
+    assert.deepEqual(optionLabels.slice(0, 4), ["All mobs", "Support desk team", "Desk Manager's helpers", "Desk Manager's refund research team"]);
+    assert(optionLabels.includes("Night shift team (2 of 2)") && optionLabels.includes("Team 2"), JSON.stringify(optionLabels));
+    for (const label of optionLabels) {
+      for (const id of [GENERATED_HOSTED, IMPLICIT, GENERATED_A, GENERATED_B]) {
+        assert.equal(showsIdPiece(label, id), false, `the option ${label} shows no piece of ${id}`);
+      }
+    }
+    await mobSelect.focus();
+    await mobSelect.selectOption("ledger-audit");
+    await closeViewOptions();
+    const ledgerSubtree = mobSubtree("ledger-audit");
+    await expectRoster(ledgerSubtree, "the select chooses a mob");
+    await page.getByTestId("sidebar-search").fill("sort");
+    await expectRoster(["mob:ledger-audit", "mob:claims-archive", "mob:claims-index", "mob:claims-index-east", "claims-index-east/sorter"],
+      "a search under a choice finds agents of the mobs nested under the chosen one, under their mobs");
+    await page.getByTestId("sidebar-search").fill("");
+
+    // The choice under the other groupings: Category and None keep the
+    // roster narrowed to the chosen mobs, say so in the summary, and show
+    // and change the choice in the view options.
+    const ledgerAgents = ledgerSubtree.filter((row) => !row.startsWith("mob:")).sort();
+    await chooseView("sidebar-view-group:category");
+    await eventually(async () => (await page.locator('[data-testid^="sidebar-mob:"]').count()) === 0, "the category view lists no mob header", 10_000);
+    assert.deepEqual((await rosterRows()).sort(), ledgerAgents, "the category view lists the chosen mobs' agents only");
+    assert.match(await page.getByTestId("sidebar-view-summary").textContent(), /Policy reader's ledger audit team/);
+    assert.equal(/By category/.test(await page.getByTestId("sidebar-view-summary").textContent()), false, "Category is no changed view");
+    await openViewOptions();
+    assert.equal(await page.getByTestId("sidebar-view-mob").inputValue(), "ledger-audit", "the view options show the choice");
+    await page.waitForTimeout(300);
+    await shot("category-grouping-with-mob-choice");
+    await closeViewOptions();
+    await chooseView("sidebar-view-group:none");
+    assert.deepEqual((await rosterRows()).sort(), ledgerAgents, "the flat list lists the chosen mobs' agents only");
+    assert.match(await page.getByTestId("sidebar-view-summary").textContent(), /Policy reader's ledger audit team · Ungrouped/);
+    await openViewOptions();
+    await page.waitForTimeout(300);
+    await shot("no-grouping-with-mob-choice");
+    // The choice changes from the keyboard: the select takes the arrow keys.
+    await page.getByTestId("sidebar-view-mob").focus();
+    await page.keyboard.press("ArrowDown");
+    await eventually(async () => await storedMobChoice() === "claims-archive", "ArrowDown chooses the next mob", 5_000);
+    await page.getByTestId("sidebar-view-mob").selectOption("");
+    await closeViewOptions();
+    assert.equal((await rosterRows()).length, team.length, "All mobs lists every agent in the flat list");
+    await chooseView("sidebar-view-group:mob");
+    await expectRoster(wholeRoster, "Group: Mob lists the mobs again");
+    assert.equal(await page.getByTestId("sidebar-view-summary").count(), 0, "the view is the default again");
+
+    // Copy mob ID copies the id and says so beside the mob.
+    await scrollToMob(GENERATED_HOSTED);
+    await page.getByTestId(`sidebar-mob-menu:${GENERATED_HOSTED}`).click();
+    await page.getByTestId(`sidebar-mob-copy:${GENERATED_HOSTED}`).click();
+    const copied = page.getByTestId(`sidebar-mob-copied:${GENERATED_HOSTED}`);
+    await copied.waitFor({ timeout: 5_000 });
+    assert.equal((await copied.textContent()).trim(), "Mob ID copied");
+    await shot("copy-mob-id-feedback", sidebar);
+    await copied.waitFor({ state: "detached", timeout: 5_000 });
+    // What was copied: pasted into the roster search.
+    await page.getByTestId("sidebar-search").focus();
+    await page.keyboard.press("Control+V");
+    await eventually(async () => await page.getByTestId("sidebar-search").inputValue() === GENERATED_HOSTED,
+      "the clipboard holds the mob's id", 5_000);
+    // The id finds the mob's member through its identity; the name stays "Scout".
+    await expectRoster([`mob:${PRIMARY}`, `mob:${GENERATED_HOSTED}`, `${GENERATED_HOSTED}/scout`], "a search by mob id finds its members, under the mob's own header");
+    await page.getByTestId("sidebar-search").fill("");
+    await page.getByTestId("sidebar-agent-list").evaluate((node) => { node.scrollTop = 0; });
+
+    // The topology's menu offers All mobs and every mob by name, with what
+    // tells equal names apart; a long list scrolls in its own group and the
+    // menu's other actions stay in reach.
+    await page.getByTestId("topology-menu").click();
+    await page.getByTestId(`topology-mob:${PRIMARY}`).waitFor({ timeout: 5_000 });
+    const menuOption = async (mobId) => (await page.getByTestId(`topology-mob:${mobId}`).textContent()).replace(/\s+/g, " ").trim();
+    assert.equal(await menuOption("refund-research"), "Desk Manager's refund research team");
+    assert.equal(await menuOption("night_shift"), "Night shift team 2 of 2");
+    assert.equal(await menuOption(GENERATED_B), "Team 2");
+    const menuText = await page.getByRole("menu").innerText();
+    for (const id of [GENERATED_HOSTED, IMPLICIT, GENERATED_A, GENERATED_B]) {
+      assert.equal(showsIdPiece(menuText, id), false, `the topology menu shows no piece of ${id}`);
+    }
+    const mobGroup = page.getByRole("menu").getByRole("group", { name: "Mob" });
+    const groupBox = await mobGroup.evaluate((node) => ({ scroll: node.scrollHeight, client: node.clientHeight }));
+    assert(groupBox.scroll > groupBox.client && groupBox.client <= 160,
+      `the mob list is a short group that scrolls on its own: ${JSON.stringify(groupBox)}`);
+    const menuBox = await page.getByRole("menu").evaluate((node) => ({ scroll: node.scrollHeight, client: node.clientHeight }));
+    assert(menuBox.scroll - menuBox.client < groupBox.scroll - groupBox.client,
+      `thirteen mobs push the menu's other actions less than their own length: ${JSON.stringify({ menuBox, groupBox })}`);
+    await page.waitForTimeout(400); // the menu's fade-in, for the screenshot
+    await shot("topology-menu");
+    // Choose a top-level mob there.
+    await page.getByTestId("topology-mob:night-shift").scrollIntoViewIfNeeded();
+    await page.getByTestId("topology-mob:night-shift").click();
+    await page.keyboard.press("Escape");
+    await expectRoster(["mob:night-shift", "night-shift/porter"], "the topology's choice narrows the roster");
+    assert.equal((await page.getByTestId("topology-mob-choice").textContent()).trim(), "Night shift team (1 of 2)");
+    assert.equal(await storedMobChoice(), "night-shift");
+
+    // The choice survives a reload, in the roster and in the topology.
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.waitForSelector('[data-testid="sidebar-mob:night-shift"]', { timeout: 30_000 });
+    await expectRoster(["mob:night-shift", "night-shift/porter"], "the mob choice persists");
+    if (!(await page.getByTestId("topology-panel").count())) await page.getByTestId("nav:topology").click();
+    await page.getByTestId("topology-panel").waitFor({ timeout: 10_000 });
+    assert.equal((await page.getByTestId("topology-mob-choice").textContent()).trim(), "Night shift team (1 of 2)");
+
+    // The chosen mob goes away (its last listed member left): the console
+    // reads all mobs at its next read, drops the stored choice, and keeps the
+    // roster grouped by mob. The same id listed again later brings no choice
+    // back.
+    const gone = { agent: team.find((agent) => agent.mob_id === "night-shift"), mob: mobs.find((mob) => mob.mob_id === "night-shift") };
+    team.splice(team.indexOf(gone.agent), 1);
+    mobs.splice(mobs.indexOf(gone.mob), 1);
+    topologySnapshot.nodes = team.map(nodeOf);
+    topologySnapshot.node_count = team.length;
+    await eventually(async () => await storedMobChoice() === null, "the stored choice is dropped once the mob is no longer listed", 30_000);
+    const withoutGone = wholeRoster.filter((row) => row !== "mob:night-shift" && row !== "night-shift/porter");
+    await expectRoster(withoutGone, "all mobs are listed again, still grouped by mob");
+    assert.equal(await page.getByTestId("sidebar-view-summary").count(), 0, "no choice is shown");
+    assert.equal((await page.getByTestId("topology-mob-choice").textContent()).trim(), "All mobs");
+    // The mob left alone with its name no longer needs telling apart.
+    assert.deepEqual([(await headerOf("night_shift")).name, (await headerOf("night_shift")).detail], ["Night shift team", null]);
+    await page.getByTestId("sidebar-agent-list").evaluate((node) => { node.scrollTop = 0; });
+    await shot("mob-choice-dropped");
+    team.push(gone.agent);
+    mobs.push(gone.mob);
+    topologySnapshot.nodes = team.map(nodeOf);
+    topologySnapshot.node_count = team.length;
+    await eventually(async () => (await rosterRows()).includes("mob:night-shift"), "the mob is listed again", 30_000);
+    assert.equal(await storedMobChoice(), null, "the returning id brings no choice back");
+    assert.equal((await rosterRows()).length, mobs.length + team.length, "every mob and agent is listed");
+
+    // A mob nested six levels deep keeps its name readable at a narrow
+    // width: the indent stops growing after three levels, the header's
+    // controls reserve no width, and the name has room.
+    for (const width of [760, 480]) {
+      await page.setViewportSize({ width, height: 900 });
+      await page.getByTestId("sidebar-agent-list").waitFor({ timeout: 10_000 });
+      await scrollToMob("claims-index-east-vault");
+      const rootBox = await sidebar.boundingBox();
+      const measure = async (mobId) => {
+        const toggle = page.getByTestId(`sidebar-mob-toggle:${mobId}`);
+        const label = toggle.locator(".sidebar__mob-label");
+        return {
+          header: await toggle.boundingBox(),
+          label: await label.boundingBox(),
+          text: (await label.textContent()).trim(),
+          shown: await label.evaluate((node) => ({ client: node.clientWidth, scroll: node.scrollWidth })),
+        };
+      };
+      const deepest = await measure("claims-index-east-vault");
+      const third = await measure("claims-archive");
+      assert(deepest.header && rootBox && deepest.header.x >= rootBox.x && deepest.header.x + deepest.header.width <= rootBox.x + rootBox.width + 1,
+        `the deepest mob's header stays inside the roster at ${width}px: ${JSON.stringify({ deepest, rootBox })}`);
+      assert.equal(deepest.label.x, third.label.x, `the indent stops growing after three levels at ${width}px`);
+      assert.equal(deepest.text, "Claims index east vault team");
+      // The name has the header's width less the capped indent, the mark,
+      // the count and the list's gutter: nothing else takes room from it.
+      assert(deepest.label.width >= 90 && deepest.label.width >= Math.min(deepest.shown.scroll, rootBox.width - 110),
+        `the deepest mob's name keeps its room at ${width}px: ${JSON.stringify({ label: deepest.label, shown: deepest.shown, rootBox })}`);
+      // Its agent's name keeps room too: the agents step in no further than their header.
+      const keeperName = await page.getByTestId("sidebar-agent:claims-index-east-vault/keeper").locator(".agent__name")
+        .evaluate((node) => ({ client: node.clientWidth, scroll: node.scrollWidth, text: node.textContent }));
+      assert(keeperName.client >= Math.min(keeperName.scroll, 36),
+        `the deepest mob's agent keeps room for its name at ${width}px: ${JSON.stringify(keeperName)}`);
+      await shot(`six-levels-deep-${width}`);
+    }
+    assert.deepEqual(pageErrors, [], "no page errors");
+
+    process.stdout.write("browser sidebar mobs and mob choice ok\n");
+  } finally {
+    if (browser) {
+      await browser.close();
+    }
+    await server.close();
+  }
+}
+
 const scenarios = [
   ...["conflict", "group", "unavailable"].map(mode => ({ id: `checked-save-${mode}`, family: "console", backend: "mock", run: () => runCheckedSaveBrowserProof(mode) })),
   { id: "access-tab-click-during-refresh", family: "console", backend: "mock", run: runAccessTabClickDuringRefreshProof },
@@ -5253,6 +6027,9 @@ const allScenarios = [
     { id: "chat-pane-older-history-after-today-prefill", family: "presentation", backend: "mock", run: runChatPaneOlderHistoryAfterTodayPrefillProof },
     { id: "identity-changes-story", family: "console", backend: "mock", run: runIdentityChangesStoryProof },
     ...require("./scenarios/real-identity-changes.cjs").scenarios,
+    { id: "sidebar-mobs-and-mob-choice", family: "console", backend: "mock", run: runSidebarMobsProof },
+    ...require("./scenarios/hosted-mobs.cjs").scenarios,
+    { id: "question-set-answered-placement", family: "console", backend: "mock", run: runQuestionSetAnsweredPlacementProof },
   ];
 
 module.exports = { scenarios: allScenarios };

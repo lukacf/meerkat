@@ -676,13 +676,39 @@ impl meerkat_core::AgentToolDispatcher for ScopePinnedWorkGraphTools {
 /// build is guarded when its grant is that scope's. The admission is
 /// filled when the runtime has its mob handle; a guarded call that arrives
 /// before then is refused.
+///
+/// That scope and that admission are the launch mob's. A member of a mob
+/// the launch composes beside its launch mob
+/// ([`Self::refuse_guarded_calls_of_members_of`]) is refused the two
+/// guarded calls outright ([`HostedMemberWorkGraphTools`]).
 #[derive(Clone, Default)]
 pub(crate) struct MemberWorkGraphTools {
     service: Arc<std::sync::RwLock<Option<WorkGraphService>>>,
     admission: WorkGraphAdmissionSlot,
+    /// The mobs the launch composes beside its launch mob, once the base
+    /// session layer was told them
+    /// ([`Self::refuse_guarded_calls_of_members_of`]).
+    hosted: Arc<std::sync::RwLock<Option<crate::private_owners::HostedMobs>>>,
 }
 
 impl MemberWorkGraphTools {
+    /// The mobs `mobs` names, now and as it comes to name more, are the
+    /// mobs the launch composes beside its launch mob. The scope and the
+    /// admission of this value are the launch mob's, and the members of
+    /// those mobs are not judged by it: a member build that names one of
+    /// them has its reassign and its escalation refused
+    /// ([`HostedMemberWorkGraphTools`]), and the host makes both changes
+    /// for that mob.
+    pub(crate) fn refuse_guarded_calls_of_members_of(
+        &self,
+        mobs: crate::private_owners::HostedMobs,
+    ) {
+        *self
+            .hosted
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(mobs);
+    }
+
     /// Bind the scope of the mob `mob_id` over the runtime's `service`: the
     /// service Meerkat scopes for that mob's members
     /// ([`meerkat_mob::mob_scoped_workgraph_service`]), so the grant
@@ -739,7 +765,10 @@ impl MemberWorkGraphTools {
     /// ([`crate::workgraph_admission::WorkGraphAdmission::hold_bindings_onto_private_member_build`]).
     /// Every create and rebuild of such a member asks it, so a binding the
     /// host made onto the name before the member existed does not stay
-    /// active on it.
+    /// active on it. The scope and the admission asked are the launch
+    /// mob's; for a member of a mob the launch composes beside its launch
+    /// mob, that admission has the mob's own admission hold the bindings of
+    /// the mob's own realm, once the mob's entry is made.
     ///
     /// The hold fails open, as a start's does: when the bindings cannot be
     /// read the fault is logged as an error and the build goes on, so a
@@ -778,10 +807,23 @@ impl MemberWorkGraphTools {
     /// admission, when the build's grant is the bound scope. A build with
     /// no WorkGraph tools, or with a grant of another scope (a member of a
     /// mob this runtime does not own), is left as it is.
+    ///
+    /// A member of a mob the launch composes beside its launch mob is
+    /// judged first, by the mob its build names and by nothing that is
+    /// bound: its tools go behind [`HostedMemberWorkGraphTools`], which
+    /// refuses the two calls this runtime's admission would judge. So such
+    /// a member is refused them whether the launch mob's scope is bound yet
+    /// or not.
     fn guard(&self, req: &mut meerkat_core::service::CreateSessionRequest) {
         let Some(build) = req.build.as_mut() else {
             return;
         };
+        if self.of_a_hosted_mob(build) {
+            if let Some(tools) = build.workgraph_tools.take() {
+                build.workgraph_tools = Some(Arc::new(HostedMemberWorkGraphTools { inner: tools }));
+            }
+            return;
+        }
         let service = self
             .service
             .read()
@@ -800,6 +842,89 @@ impl MemberWorkGraphTools {
                 self.admission_slot(),
             )));
         }
+    }
+
+    /// Whether the member build `build` is of a mob the launch composes
+    /// beside its launch mob: the launch's composition names such a mob
+    /// before it is built, at its create and at every load.
+    fn of_a_hosted_mob(&self, build: &meerkat_core::service::SessionBuildOptions) -> bool {
+        let Some(binding) = build.mob_member_binding.as_ref() else {
+            return false;
+        };
+        self.hosted
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .is_some_and(|mobs| mobs.holds(&binding.mob_id))
+    }
+}
+
+/// The WorkGraph tools of a member of a mob the launch composes beside its
+/// launch mob.
+///
+/// The admission a mob runtime's member tools take
+/// ([`MemberWorkGraphTools`]) is the launch mob's, and it judges the launch
+/// mob's members. A member of another mob the launch composes is therefore
+/// refused the two calls that admission judges,
+/// `workgraph_attention_reassign` and `workgraph_policy_escalate`, with or
+/// without a goal's attention in the turn: the host makes both changes for
+/// that mob with its own WorkGraph methods. Every other call reaches the
+/// member's own surface with the bytes it was made with, and the catalog
+/// is the member's own.
+struct HostedMemberWorkGraphTools {
+    inner: Arc<dyn meerkat_core::AgentToolDispatcher>,
+}
+
+impl HostedMemberWorkGraphTools {
+    /// The refusal of the call `name`, when it is one of the two.
+    fn refusal(name: &str) -> Option<meerkat_core::ToolError> {
+        matches!(
+            name,
+            "workgraph_attention_reassign" | "workgraph_policy_escalate"
+        )
+        .then(|| {
+            meerkat_core::ToolError::execution_failed(format!(
+                "{name} is not available to a member of a mob this gateway hosts beside its \
+                 launch mob; the host makes this change for the mob with its own WorkGraph \
+                 methods"
+            ))
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl meerkat_core::AgentToolDispatcher for HostedMemberWorkGraphTools {
+    fn tools(&self) -> Arc<[Arc<meerkat_core::types::ToolDef>]> {
+        self.inner.tools()
+    }
+
+    fn tool_catalog_capabilities(&self) -> meerkat_core::ToolCatalogCapabilities {
+        self.inner.tool_catalog_capabilities()
+    }
+
+    fn tool_catalog(&self) -> Arc<[meerkat_core::ToolCatalogEntry]> {
+        self.inner.tool_catalog()
+    }
+
+    async fn dispatch(
+        &self,
+        call: meerkat_core::types::ToolCallView<'_>,
+    ) -> Result<meerkat_core::ToolDispatchOutcome, meerkat_core::ToolError> {
+        if let Some(refusal) = Self::refusal(call.name) {
+            return Err(refusal);
+        }
+        self.inner.dispatch(call).await
+    }
+
+    async fn dispatch_with_context(
+        &self,
+        call: meerkat_core::types::ToolCallView<'_>,
+        context: &meerkat_core::agent::ToolDispatchContext,
+    ) -> Result<meerkat_core::ToolDispatchOutcome, meerkat_core::ToolError> {
+        if let Some(refusal) = Self::refusal(call.name) {
+            return Err(refusal);
+        }
+        self.inner.dispatch_with_context(call, context).await
     }
 }
 
@@ -1861,6 +1986,150 @@ comms = true
             "the fault is logged as an error that names the member: {log}"
         );
         runtime.handle().stop().await.expect("stop");
+    }
+
+    /// A member of a mob the launch composes beside its launch mob is
+    /// refused a reassign and an escalation by the WorkGraph tools its build
+    /// carries, with the goal's attention in the call, whether a scope is
+    /// bound for the launch mob or not; every other call reaches the
+    /// member's own surface. The binding it would have moved stays where it
+    /// was.
+    #[tokio::test]
+    async fn a_hosted_mobs_member_is_refused_a_reassign_and_an_escalation_whatever_is_bound() {
+        const NOT_FOR_A_HOSTED_MOBS_MEMBER: &str =
+            "is not available to a member of a mob this gateway hosts beside its launch mob";
+        let hosted_mob = unique_admission_mob_id();
+        let hosted_mobs = crate::private_owners::HostedMobs::default();
+        hosted_mobs.name(&hosted_mob);
+        let tools = MemberWorkGraphTools::default();
+        tools.refuse_guarded_calls_of_members_of(hosted_mobs);
+        // The member's own surface, over its own mob's realm, as Meerkat's
+        // provisioner puts it on the build.
+        let service = ephemeral_workgraph_service(&hosted_mob);
+        let mover = create_session_goal(
+            &service,
+            "mover",
+            SESSION_MOVER,
+            meerkat::WorkAttentionMode::Coordinate,
+        )
+        .await;
+        let context = witness_context(&service, &mover.attention.binding_id).await;
+        let noop: crate::mob_handle_runtime::PreBuildHook =
+            Arc::new(|_req: &mut meerkat_core::service::CreateSessionRequest| {
+                Box::pin(async { Ok(()) })
+            });
+        let hook = tools.after_hook(noop);
+
+        let mut wrong = Vec::new();
+        for launch_scope_bound in [false, true] {
+            if launch_scope_bound {
+                let launch_mob = unique_admission_mob_id();
+                tools.bind(
+                    Some(&ephemeral_workgraph_service(&launch_mob)),
+                    &meerkat_mob::MobId::from(launch_mob.as_str()),
+                );
+            }
+            let mut request = meerkat_core::service::CreateSessionRequest {
+                model: "gpt-5.5".to_string(),
+                prompt: meerkat_core::types::ContentInput::Text("hello".to_string()),
+                system_prompt: meerkat_core::config::SystemPromptOverride::Inherit,
+                max_tokens: None,
+                event_tx: None,
+                initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+                build: Some(meerkat_core::service::SessionBuildOptions {
+                    mob_member_binding: Some(meerkat_core::MobMemberBinding {
+                        mob_id: hosted_mob.clone(),
+                        role: "worker".to_string(),
+                        member: "desk".to_string(),
+                    }),
+                    workgraph_namespace_grant: Some(service.namespace_grant().clone()),
+                    workgraph_tools: Some(Arc::new(WorkGraphToolSurface::new(service.clone()))),
+                    ..Default::default()
+                }),
+                labels: None,
+                deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::default(),
+                injected_context: Vec::new(),
+            };
+            hook(&mut request)
+                .await
+                .expect("the member's build goes on");
+            let plane = request
+                .build
+                .as_ref()
+                .and_then(|build| build.workgraph_tools.clone())
+                .expect("the build keeps its WorkGraph tools");
+
+            let onto_free = reassign_args(&mover, SESSION_FREE);
+            let escalate = serde_json::value::RawValue::from_string(
+                serde_json::json!({
+                    "id": mover.item.id,
+                    "expected_revision": mover.item.revision,
+                    "completion_policy": {"kind": "host_confirmed"},
+                })
+                .to_string(),
+            )
+            .expect("escalate args");
+            for (name, args) in [
+                ("workgraph_attention_reassign", &onto_free),
+                ("workgraph_policy_escalate", &escalate),
+            ] {
+                let answer = plane
+                    .dispatch_with_context(
+                        meerkat_core::types::ToolCallView {
+                            id: "call-of-a-hosted-member",
+                            name,
+                            args,
+                        },
+                        &context,
+                    )
+                    .await;
+                let refused = answer
+                    .as_ref()
+                    .err()
+                    .is_some_and(|error| error.to_string().contains(NOT_FOR_A_HOSTED_MOBS_MEMBER));
+                if !refused {
+                    wrong.push(format!(
+                        "{name} of a hosted mob's member is not refused (the launch mob's scope \
+                         bound: {launch_scope_bound}): {answer:?}"
+                    ));
+                }
+            }
+            let title = format!("an item of the hosted mob's member ({launch_scope_bound})");
+            let create = serde_json::value::RawValue::from_string(
+                serde_json::json!({ "title": title }).to_string(),
+            )
+            .expect("create args");
+            let created = plane
+                .dispatch_with_context(
+                    meerkat_core::types::ToolCallView {
+                        id: "call-create",
+                        name: "workgraph_create",
+                        args: &create,
+                    },
+                    &meerkat_core::agent::ToolDispatchContext::default(),
+                )
+                .await;
+            if created.is_err() {
+                wrong.push(format!(
+                    "a create of a hosted mob's member does not reach its own surface: {created:?}"
+                ));
+            }
+        }
+        let bindings = service
+            .list_attention(meerkat::AttentionListRequest::default())
+            .await
+            .expect("list attention");
+        let moved = bindings.attention.iter().any(|binding| {
+            binding.binding_id != mover.attention.binding_id
+                || !matches!(binding.status, meerkat::WorkAttentionStatus::Active)
+        });
+        if moved {
+            wrong.push(format!(
+                "the goal's binding did not stay as it was: {:?}",
+                bindings.attention
+            ));
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
 
     /// An UNFILLED admission slot (non-mob embedder: no runtime, no roster)

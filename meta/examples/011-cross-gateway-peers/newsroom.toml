@@ -1,0 +1,9 @@
+[mob]
+id = "newsroom"
+
+[profiles.worker]
+model = "claude-haiku-5-5"
+external_addressable = true
+
+[profiles.worker.tools]
+comms = true

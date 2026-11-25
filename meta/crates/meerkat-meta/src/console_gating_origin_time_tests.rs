@@ -284,6 +284,7 @@ impl Scene {
         let result = self.gating.lock().await.evaluate_gating_action_with_origin(
             serde_json::from_value(request).expect("gating request"),
             origin.map(|identity| crate::runtime::GatingOrigin {
+                mob_id: None,
                 identity: identity.to_string(),
                 conversation_id: None,
                 interaction_id: None,
@@ -755,6 +756,79 @@ async fn a_request_whose_opening_audit_row_is_no_longer_retained() {
     scene.launch.finish().await;
 }
 
+/// A pending request made with no origin for a mob beside the launch mob:
+/// its audit rows name that mob (`request_mob_id` in a row's detail). A
+/// person who may not address that mob does not decide it: the decide is
+/// answered as for an id that is not pending and the request still waits.
+/// A request made with no origin for the launch mob is decided as before,
+/// and the administrator decides the other mob's.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_request_made_for_another_mob_is_not_decided_by_a_person_who_may_not_address_it() {
+    let scene = scene("request-mob-decide").await;
+    // Two requests with no origin, then the stored state as an owner keeps
+    // it: the rows of the second name another mob, as an evaluation for
+    // that mob writes them.
+    let (of_the_launch_mob, of_another_mob, stored) = {
+        let first = gating_owner("request-mob-decide-first");
+        let mut first = first.lock().await;
+        let mut pend = || {
+            let evaluated = first.evaluate_gating_action(
+                serde_json::from_value(json!({
+                    "action": "Publish the reviewed report",
+                    "actor_id": "agent:writer",
+                    "risk_tier": "r3",
+                    "approval_timeout_ms": 600_000,
+                }))
+                .expect("gating request"),
+            );
+            (
+                evaluated
+                    .pending_id
+                    .expect("an R3 gate waits for a decision"),
+                evaluated.action_id,
+            )
+        };
+        let (of_the_launch_mob, _) = pend();
+        let (of_another_mob, action_of_another_mob) = pend();
+        let mut stored = first.gating_state_snapshot();
+        for entry in &mut stored.audit {
+            if entry.action_id == action_of_another_mob {
+                entry.detail["request_mob_id"] = json!("another-mob");
+            }
+        }
+        (of_the_launch_mob, of_another_mob, stored)
+    };
+    scene
+        .gating
+        .lock()
+        .await
+        .restore_gating_state(stored)
+        .expect("the stored state is restored");
+
+    let of_an_id_that_is_not_pending = scene.approve(&scene.bob, "no-such-request").await;
+    let refused = scene.approve(&scene.bob, &of_another_mob).await;
+    scene.expect(
+        !refused["error"].is_null()
+            && refusal(&refused) == refusal(&of_an_id_that_is_not_pending)
+            && scene.still_pending(&of_another_mob).await,
+        format!(
+            "a person who may not address the other mob is answered as for an id that is not \
+             pending: {refused}, and for such an id: {of_an_id_that_is_not_pending}"
+        ),
+    );
+    let decided = scene.approve(&scene.bob, &of_the_launch_mob).await;
+    scene.expect(
+        decided["error"].is_null() && !scene.still_pending(&of_the_launch_mob).await,
+        format!("the launch mob's request is decided as before: {decided}"),
+    );
+    let decided = scene.approve(&scene.root, &of_another_mob).await;
+    scene.expect(
+        decided["error"].is_null() && !scene.still_pending(&of_another_mob).await,
+        format!("the administrator decides the other mob's request: {decided}"),
+    );
+    scene.launch.finish().await;
+}
+
 /// A Console that identifies nobody: its one operator reads the requests
 /// and the question sets of the runtime's members as before, under a name
 /// that was seated more than once too.
@@ -782,6 +856,7 @@ async fn on_a_console_that_identifies_nobody_the_operator_reads_its_members_entr
                 .evaluate_gating_action_with_origin(
                     serde_json::from_value(request).expect("gating request"),
                     Some(crate::runtime::GatingOrigin {
+                        mob_id: None,
                         identity: origin.to_string(),
                         conversation_id: None,
                         interaction_id: None,

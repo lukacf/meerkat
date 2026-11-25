@@ -1,4 +1,6 @@
 import { defineConfig } from "vite";
+import { fileURLToPath } from "node:url";
+import { verifyCache } from "../webcm-cache.mjs";
 
 // The key fields are pre-filled from the environment only by the local dev
 // server (`vite`, bound to 127.0.0.1). A build never contains a key: its
@@ -7,25 +9,30 @@ import { defineConfig } from "vite";
 const devKey = (command: string, name: string): string =>
   JSON.stringify(command === "serve" ? (process.env[name] ?? "") : "");
 
-export default defineConfig(({ command }) => ({
-  define: {
-    __ANTHROPIC_API_KEY__: devKey(command, "ANTHROPIC_API_KEY"),
-    __OPENAI_API_KEY__: devKey(command, "OPENAI_API_KEY"),
-    __GEMINI_API_KEY__: devKey(command, "GEMINI_API_KEY"),
-  },
-  server: {
-    host: "127.0.0.1",
-    port: 4032,
-    headers: {
-      "Cross-Origin-Opener-Policy": "same-origin",
-      "Cross-Origin-Embedder-Policy": "require-corp",
+export default defineConfig(async ({ command, isPreview }) => {
+  const assets = fileURLToPath(new URL(isPreview ? "./dist/" : "./public/", import.meta.url));
+  // Allow an asset-free build for offline UI checks; never copy a partial pair.
+  await verifyCache(assets, { allowAbsent: command === "build" });
+  return {
+    define: {
+      __ANTHROPIC_API_KEY__: devKey(command, "ANTHROPIC_API_KEY"),
+      __OPENAI_API_KEY__: devKey(command, "OPENAI_API_KEY"),
+      __GEMINI_API_KEY__: devKey(command, "GEMINI_API_KEY"),
     },
-  },
-  preview: {
-    host: "127.0.0.1",
-    port: 4032,
-  },
-  optimizeDeps: {
-    exclude: ["webcm"],
-  },
-}));
+    server: {
+      host: "127.0.0.1",
+      port: 4032,
+      headers: {
+        "Cross-Origin-Opener-Policy": "same-origin",
+        "Cross-Origin-Embedder-Policy": "require-corp",
+      },
+    },
+    preview: {
+      host: "127.0.0.1",
+      port: 4032,
+    },
+    optimizeDeps: {
+      exclude: ["webcm"],
+    },
+  };
+});

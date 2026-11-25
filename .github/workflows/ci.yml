@@ -32,7 +32,7 @@ name: CI
 #                     when machine authority or a dogma document changed
 #   governance-docs-gate - the machine-authority docs gate, on the same
 #                     changes, in parallel with governance-gates
-#   tlc-audits      - (x24) the hand-written TLC audit shards on a
+#   tlc-audits      - (x27) the hand-written TLC audit shards on a
 #                     machine-authority change
 #   clippy (xN)     - one lane per shard of directly changed packages:
 #                     clippy --no-deps --all-features over every target; in a
@@ -1053,7 +1053,7 @@ jobs:
   # in `ratchets` only proves the artifacts match the DSL). Each shard of
   # the canonical TLC lane needs only a JDK and the TLC jar
   # (setup-tlc-ci; the audit parts never run xtask), runs in parallel, and
-  # fits the PR budget: twenty-four shards, which took 146-751 s each on the
+  # fits the PR budget: twenty-seven shards, which took 146-751 s each on the
   # hosted runners of the 0.9.9 release pushes and up to 776 s on its pull
   # requests, audits-f aside (1020 s, then its 20-minute timeout, before
   # two of its audits moved out). machine_verify_all_tlc_test.sh lists
@@ -1063,7 +1063,13 @@ jobs:
   # shorter only when its part splits. The identity entry audit's entry and
   # lifecycle runs take three shards (audits-l, audits-w and audits-x) since
   # its single entry run reached the 900 s per-run cap, and its legacy run
-  # two (audits-m and audits-y) since one shard of it took 1182 s.
+  # two (audits-m and audits-y) since one shard of it took 1182 s. The
+  # durable decision audit's whole-space run, witnesses and seeded defects
+  # take three (audits-j, audits-z and audits-a) since its one shard took
+  # 833-1598 s on the pull requests of 2026-11-09 to 2026-11-20. Two
+  # shards (audits-aa and audits-ab) take five whole audits from audits-r,
+  # audits-h, audits-u and audits-s, which took up to 1271 s, 1089 s,
+  # 1152 s and 1049 s on those pull requests.
   # The `machine-verify --all` sweep stays on nightly, the release gate and
   # the release-tag graph.
   tlc-audits:
@@ -1076,9 +1082,12 @@ jobs:
     # classification), but a budget failure is reported while a cancelled
     # shard is a failed lane. A shard is sized to about 13 minutes hosted
     # (776 s, the longest shard of this assignment on the 0.9.9 release
-    # runs), but one audit cannot be split across shards: the durable
-    # decision audit with --mutants, alone in audits-j, took 1120 s on main
-    # push 42552143103, near 20 minutes. On that push audits-s took 3072 s
+    # runs), but shards have run past 20 minutes: the durable decision audit
+    # with --mutants, then whole in audits-j, took 1120 s on main push
+    # 42552143103 and 1598 s on a pull request's run 42698827144 (its three
+    # parts now run in audits-j, audits-z and audits-a), and audits-r took
+    # 1271 s on a pull request's run 43650149872. On main push 42552143103
+    # audits-s took 3072 s
     # (1111 s locally with 4 TLC workers) while the AuthMachine
     # source-credential publication audit explored the whole domains of a
     # restore's last_refresh and refresh_attempt, which nothing reads (797 s
@@ -1089,7 +1098,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        part: [audits-a, audits-b, audits-c, audits-d, audits-e, audits-f, audits-g, audits-h, audits-i, audits-j, audits-k, audits-l, audits-m, audits-n, audits-o, audits-q, audits-r, audits-s, audits-t, audits-u, audits-v, audits-w, audits-x, audits-y]
+        part: [audits-a, audits-b, audits-c, audits-d, audits-e, audits-f, audits-g, audits-h, audits-i, audits-j, audits-k, audits-l, audits-m, audits-n, audits-o, audits-q, audits-r, audits-s, audits-t, audits-u, audits-v, audits-w, audits-x, audits-y, audits-z, audits-aa, audits-ab]
     env:
       # A 4-vCPU runner: four TLC workers, and a heap that leaves room for
       # the runner.
@@ -1139,7 +1148,18 @@ jobs:
     # needs about 65 minutes. A pull request gets 90: such a row fails the
     # pull-request execution budget (CI_MAX_EXEC_SECONDS) either way, but a
     # budget failure is reported while a cancelled row is a failed lane.
-    timeout-minutes: ${{ github.event_name == 'pull_request' && 90 || 120 }}
+    # One kind of row is not sized by its event: a row that names
+    # meerkat-meta and lints every target runs ONE build job (see the swap
+    # step below), so its two long checks, the library and the library
+    # test target, run one after the other on one processor. Where such a
+    # row ended, its lint took 80m 59s on a pull request (run 45369560555,
+    # second attempt) and 109m 35s on a push (run 45267846643). Its first
+    # six executions on a pull request, in four runs, were that one result
+    # and five cut at 90 minutes, two of them in the row's last targets.
+    # That row gets 150 minutes on every event: an estimate from eight job
+    # logs and those two results, not a guarantee. The limit selects the
+    # row by the swap step's condition.
+    timeout-minutes: ${{ contains(matrix.packages, '-p meerkat-meta') && contains(matrix.targets, '--all-targets') && 150 || (github.event_name == 'pull_request' && 90 || 120) }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.changes.outputs.shard_matrix) }}
@@ -1185,6 +1205,77 @@ jobs:
           cache-targets: "false"
           cache-on-failure: true
 
+      # On hosted runners the lint of a push's meta+2 row, which names
+      # meerkat-meta and lints every target, ended without a verdict (the
+      # runner lost, the compile killed by signal 9, the runner shut down)
+      # while it checked meerkat-meta. On another machine the same command
+      # is clean, and its two meerkat-meta checks, the library and the
+      # library test target, held 18.6 GiB while they ran side by side (the
+      # library test target alone 13.1 GiB). That is consistent with a
+      # runner of 15 GiB of memory and 3 GiB of swap running out; the hosted
+      # cause is not established. So every row that names meerkat-meta and
+      # lints every target gets the unit lanes' swap step (see main-unit)
+      # with one more condition, and ONE build job in the lint step, so that
+      # the two checks cannot overlap. The lint command is unchanged, and
+      # neither added step can fail a lane or pass one.
+      #
+      # The condition below selects two kinds of rows. The row names here
+      # are examples; the planner (scripts/ci-cargo-lanes.mjs) plans them.
+      # Kind A: every push row that names meerkat-meta, because the planner
+      # gives every Clippy row of a push all targets. For example meta+2 in
+      # the whole-workspace plan, meta when only meerkat-meta changed, and
+      # meta+1 when meerkat-meta changed together with meta-extension-state.
+      # Such a row's bound is 150 minutes (the job's limit above).
+      # Kind B: a pull request's downstream row that names meerkat-meta,
+      # because the planner gives a downstream row all targets. For example
+      # downstream meta+1 (meerkat-meta and meta-store-conformance), planned
+      # when a pull request changes meerkat-mob-mcp,
+      # meerkat-store-conformance or mcp-test-server and no Meta crate. Such
+      # a row's bound is 150 minutes too.
+      # Not selected: a pull request's own Meta row, which lints only the
+      # library and binaries (for example meta, or meta+1 when meerkat-meta
+      # and meta-store-conformance changed). It has no library test target
+      # to keep apart from the library, and runs as before. A row that does
+      # not name meerkat-meta is never selected.
+      - name: Show the runner's size and add swap (meerkat-meta rows)
+        if: ${{ contains(matrix.packages, '-p meerkat-meta') && contains(matrix.targets, '--all-targets') }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          show_resources() {
+            nproc
+            free -m
+            if [[ -d /mnt ]]; then
+              df -h / /mnt
+            else
+              df -h /
+            fi
+            swapon --show || true
+          }
+          show_resources
+          vmstat -t 30 >"${RUNNER_TEMP}/meta-unit-vmstat.log" 2>&1 </dev/null &
+          swapfile=/meta-unit-swapfile
+          need_gib=40
+          if mountpoint -q /mnt; then
+            mnt_avail_kib="$(df --output=avail -k /mnt | tail -n 1 | tr -d ' ')"
+            if ((mnt_avail_kib >= 20 * 1024 * 1024)); then
+              swapfile=/mnt/meta-unit-swapfile
+              need_gib=20
+            fi
+          fi
+          avail_kib="$(df --output=avail -k "$(dirname "${swapfile}")" | tail -n 1 | tr -d ' ')"
+          if ((avail_kib < need_gib * 1024 * 1024)); then
+            echo "::warning title=Meta unit row swap::under ${need_gib} GiB free for ${swapfile}: no swap added"
+            exit 0
+          fi
+          echo "Adding 12 GiB of swap at ${swapfile}"
+          sudo fallocate -l 12GiB "${swapfile}"
+          sudo chmod 600 "${swapfile}"
+          sudo mkswap "${swapfile}"
+          sudo swapon "${swapfile}"
+          show_resources
+
       - name: Clippy (changed packages, the shard's targets, all features)
         shell: bash
         env:
@@ -1193,6 +1284,11 @@ jobs:
           # their lib and bin targets (--lib --bins), since their tests run
           # on the push, which lints every target.
           TARGETS: ${{ matrix.targets }}
+          # One build job for the row that names meerkat-meta and lints every
+          # target (see the swap step above): its library and its library
+          # test target are then checked one after the other, never side by
+          # side.
+          META_ROW: ${{ contains(matrix.packages, '-p meerkat-meta') && contains(matrix.targets, '--all-targets') }}
         run: |
           set -euo pipefail
           [[ -n "${PACKAGES}" ]] || { echo "::error::empty package list in a clippy lane"; exit 1; }
@@ -1200,8 +1296,47 @@ jobs:
             "--all-targets"|"--lib"|"--bins"|"--lib --bins") ;;
             *) echo "::error::unexpected clippy targets '${TARGETS}'"; exit 1 ;;
           esac
+          if [[ "${META_ROW}" == "true" ]]; then
+            export CARGO_BUILD_JOBS=1
+          fi
           # shellcheck disable=SC2086
           ./scripts/repo-cargo clippy ${PACKAGES} --no-deps ${TARGETS} --all-features -- -D warnings
+
+      # Memory, swap and disk after the meerkat-meta row's lint (see main-unit).
+      - name: Show memory after the lint (meerkat-meta rows)
+        if: ${{ always() && contains(matrix.packages, '-p meerkat-meta') && contains(matrix.targets, '--all-targets') }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          nproc
+          free -m
+          if [[ -d /mnt ]]; then
+            df -h / /mnt
+          else
+            df -h /
+          fi
+          swapon --show || true
+          echo "Since boot, in pages of $(getconf PAGESIZE) bytes:"
+          grep -E '^(pswpin|pswpout|oom_kill) ' /proc/vmstat || true
+          if [[ -r /proc/pressure/memory ]]; then
+            cat /proc/pressure/memory
+          fi
+          vmstat_log="${RUNNER_TEMP}/meta-unit-vmstat.log"
+          if [[ -f "${vmstat_log}" ]]; then
+            awk '
+              $1 ~ /^[0-9]+$/ {
+                if (line == "" || $3 + 0 > peak) { peak = $3 + 0; line = $0 }
+                if (low == "" || $4 + 0 < low) low = $4 + 0
+              }
+              END {
+                if (line != "") printf "Most swap in use: %d KiB. Least free memory: %d KiB. The sample with the most swap:\n%s\n", peak, low, line
+              }
+            ' "${vmstat_log}"
+            echo "::group::vmstat every 30 seconds"
+            cat "${vmstat_log}"
+            echo "::endgroup::"
+          fi
 
       - name: Upload sccache server log
         if: ${{ always() }}
@@ -1221,7 +1356,7 @@ jobs:
     # a copy of that job, which scripts/ci-cargo-lanes-selftest.mjs checks.
     if: ${{ needs.changes.outputs.rust_changed == 'true' && needs.changes.outputs.shard_rest_count != '0' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: ${{ github.event_name == 'pull_request' && 90 || 120 }}
+    timeout-minutes: ${{ contains(matrix.packages, '-p meerkat-meta') && contains(matrix.targets, '--all-targets') && 150 || (github.event_name == 'pull_request' && 90 || 120) }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.changes.outputs.shard_rest_matrix) }}
@@ -1254,11 +1389,76 @@ jobs:
           cache-targets: "false"
           cache-on-failure: true
 
+      # The meerkat-meta rows' swap, as in the clippy job, whose comment gives
+      # the reason.
+      #
+      # The condition below selects two kinds of rows. The row names here
+      # are examples; the planner (scripts/ci-cargo-lanes.mjs) plans them.
+      # Kind A: every push row that names meerkat-meta, because the planner
+      # gives every Clippy row of a push all targets. For example meta+2 in
+      # the whole-workspace plan, meta when only meerkat-meta changed, and
+      # meta+1 when meerkat-meta changed together with meta-extension-state.
+      # Such a row's bound is 150 minutes (the job's limit above).
+      # Kind B: a pull request's downstream row that names meerkat-meta,
+      # because the planner gives a downstream row all targets. For example
+      # downstream meta+1 (meerkat-meta and meta-store-conformance), planned
+      # when a pull request changes meerkat-mob-mcp,
+      # meerkat-store-conformance or mcp-test-server and no Meta crate. Such
+      # a row's bound is 150 minutes too.
+      # Not selected: a pull request's own Meta row, which lints only the
+      # library and binaries (for example meta, or meta+1 when meerkat-meta
+      # and meta-store-conformance changed). It has no library test target
+      # to keep apart from the library, and runs as before. A row that does
+      # not name meerkat-meta is never selected.
+      - name: Show the runner's size and add swap (meerkat-meta rows)
+        if: ${{ contains(matrix.packages, '-p meerkat-meta') && contains(matrix.targets, '--all-targets') }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          show_resources() {
+            nproc
+            free -m
+            if [[ -d /mnt ]]; then
+              df -h / /mnt
+            else
+              df -h /
+            fi
+            swapon --show || true
+          }
+          show_resources
+          vmstat -t 30 >"${RUNNER_TEMP}/meta-unit-vmstat.log" 2>&1 </dev/null &
+          swapfile=/meta-unit-swapfile
+          need_gib=40
+          if mountpoint -q /mnt; then
+            mnt_avail_kib="$(df --output=avail -k /mnt | tail -n 1 | tr -d ' ')"
+            if ((mnt_avail_kib >= 20 * 1024 * 1024)); then
+              swapfile=/mnt/meta-unit-swapfile
+              need_gib=20
+            fi
+          fi
+          avail_kib="$(df --output=avail -k "$(dirname "${swapfile}")" | tail -n 1 | tr -d ' ')"
+          if ((avail_kib < need_gib * 1024 * 1024)); then
+            echo "::warning title=Meta unit row swap::under ${need_gib} GiB free for ${swapfile}: no swap added"
+            exit 0
+          fi
+          echo "Adding 12 GiB of swap at ${swapfile}"
+          sudo fallocate -l 12GiB "${swapfile}"
+          sudo chmod 600 "${swapfile}"
+          sudo mkswap "${swapfile}"
+          sudo swapon "${swapfile}"
+          show_resources
+
       - name: Clippy (changed packages, the shard's targets, all features)
         shell: bash
         env:
           PACKAGES: ${{ matrix.packages }}
           TARGETS: ${{ matrix.targets }}
+          # One build job for the row that names meerkat-meta and lints every
+          # target (see the swap step above): its library and its library
+          # test target are then checked one after the other, never side by
+          # side.
+          META_ROW: ${{ contains(matrix.packages, '-p meerkat-meta') && contains(matrix.targets, '--all-targets') }}
         run: |
           set -euo pipefail
           [[ -n "${PACKAGES}" ]] || { echo "::error::empty package list in a clippy lane"; exit 1; }
@@ -1266,8 +1466,47 @@ jobs:
             "--all-targets"|"--lib"|"--bins"|"--lib --bins") ;;
             *) echo "::error::unexpected clippy targets '${TARGETS}'"; exit 1 ;;
           esac
+          if [[ "${META_ROW}" == "true" ]]; then
+            export CARGO_BUILD_JOBS=1
+          fi
           # shellcheck disable=SC2086
           ./scripts/repo-cargo clippy ${PACKAGES} --no-deps ${TARGETS} --all-features -- -D warnings
+
+      # Memory, swap and disk after the meerkat-meta row's lint (see main-unit).
+      - name: Show memory after the lint (meerkat-meta rows)
+        if: ${{ always() && contains(matrix.packages, '-p meerkat-meta') && contains(matrix.targets, '--all-targets') }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          nproc
+          free -m
+          if [[ -d /mnt ]]; then
+            df -h / /mnt
+          else
+            df -h /
+          fi
+          swapon --show || true
+          echo "Since boot, in pages of $(getconf PAGESIZE) bytes:"
+          grep -E '^(pswpin|pswpout|oom_kill) ' /proc/vmstat || true
+          if [[ -r /proc/pressure/memory ]]; then
+            cat /proc/pressure/memory
+          fi
+          vmstat_log="${RUNNER_TEMP}/meta-unit-vmstat.log"
+          if [[ -f "${vmstat_log}" ]]; then
+            awk '
+              $1 ~ /^[0-9]+$/ {
+                if (line == "" || $3 + 0 > peak) { peak = $3 + 0; line = $0 }
+                if (low == "" || $4 + 0 < low) low = $4 + 0
+              }
+              END {
+                if (line != "") printf "Most swap in use: %d KiB. Least free memory: %d KiB. The sample with the most swap:\n%s\n", peak, low, line
+              }
+            ' "${vmstat_log}"
+            echo "::group::vmstat every 30 seconds"
+            cat "${vmstat_log}"
+            echo "::endgroup::"
+          fi
 
       - name: Upload sccache server log
         if: ${{ always() }}

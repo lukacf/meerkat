@@ -338,7 +338,22 @@ impl StdioDecisionConnection {
             return None;
         }
         let id = request.get("id").cloned().unwrap_or(Value::Null);
-        let params = request.get("params").cloned().unwrap_or(Value::Null);
+        let mut params = request.get("params").cloned().unwrap_or(Value::Null);
+        // The mob the request names is read and taken off the params before
+        // a method's own strict parameters are parsed. The decision methods
+        // are the host's: the id is checked, and that check loads no mob.
+        let named_mob = match crate::rpc::mob_addressing::take_named_mob(method, &mut params) {
+            Ok(named_mob) => named_mob,
+            Err(error) => {
+                return Some(wire::failure(&id, error.code, error.message, error.data).to_string());
+            }
+        };
+        if let Err(error) = runtime.served_mob_id(named_mob.named()).await {
+            let refusal = crate::rpc::mob_addressing::mob_resolve_refusal(&error);
+            return Some(
+                wire::failure(&id, refusal.code, refusal.message, refusal.data).to_string(),
+            );
+        }
         let decisions = runtime.durable_decisions();
         let answer = match method {
             LIST_METHOD => self.list(&id, params, runtime, decisions).await,

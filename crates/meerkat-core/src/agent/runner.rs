@@ -3896,6 +3896,7 @@ impl Agent<dyn AgentLlmClient, dyn AgentToolDispatcher, dyn AgentSessionStore> {
             auth_lease_handle: None,
             auth_credential_identity: self.auth_credential_identity.clone(),
             mcp_server_lifecycle_handle: None,
+            tool_call_outer_bound: self.tool_call_outer_bound.clone(),
             cancel_after_boundary_tx,
             cancel_after_boundary_rx,
             model_defaults_resolver: self.model_defaults_resolver.clone(),
@@ -8482,7 +8483,7 @@ mod skill_activation_effect_tests {
             .expect("ordinary boundary resumed")
             .expect("take task")
             .expect("take original ordinary context");
-        assert!(contexts.durable.is_none());
+        assert!(contexts.durable.is_empty());
         let contexts = contexts.request_only;
         assert_eq!(contexts.len(), 1);
         assert_eq!(contexts[0].as_str(), "ordinary pending context");

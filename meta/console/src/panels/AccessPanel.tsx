@@ -132,6 +132,7 @@ export function summarizeRuleResources(rule: ConsoleAccessRule): string {
   if (rule.roles?.length) parts.push(`roles: ${rule.roles.join(", ")}`);
   const labels = formatLabelSelectorInput(rule.match_labels);
   if (labels) parts.push(`labels: ${labels}`);
+  if (rule.mobs?.length) parts.push(rule.mobs.includes("*") ? "every team" : `teams: ${rule.mobs.join(", ")}`);
   return parts.length > 0 ? parts.join(" · ") : "all agents";
 }
 
@@ -159,6 +160,9 @@ interface RuleDraft {
   agents: string;
   roles: string;
   matchLabels: string;
+  /** The mobs the stored rule lists. The editor shows them and saves them
+   * as they are; a new rule lists none (the default mob's). */
+  mobs: string[];
 }
 
 function emptyRuleDraft(): RuleDraft {
@@ -172,6 +176,7 @@ function emptyRuleDraft(): RuleDraft {
     agents: "",
     roles: "",
     matchLabels: "",
+    mobs: [],
   };
 }
 
@@ -186,6 +191,7 @@ function draftFromRule(rule: ConsoleAccessRule): RuleDraft {
     agents: formatListInput(rule.agents),
     roles: formatListInput(rule.roles),
     matchLabels: formatLabelSelectorInput(rule.match_labels),
+    mobs: [...(rule.mobs ?? [])],
   };
 }
 
@@ -207,7 +213,15 @@ export function ruleFromDraft(draft: RuleDraft): ConsoleAccessRule {
   if (roles.length) rule.roles = roles;
   const labels = parseLabelSelectorInput(draft.matchLabels);
   if (Object.keys(labels).length) rule.match_labels = labels;
+  if (draft.mobs.length) rule.mobs = [...draft.mobs];
   return rule;
+}
+
+/** Whether `id`, as it would be saved (without the space around it), is the
+ * ID of a rule in one of `lists`. The runtime compares rule IDs exactly. */
+function ruleIdIsTaken(id: string, ...lists: (ConsoleAccessRule[] | undefined)[]): boolean {
+  const saved = id.trim();
+  return saved.length > 0 && lists.some((rules) => (rules ?? []).some((rule) => rule.id === saved));
 }
 
 export const __accessTest = {
@@ -218,6 +232,7 @@ export const __accessTest = {
   summarizeRuleSubjects,
   summarizeRuleResources,
   ruleFromDraft,
+  draftFromRule,
   emptyRuleDraft,
   ruleTitle,
   ruleDeleteConfirmText,
@@ -348,6 +363,7 @@ function RuleCard({
   const agents = rule.agents ?? [];
   const roles = rule.roles ?? [];
   const labels = Object.entries(rule.match_labels ?? {});
+  const mobs = rule.mobs ?? [];
   const who = groups.length || subjects.length ? (
     <span className="cc-chips">
       {groups.map((group) => <Chip key={`group:${group}`} title={`Group ${group}`}>{`${group} group`}</Chip>)}
@@ -361,11 +377,12 @@ function RuleCard({
       ))}
     </span>
   ) : "No actions";
-  const on = agents.length || roles.length || labels.length ? (
+  const on = agents.length || roles.length || labels.length || mobs.length ? (
     <span className="cc-chips">
       {agents.map((agent) => <Chip key={`agent:${agent}`} title={agent}>{agent === "*" ? "Any agent" : agentDisplayName(agent, directory)}</Chip>)}
       {roles.map((role) => <Chip key={`role:${role}`} title={`Role ${role}`}>{`${role} role`}</Chip>)}
       {labels.map(([key, value]) => <Chip key={`label:${key}`} mono title={`Label ${key}=${value}`}>{`${key}=${value}`}</Chip>)}
+      {mobs.map((mob) => <Chip key={`mob:${mob}`} title={mob === "*" ? "Every team" : `Team ${mob}`}>{mob === "*" ? "Every team" : `${mob} team`}</Chip>)}
     </span>
   ) : "All agents";
   return (
@@ -1002,6 +1019,12 @@ export function AccessPanel({
   // removable choice, and only an entry the runtime would refuse blocks Save.
   const extraActions = ruleDraft ? ruleDraft.actions.filter((action) => !actions.includes(action)) : [];
   const unknownActions = extraActions.filter((action) => !actionPatternIsKnown(action, actions));
+  // A new rule never takes the ID of an existing rule. The runtime replaces
+  // a rule whole under its ID, so that save would drop what this form does
+  // not show: the teams the existing rule lists. The rules on screen count,
+  // and so do the rules of the configuration the save is made against.
+  const newRuleIdTaken = ruleDraft !== null && editingRuleId === null
+    && ruleIdIsTaken(ruleDraft.id, rules, ruleBase?.config.rules);
   const ruleEditor = ruleDraft ? (
     <div className="access-panel__rule access-panel__rule--editor" data-testid="access-rule-editor">
       <h3 className="access-panel__editor-title">{editingRuleId !== null ? "Edit rule" : "New rule"}</h3>
@@ -1033,6 +1056,11 @@ export function AccessPanel({
           options={[{ value: "allow", label: "Allow" }, { value: "deny", label: "Deny" }]}
         />
       </div>
+      {newRuleIdTaken ? (
+        <p className="access-panel__form-note access-panel__form-note--warn" data-testid="access-rule-id-taken">
+          {`The ID "${ruleDraft.id.trim()}" is the ID of an existing rule. A new rule needs an ID of its own; to change that rule, edit it.`}
+        </p>
+      ) : null}
       <SectionHeader as="h4" label="Who" className="access-panel__form-head" />
       <div className="access-panel__form">
         <TextField
@@ -1131,11 +1159,16 @@ export function AccessPanel({
         />
       </div>
       <p className="access-panel__form-note">Leave agents, roles and labels empty to cover every agent.</p>
+      {ruleDraft.mobs.length ? (
+        <p className="access-panel__form-note" data-testid="access-rule-mobs">
+          {`Teams: ${ruleDraft.mobs.map((mob) => (mob === "*" ? "every team" : mob)).join(", ")}. This rule keeps the teams it lists; they are set in the access file, not here.`}
+        </p>
+      ) : null}
       <div className="access-panel__form-actions">
         <Button
           variant="primary"
           data-testid="access-rule-save"
-          disabled={!canEdit || !ruleDraft.id.trim() || ruleDraft.actions.length === 0 || unknownActions.length > 0}
+          disabled={!canEdit || !ruleDraft.id.trim() || newRuleIdTaken || ruleDraft.actions.length === 0 || unknownActions.length > 0}
           onClick={() => {
             void mutate("rule", ruleBase, base => onUpsertRule(ruleFromDraft(ruleDraft), base), closeRuleEditor);
           }}

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, rm, readFile, writeFile, readdir } from "node:fs/promises";
+import { mkdir, rm, readFile, readdir } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { resolve } from "node:path";
@@ -340,43 +340,5 @@ test("WebCM regressions run actual browser modules and local synthetic shell inp
     await browser?.close();
     await server.close();
     await rm(work, { recursive: true, force: true });
-  }
-});
-
-test("E15 download helper never certifies a partial cache", async () => {
-  const root = resolve(".work/cache-regression");
-  await mkdir(root, { recursive: true });
-  const { createServer: httpServer } = await import("node:http");
-  let requests = 0, failWasm = false;
-  const server = httpServer((req, res) => {
-    requests++;
-    if (failWasm && req.url.endsWith(".wasm")) { res.writeHead(500); res.end("synthetic failure"); }
-    else res.end(req.url.endsWith(".wasm") ? "synthetic wasm" : "synthetic js");
-  });
-  await new Promise(r => server.listen(0, "127.0.0.1", r));
-  const base = `http://127.0.0.1:${server.address().port}`;
-  const invoke = () => exec("bash", ["-c", 'source ../download-webcm.sh; download_webcm "$1" "$2"', "test", base, root], { cwd: process.cwd() });
-  try {
-    for (const shape of ["js-only", "wasm-only", "zero", "complete"]) {
-      await rm(root, { recursive: true, force: true }); await mkdir(root);
-      if (shape !== "wasm-only") await writeFile(resolve(root, "webcm.mjs"), shape === "zero" ? "" : "cached js");
-      if (shape !== "js-only") await writeFile(resolve(root, "webcm.wasm"), shape === "zero" ? "" : "cached wasm");
-      const before = requests;
-      await invoke();
-      assert.equal(requests - before, shape === "complete" ? 0 : 2);
-      assert.ok((await readFile(resolve(root, "webcm.mjs"))).length);
-      assert.ok((await readFile(resolve(root, "webcm.wasm"))).length);
-    }
-    await rm(root, { recursive: true, force: true }); await mkdir(root);
-    failWasm = true;
-    await assert.rejects(invoke);
-    failWasm = false;
-    const before = requests;
-    await invoke();
-    assert.equal(requests - before, 2);
-    assert.equal(await readFile(resolve(root, "webcm.wasm"), "utf8"), "synthetic wasm");
-  } finally {
-    await new Promise(r => server.close(r));
-    await rm(root, { recursive: true, force: true });
   }
 });

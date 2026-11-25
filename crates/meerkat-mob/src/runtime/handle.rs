@@ -1944,6 +1944,7 @@ pub fn profile_to_wire(profile: &crate::Profile) -> meerkat_contracts::WireMobPr
             mob: tools.mob,
             schedule: tools.schedule,
             image_generation: tools.image_generation,
+            web_search: tools.web_search,
             read_only: tools.read_only,
             deny: tools.deny.clone(),
             mcp: tools.mcp.clone(),
@@ -2793,6 +2794,13 @@ impl MobActorTaskWatch {
         }
     }
 
+    /// Whether the actor task has ended, read now without waiting: its
+    /// future returned, or the task was lost (a panic or an abort). An
+    /// ended task runs nothing and holds nothing of the mob any more.
+    pub fn has_ended(&self) -> bool {
+        *self.rx.borrow() != super::ActorTaskEnd::Running
+    }
+
     /// Whether this watch observes the actor task behind `handle`. Every
     /// handle of one mob instance shares that task; another instance, such
     /// as a mob registered under the same id, has its own.
@@ -3009,6 +3017,8 @@ impl std::error::Error for MobSpawnManyFailure {
 fn spawn_many_failure_observation(error: &MobError) -> mob_dsl::MobSpawnManyFailureObservationKind {
     match error {
         MobError::MobNotFound(_)
+        // A create's refusal: no member spawn meets it.
+        | MobError::MobAlreadyExists(_)
         | MobError::MobDefinitionProjectionMismatch { .. }
         | MobError::MobDefinitionAuthorityChanged { .. }
         | MobError::MemberSessionNotLive { .. }
@@ -6842,12 +6852,47 @@ impl MobHandle {
         self.admission_closed_rx.clone()
     }
 
+    /// Observe whether the mob is idle, and decide nothing. The actor reads,
+    /// on its serialized admission path, the facts an idle close
+    /// ([`Self::close_if_idle`]) is decided on: what is in flight, the
+    /// foreground owner leases, and why admission is closed when it is.
+    /// Nothing is closed, no owner is taken and nothing is waited for: a
+    /// mob that reads idle may be busy, or closed, when the caller next
+    /// acts, and a command the actor admits after the observation is
+    /// admitted as before.
+    ///
+    /// The observation covers the mob's own admission and nothing outside
+    /// it: a schedule that is due, a delivery another owner holds for one
+    /// of its members, and the mobs its members created are not in it. The
+    /// counts are diagnostic. The native work of the members' sessions
+    /// (accepted inputs that are queued, held or running, an open live
+    /// channel) is read only when the actor's own counts are idle, for the
+    /// members that have a bridge session in this process, and reads as
+    /// none in a build without the runtime adapter. The step between the
+    /// actor's delivery of a peer message and the member's accepted input
+    /// is not traced for it.
+    ///
+    /// It costs what an idle close costs: it runs on the actor's loop and,
+    /// when the actor's own counts are idle, asks the runtime of each
+    /// member's session. It is a read for an occasion, not for a poll.
+    pub async fn observe_idle(
+        &self,
+    ) -> Result<super::admission_close::MobIdleObservation, MobError> {
+        self.send_actor_command(|reply_tx| MobCommand::ObserveIdle { reply_tx })
+            .await?
+    }
+
     /// Close admission if the mob is idle (D67). The actor decides on its
     /// serialized admission path, in the same step that closes: a command it
     /// admitted earlier makes the mob busy, and a mutating command it
     /// receives later is refused with [`MobError::AdmissionClosed`]. A busy
     /// mob is left untouched. Closing does not stop or tear down anything;
     /// use Stop, Shutdown or Destroy afterwards.
+    ///
+    /// A request whose caller stopped waiting before the actor reached it
+    /// (this future was dropped, for one at a timeout) is skipped: it closes
+    /// nothing, so a caller that took the missing answer for "not closed"
+    /// is not contradicted later.
     pub async fn close_if_idle(
         &self,
     ) -> Result<super::admission_close::CloseIfIdleOutcome, MobError> {
@@ -7633,6 +7678,11 @@ pub struct SpawnMemberSpec {
     /// caller-supplied arguments.
     pub(crate) spawned_by: Option<AgentIdentity>,
     pub(crate) creation_origin: crate::member_creation::MemberCreationOrigin,
+    /// What the runtime observed of who asks for this seat: whether the host
+    /// attested it as its own ([`Self::attest_host_seat`]) and whether the
+    /// call acts for an agent. Read only for the member's seat record; never
+    /// taken from caller-supplied arguments.
+    pub(crate) seat: super::seat_lineage::SeatObservations,
     pub(crate) fork_job: Option<crate::runtime::ForkJobRecord>,
     /// Typed lineage of a fork-derived member, carried into its seating build
     /// as `SessionBuildOptions::fork_source`. Set only when the runtime applies
@@ -7785,6 +7835,7 @@ impl std::fmt::Debug for SpawnMemberSpec {
                 &self.dispatch_admission_lineage,
             )
             .field("instruction_lineage_root", &self.instruction_lineage_root)
+            .field("seat", &self.seat)
             .finish()
     }
 }
@@ -7863,6 +7914,7 @@ impl SpawnMemberSpec {
             forked_participant_attachment: None,
             spawned_by: None,
             creation_origin: crate::member_creation::MemberCreationOrigin::Unproven,
+            seat: super::seat_lineage::SeatObservations::default(),
             fork_job: None,
             fork_source: None,
             fork_overlay: super::ForkOverlayOrigin::default(),
@@ -7886,7 +7938,46 @@ impl SpawnMemberSpec {
     pub fn host_root(profile: impl Into<ProfileName>, identity: impl Into<AgentIdentity>) -> Self {
         let mut spec = Self::new(profile, identity);
         spec.creation_origin = crate::member_creation::MemberCreationOrigin::HostRoot;
+        spec.seat.host_seat = true;
         spec
+    }
+
+    /// Attest that the host itself seats this member: a host's own call, or
+    /// a verified person's through a host surface, never a call made for an
+    /// agent. [`Self::host_root`] attests it too.
+    ///
+    /// The attestation is read only for the member's seat record
+    /// ([`MobHandle::member_seat`]), where it makes the seat the host's own;
+    /// it changes nothing of what the spec says of the member's creation.
+    /// Core drops it wherever the spawn is sent by an authority that acts
+    /// for an agent, or under an operation owner: such a seat is never
+    /// recorded as the host's.
+    #[must_use]
+    pub fn attest_host_seat(mut self) -> Self {
+        self.seat.host_seat = true;
+        self
+    }
+
+    /// Attach the seat of the member this spawn is made for, as a mob's
+    /// handle sealed it ([`MobHandle::seal_seat_creator`]), for the seat
+    /// record of the member the spawn seats ([`MobHandle::member_seat`]).
+    ///
+    /// It is read for that record alone and allows nothing: a spawn with
+    /// none, or with one that names no seat, is admitted as before and its
+    /// record shows no creating member.
+    #[must_use]
+    pub fn with_seat_creator(mut self, creator: crate::MemberSeatCreator) -> Self {
+        self.seat.creator = Some(creator);
+        self
+    }
+
+    /// Record what the handle's spawn entry `entry` observes of its call for
+    /// this seat: whether its authority acts for an agent, and whether the
+    /// spawn runs under an operation owner. Either drops the host's
+    /// attestation ([`Self::attest_host_seat`]).
+    pub(crate) fn observe_seat_entry(&mut self, entry: &MobHandle, owner_bound: bool) {
+        self.seat
+            .at_entry(entry.command_authority.acts_for_agent(), owner_bound);
     }
 
     /// Seat this capability-attached participant with its source member's
@@ -9351,10 +9442,12 @@ impl MobHandle {
                 Ok(MobMachineCommandResult::FlowStatus(status))
             }
             MobMachineCommand::Spawn {
-                spec,
+                mut spec,
                 spawn_source,
                 owner_context,
             } => {
+                // What this entry observes for the member's seat record.
+                spec.observe_seat_entry(self, owner_context.is_some());
                 tracing::debug!(
                     member_id = %spec.identity,
                     profile = %spec.role_name,
@@ -10331,6 +10424,9 @@ impl MobHandle {
                     spec.mark_agent_creation();
                 }
             }
+            for spec in &mut chunk {
+                spec.observe_seat_entry(self, false);
+            }
             outcomes.extend(Box::pin(self.seat_dormant_chunk(chunk)).await?);
         }
         Ok(outcomes)
@@ -10426,6 +10522,7 @@ impl MobHandle {
         ) {
             spec.mark_agent_creation();
         }
+        spec.observe_seat_entry(self, false);
         let identity = spec.identity.clone();
         let plan = self
             .send_actor_command(|reply_tx| MobCommand::PlanMemberRotation {
@@ -10828,6 +10925,20 @@ impl MobHandle {
             });
         }
         Ok(record.provenance()?)
+    }
+
+    /// The revision of this mob's definition: the epoch its event log holds
+    /// now, 1 for a mob whose definition was never replaced. It is the
+    /// revision a replacement of the definition has to name
+    /// ([`crate::MobStorage::update_definition`]). Read from the mob's event
+    /// log, which is replayed for it: a read for an operator's question, not
+    /// for a listing. `None` when the log holds no definition.
+    pub async fn definition_revision(&self) -> Result<Option<u64>, MobError> {
+        let events = self.events.replay_all().await?;
+        Ok(
+            crate::MobStorage::current_definition_snapshot_for_log(&events)?
+                .map(|snapshot| snapshot.epoch()),
+        )
     }
 
     /// Whether this mob's incarnation was assigned to a store from before
@@ -11301,6 +11412,77 @@ impl MobHandle {
         #[cfg(not(feature = "runtime-adapter"))]
         {
             let _ = (sessions, reason);
+            Ok(Vec::new())
+        }
+    }
+
+    /// The members of this mob whose session marks a run its registration
+    /// has neither resumed nor settled: a run a restart left open, from the
+    /// moment the member's session registers until the run resumes or its
+    /// settlement commits. In identity order.
+    ///
+    /// A host polls this to see a durable worker whose run waits on the
+    /// mob's resume gate ([`crate::DurableResumeGate`]): the entry names the
+    /// member and the run, says whether the machine holds the run because
+    /// the gate could not decide, with the undecided rounds, how the last
+    /// ended and the gate's reason, and whether a stop of the run was asked
+    /// and is not settled yet. The run id is the one
+    /// [`Self::stop_member_run`] takes; [`Self::settle_member_retained_run`]
+    /// ends the run by the member's identity.
+    ///
+    /// Read from the published machine state and the member's runtime in
+    /// memory, with no actor command, no wake, no store call and no change:
+    /// a poll never moves a round count, and it answers for a member whose
+    /// runtime loop makes no pass. A member whose session's state stays held
+    /// for longer than the runtime's read waits for it is listed as not
+    /// readable now; the members are read one after another, and for each
+    /// such member the read first waits out that wait
+    /// (`meerkat_runtime::PENDING_RESUMED_RUN_READ_BOUND`), so the call as a
+    /// whole has no bound of its own. A member whose session has no
+    /// registration in this process (a member not woken yet) is not
+    /// listed: it is answered from the moment its session registers.
+    ///
+    /// The call fails whole, listing no one, when one member's session
+    /// binding in the published state does not parse as a session id
+    /// ([`MobError::Internal`], naming the member).
+    /// The [`crate::ControlScope::List`] scope. A placed member (its session
+    /// lives on its host) and a mob without the runtime adapter list none.
+    pub async fn members_with_pending_resumed_runs(
+        &self,
+    ) -> Result<Vec<super::stop_report::MemberPendingResumedRun>, MobError> {
+        let sessions = self.read_published_machine_state(crate::ControlScope::List, |state| {
+            state
+                .member_session_bindings
+                .iter()
+                // A placed member's session lives on its host.
+                .filter(|(identity, _)| !state.member_placement.contains_key(*identity))
+                .map(|(identity, session)| (identity.0.clone(), session.0.clone()))
+                .collect::<Vec<_>>()
+        })?;
+        #[cfg(feature = "runtime-adapter")]
+        {
+            let Some(adapter) = self.runtime_adapter.as_ref() else {
+                return Ok(Vec::new());
+            };
+            let mut pending = Vec::new();
+            for (identity, session) in sessions {
+                let session_id = SessionId::parse(&session).map_err(|error| {
+                    MobError::Internal(format!(
+                        "member '{identity}' holds an invalid session binding: {error}"
+                    ))
+                })?;
+                if let Some(run) = adapter.pending_resumed_run(&session_id).await {
+                    pending.push(super::stop_report::MemberPendingResumedRun {
+                        agent_identity: AgentIdentity::from(identity.as_str()),
+                        run,
+                    });
+                }
+            }
+            Ok(pending)
+        }
+        #[cfg(not(feature = "runtime-adapter"))]
+        {
+            let _ = sessions;
             Ok(Vec::new())
         }
     }
@@ -12818,6 +13000,8 @@ impl MobHandle {
         target_spec: SpawnMemberSpec,
     ) -> Result<super::forked_participant_routing::AttachedForkedParticipantSpawn, MobError> {
         let capability = Box::new(capability.clone());
+        let mut target_spec = target_spec;
+        target_spec.observe_seat_entry(self, false);
         self.clone()
             .with_command_authority(crate::control_policy::CommandAuthority::principal(caller))
             .send_actor_command(|reply_tx| {
@@ -15472,6 +15656,7 @@ impl MobHandle {
         ) {
             spec.mark_agent_creation();
         }
+        spec.observe_seat_entry(self, false);
         let identity = spec.identity.to_string();
         let spawn_source = SpawnSource::for_launch_mode(SpawnSource::Consumer, &spec.launch_mode);
         let (caller, bound) = super::held_spawn::HeldProvisionBound::new(&identity, setup_deadline);
@@ -20930,6 +21115,7 @@ impl MobHandle {
             meerkat_core::DurableForkSourceAdmission::CallerTurn
         ) {
             member.spawned_by = Some(source_identity.clone());
+            member.seat.creator = Some(self.seal_own_turn_creator(source_identity).await);
         }
         // This call admits the child's turn itself: the host has no window to
         // activate inherited instruction keys on the child first.
@@ -21063,6 +21249,7 @@ impl MobHandle {
             // The caller's own turn asked for this fork, so the source is
             // provably the spawner and owns the child.
             member.spawned_by = Some(source_identity.clone());
+            member.seat.creator = Some(self.seal_own_turn_creator(source_identity).await);
         }
         // This call admits the child's turn itself: the host has no window to
         // activate inherited instruction keys on the child first.
@@ -21250,6 +21437,13 @@ impl MobHandle {
             Some(objective_id) => work.with_objective_id(objective_id),
             None => work,
         }
+    }
+
+    /// The authority under which the engine ends a member it seated for
+    /// one bounded call (a delegation's helper), the same as for a fork
+    /// child: the owner's, whatever principal made the call.
+    pub(super) fn bounded_child_cleanup_authority(&self) -> MobHandle {
+        self.fork_child_cleanup_authority()
     }
 
     fn fork_child_cleanup_authority(&self) -> MobHandle {
@@ -21672,6 +21866,92 @@ impl MobHandle {
                 fork_context,
             },
         )?;
+        self.spawn_spec_internal_with_source(spec, SpawnSource::Fork)
+            .await?;
+        self.finish_bounded_helper(identity, task.into(), turn_options, result_spec)
+            .await
+    }
+
+    /// The seat of `source_identity`, the member whose own turn asks for a
+    /// copy of itself, sealed from this mob's own bindings for the copy's
+    /// seat record. A member bound to no session seals nothing.
+    async fn seal_own_turn_creator(
+        &self,
+        source_identity: &AgentIdentity,
+    ) -> crate::MemberSeatCreator {
+        match self.resolve_bridge_session_id(source_identity).await {
+            Some(session) => {
+                let sealed = self
+                    .seal_seat_creator(&session, crate::SeatSealer::Mob)
+                    .await;
+                // The session's member is the source, or nothing is sealed.
+                if sealed
+                    .recorded()
+                    .is_some_and(|recorded| &recorded.creator_identity == source_identity)
+                {
+                    sealed
+                } else {
+                    crate::MemberSeatCreator::unavailable()
+                }
+            }
+            None => crate::MemberSeatCreator::unavailable(),
+        }
+    }
+
+    /// [`Self::spawn_helper`] for a schedule's fire: the helper's seat record
+    /// ([`Self::member_seat`]) says a schedule seated it. For the host of
+    /// schedules alone; nothing of the schedule is read for it.
+    pub async fn spawn_scheduled_helper(
+        &self,
+        identity: AgentIdentity,
+        task: impl Into<String>,
+        options: HelperOptions,
+        result_label: impl Into<String>,
+        max_text_bytes: usize,
+    ) -> Result<BoundedHelperRunOutcome, BoundedMemberRunError> {
+        let result_spec = BoundedResultSpec::new(result_label, max_text_bytes)?;
+        Self::refuse_autonomous_bounded_run(options.runtime_mode)?;
+        self.admit_control_scope(mob_dsl::ControlScope::SendCommand)
+            .await?;
+        let (mut spec, turn_options) = self.bounded_helper_spawn_spec(
+            identity.clone(),
+            options,
+            crate::launch::MemberLaunchMode::Fresh,
+        )?;
+        spec.seat.scheduled = true;
+        self.spawn_spec_internal_with_source(spec, SpawnSource::HelperSpawn)
+            .await?;
+        self.finish_bounded_helper(identity, task.into(), turn_options, result_spec)
+            .await
+    }
+
+    /// [`Self::fork_helper`] for a schedule's fire: the helper's seat record
+    /// ([`Self::member_seat`]) says a schedule seated it, not that it is a
+    /// copy of its source. For the host of schedules alone.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn fork_scheduled_helper(
+        &self,
+        source_identity: &AgentIdentity,
+        identity: AgentIdentity,
+        task: impl Into<String>,
+        fork_context: crate::launch::ForkContext,
+        options: HelperOptions,
+        result_label: impl Into<String>,
+        max_text_bytes: usize,
+    ) -> Result<BoundedHelperRunOutcome, BoundedMemberRunError> {
+        let result_spec = BoundedResultSpec::new(result_label, max_text_bytes)?;
+        Self::refuse_autonomous_bounded_run(options.runtime_mode)?;
+        self.admit_control_scope(mob_dsl::ControlScope::SendCommand)
+            .await?;
+        let (mut spec, turn_options) = self.bounded_helper_spawn_spec(
+            identity.clone(),
+            options,
+            crate::launch::MemberLaunchMode::Fork {
+                source_member_id: source_identity.clone(),
+                fork_context,
+            },
+        )?;
+        spec.seat.scheduled = true;
         self.spawn_spec_internal_with_source(spec, SpawnSource::Fork)
             .await?;
         self.finish_bounded_helper(identity, task.into(), turn_options, result_spec)
@@ -23073,9 +23353,17 @@ impl MobHandle {
         )
     }
 
-    /// Fallible roster snapshot: an actor failure is an error, never an empty
-    /// roster that would read as every member being absent.
-    async fn roster_snapshot(&self) -> Result<Roster, MobError> {
+    /// The current roster, or the error of its read: a read that fails or
+    /// answers something else is an error here, never an empty roster that
+    /// would read as every member being absent.
+    ///
+    /// It is the snapshot [`Self::roster`] answers: the handle's own roster
+    /// as the mob's published machine state projects it, at the moment of
+    /// the call. It is not a durable read and it loads no mob. A caller
+    /// that must tell "no member holds this" from "the roster could not be
+    /// read" reads the roster through this method; [`Self::roster`] answers
+    /// an empty roster for both.
+    pub async fn roster_snapshot(&self) -> Result<Roster, MobError> {
         match self
             .execute_machine_command(MobMachineCommand::RosterSnapshot)
             .await?

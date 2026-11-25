@@ -1,0 +1,520 @@
+{
+  "note": "Shared cases of the member row key and of the door of a member (contract v0.6.0, mob_addressing.row_key). A row is keyed by the door it was read on: the name as that door knows it on the launch mob's door, and <the door's mob id>/<that name> on the door of another hosted mob. A frame's mob_id and identity are the key's two parts. A row names its door in mob_id, the mob its member sits in in member_mob_id and the member's bare name in member_name. An identity a door is given as one string is read so: it splits at its first separator, and its first part names a mob only when that mob is listed under the same door; else the whole string is a name of the door's own mob. Two members of one door can spell one identity (shared_spelling): the two row members tell them apart, and no reading of the identity does. The gateway's rows and the console's rows read this one file.",
+  "mobs": [
+    {
+      "mob_id": "front-desk",
+      "provenance": "host",
+      "default": true
+    },
+    {
+      "mob_id": "desk-helpers",
+      "parent_mob_id": "front-desk",
+      "provenance": "member"
+    },
+    {
+      "mob_id": "research",
+      "provenance": "host"
+    },
+    {
+      "mob_id": "research-council",
+      "parent_mob_id": "research",
+      "provenance": "member"
+    },
+    {
+      "mob_id": "council-notes",
+      "parent_mob_id": "research-council",
+      "provenance": "member"
+    },
+    {
+      "mob_id": "archive",
+      "provenance": "host",
+      "state": "dormant"
+    },
+    {
+      "mob_id": "unplaced",
+      "provenance": "member"
+    },
+    {
+      "mob_id": "later-kind",
+      "provenance": "a-word-of-a-later-version"
+    }
+  ],
+  "door": [
+    {
+      "case": "a member of the launch mob: the bytes of contract v0.5.0",
+      "mob_id": "front-desk",
+      "name": "reviewer",
+      "row_key": "reviewer",
+      "request": {
+        "mob_id": null,
+        "identity": "reviewer"
+      },
+      "request_by_mob": {
+        "mob_id": null,
+        "member_mob_id": "front-desk",
+        "identity": "reviewer"
+      }
+    },
+    {
+      "case": "a launch mob member whose name holds the separator",
+      "mob_id": "front-desk",
+      "name": "audit/singleton",
+      "row_key": "audit/singleton",
+      "request": {
+        "mob_id": null,
+        "identity": "audit/singleton"
+      },
+      "request_by_mob": {
+        "mob_id": null,
+        "member_mob_id": "front-desk",
+        "identity": "audit/singleton"
+      }
+    },
+    {
+      "case": "a member of a mob nested under the launch mob: the launch mob's door, by its composed name",
+      "mob_id": "desk-helpers",
+      "name": "helper-1",
+      "row_key": "desk-helpers/helper-1",
+      "request": {
+        "mob_id": null,
+        "identity": "desk-helpers/helper-1"
+      },
+      "request_by_mob": {
+        "mob_id": null,
+        "member_mob_id": "desk-helpers",
+        "identity": "helper-1"
+      }
+    },
+    {
+      "case": "a member of a hosted mob: its own door, the bare name",
+      "mob_id": "research",
+      "name": "reviewer",
+      "row_key": "research/reviewer",
+      "request": {
+        "mob_id": "research",
+        "identity": "reviewer"
+      },
+      "request_by_mob": {
+        "mob_id": "research",
+        "member_mob_id": "research",
+        "identity": "reviewer"
+      }
+    },
+    {
+      "case": "a hosted mob's member whose name holds the separator",
+      "mob_id": "research",
+      "name": "audit/singleton",
+      "row_key": "research/audit/singleton",
+      "request": {
+        "mob_id": "research",
+        "identity": "audit/singleton"
+      },
+      "request_by_mob": {
+        "mob_id": "research",
+        "member_mob_id": "research",
+        "identity": "audit/singleton"
+      }
+    },
+    {
+      "case": "a member of a mob nested under a hosted mob: the hosted mob's door",
+      "mob_id": "research-council",
+      "name": "chair",
+      "row_key": "research/research-council/chair",
+      "request": {
+        "mob_id": "research",
+        "identity": "research-council/chair"
+      },
+      "request_by_mob": {
+        "mob_id": "research",
+        "member_mob_id": "research-council",
+        "identity": "chair"
+      }
+    },
+    {
+      "case": "two levels under a hosted mob: still the door at the top of the tree",
+      "mob_id": "council-notes",
+      "name": "scribe",
+      "row_key": "research/council-notes/scribe",
+      "request": {
+        "mob_id": "research",
+        "identity": "council-notes/scribe"
+      },
+      "request_by_mob": {
+        "mob_id": "research",
+        "member_mob_id": "council-notes",
+        "identity": "scribe"
+      }
+    },
+    {
+      "case": "a member of a hosted mob that is listed as not loaded: its own door (a person's request names the mob and loads it)",
+      "mob_id": "archive",
+      "name": "keeper",
+      "row_key": "archive/keeper",
+      "request": {
+        "mob_id": "archive",
+        "identity": "keeper"
+      },
+      "request_by_mob": {
+        "mob_id": "archive",
+        "member_mob_id": "archive",
+        "identity": "keeper"
+      }
+    },
+    {
+      "case": "a top-level mob the host did not create: the launch mob's door",
+      "mob_id": "unplaced",
+      "name": "worker",
+      "row_key": "unplaced/worker",
+      "request": {
+        "mob_id": null,
+        "identity": "unplaced/worker"
+      },
+      "request_by_mob": {
+        "mob_id": null,
+        "member_mob_id": "unplaced",
+        "identity": "worker"
+      }
+    },
+    {
+      "case": "a provenance word the reader does not know: the launch mob's door",
+      "mob_id": "later-kind",
+      "name": "worker",
+      "row_key": "later-kind/worker",
+      "request": {
+        "mob_id": null,
+        "identity": "later-kind/worker"
+      },
+      "request_by_mob": {
+        "mob_id": null,
+        "member_mob_id": "later-kind",
+        "identity": "worker"
+      }
+    },
+    {
+      "case": "a mob the list does not hold: no row and no request",
+      "mob_id": "not-listed",
+      "name": "worker",
+      "row_key": null,
+      "request": null
+    },
+    {
+      "case": "an empty name: no row and no request",
+      "mob_id": "research",
+      "name": "",
+      "row_key": null,
+      "request": null
+    }
+  ],
+  "frame": [
+    {
+      "case": "a frame of the launch mob: no mob_id, the bytes of contract v0.5.0",
+      "mob_id": null,
+      "identity": "reviewer",
+      "row_key": "reviewer"
+    },
+    {
+      "case": "a frame of a mob nested under the launch mob",
+      "mob_id": null,
+      "identity": "desk-helpers/helper-1",
+      "row_key": "desk-helpers/helper-1"
+    },
+    {
+      "case": "a frame that names the launch mob by its id is a frame of the launch mob",
+      "mob_id": "front-desk",
+      "identity": "reviewer",
+      "row_key": "reviewer"
+    },
+    {
+      "case": "a frame of a hosted mob's member: not the launch mob's member of the same name",
+      "mob_id": "research",
+      "identity": "reviewer",
+      "row_key": "research/reviewer"
+    },
+    {
+      "case": "a hosted mob's member whose name holds the separator: its first part names no mob under that door",
+      "mob_id": "research",
+      "identity": "audit/singleton",
+      "row_key": "research/audit/singleton"
+    },
+    {
+      "case": "a frame of a mob nested under a hosted mob",
+      "mob_id": "research",
+      "identity": "research-council/chair",
+      "row_key": "research/research-council/chair"
+    },
+    {
+      "case": "two levels under a hosted mob",
+      "mob_id": "research",
+      "identity": "council-notes/scribe",
+      "row_key": "research/council-notes/scribe"
+    },
+    {
+      "case": "a frame of a hosted mob that was listed as not loaded",
+      "mob_id": "archive",
+      "identity": "keeper",
+      "row_key": "archive/keeper"
+    },
+    {
+      "case": "a first part that names a mob under another door is a name of this door",
+      "mob_id": "research",
+      "identity": "desk-helpers/helper-1",
+      "row_key": "research/desk-helpers/helper-1"
+    },
+    {
+      "case": "a frame of a mob the list does not hold belongs to no row",
+      "mob_id": "not-listed",
+      "identity": "worker",
+      "row_key": null
+    },
+    {
+      "case": "an empty identity belongs to no row",
+      "mob_id": "research",
+      "identity": "",
+      "row_key": null
+    }
+  ],
+  "row": [
+    {
+      "case": "a row of the launch mob's member: every name of the row is the bare name",
+      "mob_id": "front-desk",
+      "name": "reviewer",
+      "row": {
+        "identity": "reviewer",
+        "member_id": "reviewer",
+        "agent_id": "reviewer",
+        "mob_id": "front-desk",
+        "member_mob_id": "front-desk",
+        "member_name": "reviewer"
+      }
+    },
+    {
+      "case": "a row of a mob nested under the launch mob",
+      "mob_id": "desk-helpers",
+      "name": "helper-1",
+      "row": {
+        "identity": "desk-helpers/helper-1",
+        "member_id": "desk-helpers/helper-1",
+        "agent_id": "desk-helpers/helper-1",
+        "mob_id": "front-desk",
+        "member_mob_id": "desk-helpers",
+        "member_name": "helper-1"
+      }
+    },
+    {
+      "case": "a row of a hosted mob's member: no name of the row is the bare name",
+      "mob_id": "research",
+      "name": "reviewer",
+      "row": {
+        "identity": "research/reviewer",
+        "member_id": "research/reviewer",
+        "agent_id": "research/reviewer",
+        "mob_id": "research",
+        "member_mob_id": "research",
+        "member_name": "reviewer"
+      }
+    },
+    {
+      "case": "a row of a mob nested under a hosted mob",
+      "mob_id": "research-council",
+      "name": "chair",
+      "row": {
+        "identity": "research/research-council/chair",
+        "member_id": "research/research-council/chair",
+        "agent_id": "research/research-council/chair",
+        "mob_id": "research",
+        "member_mob_id": "research-council",
+        "member_name": "chair"
+      }
+    }
+  ],
+  "whole": [
+    {
+      "case": "a member of a mob nested under a hosted mob, whole: its row, its frame and its requests",
+      "mob_id": "research-council",
+      "name": "chair",
+      "row": {
+        "identity": "research/research-council/chair",
+        "member_id": "research/research-council/chair",
+        "agent_id": "research/research-council/chair",
+        "mob_id": "research",
+        "member_mob_id": "research-council",
+        "member_name": "chair"
+      },
+      "frame": {
+        "mob_id": "research",
+        "identity": "research-council/chair"
+      },
+      "request": {
+        "mob_id": "research",
+        "identity": "research-council/chair"
+      },
+      "request_by_mob": {
+        "mob_id": "research",
+        "member_mob_id": "research-council",
+        "identity": "chair"
+      }
+    }
+  ],
+  "plain_row": [
+    {
+      "case": "a row of the plain experience, a member of the launch mob: the same members as under the read over every mob",
+      "mob_id": "front-desk",
+      "name": "reviewer",
+      "row": {
+        "identity": "reviewer",
+        "member_id": "reviewer",
+        "agent_id": "reviewer",
+        "mob_id": "front-desk",
+        "member_mob_id": "front-desk",
+        "member_name": "reviewer"
+      }
+    },
+    {
+      "case": "a row of the plain experience, a member of a mob nested under the launch mob: mob_id is the door, not the member's own mob",
+      "mob_id": "desk-helpers",
+      "name": "helper-1",
+      "row": {
+        "identity": "desk-helpers/helper-1",
+        "member_id": "desk-helpers/helper-1",
+        "agent_id": "desk-helpers/helper-1",
+        "mob_id": "front-desk",
+        "member_mob_id": "desk-helpers",
+        "member_name": "helper-1"
+      }
+    }
+  ],
+  "shared_spelling": [
+    {
+      "case": "on the launch mob's door: its own member named desk-helpers/helper-1 beside helper-1 of desk-helpers: one identity, two members",
+      "identity": "desk-helpers/helper-1",
+      "request": null,
+      "members": [
+        {
+          "mob_id": "front-desk",
+          "name": "desk-helpers/helper-1",
+          "row": {
+            "identity": "desk-helpers/helper-1",
+            "member_id": "desk-helpers/helper-1",
+            "agent_id": "desk-helpers/helper-1",
+            "mob_id": "front-desk",
+            "member_mob_id": "front-desk",
+            "member_name": "desk-helpers/helper-1"
+          },
+          "request_by_mob": {
+            "mob_id": null,
+            "member_mob_id": "front-desk",
+            "identity": "desk-helpers/helper-1"
+          }
+        },
+        {
+          "mob_id": "desk-helpers",
+          "name": "helper-1",
+          "row": {
+            "identity": "desk-helpers/helper-1",
+            "member_id": "desk-helpers/helper-1",
+            "agent_id": "desk-helpers/helper-1",
+            "mob_id": "front-desk",
+            "member_mob_id": "desk-helpers",
+            "member_name": "helper-1"
+          },
+          "request_by_mob": {
+            "mob_id": null,
+            "member_mob_id": "desk-helpers",
+            "identity": "helper-1"
+          }
+        }
+      ]
+    },
+    {
+      "case": "on a hosted mob's door: its own member named research-council/chair beside chair of research-council: one identity, two members",
+      "identity": "research/research-council/chair",
+      "request": null,
+      "members": [
+        {
+          "mob_id": "research",
+          "name": "research-council/chair",
+          "row": {
+            "identity": "research/research-council/chair",
+            "member_id": "research/research-council/chair",
+            "agent_id": "research/research-council/chair",
+            "mob_id": "research",
+            "member_mob_id": "research",
+            "member_name": "research-council/chair"
+          },
+          "request_by_mob": {
+            "mob_id": "research",
+            "member_mob_id": "research",
+            "identity": "research-council/chair"
+          }
+        },
+        {
+          "mob_id": "research-council",
+          "name": "chair",
+          "row": {
+            "identity": "research/research-council/chair",
+            "member_id": "research/research-council/chair",
+            "agent_id": "research/research-council/chair",
+            "mob_id": "research",
+            "member_mob_id": "research-council",
+            "member_name": "chair"
+          },
+          "request_by_mob": {
+            "mob_id": "research",
+            "member_mob_id": "research-council",
+            "identity": "chair"
+          }
+        }
+      ]
+    }
+  ],
+  "node": [
+    {
+      "case": "a node of the launch mob's member",
+      "mob_id": "front-desk",
+      "name": "reviewer",
+      "row_key": "reviewer",
+      "node": {
+        "identity": "reviewer",
+        "mob_id": "front-desk",
+        "member_mob_id": "front-desk",
+        "member_name": "reviewer"
+      }
+    },
+    {
+      "case": "a node of a member of a mob nested under the launch mob: mob_id is the door",
+      "mob_id": "desk-helpers",
+      "name": "helper-1",
+      "row_key": "desk-helpers/helper-1",
+      "node": {
+        "identity": "desk-helpers/helper-1",
+        "mob_id": "front-desk",
+        "member_mob_id": "desk-helpers",
+        "member_name": "helper-1"
+      }
+    },
+    {
+      "case": "a node of a hosted mob's member, read on that mob's door: the bare name, not the row key",
+      "mob_id": "research",
+      "name": "reviewer",
+      "row_key": "research/reviewer",
+      "node": {
+        "identity": "reviewer",
+        "mob_id": "research",
+        "member_mob_id": "research",
+        "member_name": "reviewer"
+      }
+    },
+    {
+      "case": "a node of a member of a mob nested under a hosted mob, read on the hosted mob's door: the name as that door knows it",
+      "mob_id": "research-council",
+      "name": "chair",
+      "row_key": "research/research-council/chair",
+      "node": {
+        "identity": "research-council/chair",
+        "mob_id": "research",
+        "member_mob_id": "research-council",
+        "member_name": "chair"
+      }
+    }
+  ]
+}

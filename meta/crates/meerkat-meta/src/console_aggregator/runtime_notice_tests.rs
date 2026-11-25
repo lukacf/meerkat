@@ -20,6 +20,7 @@ fn notice(session: &SessionId, run: u128, input: u128) -> SystemNoticeMessage {
 
 fn frame(key: &str, session: &SessionId, kind: &str, payload: Value) -> NewConsoleFrame {
     NewConsoleFrame {
+        mob_id: None,
         id: None,
         dedupe_key: key.to_string(),
         timestamp_ms: 1,

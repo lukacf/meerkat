@@ -1913,6 +1913,11 @@ struct RuntimeSessionEntry {
     /// The MCP adapter this registration's latest finished construction
     /// installed, for observation only. Every registration owns a fresh slot.
     mcp_observation: meerkat_core::McpObservationSlot,
+    /// Whether this registration has said, once, that a model switch went
+    /// on without the target's route being asked about the reasoning effort
+    /// level the session holds. It deduplicates a warning: nothing reads it
+    /// for a decision, and it is not stored.
+    legacy_host_trust_noted: std::sync::atomic::AtomicBool,
     /// This runtime owner's hosting claim for the session (#1813), taken
     /// before the registration's durable recovery and held exactly as long as
     /// this entry: unregister finalization, which removes the entry after
@@ -6856,6 +6861,38 @@ struct RuntimeAcceptedLiveBoundaryPlan {
     witness: RuntimeLiveBoundaryAttachmentWitness,
     input_id: InputId,
     publication_handle: Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorPublicationHandle>>,
+    /// The admission's announcement of an acknowledged durable steer
+    /// ([`Self::announce_pending_boundary_admission`]), ended when this
+    /// input's live-boundary work is over. `None` for another class.
+    pending_admission: Option<meerkat_core::PendingBoundaryAdmission>,
+}
+
+impl RuntimeAcceptedLiveBoundaryPlan {
+    /// Announce, under the admission's mutation gate and before the
+    /// admission answers its caller, that `input_id` was admitted as a
+    /// durable steer whose boundary preparation is still to register.
+    ///
+    /// The preparation runs in a task of its own after the admission
+    /// answered, so the runner could otherwise reach its boundary first,
+    /// find nothing registered and fix the next request's input without a
+    /// steer that was acknowledged before it. While the announcement stands
+    /// the runner keeps that boundary open. It names no input: which steer
+    /// joins the run is still decided by the machine when the preparation's
+    /// work revalidates under the gate.
+    async fn announce_pending_boundary_admission(
+        mutation_gate: &SessionMutationGate,
+        driver: &SharedDriver,
+        input_id: &InputId,
+    ) -> Option<meerkat_core::PendingBoundaryAdmission> {
+        let durable = driver
+            .lock()
+            .await
+            .driver_ingress()
+            .runtime_semantics(input_id)
+            .and_then(|semantics| semantics.live_boundary_delivery())
+            == Some(crate::ingress_types::LiveBoundaryDeliveryClass::DurableAppend);
+        durable.then(|| mutation_gate.pending_boundary_admissions().announce())
+    }
 }
 
 struct RuntimeAcceptedBoundaryCancelPlan {
@@ -9972,6 +10009,217 @@ impl MeerkatMachine {
         });
     }
 
+    /// Start the live-boundary work of a durable steer that waits beside a
+    /// run that has just resumed.
+    ///
+    /// A durable steer waits for the next boundary of its run, and the work
+    /// that registers it there is started by its admission
+    /// ([`Self::spawn_accepted_ingress_boundary_work`]). That work does not
+    /// outlive the process. After a restart the machine still holds the
+    /// delivery of a steer that never left the steer lane, and when its run
+    /// resumes nothing would register it: the run's requests would carry
+    /// neither it nor any durable steer admitted behind it.
+    ///
+    /// The runtime loop calls this where it begins a resumed run, holding
+    /// the session mutation gate (`_held_mutation_gate`), before the run is
+    /// dispatched. As an admission does, it announces the pending boundary
+    /// admission under that gate, so the runner keeps its first boundary
+    /// open, and hands the rest to a task. The task waits until the machine
+    /// shows the run's primitive applied (the executor starts the run after
+    /// this call, and the actor opens the run's first boundary before it
+    /// signals that), takes the gate, reads
+    /// the lane's first waiting durable steer again and runs for it the
+    /// accepted-input boundary work an admission runs. That work holds the
+    /// boundary's one claim and joins every durable steer behind it in lane
+    /// order, so one task serves the lane. Nothing is joined or published
+    /// here.
+    pub(crate) async fn start_waiting_steer_boundary_work(
+        &self,
+        session_id: &SessionId,
+        driver: &SharedDriver,
+        run_id: &RunId,
+        _held_mutation_gate: &crate::tokio::sync::OwnedMutexGuard<()>,
+    ) {
+        let captured = {
+            let sessions = self.sessions.read().await;
+            sessions.get(session_id).and_then(|entry| {
+                if !Arc::ptr_eq(&entry.driver, driver) {
+                    return None;
+                }
+                Some((
+                    entry.mutation_gate.clone(),
+                    Arc::clone(&entry.dsl_authority),
+                    entry.boundary_handle()?,
+                    entry.live_attachment_id()?,
+                    entry.completions.clone(),
+                    entry.publication_handle(),
+                ))
+            })
+        };
+        let Some((
+            mutation_gate,
+            dsl_authority,
+            boundary_handle,
+            attachment_id,
+            completions,
+            publication_handle,
+        )) = captured
+        else {
+            return;
+        };
+        if driver
+            .lock()
+            .await
+            .driver_ingress()
+            .durable_steer_waiting_without_work()
+            .is_none()
+        {
+            return;
+        }
+        let cleanup_spawner = match MachineCleanupTaskSpawner::acquire() {
+            Ok(cleanup_spawner) => cleanup_spawner,
+            Err(error) => {
+                tracing::warn!(
+                    %session_id,
+                    %error,
+                    "a durable steer waits beside the resumed run and its boundary work could not start; it takes the follow-up turn"
+                );
+                return;
+            }
+        };
+        let pending_admission = mutation_gate.pending_boundary_admissions().announce();
+        let machine = self.clone();
+        let driver = Arc::clone(driver);
+        let work_session_id = session_id.clone();
+        let session_id = session_id.clone();
+        let resumed_run_id = dsl::RunId::from_domain(run_id);
+        let work = cleanup_spawner.spawn(async move {
+            // Held until this work is over, as an admission's announcement is.
+            let pending_admission = pending_admission;
+            // The loop has begun the run in the machine and dispatches it
+            // after this task was spawned. Until the executor applies the
+            // run's primitive the actor has not opened the run's first
+            // boundary, and a preparation for it would be refused as for a
+            // run that ended.
+            if !machine
+                .resumed_run_primitive_applied(
+                    &work_session_id,
+                    &driver,
+                    &dsl_authority,
+                    &resumed_run_id,
+                )
+                .await
+            {
+                return;
+            }
+            let Ok(held_mutation_gate) = machine
+                .lock_live_session_mutation_gate(&work_session_id, &mutation_gate)
+                .await
+            else {
+                return;
+            };
+            // Read again under the gate: a recall may have taken the steer
+            // that waited, and the next one is then the lane's first.
+            let Some(input_id) = driver
+                .lock()
+                .await
+                .driver_ingress()
+                .durable_steer_waiting_without_work()
+            else {
+                return;
+            };
+            let dispatched = machine
+                .dispatch_accepted_ingress_boundary_work_owned(
+                    &work_session_id,
+                    held_mutation_gate,
+                    Some(RuntimeAcceptedLiveBoundaryPlan {
+                        witness: RuntimeLiveBoundaryAttachmentWitness {
+                            mutation_gate,
+                            driver,
+                            dsl_authority,
+                            attachment_id,
+                            boundary_handle,
+                        },
+                        input_id: input_id.clone(),
+                        publication_handle,
+                        pending_admission: Some(pending_admission),
+                    }),
+                    None,
+                    completions,
+                    None,
+                    false,
+                    AcceptedIngressFallbackWakeGuard::new(None, false),
+                )
+                .await;
+            if let Err(error) = dispatched {
+                tracing::error!(
+                    session_id = %work_session_id,
+                    %input_id,
+                    %error,
+                    "boundary work of a durable steer waiting beside a resumed run failed"
+                );
+            }
+        });
+        cleanup_spawner.spawn(async move {
+            if let Err(error) = work.await {
+                tracing::error!(
+                    %session_id,
+                    %error,
+                    "boundary task of a durable steer waiting beside a resumed run panicked or was cancelled"
+                );
+            }
+        });
+    }
+
+    /// Wait until the executor has applied the primitive of the resumed run
+    /// `run_id`: the machine's turn has left `ApplyingPrimitive`, which the
+    /// actor signals after it opened the run's first boundary. Answers
+    /// `false` when the run is no longer the session's current run or the
+    /// session's registration changed, so the caller starts nothing.
+    ///
+    /// The run's own start is bounded (a run whose executor never applies
+    /// its primitive is torn down), so this wait ends with the run.
+    async fn resumed_run_primitive_applied(
+        &self,
+        session_id: &SessionId,
+        driver: &SharedDriver,
+        dsl_authority: &Arc<std::sync::Mutex<dsl::MeerkatMachineAuthority>>,
+        run_id: &dsl::RunId,
+    ) -> bool {
+        const POLL: std::time::Duration = std::time::Duration::from_millis(5);
+        loop {
+            let (run_is_current, primitive_pending) = {
+                let authority = dsl_authority
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let state = authority.state();
+                (
+                    state.current_run_id.as_ref() == Some(run_id),
+                    matches!(
+                        state.turn_phase,
+                        dsl::TurnPhase::Ready | dsl::TurnPhase::ApplyingPrimitive
+                    ),
+                )
+            };
+            if !run_is_current {
+                return false;
+            }
+            if !primitive_pending {
+                return true;
+            }
+            let registered = {
+                let sessions = self.sessions.read().await;
+                sessions
+                    .get(session_id)
+                    .is_some_and(|entry| Arc::ptr_eq(&entry.driver, driver))
+            };
+            if !registered {
+                return false;
+            }
+            crate::tokio::time::sleep(POLL).await;
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn dispatch_accepted_ingress_boundary_work_owned(
         &self,
@@ -9986,6 +10234,10 @@ impl MeerkatMachine {
     ) -> Result<(), RuntimeDriverError> {
         let mut gate_guard = held_mutation_gate;
         let live_boundary_disposition = if let Some(live_boundary_plan) = live_boundary_plan {
+            // The admission's announcement stands for as long as this
+            // input's live-boundary work runs, and ends with it on every
+            // path, an error included.
+            let pending_admission = live_boundary_plan.pending_admission;
             let (returned_gate, disposition) = self
                 .commit_live_boundary_input_if_available(
                     session_id,
@@ -9997,6 +10249,7 @@ impl MeerkatMachine {
                     &mut fallback_wake,
                 )
                 .await?;
+            drop(pending_admission);
             gate_guard = returned_gate;
             disposition
         } else {
@@ -12833,6 +13086,25 @@ impl MeerkatMachine {
         })
     }
 
+    /// The slot of the outer bound on the tool calls of `session_id`, from
+    /// the session's canonical bindings: the one its agent loop reads. A
+    /// host that runs the session for a bounded caller (a `delegate` that
+    /// waits for its helper) sets the bound in it. `None` for a session this
+    /// runtime holds no bindings for: one that runs on another host, or one
+    /// whose agent was not built yet.
+    pub async fn session_tool_call_outer_bound(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<Arc<meerkat_core::ToolCallOuterBoundSlot>> {
+        let sessions = self.sessions.read().await;
+        sessions.get(session_id).and_then(|entry| {
+            entry
+                .canonical_runtime_bindings
+                .as_ref()
+                .map(|bindings| Arc::clone(bindings.tool_call_outer_bound()))
+        })
+    }
+
     /// The run whose provisional (uncommitted) tail the runtime store holds
     /// for `session_id`, if any.
     pub(crate) async fn provisional_tail_run(
@@ -15240,6 +15512,9 @@ mod durability_gate_wait_tests;
 
 #[cfg(test)]
 mod commit_deadline_tests;
+
+#[cfg(test)]
+mod pending_resumed_run_read_tests;
 
 #[cfg(test)]
 mod lost_admission_ack_tests;

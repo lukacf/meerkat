@@ -531,9 +531,9 @@ impl OpenAiCompatibleClient {
                 .tools
                 .iter()
                 .map(|tool| -> Result<Value, LlmError> {
-                    let parameters = crate::tool_schema::normalize_openai_tool_parameters_schema(
-                        &tool.name,
-                        &tool.input_schema,
+                    let parameters = crate::tool_schema::openai_tool_parameters(
+                        tool,
+                        self.provider == Provider::SelfHosted,
                     )?;
                     Ok(serde_json::json!({
                         "type": "function",
@@ -2128,6 +2128,176 @@ mod tests {
         assert_eq!(
             parameters["properties"]["lease_expires_at"]["format"],
             "date-time"
+        );
+    }
+
+    /// The request bodies built for the stock `task_list` tool, compared as
+    /// whole `parameters` objects. A self-hosted client, on either API style,
+    /// writes the optional `status` choice as a plain typed `enum` outside
+    /// `required`, in place of the untyped `anyOf` of constants and `null`
+    /// that schemars writes for it. A client of an OpenAI backend writes that
+    /// authored form unchanged, and so does every client for a tool the
+    /// engine did not author: the same schema from an MCP server, or from a
+    /// tool of no stated source, is written as its author wrote it. Nothing
+    /// is sent: no row says what any server accepts.
+    #[test]
+    fn optional_choice_parameter_reaches_a_self_hosted_server_as_a_typed_enum() {
+        use meerkat_core::ToolDef;
+        use meerkat_core::provider_matrix::OpenAiBackendKind;
+        use meerkat_core::types::{ToolProvenance, ToolSourceKind};
+        use serde_json::json;
+
+        let request_from = |source: Option<ToolSourceKind>| {
+            let tool = ToolDef {
+                audience: Default::default(),
+                name: "task_list".into(),
+                description: "List tasks in the project, optionally filtered by status or labels"
+                    .to_string(),
+                input_schema: crate::tool_schema::test_fixtures::stock_task_list_schema(),
+                provenance: source.map(|kind| ToolProvenance {
+                    kind,
+                    source_id: "source".into(),
+                    artifact: None,
+                }),
+            };
+            LlmRequest::new(
+                "gpt-5.5",
+                vec![meerkat_core::Message::User(UserMessage::text(
+                    "test".to_string(),
+                ))],
+            )
+            .with_tools(vec![Arc::new(tool)])
+        };
+        let stock = request_from(Some(ToolSourceKind::Builtin));
+        let from_mcp_server = request_from(Some(ToolSourceKind::Mcp));
+        let of_no_stated_source = request_from(None);
+
+        let status_description = "Filter by status: \"pending\", \"in_progress\", \"completed\"";
+        let authored_status = json!({
+            "anyOf": [
+                {
+                    "description": "Status of a task in its lifecycle",
+                    "oneOf": [
+                        {
+                            "const": "pending",
+                            "description": "Task is waiting to be started",
+                            "type": "string"
+                        },
+                        {
+                            "const": "in_progress",
+                            "description": "Task is actively being worked on",
+                            "type": "string"
+                        },
+                        {
+                            "const": "completed",
+                            "description": "Task has been finished",
+                            "type": "string"
+                        }
+                    ]
+                },
+                { "type": "null" }
+            ],
+            "default": null,
+            "description": status_description
+        });
+        let typed_status = json!({
+            "type": "string",
+            "enum": ["pending", "in_progress", "completed"],
+            "description": status_description
+        });
+        let parameters_with = |status: &Value| {
+            json!({
+                "description": "Parameters for the task_list tool",
+                "type": "object",
+                "properties": {
+                    "labels": {
+                        "default": null,
+                        "description": "Filter by labels (any match)",
+                        "items": { "type": "string" },
+                        "type": ["array", "null"]
+                    },
+                    "status": status
+                },
+                "required": []
+            })
+        };
+
+        let compatible = |mode| {
+            OpenAiCompatibleClient::new_with_options(
+                mode,
+                "remote-model".to_string(),
+                "https://example.test".to_string(),
+                None,
+                options(true, true, true, true),
+            )
+        };
+        let chat_parameters = |client: &OpenAiCompatibleClient, request: &LlmRequest| {
+            client
+                .build_chat_completions_body(request)
+                .expect("Chat Completions body")["tools"][0]["function"]["parameters"]
+                .clone()
+        };
+        let responses_parameters = |client: &crate::OpenAiClient, request: &LlmRequest| {
+            client.build_request_body(request).expect("Responses body")["tools"][0]["parameters"]
+                .clone()
+        };
+        let openai_chat = compatible(OpenAiCompatibleMode::ChatCompletions)
+            .with_provider(Provider::OpenAI)
+            .with_openai_backend(OpenAiBackendKind::Copilot);
+        let openai_responses = crate::OpenAiClient::new_with_optional_api_key_and_base_url(
+            None,
+            "https://example.test".to_string(),
+        );
+        let self_hosted_chat = compatible(OpenAiCompatibleMode::ChatCompletions);
+        let self_hosted_responses = compatible(OpenAiCompatibleMode::Responses);
+        let self_hosted_responses = self_hosted_responses
+            .responses_delegate
+            .as_ref()
+            .expect("a Responses client has its delegate");
+
+        // Every row is judged, so that one row's failure never hides another's.
+        let mut differing = Vec::new();
+        for (row, emitted, status) in [
+            (
+                "the stock tool to an OpenAI backend, Chat Completions",
+                chat_parameters(&openai_chat, &stock),
+                &authored_status,
+            ),
+            (
+                "the stock tool to an OpenAI backend, Responses",
+                responses_parameters(&openai_responses, &stock),
+                &authored_status,
+            ),
+            (
+                "the stock tool to a self-hosted server, Chat Completions",
+                chat_parameters(&self_hosted_chat, &stock),
+                &typed_status,
+            ),
+            (
+                "the stock tool to a self-hosted server, Responses",
+                responses_parameters(self_hosted_responses, &stock),
+                &typed_status,
+            ),
+            (
+                "an MCP server's tool to a self-hosted server, Chat Completions",
+                chat_parameters(&self_hosted_chat, &from_mcp_server),
+                &authored_status,
+            ),
+            (
+                "a tool of no stated source to a self-hosted server, Responses",
+                responses_parameters(self_hosted_responses, &of_no_stated_source),
+                &authored_status,
+            ),
+        ] {
+            if emitted != parameters_with(status) {
+                differing.push(format!("{row}: sent {emitted}"));
+            }
+        }
+        assert!(
+            differing.is_empty(),
+            "task_list parameters differ in {} of 6 rows:\n{}",
+            differing.len(),
+            differing.join("\n")
         );
     }
 

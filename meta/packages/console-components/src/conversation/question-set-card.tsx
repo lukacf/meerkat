@@ -26,6 +26,7 @@ import {
   KitGlyph,
   Notice,
   agentDisplayName,
+  agentOpenable,
   cx,
   formatAbsoluteTime,
   formatDuration,
@@ -258,9 +259,9 @@ function QuestionGroup({ setId, question, answer, disabled, onChange }: {
 
 /** What was sent, read-only: each prompt with the chosen label, the
  * person's own words, or "Not answered". */
-function AnswerSummary({ set, answers }: { set: QuestionSet; answers: QuestionSetAnswers }) {
+function AnswerSummary({ set, answers, testId }: { set: QuestionSet; answers: QuestionSetAnswers; testId?: string }) {
   return (
-    <dl className="cc-question-set__summary" data-testid={`question-set-summary:${set.pendingId}`}>
+    <dl className="cc-question-set__summary" data-testid={testId ?? `question-set-summary:${set.pendingId}`}>
       {set.questions.map((question) => {
         const answer = Object.prototype.hasOwnProperty.call(answers, question.id) ? answers[question.id] : undefined;
         const words = !answer ? "Not answered"
@@ -335,7 +336,7 @@ export function QuestionSetCard({ set, resourceStatus, readFailed = false, decis
   const sendable = editable && questionSetAnswersSendable(set, answers);
   const title = set.title || `Questions from ${agentName}`;
   const waiting = open && set.createdAtMs !== undefined ? formatDuration(Math.max(0, now - set.createdAtMs)) : "";
-  const openChat = navigation?.openAgent ? () => navigation.openAgent?.(identity, "chat") : null;
+  const openChat = navigation?.openAgent && agentOpenable(identity, directory) ? () => navigation.openAgent?.(identity, "chat") : null;
   const change = (questionId: string, answer: QuestionAnswer | undefined) => setDraft((current) => {
     const { [questionId]: _previous, ...rest } = current;
     return answer ? { ...rest, [questionId]: answer } : rest;
@@ -474,10 +475,14 @@ export function QuestionSetCard({ set, resourceStatus, readFailed = false, decis
  * that has not answered yet show nothing. A card whose set the gateway no
  * longer lists is gone, and where this list showed it one neutral line
  * stays for a while: the newest, when several cards left. */
-export function QuestionSetList({ view, identity, readOnly = false, className, testId, onContent }: {
+export function QuestionSetList({ view, identity, open = false, readOnly = false, className, testId, onContent }: {
   view?: QuestionSetsView;
   /** Only the sets this agent asked. */
   identity?: string;
+  /** Only the sets that still need the person: none this console answered
+   *  or dismissed. A conversation shows those as receipts instead
+   *  ({@link ConversationQuestionReceipts}). */
+  open?: boolean;
   /** The host's own read-only mode, on top of the snapshot's. */
   readOnly?: boolean;
   className?: string;
@@ -491,7 +496,7 @@ export function QuestionSetList({ view, identity, readOnly = false, className, t
   // counts, so the list can tell which lines are for cards it showed
   // without keeping anything of a set.
   const shown = React.useRef(new Set<number>());
-  const entries = view ? questionSetEntries(view.snapshot, identity) : [];
+  const entries = view ? questionSetEntries(view.snapshot, identity).filter((entry) => !open || entry.closed === undefined) : [];
   const notices = view?.snapshot.notices;
   React.useEffect(() => {
     // The places of the cards on screen now, and of the cards this list
@@ -517,14 +522,18 @@ export function QuestionSetList({ view, identity, readOnly = false, className, t
   // A card that held the focus left: the focus goes to the line this list
   // shows. That is the card's own line, or, when several cards left in one
   // read, the one line shown for them. With no line it goes to the list
-  // itself, where the host gave it an element; never to the page.
+  // itself, where the host gave it an element; never to the page. A card
+  // that left because its set was answered here has a line of its own in
+  // the conversation (its receipt), which takes the focus before this
+  // runs: the list then leaves it there.
   const lineRef = React.useRef<HTMLDivElement | null>(null);
   const listRef = React.useRef<HTMLDivElement | null>(null);
   const leftFocused = React.useRef(false);
   React.useEffect(() => {
     const left = leftFocused.current;
     leftFocused.current = false;
-    if (left) (lineRef.current ?? listRef.current)?.focus();
+    const active = typeof document === "undefined" ? null : document.activeElement;
+    if (left && (active === null || active === document.body)) (lineRef.current ?? listRef.current)?.focus();
   });
   if (!view || !shows) return null;
   const { snapshot } = view;
@@ -560,13 +569,150 @@ export function QuestionSetList({ view, identity, readOnly = false, className, t
   return className || testId ? <div ref={listRef} tabIndex={-1} className={className} data-testid={testId}>{failed}{line}{cards}</div> : <>{failed}{line}{cards}</>;
 }
 
-/** The question sets the conversation's agent asked, from the provider:
- * placed with the conversation's approvals. */
+/** The question sets the conversation's agent asked that still need the
+ * person, from the provider: placed with the conversation's approvals,
+ * below its newest turn. A set this console answered or dismissed is not
+ * among them: the conversation draws it as a receipt
+ * ({@link ConversationQuestionReceipts}) where it was answered. */
 export function ConversationQuestionSets({ identity }: {
   /** Canonical host-authorized target, never a label or actor ID. */
   identity?: string;
 }): React.JSX.Element | null {
   const view = useQuestionSetsView();
   if (!view || !identity) return null;
-  return <QuestionSetList view={view} identity={identity} />;
+  return <QuestionSetList view={view} identity={identity} open />;
+}
+
+/** Where a conversation draws the receipts of the sets this console
+ * closed. */
+export interface QuestionReceiptPlacement {
+  /** For each turn, in the turns' order, the ids of the sets drawn after
+   *  it, the earliest closed first. */
+  byTurn: readonly (readonly string[])[];
+  /** The sets of a conversation that has no turn. */
+  unplaced: readonly string[];
+}
+
+const NO_RECEIPTS: readonly string[] = Object.freeze([]);
+
+/**
+ * A closed set belongs after the newest turn that had begun when it was
+ * closed: later turns come below it. A set closed before every turn goes
+ * after the first; with no turn at all it is `unplaced`. `turnStartsMs` is
+ * each turn's start in the turns' order; a turn whose start is not known
+ * counts as begun with the turn before it.
+ *
+ * The gateway's reply to the decide carries the time it decided
+ * (`decidedAtMs`), on the clock the turns' starts are on: a set is placed
+ * by it, and a turn that starts at that instant is the one the answers
+ * start, so it comes below. A reply without that time is placed by this
+ * page's own closing time (`closedAtMs`), which is another clock: where the
+ * two disagree, such a receipt can stand one turn off.
+ */
+export function questionReceiptPlacement(
+  closed: readonly { pendingId: string; closedAtMs: number; decidedAtMs?: number }[],
+  turnStartsMs: readonly (number | null | undefined)[],
+): QuestionReceiptPlacement {
+  const ordered = [...closed].sort((a, b) => a.closedAtMs - b.closedAtMs);
+  if (turnStartsMs.length === 0) return { byTurn: [], unplaced: ordered.map((entry) => entry.pendingId) };
+  const starts: number[] = [];
+  for (const start of turnStartsMs) {
+    const known = typeof start === "number" && Number.isFinite(start);
+    starts.push(known ? start : starts.length > 0 ? starts[starts.length - 1] : Number.NEGATIVE_INFINITY);
+  }
+  const byTurn: string[][] = turnStartsMs.map(() => []);
+  for (const entry of ordered) {
+    const decided = typeof entry.decidedAtMs === "number" && Number.isFinite(entry.decidedAtMs) ? entry.decidedAtMs : undefined;
+    let index = 0;
+    for (let turn = 0; turn < starts.length; turn += 1) {
+      if (decided !== undefined ? starts[turn] < decided : starts[turn] <= entry.closedAtMs) index = turn;
+    }
+    byTurn[index].push(entry.pendingId);
+  }
+  return { byTurn, unplaced: NO_RECEIPTS };
+}
+
+/** The placement of the receipts of the conversation's agent, from the
+ * provider. Each turn's list keeps its identity while its ids are the
+ * same, so a turn that gained no receipt is not drawn again. */
+export function useQuestionReceiptPlacement(
+  identity: string | undefined,
+  turnStartsMs: readonly (number | null | undefined)[],
+): QuestionReceiptPlacement {
+  const snapshot = useQuestionSetsView()?.snapshot;
+  const closed = snapshot?.closed;
+  const decisions = snapshot?.decisions;
+  const previous = React.useRef<QuestionReceiptPlacement>({ byTurn: [], unplaced: NO_RECEIPTS });
+  return React.useMemo(() => {
+    const decidedAt = (pendingId: string) =>
+      decisions && Object.prototype.hasOwnProperty.call(decisions, pendingId) ? decisions[pendingId]?.decidedAtMs : undefined;
+    const mine = identity && closed
+      ? closed.filter((entry) => entry.set.origin.identity === identity)
+        .map((entry) => ({ pendingId: entry.set.pendingId, closedAtMs: entry.closedAtMs, decidedAtMs: decidedAt(entry.set.pendingId) }))
+      : [];
+    const placed = questionReceiptPlacement(mine, turnStartsMs);
+    const same = (a: readonly string[] | undefined, b: readonly string[]) =>
+      a !== undefined && a.length === b.length && a.every((id, index) => id === b[index]);
+    const kept = (a: readonly string[] | undefined, b: readonly string[]) => (b.length === 0 ? NO_RECEIPTS : same(a, b) ? a! : b);
+    const next: QuestionReceiptPlacement = {
+      byTurn: placed.byTurn.map((ids, index) => kept(previous.current.byTurn[index], ids)),
+      unplaced: kept(previous.current.unplaced, placed.unplaced),
+    };
+    previous.current = next;
+    return next;
+  }, [closed, decisions, identity, turnStartsMs]);
+}
+
+/** One set this console answered or dismissed, as its conversation keeps
+ * it: one line, which opens to the questions with the answers given.
+ * Nothing in it can be answered again, and it shows no id. */
+function QuestionSetReceipt({ set, outcome, answers, closedAtMs }: {
+  set: QuestionSet;
+  outcome: ClosedQuestionSetOutcome;
+  answers?: QuestionSetAnswers;
+  closedAtMs: number;
+}) {
+  const directory = useAgentDirectory();
+  const title = set.title || `Questions from ${agentDisplayName(set.origin.identity, directory) || "an agent"}`;
+  const count = set.questions.length === 1 ? "1 question" : `${set.questions.length} questions`;
+  // The card that held the focus left with the reply: the focus goes to
+  // the line that stands for it, never to the page.
+  const lineRef = React.useRef<HTMLElement | null>(null);
+  React.useEffect(() => {
+    const active = typeof document === "undefined" ? null : document.activeElement;
+    if (Date.now() - closedAtMs < ACTED_FOCUS_MS && (active === null || active === document.body)) lineRef.current?.focus();
+    // On arrival only: a receipt that is drawn again takes no focus.
+  }, []);
+  return (
+    <details className="cc-question-set__receipt" data-outcome={outcome} data-testid={`question-set-receipt:${set.pendingId}`}>
+      <summary ref={lineRef} className="cc-question-set__receipt-line" title={formatAbsoluteTime(closedAtMs)}>
+        <span className="cc-question-set__receipt-state">{outcome === "answered" ? "Answered" : "Dismissed"}</span>
+        <span className="cc-question-set__receipt-title">{title}</span>
+        <span className="cc-question-set__receipt-count">{count}</span>
+      </summary>
+      <AnswerSummary set={set} answers={outcome === "answered" ? answers ?? {} : {}} testId={`question-set-receipt-summary:${set.pendingId}`} />
+    </details>
+  );
+}
+
+/** The receipts of the sets the conversation's agent asked and this
+ * console answered or dismissed, for the ids the conversation places here
+ * ({@link useQuestionReceiptPlacement}), in that order. */
+export function ConversationQuestionReceipts({ identity, pendingIds }: {
+  /** Canonical host-authorized target, never a label or actor ID. */
+  identity?: string;
+  pendingIds?: readonly string[];
+}): React.JSX.Element | null {
+  const view = useQuestionSetsView();
+  if (!view || !identity || !pendingIds || pendingIds.length === 0) return null;
+  const closed = new Map(view.snapshot.closed
+    .filter((entry) => entry.set.origin.identity === identity)
+    .map((entry) => [entry.set.pendingId, entry] as const));
+  const receipts = pendingIds.flatMap((pendingId) => {
+    const entry = closed.get(pendingId);
+    if (!entry) return [];
+    const decision = Object.prototype.hasOwnProperty.call(view.snapshot.decisions, pendingId) ? view.snapshot.decisions[pendingId] : undefined;
+    return [<QuestionSetReceipt key={pendingId} set={entry.set} outcome={entry.outcome} answers={decision?.answers} closedAtMs={entry.closedAtMs} />];
+  });
+  return receipts.length > 0 ? <>{receipts}</> : null;
 }

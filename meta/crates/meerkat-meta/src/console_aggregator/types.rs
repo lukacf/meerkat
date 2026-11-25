@@ -164,6 +164,14 @@ pub struct ConsoleFrame {
     pub timestamp_ms: u64,
     pub runtime_key: String,
     pub identity: String,
+    /// The mob the frame's identity is a member of, when it is not the
+    /// host's default mob. A frame that names none is of a member of the
+    /// default mob, as every frame stored before frames named a mob is
+    /// ([`crate::member_key::DefaultMob::stored`]). With `identity` it is
+    /// the member the frame belongs to: two mobs may each have a member of
+    /// the same name, and their frames are apart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mob_id: Option<meerkat_mob::MobId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -197,6 +205,18 @@ pub struct NewConsoleFrame {
     pub timestamp_ms: u64,
     pub runtime_key: String,
     pub identity: String,
+    /// The mob the frame's identity is a member of, when it is not the
+    /// host's default mob. A frame that names none is of a member of the
+    /// default mob, as every frame stored before frames named a mob is
+    /// ([`crate::member_key::DefaultMob::stored`]). With `identity` it is
+    /// the member the frame belongs to: two mobs may each have a member of
+    /// the same name, and their frames are apart. A store that was told the
+    /// host's default mob
+    /// ([`ConsoleLogStore::bind_default_mob`](crate::console_aggregator::ConsoleLogStore::bind_default_mob))
+    /// stores a frame that names that mob by its id as a frame that names
+    /// none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mob_id: Option<meerkat_mob::MobId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -236,6 +256,17 @@ pub struct AppendOutcome {
 pub struct ConsoleTimelineQuery {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity: Option<String>,
+    /// The mob `identity` is a member of, when it is not the host's default
+    /// mob: a query that names an identity reads that mob's member of the
+    /// name, the default mob's when it names no mob (or, for a store that
+    /// was told the host's default mob, that mob's id). Without `identity`
+    /// the stores of this crate select by it all the same: a read that
+    /// names no mob answers the default mob's frames alone. A store that
+    /// does not select by mob answers every frame it holds; the read of
+    /// one mob's frames, whoever their member, is
+    /// `ConsoleLogStore::query_windowed_frames_of_mob`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mob_id: Option<meerkat_mob::MobId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -251,6 +282,7 @@ impl Default for ConsoleTimelineQuery {
     fn default() -> Self {
         Self {
             identity: None,
+            mob_id: None,
             conversation_id: None,
             after: None,
             limit: 200,
@@ -262,6 +294,17 @@ impl Default for ConsoleTimelineQuery {
 pub struct ConsoleTimelineWindowQuery {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity: Option<String>,
+    /// The mob `identity` is a member of, when it is not the host's default
+    /// mob: a query that names an identity reads that mob's member of the
+    /// name, the default mob's when it names no mob (or, for a store that
+    /// was told the host's default mob, that mob's id). Without `identity`
+    /// the stores of this crate select by it all the same: a read that
+    /// names no mob answers the default mob's frames alone. A store that
+    /// does not select by mob answers every frame it holds; the read of
+    /// one mob's frames, whoever their member, is
+    /// `ConsoleLogStore::query_windowed_frames_of_mob`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mob_id: Option<meerkat_mob::MobId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -287,6 +330,7 @@ impl Default for ConsoleTimelineWindowQuery {
     fn default() -> Self {
         Self {
             identity: None,
+            mob_id: None,
             conversation_id: None,
             after: None,
             before: None,
@@ -300,6 +344,7 @@ impl From<ConsoleTimelineQuery> for ConsoleTimelineWindowQuery {
     fn from(query: ConsoleTimelineQuery) -> Self {
         Self {
             identity: query.identity,
+            mob_id: query.mob_id,
             conversation_id: query.conversation_id,
             after: query.after,
             before: None,
@@ -405,6 +450,10 @@ pub struct ConsoleDeltaCompaction {
     pub runtime_key: String,
     /// The identity the rows are stored under.
     pub identity: String,
+    /// The mob that identity is a member of, when it is not the host's
+    /// default mob, as the rows name it
+    /// ([`ConsoleFrame::mob_id`](crate::console_aggregator::ConsoleFrame)).
+    pub mob_id: Option<meerkat_mob::MobId>,
     /// Which streamed rows, and which complete row supersedes them.
     pub kind: ConsoleDeltaKind,
     /// The assistant message the rows' payloads name.
@@ -427,11 +476,19 @@ impl ConsoleDeltaCompaction {
         Self {
             runtime_key: runtime_key.into(),
             identity: identity.into(),
+            mob_id: None,
             kind,
             assistant_message_id: assistant_message_id.into(),
             first_delta,
             complete,
         }
+    }
+
+    /// This compaction for the rows of the identity in the mob `mob_id`
+    /// names (none for the default mob).
+    pub(crate) fn in_mob(mut self, mob_id: Option<meerkat_mob::MobId>) -> Self {
+        self.mob_id = mob_id.filter(|mob_id| !mob_id.as_str().is_empty());
+        self
     }
 }
 

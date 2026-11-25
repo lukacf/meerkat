@@ -15,6 +15,7 @@ pub mod events;
 pub mod factory_handle;
 pub mod guards;
 pub mod hygienist;
+pub mod own_memory_only;
 pub mod records;
 pub mod review;
 pub mod secrets;

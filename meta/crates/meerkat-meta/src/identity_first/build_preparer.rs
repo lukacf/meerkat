@@ -159,6 +159,12 @@ struct PreparerState {
     /// not run it again. The next composition of the member's seat replaces
     /// it, and its build's report clears it.
     seat_composed: BTreeMap<MobAgentIdentity, MemberBuildPrepared>,
+    /// Why every build of this mob's members is withheld, while it is
+    /// ([`IdentityBuildPreparer::withhold_builds`]).
+    withheld: Option<crate::memory::sqlite_store::HostedAgentsNotBuilt>,
+    /// The members whose build was refused while the builds were withheld:
+    /// Core holds each one's wakes until its host retries the preparation.
+    withheld_members: BTreeSet<MobAgentIdentity>,
 }
 
 impl IdentityBuildPreparer {
@@ -201,6 +207,55 @@ impl IdentityBuildPreparer {
 
     pub(crate) fn publishes_tools(&self) -> bool {
         self.publishes_tools.get().copied().unwrap_or(false)
+    }
+
+    /// Withhold every build of this mob's members, for `why`, until
+    /// [`Self::release_withheld_builds`]: each build is refused, to be
+    /// retried, so a wake of a stored member leaves it dormant and the
+    /// caller that needed it is answered a typed retryable refusal
+    /// (`MemberWakeRefusal::BuildPreparationRetry`). The mob's table and
+    /// its entry say it where the mob's launch builds none of the mob's
+    /// agents; a second call replaces the reason.
+    pub(crate) fn withhold_builds(&self, why: crate::memory::sqlite_store::HostedAgentsNotBuilt) {
+        self.lock_state().withheld = Some(why);
+    }
+
+    /// [`Self::withhold_builds`] where nothing is withheld yet.
+    pub(crate) fn withhold_builds_unless_withheld(
+        &self,
+        why: crate::memory::sqlite_store::HostedAgentsNotBuilt,
+    ) {
+        let mut state = self.lock_state();
+        if state.withheld.is_none() {
+            state.withheld = Some(why);
+        }
+    }
+
+    /// End [`Self::withhold_builds`]. Answers the members whose build was
+    /// refused meanwhile, for the caller to ask Core to retry each one's
+    /// preparation. Nothing was withheld: none.
+    pub(crate) fn release_withheld_builds(&self) -> Vec<MobAgentIdentity> {
+        let mut state = self.lock_state();
+        state.withheld = None;
+        std::mem::take(&mut state.withheld_members)
+            .into_iter()
+            .collect()
+    }
+
+    /// The refusal of `member`'s build while the builds are withheld.
+    fn withheld(&self, member: &MobAgentIdentity) -> Option<MemberBuildPreparationRefusal> {
+        let mut state = self.lock_state();
+        let reason = state.withheld.as_ref()?.to_string();
+        state.withheld_members.insert(member.clone());
+        Some(MemberBuildPreparationRefusal::Retryable { reason })
+    }
+
+    /// Test builds only: why the builds are withheld, while they are.
+    #[cfg(test)]
+    pub(crate) fn withheld_in_tests(
+        &self,
+    ) -> Option<crate::memory::sqlite_store::HostedAgentsNotBuilt> {
+        self.lock_state().withheld.clone()
     }
 
     /// A deferred preparer no identity bootstrap found a customizer for:
@@ -635,6 +690,11 @@ impl MemberBuildPreparer for IdentityBuildPreparer {
         &self,
         request: MemberBuildPreparation,
     ) -> Result<MemberBuildPrepared, MemberBuildPreparationRefusal> {
+        // Withheld builds are refused first, whatever the preparer has
+        // decided: the mob's table and entry withhold them, and end that.
+        if let Some(refusal) = self.withheld(&request.agent_identity) {
+            return Err(refusal);
+        }
         // An inert preparer answers as if the mob had none: it reads nothing.
         if self.inert() {
             return Ok(MemberBuildPrepared::Prepared);
@@ -664,6 +724,9 @@ impl MemberBuildPreparer for IdentityBuildPreparer {
         _handle: MobReadHandle,
         seat: &mut SpawnMemberSpec,
     ) -> Result<(), MemberBuildPreparationRefusal> {
+        if let Some(refusal) = self.withheld(&seat.identity) {
+            return Err(refusal);
+        }
         // The composition reads through the identity runtime's session
         // bridge, as the build's preparation reads a row: it needs nothing
         // of the build's read handle.

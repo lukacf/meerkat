@@ -26,15 +26,15 @@ use crate::mob_announcements::declarations::{
     Declarations, DeclarationsSource, DeclarationsView, DeclaredCollection, DeclaredDelivery,
     DeclaredSource, DeclaredSubscription, read_sidecar, validate,
 };
-use crate::mob_announcements::declarations::{PutRoleTemplate, RoleTemplate};
+use crate::mob_announcements::declarations::{PutRoleTemplate, RoleSelector, RoleTemplate};
 use crate::mob_announcements::native::{MemberProblem, MemberRoute, NativeUnavailable};
 use crate::mob_announcements::sources::RosterFacts;
 use crate::mob_announcements::sources::{
     AnnouncementSource, SourceChange, SourceConfig, SourceHealthStatus, SourceState,
 };
 use crate::mob_announcements::store::{
-    AnnouncementStore, AppliedDeclarations, DeclarationMark, RoleChildStatus, RoleExpansion,
-    RoleExpansions, RoleMember, SubscriptionVerbOutcome, TemplateChildren,
+    AnnouncementStore, AppliedDeclarations, DeclarationMark, MobRelease, RoleChildStatus,
+    RoleExpansion, RoleExpansions, RoleMember, SubscriptionVerbOutcome, TemplateChildren,
 };
 use crate::mob_announcements::types::{
     AnnouncementStoreError, Member, MemberRouteRecord, MobId, OperationId, Subscription,
@@ -339,7 +339,7 @@ pub(super) async fn bounded_native<T: Send + 'static>(
     call: impl Future<Output = Result<T, NativeUnavailable>> + Send + 'static,
 ) -> Result<T, NativeUnavailable> {
     bounded(Waited::Native(method), call, |detail| {
-        Err(NativeUnavailable(detail))
+        Err(NativeUnavailable::new(detail))
     })
     .await
 }
@@ -1444,6 +1444,50 @@ impl AnnouncementService {
         }
     }
 
+    /// Release what a mob of the id `mob_id` left with the announcements: a
+    /// mob is about to be created under that id, and nothing of an earlier
+    /// mob of it is the new mob's (see [`AnnouncementStore::release_mob`]).
+    /// The caller creates the mob only when this returned without an error.
+    ///
+    /// It runs under the declarations gate, so no reconcile of declared
+    /// records runs beside it. After the store's release the schedule of
+    /// each ended source's runner follows its record, as after any end of a
+    /// source, and the markers kept in memory for the mob's members go. A
+    /// runner's schedule that could not be ended is logged and ends at the
+    /// next reconcile of the runners: the source is ended either way, so
+    /// its collector's next step is refused.
+    pub async fn release_mob(&self, mob_id: &MobId) -> Result<MobRelease, AnnouncementError> {
+        self.ensure_authoritative()?;
+        self.under_gate(|| async {
+            let (mob, now) = (mob_id.clone(), self.now());
+            let released = self
+                .stored("release_mob", move |store| async move {
+                    store.release_mob(&mob, now).await
+                })
+                .await?;
+            for source in &released.sources {
+                self.reconcile_runner(source).await;
+            }
+            for member in &released.members {
+                self.unmark(member).await;
+            }
+            if !released.is_empty() {
+                tracing::info!(
+                    mob_id = %mob_id,
+                    sources = released.sources.len(),
+                    subscriptions = released.subscriptions.len(),
+                    templates = released.templates.len(),
+                    members = released.members.len(),
+                    announcements = released.announcements,
+                    "what an earlier mob left with the announcements under this id was released"
+                );
+                self.wake();
+            }
+            Ok(released)
+        })
+        .await
+    }
+
     async fn cancel_declared_subscription(
         &self,
         mark: &DeclarationMark,
@@ -1516,7 +1560,9 @@ impl AnnouncementService {
         if templates.is_empty() {
             return Ok(());
         }
-        let (roles, admitted) = self.expand_roles(&templates).await;
+        // A reconcile addresses no member: a mob that is not loaded stays so,
+        // and its templates' children stay as they are.
+        let (roles, admitted) = self.expand_roles(&templates, None).await;
         let facts = self.roster_facts(admitted).await;
         let now = self.now();
         self.stored("reconcile_role_children", move |store| async move {
@@ -1532,9 +1578,17 @@ impl AnnouncementService {
     /// A template whose roster or mobs cannot be read now is left out: its
     /// children stay as they are, and none is made. Returns the expansions
     /// and the members admitted, whose roster facts the store needs.
+    ///
+    /// With `capture`, the templates are expanded for a capture (an
+    /// announcement, a source's step): one that can reach a member has the
+    /// mob a template names loaded first when it is not loaded, and a mob
+    /// whose roster stays unread is noted there, to be reported once.
+    /// Without it (a reconcile), nothing is loaded and each template whose
+    /// roster cannot be read is logged.
     pub(super) async fn expand_roles(
         &self,
         templates: &[TemplateChildren],
+        mut capture: Option<&mut super::UnreadRosters>,
     ) -> (RoleExpansions, BTreeSet<Member>) {
         let mut roles = RoleExpansions {
             templates: BTreeMap::new(),
@@ -1542,25 +1596,28 @@ impl AnnouncementService {
         };
         let mut admitted = BTreeSet::new();
         for TemplateChildren { template, children } in templates {
-            let native = std::sync::Arc::clone(&self.inner.native);
-            let selector = template.members.clone();
-            let read = bounded_native("members_with_role", async move {
-                native
-                    .members_with_role(&selector.mob_id, &selector.role)
-                    .await
-            })
-            .await;
-            let members = match read {
+            let loads = capture.as_deref().is_some_and(super::UnreadRosters::loads);
+            let members = match self.role_members(&template.members, loads).await {
                 Ok(members) => members,
                 // A declarations reconcile that stopped reads no further
                 // roster, and logged its stop already.
                 Err(_) if holder_stopped() => break,
                 Err(error) => {
-                    tracing::warn!(
-                        template = %template.id,
-                        error = %error.0,
-                        "a role template's roster could not be read; its children stay as they are"
-                    );
+                    match capture.as_deref_mut() {
+                        Some(unread) => {
+                            tracing::debug!(
+                                template = %template.id,
+                                error = %error.0,
+                                "a role template's roster could not be read; its children stay as they are"
+                            );
+                            unread.note(&template.members.mob_id, &error);
+                        }
+                        None => tracing::warn!(
+                            template = %template.id,
+                            error = %error.0,
+                            "a role template's roster could not be read; its children stay as they are"
+                        ),
+                    }
                     continue;
                 }
             };
@@ -1608,6 +1665,41 @@ impl AnnouncementService {
             roles.templates.insert(template.id.clone(), expansion);
         }
         (roles, admitted)
+    }
+
+    /// The members with the role `selector` names, now. With `loads` (a
+    /// capture that can reach them), a mob whose roster cannot be read is
+    /// loaded if it is not loaded, through the lookup of a mob by its id
+    /// that the cursor read of a new subscription makes, and its roster is
+    /// read again; a mob that stays unreadable answers the first error.
+    async fn role_members(
+        &self,
+        selector: &RoleSelector,
+        loads: bool,
+    ) -> Result<Vec<Member>, NativeUnavailable> {
+        let read = || {
+            let native = std::sync::Arc::clone(&self.inner.native);
+            let selector = selector.clone();
+            bounded_native("members_with_role", async move {
+                native
+                    .members_with_role(&selector.mob_id, &selector.role)
+                    .await
+            })
+        };
+        let error = match read().await {
+            Err(error)
+                if loads
+                    && !holder_stopped()
+                    && self.inner.native.own_mob().as_ref() != Some(&selector.mob_id) =>
+            {
+                error
+            }
+            members => return members,
+        };
+        match self.member_mob_cursor(&selector.mob_id).await {
+            Ok(_) => read().await,
+            Err(_) => Err(error),
+        }
     }
 
     /// `subscriptions/put` with `members`, and the reconciler's put of a

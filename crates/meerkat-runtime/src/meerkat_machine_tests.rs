@@ -62078,9 +62078,11 @@ async fn unsettled_run_session_count_sees_a_committed_run_whose_loop_stands() {
         "a run whose terminal work the loop settled owes nothing, however old its rows",
     )
     .await;
-    // The same miss on a healthy session: the last completed reading is
-    // zero, and that is what a busy healthy host publishes, not a failed
-    // read. As above, the registry guard is dropped before the census is
+    // A settled session with its driver held: the census answers 0, and not
+    // a failed read. No miss occurs here: a session whose machine holds no
+    // input in a terminal phase reads clear before its driver is tried, so
+    // the held driver is never asked for and the census makes a completed
+    // reading. As above, the registry guard is dropped before the census is
     // asked, and the census is asked while the driver is held.
     {
         let driver = session_driver_for_census(machine, &held.session_id).await;

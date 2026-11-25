@@ -2781,6 +2781,20 @@ above) keeps its reason. After any of them `acquire_owner()` is refused and
 `admission_closed()` reports the reason; 0.9.3 and earlier could still hand out
 an owner lease on a shut-down, destroyed or lost actor.
 
+From 0.9.18, a Rust host can inspect the mob's own admission state with
+`MobHandle::observe_idle()`. The call needs `ControlScope::List`. An actor
+that is still serving commands can answer even after admission closes.
+The observation then reports the close reason in `admission_closed`, and
+`is_idle()` is false even if nothing is in flight. A terminal Shutdown
+that is already draining refuses the read with `MobError::ShutdownInProgress`.
+Once the actor exits, it can no longer answer the read.
+
+Observing neither closes admission nor reserves the mob for a later action.
+The observation does not cover due schedules, deliveries held by another
+owner, or mobs that members created. A peer message is not guaranteed to
+be counted between the actor handing it off and the member accepting it as
+input.
+
 When a mob start's durable recovery fails before the actor admits a command
 (`DurabilityFailStop`), `MobHandle::status` and `MobHandle::resume` return the
 failure, typed, as `MobError::SharedLifecycleFailure`. For a member's session

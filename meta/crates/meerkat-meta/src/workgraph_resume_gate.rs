@@ -1938,40 +1938,140 @@ mod tests {
         );
     }
 
-    /// One attempt of the gate over `store`, asked the way Meerkat asks: the
-    /// gate's answer inside [`meerkat_runtime::RESUMED_RUN_ADMISSION_ATTEMPT_TIMEOUT`],
-    /// or `None` when Meerkat's cut ended the attempt first. With it, how
-    /// long the attempt took and every warning logged while it ran, the ones
-    /// written as the gate's dropped answer is torn down included.
-    async fn one_attempt(
+    /// How one attempt of the gate ended, as the rows below read it.
+    struct Attempt {
+        /// The gate's answer, or `None` when its answer was dropped first.
+        answer: Option<meerkat_mob::DurableResumeVerdict>,
+        /// From the start of the attempt's clock to its end.
+        waited: Duration,
+        /// Every warning logged while the attempt ran, the ones written as
+        /// a dropped answer is torn down included.
+        log: String,
+    }
+
+    impl Attempt {
+        /// The warnings that say a claim scan was dropped at the attempt's
+        /// limit: the gate's word about a list that had not answered when
+        /// one attempt had passed.
+        fn dropped_at_the_limit(&self) -> Vec<&str> {
+            self.lines_with("durable resume gate: a claim scan was dropped at the attempt's limit")
+        }
+
+        /// The warnings that say a claim scan was dropped before the
+        /// attempt's limit, for a cause the gate does not know.
+        fn dropped_early(&self) -> Vec<&str> {
+            self.lines_with(
+                "durable resume gate: a claim scan was dropped before the attempt's limit",
+            )
+        }
+
+        /// The gate's warning beside an unavailable answer of its own: a
+        /// failed read, or a projection that does not decode.
+        fn answered_unavailable(&self) -> Vec<&str> {
+            self.lines_with("durable resume gate: the gate cannot decide")
+        }
+
+        fn lines_with(&self, text: &str) -> Vec<&str> {
+            self.log
+                .lines()
+                .filter(|line| line.contains(text))
+                .collect()
+        }
+
+        /// Nothing in the log says that a scan was dropped or that the list
+        /// was too slow.
+        fn assert_no_word_of_a_drop_or_a_slow_list(&self, when: &str) {
+            assert!(
+                self.dropped_at_the_limit().is_empty() && self.dropped_early().is_empty(),
+                "{when}: no warning says a scan was dropped: {}",
+                self.log
+            );
+            assert!(
+                !self.log.contains("too slow"),
+                "{when}: nothing says the list was too slow: {}",
+                self.log
+            );
+        }
+
+        fn unavailable_reason(&self, when: &str) -> &str {
+            match &self.answer {
+                Some(meerkat_mob::DurableResumeVerdict::Unavailable { reason }) => reason,
+                other => panic!("{when}: the gate answers unavailable: {other:?}"),
+            }
+        }
+    }
+
+    /// One attempt of `gate`, asked the way Meerkat asks: the gate's answer
+    /// inside [`meerkat_runtime::RESUMED_RUN_ADMISSION_ATTEMPT_TIMEOUT`], cut
+    /// by a timeout around the gate's own call. The attempt's clock starts
+    /// `entered_after` before the gate is entered: zero when both start in
+    /// the same instant.
+    async fn one_attempt_entered_after(
         gate: &WorkGraphResumeGate,
         request: &meerkat_mob::DurableResumeRequest,
-    ) -> (Option<meerkat_mob::DurableResumeVerdict>, Duration, String) {
+        entered_after: Duration,
+    ) -> Attempt {
         use meerkat_mob::DurableResumeGate as _;
 
         let asked = tokio::time::Instant::now();
         let (answer, log) = crate::test_diagnostics::capture_warnings(async {
             tokio::time::timeout(
                 meerkat_runtime::RESUMED_RUN_ADMISSION_ATTEMPT_TIMEOUT,
-                gate.check(request),
+                async {
+                    if !entered_after.is_zero() {
+                        tokio::time::sleep(entered_after).await;
+                    }
+                    gate.check(request).await
+                },
             )
             .await
             .ok()
         })
         .await;
-        (answer, asked.elapsed(), log)
+        Attempt {
+            answer,
+            waited: asked.elapsed(),
+            log,
+        }
     }
 
-    /// The warning the gate writes when its claim scan is dropped unfinished.
-    const DROPPED_SCAN: &str = "durable resume gate: a claim scan was dropped before it ended";
+    /// One attempt whose clock and whose gate start in the same instant.
+    async fn one_attempt(
+        gate: &WorkGraphResumeGate,
+        request: &meerkat_mob::DurableResumeRequest,
+    ) -> Attempt {
+        one_attempt_entered_after(gate, request, Duration::ZERO).await
+    }
 
-    /// The released gate read the list until Meerkat cut the attempt, so a
-    /// list that answers anywhere inside the attempt decides the run. Here
-    /// one list of the open items answers in the last eighth of the attempt
-    /// (after fifteen sixteenths of it): the worker's live claim keeps the
-    /// run, nothing is written, and the gate says nothing about a slow list.
+    /// The gate asked by a caller that drops its answer `after`, well before
+    /// one of Meerkat's attempts would end: a cancellation, not a timeout.
+    async fn dropped_by_its_caller(
+        gate: &WorkGraphResumeGate,
+        request: &meerkat_mob::DurableResumeRequest,
+        after: Duration,
+    ) -> Attempt {
+        use meerkat_mob::DurableResumeGate as _;
+
+        let asked = tokio::time::Instant::now();
+        let (answer, log) = crate::test_diagnostics::capture_warnings(async {
+            tokio::time::timeout(after, gate.check(request)).await.ok()
+        })
+        .await;
+        Attempt {
+            answer,
+            waited: asked.elapsed(),
+            log,
+        }
+    }
+
+    /// SUCCESS. The released gate read the list until Meerkat cut the
+    /// attempt, so a list that answers anywhere inside the attempt decides
+    /// the run. Here one list of the open items answers in the last eighth
+    /// of the attempt (after fifteen sixteenths of it): the worker's live
+    /// claim keeps the run, nothing is written, and no warning speaks of a
+    /// dropped scan or of a slow list.
     #[tokio::test(start_paused = true)]
-    async fn a_claim_scan_that_ends_in_the_last_eighth_of_an_attempt_decides() {
+    async fn success_a_claim_scan_that_ends_in_the_last_eighth_of_the_attempt_is_decided() {
         let attempt = meerkat_runtime::RESUMED_RUN_ADMISSION_ATTEMPT_TIMEOUT;
         let store = SlowListStore::new();
         let direct = store.direct();
@@ -1986,67 +2086,109 @@ mod tests {
             "the list answers inside the last eighth of the attempt: {slow:?} of {attempt:?}"
         );
         store.slow_from(1, slow);
-        let (answer, waited, log) = one_attempt(&gate, &request).await;
+        let asked = one_attempt(&gate, &request).await;
         assert!(
-            matches!(answer, Some(meerkat_mob::DurableResumeVerdict::Continue)),
-            "a list that answers inside the attempt decides the run: {answer:?}"
+            matches!(
+                asked.answer,
+                Some(meerkat_mob::DurableResumeVerdict::Continue)
+            ),
+            "a list that answers inside the attempt decides the run: {:?}",
+            asked.answer
         );
-        assert_eq!(waited, slow, "the answer came when the list did");
+        assert_eq!(asked.waited, slow, "the answer came when the list did");
         assert_eq!(store.lists(), 1, "one list was read");
         assert_eq!(store.writes(), 0, "a run that continues writes nothing");
-        assert!(
-            !log.contains(DROPPED_SCAN),
-            "a scan that ended was not dropped: {log}"
-        );
+        asked.assert_no_word_of_a_drop_or_a_slow_list("a scan that ended");
     }
 
-    /// The edge of the window, to the millisecond. A list that answers one
-    /// millisecond before the attempt's limit decides. So does one that
-    /// answers in the very millisecond of the limit: Meerkat's cut polls the
-    /// gate before its own timer, so an answer that is ready then is taken.
-    /// A list one millisecond slower is cut by Meerkat, and nothing is
-    /// admitted.
+    /// SUCCESS, at the edge of the window. A list that answers one timer
+    /// tick (a millisecond) before the attempt's limit decides the run. So
+    /// does one that answers in the very tick of the limit: Meerkat's cut
+    /// tries the gate before its own timer, so an answer that is ready then
+    /// is taken, as in the released version.
     #[tokio::test(start_paused = true)]
-    async fn the_claim_scans_window_is_the_whole_attempt_to_the_millisecond() {
+    async fn success_a_claim_scan_that_ends_one_tick_before_the_limit_or_in_its_tick_is_decided() {
         let attempt = meerkat_runtime::RESUMED_RUN_ADMISSION_ATTEMPT_TIMEOUT;
         let tick = Duration::from_millis(1);
         let store = SlowListStore::new();
         let gate = WorkGraphResumeGate::new(store.service());
 
-        for (slow, decided) in [
-            (attempt - tick, true),
-            (attempt, true),
-            (attempt + tick, false),
-        ] {
+        for slow in [attempt - tick, attempt] {
             let request = plain_resume_request();
             store.slow_from(1, slow);
-            let (answer, waited, _log) = one_attempt(&gate, &request).await;
-            if decided {
-                assert!(
-                    matches!(answer, Some(meerkat_mob::DurableResumeVerdict::Continue)),
-                    "a list that answers after {slow:?} of {attempt:?} decides: {answer:?}"
-                );
-                assert_eq!(waited, slow, "the answer came when the list did");
-            } else {
-                assert!(
-                    answer.is_none(),
-                    "a list that answers after {slow:?} of {attempt:?} is cut by Meerkat: {answer:?}"
-                );
-                assert_eq!(waited, attempt, "the attempt ended at its limit");
-            }
+            let asked = one_attempt(&gate, &request).await;
+            assert!(
+                matches!(
+                    asked.answer,
+                    Some(meerkat_mob::DurableResumeVerdict::Continue)
+                ),
+                "a list that answers after {slow:?} of {attempt:?} decides: {:?}",
+                asked.answer
+            );
+            assert_eq!(asked.waited, slow, "the answer came when the list did");
+            asked.assert_no_word_of_a_drop_or_a_slow_list("a scan that ended");
         }
     }
 
-    /// A list of the open items that does not answer. Asked the way Meerkat
-    /// asks, through every attempt of one round, the gate never answers:
-    /// Meerkat's cut ends each attempt at its limit, as in the released
-    /// version, so nothing is admitted and Meerkat holds the run. Each time
-    /// its scan is dropped the gate writes one warning with what it was
-    /// reading: the run, the pages read, the time waited, the attempt's
-    /// limit, the realm and the namespace. It wrote nothing, and the same
-    /// run asked again once the list answers is decided as ever.
+    /// SUCCESS, with a write. A list that answers one tick before the limit
+    /// holds the worker's lapsed claim: the run is superseded, and the
+    /// lapsed lease's expiry, written after the walk, is written whole
+    /// before the attempt ends. Nothing is left half done, and nothing is
+    /// logged about a drop.
+    #[tokio::test]
+    async fn success_a_claim_scan_that_ends_one_tick_before_the_limit_completes_its_write() {
+        let attempt = meerkat_runtime::RESUMED_RUN_ADMISSION_ATTEMPT_TIMEOUT;
+        let store = SlowListStore::new();
+        let direct = store.direct();
+        let item = plain_item(&direct).await;
+        let claimed = claim(&direct, &item, member_key(WORKER), lapsing_soon()).await;
+        let_the_lease_lapse().await;
+        let gate = WorkGraphResumeGate::new(store.service());
+        let request = plain_resume_request();
+
+        tokio::time::pause();
+        store.slow_from(1, attempt - Duration::from_millis(1));
+        let asked = one_attempt(&gate, &request).await;
+        let Some(meerkat_mob::DurableResumeVerdict::Superseded { reason }) = &asked.answer else {
+            panic!(
+                "a list that answers a tick before the limit decides: {:?}",
+                asked.answer
+            );
+        };
+        assert!(reason.contains("lapsed"), "{reason}");
+        assert_eq!(store.writes(), 1, "the lapsed claim's expiry was written");
+        let after = direct
+            .get(None, None, item.id.clone())
+            .await
+            .expect("read the item");
+        assert_eq!(after.claim, None, "the expiry is committed whole");
+        assert_eq!(
+            after.status,
+            WorkStatus::Open,
+            "the item can be claimed again"
+        );
+        assert!(
+            after.revision > claimed.revision,
+            "the item moved on: revision {} after {}",
+            after.revision,
+            claimed.revision
+        );
+        asked.assert_no_word_of_a_drop_or_a_slow_list("a scan that ended");
+    }
+
+    /// TIMEOUT, through a whole round, the attempt's clock and the gate
+    /// started in the same instant. A list of the open items that does not
+    /// answer: the gate has no end of its own, so Meerkat's cut ends every
+    /// attempt at its limit and the gate never answers. Nothing is admitted
+    /// and nothing is written, and what the caller has after the round is
+    /// what the released version gave it: no answer in any attempt, which
+    /// Meerkat counts as timed out. The round lasts as in the released
+    /// version. Each time its scan is dropped the gate writes one warning:
+    /// dropped at the attempt's limit, the list too slow, with the run, the
+    /// pages read and the time waited. The same run asked again once the
+    /// list answers is decided as ever.
     #[tokio::test(start_paused = true)]
-    async fn a_claim_scan_that_never_ends_is_cut_by_meerkat_and_the_gate_logs_what_it_read() {
+    async fn timeout_through_a_whole_round_meerkats_cut_wins_and_the_gate_logs_each_drop() {
         let attempt = meerkat_runtime::RESUMED_RUN_ADMISSION_ATTEMPT_TIMEOUT;
         let attempts = meerkat_runtime::RESUMED_RUN_ADMISSION_ATTEMPTS;
         let pause = meerkat_runtime::RESUMED_RUN_ADMISSION_RETRY_DELAY;
@@ -2060,30 +2202,32 @@ mod tests {
 
         store.slow_from(1, attempt * 100);
         let round = tokio::time::Instant::now();
-        for asked in 1..=attempts {
-            let (answer, waited, log) = one_attempt(&gate, &request).await;
+        let mut answers = Vec::new();
+        for number in 1..=attempts {
+            let asked = one_attempt(&gate, &request).await;
+            let when = format!("attempt {number}");
             assert!(
-                answer.is_none(),
-                "attempt {asked}: the gate has no end of its own, Meerkat cuts the attempt and \
-                 nothing is admitted: {answer:?}"
+                asked.answer.is_none(),
+                "{when}: the gate has no end of its own, Meerkat cuts the attempt and nothing \
+                 is admitted: {:?}",
+                asked.answer
             );
             assert_eq!(
-                waited, attempt,
-                "attempt {asked}: the scan had the whole attempt"
+                asked.waited, attempt,
+                "{when}: the scan had the whole attempt, and not more"
             );
-            let warnings: Vec<&str> = log
-                .lines()
-                .filter(|line| line.contains(DROPPED_SCAN))
-                .collect();
-            let [warning] = warnings.as_slice() else {
-                panic!("attempt {asked}: one warning says the scan was dropped: {log}");
+            let &[warning] = asked.dropped_at_the_limit().as_slice() else {
+                panic!(
+                    "{when}: one warning says the scan was dropped at the attempt's limit: {}",
+                    asked.log
+                );
             };
             for part in [
                 format!("run={}/{}", request.session_id, request.run_id),
                 "pages_read=0".to_string(),
                 format!("elapsed_ms={}", attempt.as_millis()),
                 format!("attempt_limit_ms={}", attempt.as_millis()),
-                "open work item list".to_string(),
+                "open work item list was too slow".to_string(),
                 format!("0 page(s) of up to {CLAIM_SCAN_PAGE} items"),
                 "no verdict was drawn from the pages read and nothing was written".to_string(),
                 format!(
@@ -2094,13 +2238,24 @@ mod tests {
             ] {
                 assert!(
                     warning.contains(&part),
-                    "attempt {asked}: the warning holds \"{part}\": {warning}"
+                    "{when}: the warning holds \"{part}\": {warning}"
                 );
             }
-            if asked < attempts {
+            assert!(
+                asked.dropped_early().is_empty() && asked.answered_unavailable().is_empty(),
+                "{when}: the drop is logged once, as a drop at the limit, and the gate answered \
+                 nothing: {}",
+                asked.log
+            );
+            answers.push(asked.answer);
+            if number < attempts {
                 tokio::time::sleep(pause).await;
             }
         }
+        assert!(
+            answers.iter().all(Option::is_none),
+            "the caller's result of the round: no answer in any attempt, as released: {answers:?}"
+        );
         assert_eq!(
             round.elapsed(),
             attempt * attempts + pause * (attempts - 1),
@@ -2125,15 +2280,232 @@ mod tests {
         assert_eq!(after.claim, claimed.claim, "the claim is as it was");
 
         store.fast_again();
-        let (again, _waited, log) = one_attempt(&gate, &request).await;
+        let again = one_attempt(&gate, &request).await;
         assert!(
-            matches!(again, Some(meerkat_mob::DurableResumeVerdict::Continue)),
-            "the same run, asked again over a list that answers, continues: {again:?}"
+            matches!(
+                again.answer,
+                Some(meerkat_mob::DurableResumeVerdict::Continue)
+            ),
+            "the same run, asked again over a list that answers, continues: {:?}",
+            again.answer
         );
+        again.assert_no_word_of_a_drop_or_a_slow_list("a scan that ended");
+    }
+
+    /// TIMEOUT, the attempt's clock started one timer tick before the gate
+    /// was entered. Meerkat's cut ends the attempt at its limit, one tick
+    /// short of a whole attempt on the gate's own clock: the gate never
+    /// answers, nothing is admitted and nothing is written, as in the
+    /// released version. The gate's word is the warning it writes as its
+    /// scan is dropped. A drop within one tick of the limit is still
+    /// logged as a drop at the limit, the list too slow, with the run, the
+    /// pages read and the time waited.
+    #[tokio::test(start_paused = true)]
+    async fn timeout_not_aligned_meerkats_cut_wins_and_the_gate_logs_the_drop_at_the_limit() {
+        let attempt = meerkat_runtime::RESUMED_RUN_ADMISSION_ATTEMPT_TIMEOUT;
+        let tick = Duration::from_millis(1);
+        let store = SlowListStore::new();
+        let direct = store.direct();
+        let item = plain_item(&direct).await;
+        let claimed = claim(&direct, &item, member_key(WORKER), in_an_hour()).await;
+        let gate = WorkGraphResumeGate::new(store.service());
+        let request = plain_resume_request();
+
+        store.slow_from(1, attempt * 100);
+        let asked = one_attempt_entered_after(&gate, &request, tick).await;
         assert!(
-            !log.contains(DROPPED_SCAN),
-            "a scan that ended was not dropped: {log}"
+            asked.answer.is_none(),
+            "Meerkat's cut ends the attempt and nothing is admitted: {:?}",
+            asked.answer
         );
+        assert_eq!(
+            asked.waited, attempt,
+            "the attempt ended at its limit, not later"
+        );
+        let &[warning] = asked.dropped_at_the_limit().as_slice() else {
+            panic!(
+                "one warning says the scan was dropped at the attempt's limit: {}",
+                asked.log
+            );
+        };
+        for part in [
+            format!("run={}/{}", request.session_id, request.run_id),
+            "pages_read=0".to_string(),
+            format!("elapsed_ms={}", (attempt - tick).as_millis()),
+            format!("attempt_limit_ms={}", attempt.as_millis()),
+            "open work item list was too slow".to_string(),
+            format!("0 page(s) of up to {CLAIM_SCAN_PAGE} items"),
+            "no verdict was drawn from the pages read and nothing was written".to_string(),
+            format!(
+                "realm '{}' namespace '{}'",
+                mob_realm(),
+                WorkNamespace::default()
+            ),
+        ] {
+            assert!(
+                warning.contains(&part),
+                "the warning holds \"{part}\": {warning}"
+            );
+        }
+        assert!(
+            asked.dropped_early().is_empty() && asked.answered_unavailable().is_empty(),
+            "the drop is logged once, as a drop at the limit: {}",
+            asked.log
+        );
+        assert_eq!(store.writes(), 0, "a dropped scan wrote nothing");
+        let after = direct
+            .get(None, None, item.id.clone())
+            .await
+            .expect("read the item");
+        assert_eq!(after.revision, claimed.revision, "the item is as it was");
+        assert_eq!(after.claim, claimed.claim, "the claim is as it was");
+    }
+
+    /// TIMEOUT that the gate cannot tell from a cancellation. The gate's
+    /// clock starts when it is entered. Here Meerkat's attempt had already
+    /// run for a quarter of its time by then, so Meerkat's cut drops the
+    /// scan well before the limit as the gate measures it. The cut wins,
+    /// nothing is admitted and nothing is written. The gate's warning says
+    /// what it knows: a scan dropped before the attempt's limit, the pages
+    /// read and the time waited. It names no cause and does not say that
+    /// the list was too slow.
+    #[tokio::test(start_paused = true)]
+    async fn timeout_after_a_late_entry_the_gate_logs_a_drop_without_a_cause() {
+        let attempt = meerkat_runtime::RESUMED_RUN_ADMISSION_ATTEMPT_TIMEOUT;
+        let late = attempt / 4;
+        let store = SlowListStore::new();
+        let gate = WorkGraphResumeGate::new(store.service());
+        let request = plain_resume_request();
+
+        store.slow_from(1, attempt * 100);
+        let asked = one_attempt_entered_after(&gate, &request, late).await;
+        assert!(
+            asked.answer.is_none(),
+            "Meerkat's cut ends the attempt and nothing is admitted: {:?}",
+            asked.answer
+        );
+        assert_eq!(asked.waited, attempt, "the attempt ended at its limit");
+        let &[warning] = asked.dropped_early().as_slice() else {
+            panic!(
+                "one warning says the scan was dropped before the attempt's limit: {}",
+                asked.log
+            );
+        };
+        for part in [
+            format!("run={}/{}", request.session_id, request.run_id),
+            "pages_read=0".to_string(),
+            format!("elapsed_ms={}", (attempt - late).as_millis()),
+            format!("attempt_limit_ms={}", attempt.as_millis()),
+            "the gate does not know why".to_string(),
+        ] {
+            assert!(
+                warning.contains(&part),
+                "the warning holds \"{part}\": {warning}"
+            );
+        }
+        assert!(
+            asked.dropped_at_the_limit().is_empty() && !asked.log.contains("too slow"),
+            "a drop before the limit is not said to be a slow list: {}",
+            asked.log
+        );
+        assert_eq!(store.writes(), 0, "a dropped scan wrote nothing");
+    }
+
+    /// UNRELATED DROP. A caller that drops the gate's answer early, after a
+    /// quarter of an attempt, has cancelled the check; no attempt timed out.
+    /// The gate's warning says that its scan was dropped before the
+    /// attempt's limit, with the pages read and the time waited, and that it
+    /// does not know why. Nothing says that the list was too slow, and
+    /// nothing is written. The same run asked again is decided as ever.
+    #[tokio::test(start_paused = true)]
+    async fn unrelated_drop_a_claim_scan_dropped_early_is_never_logged_as_too_slow() {
+        let attempt = meerkat_runtime::RESUMED_RUN_ADMISSION_ATTEMPT_TIMEOUT;
+        let early = attempt / 4;
+        let store = SlowListStore::new();
+        let direct = store.direct();
+        let item = plain_item(&direct).await;
+        claim(&direct, &item, member_key(WORKER), in_an_hour()).await;
+        let gate = WorkGraphResumeGate::new(store.service());
+        let request = plain_resume_request();
+
+        store.slow_from(1, attempt * 100);
+        let asked = dropped_by_its_caller(&gate, &request, early).await;
+        assert!(
+            asked.answer.is_none(),
+            "the caller dropped the answer: {:?}",
+            asked.answer
+        );
+        assert_eq!(asked.waited, early, "the caller dropped it early");
+        let &[warning] = asked.dropped_early().as_slice() else {
+            panic!(
+                "one warning says the scan was dropped before the attempt's limit: {}",
+                asked.log
+            );
+        };
+        for part in [
+            format!("run={}/{}", request.session_id, request.run_id),
+            "pages_read=0".to_string(),
+            format!("elapsed_ms={}", early.as_millis()),
+            format!("attempt_limit_ms={}", attempt.as_millis()),
+            "the gate does not know why".to_string(),
+        ] {
+            assert!(
+                warning.contains(&part),
+                "the warning holds \"{part}\": {warning}"
+            );
+        }
+        assert!(
+            asked.dropped_at_the_limit().is_empty() && !asked.log.contains("too slow"),
+            "a cancellation is not said to be a timeout or a slow list: {}",
+            asked.log
+        );
+        assert_eq!(store.writes(), 0, "a dropped scan wrote nothing");
+
+        store.fast_again();
+        let again = one_attempt(&gate, &request).await;
+        assert!(
+            matches!(
+                again.answer,
+                Some(meerkat_mob::DurableResumeVerdict::Continue)
+            ),
+            "the same run, asked again, continues: {:?}",
+            again.answer
+        );
+        again.assert_no_word_of_a_drop_or_a_slow_list("a scan that ended");
+    }
+
+    /// ANSWERED ERROR. A read of the list that fails, and a run whose
+    /// attention projection does not decode, are answered at once with
+    /// their own reasons, and neither is logged as a dropped scan or as a
+    /// slow list.
+    #[tokio::test(start_paused = true)]
+    async fn answered_error_a_failed_read_and_an_unreadable_projection_are_answered_at_once() {
+        let store = SlowListStore::new();
+        let gate = WorkGraphResumeGate::new(store.service());
+
+        store.fail_reads_with("the store's own words");
+        let failed = one_attempt(&gate, &plain_resume_request()).await;
+        let reason = failed.unavailable_reason("a failed read");
+        assert!(
+            reason.contains("the WorkGraph could not be read: store error")
+                && !reason.contains("the store's own words"),
+            "a failed read is answered with its kind: {reason}"
+        );
+        assert_eq!(failed.waited, Duration::ZERO, "it is answered at once");
+        failed.assert_no_word_of_a_drop_or_a_slow_list("a failed read");
+
+        let undecodable = one_attempt(
+            &gate,
+            &plain_resume_request().with_attention_projection_unreadable(Some("bad".to_string())),
+        )
+        .await;
+        let reason = undecodable.unavailable_reason("a projection that does not decode");
+        assert!(
+            reason.contains("attention projection does not decode") && !reason.contains("bad"),
+            "a projection that does not decode is answered in the gate's sentence: {reason}"
+        );
+        assert_eq!(undecodable.waited, Duration::ZERO, "it is answered at once");
+        undecodable.assert_no_word_of_a_drop_or_a_slow_list("a projection that does not decode");
     }
 
     /// The first `bytes` bytes of `text`, cut back to a character boundary:

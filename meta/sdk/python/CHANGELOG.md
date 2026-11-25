@@ -26,8 +26,8 @@ All notable changes to the Python SDK are documented here.
   when it registers; a `presented` notice is not kept. Register the handler
   from the runtime's running event loop: registered where no loop runs, it
   receives the kept notices only before the next notice that arrives. A
-  host that registers no handler sees no change. See Changed and Upgrade in
-  Meta's changelog.
+  host that registers no handler sees no change. See Changed and Upgrade
+  notes in Meta's changelog.
 
 ### Upgrade notes
 

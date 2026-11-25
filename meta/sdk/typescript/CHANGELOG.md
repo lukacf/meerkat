@@ -15,8 +15,8 @@
   handler is registered is no longer dropped: the SDK keeps one per
   decision, for the newest 1024 decisions, and calls the handler with them
   when it registers; a `presented` notice is not kept. A host that
-  registers no handler sees no change. See Changed and Upgrade in Meta's
-  changelog.
+  registers no handler sees no change. See Changed and Upgrade notes in
+  Meta's changelog.
 
 ## 0.9.18
 

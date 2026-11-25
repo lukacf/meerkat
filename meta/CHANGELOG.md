@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Python identity results can be narrowed by their `outcome` string. For
+  example, after `if state.outcome == "refused":`, mypy and pyright know
+  that `state.refusal` is available on the result of `identities.operation()`.
+  The other outcome strings narrow to their corresponding result types.
+
 ### Changed
 
 - The agent tool `delegate` of a Meta member owns its wait, as in Meerkat
@@ -19,6 +26,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   default_timeout`). Without that forward a `delegate` of a Meta member
   would have waited 30 minutes by default. The wrapper's own checks and
   rewrites are unchanged.
+
+### Fixed
+
+- An update of an agent's instructions that arrives while the agent's run is in a tool round answers by the agent's model, as one that arrives between runs does. Before, from the run's first tool round until the run committed, Meerkat's read of the agent's session failed and the update answered `applies_after_compaction` whatever the model: also for a model that takes the change at its next run (`applies_at_next_run`) and for a backend that takes it only with a fresh conversation (`applies_at_next_session`, reason `lowering_unavailable`). In the same state the agent's row of `meta/instruction_status` read `effective_read: unreadable`; it now shows the session's last committed state, in which a change the running run applied at its start reads `pending` until the run commits. Affected: 0.9.15 to 0.9.18 for the update's answer and 0.9.11 to 0.9.18 for the status row, agents on a SQLite realm. The change is in Meerkat's status read; no Meta code changed. Read from the source, not seen in a run.
+
+### Upgrade notes
+
+- Type checkers can now report mistakes that a `str` annotation
+  previously hid, such as comparing against an impossible outcome. The outcome
+  strings, returned objects and behavior at run time are unchanged.
 
 ## [0.9.18] - 2026-11-22
 
@@ -3458,6 +3475,21 @@ frame's own `mob_id` follows with the surfaces that address a mob.
   were asked; they time out unless someone answers from a current page. An
   application that mounts the Console package builds it from the source of its
   gateway's release.
+
+- Added 2026-11-24, after the release. A persistent `meta_gateway`
+  (`persistent_sessions: true`) using the built-in default mob definition
+  (no `config/mob.toml` or `<workspace>/definition.json`) derives a different
+  mob ID after the upgrade. On its existing state it exits with code 1. The
+  `meta/init` error is `-32603`, `failed to bootstrap local runtime`, with a
+  null response ID. Only the gateway log says why:
+  `the supplied mob definition diverges from the canonical definition in this storage, in: id`.
+  Before upgrading, or after the first refused start, copy the `definition`
+  object from `<state directory>/event_log.sqlite3.composition.json` into a
+  new `<workspace>/definition.json`, then start the gateway. This was shown
+  with state from the published 0.9.15 gateway and a 0.9.16 release candidate.
+  The same refusal on upgrades since Meta 0.9.9 and the fact that it does not
+  affect the SDK-started `rpc_gateway` are read from the source. See the
+  [Meta 0.9.16 upgrade guide](https://docs.rkat.ai/guides/upgrading#meta-0-9-16).
 
 ### Added
 

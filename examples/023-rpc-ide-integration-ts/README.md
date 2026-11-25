@@ -24,12 +24,33 @@ exercise success and startup/session failure paths.
 | Streaming | Server-sent events | Server notifications |
 | Best for | Web apps and services | IDEs, desktop apps, local SDK clients |
 
-## Run
+## Run with the released SDK
+
+Start at the repository root, using the tag that matches your SDK version.
+Set `ANTHROPIC_API_KEY` in your shell. Copy the example outside the checkout
+so it imports the released package rather than the local SDK:
+
 ```bash
-# From the repository root, first build the local TypeScript SDK and RPC binary:
-# npm --prefix sdks/typescript install && npm --prefix sdks/typescript run build
-# (cd examples && npm install)
-# ./scripts/repo-cargo build -p meerkat-rpc --bin rkat-rpc
-# export MEERKAT_BIN_PATH="$(./scripts/repo-cargo --print-env | sed -n 's/^CARGO_TARGET_DIR=//p')/debug/rkat-rpc"
-ANTHROPIC_API_KEY=sk-... npx tsx examples/023-rpc-ide-integration-ts/main.ts
+project="$(mktemp -d)"
+cp examples/023-rpc-ide-integration-ts/main.ts "$project/"
+cd "$project"
+npm init -y
+npm pkg set type=module
+npm install @rkat/sdk tsx
+npx tsx main.ts
+```
+
+If `MEERKAT_BIN_PATH` is unset and `rkat-rpc` is not on `PATH`, the released
+SDK downloads its matching runtime on first connection and checks its digest.
+
+## Run from a source checkout
+
+From the repository root, build the local SDK and runtime instead:
+
+```bash
+npm --prefix sdks/typescript install && npm --prefix sdks/typescript run build
+(cd examples && npm install)
+./scripts/repo-cargo build -p meerkat-rpc --bin rkat-rpc
+export MEERKAT_BIN_PATH="$(./scripts/repo-cargo --print-env | sed -n 's/^CARGO_TARGET_DIR=//p')/debug/rkat-rpc"
+npx tsx examples/023-rpc-ide-integration-ts/main.ts
 ```

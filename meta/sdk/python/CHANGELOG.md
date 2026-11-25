@@ -4,6 +4,19 @@ All notable changes to the Python SDK are documented here.
 
 ## Unreleased
 
+### Added
+
+- Python identity results can be narrowed by their `outcome` string. For
+  example, after `if state.outcome == "refused":`, mypy and pyright know
+  that `state.refusal` is available on the result of `identities.operation()`.
+  The other outcome strings narrow to their corresponding result types.
+
+### Upgrade notes
+
+- Type checkers can now report mistakes that a `str` annotation
+  previously hid, such as comparing against an impossible outcome. The outcome
+  strings, returned objects and behavior at run time are unchanged.
+
 ## 0.9.18
 
 - `PersistedEvent` gains `mob_id` and `mob_incarnation` (both `None` by

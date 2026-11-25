@@ -1879,3 +1879,59 @@ async fn a_binding_made_before_its_member_is_held_when_the_member_is_private_to_
 
     teardown(runtime).await;
 }
+
+/// A start over a WorkGraph that holds no attention binding has nothing to
+/// hold and takes no admission, so it makes no admission lock file in the
+/// state directory. The first call that takes an admission makes the file.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_start_with_no_attention_binding_makes_no_admission_lock_file() {
+    const MOB: &str = "workgraph-member-calls-start-no-lock-file";
+    let state_dir = tempfile::tempdir().expect("state dir");
+    let model = CallingModel::default();
+    let runtime = member_calls_runtime(MOB, state_dir.path(), &model).await;
+    let lock_file =
+        meerkat_meta::workgraph_admission::workgraph_admission_sidecar_path(state_dir.path());
+    assert!(
+        !lock_file.exists(),
+        "a start with no binding to hold makes no admission lock file: {}",
+        lock_file.display()
+    );
+
+    host_goal(&runtime, "the first goal", "later-helper", "pursue").await;
+    assert!(
+        lock_file.exists(),
+        "the first admission makes the lock file: {}",
+        lock_file.display()
+    );
+
+    teardown(runtime).await;
+}
+
+/// The build of a member private to a person holds the bindings that name
+/// it, and that hold always takes the admission: a start that built no
+/// such member leaves no admission lock file, and the first build of one
+/// makes it.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_first_build_of_a_private_member_makes_the_admission_lock_file() {
+    const MOB: &str = "workgraph-member-calls-private-build-lock-file";
+    let state_dir = tempfile::tempdir().expect("state dir");
+    let model = CallingModel::default();
+    let runtime = member_calls_runtime(MOB, state_dir.path(), &model).await;
+    let lock_file =
+        meerkat_meta::workgraph_admission::workgraph_admission_sidecar_path(state_dir.path());
+    assert!(
+        !lock_file.exists(),
+        "a start that built no member private to a person makes no admission lock file: {}",
+        lock_file.display()
+    );
+
+    spawn_private_worker(&runtime, "private-helper").await;
+    assert!(
+        lock_file.exists(),
+        "the build of a member private to a person takes the admission, which makes the lock \
+         file: {}",
+        lock_file.display()
+    );
+
+    teardown(runtime).await;
+}

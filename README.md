@@ -128,10 +128,10 @@ or fallback Azure key/endpoint pair the OpenAI environment default.
 
 The catalog defaults are `gpt-6-astra` (OpenAI, and the global default) and
 `claude-opus-5-5` (Anthropic). The Gemini default is `gemini-4-argon` from
-0.9.1 through 0.9.17; the unreleased catalog changes it to `gemini-4-neon`.
+0.9.1 through 0.9.17; 0.9.18 changes it to `gemini-4-neon`.
 Both Gemini defaults require paid Gemini API access; on the free tier select
 `gemini-3.8-flash` or `gemini-4-hydrogen` (available from 0.9.15).
-Unreleased Neon support includes `low`/`medium`/`high`; Meerkat does not yet
+Neon support, from 0.9.18, includes `low`/`medium`/`high`; Meerkat does not yet
 send Google's `xhigh`. Argon and Hydrogen remain explicitly selectable.
 Catalog support does not guarantee access for an API organization or through
 Azure, Copilot or custom backends, so select an available model explicitly
@@ -306,7 +306,7 @@ Meerkat is pre-1.0 and patch releases can contain declared public API breaks.
 Exactly pin the Meerkat crate family and bump deliberately:
 
 ```toml
-meerkat = { version = "=0.9.17", features = ["sqlite-store", "session-store"] }
+meerkat = { version = "=0.9.18", features = ["sqlite-store", "session-store"] }
 ```
 
 ### Architecture

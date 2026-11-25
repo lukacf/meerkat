@@ -1,4 +1,5 @@
 import { cleanup, fireEvent, render, within } from "@testing-library/react";
+import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentDirectoryProvider } from "../panel-kit";
 import { ConversationPresentationProvider, ConversationRowStateScope } from "./presentation-policy";
@@ -15,7 +16,7 @@ import {
 import { normalizePendingApproval, type PendingApprovalSnapshot } from "../../../console-core/src/pending-approvals";
 import { ApprovalAttention } from "./approval-card";
 import { ConversationApprovals } from "./conversation-approvals";
-import { ConversationQuestionSets, QuestionSetCard, QuestionSetList, QuestionSetsProvider, type QuestionSetCardProps } from "./question-set-card";
+import { ConversationQuestionSets, QuestionSetCard, QuestionSetList, QuestionSetsProvider, questionReceiptPlacement, type QuestionSetCardProps } from "./question-set-card";
 
 afterEach(cleanup);
 
@@ -989,5 +990,304 @@ describe("ConversationQuestionSets", () => {
     );
     expect(unsupported.container.textContent).toBe("");
     expect(unsupported.queryByRole("alert")).toBeNull();
+  });
+
+  // The conversation's active area holds what still needs the person; what
+  // this console answered or dismissed is drawn as a receipt, where the
+  // conversation places it.
+  const answered = (): QuestionSetSnapshot => snapshot({
+    sets: [billing()],
+    slots: { [PENDING_ID]: 1, [BILLING_ID]: 2 },
+    closed: [{ set: questions(), outcome: "answered", closedAtMs: Date.now() }],
+    decisions: { [PENDING_ID]: { phase: "answered", action: "answer", answers: { "q-region": { kind: "choice", choiceId: "c-eu" } } } },
+  });
+  const inConversation = (value: QuestionSetSnapshot, children: ReactNode) => render(
+    <AgentDirectoryProvider directory={directory}>
+      <QuestionSetsProvider value={{ snapshot: value, onAnswer: vi.fn(), onDismiss: vi.fn() }}>{children}</QuestionSetsProvider>
+    </AgentDirectoryProvider>,
+  );
+
+  it("keeps an open set answerable in the conversation's active area", () => {
+    const onAnswer = vi.fn();
+    const view = render(
+      <AgentDirectoryProvider directory={directory}>
+        <QuestionSetsProvider value={{ snapshot: snapshot(), onAnswer, onDismiss: vi.fn() }}>
+          <ConversationApprovals approvalIdentity={IDENTITY} />
+        </QuestionSetsProvider>
+      </AgentDirectoryProvider>,
+    );
+    const card = view.getByTestId(`question-set:${PENDING_ID}`);
+    expect(card.dataset.state).toBe("pending");
+    fireEvent.click(within(card).getByRole("radio", { name: /Europe/ }));
+    fireEvent.click(within(card).getByRole("button", { name: "Send answers" }));
+    expect(onAnswer).toHaveBeenCalledTimes(1);
+    expect(onAnswer.mock.calls[0][0]).toBe(PENDING_ID);
+  });
+
+  it("takes a set out of the active area once it is answered", () => {
+    const view = inConversation(answered(), <ConversationApprovals approvalIdentity={IDENTITY} />);
+    expect(view.queryByTestId(`question-set:${PENDING_ID}`)).toBeNull();
+    expect(view.queryByRole("button", { name: "Send answers" })).toBeNull();
+    expect(view.container.textContent).not.toContain("Which region goes first?");
+    cleanup();
+    // A set dismissed here leaves it the same way.
+    const dismissed = inConversation(
+      snapshot({
+        sets: [billing()], slots: { [PENDING_ID]: 1, [BILLING_ID]: 2 },
+        closed: [{ set: questions(), outcome: "dismissed", closedAtMs: Date.now() }],
+        decisions: { [PENDING_ID]: { phase: "dismissed", action: "dismiss" } },
+      }),
+      <ConversationApprovals approvalIdentity={IDENTITY} />,
+    );
+    expect(dismissed.queryByTestId(`question-set:${PENDING_ID}`)).toBeNull();
+  });
+
+  it("keeps an answered set as a folded receipt that opens to its questions and the answers given", () => {
+    // The conversation names the sets it places after a turn.
+    const view = inConversation(
+      answered(),
+      <ConversationApprovals approvalIdentity={IDENTITY} interactionIds={[]} questionReceiptIds={[PENDING_ID]} />,
+    );
+    expect(view.queryByTestId(`question-set:${PENDING_ID}`)).toBeNull();
+    const receipt = view.getByTestId(`question-set-receipt:${PENDING_ID}`) as HTMLDetailsElement;
+    expect(receipt.tagName).toBe("DETAILS");
+    expect(receipt.open).toBe(false);
+    const line = receipt.querySelector("summary")?.textContent ?? "";
+    expect(line).toContain("Answered");
+    expect(line).toContain("Release plan");
+    // Opened, it reads as the questions with the answers given: the one
+    // answered, and the other as not answered.
+    expect(receipt.textContent).toContain("Which region goes first?");
+    expect(receipt.textContent).toContain("Europe");
+    expect(receipt.textContent).toContain("When should it start?");
+    expect(receipt.textContent).toContain("Not answered");
+    expect(receipt.textContent).not.toContain("United States");
+    // Nothing of it can be answered again, and no id of it is shown.
+    expect(within(receipt).queryByRole("radio")).toBeNull();
+    expect(within(receipt).queryByRole("button")).toBeNull();
+    expect(receipt.textContent).not.toContain(PENDING_ID);
+    cleanup();
+    // A turn the conversation places nothing after shows none.
+    const other = inConversation(answered(), <ConversationApprovals approvalIdentity={IDENTITY} interactionIds={[]} questionReceiptIds={[]} />);
+    expect(other.queryByTestId(`question-set-receipt:${PENDING_ID}`)).toBeNull();
+  });
+
+  it("opens the answered row to each question with its answer, as a term and its definition, with nothing to act on", () => {
+    const view = inConversation(
+      answered(),
+      <ConversationApprovals approvalIdentity={IDENTITY} interactionIds={[]} questionReceiptIds={[PENDING_ID]} />,
+    );
+    const receipt = view.getByTestId(`question-set-receipt:${PENDING_ID}`) as HTMLDetailsElement;
+    // A native disclosure: its line comes first, takes the keyboard's
+    // focus as any summary does, and says what the row is.
+    const line = receipt.firstElementChild as HTMLElement;
+    expect(line.tagName).toBe("SUMMARY");
+    expect(line.getAttribute("tabindex")).toBeNull();
+    expect(line.getAttribute("role")).toBeNull();
+    expect([...line.children].map((part) => part.textContent)).toEqual(["Answered", "Release plan", "2 questions"]);
+    // It arrives folded: one line. The line opens it.
+    expect(receipt.open).toBe(false);
+    fireEvent.click(line);
+    expect(receipt.open).toBe(true);
+    // A description list: each question is a term and its answer the
+    // definition that follows it, which is how a screen reader says them.
+    const list = receipt.querySelector("dl") as HTMLElement;
+    expect([...list.children].map((part) => `${part.tagName}:${part.textContent}`)).toEqual([
+      "DT:Which region goes first?", "DD:Europe",
+      "DT:When should it start?", "DD:Not answered",
+    ]);
+    expect(within(receipt).getAllByRole("term").map((term) => term.textContent)).toEqual(["Which region goes first?", "When should it start?"]);
+    expect(within(receipt).getAllByRole("definition").map((answer) => answer.textContent)).toEqual(["Europe", "Not answered"]);
+    // Nothing in the row is kept from assistive technology.
+    expect(receipt.querySelector("[aria-hidden='true'], [hidden], [inert]")).toBeNull();
+    // Read-only: no field, no button, no link, nothing to edit.
+    expect(receipt.querySelector("input, textarea, select, button, a[href], [contenteditable], [role='button'], [role='radio'], [role='textbox']")).toBeNull();
+    // The line folds the row again and opens it again; folded, the row is still there.
+    fireEvent.click(line);
+    expect(receipt.open).toBe(false);
+    expect(view.queryAllByTestId(`question-set-receipt:${PENDING_ID}`).length).toBe(1);
+    fireEvent.click(line);
+    expect(receipt.open).toBe(true);
+  });
+
+  // Sets that still need the person stay in the active area whatever
+  // happens to another set beside them.
+  const SECOND_ID = `decision:${"e".repeat(64)}`;
+  /** A second set of the same agent. */
+  const second = () => questions({
+    pending_id: SECOND_ID, title: "Rollout order", subject_digest: `sha256:${"f".repeat(64)}`,
+    questions: [{ id: "r-order", prompt: "Which service goes first?", choices: [{ id: "r-api", label: "The API" }, { id: "r-web", label: "The site" }] }],
+  });
+  const active = (value: QuestionSetSnapshot) => (
+    <AgentDirectoryProvider directory={directory}>
+      <QuestionSetsProvider value={{ snapshot: value, onAnswer: vi.fn(), onDismiss: vi.fn() }}>
+        <ConversationApprovals approvalIdentity={IDENTITY} />
+      </QuestionSetsProvider>
+    </AgentDirectoryProvider>
+  );
+
+  it("keeps a second open set of the same agent with its card, its draft and its Send when the first is answered", () => {
+    const slots = { [PENDING_ID]: 1, [SECOND_ID]: 2 };
+    const view = render(active(snapshot({ sets: [questions(), second()], slots })));
+    const card = () => view.getByTestId(`question-set:${SECOND_ID}`);
+    fireEvent.click(within(card()).getByRole("radio", { name: "The site" }));
+    const before = card();
+    // The first set is answered here: it leaves the active area.
+    view.rerender(active(snapshot({
+      sets: [second()], slots,
+      closed: [{ set: questions(), outcome: "answered", closedAtMs: Date.now() }],
+      decisions: { [PENDING_ID]: { phase: "answered", action: "answer", answers: { "q-region": { kind: "choice", choiceId: "c-eu" } } } },
+    })));
+    expect(view.queryByTestId(`question-set:${PENDING_ID}`)).toBeNull();
+    // The second is the same card, with what the person had chosen.
+    expect(card()).toBe(before);
+    expect(card().dataset.state).toBe("pending");
+    expect((within(card()).getByRole("radio", { name: "The site" }) as HTMLInputElement).checked).toBe(true);
+    expect((within(card()).getByRole("button", { name: "Send answers" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("keeps a set whose reply is on its way, and one whose reply could not be confirmed, in the active area", () => {
+    const answers = { "q-region": { kind: "choice" as const, choiceId: "c-eu" } };
+    const sending = render(active(snapshot({ decisions: { [PENDING_ID]: { phase: "submitting", action: "answer", answers } } })));
+    expect(sending.getByTestId(`question-set:${PENDING_ID}`).dataset.state).toBe("submitting");
+    expect(sending.queryByTestId(`question-set-receipt:${PENDING_ID}`)).toBeNull();
+    cleanup();
+    const unconfirmed = render(active(snapshot({ decisions: { [PENDING_ID]: { phase: "failed", action: "answer", answers, error: "network" } } })));
+    expect(unconfirmed.getByTestId(`question-set:${PENDING_ID}`).dataset.state).toBe("failed");
+    expect(unconfirmed.queryByTestId(`question-set-receipt:${PENDING_ID}`)).toBeNull();
+  });
+
+  it("still shows, in the active area, the line of a set that left without a reply from here", () => {
+    const view = render(active(snapshot()));
+    expect(view.getByTestId(`question-set:${PENDING_ID}`)).toBeTruthy();
+    view.rerender(active(snapshot({ sets: [billing()], slots: { [BILLING_ID]: 2 }, notices: [{ slot: 1, kind: "gone", atMs: 5 }] })));
+    expect(view.queryByTestId(`question-set:${PENDING_ID}`)).toBeNull();
+    expect(view.getByTestId("question-set-notice").textContent).toBe("This question is no longer listed here.");
+    // It is not a set this console closed: no receipt stands for it.
+    expect(view.queryByTestId(`question-set-receipt:${PENDING_ID}`)).toBeNull();
+  });
+
+  it("reads a dismissed set's receipt as dismissed, with every question not answered", () => {
+    const view = inConversation(
+      snapshot({
+        sets: [billing()], slots: { [PENDING_ID]: 1, [BILLING_ID]: 2 },
+        closed: [{ set: questions(), outcome: "dismissed", closedAtMs: Date.now() }],
+        decisions: { [PENDING_ID]: { phase: "dismissed", action: "dismiss" } },
+      }),
+      <ConversationApprovals approvalIdentity={IDENTITY} interactionIds={[]} questionReceiptIds={[PENDING_ID]} />,
+    );
+    const receipt = view.getByTestId(`question-set-receipt:${PENDING_ID}`);
+    const line = receipt.querySelector("summary")?.textContent ?? "";
+    expect(line).toContain("Dismissed");
+    expect(line).not.toContain("Answered");
+    expect(receipt.textContent).toContain("Which region goes first?");
+    expect(receipt.textContent).toContain("When should it start?");
+    expect(receipt.textContent?.split("Not answered").length).toBe(3);
+    expect(receipt.textContent).not.toContain("Europe");
+    expect(within(receipt).queryByRole("button")).toBeNull();
+  });
+
+  // Where the focus goes when the card that held it is answered here.
+  const focusedLine = () => (document.activeElement?.tagName === "SUMMARY" ? document.activeElement.parentElement?.getAttribute("data-testid") ?? null : null);
+  const answeredHere = (extra: Partial<QuestionSetSnapshot> = {}): QuestionSetSnapshot => snapshot({
+    sets: [], slots: { [PENDING_ID]: 1, [SECOND_ID]: 2 },
+    closed: [{ set: questions(), outcome: "answered", closedAtMs: Date.now() }],
+    decisions: { [PENDING_ID]: { phase: "answered", action: "answer", answers: { "q-region": { kind: "choice", choiceId: "c-eu" } } } },
+    ...extra,
+  });
+  const place = (value: QuestionSetSnapshot, receiptIds: readonly string[]) => (
+    <AgentDirectoryProvider directory={directory}>
+      <QuestionSetsProvider value={{ snapshot: value, onAnswer: vi.fn(), onDismiss: vi.fn() }}>
+        <ConversationApprovals approvalIdentity={IDENTITY} questionReceiptIds={receiptIds} />
+      </QuestionSetsProvider>
+    </AgentDirectoryProvider>
+  );
+
+  it("moves the focus from the answered card to the line that stands for it, and to nothing where no line is drawn", () => {
+    const open = snapshot({ sets: [questions()], slots: { [PENDING_ID]: 1 } });
+    const view = render(place(open, []));
+    view.getByTestId(`question-set-sentence:${PENDING_ID}`).focus();
+    view.rerender(place(answeredHere(), [PENDING_ID]));
+    expect(focusedLine()).toBe(`question-set-receipt:${PENDING_ID}`);
+    cleanup();
+    // The conversation draws the line with a turn that is not on screen:
+    // nothing takes the focus, which is then the page's.
+    const far = render(place(open, []));
+    far.getByTestId(`question-set-sentence:${PENDING_ID}`).focus();
+    far.rerender(place(answeredHere(), []));
+    expect(far.queryByTestId(`question-set-receipt:${PENDING_ID}`)).toBeNull();
+    expect(document.activeElement === null || document.activeElement.tagName === "BODY").toBe(true);
+  });
+
+  it("keeps the focus on the answered set's own line when the line of another set that left is shown too", () => {
+    const view = render(place(snapshot({ sets: [questions(), second()], slots: { [PENDING_ID]: 1, [SECOND_ID]: 2 } }), []));
+    view.getByTestId(`question-set-sentence:${PENDING_ID}`).focus();
+    // In one read: the first set is answered here, the second left.
+    view.rerender(place(answeredHere({ notices: [{ slot: 2, kind: "gone", atMs: 5 }] }), [PENDING_ID]));
+    expect(view.getByTestId("question-set-notice").textContent).toBe("This question is no longer listed here.");
+    expect(focusedLine()).toBe(`question-set-receipt:${PENDING_ID}`);
+    cleanup();
+    // The card that left held the focus and no line of an answered set
+    // took it: it goes to the left set's line, as before.
+    const other = render(place(snapshot({ sets: [questions(), second()], slots: { [PENDING_ID]: 1, [SECOND_ID]: 2 } }), []));
+    other.getByTestId(`question-set-sentence:${SECOND_ID}`).focus();
+    other.rerender(place(snapshot({ sets: [questions()], slots: { [PENDING_ID]: 1 }, notices: [{ slot: 2, kind: "gone", atMs: 5 }] }), []));
+    expect(document.activeElement?.getAttribute("data-testid")).toBe("question-set-line");
+  });
+});
+
+describe("questionReceiptPlacement", () => {
+  const closed = (pendingId: string, closedAtMs: number) => ({ pendingId, closedAtMs });
+
+  it("puts a set after the newest turn that had begun when it was closed", () => {
+    const placed = questionReceiptPlacement([closed("a", 150), closed("b", 250), closed("c", 300)], [100, 200, 300]);
+    expect(placed.byTurn).toEqual([["a"], ["b"], ["c"]]);
+    expect(placed.unplaced).toEqual([]);
+    // A turn that began after the set was closed comes below its receipt.
+    expect(questionReceiptPlacement([closed("a", 150)], [100, 200, 300]).byTurn).toEqual([["a"], [], []]);
+  });
+
+  it("keeps the sets of one turn in the order they were closed, whatever order they are given in", () => {
+    expect(questionReceiptPlacement([closed("late", 190), closed("early", 110), closed("middle", 150)], [100, 200]).byTurn)
+      .toEqual([["early", "middle", "late"], []]);
+  });
+
+  it("puts a set closed before every turn after the first one", () => {
+    expect(questionReceiptPlacement([closed("a", 50)], [100, 200]).byTurn).toEqual([["a"], []]);
+  });
+
+  it("counts a turn whose start is not known as begun with the turn before it", () => {
+    // The middle turn has no time: a set closed after the first turn's start
+    // goes after the middle one, the newest that had begun.
+    expect(questionReceiptPlacement([closed("a", 150)], [100, null, 200]).byTurn).toEqual([[], ["a"], []]);
+    // No turn has a known start: every set goes after the last.
+    expect(questionReceiptPlacement([closed("a", 150)], [undefined, Number.NaN]).byTurn).toEqual([[], ["a"]]);
+  });
+
+  it("leaves the sets of a conversation with no turn unplaced, in the order they were closed", () => {
+    const placed = questionReceiptPlacement([closed("b", 20), closed("a", 10)], []);
+    expect(placed.byTurn).toEqual([]);
+    expect(placed.unplaced).toEqual(["a", "b"]);
+  });
+
+  // The gateway's reply to the decide carries the time it decided, on the
+  // clock the turns' starts are on. This page's own closing time is on
+  // another clock.
+  const decided = (pendingId: string, closedAtMs: number, decidedAtMs: number) => ({ pendingId, closedAtMs, decidedAtMs });
+
+  it("places a set by the gateway's decision time when the reply carried one, not by this page's clock", () => {
+    // This page's clock is ahead of the gateway's: the turn the answers
+    // start (200) began after the gateway decided (150).
+    expect(questionReceiptPlacement([decided("a", 5_000, 150)], [100, 200]).byTurn).toEqual([["a"], []]);
+    // This page's clock is behind: the second turn had begun when the
+    // gateway decided, the third had not.
+    expect(questionReceiptPlacement([decided("a", 120, 250)], [100, 200, 300]).byTurn).toEqual([[], ["a"], []]);
+  });
+
+  it("counts a turn that starts at the instant of the decision as later: the answers start it", () => {
+    expect(questionReceiptPlacement([decided("a", 260, 200)], [100, 200]).byTurn).toEqual([["a"], []]);
+    // Without a decision time the page's own closing time decides, and a
+    // turn that starts at that instant had begun.
+    expect(questionReceiptPlacement([closed("a", 200)], [100, 200]).byTurn).toEqual([[], ["a"]]);
   });
 });

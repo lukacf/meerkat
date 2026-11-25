@@ -1,5 +1,26 @@
-import type { ConsoleFrame } from "../types";
+import type { ConsoleAgent, ConsoleFrame } from "../types";
 import { countRender } from "./render-counts";
+
+/**
+ * Whether the console offers Stop for the run `activeRunId` of `agent`: only
+ * while the timeline names the in-flight run, and as the agent's row says:
+ * `can_stop_run` when the row says it (true for a hosted mob's member the
+ * gateway does not retire, false for a member of a nested mob), else the
+ * authority of force-cancel, `can_retire` (a gateway that says nothing of
+ * stopping authorizes a stop as a retirement).
+ */
+export function runStopOffered(input: {
+  readOnly: boolean;
+  agent: ConsoleAgent | null | undefined;
+  activeRunId: string | null;
+}): boolean {
+  const affordances = input.agent?.affordances;
+  return (
+    !input.readOnly &&
+    input.activeRunId !== null &&
+    (affordances?.can_stop_run ?? affordances?.can_retire) === true
+  );
+}
 
 /** One input that contributed to a stopped member run. */
 export interface RunStopContributor {

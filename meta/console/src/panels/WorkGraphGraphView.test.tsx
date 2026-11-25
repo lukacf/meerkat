@@ -279,3 +279,72 @@ describe("WorkGraphPanel navigation", () => {
     expect(view.queryByTestId("workgraph-graph-detail") === null).toBe(true);
   });
 });
+
+describe("WorkGraphPanel Ready figure", () => {
+  it("is the same number whatever the panel's filters show or hide", () => {
+    // One open item the runtime reports ready, and one cancelled item that
+    // the Graph draws only when asked to.
+    const view = render(
+      <WorkGraphPanel
+        data={panelData({
+          items: [
+            ...items,
+            item("child-free", "2026-07-08T08:40:00Z"),
+            item("child-dropped", "2026-07-08T08:50:00Z", { status: "cancelled" }),
+          ],
+          edges: [
+            ...edges,
+            { kind: "parent", from_id: "child-free", to_id: "root" },
+            { kind: "parent", from_id: "child-dropped", to_id: "root" },
+          ],
+          readyItemIds: ["child-free"],
+        })}
+        canManage={false}
+        onRefresh={() => {}}
+      />,
+    );
+    const ready = () => view.getByTestId("workgraph-glance:ready").querySelector(".cc-figure__value")?.textContent?.trim();
+    // The menu closes or stays open as it likes: it is opened when the entry is not there.
+    const entry = (id: string) => {
+      if (view.queryByTestId(id) === null) fireEvent.click(view.getByTestId("workgraph-menu"));
+      return view.getByTestId(id);
+    };
+    const set = (id: string, wanted: boolean) => {
+      if ((entry(id).getAttribute("aria-checked") === "true") !== wanted) fireEvent.click(entry(id));
+      expect(entry(id).getAttribute("aria-checked")).toBe(String(wanted));
+    };
+    const blocksEdges = () => Array.from(view.container.querySelectorAll('[data-testid="workgraph-graph-edge"]'))
+      .filter((edge) => edge.getAttribute("data-relation") === "blocks").length;
+
+    // The outline, as the panel opens.
+    expect(ready()).toBe("1");
+    // The Graph, every filter at rest (an earlier row may have left one set).
+    fireEvent.click(view.getByTestId("workgraph-view-toggle:graph"));
+    set("workgraph-menu:show-cancelled", false);
+    set("workgraph-menu:show-done", false);
+    set("workgraph-menu:links-blocks", true);
+    expect(nodeIds(view.container).includes("child-dropped")).toBe(false);
+    expect(blocksEdges() > 0).toBe(true);
+    expect(ready()).toBe("1");
+
+    // Each filter changes what is drawn and leaves the figure alone.
+    set("workgraph-menu:show-cancelled", true);
+    expect(nodeIds(view.container).includes("child-dropped")).toBe(true);
+    expect(ready()).toBe("1");
+    set("workgraph-menu:links-blocks", false);
+    expect(blocksEdges()).toBe(0);
+    expect(ready()).toBe("1");
+    set("workgraph-menu:show-done", true);
+    expect(ready()).toBe("1");
+    // Back in the outline with all three set.
+    fireEvent.click(view.getByTestId("workgraph-view-toggle:tree"));
+    expect(ready()).toBe("1");
+
+    // The panel remembers its filters between mounts: leave them at rest.
+    fireEvent.click(view.getByTestId("workgraph-view-toggle:graph"));
+    set("workgraph-menu:show-cancelled", false);
+    set("workgraph-menu:show-done", false);
+    set("workgraph-menu:links-blocks", true);
+    expect(ready()).toBe("1");
+  });
+});

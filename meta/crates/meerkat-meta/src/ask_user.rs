@@ -38,7 +38,10 @@
 //!   that can identify no person or takes no changes), and for
 //!   an asker no answer can be routed back to (a member of another mob than
 //!   the runtime's own, or a name that is no agent name). Otherwise the set
-//!   is held and the call answers `asked`.
+//!   is held and the call answers `asked`. Where the Console refuses every
+//!   caller (it requires sign-in and trusts no signing key) the set is held
+//!   too, for the program that embeds the gateway to answer, and the
+//!   result's note says so (`ASKED_WHERE_THE_CONSOLE_ADMITS_NOBODY`).
 //! - **Read.** `open_question_sets` lists the open sets, soonest deadline
 //!   first, for `meta/gating/questions`.
 //! - **Answer.** `answer_question_set` is the one hand-off of a person's
@@ -72,7 +75,8 @@ use meerkat_core::approval::decision::{
 };
 use meerkat_core::ask_user::{
     ASK_USER_RESULT_INPUT, ASK_USER_TOOL, AskUserAnswers, AskUserDispatcher, AskUserHost,
-    AskUserQuestionAnswer, AskUserQuestionSet, AskUserRefusal, AskUserRequest, AskUserResult,
+    AskUserOutcome, AskUserQuestionAnswer, AskUserQuestionSet, AskUserRefusal, AskUserRequest,
+    AskUserResult,
 };
 use meerkat_core::service::CreateSessionRequest;
 use meerkat_core::{PrincipalKind, PrincipalRef, TrustDomainId};
@@ -91,6 +95,19 @@ use crate::mob_handle_runtime::{MobRuntime, PreBuildHook};
 
 /// The `kind` of a decided question set in a `meta/gating/decide` result.
 pub const QUESTION_SET_RESULT_KIND: &str = "question_set";
+
+/// The note of an `asked` result where the runtime's Console refuses every
+/// caller (it requires sign-in and trusts no signing key). The set is held
+/// there as on any Console, because the program that embeds the gateway can
+/// read and answer it, so the outcome stays `asked`; what the asking agent's
+/// model reads says who can answer and until when, in place of the stock
+/// note's "A person is being asked". It says that the Console cannot, never
+/// that nobody can.
+const ASKED_WHERE_THE_CONSOLE_ADMITS_NOBODY: &str = "The host holds these questions. No person can answer them in this host's Console as it is \
+     configured: it requires sign-in and trusts no signing key, so it admits nobody. The \
+     program that embeds this gateway may still answer them over its own connection. This \
+     call does not wait: answers arrive later as an `ask_user_result` input with this \
+     `request_id`, and if none came by `answer_by` that input says `timed_out`.";
 
 /// The stock tools Meta puts on member builds as host tools, by name. Every
 /// member build is told these names (`declare_stock_tools`), whether or
@@ -160,6 +177,10 @@ impl std::fmt::Debug for AskUserSurface {
             .debug_struct("AskUserSurface")
             .field("decisions", &self.decisions)
             .field("a_person_decides", &self.console.takes_a_persons_decision())
+            .field(
+                "console_refuses_every_caller",
+                &self.console.refuses_every_caller(),
+            )
             .field("mob_id", &self.mob_id)
             .finish_non_exhaustive()
     }
@@ -244,6 +265,13 @@ impl std::fmt::Debug for AskUserSlot {
 }
 
 impl AskUserSlot {
+    /// Test builds only: whether `other` is this very slot (a clone of it),
+    /// so that filling one fills the other.
+    #[cfg(test)]
+    pub(crate) fn is_the_slot_of(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.surface, &other.surface)
+    }
+
     /// Fill the slot; it replaces the surface before. A runtime that
     /// follows the ends of its private members
     /// ([`Self::follow_private_member_ends`]) then withdraws, in the
@@ -327,6 +355,22 @@ impl AskUserSlot {
         })
     }
 
+    /// The host the `ask_user` tool of a member build asks through: of the
+    /// mob and the member the build's own binding names, whatever mob the
+    /// slot's surface was built for. A host serves any number of mobs with
+    /// one surface, so a member of a mob the surface cannot route an answer
+    /// back to is answered that no person can be asked.
+    pub(crate) fn member_host(
+        &self,
+        binding: &meerkat_core::MobMemberBinding,
+    ) -> MemberAskUserHost {
+        MemberAskUserHost::new(
+            self.clone(),
+            binding.mob_id.clone(),
+            crate::member_comms_id::logical_memory_identity(&binding.member),
+        )
+    }
+
     /// Put the `ask_user` tool, with a host for that member, into the host
     /// tools of a member build (`SessionBuildOptions::host_tools`), beside a
     /// dispatcher a host layer already put there. Core's factory composes
@@ -379,11 +423,7 @@ impl AskUserSlot {
             );
             return;
         }
-        let host = MemberAskUserHost::new(
-            self.clone(),
-            binding.mob_id.clone(),
-            crate::member_comms_id::logical_memory_identity(&binding.member),
-        );
+        let host = self.member_host(binding);
         let tool: Arc<dyn meerkat_core::AgentToolDispatcher> =
             Arc::new(AskUserDispatcher::new(Arc::new(host)));
         build.host_tools = Some(match build.host_tools.take() {
@@ -503,7 +543,14 @@ impl AskUserHost for MemberAskUserHost {
         .map_err(hold_refusal)?;
         surface.held.notify_one();
         surface.decisions.notify_work();
-        ask_user_result_of(&held).map_err(|error| AskUserRefusal::Failed(error.to_string()))
+        let mut result =
+            ask_user_result_of(&held).map_err(|error| AskUserRefusal::Failed(error.to_string()))?;
+        // The words only: the set is held and the outcome is `asked` on
+        // every Console that holds one.
+        if result.outcome == AskUserOutcome::Asked && surface.console.refuses_every_caller() {
+            ASKED_WHERE_THE_CONSOLE_ADMITS_NOBODY.clone_into(&mut result.note);
+        }
+        Ok(result)
     }
 }
 

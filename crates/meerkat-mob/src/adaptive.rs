@@ -342,6 +342,11 @@ pub struct FinishResult {
 /// definitions only it brings in, for the same reason: a decision that
 /// carries it anyway is parsed and judged by the member's build.
 ///
+/// So is a profile's web search switch (`tools.web_search`), for the same
+/// reason: a decision that carries it anyway is parsed, an enable is counted
+/// as the `web_search` tool class in the policy evidence, and the member's
+/// build judges it.
+///
 /// So is the `12h` OpenAI prompt-cache TTL (`prompt_cache_options.ttl`), for
 /// the same reason: a decision that carries it anyway is parsed and judged by
 /// the member's build like any other request, which accepts it on the models
@@ -373,13 +378,15 @@ pub fn layer_decision_schema() -> Result<serde_json::Value, serde_json::Error> {
         });
     }
     // Nor the tool bundle opt-in, which the released schema does not carry,
-    // nor the member tool grant gate and its definition.
+    // nor the member tool grant gate and its definition, nor a profile's web
+    // search switch.
     if let Some(properties) = schema
         .pointer_mut("/$defs/ToolConfig/properties")
         .and_then(serde_json::Value::as_object_mut)
     {
         properties.remove("bundles");
         properties.remove("grant_gated");
+        properties.remove("web_search");
     }
     if let Some(definitions) = schema
         .pointer_mut("/$defs")
@@ -3324,6 +3331,11 @@ fn collect_profile_tool_classes(
     if profile.tools.image_generation {
         out.insert("image_generation".to_string());
     }
+    // An explicit enable is a capability the layer uses; a profile that
+    // disables web search or leaves it to the build names none.
+    if profile.tools.web_search == Some(true) {
+        out.insert("web_search".to_string());
+    }
     for name in &profile.tools.mcp {
         out.insert(AdaptiveToolIdentity::mcp_server(name)?.into_canonical());
     }
@@ -3863,6 +3875,36 @@ mod tests {
             &serde_json::to_value(schemars::schema_for!(LayerDecision)).expect("derived schema"),
         );
         assert!(derived.iter().any(|name| name == "bundles"), "{derived:?}");
+    }
+
+    /// A profile's `tools.web_search` switch is left out of the pinned
+    /// schema, which the released schema does not carry. (Fails-old: the
+    /// derived schema has no such property.)
+    #[cfg(feature = "schema")]
+    #[test]
+    fn layer_decision_schema_leaves_the_web_search_switch_out() {
+        let properties = |schema: &serde_json::Value| {
+            schema
+                .pointer("/$defs/ToolConfig/properties")
+                .and_then(serde_json::Value::as_object)
+                .expect("ToolConfig properties")
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        let pinned = properties(&layer_decision_schema().expect("canonical schema serializes"));
+        assert!(
+            !pinned.iter().any(|name| name == "web_search"),
+            "{pinned:?}"
+        );
+        // The derived schema carries the field; the pin is what removes it.
+        let derived = properties(
+            &serde_json::to_value(schemars::schema_for!(LayerDecision)).expect("derived schema"),
+        );
+        assert!(
+            derived.iter().any(|name| name == "web_search"),
+            "{derived:?}"
+        );
     }
 
     /// A stdio MCP server's working directory is left out of the pinned
@@ -6363,6 +6405,35 @@ mod tests {
                 .used_tool_classes
                 .contains("rust_bundle:announcements")
         );
+    }
+
+    /// A profile that enables web search uses the `web_search` tool class:
+    /// the adaptive policy sees it. A profile that disables it or omits the
+    /// key uses none.
+    #[test]
+    fn adaptive_layer_evidence_counts_an_enabled_web_search() {
+        for (stated, counted) in [(Some(true), true), (Some(false), false), (None, false)] {
+            let mut context = compile_context();
+            let verifier = context
+                .profile_templates
+                .get_mut(&ProfileName::from("verifier"))
+                .expect("verifier profile");
+            let mut tools = serde_json::to_value(&verifier.tools).expect("the tools serialize");
+            if let Some(stated) = stated {
+                tools["web_search"] = serde_json::json!(stated);
+            }
+            verifier.tools = serde_json::from_value(tools).expect("the tools are read");
+
+            let compiled = compile_layer(&layer_plan(), &context, &compile_policy()).unwrap();
+            assert_eq!(
+                compiled
+                    .policy_evidence
+                    .used_tool_classes
+                    .contains("web_search"),
+                counted,
+                "web_search = {stated:?}"
+            );
+        }
     }
 
     #[test]

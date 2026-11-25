@@ -5821,6 +5821,31 @@ async fn handle_meerkat_run_with_help_tools(
     }
 }
 
+/// What the plain resume does with a failed turn on the live session.
+///
+/// A not-found answer does not prove that the turn did not run. The session
+/// service hands the turn's reserved admission back with an error only when
+/// the turn did not take it, so only a not-found answer that came with the
+/// admission lets the resume submit its prompt again.
+enum LiveTurnFailure<A> {
+    /// The session was not found and the turn's reserved admission came back
+    /// with the answer: the turn did not run. The session is rebuilt and the
+    /// prompt runs on that admission.
+    Rebuild(A),
+    /// Any other failure is the resume's result, a not-found answer without
+    /// the admission included: nothing is submitted again.
+    Surface(SessionError),
+}
+
+/// Classify a failed turn on the live session from the error and the
+/// reserved admission that came back with it.
+fn live_turn_failure<A>(error: SessionError, returned_admission: Option<A>) -> LiveTurnFailure<A> {
+    match (error, returned_admission) {
+        (SessionError::NotFound { .. }, Some(admission)) => LiveTurnFailure::Rebuild(admission),
+        (error, _admission) => LiveTurnFailure::Surface(error),
+    }
+}
+
 async fn handle_meerkat_resume(
     state: &MeerkatMcpState,
     input: MeerkatResumeInput,
@@ -6478,25 +6503,23 @@ async fn handle_meerkat_resume(
             .await;
         match turn_result {
             Ok(run_result) => Ok(run_result),
-            Err((SessionError::NotFound { .. }, recovered_admission)) => {
+            Err((error, returned_admission)) => {
                 // The live session ended under the turn: a help session is
                 // not rebuilt.
-                if let Some(refusal) = help_session.as_ref() {
+                if matches!(error, SessionError::NotFound { .. })
+                    && let Some(refusal) = help_session.as_ref()
+                {
                     return Err(help_session_not_resumable_tool_error(refusal));
                 }
-                let admission = match recovered_admission.or_else(|| resume_admission.take()) {
-                    Some(admission) => admission,
-                    None => state
-                        .service
-                        .reserve_runtime_turn_admission(&session_id)
-                        .await
-                        .map_err(|err| ToolCallError::internal(format!("Agent error: {err}")))?,
-                };
-                let outcome = materialize_resume(Some(admission)).await?;
-                runtime_materialization_committed = outcome.committed;
-                outcome.result
+                match live_turn_failure(error, returned_admission) {
+                    LiveTurnFailure::Rebuild(admission) => {
+                        let outcome = materialize_resume(Some(admission)).await?;
+                        runtime_materialization_committed = outcome.committed;
+                        outcome.result
+                    }
+                    LiveTurnFailure::Surface(error) => Err(error),
+                }
             }
-            Err((other, _admission)) => Err(other),
         }
     };
     // Presence and archive state, read body-free: a run still going on the
@@ -6774,6 +6797,7 @@ mod tests {
     use meerkat::Session;
 
     pub(crate) mod committed_reads_tests;
+    mod live_turn_failure_tests;
     use meerkat::surface::{
         CancelActionInstallOutcome, SurfaceRequestExecutor, noop_request_action,
     };
@@ -18393,6 +18417,83 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
             .expect("tool payload text");
         let payload: Value = serde_json::from_str(text).expect("json payload");
         assert_eq!(payload["items"].as_array().map(Vec::len), Some(1));
+    }
+
+    #[tokio::test]
+    async fn test_handle_tools_call_workgraph_evidence_page_envelope_and_stale_cursor() {
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let state = MeerkatMcpState::new_with_store(store).await;
+        let payload = |wrapped: Value| -> Value {
+            serde_json::from_str(
+                wrapped["content"][0]["text"]
+                    .as_str()
+                    .expect("MCP payload text"),
+            )
+            .expect("MCP payload JSON")
+        };
+        let created = Box::pin(handle_tools_call(
+            &state,
+            "workgraph_create",
+            &json!({
+                "title": "MCP evidence envelope fixture",
+                "evidence_refs": [{"kind": "note", "id": "one"}, {"kind": "note", "id": "two"}]
+            }),
+        ))
+        .await
+        .expect("create synthetic item");
+        let item = payload(created)["item"].clone();
+        let paged = Box::pin(handle_tools_call(
+            &state,
+            "workgraph_get",
+            &json!({
+                "id": item["id"], "evidence_limit": 1
+            }),
+        ))
+        .await
+        .expect("bounded MCP read");
+        let page = payload(paged);
+        assert_eq!(page["evidence_page"]["returned"], 1);
+        let cursor = page["evidence_page"]["next_cursor"]
+            .as_str()
+            .filter(|cursor| !cursor.is_empty())
+            .expect("wrapped page continuation");
+        let continued = Box::pin(handle_tools_call(
+            &state,
+            "workgraph_get",
+            &json!({
+                "id": item["id"], "evidence_limit": 1, "evidence_cursor": cursor
+            }),
+        ))
+        .await
+        .expect("returned cursor is valid before the revision changes");
+        assert_eq!(
+            payload(continued)["evidence_page"]["entries"][0]["evidence"]["id"],
+            "one"
+        );
+        Box::pin(handle_tools_call(
+            &state,
+            "workgraph_add_evidence",
+            &json!({
+                "id": item["id"], "expected_revision": item["revision"],
+                "evidence": {"kind": "note", "id": "three"}
+            }),
+        ))
+        .await
+        .expect("advance item revision");
+        let stale = Box::pin(handle_tools_call(
+            &state,
+            "workgraph_get",
+            &json!({
+                "id": item["id"], "evidence_limit": 1, "evidence_cursor": cursor
+            }),
+        ))
+        .await
+        .expect_err("stale cursor is a protocol error, not wrapped success");
+        assert_eq!(
+            stale.code,
+            meerkat_contracts::ErrorCode::InvalidParams.jsonrpc_code()
+        );
+        assert!(stale.message.contains("evidence cursor revision is stale"));
     }
 
     #[tokio::test]

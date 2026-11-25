@@ -3,6 +3,8 @@
 // builders), so one agent has one name everywhere. Pure, with no runtime
 // imports, so every test bundle can include it by a relative path.
 
+import { memberDisplayName, memberNameInMob } from "./member-ref";
+
 /** The fields an agent name is built from. */
 export interface AgentTitleSource {
   label?: string | null;
@@ -12,6 +14,13 @@ export interface AgentTitleSource {
   labels?: Readonly<Record<string, string | undefined>> | null;
   role?: string | null;
   group?: string | null;
+  /**
+   * The mob the agent is a member of, as its row names it. A member of a mob
+   * other than the console's own carries its mob in its identity
+   * (`<mob id>/<member name>`); the name is then read from the member name
+   * alone.
+   */
+  mob_id?: string | null;
 }
 
 const KEY_PREFIXES = ["identity:", "agent:", "member:"];
@@ -42,9 +51,10 @@ export function agentKindLabel(agent: Pick<AgentTitleSource, "role" | "group">):
 /**
  * Whether a piece of an identity reads as a generated id rather than a word:
  * eight or more characters with a digit, other than a word with a short
- * number ("worker2024").
+ * number ("worker2024"). Mob names ([`mobDisplayName`](./mobs.ts)) read ids
+ * by the same rule.
  */
-function isOpaqueIdPart(part: string): boolean {
+export function isOpaqueIdPart(part: string): boolean {
   return part.length >= 8 && /\d/.test(part) && !/^\p{L}+\d{1,4}$/u.test(part);
 }
 
@@ -54,8 +64,10 @@ function isOpaqueIdPart(part: string): boolean {
  * prefix (identity:, agent:, member:) and a readable rest reads as words
  * ("identity:queue-agent" reads "Queue agent", "router:main" reads "Router
  * main"), while a generated id reads as the agent's kind and the id's last
- * six characters ("Reviewer 4e5f60"). The raw identity belongs in a tooltip
- * or a copy action, not in the name.
+ * six characters ("Reviewer 4e5f60"). A member of a nested mob is named by
+ * its member name, never by its mob and name ("research-team/reviewer" of the
+ * mob "research-team" reads "Reviewer"). The raw identity belongs in a
+ * tooltip or a copy action, not in the name.
  */
 export function agentDisplayTitle(agent: AgentTitleSource): string {
   const label = (agent.label || "").trim();
@@ -64,7 +76,7 @@ export function agentDisplayTitle(agent: AgentTitleSource): string {
     .filter(Boolean);
   if (label && !ids.includes(label)) return label;
   const id = label || ids[0] || "";
-  const bare = stripAgentKeyPrefix(id);
+  const bare = memberNameInMob(stripAgentKeyPrefix(id), agent.mob_id?.trim());
   // An email already reads as a person's address; it is not an agent key.
   if (bare.includes("@")) return bare;
   const parts = bare.split(/[^\p{L}\p{N}]+/u).filter(Boolean);
@@ -74,4 +86,20 @@ export function agentDisplayTitle(agent: AgentTitleSource): string {
   }
   const words = parts.join(" ");
   return words[0]!.toUpperCase() + words.slice(1);
+}
+
+/**
+ * The name to show for an identity no roster row names (a member that left,
+ * a peer the caller cannot list): {@link agentDisplayTitle} of the member
+ * name, the mob dropped when the identity is a member's of a listed nested
+ * mob (`nested`: the ids of the listed mobs other than the console's own).
+ */
+export function identityDisplayTitle(
+  identity: string,
+  nested?: ReadonlySet<string> | null,
+  kind?: Pick<AgentTitleSource, "role" | "group">,
+): string {
+  const key = identity.trim();
+  const name = memberDisplayName(stripAgentKeyPrefix(key), nested);
+  return agentDisplayTitle({ ...kind, label: name, identity: name });
 }

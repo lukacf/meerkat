@@ -83,8 +83,8 @@ const DOORS: &[Door] = &[
         reads: &[
             ("decide_gating_action_attested", 1),
             ("gating_audit_after", 3),
-            ("gating_audit_entries", 6),
-            ("list_gating_pending", 2),
+            ("gating_audit_entries", 7),
+            ("list_gating_pending", 3),
             ("subscribe_gating_changes", 1),
         ],
         decided_by: DecidedBy::TheOneRule,

@@ -71,9 +71,9 @@ pub use console_ingress::handle_console_rest_json_route_with_snapshot_access_and
 pub(crate) use console_ingress::resolve_authorized_console_caller_from_token_at;
 pub use console_ingress::{
     AuthenticatedConsoleHuman, CONSOLE_HUMAN_TRUST_DOMAIN_PREFIX, ConsoleAgentLiveSnapshot,
-    ConsoleHumanNotCurrent, ConsoleLiveSnapshot, ConsoleMember, ConsoleModelCapabilities,
-    ConsoleRestJsonRequest, ConsoleRestJsonResponse, CurrentConsoleHumanEvidence,
-    extract_bearer_token_from_header, handle_console_rest_json_route,
+    ConsoleHumanNotCurrent, ConsoleLiveSnapshot, ConsoleMember, ConsoleMob, ConsoleMobState,
+    ConsoleModelCapabilities, ConsoleRestJsonRequest, ConsoleRestJsonResponse,
+    CurrentConsoleHumanEvidence, extract_bearer_token_from_header, handle_console_rest_json_route,
     handle_console_rest_json_route_with_snapshot,
     handle_console_rest_json_route_with_snapshot_access_memory_and_workgraph,
     handle_console_rest_json_route_with_snapshot_and_access, validate_console_token,
@@ -83,13 +83,15 @@ pub(crate) use console_ingress::{
     ConsoleCallerVerification, ConsoleLoginKind, ConsoleSignOutError, ConsoleSignedOut,
     ResolvedConsoleCaller, SnapshotRows, apply_identity_changes_to_experience,
     authorize_console_rest_json_route, console_human_principal, console_identifies_people,
-    console_member_access_attributes, console_takes_a_persons_decision,
-    fold_console_member_attributes, render_console_rest_json_route,
-    resolve_authorized_console_caller_from_token, session_fence_first_accepted_iat,
+    console_member_access_attributes, console_member_display_name, console_refuses_every_caller,
+    console_takes_a_persons_decision, fold_console_member_attributes,
+    render_console_rest_json_route, resolve_authorized_console_caller_from_token,
+    session_fence_first_accepted_iat,
 };
 pub use event_transport::normalize_event_line;
 pub(crate) use gating::{
-    APPROVAL_NOTIFICATION_KIND, MEMORY_CONFLICT_LOOKUP_FAILED_EVENT,
+    APPROVAL_NOTIFICATION_KIND, GATING_REQUEST_MOB_KEY, GatingRequestMob,
+    MEMORY_CONFLICT_LOOKUP_FAILED_EVENT, gating_row_is_an_evaluations,
     is_legacy_sequential_pending_id,
 };
 pub(crate) use memory::staged_ledger_path;
@@ -98,7 +100,7 @@ pub use metadata::{
     LifecycleEffectFailure, LifecycleEffectFailureCause, LifecycleEffectIntent,
     LifecycleEffectKind, LifecycleEffectVerb, LifecycleIntentKey, LifecycleIntentSlot,
     LifecycleProjectionBacklog, LifecycleProjectionCursor, MemberIdleRetireOverrideRecord,
-    MetadataScope, MetadataStoreError, PersistentMetadataStore, RecordRetention,
+    MetadataScope, MetadataStoreError, MobRecordsRelease, PersistentMetadataStore, RecordRetention,
     RuntimeMetadataTable, SqliteMetadataStore, dispatch_label_method, dispatch_labels_delete,
     dispatch_labels_get, dispatch_labels_set, labels_to_json_value, parse_labels_param,
     parse_run_id_param,
@@ -727,6 +729,11 @@ pub struct RuntimeShutdownReport {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoutingResolveRequest {
+    /// The mob the recipient is resolved in, when it is not the host's
+    /// default mob: the routes of that mob apply
+    /// ([`RuntimeRoute::mob_id`]). Left out for the default mob.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mob_id: Option<meerkat_mob::MobId>,
     pub recipient: String,
     #[serde(default)]
     pub channel: Option<String>,
@@ -741,6 +748,14 @@ pub struct RoutingResolveRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeRoute {
     pub route_key: String,
+    /// The mob the route belongs to, when it is not the host's default mob.
+    /// The module runtime's routes are the host's, for all its mobs, and a
+    /// recipient may be a member: two mobs may each have a member of the
+    /// same name. So a route is keyed by its mob and its `route_key`, and
+    /// applies to the resolves of its own mob only, a wildcard route too.
+    /// Left out for the default mob.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mob_id: Option<meerkat_mob::MobId>,
     pub recipient: String,
     #[serde(default)]
     pub channel: Option<String>,
@@ -757,6 +772,13 @@ pub struct RuntimeRoute {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoutingResolution {
     pub route_id: String,
+    /// The mob the resolution was made for, when it is not the host's
+    /// default mob: the mob its resolve named
+    /// ([`RoutingResolveRequest::mob_id`]). A delivery is sent for one mob
+    /// and takes a resolution of that mob only. Left out for the default
+    /// mob.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mob_id: Option<meerkat_mob::MobId>,
     pub recipient: String,
     pub channel: String,
     pub sink: String,
@@ -768,6 +790,14 @@ pub struct RoutingResolution {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeliverySendRequest {
+    /// The mob the delivery is sent for, when it is not the host's default
+    /// mob. The resolution must be one of that mob
+    /// ([`RoutingResolution::mob_id`]), the delivery is recorded for it
+    /// ([`DeliveryRecord::mob_id`]), and the delivery module is told it:
+    /// the module is called with this request. Left out for the default
+    /// mob.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mob_id: Option<meerkat_mob::MobId>,
     pub resolution: RoutingResolution,
     pub payload: Value,
     #[serde(default)]
@@ -785,6 +815,12 @@ pub struct DeliveryAttempt {
 pub struct DeliveryRecord {
     pub delivery_id: String,
     pub route_id: String,
+    /// The mob the delivery was sent for, when it is not the host's default
+    /// mob ([`DeliverySendRequest::mob_id`]). The host keeps the deliveries
+    /// of each mob apart, and a history is read for one mob. Left out for
+    /// the default mob.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mob_id: Option<meerkat_mob::MobId>,
     pub recipient: String,
     pub sink: String,
     pub target_module: String,
@@ -799,6 +835,11 @@ pub struct DeliveryRecord {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeliveryHistoryRequest {
+    /// The mob whose deliveries are read, when it is not the host's default
+    /// mob. Left out for the default mob: the history of one mob never
+    /// lists another mob's deliveries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mob_id: Option<meerkat_mob::MobId>,
     #[serde(default)]
     pub recipient: Option<String>,
     #[serde(default)]
@@ -980,13 +1021,37 @@ pub struct GatingEvaluateResult {
 
 /// Origin supplied by the host at the action boundary, never inferred from
 /// actor_id or accepted from ordinary gating RPC parameters.
+///
+/// The gating owner's pending requests and audit are the host's: one set
+/// for all its mobs. So an origin names the member the action came from by
+/// its mob and its identity ([`Self::mob`]): two mobs may each have a member
+/// of the same name, and a request from one is not the other's.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GatingOrigin {
+    /// The mob the member is in, when it is not the host's default mob. An
+    /// origin that names none is a member of the default mob, as every
+    /// origin recorded before origins named a mob is. A host's action
+    /// boundary
+    /// ([`crate::UnifiedRuntime::evaluate_gating_action_with_origin`]) takes
+    /// an origin that names its default mob by its id as one that names
+    /// none; the module runtime alone knows no default mob and takes the
+    /// origin as it is given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mob_id: Option<meerkat_mob::MobId>,
     pub identity: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interaction_id: Option<String>,
+}
+
+impl GatingOrigin {
+    /// The mob the origin's member is in, on a host whose default mob is
+    /// `default_mob`.
+    #[must_use]
+    pub fn mob(&self, default_mob: &crate::member_key::DefaultMob) -> meerkat_mob::MobId {
+        default_mob.resolve(self.mob_id.as_ref().map(meerkat_mob::MobId::as_str))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1385,6 +1450,19 @@ struct MemoryConflictKey {
     store: String,
 }
 
+/// The mob an event is kept under when the event is not of the launch
+/// selection: the mob's id and the incarnation of the mob whose member's
+/// stream the event came from. A mob created under an id an earlier mob had
+/// is another incarnation, so a request that names the id is answered the
+/// events of the mob that runs under it now and none of the earlier mob's.
+/// An event kept with no incarnation is answered to no request that names
+/// a mob.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EventMob {
+    pub(crate) mob_id: meerkat_mob::MobId,
+    pub(crate) incarnation: Option<meerkat_core::service::MobIncarnationId>,
+}
+
 #[derive(Debug)]
 pub struct MetaRuntimeHandle {
     config: MetaConfig,
@@ -1401,15 +1479,24 @@ pub struct MetaRuntimeHandle {
     /// batches, so the buffer never holds more than 4,608; it is a
     /// recent-event buffer for `meta/events/subscribe`, not a history.
     pub merged_events: Vec<EventEnvelope<UnifiedEvent>>,
+    /// The mob of each merged event that is not of the launch selection, by
+    /// the event's id (`append_normalized_event_of_mob`). A host of one mob
+    /// keeps none.
+    event_mobs: std::collections::HashMap<String, EventMob>,
     routing_sequence: u64,
     routing_resolutions: BTreeMap<String, RoutingResolution>,
     routing_resolution_order: Vec<String>,
-    runtime_routes: BTreeMap<String, RuntimeRoute>,
+    /// By mob (none for the host's default mob) and route key.
+    runtime_routes: BTreeMap<(Option<String>, String), RuntimeRoute>,
     delivery_sequence: u64,
     delivery_runtime_epoch_ms: u64,
     delivery_now_floor_ms: u64,
     delivery_clock_ms: u64,
-    delivery_history: Vec<DeliveryRecord>,
+    /// The deliveries the host keeps, by mob (none for the host's default
+    /// mob), each mob's oldest first. A mob keeps its newest
+    /// `DELIVERY_HISTORY_LIMIT_MAX`: what one mob sends never drops another
+    /// mob's deliveries, nor the idempotency entries that go with them.
+    delivery_history: BTreeMap<Option<String>, Vec<DeliveryRecord>>,
     delivery_idempotency: BTreeMap<String, DeliveryIdempotencyEntry>,
     delivery_idempotency_by_delivery: BTreeMap<String, Vec<String>>,
     delivery_rate_window_counts: BTreeMap<DeliveryRateWindowKey, u32>,
@@ -1446,6 +1533,13 @@ impl MetaRuntimeHandle {
         observer: Arc<dyn GatingResolutionObserver>,
     ) {
         self.gating_resolution_observers.push(observer);
+    }
+
+    /// Test builds only: how many gating-resolution observers are
+    /// registered.
+    #[cfg(test)]
+    pub(crate) fn gating_resolution_observers_in_tests(&self) -> usize {
+        self.gating_resolution_observers.observers().len()
     }
 
     pub fn lifecycle_events(&self) -> &[LifecycleEvent] {
@@ -1553,6 +1647,14 @@ pub enum DeliverySendError {
     InvalidRouteId,
     UnknownRouteId(String),
     ForgedResolution,
+    /// The resolution was made for one mob of the host and the send is for
+    /// another. `None` is the host's default mob on both sides. Judged
+    /// before anything else about the send: the delivery module is not
+    /// called and nothing is recorded.
+    ResolutionOfAnotherMob {
+        resolution_mob_id: Option<meerkat_mob::MobId>,
+        request_mob_id: Option<meerkat_mob::MobId>,
+    },
     InvalidRecipient,
     InvalidSink,
     InvalidIdempotencyKey,
@@ -1573,6 +1675,21 @@ impl std::fmt::Display for DeliverySendError {
             Self::InvalidRouteId => write!(f, "invalid route id"),
             Self::UnknownRouteId(id) => write!(f, "unknown route id: {id}"),
             Self::ForgedResolution => write!(f, "forged resolution"),
+            Self::ResolutionOfAnotherMob {
+                resolution_mob_id,
+                request_mob_id,
+            } => {
+                let named = |mob_id: Option<&meerkat_mob::MobId>| match mob_id {
+                    Some(mob_id) => format!("mob '{}'", mob_id.as_str()),
+                    None => "the host's default mob".to_string(),
+                };
+                write!(
+                    f,
+                    "the resolution was made for {}, and this send is for {}",
+                    named(resolution_mob_id.as_ref()),
+                    named(request_mob_id.as_ref())
+                )
+            }
             Self::InvalidRecipient => write!(f, "invalid recipient"),
             Self::InvalidSink => write!(f, "invalid sink"),
             Self::InvalidIdempotencyKey => write!(f, "invalid idempotency key"),
@@ -1604,12 +1721,19 @@ impl std::error::Error for DeliverySendError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeRouteMutationError {
     EmptyRouteKey,
+    /// The route, or the delete, names a mob by a blank id (empty, or only
+    /// white space). A blank id names no mob and is never read as the
+    /// host's default mob, which is named by leaving the mob out.
+    EmptyMobId,
     EmptyRecipient,
     InvalidChannel,
     EmptySink,
     EmptyTargetModule,
     InvalidRateLimitPerMinute,
-    RetryMaxExceedsCap { provided: u32, cap: u32 },
+    RetryMaxExceedsCap {
+        provided: u32,
+        cap: u32,
+    },
     RouteNotFound(String),
 }
 
@@ -1617,6 +1741,7 @@ impl std::fmt::Display for RuntimeRouteMutationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::EmptyRouteKey => write!(f, "empty route key"),
+            Self::EmptyMobId => write!(f, "empty mob id"),
             Self::EmptyRecipient => write!(f, "empty recipient"),
             Self::InvalidChannel => write!(f, "invalid channel"),
             Self::EmptySink => write!(f, "empty sink"),

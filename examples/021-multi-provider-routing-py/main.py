@@ -11,7 +11,7 @@ What you'll learn:
 - Comparing responses across providers
 - Model selection strategies
 
-Needs Meerkat 0.9.15 or later for the reasoning-effort part.
+The OpenAI path needs a runtime whose catalog includes gpt-6.2-astra.
 
 Run:
     ANTHROPIC_API_KEY=sk-... OPENAI_API_KEY=sk-... python3 main.py
@@ -57,7 +57,7 @@ async def main():
         if os.environ.get("ANTHROPIC_API_KEY"):
             models.append("claude-sonnet-5-5")
         if os.environ.get("OPENAI_API_KEY"):
-            models.append("gpt-6-astra")
+            models.append("gpt-6.2-astra")
         if os.environ.get("GEMINI_API_KEY"):
             models.append("gemini-4-hydrogen")
 
@@ -152,11 +152,11 @@ Model selection strategies:
 
 1. COST OPTIMIZATION
    - Simple tasks → claude-sonnet-5-5 or gemini-4-hydrogen
-   - Complex tasks → claude-opus-5-5 or gpt-6-astra
+   - Complex tasks → claude-opus-5-5 or gpt-6.2-astra
 
 2. CAPABILITY-BASED
    - Code generation → claude-sonnet-5-5 (strong at code)
-   - Reasoning → claude-opus-5-5 or gpt-6-astra with reasoning_effort set to high
+   - Reasoning → claude-opus-5-5 or gpt-6.2-astra with reasoning_effort set to high
    - Speed → gemini-4-hydrogen
 
 3. FALLBACK CHAIN

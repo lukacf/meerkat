@@ -54,7 +54,7 @@ impl Pack for PanelPack {
                 "pragmatist",
                 "pragmatist-skill",
                 "Pragmatist — ship it and iterate",
-                resolve_model(overrides, "pragmatist", "gpt-6-astra"),
+                resolve_model(overrides, "pragmatist", "gpt-6.2-astra"),
             ),
             (
                 "skeptic",

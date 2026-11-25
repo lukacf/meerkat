@@ -502,3 +502,72 @@ async fn an_older_scope_never_joins_the_successors_retirement() {
         .expect_err("an older scope names no current incarnation of its own");
     assert_stale_fence(&error, &first, &successor);
 }
+
+/// A member's retirement in progress is counted work: while `retire` has not
+/// answered, an idle observation reads not idle, with at least one roster
+/// transition and admission open, and an idle close answers busy and leaves
+/// admission open. Observing does not change it: a second observation reads
+/// the same, and the retirement is still in progress afterwards and ends
+/// `Ok(())` once it is released.
+///
+/// The row asserts no count beyond "at least one", does not compare the two
+/// observations, and asserts nothing after the release but the retire's own
+/// answer.
+#[tokio::test]
+async fn a_retirement_in_progress_reads_not_idle_and_observing_it_changes_nothing() {
+    let (handle, _service) = turn_driven_mob("idle-retiring").await;
+    let (identity, _) = spawn_member(&handle, "idle-retiring-member").await;
+    let hold = super::actor::retirement_stage_hold::install(&identity, "retire-projection-cleanup");
+    let retire = {
+        let handle = handle.clone();
+        let identity = identity.clone();
+        tokio::spawn(async move { handle.retire(identity).await })
+    };
+    tokio::time::timeout(STEP, hold.entered())
+        .await
+        .expect("the retirement reaches its held stage");
+    assert!(
+        !retire.is_finished(),
+        "the retire has not answered while its stage is held"
+    );
+
+    let first = tokio::time::timeout(STEP, handle.observe_idle())
+        .await
+        .expect("the first observation answers during the retirement")
+        .expect("observe during the retirement");
+    assert!(!first.is_idle(), "{first:?}");
+    assert!(first.busy.roster_transitions >= 1, "{first:?}");
+    assert!(first.admission_closed.is_none(), "{first:?}");
+
+    let second = tokio::time::timeout(STEP, handle.observe_idle())
+        .await
+        .expect("the second observation answers during the retirement")
+        .expect("observe the retirement again");
+    assert!(!second.is_idle(), "{second:?}");
+    assert!(second.busy.roster_transitions >= 1, "{second:?}");
+    assert!(second.admission_closed.is_none(), "{second:?}");
+
+    let close = tokio::time::timeout(STEP, handle.close_if_idle())
+        .await
+        .expect("the idle close answers during the retirement")
+        .expect("an idle close during the retirement");
+    assert!(
+        matches!(close, crate::CloseIfIdleOutcome::Busy(_)),
+        "a retirement in progress keeps the mob busy: {close:?}"
+    );
+    assert!(
+        handle.admission_closed().borrow().is_none(),
+        "neither an observation nor a refused idle close closes admission"
+    );
+    assert!(
+        !retire.is_finished(),
+        "observing did not end the retirement"
+    );
+
+    hold.release();
+    tokio::time::timeout(STEP, retire)
+        .await
+        .expect("the retire answers once its stage is released")
+        .expect("join the retire")
+        .expect("the retirement ends Ok");
+}

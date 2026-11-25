@@ -125,10 +125,64 @@ jobs:
       - name: Install this commit's Meta Python SDK
         run: python -m pip install ./sdk/python
       - run: python -m pip install -e './installer[test]'
+      # The package index refresh and the install are bounded. On a runner
+      # whose package mirror stalled, an unbounded `apt-get update` printed a
+      # few lines and then sat silent until the job's two hour limit. A slow
+      # mirror is not a stalled one: a healthy shard finishes this whole step
+      # in 12 s, but in 319 successful unbounded steps of 27 runs (18 to 24
+      # November 2026) the step took up to 191 s, and in a later run outside
+      # that sample a refresh ended 161 s after the step began and succeeded.
+      # Each command gets apt's own retry and connection timeouts, a wall
+      # bound of 300 s (1.6 times the longest whole step of that sample and
+      # 1.9 times that later refresh), and one second attempt after a pause
+      # of 5 s. The wall bound is what is relied on to end a stalled
+      # download: the observed stall outlasted apt's default connection
+      # timeout.
+      #
+      # The arithmetic: the wrapper times four attempts. `timeout` ends an
+      # attempt's command at most 310 s after starting it (300 s to the
+      # bound, 10 s more before the kill), so the timed attempts and the two
+      # pauses of 5 s add up to at most 1250 s (310 + 5 + 310 for each
+      # command). That is not a bound on the whole step. Not timed, and
+      # bounded only by the step's limit of 25 minutes (1500 s): starting
+      # `sudo` and `timeout` for each attempt, the return of an attempt
+      # after its kill, and the profile search and `apparmor_parser` load
+      # after the two commands. Together they took under a second in the
+      # runs read; the 250 s between 1250 s and the limit is what they
+      # have. Inside that margin a bounded attempt, not the step's limit,
+      # ends a stalled apt, and every second attempt that starts can run to
+      # its bound. A stall in an untimed part is ended by the step's limit,
+      # without the error line below. The job's limit is 120 minutes.
+      #
+      # A command that does not succeed in two attempts fails the step with
+      # one error line that says the shard ran no installer test. No test
+      # step runs after it. The shard then uploads no plan, no toolchain
+      # record and no test results (the upload of test results has
+      # `if: always()` and finds no file), the `backend` job below does not
+      # run, and the run fails: nothing credits tests that did not run.
       - name: Prepare Linux acceptance isolation
+        timeout-minutes: 25
         run: |
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends -y bubblewrap libseccomp2 apparmor apparmor-profiles
+          apt_bounds=(-o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 -o DPkg::Lock::Timeout=60)
+          bounded() {
+            local what=$1 seconds=$2 attempt status
+            shift 2
+            for attempt in 1 2; do
+              status=0
+              sudo timeout --kill-after=10 "$seconds" "$@" || status=$?
+              if test "$status" -eq 0; then
+                return 0
+              fi
+              printf 'Attempt %s of 2 of the %s ended with status %s (124 or 137 means it ran into its bound of %s seconds).\n' "$attempt" "$what" "$status" "$seconds"
+              if test "$attempt" -eq 1; then
+                sleep 5
+              fi
+            done
+            printf '::error title=Linux acceptance isolation::The %s did not succeed in 2 attempts of at most %s seconds each (last status %s). The isolation packages are not in place, so this shard ran NO installer test.\n' "$what" "$seconds" "$status"
+            return 1
+          }
+          bounded 'package index refresh' 300 apt-get "${apt_bounds[@]}" update
+          bounded 'install of the isolation packages' 300 apt-get "${apt_bounds[@]}" install --no-install-recommends -y bubblewrap libseccomp2 apparmor apparmor-profiles
           bwrap_profile=
           for candidate in /etc/apparmor.d/bwrap /etc/apparmor.d/bwrap-userns-restrict /usr/share/apparmor/extra-profiles/bwrap-userns-restrict; do
             if test -f "$candidate"; then

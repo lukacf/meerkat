@@ -1055,6 +1055,35 @@ describe("createQuestionSetResource", () => {
     resource.dispose();
   });
 
+  it("keeps the 20 sets answered or dismissed here most recently, of all agents, and nothing of an older one", async () => {
+    const ids = Array.from({ length: 21 }, (_, index) => `decision:${index.toString(16).padStart(2, "0").repeat(32)}`);
+    const c = clock();
+    let listed: unknown[] = ids.map((id, index) => wire(id, { origin: { identity: `identity:agent-${index % 3}` } }));
+    const resource = createQuestionSetResource({
+      scopeKey: "a", environment: c.environment,
+      load: async () => ({ question_sets: listed }),
+      decide: async (params) => {
+        const id = String((params as { pending_id?: unknown }).pending_id);
+        listed = listed.filter((set) => (set as { pending_id: string }).pending_id !== id);
+        return accepted("answered", id);
+      },
+    });
+    await tick();
+    expect(resource.getSnapshot().sets.length).toBe(21);
+    for (const id of ids) {
+      c.advance(1);
+      await resource.answer(id, { q1: { kind: "choice", choiceId: "eu" } });
+      await tick();
+    }
+    const snapshot = resource.getSnapshot();
+    expect(snapshot.sets).toEqual([]);
+    // The newest first; the first one answered is no longer held.
+    expect(snapshot.closed.map((entry) => entry.set.pendingId)).toEqual(ids.slice(1).reverse());
+    expect(Object.keys(snapshot.decisions).sort()).toEqual(ids.slice(1).sort());
+    expect(JSON.stringify(snapshot)).not.toContain(ids[0]);
+    resource.dispose();
+  });
+
   it("holds nothing after dispose: no set, closed card, decision, line or place", async () => {
     const other = `decision:${"c".repeat(64)}`;
     const c = clock(); let listed: unknown[] = [wire(), wire(other)];

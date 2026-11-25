@@ -508,6 +508,11 @@ pub struct WireMobToolConfig {
     pub schedule: bool,
     #[serde(default)]
     pub image_generation: bool,
+    /// The profile's web search choice: `true` enables web search for its
+    /// members' builds, `false` disables it, unset leaves it to the build.
+    /// Omitted when unset, for the compatibility reason `read_only` states.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_search: Option<bool>,
     /// Declare the profile read-only: the execution gate admits only tools
     /// their owning dispatcher declares read-only, and a spawn cannot widen
     /// it. Enforcement, not prompt guidance.
@@ -659,6 +664,14 @@ pub struct MobToolConfigInput {
     pub schedule: bool,
     #[serde(default)]
     pub image_generation: bool,
+    /// Web search for members of the profile: `true` enables it for their
+    /// builds (the provider's own search where it serves the member, else
+    /// the ordinary `web_search` tool, or a failed build where that tool is
+    /// needed and cannot be provided), `false` disables it, and unset leaves
+    /// it to the build as before the key existed. A spawn's own web search
+    /// override wins.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_search: Option<bool>,
     /// Declare the profile read-only: the execution gate admits only tools
     /// their owning dispatcher declares read-only, and a spawn cannot widen
     /// it. Enforcement, not prompt guidance.

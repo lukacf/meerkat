@@ -2,7 +2,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use async_trait::async_trait;
 use meerkat_meta::console_aggregator::{
@@ -11,6 +11,7 @@ use meerkat_meta::console_aggregator::{
     ConsoleTimelinePage, ConsoleTimelineQuery, ConsoleTimelineWindowPage,
     ConsoleTimelineWindowQuery, NewConsoleFrame,
 };
+use meerkat_meta::member_key::DefaultMob;
 use meta_store_conformance::{ConformanceFailure, ConsoleLogStoreFactory, chapters};
 use serde_json::{Value, json};
 
@@ -23,6 +24,8 @@ struct JsonStorage {
 struct JsonStore {
     storage: Arc<Mutex<JsonStorage>>,
     discard_provenance: bool,
+    /// The host's default mob, once this handle was told it.
+    default_mob: OnceLock<DefaultMob>,
 }
 
 struct JsonFactory {
@@ -37,6 +40,7 @@ impl ConsoleLogStoreFactory for JsonFactory {
         Ok(Arc::new(JsonStore {
             storage: self.storage.clone(),
             discard_provenance: self.discard_provenance,
+            default_mob: OnceLock::new(),
         }))
     }
 }
@@ -61,7 +65,26 @@ fn read_frames(storage: &JsonStorage) -> ConsoleLogResult<Vec<ConsoleFrame>> {
 
 #[async_trait]
 impl ConsoleLogStore for JsonStore {
-    async fn append_if_absent(&self, frame: NewConsoleFrame) -> ConsoleLogResult<AppendOutcome> {
+    fn bind_default_mob(&self, default_mob: &DefaultMob) -> ConsoleLogResult<()> {
+        if default_mob.mob_id().as_str().is_empty() {
+            return Err("a blank id names no mob".into());
+        }
+        if self.default_mob.get_or_init(|| default_mob.clone()) == default_mob {
+            Ok(())
+        } else {
+            Err("this store was told another default mob".into())
+        }
+    }
+
+    async fn append_if_absent(
+        &self,
+        mut frame: NewConsoleFrame,
+    ) -> ConsoleLogResult<AppendOutcome> {
+        // The default mob has one stored key: no mob, however it is named.
+        let default_mob = self.default_mob.get();
+        frame.mob_id = frame
+            .mob_id
+            .filter(|mob_id| default_mob.is_none_or(|default_mob| !default_mob.is(mob_id)));
         let mut storage = self.storage.lock().unwrap();
         if let Some(stored) = read_frames(&storage)?
             .into_iter()
@@ -131,20 +154,23 @@ impl ConsoleLogStore for JsonStore {
         &self,
         query: ConsoleTimelineWindowQuery,
     ) -> ConsoleLogResult<ConsoleTimelineWindowPage> {
+        let default_mob = self.default_mob.get();
+        let member_mob = query
+            .mob_id
+            .clone()
+            .filter(|mob_id| default_mob.is_none_or(|default_mob| !default_mob.is(mob_id)));
         let storage = self.storage.lock().unwrap();
         let all = read_frames(&storage)?;
         let latest_cursor = all.last().map(|frame| frame.cursor.clone());
         let mut frames: Vec<_> = all
             .into_iter()
             .filter(|frame| {
-                query
-                    .identity
+                query.identity.as_ref().is_none_or(|identity| {
+                    identity == &frame.identity && member_mob == frame.mob_id
+                }) && query
+                    .conversation_id
                     .as_ref()
-                    .is_none_or(|identity| identity == &frame.identity)
-                    && query
-                        .conversation_id
-                        .as_ref()
-                        .is_none_or(|id| frame.conversation_id.as_ref() == Some(id))
+                    .is_none_or(|id| frame.conversation_id.as_ref() == Some(id))
                     && query
                         .after
                         .as_ref()
@@ -236,4 +262,20 @@ async fn console_conformance_rejects_store_that_drops_member_provenance() {
         .expect_err("dropping policy provenance must fail conformance");
     assert_eq!(failure.chapter(), "console_log");
     assert_eq!(failure.step(), "member_provenance_roundtrip");
+}
+
+/// A store that keeps the trait's own `remove_frames_of_mob` fails the
+/// profile of a host that creates a mob beside its default mob, at the
+/// removal: such a host refuses every create of a second mob over it.
+#[tokio::test]
+async fn console_conformance_rejects_a_store_without_the_removal_of_a_mobs_frames() {
+    let factory = JsonFactory {
+        storage: Arc::default(),
+        discard_provenance: false,
+    };
+    let failure = chapters::console_log_mobs(&factory)
+        .await
+        .expect_err("a store that cannot remove a mob's frames must fail the profile");
+    assert_eq!(failure.chapter(), "console_log_mobs");
+    assert_eq!(failure.step(), "removal_of_one_mobs_frames");
 }

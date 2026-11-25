@@ -12,6 +12,7 @@
 
 import React from "react";
 import { stripAgentKeyPrefix } from "../../../packages/console-core/src/agent-title";
+import { memberReferenceKeys, nestedMobIdsOfMembers } from "../../../packages/console-core/src/member-ref";
 import type { ConsoleAgent, ConsoleFrame } from "../types";
 import { classifyFrame, type ClassifiedFrame } from "./frame-classifier";
 
@@ -227,12 +228,17 @@ function compact(value: string): string {
  * identity, member, agent or session id, durable identity label or display
  * label, exactly or ignoring case and punctuation, whole or by its last path
  * segment ("team/lead/support-member").
+ * A reference that starts with a
+ * listed nested mob ("alpha/reviewer", "alpha/role/reviewer") names that
+ * mob's member, listed or not: never a member of the same name in another
+ * mob.
  */
 export function createAgentResolver(
-  agents: readonly Pick<ConsoleAgent, "identity" | "member_id" | "agent_id" | "session_id" | "label" | "labels">[],
+  agents: readonly Pick<ConsoleAgent, "identity" | "member_id" | "agent_id" | "session_id" | "label" | "labels" | "mob_id">[],
 ): LedgerResolver {
   const exact = new Map<string, string>();
   const loose = new Map<string, string>();
+  const nested = nestedMobIdsOfMembers(agents);
   for (const agent of agents) {
     const identity = (agent.identity || agent.member_id || agent.agent_id || "").trim();
     if (!identity) continue;
@@ -248,6 +254,14 @@ export function createAgentResolver(
   return (reference) => {
     const trimmed = reference.trim();
     if (!trimmed) return undefined;
+    const lookup = memberReferenceKeys(trimmed, nested);
+    if (lookup.nested) {
+      for (const key of lookup.keys) {
+        const found = exact.get(key);
+        if (found) return found;
+      }
+      return lookup.keys[lookup.keys.length - 1];
+    }
     for (const candidate of [trimmed, lastPathSegment(trimmed)]) {
       const found = exact.get(candidate) ?? loose.get(candidate.toLowerCase()) ?? loose.get(compact(candidate))
         ?? loose.get(compact(stripAgentKeyPrefix(candidate)));

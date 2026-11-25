@@ -6530,6 +6530,39 @@ mod scoped_tool_grants {
     }
 
     #[tokio::test]
+    async fn a_gate_that_does_not_cover_web_search_leaves_an_enabled_search_ungoverned() {
+        // claude-sonnet-4-5 serves web search natively. A gate that covers
+        // something else leaves the provider's own tools on, so an explicit
+        // enable keeps the provider's own search and no ordinary
+        // `web_search` tool is added, exactly as without a gate.
+        for gate in [
+            None,
+            Some(GrantGatedTools::default().with_mcp_server("later")),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let machine = Arc::new(MeerkatMachine::ephemeral());
+            let mut build = gated_runtime_build(
+                &machine,
+                Session::new(),
+                meerkat_core::SessionBuildIntent::Mint,
+                gate.clone(),
+            )
+            .await;
+            build.override_web_search = meerkat_core::ToolCategoryOverride::Enable;
+            build.web_search_executor_override = Some(Arc::new(NoopWebSearchExecutor));
+            let agent = temp_factory(&temp)
+                .build_agent(build, &Config::default())
+                .await
+                .expect("an enabled web search builds on a native-search model");
+            let (base, _visible) = names(&agent);
+            assert!(
+                !base.iter().any(|name| name == WEB_SEARCH_TOOL_NAME),
+                "{gate:?}: the provider's own search serves the enable: {base:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn standalone_build_without_grant_service_refuses_a_grant_gate() {
         let temp = tempfile::tempdir().unwrap();
         let err = temp_factory(&temp)

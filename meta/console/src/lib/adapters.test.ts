@@ -13,6 +13,7 @@ import {
   buildWorkGraphOperatorResultFrame,
   createWorkGraphHydrationGate,
   describeMemoryTimelineEvent,
+  deriveTimelineEntries,
   inferResponsePhaseFromFrames,
   mapFramesToTimelineEntries,
   mergeConversationFrames,
@@ -26,6 +27,7 @@ import {
 import { MEERKAT_1608_KICKOFF_NOTICES } from "./fixtures/meerkat-1608-kickoff-notices";
 import { describeFailure, summarizeFailureData } from "./failure-summary";
 import type { ConsoleFrame } from "../types";
+import { isLogFrameVisible } from "../panels/activity/logs-model";
 
 test("authorization feedback projects a typed operation refusal without ending the active run", () => {
   const frames = [
@@ -104,12 +106,14 @@ test("authorization feedback keeps audit observation failure distinct and nonter
   assert.equal(inferResponsePhaseFromFrames(frames, null), "waiting");
 });
 import {
+  buildActivityRailViewState as buildActivityRailViewStateShared,
   mapFramesToTimelineEntries as mapFramesToTimelineEntriesShared,
   inferResponsePhaseFromFrames as inferResponsePhaseFromFramesShared,
   resolvePanelResponsePhase as resolvePanelResponsePhaseShared,
 } from "../../../packages/console-core/src/adapters";
 import {
   conversationRichBlockCopyText,
+  runtimeEventFromFrame,
   groupConversationTimelineEntries, describeMemoryTimelineEvent as describeMemoryTimelineEventCore } from "@console-core";
 
 const confinementCauses = ["invalid_requirement", "invalid_launch", "unsupported_requirement",
@@ -7770,6 +7774,76 @@ test("workgraph snapshot results hydrate the goal tree, parent depths, and atten
   assert.equal(card.attention[0].targetLabel, "sess-42");
 });
 
+test("a workgraph binding whose target names an owner key is labelled by the key's kind and id", () => {
+  const frames = workGraphToolFrames({
+    idPrefix: "wg-owner-key",
+    name: "workgraph_snapshot",
+    callArgs: {},
+    result: {
+      snapshot: {
+        realm_id: "realm-1",
+        all_namespaces: false,
+        captured_at: "2026-07-08T09:10:00Z",
+        items: [
+          workGraphItem({
+            id: "goal-1",
+            title: "Release 0.7.30",
+            status: "in_progress",
+            revision: 4,
+            createdAt: "2026-07-08T08:00:00Z",
+          }),
+        ],
+        edges: [],
+        attention: [
+          {
+            binding_id: "attention-owner",
+            work_ref: { realm_id: "realm-1", namespace: "default", item_id: "goal-1" },
+            target: { kind: "lowered_owner", owner_key: { kind: "agent", id: "planner" } },
+            mode: "coordinate",
+            status: { state: "active" },
+            machine_state: { lifecycle_phase: "active", revision: 3 },
+            created_at: "2026-07-08T08:00:00Z",
+            updated_at: "2026-07-08T09:00:00Z",
+          },
+          {
+            // A key with a kind and no id is labelled by what it holds.
+            binding_id: "attention-kind-only",
+            work_ref: { realm_id: "realm-1", namespace: "default", item_id: "goal-1" },
+            target: { kind: "lowered_owner", owner_key: { kind: "agent" } },
+            mode: "pursue",
+            status: { state: "active" },
+            machine_state: { lifecycle_phase: "active", revision: 1 },
+            created_at: "2026-07-08T08:00:00Z",
+            updated_at: "2026-07-08T09:00:00Z",
+          },
+          {
+            // A target that names neither a session nor an owner key has no label.
+            binding_id: "attention-unnamed",
+            work_ref: { realm_id: "realm-1", namespace: "default", item_id: "goal-1" },
+            target: { kind: "lowered_owner", owner_key: "planner" },
+            mode: "pursue",
+            status: { state: "active" },
+            machine_state: { lifecycle_phase: "active", revision: 1 },
+            created_at: "2026-07-08T08:00:00Z",
+            updated_at: "2026-07-08T09:00:00Z",
+          },
+        ],
+        ready_item_ids: [],
+      },
+    },
+  });
+
+  const cards = mapFramesToTimelineEntries(WORKGRAPH_AGENT, frames).filter((entry) => entry.kind === "workgraph");
+  assert.equal(cards.length, 1);
+  const card = cards[0];
+  if (card.kind !== "workgraph") return;
+  // By binding id; a binding with no label carries none.
+  assert.deepEqual(
+    Object.fromEntries(card.attention.map((binding) => [binding.bindingId, binding.targetLabel ?? null])),
+    { "attention-owner": "agent:planner", "attention-kind-only": "agent", "attention-unnamed": null },
+  );
+});
+
 test("workgraph unrooted items in one interaction group into a single catch-all card", () => {
   const frames = [
     ...workGraphToolFrames({
@@ -10264,3 +10338,55 @@ test("agent pane titles and transcript names read as the sidebar names the agent
   assert.equal(entry?.identity.label, "Router main");
   assert.equal(buildDockTarget({ ...unnamed, label: "Front Desk" }).title, "Front Desk");
 });
+
+for (const [name, map, activity] of [
+  ["stock", mapFramesToTimelineEntries, buildActivityRailViewState],
+  ["shared", mapFramesToTimelineEntriesShared, buildActivityRailViewStateShared],
+] as const) {
+  test(`${name} chat hides repeated reasoning receipts in replay and live updates while keeping failures and diagnostics`, () => {
+    const agent = { agent_id: "worker", member_id: "worker", identity: "worker", label: "Worker", kind: "mob_agent" };
+    const receiptEvent = "request_reasoning_effort_resolved";
+    const receipts: ConsoleFrame[] = Array.from({ length: 8 }, (_, index) => ({
+      id: `reasoning-receipt-${index}`, event: receiptEvent, timestampMs: index + 2,
+      identity: "worker", runId: "run-1", interactionId: "interaction-1",
+      data: { turn_number: index + 1, resolution: { requested: "high", level: "high", model: "gpt-5.5" } },
+    }));
+    const frames: ConsoleFrame[] = [
+      { id: "text-a", event: "text_delta", timestampMs: 1, identity: "worker", runId: "run-1", interactionId: "interaction-1", data: { delta: "The reply " } },
+      ...receipts,
+      { id: "text-b", event: "text_delta", timestampMs: 10, identity: "worker", runId: "run-1", interactionId: "interaction-1", data: { delta: "continues." } },
+      { id: "failed", event: "interaction_failed", timestampMs: 11, identity: "worker", runId: "run-1", interactionId: "interaction-1", data: {
+        error_report: { class: "llm", reason: { reason_type: "reasoning_effort_refused" }, message: "Requested reasoning effort is unavailable" },
+      } },
+    ];
+    const before = structuredClone(frames);
+    const options = { renderTextDeltas: true, textMode: "markdown" as const };
+    const replay = map(agent, frames, options);
+    assert.equal(replay.length, 2, "one uninterrupted assistant message and one actionable failure");
+    assert.equal(replay[0].kind === "message" && replay[0].blocks?.map(conversationRichBlockCopyText).join(""), "The reply continues.");
+    assert.equal(replay[1].kind === "message" && replay[1].runtimeEvent?.eventType, "interaction_failed");
+    assert.match(replay[1].kind === "message" ? replay[1].text : "", /Interaction failed/);
+    assert.deepEqual(replay[1].kind === "message" && replay[1].runtimeEvent?.payload, frames.at(-1)?.data);
+
+    // The stock pane keeps its derivation between live updates. The shared
+    // adapter maps the growing frame list; replay reconstructs from records.
+    let previous = deriveTimelineEntries(agent, [], options);
+    for (let end = 1; end <= frames.length; end++) {
+      const prefix = frames.slice(0, end);
+      const current = name === "stock"
+        ? (previous = deriveTimelineEntries(agent, prefix, options, previous)).entries
+        : map(agent, prefix, options);
+      assert.equal(current.some(entry => entry.kind === "message" && entry.runtimeEvent?.eventType === receiptEvent), false);
+      assert.deepEqual(current, map(agent, structuredClone(prefix), options));
+      if (end === frames.length) assert.deepEqual(current, replay);
+    }
+
+    for (const receipt of receipts) {
+      assert.equal(isLogFrameVisible(receipt), true);
+      assert.deepEqual(runtimeEventFromFrame(receipt.event, receipt.data).payload, receipt.data);
+    }
+    const rail = activity({ agents: [agent], eventFrames: receipts });
+    assert.equal(rail.panels[0].items.length, receipts.length, "activity still includes every receipt");
+    assert.deepEqual(frames, before, "chat projection leaves raw records unchanged");
+  });
+}

@@ -191,6 +191,9 @@ pub mod labels {
     pub const SKILLS: &str = "Skills";
     /// The tool families a profile turns on.
     pub const TOOL_FAMILIES: &str = "Tool families";
+    /// A profile's web search choice, shown only when the profile states
+    /// one: `enabled` or `disabled`.
+    pub const WEB_SEARCH: &str = "Web search";
     /// Whether a profile is read-only: `yes` or `no`.
     pub const READ_ONLY: &str = "Read only";
     /// The tools a profile denies.
@@ -790,6 +793,7 @@ pub struct ProfileTools {
     auth_binding: Option<String>,
     skills: Vec<String>,
     families: Vec<&'static str>,
+    web_search: Option<bool>,
     read_only: bool,
     denied: Vec<String>,
     host_mcp_servers: Vec<String>,
@@ -887,6 +891,7 @@ impl ProfileTools {
             mob,
             schedule,
             image_generation,
+            web_search,
             read_only,
             deny,
             mcp,
@@ -936,6 +941,7 @@ impl ProfileTools {
             auth_binding,
             skills: sorted(profile.skills.clone()),
             families,
+            web_search: *web_search,
             read_only: *read_only,
             denied: sorted(deny.clone()),
             host_mcp_servers: sorted(mcp.clone()),
@@ -1077,6 +1083,14 @@ fn profile_blocks(text: &mut Text, tools: Option<&ToolConfigurations>) {
             .map(|family| (*family).to_owned())
             .collect();
         text.list(labels::TOOL_FAMILIES, &families);
+        // Shown only when the profile states a choice: a profile that leaves
+        // web search to the build keeps the rendering it had.
+        if let Some(web_search) = profile.web_search {
+            text.field(
+                labels::WEB_SEARCH,
+                if web_search { "enabled" } else { "disabled" },
+            );
+        }
         text.field(
             labels::READ_ONLY,
             if profile.read_only { "yes" } else { "no" },

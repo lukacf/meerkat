@@ -31,7 +31,7 @@ use meerkat_meta::{
     mob_handle_runtime::mob_definition_may_use_image_generation,
 };
 use meerkat_mob::ids::AgentIdentity;
-use meerkat_mob::{MobDefinition, MobStorage, ProfileName, SpawnMemberSpec};
+use meerkat_mob::{MobDefinition, ProfileName, SpawnMemberSpec};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -107,6 +107,10 @@ struct InitParams {
     surface: Option<String>,
     runtime_profile: Option<String>,
     console_read_only: Option<bool>,
+    /// Whether the console this gateway serves lists the mobs nested under
+    /// its own mob, with the name and meaning of `rpc_gateway`'s
+    /// `runtime_options.console_list_nested_mobs`. Absent, it does.
+    console_list_nested_mobs: Option<bool>,
     /// Run this gateway identity-first (downstream ask K0): durable
     /// identities with continuity records, lease-fenced embodiment, and the
     /// tolerant identity lifecycle paths — instead of the session-owned
@@ -1121,6 +1125,63 @@ const TUX_BIGQUERY_TABLE: &str = "runtime_events";
 /// Default standalone console snapshot. Explicit auth_config replaces its
 /// authentication fields at launch; otherwise the loopback host is the
 /// protection. Shared non-auth defaults come from the keyless snapshot owner.
+/// The environment twin of the init param `console_list_nested_mobs`.
+const CONSOLE_LIST_NESTED_MOBS_ENV: &str = "META_CONSOLE_LIST_NESTED_MOBS";
+
+/// Whether the console lists nested mobs: the init param
+/// `console_list_nested_mobs`, else `META_CONSOLE_LIST_NESTED_MOBS`
+/// (`env_value`, the variable's raw value), else it does. The precedence
+/// and the values are those of `console_read_only` and
+/// `META_CONSOLE_READ_ONLY`: the init param wins and the variable is then
+/// not read at all, an empty value counts as unset, and a value that is no
+/// boolean refuses the launch. Pure, so the precedence is testable without
+/// touching the process environment.
+fn resolve_console_nested_mob_listing(
+    init_param: Option<bool>,
+    env_value: Option<&str>,
+) -> anyhow::Result<meerkat_meta::NestedMobListing> {
+    let listed = match init_param {
+        Some(listed) => listed,
+        None => match env_value {
+            Some(value) => parse_env_bool(CONSOLE_LIST_NESTED_MOBS_ENV, value)?.unwrap_or(true),
+            None => true,
+        },
+    };
+    Ok(meerkat_meta::NestedMobListing::from_listed(listed))
+}
+
+/// The resume key of a launch whose console lists nested mobs or not: the
+/// key itself while it lists them, as a launch without the option has it,
+/// and a key of its own otherwise. The console is built once, at launch, so
+/// a launch that turns the listing off must not resume a runtime that
+/// serves it, nor the other way round.
+fn resume_key_with_console_listing(
+    key: String,
+    nested_mobs: meerkat_meta::NestedMobListing,
+) -> String {
+    match nested_mobs {
+        meerkat_meta::NestedMobListing::Listed => key,
+        meerkat_meta::NestedMobListing::Hidden => format!(
+            "{:x}",
+            Sha256::digest(format!("{key}\nconsole_list_nested_mobs=false"))
+        ),
+    }
+}
+
+/// The console app this gateway serves: the runtime's reference router with
+/// the stock console's visibility policy, listing nested mobs or not as
+/// `nested_mobs` says.
+fn console_reference_app(
+    runtime: &meerkat_meta::UnifiedRuntime,
+    decisions: RuntimeDecisionState,
+    nested_mobs: meerkat_meta::NestedMobListing,
+) -> axum::Router {
+    runtime.build_reference_app_router_with_console_visibility_policy(
+        decisions,
+        meerkat_meta::stock_console_visibility_policy(nested_mobs),
+    )
+}
+
 fn runtime_decision_state(
     console_ui: ConsoleUiConfig,
     console_read_only: bool,
@@ -1302,6 +1363,13 @@ fn env_bool(name: &str) -> anyhow::Result<Option<bool>> {
     let Ok(value) = std::env::var(name) else {
         return Ok(None);
     };
+    parse_env_bool(name, &value)
+}
+
+/// The boolean the environment variable `name` holds as `value`: `None` for
+/// an empty value, which counts as unset, and an error naming the variable
+/// for a value that is no boolean.
+fn parse_env_bool(name: &str, value: &str) -> anyhow::Result<Option<bool>> {
     let normalized = value.trim().to_ascii_lowercase();
     match normalized.as_str() {
         "" => Ok(None),
@@ -3092,6 +3160,10 @@ async fn run(launch: GatewayLaunchArgs) -> anyhow::Result<()> {
         Some(value) => value,
         None => env_bool("META_CONSOLE_READ_ONLY")?.unwrap_or(false),
     };
+    let console_nested_mobs = resolve_console_nested_mob_listing(
+        params.console_list_nested_mobs,
+        std::env::var(CONSOLE_LIST_NESTED_MOBS_ENV).ok().as_deref(),
+    )?;
     // HTTP listener: init param > --http-listen > META_HTTP_LISTEN_ADDR >
     // loopback on an ephemeral port. Resolved before the resume lookup so the
     // address joins the resume key and the exposure gate runs on every
@@ -3235,7 +3307,10 @@ async fn run(launch: GatewayLaunchArgs) -> anyhow::Result<()> {
             flow_editor_host_deploy,
         ))
     };
-    let key = with_launch_shape(key)?;
+    // The console's listing of nested mobs joins the resume key alone: it
+    // says what the console shows, and the default mob's id does not
+    // follow it.
+    let key = resume_key_with_console_listing(with_launch_shape(key)?, console_nested_mobs);
     let default_mob_id_seed = with_launch_shape(default_mob_id_seed)?;
     // A launch resumes only a runtime on its own credentials root. The root
     // joins the registry's resume key alone: `key` also names the discovery
@@ -3467,34 +3542,46 @@ async fn run(launch: GatewayLaunchArgs) -> anyhow::Result<()> {
         // while the session store faithfully survives, which presents as a
         // healthy boot with the right member count and an empty roster of
         // adoptions - the failure announces nothing.
-        let (mob_storage, mob_storage_provenance) =
-            meerkat_meta::mob_composition_manifest::persistent_mob_storage(layout.event_log_db())?;
-        let mut spec = MobBootstrapSpec::new(definition, mob_storage, service)
-            // The config `build_persistent_session_service` gave the member
-            // builder: the same producer over the same inputs.
-            .with_member_model_config(Arc::new(gateway_agent_config(
-                host_config.as_ref(),
-                compaction_policy.as_ref(),
-            )?))
-            .with_member_mcp_custody(Arc::clone(&member_mcp_custody))
-            .with_host_default_agent_llm_client_decorator(host_default_decorator)
-            .with_mob_storage_provenance(mob_storage_provenance)
-            // Agent-created child mobs default to durable under this layout.
-            .with_meta_storage_layout(layout.clone())
-            // The SAME store handed to MeerkatMachine::persistent above.
-            .with_durable_runtime_store(&runtime_store)
-            // Resume-seam reads must carry the runtime store's archived
-            // terminal (at 0.8.11 archive stamps the catalog/lifecycle row,
-            // never the session body).
-            .with_runtime_archived_terminal_authority(runtime_store)
-            .with_session_runtime_adapter(adapter.clone())
-            .context("failed to acquire the gateway session runtime owner")?
-            .with_workgraph_service(workgraph_service.clone())
-            // This is the persistent session builder's shared agent-tool slot.
-            // Identity activation needs it even when console voice is absent.
-            .with_runtime_delivery(runtime_delivery)
-            .with_agent_mob_tools(Arc::clone(&voice_inputs.4))
-            .context("failed to install gateway agent mob tools")?;
+        //
+        // The launch opens its mob's store here, as every release did, so a
+        // store that cannot be opened fails the launch with the store's own
+        // error before anything is built over it. Nothing of this launch
+        // reads the store before the bootstrap, so the open is closed again
+        // at once. The launch then says where the store is: the mob set it
+        // declares its mob to opens the store when the bootstrap prepares
+        // the mob, creates the mob there or loads it.
+        drop(
+            meerkat_meta::mob_composition_manifest::persistent_mob_storage(layout.event_log_db())?,
+        );
+        let mut spec = MobBootstrapSpec::declared(
+            definition,
+            meerkat_meta::mob_composition_manifest::declared_mob_store(layout.event_log_db()),
+            service,
+        )
+        // The config `build_persistent_session_service` gave the member
+        // builder: the same producer over the same inputs.
+        .with_member_model_config(Arc::new(gateway_agent_config(
+            host_config.as_ref(),
+            compaction_policy.as_ref(),
+        )?))
+        .with_member_mcp_custody(Arc::clone(&member_mcp_custody))
+        .with_host_default_agent_llm_client_decorator(host_default_decorator)
+        // Agent-created child mobs default to durable under this layout.
+        .with_meta_storage_layout(layout.clone())
+        // The SAME store handed to MeerkatMachine::persistent above.
+        .with_durable_runtime_store(&runtime_store)
+        // Resume-seam reads must carry the runtime store's archived
+        // terminal (at 0.8.11 archive stamps the catalog/lifecycle row,
+        // never the session body).
+        .with_runtime_archived_terminal_authority(runtime_store)
+        .with_session_runtime_adapter(adapter.clone())
+        .context("failed to acquire the gateway session runtime owner")?
+        .with_workgraph_service(workgraph_service.clone())
+        // This is the persistent session builder's shared agent-tool slot.
+        // Identity activation needs it even when console voice is absent.
+        .with_runtime_delivery(runtime_delivery)
+        .with_agent_mob_tools(Arc::clone(&voice_inputs.4))
+        .context("failed to install gateway agent mob tools")?;
         // The launch has a schedule service: it says so before its runtime is
         // built, so that a create under a mob's id waits for the release of
         // that mob's schedules to be bound to the runtime and never goes on
@@ -3647,19 +3734,25 @@ async fn run(launch: GatewayLaunchArgs) -> anyhow::Result<()> {
         session_service
             .acquire_canonical_runtime_adapter(Some(Arc::clone(&adapter)))
             .context("failed to acquire the process-local gateway session runtime owner")?;
-        let mut spec = MobBootstrapSpec::new(definition, MobStorage::in_memory(), session_service)
-            .with_member_model_config(member_model_config)
-            .with_member_mcp_custody(Arc::clone(&member_mcp_custody))
-            .with_host_default_agent_llm_client_decorator(host_default_decorator)
-            // The SAME store handed to MeerkatMachine::persistent above.
-            .with_durable_runtime_store(&runtime_store)
-            .with_session_runtime_adapter(adapter.clone())
-            .context("failed to acquire the gateway session runtime owner")?
-            .with_workgraph_service(workgraph_service.clone())
-            .with_workgraph_admission_slot(workgraph_admission_slot)
-            .with_runtime_delivery(runtime_delivery)
-            .with_agent_mob_tools(agent_mob_tools_slot)
-            .context("failed to install ephemeral gateway agent mob tools")?;
+        // The launch keeps its mob in memory, and says so to the mob set it
+        // declares its mob to, which creates the mob there.
+        let mut spec = MobBootstrapSpec::declared(
+            definition,
+            meerkat_meta::mob_composition_manifest::DeclaredMobStore::in_memory(),
+            session_service,
+        )
+        .with_member_model_config(member_model_config)
+        .with_member_mcp_custody(Arc::clone(&member_mcp_custody))
+        .with_host_default_agent_llm_client_decorator(host_default_decorator)
+        // The SAME store handed to MeerkatMachine::persistent above.
+        .with_durable_runtime_store(&runtime_store)
+        .with_session_runtime_adapter(adapter.clone())
+        .context("failed to acquire the gateway session runtime owner")?
+        .with_workgraph_service(workgraph_service.clone())
+        .with_workgraph_admission_slot(workgraph_admission_slot)
+        .with_runtime_delivery(runtime_delivery)
+        .with_agent_mob_tools(agent_mob_tools_slot)
+        .context("failed to install ephemeral gateway agent mob tools")?;
         spec.runtime_adapter = Some(adapter);
         spec.binary_blob_store = Some(binary_blob_store);
         // The service's session and blob stores are explicitly process-local;
@@ -3943,6 +4036,18 @@ async fn run(launch: GatewayLaunchArgs) -> anyhow::Result<()> {
             .install_and_bootstrap_identity_first_context(context, &roster.snapshot())
             .await
             .context("identity-first bootstrap failed")?;
+        // The launch says how the identity planes of the mobs it hosts
+        // beside its launch mob are composed. Its roster is its launch
+        // mob's own (the agents the console manages there): another mob
+        // gets its identity plane with no agent of it.
+        meerkat_meta::gateway_wiring::HostMobIdentities::new(roster.clone(), persistent_sessions)
+            .with_session_repair_scope(
+                runtime.resolved_storage().as_ref().and_then(
+                    meerkat_meta::identity_first::SessionRepairScope::from_resolved_storage,
+                ),
+            )
+            .with_roster_of_the_launch_mob_alone(mob_handle.mob_id().clone())
+            .hand_over_to(runtime);
         tracing::info!(
             roster = roster.snapshot().len(),
             continuity_db = %continuity_db.display(),
@@ -4106,8 +4211,7 @@ async fn run(launch: GatewayLaunchArgs) -> anyhow::Result<()> {
         http_binding.local_addr(),
         &decisions,
     );
-    let app = runtime
-        .build_reference_app_router(decisions)
+    let app = console_reference_app(runtime, decisions, console_nested_mobs)
         .layer(axum::Extension(controller.clone()));
     // Before anything is served: console sends a previous process accepted
     // and did not see settle are settled from the runtime's evidence.
@@ -4913,6 +5017,288 @@ command = "files-server"
         let (_id, params) = parse_init_request(&line)?;
 
         assert_eq!(params.console_read_only, Some(true));
+        Ok(())
+    }
+
+    /// `console_list_nested_mobs` is an init param of this gateway, with the
+    /// name and meaning of `rpc_gateway`'s runtime option: the launch that
+    /// sets it to `false` is read as asking for the listing off.
+    #[test]
+    fn init_params_take_console_list_nested_mobs() -> anyhow::Result<()> {
+        let line = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "meta/init",
+            "params": {
+                "console_list_nested_mobs": false
+            }
+        })
+        .to_string();
+
+        let (_id, params) = parse_init_request(&line)?;
+
+        let read = format!("{params:?}");
+        assert!(
+            read.contains("console_list_nested_mobs: Some(false)"),
+            "the init params hold the option as given: {read}"
+        );
+        Ok(())
+    }
+
+    /// The resume key follows the option: a launch that leaves the listing
+    /// on keeps the key a launch without the option has, and one that turns
+    /// it off gets a key of its own, so neither resumes the other's runtime.
+    #[test]
+    fn resume_key_changes_with_console_list_nested_mobs() {
+        use meerkat_meta::NestedMobListing::{Hidden, Listed};
+        let key = "a-resume-key".to_string();
+
+        assert_eq!(resume_key_with_console_listing(key.clone(), Listed), key);
+        let off = resume_key_with_console_listing(key.clone(), Hidden);
+        assert_ne!(off, key);
+        assert_eq!(
+            off,
+            resume_key_with_console_listing(key, Hidden),
+            "the key of a launch with the listing off is stable"
+        );
+    }
+
+    /// `META_CONSOLE_LIST_NESTED_MOBS` is the environment twin of the init
+    /// param: with no init param the variable decides, read as
+    /// `META_CONSOLE_READ_ONLY` is. Unset or empty, the console lists nested
+    /// mobs.
+    #[test]
+    fn console_list_nested_mobs_follows_its_variable_when_the_init_param_is_absent()
+    -> anyhow::Result<()> {
+        use meerkat_meta::NestedMobListing::{Hidden, Listed};
+
+        for unset in [None, Some(""), Some("  ")] {
+            assert_eq!(
+                resolve_console_nested_mob_listing(None, unset)?,
+                Listed,
+                "{unset:?}"
+            );
+        }
+        for on in ["1", "true", "yes", "on", "TRUE", " On "] {
+            assert_eq!(
+                resolve_console_nested_mob_listing(None, Some(on))?,
+                Listed,
+                "{on:?}"
+            );
+        }
+        for off in ["0", "false", "no", "off", "False", " OFF "] {
+            assert_eq!(
+                resolve_console_nested_mob_listing(None, Some(off))?,
+                Hidden,
+                "{off:?}"
+            );
+        }
+        Ok(())
+    }
+
+    /// A value of the variable that is no boolean refuses the launch and
+    /// names the variable.
+    #[test]
+    fn a_console_list_nested_mobs_variable_that_is_no_boolean_refuses_the_launch() {
+        let refused = resolve_console_nested_mob_listing(None, Some("sometimes"))
+            .err()
+            .map(|error| error.to_string());
+
+        assert_eq!(
+            refused.as_deref(),
+            Some("META_CONSOLE_LIST_NESTED_MOBS must be a boolean value")
+        );
+    }
+
+    /// The init param wins over the variable, either way round, and the
+    /// variable is then not read: a value of it that is no boolean does not
+    /// refuse a launch whose init param says which it is.
+    #[test]
+    fn the_init_param_wins_over_the_console_list_nested_mobs_variable() -> anyhow::Result<()> {
+        use meerkat_meta::NestedMobListing::{Hidden, Listed};
+
+        assert_eq!(
+            resolve_console_nested_mob_listing(Some(true), Some("false"))?,
+            Listed
+        );
+        assert_eq!(
+            resolve_console_nested_mob_listing(Some(false), Some("true"))?,
+            Hidden
+        );
+        assert_eq!(
+            resolve_console_nested_mob_listing(Some(false), Some("sometimes"))?,
+            Hidden
+        );
+        Ok(())
+    }
+
+    /// The console this gateway builds lists the members of a mob nested
+    /// under its own (a mob a member of its own mob created) unless the
+    /// launch turned the listing off: with no option and with
+    /// `console_list_nested_mobs: true` the identity list holds the nested
+    /// member, with `false` it holds the gateway's own member alone and an
+    /// inspection of the nested member answers as one of a member no mob
+    /// holds. A mob the host created beside the gateway's own is a mob of
+    /// its own: with any of the three, the console of the gateway's own mob
+    /// lists neither that mob nor a member of it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_console_lists_nested_mobs_unless_the_launch_turns_the_listing_off()
+    -> anyhow::Result<()> {
+        use tower::ServiceExt as _;
+
+        fn turn_driven(profile: &str, member: &str) -> SpawnMemberSpec {
+            let mut spec =
+                SpawnMemberSpec::new(ProfileName::from(profile), AgentIdentity::from(member));
+            spec.runtime_mode = Some(meerkat_mob::MobRuntimeMode::TurnDriven);
+            spec
+        }
+        async fn rpc(app: &axum::Router, method: &str, params: Value) -> anyhow::Result<Value> {
+            let response = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::post("/console/rpc")
+                        .header("Content-Type", "application/json")
+                        .body(axum::body::Body::from(
+                            json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params })
+                                .to_string(),
+                        ))?,
+                )
+                .await?;
+            let body = axum::body::to_bytes(response.into_body(), 1 << 22).await?;
+            Ok(serde_json::from_slice(&body)?)
+        }
+
+        let profile = json!({ "model": "gpt-5.5", "runtime_mode": "turn_driven", "tools": { "comms": true } });
+        let definition: MobDefinition = serde_json::from_value(
+            json!({ "id": "meta-gateway-listing", "profiles": { "worker": profile.clone() } }),
+        )?;
+        let runtime = meerkat_meta::UnifiedRuntimeBuilder::default()
+            .definition(definition)
+            .default_llm_client(Arc::new(meerkat_client::TestClient::default()))
+            .build()
+            .await?;
+        runtime
+            .mob_handle()
+            .ensure_member(turn_driven("worker", "planner"))
+            .await?;
+        // A mob the gateway's own member created, for that member's session,
+        // with one member.
+        let mobs = runtime
+            .mob_runtime()
+            .agent_mob_mcp_state()
+            .ok_or_else(|| anyhow!("the runtime carries agent mob tools"))?;
+        let team: MobDefinition = serde_json::from_value(
+            json!({ "id": "meta-gateway-listing-team", "profiles": { "worker": profile.clone() } }),
+        )?;
+        let planner_session = runtime
+            .mob_handle()
+            .resolve_bridge_session_id(&AgentIdentity::from("planner"))
+            .await
+            .ok_or_else(|| anyhow!("the planner has a bridge session"))?;
+        let team = mobs
+            .mob_create_definition_with_owner_bridge_session(team, planner_session, true, false)
+            .await
+            .map_err(|error| anyhow!("{error}"))?;
+        mobs.handle_for(&team)
+            .await
+            .map_err(|error| anyhow!("{error}"))?
+            .ensure_member(turn_driven("worker", "aide"))
+            .await?;
+        // A mob the host created beside the gateway's own, with one member.
+        let sibling: MobDefinition = serde_json::from_value(
+            json!({ "id": "meta-gateway-listing-sibling", "profiles": { "worker": profile } }),
+        )?;
+        let sibling = mobs
+            .mob_create_definition(sibling)
+            .await
+            .map_err(|error| anyhow!("{error}"))?;
+        mobs.handle_for(&sibling)
+            .await
+            .map_err(|error| anyhow!("{error}"))?
+            .ensure_member(turn_driven("worker", "clerk"))
+            .await?;
+        let nested = "meta-gateway-listing-team/aide";
+        let sibling_member = "meta-gateway-listing-sibling/clerk";
+        let absent = "meta-gateway-nowhere/nobody";
+
+        for (param, lists_nested) in [(None, true), (Some(true), true), (Some(false), false)] {
+            let app = console_reference_app(
+                &runtime,
+                runtime_decision_state(ConsoleUiConfig::default(), false),
+                resolve_console_nested_mob_listing(param, None)?,
+            );
+            let listed = rpc(&app, "meta/console/list_identities", json!({})).await?;
+            let mut identities: Vec<&str> = listed["result"]["identities"]
+                .as_array()
+                .ok_or_else(|| anyhow!("the identities array: {listed}"))?
+                .iter()
+                .filter_map(|record| record["identity"].as_str())
+                .collect();
+            identities.sort_unstable();
+            let expected = if lists_nested {
+                vec![nested, "planner"]
+            } else {
+                vec!["planner"]
+            };
+            assert_eq!(identities, expected, "console_list_nested_mobs: {param:?}");
+            assert!(
+                !identities.contains(&sibling_member),
+                "no member of a mob the host created is listed ({param:?}): {identities:?}"
+            );
+            let experience = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::get("/console/experience")
+                        .body(axum::body::Body::empty())?,
+                )
+                .await?;
+            let experience: Value = serde_json::from_slice(
+                &axum::body::to_bytes(experience.into_body(), 1 << 22).await?,
+            )?;
+            let mut listed_mobs: Vec<&str> = experience
+                .pointer("/topology/live_snapshot/mobs")
+                .and_then(Value::as_array)
+                .ok_or_else(|| anyhow!("the listed mobs: {experience}"))?
+                .iter()
+                .filter_map(|mob| mob["mob_id"].as_str())
+                .collect();
+            listed_mobs.sort_unstable();
+            let expected_mobs = if lists_nested {
+                vec!["meta-gateway-listing", "meta-gateway-listing-team"]
+            } else {
+                vec!["meta-gateway-listing"]
+            };
+            assert_eq!(
+                listed_mobs, expected_mobs,
+                "the mobs listed, none of them the mob the host created ({param:?})"
+            );
+            let inspect = |identity: &'static str| {
+                let app = app.clone();
+                async move {
+                    rpc(
+                        &app,
+                        "meta/console/inspect_identity",
+                        json!({ "identity": identity }),
+                    )
+                    .await
+                    .map(|answer| answer.to_string().replace(identity, "<member>"))
+                }
+            };
+            let inspected = inspect(nested).await?;
+            if lists_nested {
+                assert!(
+                    inspected.contains("\"result\""),
+                    "the nested member is inspected: {inspected}"
+                );
+            } else {
+                assert_eq!(
+                    inspected,
+                    inspect(absent).await?,
+                    "the nested member answers as a member no mob holds"
+                );
+            }
+        }
+        runtime.shutdown().await;
         Ok(())
     }
 

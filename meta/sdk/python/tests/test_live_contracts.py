@@ -254,7 +254,7 @@ def test_execution_identity_rejects_unknown_fields_null_and_legacy_conflicts():
 
 def test_capability_is_off_when_absent():
     old_gateway = CapabilitiesResult.from_dict(
-        {"contract_version": "0.5.0", "methods": [], "loaded_modules": []}
+        {"contract_version": "0.6.0", "methods": [], "loaded_modules": []}
     )
     assert old_gateway.feature_capabilities == []
     assert not supports_live_execution_identity_v1(old_gateway.feature_capabilities)

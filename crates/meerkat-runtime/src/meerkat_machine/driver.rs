@@ -845,6 +845,12 @@ impl IngressView<'_> {
         self.driver.durable_steer_order()
     }
 
+    /// The steer lane's first input that the machine holds a durable
+    /// live-boundary delivery for and that has no live-boundary work running.
+    pub(crate) fn durable_steer_waiting_without_work(&self) -> Option<InputId> {
+        self.driver.durable_steer_waiting_without_work()
+    }
+
     /// Whether `input_id` may join the current run `run_id` at a live
     /// boundary: inputs of different requesters never share a run, and the
     /// Steer lane is first in, first out across requesters (see
@@ -7182,6 +7188,8 @@ pub(crate) fn machine_suspend_run_for_stop(
         projection.current_run_id,
         projection.pre_run_phase,
     );
+    // The suspension marked the run resumable: it waits from now.
+    driver.shell_driver_mut().restamp_resumable_mark(run_id);
     Ok(true)
 }
 

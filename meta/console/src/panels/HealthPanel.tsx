@@ -23,7 +23,7 @@ import {
   type SummaryFact,
   type Tone,
 } from "../../../packages/console-components/src/panel-kit";
-import { agentDisplayTitle } from "../../../packages/console-core/src/agent-title";
+import { identityDisplayTitle } from "../../../packages/console-core/src/agent-title";
 import { reachabilityWords } from "./AgentDetailsPanel";
 import type { ConsoleAgent } from "../types";
 import { agentHealth, type AgentHealth, type AgentHealthKind } from "../lib/agent-status";
@@ -164,8 +164,14 @@ export function HealthPanel({
   const [showAllHealthy, setShowAllHealthy] = React.useState(false);
 
   // Named the way every other surface names the agent; the identity is the tooltip.
-  const titleOf = (row: IdentityStatusRow) => directory.lookup(row.identity)?.label
-    || agentDisplayTitle({ label: row.display_name || "", identity: row.identity, role: row.role });
+  const titleOf = (row: IdentityStatusRow) => {
+    const known = directory.lookup(row.identity)?.label;
+    if (known) return known;
+    const displayName = (row.display_name || "").trim();
+    return displayName && displayName !== row.identity
+      ? displayName
+      : identityDisplayTitle(row.identity, directory.nestedMobIds, { role: row.role });
+  };
 
   const entries = React.useMemo(() => {
     const byKey = new Map<string, ConsoleAgent>();

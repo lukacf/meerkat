@@ -167,6 +167,7 @@ fn phase_c_req_c001_c002_mcp_path_is_used_for_configured_router_and_delivery_mod
 
     let resolution = runtime
         .resolve_routing(RoutingResolveRequest {
+            mob_id: None,
             recipient: "approvals@example.com".to_string(),
             channel: Some("transactional".to_string()),
             retry_max: None,
@@ -176,6 +177,7 @@ fn phase_c_req_c001_c002_mcp_path_is_used_for_configured_router_and_delivery_mod
         .expect("routing should succeed through MCP path");
     let delivery = runtime
         .send_delivery(DeliverySendRequest {
+            mob_id: None,
             resolution: resolution.clone(),
             payload: json!({"kind":"phase-c"}),
             idempotency_key: Some("phase-c-routing-delivery".to_string()),
@@ -288,6 +290,7 @@ fn phase_c_typed_errors_surface_for_unloaded_and_failed_mcp_modules() {
     )
     .expect("empty runtime should start");
     let unloaded_route_error = unloaded_runtime.resolve_routing(RoutingResolveRequest {
+        mob_id: None,
         recipient: "approvals@example.com".to_string(),
         channel: Some("transactional".to_string()),
         retry_max: None,
@@ -344,6 +347,7 @@ fn phase_c_typed_errors_surface_for_unloaded_and_failed_mcp_modules() {
     .expect("runtime should start even when router tool call is configured to fail");
 
     let failed_route_error = failed_runtime.resolve_routing(RoutingResolveRequest {
+        mob_id: None,
         recipient: "approvals@example.com".to_string(),
         channel: Some("transactional".to_string()),
         retry_max: None,
@@ -480,6 +484,7 @@ fn phase_c_req_c002_core_flows_require_mcp_for_loaded_core_modules() {
     .expect("runtime with legacy modules should start");
 
     let routing_error = runtime.resolve_routing(RoutingResolveRequest {
+        mob_id: None,
         recipient: "approvals@example.com".to_string(),
         channel: Some("transactional".to_string()),
         retry_max: None,
@@ -611,6 +616,7 @@ fn phase_c_req_c002_delivery_flow_requires_mcp_when_loaded() {
 
     let resolution = runtime
         .resolve_routing(RoutingResolveRequest {
+            mob_id: None,
             recipient: "approvals@example.com".to_string(),
             channel: Some("transactional".to_string()),
             retry_max: None,
@@ -619,6 +625,7 @@ fn phase_c_req_c002_delivery_flow_requires_mcp_when_loaded() {
         })
         .expect("router resolve should still work through MCP");
     let delivery_error = runtime.send_delivery(DeliverySendRequest {
+        mob_id: None,
         resolution,
         payload: json!({"kind":"phase-c-delivery-required"}),
         idempotency_key: Some("phase-c-delivery-required".to_string()),

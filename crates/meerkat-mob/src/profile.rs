@@ -47,6 +47,40 @@ pub struct ToolConfig {
     /// Enable assistant image generation tools.
     #[serde(default)]
     pub image_generation: bool,
+    /// Web search for members of this profile.
+    ///
+    /// Unset (the key omitted) leaves it to the member's build, as before
+    /// the key existed: the provider's own web search where the model has
+    /// one and the provider's switch is on, and none for a member whose
+    /// tools are governed (a read-only profile, a deny list, a tool access
+    /// or application tool policy, a dispatch admission), since governance
+    /// turns the provider's own tools off.
+    ///
+    /// `true` is the build's explicit enable. Where the provider's own
+    /// search serves the member it stays the provider's own. Where it does
+    /// not (a model without one, or a governed member) the member gets the
+    /// ordinary `web_search` tool, served by a helper on the provider's
+    /// default model through the realm's default binding for that provider,
+    /// and gated like any other tool: a read-only profile admits it, a deny
+    /// list or a tool grant gate that names it still refuses or closes it.
+    /// Where the helper is needed and cannot be provided the member's build
+    /// fails. One case gives no search without an error: an ungoverned
+    /// member whose model has its own search while that provider's web
+    /// search switch is off, where the helper is not tried.
+    ///
+    /// `false` is the build's explicit disable: no search of either kind.
+    /// One exception: the profile's own tool grant gate that covers
+    /// `web_search` mounts the tool closed whatever this switch says, and a
+    /// grant then opens it.
+    ///
+    /// A spawn's own web search override wins over this key. A member's
+    /// session records the choice it was built with: after the key is
+    /// removed a resumed member keeps a recorded enable (`false` takes it
+    /// away) or a recorded disable (`true` gives it back), and only a new
+    /// session returns to the unset behaviour. Omitted when unset, so a
+    /// profile that does not state it keeps its serialized bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_search: Option<bool>,
     /// Declare this profile read-only: every tool call is admitted at the
     /// execution gate only when the dispatcher that owns the tool declares it
     /// read-only ([`meerkat_core::ToolMutationClass::ReadOnly`]).
@@ -166,6 +200,7 @@ impl ToolConfig {
         "mob",
         "schedule",
         "image_generation",
+        "web_search",
         "read_only",
         "deny",
         "mcp",
@@ -748,6 +783,7 @@ mod tests {
             mob: true,
             schedule: true,
             image_generation: true,
+            web_search: None,
             read_only: false,
             deny: Vec::new(),
             mcp: vec!["server-a".to_string(), "server-b".to_string()],
@@ -772,6 +808,7 @@ mod tests {
             mob: false,
             schedule: false,
             image_generation: false,
+            web_search: None,
             read_only: false,
             deny: Vec::new(),
             mcp: vec!["mcp-server".to_string()],
@@ -806,6 +843,7 @@ mod tests {
                 mob: true,
                 schedule: false,
                 image_generation: false,
+                web_search: None,
                 read_only: false,
                 deny: Vec::new(),
                 mcp: vec![],
@@ -849,6 +887,7 @@ mod tests {
                 mob: false,
                 schedule: false,
                 image_generation: false,
+                web_search: None,
                 read_only: false,
                 deny: Vec::new(),
                 mcp: vec!["code-server".to_string()],

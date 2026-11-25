@@ -241,10 +241,10 @@ export function capConsoleSidebarAgentOrder(order: readonly string[], present: R
   return kept;
 }
 
-export type ConsoleSidebarGroupBy = "category" | "none";
+export type ConsoleSidebarGroupBy = "category" | "none" | "mob";
 export type ConsoleSidebarSortBy = "manual" | "name" | "activity";
 
-/** How the roster lists agents: by category or as one list, and in which order. */
+/** How the roster lists agents: by category, as one list or by mob, and in which order. */
 export interface ConsoleSidebarViewPreferences {
   groupBy: ConsoleSidebarGroupBy;
   sortBy: ConsoleSidebarSortBy;
@@ -256,7 +256,7 @@ export const DEFAULT_CONSOLE_SIDEBAR_VIEW: Readonly<ConsoleSidebarViewPreference
 });
 
 export function normalizeConsoleSidebarGroupBy(value: unknown): ConsoleSidebarGroupBy {
-  return value === "none" ? "none" : "category";
+  return value === "none" || value === "mob" ? value : "category";
 }
 
 export function normalizeConsoleSidebarSortBy(value: unknown): ConsoleSidebarSortBy {

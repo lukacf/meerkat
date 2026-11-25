@@ -2905,6 +2905,84 @@ async fn a_host_template_put_gives_its_children_its_delivery() {
     );
 }
 
+/// A declared source and a declared role template of a mob are the host's
+/// standing word for the mob that stands under the id. A release of what an
+/// earlier mob left under the id ends the source and cancels the template,
+/// and the next reconcile of the declarations starts both again: the source
+/// in its next generation, the template active, both applied, neither held
+/// as ended by an operator.
+#[tokio::test]
+async fn a_declared_source_and_template_of_a_released_id_start_again_at_the_next_reconcile() {
+    let harness = harness_with(native_with_seated_builds());
+    let service = &harness.service;
+    let inbox = SourceId::new("inbox").unwrap();
+    let audience = serde_json::json!([{ "kind": "role", "mob_id": "builds", "role": "builder" }]);
+    try_apply(
+        service,
+        1,
+        serde_json::json!([with(
+            declared_inbox(audience),
+            "mob_id",
+            serde_json::json!("builds")
+        )]),
+        serde_json::json!([{
+            "subscription_id": "builders",
+            "members": { "mob_id": "builds", "role": "builder" },
+            "topics": ["deploy.done"],
+            "start": { "kind": "now" },
+        }]),
+    )
+    .await
+    .unwrap();
+    let statuses = |view: &serde_json::Value| {
+        (
+            record(view, "source", "inbox").map(|record| record["status"].clone()),
+            record(view, "subscription", "builders").map(|record| record["status"].clone()),
+        )
+    };
+    let applied = (
+        Some(serde_json::json!("applied")),
+        Some(serde_json::json!("applied")),
+    );
+    let view = declared(service).await;
+    assert_eq!(statuses(&view), applied, "{view}");
+
+    service.release_mob(&mob("builds")).await.unwrap();
+    let ended = service
+        .source(&mob("builds"), &inbox)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(ended.state, super::super::sources::SourceState::Ended);
+    let cancelled = service
+        .role_template(&sid("builders"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(cancelled.state, SubscriptionState::Cancelled);
+
+    service.reconcile_declarations().await.unwrap();
+    let again = service
+        .source(&mob("builds"), &inbox)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(again.state, super::super::sources::SourceState::Active);
+    assert_eq!(again.generation, 2, "the declared source's next generation");
+    let template = service
+        .role_template(&sid("builders"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        template.state,
+        SubscriptionState::Active,
+        "the declared template is active again for the mob under the id"
+    );
+    let view = declared(service).await;
+    assert_eq!(statuses(&view), applied, "{view}");
+}
+
 /// The child a role template makes for a shared member in the capture of
 /// what a member private to a person announces captures nothing of it; the
 /// child is made, and captures the host's announcement on the topic.

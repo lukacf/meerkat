@@ -714,6 +714,453 @@ describe("AgentCustomizer customize_build handler registration", () => {
 });
 
 // ---------------------------------------------------------------------------
+// One live customize scope per (mob, member name)
+// ---------------------------------------------------------------------------
+
+// One gateway can host several mobs, and two of them can have a member of one
+// name. The customize callback names the member's mob as `mob_id` beside
+// `scope_id`; a gateway of an earlier release names none.
+describe("AgentCustomizer scope keyed by mob and member name", () => {
+  const CONTEXT = { identity: "agent:alpha", active_peers: [], managed_edges: [] };
+  const SPEC = { identity: "agent:alpha", profile: "default" };
+  const CUSTOMIZE = "callback/agent_customizer/customize_build";
+  const LEFT_OUT = Symbol("mob_id left out");
+
+  // A dispatcher whose customizer registers one tool, whose answer names the
+  // build that registered it, and records the mob each build's context names.
+  async function makeDispatcher() {
+    const { CallbackDispatcher } = await import("../src/agent-builder.js");
+    const dispatcher = new CallbackDispatcher();
+    const mobs: unknown[] = [];
+    let builds = 0;
+    dispatcher.registerAgentCustomizer({
+      async customizeBuild(ctx, _spec, draft) {
+        builds += 1;
+        const build = builds;
+        mobs.push("mobId" in ctx ? ctx.mobId : "the context has no mobId");
+        draft.registerTool("lookup", () => ({ registered_by_build: build }));
+      },
+    });
+    return { dispatcher, mobs };
+  }
+
+  type Dispatcher = Awaited<ReturnType<typeof makeDispatcher>>["dispatcher"];
+
+  // Params of one customize callback. `mob` is sent as given (a null
+  // included) unless it is left out.
+  function buildParams(
+    scopeId: string,
+    mob: unknown = LEFT_OUT,
+    extra: Record<string, unknown> = {},
+  ): Record<string, unknown> {
+    const params: Record<string, unknown> = {
+      scope_id: scopeId,
+      context: CONTEXT,
+      spec: SPEC,
+      draft: {},
+    };
+    if (mob !== LEFT_OUT) params.mob_id = mob;
+    return { ...params, ...extra };
+  }
+
+  function lookup(dispatcher: Dispatcher, scopeId: string): Promise<unknown> {
+    return dispatcher.handleCallback("callback/call_tool", {
+      scope_id: scopeId,
+      tool: "lookup",
+      arguments: {},
+    });
+  }
+
+  function liveScopes(dispatcher: Dispatcher): string[] {
+    const scopes = (dispatcher as unknown as { _scopeTools: Map<string, string[]> })._scopeTools;
+    return [...scopes.keys()].sort();
+  }
+
+  it("each scope of two mobs reaches the handler its own build registered", async () => {
+    const { dispatcher } = await makeDispatcher();
+    await dispatcher.handleCallback(CUSTOMIZE, buildParams("customize-agent:alpha-1", "mob-a"));
+    await dispatcher.handleCallback(CUSTOMIZE, buildParams("customize-agent:alpha-2", "mob-b"));
+    await dispatcher.handleCallback(CUSTOMIZE, buildParams("customize-agent:alpha-3", "mob-a"));
+    await assert.rejects(lookup(dispatcher, "customize-agent:alpha-1"), /no handler registered/);
+    assert.deepEqual(await lookup(dispatcher, "customize-agent:alpha-2"), {
+      content: { registered_by_build: 2 },
+    });
+    assert.deepEqual(await lookup(dispatcher, "customize-agent:alpha-3"), {
+      content: { registered_by_build: 3 },
+    });
+    // One live scope per (mob, member name): two, not three.
+    assert.deepEqual(liveScopes(dispatcher), ["customize-agent:alpha-2", "customize-agent:alpha-3"]);
+  });
+
+  it("two member names of one mob keep both scopes", async () => {
+    // The member name stays part of the key.
+    const { dispatcher } = await makeDispatcher();
+    const beta = { identity: "agent:beta", active_peers: [], managed_edges: [] };
+    await dispatcher.handleCallback(CUSTOMIZE, buildParams("customize-agent:alpha-1", "mob-a"));
+    await dispatcher.handleCallback(
+      CUSTOMIZE,
+      buildParams("customize-agent:beta-2", "mob-a", { context: beta }),
+    );
+    assert.deepEqual(await lookup(dispatcher, "customize-agent:alpha-1"), {
+      content: { registered_by_build: 1 },
+    });
+    assert.deepEqual(await lookup(dispatcher, "customize-agent:beta-2"), {
+      content: { registered_by_build: 2 },
+    });
+  });
+
+  it("a mob and a member name are never confused with another pair that joins to the same text", async () => {
+    // Mob "a:b" with member "c" and mob "a" with member "b:c" are two members,
+    // and so are the same pairs joined by any other separator.
+    for (const [first, second] of [
+      [["a:b", "c"], ["a", "b:c"]],
+      [["a\u0000b", "c"], ["a", "b\u0000c"]],
+      [['a","b', "c"], ["a", 'b","c']],
+    ]) {
+      const { dispatcher } = await makeDispatcher();
+      await dispatcher.handleCallback(
+        CUSTOMIZE,
+        buildParams("s-1", first[0], {
+          context: { identity: first[1], active_peers: [], managed_edges: [] },
+        }),
+      );
+      await dispatcher.handleCallback(
+        CUSTOMIZE,
+        buildParams("s-2", second[0], {
+          context: { identity: second[1], active_peers: [], managed_edges: [] },
+        }),
+      );
+      assert.deepEqual(await lookup(dispatcher, "s-1"), { content: { registered_by_build: 1 } });
+      assert.deepEqual(await lookup(dispatcher, "s-2"), { content: { registered_by_build: 2 } });
+    }
+  });
+
+  it("one mob alone behaves as before", async () => {
+    // One mob on the gateway: every build names the same mob, and a host
+    // observes what it observed with a gateway that names none.
+    const { dispatcher } = await makeDispatcher();
+    await dispatcher.handleCallback(CUSTOMIZE, buildParams("customize-agent:alpha-1", "mob-a"));
+    await dispatcher.handleCallback(CUSTOMIZE, buildParams("customize-agent:alpha-2", "mob-a"));
+    await assert.rejects(lookup(dispatcher, "customize-agent:alpha-1"), /no handler registered/);
+    assert.deepEqual(await lookup(dispatcher, "customize-agent:alpha-2"), {
+      content: { registered_by_build: 2 },
+    });
+    assert.deepEqual(liveScopes(dispatcher), ["customize-agent:alpha-2"]);
+  });
+
+  it("a member the SDK does not know is ignored beside the context and inside it", async () => {
+    const { dispatcher } = await makeDispatcher();
+    const result = (await dispatcher.handleCallback(
+      CUSTOMIZE,
+      buildParams("customize-agent:alpha-1", LEFT_OUT, {
+        some_later_member: "x",
+        context: { ...CONTEXT, some_later_member: "x" },
+      }),
+    )) as Record<string, unknown>;
+    const tools = result.external_tools as Array<Record<string, unknown>>;
+    assert.equal(tools[0].name, "lookup");
+    assert.deepEqual(await lookup(dispatcher, "customize-agent:alpha-1"), {
+      content: { registered_by_build: 1 },
+    });
+  });
+
+  it("a mob inside the context object is not the member's mob", async () => {
+    // The mob travels beside the context. A `mob_id` inside the context
+    // object is a member this SDK does not know: it names no mob for the
+    // customizer and none for the key.
+    const { dispatcher, mobs } = await makeDispatcher();
+    const context = { ...CONTEXT, mob_id: "mob-inside" };
+    await dispatcher.handleCallback(
+      CUSTOMIZE,
+      buildParams("customize-agent:alpha-1", LEFT_OUT, { context }),
+    );
+    await dispatcher.handleCallback(
+      CUSTOMIZE,
+      buildParams("customize-agent:alpha-2", "mob-a", { context }),
+    );
+    assert.deepEqual(mobs, ["the context has no mobId", "mob-a"]);
+    // Two keys (no mob, and mob-a): neither build released the other.
+    assert.deepEqual(liveScopes(dispatcher), ["customize-agent:alpha-1", "customize-agent:alpha-2"]);
+  });
+
+  it("a mob_id that is a number is refused and releases nothing", async () => {
+    // A `mob_id` that is present and not text is never read as no mob: the
+    // callback is refused, the customizer is not asked, and the build that
+    // named no mob keeps its scope.
+    const { ContractMismatchError } = await import("../src/errors.js");
+    const { dispatcher, mobs } = await makeDispatcher();
+    await dispatcher.handleCallback(CUSTOMIZE, buildParams("customize-agent:alpha-1"));
+    await assert.rejects(
+      dispatcher.handleCallback(CUSTOMIZE, buildParams("customize-agent:alpha-2", 7)),
+      ContractMismatchError,
+    );
+    assert.deepEqual(mobs, ["the context has no mobId"]);
+    assert.deepEqual(await lookup(dispatcher, "customize-agent:alpha-1"), {
+      content: { registered_by_build: 1 },
+    });
+    assert.deepEqual(liveScopes(dispatcher), ["customize-agent:alpha-1"]);
+  });
+
+  it("an empty mob_id is a mob of its own", async () => {
+    // Text is a mob's id, the empty text included: it is not read as no mob,
+    // so it and a build that names none keep their scopes.
+    const { dispatcher, mobs } = await makeDispatcher();
+    await dispatcher.handleCallback(CUSTOMIZE, buildParams("customize-agent:alpha-1"));
+    await dispatcher.handleCallback(CUSTOMIZE, buildParams("customize-agent:alpha-2", ""));
+    assert.deepEqual(mobs, ["the context has no mobId", ""]);
+    assert.deepEqual(liveScopes(dispatcher), ["customize-agent:alpha-1", "customize-agent:alpha-2"]);
+  });
+
+  // Beside `mob_id` the callback names the mob's incarnation as
+  // `mob_incarnation`. A build that names another incarnation of a mob
+  // releases every scope kept for that mob id; a gateway of an earlier
+  // release names none and is served as before.
+  describe("scopes of a mob created under a used id", () => {
+    const BETA = { identity: "agent:beta", active_peers: [], managed_edges: [] };
+    const GAMMA = { identity: "agent:gamma", active_peers: [], managed_edges: [] };
+
+    it("a build of another incarnation releases every scope of that mob id", async () => {
+      const { dispatcher } = await makeDispatcher();
+      await dispatcher.handleCallback(
+        CUSTOMIZE,
+        buildParams("customize-agent:alpha-1", "mob-a", { mob_incarnation: "one" }),
+      );
+      await dispatcher.handleCallback(
+        CUSTOMIZE,
+        buildParams("customize-agent:beta-2", "mob-a", { mob_incarnation: "one", context: BETA }),
+      );
+      await dispatcher.handleCallback(
+        CUSTOMIZE,
+        buildParams("customize-agent:gamma-3", "mob-a", { mob_incarnation: "two", context: GAMMA }),
+      );
+      for (const earlier of ["customize-agent:alpha-1", "customize-agent:beta-2"]) {
+        await assert.rejects(lookup(dispatcher, earlier), /no handler registered/);
+      }
+      assert.deepEqual(await lookup(dispatcher, "customize-agent:gamma-3"), {
+        content: { registered_by_build: 3 },
+      });
+      assert.deepEqual(liveScopes(dispatcher), ["customize-agent:gamma-3"]);
+    });
+
+    it("another incarnation of one mob keeps the scopes of another mob", async () => {
+      const { dispatcher } = await makeDispatcher();
+      await dispatcher.handleCallback(
+        CUSTOMIZE,
+        buildParams("customize-agent:alpha-1", "mob-a", { mob_incarnation: "one" }),
+      );
+      await dispatcher.handleCallback(
+        CUSTOMIZE,
+        buildParams("customize-agent:alpha-2", "mob-b", { mob_incarnation: "other" }),
+      );
+      await dispatcher.handleCallback(
+        CUSTOMIZE,
+        buildParams("customize-agent:beta-3", "mob-a", { mob_incarnation: "two", context: BETA }),
+      );
+      assert.deepEqual(await lookup(dispatcher, "customize-agent:alpha-2"), {
+        content: { registered_by_build: 2 },
+      });
+      assert.deepEqual(liveScopes(dispatcher), ["customize-agent:alpha-2", "customize-agent:beta-3"]);
+    });
+
+    it("builds of one incarnation keep each other's scopes", async () => {
+      // As before: one live scope per member of the mob, newest wins.
+      const { dispatcher } = await makeDispatcher();
+      await dispatcher.handleCallback(
+        CUSTOMIZE,
+        buildParams("customize-agent:alpha-1", "mob-a", { mob_incarnation: "one" }),
+      );
+      await dispatcher.handleCallback(
+        CUSTOMIZE,
+        buildParams("customize-agent:beta-2", "mob-a", { mob_incarnation: "one", context: BETA }),
+      );
+      await dispatcher.handleCallback(
+        CUSTOMIZE,
+        buildParams("customize-agent:alpha-3", "mob-a", { mob_incarnation: "one" }),
+      );
+      assert.deepEqual(liveScopes(dispatcher), ["customize-agent:alpha-3", "customize-agent:beta-2"]);
+    });
+
+    it("a gateway that names no incarnation releases the member's own scope only", async () => {
+      // A gateway of an earlier release names a mob and no incarnation,
+      // before and after a build that named one.
+      const { dispatcher } = await makeDispatcher();
+      await dispatcher.handleCallback(CUSTOMIZE, buildParams("customize-agent:alpha-1", "mob-a"));
+      await dispatcher.handleCallback(
+        CUSTOMIZE,
+        buildParams("customize-agent:beta-2", "mob-a", { mob_incarnation: "one", context: BETA }),
+      );
+      await dispatcher.handleCallback(
+        CUSTOMIZE,
+        buildParams("customize-agent:gamma-3", "mob-a", { context: GAMMA }),
+      );
+      assert.deepEqual(liveScopes(dispatcher), [
+        "customize-agent:alpha-1",
+        "customize-agent:beta-2",
+        "customize-agent:gamma-3",
+      ]);
+    });
+
+    it("an incarnation that is no text is refused and releases nothing", async () => {
+      // A `mob_incarnation` that is present and is not a non-empty text is
+      // never read as "none": the callback is refused, the customizer is
+      // not asked, and the earlier build keeps its scope.
+      const { ContractMismatchError } = await import("../src/errors.js");
+      for (const notText of [7, true, ["one"], { id: "one" }, ""]) {
+        const { dispatcher, mobs } = await makeDispatcher();
+        await dispatcher.handleCallback(
+          CUSTOMIZE,
+          buildParams("customize-agent:alpha-1", "mob-a", { mob_incarnation: "one" }),
+        );
+        await assert.rejects(
+          dispatcher.handleCallback(
+            CUSTOMIZE,
+            buildParams("customize-agent:beta-2", "mob-a", {
+              mob_incarnation: notText,
+              context: BETA,
+            }),
+          ),
+          ContractMismatchError,
+        );
+        assert.deepEqual(mobs, ["mob-a"]);
+        assert.deepEqual(liveScopes(dispatcher), ["customize-agent:alpha-1"]);
+      }
+    });
+
+    it("a build that registers no tool releases the earlier mob's scopes too", async () => {
+      // The release follows from what the gateway names, whatever the
+      // customizer does with the build.
+      const { CallbackDispatcher } = await import("../src/agent-builder.js");
+      const dispatcher = new CallbackDispatcher();
+      dispatcher.registerAgentCustomizer({
+        async customizeBuild(ctx, _spec, draft) {
+          if (ctx.identity === "agent:alpha") draft.registerTool("lookup", () => ({ ok: true }));
+        },
+      });
+      await dispatcher.handleCallback(
+        CUSTOMIZE,
+        buildParams("customize-agent:alpha-1", "mob-a", { mob_incarnation: "one" }),
+      );
+      await dispatcher.handleCallback(
+        CUSTOMIZE,
+        buildParams("customize-agent:beta-2", "mob-a", { mob_incarnation: "two", context: BETA }),
+      );
+      assert.deepEqual(liveScopes(dispatcher), []);
+    });
+
+    it("a build that ends after another incarnation was named registers no scope", async () => {
+      // A build of the earlier mob is still with the customizer when a build
+      // of the later mob arrives: when it ends, its tools are not registered.
+      const { CallbackDispatcher } = await import("../src/agent-builder.js");
+      const dispatcher = new CallbackDispatcher();
+      let asked: () => void = () => {};
+      const wasAsked = new Promise<void>((resolve) => {
+        asked = resolve;
+      });
+      let release: () => void = () => {};
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      dispatcher.registerAgentCustomizer({
+        async customizeBuild(ctx, _spec, draft) {
+          if (ctx.identity === "agent:alpha") {
+            asked();
+            await held;
+          }
+          draft.registerTool("lookup", () => ({ ok: true }));
+        },
+      });
+      const earlier = dispatcher.handleCallback(
+        CUSTOMIZE,
+        buildParams("customize-agent:alpha-1", "mob-a", { mob_incarnation: "one" }),
+      );
+      await wasAsked;
+      await dispatcher.handleCallback(
+        CUSTOMIZE,
+        buildParams("customize-agent:beta-2", "mob-a", { mob_incarnation: "two", context: BETA }),
+      );
+      release();
+      await earlier;
+      assert.deepEqual(liveScopes(dispatcher), ["customize-agent:beta-2"]);
+    });
+
+    it("a build of an earlier incarnation handled late releases and registers nothing", async () => {
+      // A build of the earlier mob that is handled after a build of the later
+      // one is of a mob that is gone: the later mob's scopes stay and the late
+      // build's tools are not registered. The customizer is still asked and
+      // its draft is answered. The later mob's next build is kept beside its
+      // others.
+      const { dispatcher, mobs } = await makeDispatcher();
+      await dispatcher.handleCallback(
+        CUSTOMIZE,
+        buildParams("customize-agent:alpha-1", "mob-a", { mob_incarnation: "one" }),
+      );
+      await dispatcher.handleCallback(
+        CUSTOMIZE,
+        buildParams("customize-agent:beta-2", "mob-a", { mob_incarnation: "two", context: BETA }),
+      );
+      const late = (await dispatcher.handleCallback(
+        CUSTOMIZE,
+        buildParams("customize-agent:gamma-3", "mob-a", { mob_incarnation: "one", context: GAMMA }),
+      )) as Record<string, unknown>;
+      assert.equal(mobs.length, 3);
+      const tools = late.external_tools as Array<Record<string, unknown>>;
+      assert.equal(tools[0].name, "lookup");
+      assert.deepEqual(await lookup(dispatcher, "customize-agent:beta-2"), {
+        content: { registered_by_build: 2 },
+      });
+      assert.deepEqual(liveScopes(dispatcher), ["customize-agent:beta-2"]);
+      await dispatcher.handleCallback(
+        CUSTOMIZE,
+        buildParams("customize-agent:alpha-4", "mob-a", { mob_incarnation: "two" }),
+      );
+      assert.deepEqual(liveScopes(dispatcher), ["customize-agent:alpha-4", "customize-agent:beta-2"]);
+    });
+
+    it("the transport hands builds on in the order they arrived", async () => {
+      // A destroy does not wait for the answer to a build it aborted, so the
+      // first build of the destroyed mob can arrive just before the first
+      // build of the mob created under its id. The transport starts the two
+      // in the order they arrived: the later mob keeps its scopes, and its
+      // next build registers its tools.
+      const { PersistentTransport } = await import("../src/transport.js");
+      const { dispatcher } = await makeDispatcher();
+      const transport = new PersistentTransport("unused-test-gateway");
+      const answered: string[] = [];
+      let answeredBoth: () => void = () => {};
+      const bothAnswered = new Promise<void>((resolve) => {
+        answeredBoth = resolve;
+      });
+      (transport as any)._writeLine = (value: Record<string, unknown>) => {
+        answered.push(String(value.id));
+        if (answered.length === 2) answeredBoth();
+      };
+      transport.setCallbackHandler(dispatcher.handleCallback.bind(dispatcher));
+      const line = (id: string, params: Record<string, unknown>): string =>
+        JSON.stringify({ jsonrpc: "2.0", id, method: CUSTOMIZE, params });
+      (transport as any)._handleLine(
+        line("cb-1", buildParams("customize-agent:alpha-1", "mob-a", { mob_incarnation: "one" })),
+      );
+      (transport as any)._handleLine(
+        line(
+          "cb-2",
+          buildParams("customize-agent:beta-2", "mob-a", { mob_incarnation: "two", context: BETA }),
+        ),
+      );
+      await bothAnswered;
+      assert.deepEqual(answered.sort(), ["cb-1", "cb-2"]);
+      await dispatcher.handleCallback(
+        CUSTOMIZE,
+        buildParams("customize-agent:gamma-3", "mob-a", { mob_incarnation: "two", context: GAMMA }),
+      );
+      assert.deepEqual(liveScopes(dispatcher), ["customize-agent:beta-2", "customize-agent:gamma-3"]);
+      assert.deepEqual(await lookup(dispatcher, "customize-agent:gamma-3"), {
+        content: { registered_by_build: 3 },
+      });
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Tool-result content-block helpers
 // ---------------------------------------------------------------------------
 
@@ -1303,5 +1750,257 @@ describe("CallbackDispatcher provider routing (REQ-51)", () => {
       session_id: "sess-1",
     });
     assert.equal(afterCreateCalled, true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The three callbacks that build a member carry the member's mob
+// ---------------------------------------------------------------------------
+
+describe("callbacks of a host with more than one mob", () => {
+  // A host that serves more than one mob sends a top-level `mob_id` with
+  // customize_build, after_create and compute_edges. Two mobs can each have a
+  // member of the same name, so the callback tools a customizer registers are
+  // kept per mob and identity: a build in one mob leaves the other mob's
+  // tools in place. A host that sends no `mob_id` has its own mob only; its
+  // callbacks read as before.
+  const CONTEXT = { identity: "agent:alpha", active_peers: [], managed_edges: [] };
+  const SPEC = { identity: "agent:alpha", profile: "default" };
+
+  async function makeDispatcher() {
+    const { CallbackDispatcher } = await import("../src/agent-builder.js");
+    const dispatcher = new CallbackDispatcher();
+    const buildContexts: unknown[] = [];
+    const created: Array<{ identity: string; context: unknown }> = [];
+    dispatcher.registerAgentCustomizer({
+      async customizeBuild(context, _spec, draft) {
+        buildContexts.push(context);
+        draft.registerTool("echo", (args) => ({ echo: args.input }), "echoes input");
+      },
+      async afterCreate(identity, _sessionId, context) {
+        created.push({ identity, context });
+      },
+    });
+    const build = (scopeId: string, mobId?: string) =>
+      dispatcher.handleCallback("callback/agent_customizer/customize_build", {
+        scope_id: scopeId,
+        context: CONTEXT,
+        spec: SPEC,
+        draft: {},
+        ...(mobId === undefined ? {} : { mob_id: mobId }),
+      });
+    const serves = async (scopeId: string): Promise<boolean> => {
+      try {
+        const result = await dispatcher.handleCallback("callback/call_tool", {
+          scope_id: scopeId,
+          tool: "echo",
+          arguments: { input: "hi" },
+        });
+        return JSON.stringify(result) === JSON.stringify({ content: { echo: "hi" } });
+      } catch {
+        return false;
+      }
+    };
+    return { dispatcher, build, serves, buildContexts, created };
+  }
+
+  it("two mobs with the same member name keep both scopes live", async () => {
+    const { build, serves } = await makeDispatcher();
+    await build("customize-agent:alpha-1", "mob-a");
+    await build("customize-agent:alpha-2", "mob-b");
+
+    // The second mob's build of agent:alpha did not release the first's.
+    assert.deepEqual(
+      [await serves("customize-agent:alpha-1"), await serves("customize-agent:alpha-2")],
+      [true, true],
+    );
+  });
+
+  it("a rebuild releases the scope of its own mob only", async () => {
+    const { build, serves } = await makeDispatcher();
+    await build("customize-agent:alpha-1", "mob-a");
+    await build("customize-agent:alpha-2", "mob-b");
+    await build("customize-agent:alpha-3", "mob-a");
+
+    // Newest wins inside mob-a; mob-b's member keeps its tools.
+    assert.deepEqual(
+      [
+        await serves("customize-agent:alpha-1"),
+        await serves("customize-agent:alpha-2"),
+        await serves("customize-agent:alpha-3"),
+      ],
+      [false, true, true],
+    );
+  });
+
+  it("a build without a mob is the host's own mob", async () => {
+    const { build, serves } = await makeDispatcher();
+    // A host that sends no mob_id (an earlier one) and a named mob are two
+    // members: neither build releases the other's tools.
+    await build("customize-agent:alpha-1");
+    await build("customize-agent:alpha-2", "mob-b");
+    assert.deepEqual(
+      [await serves("customize-agent:alpha-1"), await serves("customize-agent:alpha-2")],
+      [true, true],
+    );
+
+    // And without a mob the newest build of an identity still wins.
+    await build("customize-agent:alpha-3");
+    assert.deepEqual(
+      [
+        await serves("customize-agent:alpha-1"),
+        await serves("customize-agent:alpha-2"),
+        await serves("customize-agent:alpha-3"),
+      ],
+      [false, true, true],
+    );
+  });
+
+  it("customize_build tells the customizer the member's mob", async () => {
+    const { build, buildContexts } = await makeDispatcher();
+    await build("customize-agent:alpha-1", "mob-b");
+    await build("customize-agent:alpha-2");
+
+    assert.deepEqual(buildContexts, [
+      { identity: "agent:alpha", activePeers: [], managedEdges: [], mobId: "mob-b" },
+      // No mob_id from the host, which is its own mob: the context is whole
+      // as it was before a host could name one, with no key for a mob.
+      { identity: "agent:alpha", activePeers: [], managedEdges: [] },
+    ]);
+  });
+
+  for (const notText of [{ id: "mob-b" }, 7, true, ["mob-b"]]) {
+    it(`a mob_id that is not text is refused: ${JSON.stringify(notText)}`, async () => {
+      // A host that names mobs names them by text. Reading another value as
+      // "no mob" would hand the customizer the host's own mob for a member of
+      // another one, so each of the three callbacks is refused instead.
+      const { ContractMismatchError } = await import("../src/errors.js");
+      const { CallbackDispatcher } = await import("../src/agent-builder.js");
+      const { dispatcher, build, serves, buildContexts, created } = await makeDispatcher();
+      await build("customize-agent:alpha-1");
+      await assert.rejects(
+        dispatcher.handleCallback("callback/agent_customizer/customize_build", {
+          scope_id: "customize-agent:alpha-2",
+          context: CONTEXT,
+          spec: SPEC,
+          draft: {},
+          mob_id: notText,
+        }),
+        ContractMismatchError,
+      );
+      await assert.rejects(
+        dispatcher.handleCallback("callback/agent_customizer/after_create", {
+          identity: "agent:alpha",
+          session_id: "session-1",
+          mob_id: notText,
+        }),
+        ContractMismatchError,
+      );
+      const asked: unknown[] = [];
+      const topology = new CallbackDispatcher();
+      topology.registerTopologyProvider({
+        async computeEdges(_targetIdentities, context) {
+          asked.push(context);
+          return [];
+        },
+      });
+      await assert.rejects(
+        topology.handleCallback("callback/topology_provider/compute_edges", {
+          target_identities: ["agent:alpha"],
+          context: {},
+          mob_id: notText,
+        }),
+        ContractMismatchError,
+      );
+
+      // Neither the customizer nor the provider was asked, and the refused
+      // build registered and released nothing.
+      assert.deepEqual([buildContexts.length, created, asked], [1, [], []]);
+      assert.deepEqual(
+        [await serves("customize-agent:alpha-1"), await serves("customize-agent:alpha-2")],
+        [true, false],
+      );
+    });
+  }
+
+  it("a null mob_id is the host's own mob", async () => {
+    const { dispatcher, build, serves, buildContexts } = await makeDispatcher();
+    await dispatcher.handleCallback("callback/agent_customizer/customize_build", {
+      scope_id: "customize-agent:alpha-1",
+      context: CONTEXT,
+      spec: SPEC,
+      draft: {},
+      mob_id: null,
+    });
+    await build("customize-agent:alpha-2");
+
+    // Null is absent: no mob is told, and one member with the build that
+    // names no mob.
+    assert.deepEqual(
+      buildContexts.map((context) => "mobId" in (context as object)),
+      [false, false],
+    );
+    assert.deepEqual(
+      [await serves("customize-agent:alpha-1"), await serves("customize-agent:alpha-2")],
+      [false, true],
+    );
+  });
+
+  it("after_create tells the customizer the member's mob", async () => {
+    const { dispatcher, created } = await makeDispatcher();
+    const params = { identity: "agent:alpha", session_id: "session-1", model: "gpt-5.5" };
+    await dispatcher.handleCallback("callback/agent_customizer/after_create", {
+      ...params,
+      mob_id: "mob-b",
+    });
+    await dispatcher.handleCallback("callback/agent_customizer/after_create", params);
+
+    const context = { model: "gpt-5.5", labels: {}, systemPrompt: null };
+    assert.deepEqual(created, [
+      { identity: "agent:alpha", context: { ...context, mobId: "mob-b" } },
+      // No mob_id from the host: the context is whole as it was, with no key
+      // for a mob.
+      { identity: "agent:alpha", context },
+    ]);
+  });
+
+  it("compute_edges tells the provider the mob", async () => {
+    const { CallbackDispatcher } = await import("../src/agent-builder.js");
+    const dispatcher = new CallbackDispatcher();
+    const seen: Array<[string[], unknown]> = [];
+    dispatcher.registerTopologyProvider({
+      async computeEdges(targetIdentities, context) {
+        seen.push([targetIdentities, context]);
+        return [];
+      },
+    });
+    const roster = { roster: [{ identity: "agent:alpha", profile: "default" }] };
+    const params = { target_identities: ["agent:alpha"], context: roster };
+
+    await dispatcher.handleCallback("callback/topology_provider/compute_edges", {
+      ...params,
+      mob_id: "mob-b",
+    });
+    await dispatcher.handleCallback("callback/topology_provider/compute_edges", params);
+
+    assert.deepEqual(seen, [
+      // The provider's context names the mob; what the host sent as context
+      // is otherwise as it was.
+      [["agent:alpha"], { ...roster, mob_id: "mob-b" }],
+      // No mob_id from the host: the context is what it was before.
+      [["agent:alpha"], roster],
+    ]);
+    assert.deepEqual(params.context, roster);
+
+    // A context that is not an object has no place for the mob: it is handed
+    // on as it came.
+    for (const notAnObject of [["agent:alpha"], "roster"]) {
+      await dispatcher.handleCallback("callback/topology_provider/compute_edges", {
+        ...params,
+        context: notAnObject,
+        mob_id: "mob-b",
+      });
+      assert.deepEqual(seen.at(-1), [["agent:alpha"], notAnObject]);
+    }
   });
 });

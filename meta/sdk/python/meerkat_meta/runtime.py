@@ -19,6 +19,7 @@ import time
 from typing import TYPE_CHECKING, Any, AsyncIterator, Callable, Mapping, Sequence
 from urllib import request as urllib_request
 from urllib.error import HTTPError, URLError
+from urllib.parse import quote as url_quote
 
 if TYPE_CHECKING:
     from .identity_first_models import RegisteredSpec
@@ -65,6 +66,9 @@ from .errors import (
     IDENTITY_WAKE_HELD_KINDS,
     IdentityRefusal,
     IdentityRefusedError,
+    MOB_HOSTING_REFUSED_CODE,
+    MobHostingRefusal,
+    MobHostingRefusedError,
     CapabilityUnavailableError,
     CompositionProvenanceError,
     ContractMismatchError,
@@ -170,6 +174,12 @@ from .types import (
     CapabilitiesResult,
     FLOW_ROLE_TARGETS,
     FLOW_RUN_IDEMPOTENCY_KEY,
+    HOSTED_MOBS,
+    HostedMob,
+    MOB_ADDRESSING,
+    MobDestroyResult,
+    MobLifecycleResult,
+    MobRedefineResult,
     DeliveryHistoryResult,
     DeliveryResult,
     GatingAuditEntry,
@@ -498,6 +508,16 @@ def _rpc_error_from_payload(
                 method=method,
                 data=data,
             )
+    if code == MOB_HOSTING_REFUSED_CODE:
+        hosting_refusal = MobHostingRefusal.from_dict(data)
+        if hosting_refusal is not None:
+            return MobHostingRefusedError(
+                message,
+                refusal=hosting_refusal,
+                request_id=request_id,
+                method=method,
+                data=data,
+            )
     announcement_error = announcement_error_from_rpc(
         code, message, request_id=request_id, method=method, data=data
     )
@@ -741,6 +761,149 @@ class MonitorsHandle:
             if value is not None:
                 params[key] = value
         return await self._runtime._rpc("monitors/start", params)
+
+
+class MobsHandle:
+    """The mobs of the host this runtime talks to (``meta/mobs/*``).
+
+    ``create`` adds a mob to the host, ``list`` and ``get`` read what the
+    host has, ``lifecycle`` stops or resumes one, ``redefine`` replaces its
+    definition and ``destroy`` removes it. Each call asks the gateway:
+    nothing is kept between calls, so an entry is what the gateway said when
+    it was asked. To work with one of the mobs, name it:
+    ``runtime.mob(entry.mob_id)``.
+
+    The gateway must advertise the ``hosted_mobs`` feature capability:
+    without it every call here raises :class:`CapabilityUnavailableError`
+    and sends nothing. A refusal of the calls' own raises
+    :class:`MobHostingRefusedError`; a mob the host does not have is a plain
+    :class:`RpcError` (data ``kind`` ``foreign_mob_target``).
+    """
+
+    def __init__(self, runtime: MetaRuntime) -> None:
+        self._runtime = runtime
+
+    async def _call(self, method: str, params: dict[str, Any] | None = None) -> Any:
+        await self._runtime._require_feature(
+            HOSTED_MOBS,
+            method=method,
+            without="this gateway does not serve the mobs of a host (meta/mobs/*)",
+        )
+        return await self._runtime._rpc(method, params)
+
+    async def create(self, mob_config: str) -> HostedMob:
+        """Create a mob on this host from its definition and return its entry.
+
+        ``mob_config`` is the mob definition as TOML text, the form a launch
+        takes; the new mob's id is the definition's ``[mob] id``. An id a mob
+        of the host already has raises :class:`MobHostingRefusedError`
+        (``mob_exists``).
+        """
+        if not isinstance(mob_config, str):
+            raise TypeError("mob_config must be the mob definition as TOML text")
+        raw = await self._call("meta/mobs/create", {"mob_config": mob_config})
+        return HostedMob.from_dict(raw.get("mob") if isinstance(raw, dict) else None)
+
+    async def list(self) -> list[HostedMob]:
+        """Every mob of the host, the launch's own mob first. Loads no mob:
+        it answers from the host's records, so a mob that is not loaded is
+        listed as ``stopped`` when the records keep its stop and as
+        ``dormant`` otherwise."""
+        raw = await self._call("meta/mobs/list")
+        mobs = raw.get("mobs") if isinstance(raw, dict) else None
+        if not isinstance(mobs, list):
+            raise ContractMismatchError("meta/mobs/list returned no list of mobs")
+        return [HostedMob.from_dict(mob) for mob in mobs]
+
+    async def get(self, mob_id: str) -> HostedMob:
+        """The entry of one mob of the host. Loads the mob when the host
+        created it and it is not loaded, as its store has it (a stopped mob
+        loads stopped and nothing is started); a mob one of the host's
+        agents created is answered from the host's records and not loaded.
+        A load that fails raises what :meth:`lifecycle` would raise for that
+        mob, unless the host's records show the mob quarantined: the entry
+        then says so."""
+        if not isinstance(mob_id, str):
+            raise TypeError("mob_id must be a string")
+        raw = await self._call("meta/mobs/get", {"mob_id": mob_id})
+        return HostedMob.from_dict(raw.get("mob") if isinstance(raw, dict) else None)
+
+    async def lifecycle(self, mob_id: str, action: str) -> MobLifecycleResult:
+        """Stop or resume a mob of the host (``meta/mobs/lifecycle``).
+
+        ``action`` is ``"stop"`` or ``"resume"``: the mob's own stop and
+        resume. The answer is the mob's entry and, for a stop, its stop
+        report; a stop answered without one raises
+        :class:`ContractMismatchError`. The launch's own mob is not stopped
+        or resumed through this call: it raises
+        :class:`MobHostingRefusedError` (``default_mob``).
+        """
+        if not isinstance(mob_id, str):
+            raise TypeError("mob_id must be a string")
+        if action not in ("stop", "resume"):
+            raise ValueError('action must be "stop" or "resume"')
+        result = MobLifecycleResult.from_dict(
+            await self._call("meta/mobs/lifecycle", {"mob_id": mob_id, "action": action})
+        )
+        if action == "stop" and result.stop_report is None:
+            # The wire answers a stop with the mob's stop report.
+            raise ContractMismatchError(
+                "meta/mobs/lifecycle answered a stop without its stop_report"
+            )
+        return result
+
+    async def redefine(
+        self, mob_id: str, mob_config: str, expected_revision: int
+    ) -> MobRedefineResult:
+        """Replace the definition of a mob of the host (``meta/mobs/redefine``).
+
+        ``mob_config`` is the new definition as TOML text;
+        ``expected_revision`` is the revision the update is made against, so
+        an update against a definition that moved is refused (with the
+        revision the host found). Read it from ``get(mob_id).revision``; a
+        dormant mob has none until a call of its handle that reads the mob
+        (``runtime.mob(mob_id).status()``, for one) has loaded it. The
+        answer is the mob's entry and the receipt of the update.
+
+        A definition is changed on a stopped mob: stop the mob, redefine it,
+        resume it. A mob that is not stopped raises
+        :class:`MobHostingRefusedError` (``mob_not_stopped``), and so does
+        the launch's own mob (``default_mob``): its definition is the
+        launch's. A stopped mob that still holds something raises it with
+        ``mob_busy`` and ``retryable`` true: repeat the call once what its
+        detail names has ended.
+        """
+        if not isinstance(mob_id, str):
+            raise TypeError("mob_id must be a string")
+        if not isinstance(mob_config, str):
+            raise TypeError("mob_config must be the mob definition as TOML text")
+        if isinstance(expected_revision, bool) or not isinstance(expected_revision, int):
+            raise TypeError("expected_revision must be an integer")
+        if expected_revision < 0:
+            raise ValueError("expected_revision must not be negative")
+        return MobRedefineResult.from_dict(
+            await self._call(
+                "meta/mobs/redefine",
+                {
+                    "mob_id": mob_id,
+                    "mob_config": mob_config,
+                    "expected_revision": expected_revision,
+                },
+            )
+        )
+
+    async def destroy(self, mob_id: str) -> MobDestroyResult:
+        """Destroy a mob of the host and remove its storage
+        (``meta/mobs/destroy``).
+
+        The launch's own mob cannot be destroyed while the launch names it:
+        that raises :class:`MobHostingRefusedError` (``default_mob``).
+        """
+        if not isinstance(mob_id, str):
+            raise TypeError("mob_id must be a string")
+        return MobDestroyResult.from_dict(
+            await self._call("meta/mobs/destroy", {"mob_id": mob_id})
+        )
 
 
 class IdentitiesHandle:
@@ -1705,6 +1868,10 @@ class MetaRuntime:
             )
         if self._config.console_read_only is not None:
             runtime_options["console_read_only"] = self._config.console_read_only
+        if self._config.console_list_nested_mobs is not None:
+            runtime_options["console_list_nested_mobs"] = (
+                self._config.console_list_nested_mobs
+            )
         if self._config.console_fetch_timeout_ms is not None:
             runtime_options["console_fetch_timeout_ms"] = (
                 self._config.console_fetch_timeout_ms
@@ -1834,8 +2001,68 @@ class MetaRuntime:
     def set_rust_http_base(self, url: str) -> None:
         self._rust_http_base = url
 
+    async def _feature_capabilities(self) -> frozenset[str]:
+        """The feature capabilities of the gateway behind the current
+        transport, read once per started transport.
+
+        A gateway process does not change what it serves, so its answer is
+        kept for as long as its transport is the runtime's; a transport
+        started later is asked again. This is the gateway's build, not a
+        fact of any mob.
+        """
+        transport = self._transport
+        kept = getattr(self, "_feature_capabilities_read", None)
+        if kept is not None and kept[0] is transport:
+            return kept[1]
+        raw = await self._rpc("meta/capabilities")
+        features = raw.get("feature_capabilities") if isinstance(raw, dict) else None
+        read = (
+            frozenset(feature for feature in features if isinstance(feature, str))
+            if isinstance(features, list)
+            else frozenset()
+        )
+        self._feature_capabilities_read = (transport, read)
+        return read
+
+    async def _require_feature(self, capability: str, *, method: str, without: str) -> None:
+        """Refuse ``method``, typed, on a gateway that does not advertise
+        ``capability``; ``without`` says what such a gateway would do."""
+        if capability not in await self._feature_capabilities():
+            raise CapabilityUnavailableError(
+                f"capability {capability} is not available: {without}",
+                method=method,
+                data={"capability": capability},
+            )
+
     def mob_handle(self) -> MobHandle:
+        """The handle of the mob the launch names. Its requests name no mob."""
         return MobHandle(self)
+
+    def mob(self, mob_id: str) -> MobHandle:
+        """The handle of the mob of this host with the id ``mob_id``.
+
+        The same :class:`MobHandle` as :meth:`mob_handle` returns, for a mob
+        named by its id: every call it makes carries ``mob_id``. Obtaining it
+        sends nothing and loads nothing, and nothing says here whether the
+        host has such a mob: a call on a mob the host does not have raises
+        :class:`RpcError` (``-32602``, data ``kind`` ``foreign_mob_target``).
+        :attr:`mobs` lists and creates the mobs of the host.
+
+        The gateway must advertise the ``mob_addressing`` feature capability:
+        an earlier gateway ignores ``mob_id`` and answers for its own mob, so
+        without the capability every call of the handle raises
+        :class:`CapabilityUnavailableError` and sends nothing. The capability
+        is read once per started gateway.
+        """
+        if not isinstance(mob_id, str):
+            raise TypeError("mob_id must be a string")
+        return MobHandle(_MobView(self, mob_id))
+
+    @property
+    def mobs(self) -> MobsHandle:
+        """The mobs of this host: ``create``, ``list``, ``get``,
+        ``lifecycle``, ``redefine``, ``destroy``."""
+        return MobsHandle(self)
 
     def on_decision_notice(self, handler: Callable[[dict[str, Any]], Any]) -> None:
         """Receive each ``meta/decisions/notice`` the stdio gateway writes:
@@ -4052,14 +4279,91 @@ def _announcement_member(member: AnnouncementMember | dict[str, str]) -> dict[st
     return dict(member)
 
 
+_WITHOUT_MOB_ADDRESSING = (
+    "this gateway does not honour mob_id: it would ignore it and answer for its own mob"
+)
+
+
+class _MobView(MetaRuntime):
+    """A runtime as one mob of its host sees it: every request names the mob.
+
+    The view of ``runtime`` for the mob ``mob_id`` sends through the
+    runtime's own paths and adds ``mob_id`` on each of them: the JSON-RPC
+    requests, the console RPC, the multipart upload and the event streams.
+    Before the first of them it has the runtime read the gateway's
+    ``mob_addressing`` capability (once per started transport) and refuses,
+    typed, without it. A request that names a mob already (a method's own
+    ``mob_id``) is sent as the caller wrote it.
+
+    It holds no state: everything it reads is the runtime's, live, and it
+    refuses every write. It is how a :class:`MobHandle` for a named mob
+    reaches the wire; it is never handed out.
+    """
+
+    def __init__(self, runtime: MetaRuntime, mob_id: str):
+        object.__setattr__(self, "_viewed", runtime)
+        object.__setattr__(self, "_mob_id", mob_id)
+
+    def __getattr__(self, name: str) -> Any:
+        # Only reached for what the view does not define: the runtime's state.
+        return getattr(object.__getattribute__(self, "_viewed"), name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        raise AttributeError(f"a mob view holds no state (tried to set {name!r})")
+
+    async def _addressed(self, method: str, params: dict[str, Any] | None) -> dict[str, Any]:
+        """``params`` naming this view's mob, unless they name one already."""
+        await self._viewed._require_feature(
+            MOB_ADDRESSING, method=method, without=_WITHOUT_MOB_ADDRESSING
+        )
+        addressed = dict(params) if params is not None else {}
+        if addressed.get("mob_id") is None:
+            addressed["mob_id"] = self._mob_id
+        return addressed
+
+    async def _rpc(
+        self,
+        method: str,
+        params: dict[str, Any] | None = None,
+        *,
+        transport_timeout: float | None = None,
+    ) -> Any:
+        return await self._viewed._rpc(
+            method,
+            await self._addressed(method, params),
+            transport_timeout=transport_timeout,
+        )
+
+    def _rpc_sync(self, method: str, params: dict[str, Any] | None = None) -> Any:
+        raise NotImplementedError("a request that names a mob is sent with the async call")
+
+    async def _console_rpc(self, method: str, params: dict[str, Any]) -> Any:
+        return await self._viewed._console_rpc(method, await self._addressed(method, params))
+
+    def sse_bridge(self) -> SseBridge:
+        return SseBridge(self._viewed, mob_id=self._mob_id)
+
+
 class MobHandle:
     """Proxy for the Meerkat MobHandle API via JSON-RPC.
 
     Returns typed result objects instead of raw dicts.
+
+    ``runtime.mob_handle()`` is the handle of the mob the launch names;
+    ``runtime.mob(mob_id)`` is the same handle for another mob of the host,
+    and every call it makes carries that ``mob_id``. A method with a
+    ``mob_id`` of its own (the announcement methods, an event query) sends
+    the caller's value when one is given, and the handle's otherwise.
     """
 
     def __init__(self, runtime: MetaRuntime):
         self._runtime = runtime
+
+    @property
+    def mob_id(self) -> str | None:
+        """The id of the mob this handle names; ``None`` for the handle of
+        the mob the launch names, whose requests name no mob."""
+        return self._runtime._mob_id if isinstance(self._runtime, _MobView) else None
 
     async def status(self) -> StatusResult:
         """Return the current runtime status."""
@@ -4582,23 +4886,18 @@ class MobHandle:
         return RediscoverReport.from_dict(raw)
 
     async def reconcile_edges(self) -> ReconcileEdgesReport:
-        """Converge the definition's declared peer wiring on the live roster.
+        """Reconcile dynamic peer wiring and report the targeted pairs and changes.
 
-        The desired edges come from mob.toml's ``[wiring]`` block
-        (``auto_wire_orchestrator`` and ``role_wiring``), which the gateway
-        installs by itself; there is no builder knob to set. Wire and unwire
-        operations are applied so the live topology matches it, and the report
-        names them.
-
-        When it is needed: after ``runtime.reconcile()`` or an identity-first
-        boot, and only when the definition declares ``auto_wire_orchestrator``
-        or ``role_wiring``. Those restore paths embody identities concurrently
-        and do not converge the declared edges themselves, so the wiring is
-        otherwise bring-up-order dependent. ``ensure_member`` already runs this
-        after every successful materialization, so it is redundant there. With
-        no declared wiring the report is empty. Host ``topology_provider``
-        edges are converged by the identity plane on every restore and are not
-        this call's concern.
+        ``desired_edges`` is not a list of all live connections. On a classic
+        gateway, each successful worker-plane ensure reconciles declared wiring
+        regardless of spawn order. The definition policy unwires only edges it
+        wired itself; it does not claim a pair already wired by the host.
+        On an identity-first gateway, the dynamic input comes from the host
+        topology provider (or the identity runtime’s current desired edges)
+        together with operator topology changes. It can be empty even when
+        members are connected by ``role_wiring``. Read ``wired_to`` from
+        the member snapshot returned by ``await handle.get_member(member_id)``
+        for the recorded peers.
         """
         raw = await self._runtime._rpc("meta/reconcile_edges")
         return ReconcileEdgesReport.from_dict(raw)
@@ -4705,6 +5004,8 @@ class MobHandle:
                 "multipart RPC requires rust_http_base_url; start the gateway or call "
                 "runtime.set_rust_http_base('http://127.0.0.1:8081')"
             )
+        if isinstance(self._runtime, _MobView):
+            params = await self._runtime._addressed(method, params)
         request_id = _next_request_id(method)
         payload = _rpc_request(request_id, method, params)
         boundary = f"meta-{uuid.uuid4().hex}"
@@ -4778,16 +5079,36 @@ class MobHandle:
         event_types: list[str] | None = None,
         limit: int | None = None,
         after_seq: int | None = None,
+        mob_id: str | None = None,
     ) -> list[PersistedEvent]:
         """Query persisted operational events from the event log.
 
-        Returns an empty list if no event log is configured.
+        ``mob_id`` names the mob whose events are read, as
+        :meth:`query_mob_events` takes it in its query: the value you pass
+        is sent as given; without one the handle of a named mob sends its
+        own id, and the handle of the launch's own mob names no mob.
+
+        A query that names a mob needs the gateway's ``mob_addressing``
+        feature capability, on the handle of the launch's own mob too: an
+        earlier gateway would answer it without an error and for its own
+        mob, so without the capability the call raises
+        :class:`CapabilityUnavailableError` and the query is not sent. A
+        query that names no mob on that handle reads no capability.
+
+        Returns an empty list if no event log is configured, so an empty
+        result does not show that no event happened.
         """
         from .types import EventQuery, PersistedEvent
+        if mob_id is not None and not isinstance(self._runtime, _MobView):
+            # A named handle asks through its view; the launch's handle asks here.
+            await self._runtime._require_feature(
+                MOB_ADDRESSING, method="meta/query_events", without=_WITHOUT_MOB_ADDRESSING
+            )
         query = EventQuery(
             since_ms=since_ms,
             until_ms=until_ms,
             member_id=member_id,
+            mob_id=mob_id,
             event_types=event_types or [],
             limit=limit,
             after_seq=after_seq,
@@ -7463,6 +7784,354 @@ class MobHandle:
     # Alias for backward compatibility
     send_message = send
 
+    # -- The identity-first calls, for this handle's mob --------------------
+    #
+    # The runtime's calls by identity (``runtime.send``, ``dispatch``,
+    # ``grant_tool``, ...) address the mob the launch names. A handle offers
+    # the same calls for its own mob, under the runtime's names. Three of
+    # those names the handle has already for its mob-member calls
+    # (``send``, ``status``, ``reconcile``), so the runtime's three are here
+    # as ``send_identity``, ``status_identity`` and ``reconcile_identity``.
+    # ``realm_mcp_*`` and ``list_identities`` are the host's and stay on the
+    # runtime.
+
+    def agent(self, identity: str) -> IdentityAgentHandle:
+        """An identity-scoped agent handle for an identity of this handle's
+        mob: :meth:`MetaRuntime.agent`. Its ``send``, ``dispatch``, ``status``
+        and waits are the identity-first ones."""
+        return IdentityAgentHandle(self._runtime, identity)
+
+    @property
+    def identities(self) -> IdentitiesHandle:
+        """Long-term agents of this handle's mob (``meta/identity/*``):
+        :attr:`MetaRuntime.identities`."""
+        return IdentitiesHandle(self._runtime)
+
+    async def send_status(self, identity: str, session_id: str, input_id: str) -> Any:
+        """:meth:`MetaRuntime.send_status` for this handle's mob."""
+        return await self._runtime.send_status(identity, session_id, input_id)
+
+    async def dispatch(
+        self,
+        identity: str,
+        dispatch_input: Any,
+        *,
+        track_turn: bool = False,
+        expected_scope: Any = None,
+    ) -> Any:
+        """:meth:`MetaRuntime.dispatch` for this handle's mob."""
+        return await self._runtime.dispatch(
+            identity,
+            dispatch_input,
+            track_turn=track_turn,
+            expected_scope=expected_scope,
+        )
+
+    async def dispatch_text(
+        self,
+        identity: str,
+        text: str,
+        *,
+        origin: str = "system",
+        correlation_id: str | None = None,
+        idempotency_key: str | None = None,
+        track_turn: bool = False,
+        expected_scope: Any = None,
+    ) -> Any:
+        """:meth:`MetaRuntime.dispatch_text` for this handle's mob."""
+        return await self._runtime.dispatch_text(
+            identity,
+            text,
+            origin=origin,
+            correlation_id=correlation_id,
+            idempotency_key=idempotency_key,
+            track_turn=track_turn,
+            expected_scope=expected_scope,
+        )
+
+    async def recover_delivery(
+        self,
+        identity: str,
+        scope: Any,
+        *,
+        idempotency_key: str,
+        correlation_id: str,
+        timeout: float | None = None,
+    ) -> Any:
+        """:meth:`MetaRuntime.recover_delivery` for this handle's mob."""
+        return await self._runtime.recover_delivery(
+            identity,
+            scope,
+            idempotency_key=idempotency_key,
+            correlation_id=correlation_id,
+            timeout=timeout,
+        )
+
+    async def turn_result(self, identity: str, ticket: str) -> Any:
+        """:meth:`MetaRuntime.turn_result` for this handle's mob."""
+        return await self._runtime.turn_result(identity, ticket)
+
+    async def subscribe(self, identity: str) -> Any:
+        """:meth:`MetaRuntime.subscribe` for this handle's mob."""
+        return await self._runtime.subscribe(identity)
+
+    async def registered_spec(self, identity: str) -> RegisteredSpec:
+        """:meth:`MetaRuntime.registered_spec` for this handle's mob."""
+        return await self._runtime.registered_spec(identity)
+
+    async def inspect_identity(self, identity: str) -> Any:
+        """:meth:`MetaRuntime.inspect_identity` for this handle's mob."""
+        return await self._runtime.inspect_identity(identity)
+
+    async def completion_cursor(self, identity: str) -> CompletionCursor | None:
+        """:meth:`MetaRuntime.completion_cursor` for this handle's mob."""
+        return await self._runtime.completion_cursor(identity)
+
+    async def respawn(self, identity: str) -> Any:
+        """:meth:`MetaRuntime.respawn` for this handle's mob."""
+        return await self._runtime.respawn(identity)
+
+    async def retire(self, identity: str) -> Any:
+        """:meth:`MetaRuntime.retire` for this handle's mob."""
+        return await self._runtime.retire(identity)
+
+    async def reset(self, identity: str) -> Any:
+        """:meth:`MetaRuntime.reset` for this handle's mob."""
+        return await self._runtime.reset(identity)
+
+    async def delete_identity(self, identity: str) -> Any:
+        """:meth:`MetaRuntime.delete_identity` for this handle's mob."""
+        return await self._runtime.delete_identity(identity)
+
+    async def compact_member(
+        self,
+        identity: str,
+        *,
+        floor_tokens: int | None = None,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
+        """:meth:`MetaRuntime.compact_member` for this handle's mob."""
+        return await self._runtime.compact_member(
+            identity, floor_tokens=floor_tokens, timeout=timeout
+        )
+
+    async def wait_until_ready(
+        self,
+        identities: list[str],
+        *,
+        timeout: float = 60,
+        poll_interval: float = 1.5,
+    ) -> None:
+        """:meth:`MetaRuntime.wait_until_ready` for this handle's mob."""
+        return await self._runtime.wait_until_ready(
+            identities,
+            timeout=timeout,
+            poll_interval=poll_interval,
+        )
+
+    async def identity_bootstrap_status(self) -> IdentityBootstrapStatus:
+        """:meth:`MetaRuntime.identity_bootstrap_status` for this handle's mob."""
+        return await self._runtime.identity_bootstrap_status()
+
+    async def wait_identity_bootstrap(
+        self,
+        *,
+        timeout: float | None = None,
+        target: str = "materialized",
+    ) -> IdentityBootstrapStatus:
+        """:meth:`MetaRuntime.wait_identity_bootstrap` for this handle's mob."""
+        return await self._runtime.wait_identity_bootstrap(timeout=timeout, target=target)
+
+    async def activate_member_instruction(
+        self,
+        identity: str,
+        activation: dict[str, Any],
+        *,
+        transport_timeout: float | None = None,
+    ) -> dict[str, Any]:
+        """:meth:`MetaRuntime.activate_member_instruction` for this handle's mob."""
+        return await self._runtime.activate_member_instruction(
+            identity,
+            activation,
+            transport_timeout=transport_timeout,
+        )
+
+    async def member_instruction_activations(
+        self,
+        identity: str,
+        *,
+        namespace: str | None = None,
+        key: str | None = None,
+        offset: int | None = None,
+        limit: int | None = None,
+    ) -> dict[str, Any]:
+        """:meth:`MetaRuntime.member_instruction_activations` for this handle's mob."""
+        return await self._runtime.member_instruction_activations(
+            identity,
+            namespace=namespace,
+            key=key,
+            offset=offset,
+            limit=limit,
+        )
+
+    async def set_instruction(
+        self,
+        namespace: str,
+        key: str,
+        revision: int,
+        body: str,
+        target: dict[str, Any],
+        *,
+        content_sha256: str | None = None,
+    ) -> dict[str, Any]:
+        """:meth:`MetaRuntime.set_instruction` for this handle's mob."""
+        return await self._runtime.set_instruction(
+            namespace,
+            key,
+            revision,
+            body,
+            target,
+            content_sha256=content_sha256,
+        )
+
+    async def revoke_instruction(
+        self,
+        namespace: str,
+        key: str,
+        revision: int,
+    ) -> dict[str, Any]:
+        """:meth:`MetaRuntime.revoke_instruction` for this handle's mob."""
+        return await self._runtime.revoke_instruction(namespace, key, revision)
+
+    async def instruction_status(
+        self,
+        *,
+        namespace: str | None = None,
+        key: str | None = None,
+        identity: str | None = None,
+        profile: str | None = None,
+        offset: int | None = None,
+        limit: int | None = None,
+    ) -> dict[str, Any]:
+        """:meth:`MetaRuntime.instruction_status` for this handle's mob."""
+        return await self._runtime.instruction_status(
+            namespace=namespace,
+            key=key,
+            identity=identity,
+            profile=profile,
+            offset=offset,
+            limit=limit,
+        )
+
+    async def prune_member_system_rows(
+        self,
+        identity: str,
+        remove: list[dict[str, Any]],
+        *,
+        retire_superseded_activation_bodies: bool = False,
+        expected_parent_revision: str | None = None,
+        note: str | None = None,
+    ) -> dict[str, Any]:
+        """:meth:`MetaRuntime.prune_member_system_rows` for this handle's mob."""
+        return await self._runtime.prune_member_system_rows(
+            identity,
+            remove,
+            retire_superseded_activation_bodies=retire_superseded_activation_bodies,
+            expected_parent_revision=expected_parent_revision,
+            note=note,
+        )
+
+    async def grant_tool(
+        self,
+        identity: str,
+        *,
+        tool: str | None = None,
+        family: str | None = None,
+        duration_ms: int | None = None,
+        expires_at_ms: int | None = None,
+        reason: str | None = None,
+        decision_ref: str | None = None,
+    ) -> dict[str, Any]:
+        """:meth:`MetaRuntime.grant_tool` for this handle's mob."""
+        return await self._runtime.grant_tool(
+            identity,
+            tool=tool,
+            family=family,
+            duration_ms=duration_ms,
+            expires_at_ms=expires_at_ms,
+            reason=reason,
+            decision_ref=decision_ref,
+        )
+
+    async def revoke_tool_grant(
+        self, grant_id: str, *, reason: str | None = None
+    ) -> dict[str, Any]:
+        """:meth:`MetaRuntime.revoke_tool_grant` for this handle's mob."""
+        return await self._runtime.revoke_tool_grant(grant_id, reason=reason)
+
+    async def list_tool_grants(
+        self, identity: str, *, include_ended: bool = False
+    ) -> dict[str, Any]:
+        """:meth:`MetaRuntime.list_tool_grants` for this handle's mob."""
+        return await self._runtime.list_tool_grants(identity, include_ended=include_ended)
+
+    async def tool_grant_audit(
+        self,
+        identity: str,
+        *,
+        after_sequence: int | None = None,
+        limit: int | None = None,
+    ) -> dict[str, Any]:
+        """:meth:`MetaRuntime.tool_grant_audit` for this handle's mob."""
+        return await self._runtime.tool_grant_audit(
+            identity,
+            after_sequence=after_sequence,
+            limit=limit,
+        )
+
+    async def send_identity(
+        self,
+        identity: str,
+        content: "str | list",
+        *,
+        track_turn: bool = False,
+        expected_spec_digest: str | None = None,
+        idempotency_key: str | None = None,
+        handling_mode: str | None = None,
+    ) -> Any:
+        """Send to an identity of this handle's mob: :meth:`MetaRuntime.send`
+        (``meta/send``).
+
+        The handle's own :meth:`send` is the mob-member send
+        (``meta/send_message``), so the runtime's call has this name here.
+        """
+        return await self._runtime.send(
+            identity,
+            content,
+            track_turn=track_turn,
+            expected_spec_digest=expected_spec_digest,
+            idempotency_key=idempotency_key,
+            handling_mode=handling_mode,
+        )
+
+    async def status_identity(self, identity: str) -> Any:
+        """The status of an identity of this handle's mob:
+        :meth:`MetaRuntime.status` (``meta/status_identity``).
+
+        The handle's own :meth:`status` is the runtime status
+        (``meta/status``), so the runtime's call has this name here.
+        """
+        return await self._runtime.status(identity)
+
+    async def reconcile_identity(self) -> Any:
+        """Reconcile the identities of this handle's mob:
+        :meth:`MetaRuntime.reconcile` (``meta/reconcile_identity``).
+
+        The handle's own :meth:`reconcile` reconciles modules
+        (``meta/reconcile``), so the runtime's call has this name here.
+        """
+        return await self._runtime.reconcile()
+
     async def subscribe_agent(self, member_id: str) -> AsyncIterator[AgentEvent]:
         """Stream events for one agent. Pure observation."""
         bridge = self._runtime.sse_bridge()
@@ -7497,10 +8166,23 @@ class ToolCaller:
 
 
 class SseBridge:
-    """Bridge for streaming SSE from the Rust backend's HTTP server."""
+    """Bridge for streaming SSE from the Rust backend's HTTP server.
 
-    def __init__(self, runtime: MetaRuntime):
+    With ``mob_id`` the two streams are the named mob's: their URLs carry
+    ``?mob_id=``, after the gateway's ``mob_addressing`` capability was read.
+    """
+
+    def __init__(self, runtime: MetaRuntime, mob_id: str | None = None):
         self._runtime = runtime
+        self._mob_id = mob_id
+
+    async def _mob_query(self, route: str) -> str:
+        if self._mob_id is None:
+            return ""
+        await self._runtime._require_feature(
+            MOB_ADDRESSING, method=route, without=_WITHOUT_MOB_ADDRESSING
+        )
+        return "?mob_id=" + url_quote(self._mob_id, safe="")
 
     def _base_url(self) -> str:
         base = self._runtime.rust_http_base_url
@@ -7514,11 +8196,13 @@ class SseBridge:
 
     async def agent_events(self, agent_id: str) -> AsyncIterator[SseEvent]:
         url = f"{self._base_url()}/agents/{agent_id}/events"
+        url += await self._mob_query("GET /agents/{agent_id}/events")
         async for event in self._stream_sse(url):
             yield event
 
     async def mob_events(self) -> AsyncIterator[SseEvent]:
         url = f"{self._base_url()}/mob/events"
+        url += await self._mob_query("GET /mob/events")
         async for event in self._stream_sse(url):
             yield event
 

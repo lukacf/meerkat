@@ -3084,6 +3084,368 @@ async fn a_participant_of_an_activated_member_runs_when_the_host_opts_in() {
 }
 
 // ===========================================================================
+// A host that declares a default mob keeps one forked-participant table
+// ===========================================================================
+
+/// A fixture whose host declares a default mob and serves it: the fixture,
+/// the default mob's id and the file of its store. `persistent`: the mob has
+/// a store of its own, beside the state root; otherwise it lives in memory
+/// and the file is never made.
+async fn fixture_with_a_default_mob(
+    members: &[&str],
+    persistent: bool,
+) -> (CouncilFixture, meerkat_mob::MobId, std::path::PathBuf) {
+    let launch = meerkat_mob::MobId::from(format!(
+        "council-launch-{}",
+        &uuid::Uuid::new_v4().simple().to_string()[..12]
+    ));
+    let declared = launch.clone();
+    let fixture = CouncilFixture::new_with(role_script, move |state, state_root| {
+        let store = state_root
+            .parent()
+            .expect("the fixture root")
+            .join("launch.sqlite3");
+        state
+            .with_default_mob(if persistent {
+                meerkat_mob_mcp::DefaultMobDeclaration::persistent(declared, store)
+            } else {
+                meerkat_mob_mcp::DefaultMobDeclaration::in_memory(declared)
+            })
+            .expect("the default mob is declared once")
+    });
+    let store = fixture.root.join("launch.sqlite3");
+    fixture
+        .state
+        .serve_default_mob(council_definition(launch.as_str()))
+        .await
+        .expect("the launch creates its default mob");
+    for member in members {
+        fixture
+            .state
+            .mob_spawn(
+                &launch,
+                ProfileName::from("participant"),
+                identity(member),
+                Some(meerkat_mob::MobRuntimeMode::TurnDriven),
+                Some(meerkat_mob::MobBackendKind::Session),
+                None,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("spawn default mob member {member}: {error}"));
+    }
+    (fixture, launch, store)
+}
+
+/// The forked-participant table of the store file at `path`.
+fn table_of(path: &std::path::Path) -> Arc<dyn meerkat_mob::store::ForkedParticipantStore> {
+    Arc::new(
+        meerkat_mob::store::SqliteForkedParticipantStore::open(path)
+            .expect("open the store file's forked-participant table"),
+    )
+}
+
+/// Whether both `table` and the set's own table hold the capability of
+/// council `council_id`'s participant `order`.
+async fn capability_is_in_the_one_table(
+    fixture: &CouncilFixture,
+    table: &Arc<dyn meerkat_mob::store::ForkedParticipantStore>,
+    council_id: &meerkat_mob::temporary_council::TemporaryCouncilId,
+    order: u32,
+) -> bool {
+    let request_id = council_id.capability_request_id(order).expect("request id");
+    table
+        .load_by_request_id(&request_id)
+        .await
+        .expect("read the declared store's table")
+        .is_some()
+        && fixture
+            .state
+            .forked_participant_store_for_tests()
+            .load_by_request_id(&request_id)
+            .await
+            .expect("read the set's table")
+            .is_some()
+}
+
+/// A one-round council over the default mob's members `researcher` and
+/// `reviewer`.
+fn default_mob_council(
+    fixture: &CouncilFixture,
+    launch: &meerkat_mob::MobId,
+    label: &str,
+) -> TemporaryCouncilRequest {
+    TemporaryCouncilRequest::new(
+        fixture.council_id(label),
+        council_definition("template-is-replaced"),
+        vec![
+            TemporaryCouncilParticipantSpec::new(
+                0,
+                "analyst",
+                launch.clone(),
+                identity("researcher"),
+                identity("analyst"),
+                ProfileName::from("participant"),
+            ),
+            TemporaryCouncilParticipantSpec::new(
+                1,
+                "critic",
+                launch.clone(),
+                identity("reviewer"),
+                identity("critic"),
+                ProfileName::from("participant"),
+            ),
+        ],
+        "Should we ship the migration this week?",
+        bounds(1, 120),
+        MergeBackPolicy::NoMerge,
+    )
+}
+
+/// A council over members of the host's default mob seats their forked
+/// participants: the capabilities the default mob records for its members
+/// are found by the council the set runs, because the host has one
+/// forked-participant table, the declared store's.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_council_over_default_mob_members_finds_their_capabilities() {
+    let (fixture, launch, store) =
+        fixture_with_a_default_mob(&["researcher", "reviewer"], true).await;
+    let request = default_mob_council(&fixture, &launch, "default-mob");
+    let council_id = request.council_id.clone();
+    let outcome = fixture
+        .state
+        .temporary_council()
+        .run(request)
+        .await
+        .expect("the council over default mob members runs");
+    assert_eq!(
+        outcome.result.exit_reason,
+        TemporaryCouncilExitReason::Completed,
+        "the council seated both participants and ran its round"
+    );
+    assert!(
+        outcome.cleanup.settled(),
+        "cleanup debt: {:?}",
+        outcome.cleanup
+    );
+    let table = table_of(&store);
+    for order in 0..2 {
+        assert!(
+            capability_is_in_the_one_table(&fixture, &table, &council_id, order).await,
+            "the capability of default mob member {order} is in the declared store's table, which is the set's"
+        );
+    }
+    fixture.teardown().await;
+}
+
+/// A default mob that lives in memory has no table of its own: it uses the
+/// set's, so a council over its members seats them too, and no store file
+/// is made for it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_council_over_members_of_a_default_mob_in_memory_finds_their_capabilities() {
+    let (fixture, launch, store) =
+        fixture_with_a_default_mob(&["researcher", "reviewer"], false).await;
+    let request = default_mob_council(&fixture, &launch, "default-mob-in-memory");
+    let council_id = request.council_id.clone();
+    let outcome = fixture
+        .state
+        .temporary_council()
+        .run(request)
+        .await
+        .expect("the council over default mob members runs");
+    assert_eq!(
+        outcome.result.exit_reason,
+        TemporaryCouncilExitReason::Completed,
+        "the council seated both participants and ran its round"
+    );
+    let request_id = council_id.capability_request_id(0).expect("request id");
+    assert!(
+        fixture
+            .state
+            .forked_participant_store_for_tests()
+            .load_by_request_id(&request_id)
+            .await
+            .expect("read the set's table")
+            .is_some(),
+        "the capability is in the set's own table"
+    );
+    assert!(!store.exists(), "a default mob in memory has no store file");
+    fixture.teardown().await;
+}
+
+/// The same host's other mobs use that one table too: a council over
+/// members of a mob that is not the default mob records and finds their
+/// capabilities in the declared store's table.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_council_over_another_mobs_members_uses_the_declared_stores_table() {
+    let (fixture, _launch, store) = fixture_with_a_default_mob(&[], true).await;
+    fixture.seed_source_mob(&["researcher", "reviewer"]).await;
+    let request = two_participant_request(&fixture, "other-mob", MergeBackPolicy::NoMerge, 1, 120);
+    let council_id = request.council_id.clone();
+    let outcome = fixture
+        .state
+        .temporary_council()
+        .run(request)
+        .await
+        .expect("the council over another mob's members runs");
+    assert_eq!(
+        outcome.result.exit_reason,
+        TemporaryCouncilExitReason::Completed
+    );
+    assert!(
+        outcome.cleanup.settled(),
+        "cleanup debt: {:?}",
+        outcome.cleanup
+    );
+    let table = table_of(&store);
+    for order in 0..2 {
+        assert!(
+            capability_is_in_the_one_table(&fixture, &table, &council_id, order).await,
+            "the capability of participant {order} is in the declared store's table, which is the set's"
+        );
+    }
+    fixture.teardown().await;
+}
+
+/// An unfinished council over members of the default mob cannot be cleaned
+/// up before the launch has served that mob: its capabilities are the
+/// default mob's. The recovery sweep does not wait for the serve inside its
+/// pass, which would hold the recovery of every other council: it leaves
+/// that council unfinished and goes on, and takes it up once the launch has
+/// served.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unfinished_council_over_default_mob_members_does_not_hold_the_sweep() {
+    let launch = meerkat_mob::MobId::from(format!(
+        "council-launch-{}",
+        &uuid::Uuid::new_v4().simple().to_string()[..12]
+    ));
+    let declare =
+        |state: MobMcpState, state_root: &std::path::Path, launch: &meerkat_mob::MobId| {
+            state
+                .with_default_mob(meerkat_mob_mcp::DefaultMobDeclaration::persistent(
+                    launch.clone(),
+                    state_root
+                        .parent()
+                        .expect("the fixture root")
+                        .join("launch.sqlite3"),
+                ))
+                .expect("the default mob is declared once")
+        };
+    // The custody commit that records the council as running fails once:
+    // two capabilities and two seated members exist, and no sealed result.
+    let mut fixture = {
+        let launch = launch.clone();
+        CouncilFixture::new_with(role_script, move |state, root| {
+            let path = MobMcpState::persistent_forked_participant_store_path(root);
+            let inner: Arc<dyn meerkat_mob::store::TemporaryCouncilStore> = Arc::new(
+                meerkat_mob::store::SqliteTemporaryCouncilStore::open(&path)
+                    .expect("open durable council custody"),
+            );
+            declare(
+                state.with_temporary_council_store(Arc::new(OneShotFailingCouncilStore::new(
+                    inner, 8,
+                ))),
+                root,
+                &launch,
+            )
+        })
+    };
+    fixture
+        .state
+        .serve_default_mob(council_definition(launch.as_str()))
+        .await
+        .expect("the launch creates its default mob");
+    for member in ["researcher", "reviewer"] {
+        fixture
+            .state
+            .mob_spawn(
+                &launch,
+                ProfileName::from("participant"),
+                identity(member),
+                Some(meerkat_mob::MobRuntimeMode::TurnDriven),
+                Some(meerkat_mob::MobBackendKind::Session),
+                None,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("spawn default mob member {member}: {error}"));
+    }
+    let request = default_mob_council(&fixture, &launch, "interrupted-default-mob");
+    let id = request.council_id.clone();
+    let error = fixture
+        .state
+        .temporary_council()
+        .run(request)
+        .await
+        .expect_err("the injected custody fault aborts the owned task");
+    assert!(
+        matches!(error, TemporaryCouncilError::Store { .. }),
+        "unexpected error: {error:?}"
+    );
+    fixture.shut_down_predecessor().await;
+
+    let restarted =
+        fixture.restart_state_with(|state, state_root| declare(state, state_root, &launch));
+    drop(std::mem::replace(
+        &mut fixture.state,
+        Arc::clone(&restarted),
+    ));
+    let held = restarted.temporary_council_store_for_tests();
+    fixture.expire_claim_lease(&held, &id).await;
+
+    // The default mob awaits its launch's serve: the sweep returns.
+    let sweep = tokio::time::timeout(
+        Duration::from_secs(30),
+        restarted.temporary_council().sweep_unfinished(),
+    )
+    .await
+    .expect("the sweep does not wait for the launch's serve")
+    .expect("the sweep");
+    assert!(
+        sweep.recovered.is_empty(),
+        "the council stays unfinished while its source mob awaits its serve: {sweep:?}"
+    );
+    assert!(
+        restarted
+            .temporary_council()
+            .load(&id)
+            .await
+            .expect("load")
+            .expect("record present")
+            .result
+            .is_none(),
+        "nothing is sealed for it yet"
+    );
+
+    // The launch serves: the council is recovered, by the set's own sweep,
+    // which runs again when the serve ends, or by a sweep a caller runs.
+    restarted
+        .serve_default_mob(council_definition(launch.as_str()))
+        .await
+        .expect("the launch serves its default mob");
+    restarted
+        .temporary_council()
+        .sweep_unfinished()
+        .await
+        .expect("the sweep");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while restarted
+        .temporary_council()
+        .load(&id)
+        .await
+        .expect("load")
+        .expect("record present")
+        .result
+        .is_none()
+    {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the council is recovered once its source mob is served"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    fixture.teardown().await;
+}
+
+// ===========================================================================
 // Convener: a council a host runs directly has none
 // ===========================================================================
 

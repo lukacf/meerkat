@@ -532,6 +532,8 @@ mod completion_delivery {
                 notify_orchestrator_on_resume: false,
                 default_llm_client: Some(client),
             });
+            // The council rows seat an ordinary nested mob through the mob
+            // set by a host's create, as a member's create leaves one.
             let runtime = tokio::time::timeout(WAIT, Box::pin(MobRuntime::bootstrap(spec)))
                 .await
                 .expect("bounded completion fixture bootstrap")
@@ -1444,6 +1446,74 @@ mod completion_delivery {
         fixture.stop().await;
     }
 
+    /// Who a council's mob is private to is the same whenever it is read.
+    /// The create admission records it from the council's convener. A read
+    /// of the mob made later, with nothing kept for it (the first read
+    /// after a restart is one), takes the convener from the council's own
+    /// record and answers as the admission did: the mob of a council a
+    /// member private to a person convened is read again as private to
+    /// that person.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_council_mob_read_again_is_private_to_whoever_its_convener_is_private_to() {
+        use meerkat_mob::temporary_council::TemporaryCouncilId;
+
+        const OWNER: &str = "console-caller:v1:convener-owner";
+
+        let gate = TurnGate::new();
+        let _release = ReleaseOnDrop(Arc::clone(&gate));
+        let fixture = CompletionFixture::start(Arc::clone(&gate), &["alice"]).await;
+        seat_private_member(&fixture, "private-convener", OWNER).await;
+        let mob_id = fixture.runtime.handle().mob_id().to_string();
+        let owners = fixture.runtime.private_owners().clone();
+        let state = fixture
+            .runtime
+            .agent_mob_mcp_state()
+            .expect("final MCP state");
+
+        let surface = fixture.surface("private-convener", true).await;
+        let started = start_detached(
+            &surface,
+            "council",
+            council_tool_args(&mob_id, &[("alice", "analyst")]),
+        )
+        .await;
+        let council_id = started["council_id"].as_str().expect("council identity");
+        let job_id = started["job_id"].as_str().expect("council job id");
+        fixture
+            .wait_for_council_participant(&gate, council_id, job_id)
+            .await;
+        let council_mob = TemporaryCouncilId::new(council_id)
+            .expect("council identity")
+            .temporary_mob_id();
+        assert_eq!(
+            owners.recorded_mob_owner(council_mob.as_str()),
+            Some(Some(OWNER.to_string())),
+            "the create admission records the mob as private to the convener's person"
+        );
+
+        // Nothing is kept for the mob, as after a restart, and it is read
+        // again from its records.
+        let seated = state
+            .handle_for(&council_mob)
+            .await
+            .expect("the council's mob");
+        owners.forget_mob_in_tests(council_mob.as_str());
+        owners
+            .read_mob(&seated)
+            .await
+            .expect("the council's mob is read again");
+        assert_eq!(
+            owners.recorded_mob_owner(council_mob.as_str()),
+            Some(Some(OWNER.to_string())),
+            "read again, the council's mob is private to the convener's person as before"
+        );
+        gate.release();
+        fixture
+            .assert_delivered("private-convener", job_id, COUNCIL_SUMMARY)
+            .await;
+        fixture.stop().await;
+    }
+
     /// A shared member's council mob is private to no one, read while the
     /// council runs: its convener has no owner.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1490,6 +1560,23 @@ mod completion_delivery {
             owners.recorded_mob_owner(council.temporary_mob_id().as_str()),
             Some(None),
             "a shared member's council mob is private to no one"
+        );
+        // Read again with nothing kept for it, it is private to no one
+        // still: its convener's roster row names nobody.
+        let council_mob = council.temporary_mob_id();
+        let seated = state
+            .handle_for(&council_mob)
+            .await
+            .expect("the council's mob");
+        owners.forget_mob_in_tests(council_mob.as_str());
+        owners
+            .read_mob(&seated)
+            .await
+            .expect("the council's mob is read again");
+        assert_eq!(
+            owners.recorded_mob_owner(council_mob.as_str()),
+            Some(None),
+            "read again, a shared member's council mob is private to no one"
         );
         gate.release();
         fixture
@@ -1555,6 +1642,23 @@ mod completion_delivery {
             owners.recorded_mob_owner(hosted.temporary_mob_id().as_str()),
             Some(None),
             "a host-run council mob is private to no one"
+        );
+        // Read again with nothing kept for it, it is private to no one
+        // still: its record holds no convener.
+        let council_mob = hosted.temporary_mob_id();
+        let seated = state
+            .handle_for(&council_mob)
+            .await
+            .expect("the council's mob");
+        owners.forget_mob_in_tests(council_mob.as_str());
+        owners
+            .read_mob(&seated)
+            .await
+            .expect("the council's mob is read again");
+        assert_eq!(
+            owners.recorded_mob_owner(council_mob.as_str()),
+            Some(None),
+            "read again, a host-run council mob is private to no one"
         );
         gate.release();
         let outcome = tokio::time::timeout(WAIT, run)

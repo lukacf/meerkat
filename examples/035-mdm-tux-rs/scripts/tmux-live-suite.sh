@@ -38,7 +38,7 @@ api_key_var_for_provider() {
 default_live_provider_matrix() {
   export MDM_HIVE_MODEL="${MDM_HIVE_MODEL:-gemini-4-argon}"
   export MDM_HIVE_PROVIDER="${MDM_HIVE_PROVIDER:-gemini}"
-  export MDM_TARGET_A_MODEL="${MDM_TARGET_A_MODEL:-gpt-6-astra}"
+  export MDM_TARGET_A_MODEL="${MDM_TARGET_A_MODEL:-gpt-6.2-astra}"
   export MDM_TARGET_A_PROVIDER="${MDM_TARGET_A_PROVIDER:-openai}"
   export MDM_TARGET_B_MODEL="${MDM_TARGET_B_MODEL:-claude-opus-5-5}"
   export MDM_TARGET_B_PROVIDER="${MDM_TARGET_B_PROVIDER:-anthropic}"
@@ -77,11 +77,7 @@ wait_for_tux() {
   exit 1
 }
 
-send_prompt() {
-  local prompt="$1"
-  tmux send-keys -t "$session_name" -l "$prompt"
-  tmux send-keys -t "$session_name" Enter
-}
+source "$script_dir/tux-prompt-input.sh"
 
 start_tux_tmux() {
   local cmd
@@ -134,7 +130,7 @@ scheduled_file="/tmp/tux-live-scheduled-${run_id}.txt"
 nonce="target-b-to-a-live-suite-${run_id}"
 
 echo "Hive -> target-a request"
-send_prompt "LIVE SUITE ${run_id}: call peers, then send_request to target-a with handling_mode steer, intent \"execute_task\", params {\"instruction\":\"write ${hive_file} containing the exact words hive request ok ${run_id} plus hostname, then respond completed JSON\"}. Report the send status."
+send_prompt "LIVE SUITE ${run_id}: call peers, then send_message to target-a with handling_mode steer and this body: \"write ${hive_file} containing the exact words hive request ok ${run_id} plus hostname\". Report the send status."
 sleep "$hive_wait"
 verify_file_contains target-a "$hive_file" "hive request ok ${run_id}"
 

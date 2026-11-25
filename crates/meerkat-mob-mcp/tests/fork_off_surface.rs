@@ -1676,6 +1676,209 @@ async fn the_job_owner_waits_for_the_restore_before_calling_a_fork_job_absent() 
     fixture.teardown().await;
 }
 
+/// Under the on-demand restore policy the mob that ran a fork_off job can be
+/// known and not loaded when its completion is verified. The job owner then
+/// answers that it cannot tell yet, never that the job is absent: an absent
+/// job refuses the completion for good, and the mob that holds it is only
+/// dormant. Once the mob is loaded the job is found where it ran, and with
+/// every mob loaded a job none holds is absent.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fork_job_of_a_dormant_mob_waits_and_is_found_once_its_mob_is_loaded() {
+    let fixture = CouncilFixture::new_runtime_backed(routed_script(
+        RequestLog::default(),
+        vec![(CHILD_TASK, ChildReply::Text(CHILD_REPLY))],
+    ));
+    fixture.seed_source_mob(&["forker"]).await;
+    let forker = member_surface(&fixture, "forker").await;
+    let job_id = start_detached_fork(
+        &forker,
+        "dormant-child",
+        fork_args("dormant-child", CHILD_TASK),
+    )
+    .await;
+    wait_for_completion(&fixture, &forker.session, &job_id).await;
+
+    let bindings = Arc::clone(
+        &fixture
+            .continuations
+            .as_ref()
+            .expect("continuations")
+            .bindings,
+    );
+    let lookup = |job_id: &str| {
+        let (bindings, job_id) = (Arc::clone(&bindings), job_id.to_string());
+        async move {
+            bindings
+                .job_source()
+                .expect("a bound job owner")
+                .retained_job(&meerkat::ContinuationProducer::ForkOff, &job_id)
+                .await
+        }
+    };
+
+    // The process dies; the restarted host restores on demand.
+    fixture.shut_down_predecessor().await;
+    let restarted = fixture.restart_state_on_demand();
+    let inventory = restarted.mob_inventory().await.expect("the census");
+    assert!(
+        !inventory.dormant.is_empty(),
+        "the job's mob is known and not loaded after the restart: managed {:?}",
+        inventory.managed
+    );
+    assert!(
+        matches!(
+            lookup(&job_id).await,
+            meerkat::RetainedJobLookup::Unavailable(_)
+        ),
+        "a job whose mob is not loaded waits; it is never absent"
+    );
+    assert!(
+        matches!(
+            lookup("never-forked").await,
+            meerkat::RetainedJobLookup::Unavailable(_)
+        ),
+        "no job is absent while a mob that may hold it is not loaded"
+    );
+
+    // Something addresses the mob, and it is loaded.
+    for mob_id in &inventory.dormant {
+        restarted.mob_status(mob_id).await.expect("load the mob");
+    }
+    match lookup(&job_id).await {
+        meerkat::RetainedJobLookup::Found(facts) => {
+            assert_eq!(facts.owner_session_id, forker.session);
+        }
+        _ => panic!("the loaded mob confirms its job"),
+    }
+    assert!(
+        matches!(
+            lookup("never-forked").await,
+            meerkat::RetainedJobLookup::Absent
+        ),
+        "with every mob loaded, a job none holds is absent"
+    );
+    fixture.teardown().await;
+}
+
+/// A member convenes a detached council whose participants live in another
+/// mob. Its turn is over and its own mob holds no work, so the idle unload
+/// makes that mob dormant while the council still runs. The council's outcome
+/// is owed to the member all the same: the completion loads the member's mob
+/// and reaches the member. It is never refused as owed to an owner that is
+/// gone because the owner's mob was not loaded.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_council_convened_by_a_member_reaches_it_after_its_mob_was_unloaded() {
+    let log = RequestLog::default();
+    let gate = TurnGate::new();
+    let _release_on_exit = OpenOnDrop(gate.clone());
+    let inner = routed_script(log.clone(), Vec::new());
+    let gate_for_script = gate.clone();
+    // The participants' discussion turns wait on the gate, so the council is
+    // still running when the convener's mob is unloaded.
+    let fixture = CouncilFixture::new_runtime_backed(move |request: &LlmRequest| {
+        if !user_text(request).contains("bounded plain-text summary")
+            && let Some(role) = role_in_request(request)
+        {
+            return ScriptedTurn::Gated(gate_for_script.clone(), format!("position from {role}"));
+        }
+        inner(request)
+    });
+    // A host that restores its mobs on demand. The participants' mob, and the
+    // convener's own mob beside it, are created in it.
+    let lazy = fixture.restart_state_on_demand();
+    let source = fixture.source_mob_id();
+    let convener_mob = meerkat_mob::MobId::from(format!("council-convener-{}", fixture.scope));
+    for (mob_id, members) in [
+        (&source, &["alice", "bob"][..]),
+        (&convener_mob, &["convener"][..]),
+    ] {
+        lazy.mob_create_definition(council_definition(mob_id.as_str()))
+            .await
+            .expect("create the mob");
+        for member in members {
+            lazy.mob_spawn(
+                mob_id,
+                meerkat_mob::ProfileName::from("participant"),
+                AgentIdentity::from(*member),
+                Some(meerkat_mob::MobRuntimeMode::TurnDriven),
+                Some(meerkat_mob::MobBackendKind::Session),
+                None,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("seat {member}: {error}"));
+        }
+    }
+    let convener_session = lazy
+        .handle_for(&convener_mob)
+        .await
+        .expect("the convener's mob")
+        .resolve_bridge_session_id(&AgentIdentity::from("convener"))
+        .await
+        .expect("the convener's session");
+    // The participants' mob stays loaded: a host service holds it.
+    let _participants_held = lazy
+        .handle_for(&source)
+        .await
+        .expect("the participants' mob")
+        .acquire_owner()
+        .expect("an owner lease on the participants' mob");
+    let convener = bind_surface(
+        &lazy,
+        convener_session,
+        convener_authority(
+            source.as_str(),
+            live_incarnation(&lazy, source.as_str()).await,
+        ),
+    );
+
+    let started = call(&convener.surface, "council", council_args(&fixture, None))
+        .await
+        .expect("council starts");
+    assert_eq!(started["status"], "running", "{started}");
+    let job_id = started["job_id"].as_str().expect("job id").to_string();
+    gate.wait_entered(1).await;
+
+    // A member that waits for a detached council holds no work in its mob:
+    // the mob is idle, and the unload pass makes it dormant.
+    let unloaded = lazy.unload_idle_mobs_for_tests().await;
+    assert_eq!(
+        unloaded,
+        vec![convener_mob.clone()],
+        "the convener's mob is idle while its council runs, and is unloaded"
+    );
+    assert!(
+        lazy.mob_inventory()
+            .await
+            .expect("the inventory reads")
+            .dormant
+            .contains(&convener_mob),
+        "the convener's mob is dormant"
+    );
+    gate.open();
+
+    let record = wait_for_completion(&fixture, &convener.session, &job_id).await;
+    assert_eq!(
+        record.status,
+        BackgroundJobTerminalStatus::Completed,
+        "the council's outcome reaches the convener: {record:?}"
+    );
+    assert!(
+        lazy.mob_inventory()
+            .await
+            .expect("the inventory reads")
+            .managed
+            .iter()
+            .any(|(mob_id, _)| mob_id == &convener_mob),
+        "the completion loaded the convener's mob"
+    );
+    // The fixture's own state was never used: the mobs are this state's.
+    for (mob_id, handle) in lazy.mob_handles_snapshot().await.unwrap_or_default() {
+        if lazy.mob_destroy(&mob_id).await.is_err() {
+            let _ = handle.shutdown().await;
+        }
+    }
+}
+
 /// A continuation owed to a member of a mob this host does not manage waits
 /// (the host may insert the mob's handle later), but only while the mob can
 /// still come back. A mob this state destroyed, or one missing once the mob

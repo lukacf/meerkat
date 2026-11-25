@@ -268,7 +268,7 @@ the exact-tree attestation; nightly and the release tag carry the rest):
 | `ci-lanes-selftest` and `path-classifier-selftest`: the lane and path classifier self-tests (`make ci-lanes-selftest`, `make path-classifier-selftest`), each in a job of its own beside `fmt-governance` | yes | yes | - | - |
 | `ratchets`: schema/SDK/RPC/REST freshness when contract paths changed; machine and protocol drift when machine authority changed; machine poster coverage and freshness when machine authority or a poster input (`scripts/machine-posters-changed`) changed; the runtime authority bypass audit (`runtime-authority-bypass`, which reads every production Rust source of the workspace) when Rust, machine authority or a dogma document changed | yes | yes | - | - |
 | `governance-gates`: the typed governance gates (`rmat-audit`, whose three audits run concurrently, and `seam-inventory`), and beside it `governance-docs-gate` (`machine-authority-docs-gate`), when machine authority or a dogma document changed | yes | yes | - | - |
-| `tlc-audits`: the twenty-four hand-written TLC audit shards (`audits-a` through `audits-o`, and `audits-q` through `audits-y`) on a machine-authority change | yes | yes | bounded TLC sweep (`make machine-verify`) | Bazel graph |
+| `tlc-audits`: the twenty-seven hand-written TLC audit shards (`audits-a` through `audits-o`, `audits-q` through `audits-z`, `audits-aa` and `audits-ab`) on a machine-authority change | yes | yes | bounded TLC sweep (`make machine-verify`) | Bazel graph |
 | `clippy` per shard of every changed package: `--no-deps --all-features -D warnings` over every target; a pull request lints the meerkat-mob chain's lib and bin targets only, and one that invalidates meerkat-mob's build (workspace mode, or a change to meerkat-mob or a crate its library compiles) leaves the Clippy of rkat, meerkat-integration-tests and meerkat-rpc to the push | yes | yes | whole workspace (`make lint`) | Bazel clippy lanes |
 | `unit` per shard: `nextest --lib --bins --profile ci-pr` (a row names only the target kinds its packages have: the binary-only rkat and surface-build-fixtures run `--bins`) for changed packages outside the meerkat-mob compile chain, plus their feature-gated suites (`FEATURE_UNIT_SUITES`; a pull request skips those marked `pullRequest: false`; a suite with known reds runs without them, then needs each one that fails every time to still fail); meerkat-runtime's lane runs as two rows that each build it and run one `--partition hash:k/2` of its tests (`PARTITIONED_UNIT_PACKAGES`); a push runs these rows in `main-unit`, verbatim (`unit_rows_on_main`) | yes | in `main-unit` | `make test-unit` | Bazel unit lanes |
 | `main-unit` per shard: `nextest --lib --bins` over the whole workspace, including the meerkat-mob chain (mob, mob-adaptive, mob-mcp, mob-pack, rpc, rest, mcp-server, rkat, web-runtime, integration-tests, machine-codegen: the crates whose unit-lane build graph contains mob); the `unit` rows a push would have run are its first rows, the same shards (Cargo unifies features across the packages of one run) and suites, and the rest of the workspace is packed around them | deferred | yes | `make test-unit` | Bazel unit lanes |
@@ -283,6 +283,7 @@ the exact-tree attestation; nightly and the release tag carry the rest):
 | `connect-checks`: Connect's build receipt, packaging, library release, candidate and installed-acceptance script tests, product and starter preparation tests, immutable preparation and product readback tests, hosted MCP callback tests, docs check and TypeScript SDK suite (with the Console panel test) | on a change under `connect/` | same | - | - |
 | `sdk-host`: Python + TypeScript SDK suites | deferred | yes | yes, plus Web SDK | Bazel SDK suites |
 | `example-web`: build the `sdks/web` wasm runtime once (wasm-pack 0.13.1, no wasm-opt), then run examples 031, 032 and 033 in Playwright Chromium | when `sdks/web/`, `crates/meerkat-web-runtime/`, `crates/meerkat-contracts/` or those examples change; when the change also reaches a crate the runtime builds on (or plans the workspace), only the Web SDK's `npm test`, and the wasm build and browser suites run on the push | yes | - | - |
+| the standalone example workspaces 034 and 035 (`make -C examples standalone`, then 035's script fixtures) and Meta example pack 006's keyless script (Python and TypeScript, twice each): measured into the job summary (build, test and install seconds apart; each build cold or warm from the compiler cache's own counters; queue seconds are not printed there: a first night's evaluation reads them from the job record, created to started) and read by no gate, so a pull request that changes them gets no result of these tests before it merges. A failure is one line in the "Nightly failures" issue; an infrastructure fault stays with the CI owner, who reports a content failure (a failing test of these examples) to the maintainers with the run, the job, the revision and the failing command or assertion, to be routed to the Examples owner. Not run: any lint of 034 and 035 (035's own all-target check included), any feature set but the default, 035's container suites, every other Meta example pack | - | - | yes | - |
 | dense Mob topology, feature matrices, minimal builds, audit, `e2e-system`, release packaging | - | - | yes | BuildBuddy `full-fresh` graph |
 | `gate` (`CI gate`): fail-closed aggregate; on pull requests a 1080-second lane execution budget and a 1200-second push-to-terminal runaway ceiling, both excluding runner queue, which is reported as a warning; it prints what the pull request left to the push and refuses a push plan that left anything; schema-4 attestation on `main` | yes | yes (no budget) | - | consumed by `require_ci_green` |
 
@@ -615,11 +616,12 @@ demand (`.github/workflows/nightly.yml`) on GitHub-hosted runners:
 
 ### Published crates standalone
 
-Since 0.9.4 every crate the release publishes passes its own tests in its
-unpacked package. `.github/workflows/published-crates-standalone.yml` runs
-daily, after the nightly chains, and on dispatch
+The Core standalone census tests the unpacked crates listed in
+`scripts/release-rust-crates.sh`. To see whether the tests passed, check the
+census results for the revision you are using. The workflow
+`.github/workflows/published-crates-standalone.yml` runs daily and on dispatch
 (`gh workflow run published-crates-standalone.yml --ref <branch>`). It
-packages every release crate and unpacks the packages into a synthetic
+packages the Core release crates and unpacks them into a synthetic
 workspace. Per crate, without sibling feature unification, it runs plain
 `cargo test` with the feature set the crate's
 `[package.metadata.meerkat.standalone-tests]` publishes (the crate's README
@@ -638,6 +640,14 @@ declared in `ci/standalone-workspace-only.toml`, a declared test must be such
 a test, and the feature may gate test code only, so a gated test without its
 declaration fails the pull request instead of the next census. Publication
 does not wait for the census yet.
+
+Meta is not part of the Core census. Its published-floor check builds what
+a downstream application uses: the unpacked libraries and binaries, with
+Core dependencies resolved from crates.io. It runs `cargo check` in PR mode
+and `cargo build` in release mode, both with `--workspace --lib --bins`.
+Neither command runs tests. To run the Meta tests, use the repository
+checkout: the published `meerkat-meta` 0.9.18 archive omits the `tests/`
+directory and the test-only source files named in its package manifest.
 
 `rkat`'s docs-examples test parses
 `crates/meerkat-cli/tests/fixtures/doc_examples.txt`, which the package

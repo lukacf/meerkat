@@ -200,7 +200,7 @@ describe("storage census model", () => {
 
   it("rides StatusResult when present", () => {
     const status = parseStatusResult({
-      contract_version: "0.5.0",
+      contract_version: "0.6.0",
       running: true,
       loaded_modules: [],
       storage: CENSUS_WIRE,
@@ -214,7 +214,7 @@ describe("storage census model", () => {
 
   it("ignores StatusResult fields it does not model", () => {
     const status = parseStatusResult({
-      contract_version: "0.5.0",
+      contract_version: "0.6.0",
       running: true,
       loaded_modules: [],
       reserved_identity_members: [
@@ -222,7 +222,7 @@ describe("storage census model", () => {
       ],
     });
     assert.deepEqual(status, {
-      contractVersion: "0.5.0",
+      contractVersion: "0.6.0",
       running: true,
       loadedModules: [],
     });
@@ -230,7 +230,7 @@ describe("storage census model", () => {
 
   it("ignores the non-expiring console principals StatusResult does not model", () => {
     const status = parseStatusResult({
-      contract_version: "0.5.0",
+      contract_version: "0.6.0",
       running: true,
       loaded_modules: [],
       non_expiring_console_principals: [
@@ -238,7 +238,7 @@ describe("storage census model", () => {
       ],
     });
     assert.deepEqual(status, {
-      contractVersion: "0.5.0",
+      contractVersion: "0.6.0",
       running: true,
       loadedModules: [],
     });
@@ -246,14 +246,14 @@ describe("storage census model", () => {
 
   it("ignores the mob failure StatusResult does not model", () => {
     const status = parseStatusResult({
-      contract_version: "0.5.0",
+      contract_version: "0.6.0",
       running: true,
       loaded_modules: [],
       mob_state: "Some(Running)",
       mob_failure: "the mob's actor stopped",
     });
     assert.deepEqual(status, {
-      contractVersion: "0.5.0",
+      contractVersion: "0.6.0",
       running: true,
       loadedModules: [],
     });
@@ -261,7 +261,7 @@ describe("storage census model", () => {
 
   it("is absent from StatusResult when the wire has none", () => {
     const status = parseStatusResult({
-      contract_version: "0.5.0",
+      contract_version: "0.6.0",
       running: true,
       loaded_modules: [],
     });
@@ -270,7 +270,7 @@ describe("storage census model", () => {
 
   it("rides CapabilitiesResult when present", () => {
     const capabilities = parseCapabilitiesResult({
-      contract_version: "0.5.0",
+      contract_version: "0.6.0",
       methods: ["meta/status"],
       loaded_modules: [],
       storage: CENSUS_WIRE,

@@ -59,6 +59,30 @@ impl ConsoleScheduleDoor for NoSends {
         self.a_person_decides
     }
 
+    fn refuses_every_caller(&self) -> bool {
+        false
+    }
+
+    async fn send(&self, _send: &ConsoleScheduledSend, _delivery_key: &str) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+/// The send path of a Console that requires sign-in and trusts no signing
+/// key: it is one a person decides on, as the check that holds a set reads
+/// it, and it refuses every caller.
+struct AdmitsNobody;
+
+#[async_trait::async_trait]
+impl ConsoleScheduleDoor for AdmitsNobody {
+    fn takes_a_persons_decision(&self) -> bool {
+        true
+    }
+
+    fn refuses_every_caller(&self) -> bool {
+        true
+    }
+
     async fn send(&self, _send: &ConsoleScheduledSend, _delivery_key: &str) -> Result<(), String> {
         Ok(())
     }
@@ -2043,6 +2067,91 @@ async fn a_call_without_a_human_surface_holds_nothing() {
     assert_eq!(cleared, AskUserResult::no_human_surface());
     assert_eq!(emptied, AskUserResult::no_human_surface());
     assert_eq!(open.len(), 1, "only the whole surface held a set");
+}
+
+/// What a Console says of itself when it requires sign-in and trusts no
+/// signing key: it refuses every caller, and it is still one that
+/// identifies people, so a set asked there is held as before. A Console
+/// with a trusted key, and one that requires no sign-in, refuse nobody.
+#[test]
+fn a_console_that_trusts_no_signing_key_refuses_every_caller_and_still_holds_sets() {
+    let enforced = state().decisions;
+    let mut keyless = state().decisions;
+    keyless.trusted_oidc.jwks_json = r#"{"keys":[]}"#.to_string();
+    let mut open = state().decisions;
+    open.console.require_app_auth = false;
+
+    assert!(!crate::runtime::console_refuses_every_caller(&enforced));
+    assert!(crate::runtime::console_refuses_every_caller(&keyless));
+    assert!(!crate::runtime::console_refuses_every_caller(&open));
+    assert!(
+        crate::runtime::console_takes_a_persons_decision(&keyless, None),
+        "the check that holds a set still reads such a Console as one a person decides on"
+    );
+}
+
+/// The note the asking agent's model reads with `asked`. Where the Console
+/// refuses every caller the set is held as on any Console and the outcome is
+/// `asked`, but the note does not say that a person is being asked: it says
+/// that no person can answer in the Console as it is configured, that the
+/// program that embeds the gateway may still answer, and until when. On a
+/// Console a person can reach the note is the stock one, byte for byte.
+#[tokio::test]
+async fn the_asked_note_says_who_can_answer_where_the_console_admits_nobody() {
+    const STOCK_NOTE: &str = "A person is being asked. This call does not wait for them: the answers arrive \
+         later as an `ask_user_result` input with this `request_id`, by `answer_by` at the \
+         latest.";
+    let state_dir = tempfile::tempdir().expect("state directory");
+    let name = "questions-console-admits-nobody";
+    let decisions = decisions_in(state_dir.path(), name, true);
+    let reachable = ConsoleScheduleDoorSlot::default();
+    reachable.install(Arc::new(NoSends {
+        a_person_decides: true,
+    }));
+    let closed = ConsoleScheduleDoorSlot::default();
+    closed.install(Arc::new(AdmitsNobody));
+    let host_over = |doors: &ConsoleScheduleDoorSlot| {
+        let slot = AskUserSlot::default();
+        slot.fill(AskUserSurface::new(decisions.clone(), doors.served(), name));
+        MemberAskUserHost::new(slot, name.to_string(), ASKER.to_string())
+    };
+
+    let on_a_reachable_console = ask(&host_over(&reachable), "call-1", 3600).await;
+    let where_nobody_is_admitted = ask(&host_over(&closed), "call-2", 3600).await;
+    let held = crate::ask_user::open_question_sets(&decisions)
+        .expect("read")
+        .len();
+
+    // Both sets are held, and both calls answer `asked` with a deadline.
+    assert_eq!(held, 2, "each call holds its set");
+    for result in [&on_a_reachable_console, &where_nobody_is_admitted] {
+        assert_eq!(result.outcome, AskUserOutcome::Asked, "{result:?}");
+        assert_eq!(result.outcome.as_str(), "asked");
+        assert!(result.request_id.is_some(), "{result:?}");
+        assert!(result.answer_by.is_some(), "{result:?}");
+    }
+    assert_eq!(on_a_reachable_console.note, STOCK_NOTE);
+    let note = where_nobody_is_admitted.note.as_str();
+    assert!(
+        note.contains("No person can answer them in this host's Console"),
+        "the note says the Console cannot: {note}"
+    );
+    assert!(
+        note.contains("program that embeds this gateway may still answer"),
+        "the note names who may answer: {note}"
+    );
+    assert!(
+        note.contains("`answer_by`"),
+        "the note names the deadline: {note}"
+    );
+    assert!(
+        !note.contains("A person is being asked"),
+        "the note does not say that a person is being asked: {note}"
+    );
+    let lowered = note.to_lowercase();
+    for never in ["nobody can answer", "no one can answer", "no_human_surface"] {
+        assert!(!lowered.contains(never), "the note says `{never}`: {note}");
+    }
 }
 
 /// The names of the decision store's files under `dir`: the store itself

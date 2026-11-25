@@ -1,7 +1,7 @@
 import { approvalMatchesConversation, type ApprovalAction, type PendingApprovalSnapshot } from "../../../console-core/src/pending-approvals";
 import { hostDecideLinks } from "../../../console-core/src/host-attention";
 import { ApprovalCard, useHostDecideSources } from "./approval-card";
-import { ConversationQuestionSets } from "./question-set-card";
+import { ConversationQuestionReceipts, ConversationQuestionSets } from "./question-set-card";
 
 export type ConversationApprovalProps = {
   approvalSnapshot?: PendingApprovalSnapshot;
@@ -30,16 +30,24 @@ export function pendingApprovalTurns(
       ? [index] : []));
 }
 
-export function ConversationApprovals({ approvalSnapshot, approvalIdentity, onApprovalDecision, conversationId, interactionIds }: ConversationApprovalProps & {
+export function ConversationApprovals({ approvalSnapshot, approvalIdentity, onApprovalDecision, conversationId, interactionIds, questionReceiptIds }: ConversationApprovalProps & {
   conversationId?: string;
   /** Omit for conversation-only provenance, supply exact IDs for turn placement. */
   interactionIds?: readonly string[];
+  /** The question sets this console answered or dismissed that the
+   *  conversation draws here as receipts: after the turn they were closed
+   *  after, or, in a conversation with no turn, in this place. None are
+   *  drawn where a host names none. */
+  questionReceiptIds?: readonly string[];
 }) {
   const decideSources = useHostDecideSources();
-  // The question sets the conversation's agent asked sit with the
-  // conversation's own approvals (the placement without interaction IDs),
-  // above them, once per conversation. They come from QuestionSetsProvider.
-  const questionSets = interactionIds ? null : <ConversationQuestionSets identity={approvalIdentity} />;
+  // The question sets the conversation's agent asked that still need the
+  // person sit with the conversation's own approvals (the placement without
+  // interaction IDs), above them, once per conversation. They come from
+  // QuestionSetsProvider. The receipts of the closed ones come first: they
+  // are the past of this place.
+  const receipts = <ConversationQuestionReceipts identity={approvalIdentity} pendingIds={questionReceiptIds} />;
+  const questionSets = interactionIds ? receipts : <>{receipts}<ConversationQuestionSets identity={approvalIdentity} /></>;
   if (!approvalSnapshot || !approvalIdentity) return questionSets;
   const requests = approvalSnapshot.requests.filter((request) =>
     Boolean(request.origin?.interactionId) === Boolean(interactionIds)

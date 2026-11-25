@@ -14,6 +14,10 @@ mod test_mcp_fixture;
 #[cfg(test)]
 #[allow(clippy::panic)]
 mod test_process_isolation;
+// The crate under its own name, in its own unit tests only: the test support
+// files shared with the integration tests name it so.
+#[cfg(test)]
+extern crate self as meerkat_meta;
 
 pub mod access;
 pub mod actor_loop_health;

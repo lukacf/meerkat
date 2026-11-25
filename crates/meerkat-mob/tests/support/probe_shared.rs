@@ -577,6 +577,7 @@ pub fn portable_member_spec_for_raw_probe(
                 mob: false,
                 schedule: false,
                 image_generation: false,
+                web_search: None,
                 read_only: false,
                 deny: Vec::new(),
                 mcp_servers: std::collections::BTreeMap::new(),

@@ -2301,6 +2301,58 @@ for (const path of [
       `${job}: ${timeout?.trim() ?? "no timeout-minutes"}, not ${pullRequest} minutes on a pull request and ${push} on a push or dispatch`,
     );
   }
+  // The Clippy jobs' limit is a row's, not the job's. A row that names
+  // meerkat-meta and lints every target runs one build job (the swap step
+  // and the lint step's META_ROW select it), so its two long checks, the
+  // library and the library test target, run one after the other; that row
+  // gets 150 minutes on every event. Every other row keeps a pull request's
+  // 90 minutes and a push's or a dispatch's 120. The rows are the planner's
+  // own, and both waves carry the same line.
+  {
+    const selects = "contains(matrix.packages, '-p meerkat-meta') && contains(matrix.targets, '--all-targets')";
+    const matrixRow = (args, name) => {
+      const lines = Object.fromEntries(
+        run(["--format", "github", ...args]).stdout.trim().split("\n").map((line) => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)]),
+      );
+      const row = bothWaves(lines, "shard_matrix", "shard_rest_matrix").find((candidate) => candidate.name === name);
+      assert.ok(row, `the plan of ${args.join(" ")} holds a Clippy row named ${name}`);
+      return row;
+    };
+    const cases = [
+      // Selected: a pull request's downstream row, and a push's own row.
+      ["pull_request", matrixRow(["--event", "pull_request", "--", "crates/meerkat-mob-mcp/src/lib.rs"], "downstream meta+1"), 150],
+      ["push", matrixRow(["--event", "push", "--", "meta/crates/meerkat-meta/src/lib.rs"], "meta"), 150],
+      // Not selected: a pull request's own Meta row (library and binaries),
+      // and a push's row that does not name meerkat-meta.
+      ["pull_request", matrixRow(["--event", "pull_request", "--", "meta/crates/meerkat-meta/src/lib.rs"], "meta"), 90],
+      ["push", matrixRow(["--event", "push", "--", "crates/meerkat-core/src/lib.rs"], "core"), 120],
+    ];
+    assert.deepEqual(
+      cases.map(([event, row]) => [event, row.packages.includes("-p meerkat-meta") && row.targets.includes("--all-targets")]),
+      [["pull_request", true], ["push", true], ["pull_request", false], ["push", false]],
+      "the four rows are a selected and an unselected row of each event",
+    );
+    for (const job of ["clippy", "clippy-rest"]) {
+      const lines = jobLines(workflow, job);
+      const timeout = lines.find((line) => /^    timeout-minutes: /.test(line));
+      const perRow = /^    timeout-minutes: \$\{\{ (.+) && (\d+) \|\| \(github\.event_name == 'pull_request' && (\d+) \|\| (\d+)\) \}\}$/.exec(timeout ?? "");
+      const perEvent = /^    timeout-minutes: \$\{\{ github\.event_name == 'pull_request' && (\d+) \|\| (\d+) \}\}$/.exec(timeout ?? "");
+      assert.ok(perRow || perEvent, `${job}: ${timeout?.trim() ?? "no timeout-minutes"} is neither a row's limit nor an event's`);
+      const [selected, pullRequest, push] = perRow ? perRow.slice(2).map(Number) : [null, ...perEvent.slice(1).map(Number)];
+      const limit = (event, row) => {
+        if (selected !== null && row.packages.includes("-p meerkat-meta") && row.targets.includes("--all-targets")) return selected;
+        return event === "pull_request" ? pullRequest : push;
+      };
+      assert.deepEqual(
+        cases.filter(([event, row, minutes]) => limit(event, row) !== minutes).map(([event, row, minutes]) => `${row.name} (${row.packages}, ${row.targets}) on a ${event}: ${limit(event, row)} minutes, not ${minutes}`),
+        [],
+        `${job}: a row that names meerkat-meta and lints every target gets 150 minutes, every other row 90 on a pull request and 120 on a push`,
+      );
+      assert.equal(perRow?.[1], selects, `${job}: the limit selects its row by the condition of the swap step and of the lint step`);
+      assert.ok(lines.includes(`        if: \${{ ${selects} }}`), `${job}: the swap step runs for the rows the limit selects`);
+      assert.ok(lines.includes(`          META_ROW: \${{ ${selects} }}`), `${job}: the lint step runs one build job for the rows the limit selects`);
+    }
+  }
   // A pull request that leaves the web wasm to the push still runs the Web
   // SDK's type and unit tests: every step after them that needs Rust, the
   // wasm or a browser runs only when the plan builds the wasm.

@@ -7744,7 +7744,7 @@ impl DeferredResumeProvision {
         super::tools::attach_declared_bundle_tools(&mut config, bundle_tools);
         config.tool_dispatch_admission = tool_dispatch_admission;
         config.keep_alive = keep_alive;
-        config.override_web_search = web_search_override;
+        build::apply_spawn_web_search_override(&mut config, web_search_override);
         build::apply_application_tool_policy_choice(&mut config, application_tool_policy);
         config.tool_consequence_policy_registry = tool_consequence_policy_registry;
         config.fork_source = fork_source;
@@ -38612,7 +38612,10 @@ impl MobActor {
                     config.tool_dispatch_admission = tool_dispatch_admission.clone();
                     config.keep_alive =
                         selected_runtime_mode == crate::MobRuntimeMode::AutonomousHost;
-                    config.override_web_search = tool_category_overrides.web_search;
+                    build::apply_spawn_web_search_override(
+                        &mut config,
+                        tool_category_overrides.web_search,
+                    );
                     build::apply_application_tool_policy_choice(
                         &mut config,
                         application_tool_policy.clone(),
@@ -38708,7 +38711,7 @@ impl MobActor {
             );
             config.keep_alive =
                 selected_runtime_mode == crate::MobRuntimeMode::AutonomousHost;
-            config.override_web_search = tool_category_overrides.web_search;
+            build::apply_spawn_web_search_override(&mut config, tool_category_overrides.web_search);
             build::apply_application_tool_policy_choice(&mut config, application_tool_policy.clone());
             config.tool_consequence_policy_registry = preparation_context.tool_consequence_policy_registry.clone();
             // Fork lineage rides only fork seatings, which resume; a fresh
@@ -40352,7 +40355,14 @@ impl MobActor {
         if let Some(model) = model_override {
             profile.model = model;
         }
+        // A placed member's spec carries the spawn's web search choice in
+        // its overlay, which the member host takes first. The profile keeps
+        // what it states, so the spec and the stored record of a profile
+        // that never names the key are the ones a release without the key
+        // compiles and reads.
+        let stated_web_search = profile.tools.web_search;
         super::spec_compiler::apply_tool_category_overrides(&mut profile, tool_category_overrides);
+        profile.tools.web_search = stated_web_search;
         Ok(profile)
     }
 
@@ -42468,7 +42478,7 @@ impl MobActor {
             super::tools::resolve_profile_bundle_tools(&profile, &self.tool_bundles),
         );
         config.keep_alive = runtime_mode == crate::MobRuntimeMode::AutonomousHost;
-        config.override_web_search = tool_category_overrides.web_search;
+        build::apply_spawn_web_search_override(&mut config, tool_category_overrides.web_search);
         build::apply_application_tool_policy_choice(&mut config, application_tool_policy);
         config.tool_dispatch_admission = policy_dispatch_admission.clone();
         config.tool_consequence_policy_registry = self.tool_consequence_policy_registry.clone();

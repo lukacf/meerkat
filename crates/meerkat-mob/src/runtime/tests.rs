@@ -45,6 +45,8 @@ mod parallel_resume_restore;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod poisoned_scope_rows;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+mod profile_web_search_rows;
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod respawn_abandonment_replay_rows;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod retryable_restore_rows;
@@ -1820,6 +1822,8 @@ struct CreateSessionRecord {
     application_tool_policy: meerkat_core::ApplicationToolPolicyBinding,
     /// The build's web search override.
     override_web_search: ToolCategoryOverride,
+    /// The tool families of the build's own tool grant gate.
+    grant_gated_families: BTreeSet<String>,
     /// Whether the build carries a final dispatch admission.
     tool_dispatch_admission: bool,
     /// The build's shell environment.
@@ -4928,6 +4932,12 @@ impl MockSessionService {
                     .as_ref()
                     .map(|build| build.override_web_search)
                     .unwrap_or(ToolCategoryOverride::Inherit),
+                grant_gated_families: req
+                    .build
+                    .as_ref()
+                    .and_then(|build| build.grant_gated_tools.as_ref())
+                    .map(|gate| gate.families.clone())
+                    .unwrap_or_default(),
                 tool_dispatch_admission: req
                     .build
                     .as_ref()
@@ -9388,6 +9398,7 @@ fn sample_definition() -> MobDefinition {
                 mob: true,
                 schedule: false,
                 image_generation: false,
+                web_search: None,
                 read_only: false,
                 deny: Vec::new(),
                 mcp: vec![],
@@ -33538,6 +33549,89 @@ async fn delegation_execution_service_retires_member_after_exact_turn_failure() 
     assert!(
         handle.get_member(&helper_id).await.unwrap().is_none(),
         "delegation service must still attempt retirement after turn failure"
+    );
+}
+
+/// A host's member tool audience that hides exactly the members the mob
+/// holds a roster row for: a target handed over with labels is hidden, a
+/// target handed over without (no row) is shown. It tells an audience that
+/// was asked while a member was seated from one asked after its retirement.
+struct HideSeatedMembers;
+
+impl MemberToolAudience for HideSeatedMembers {
+    fn hides(
+        &self,
+        _mob_id: &MobId,
+        _caller: Option<&AgentIdentity>,
+        _caller_labels: Option<&BTreeMap<String, String>>,
+        _target: &AgentIdentity,
+        target_labels: Option<&BTreeMap<String, String>>,
+    ) -> bool {
+        target_labels.is_some()
+    }
+}
+
+/// A bounded delegation asks the mob's member tool audience about its
+/// helper when the helper is seated, with the labels of its roster row, and
+/// hands the answer on with its failure: the helper is retired by the time
+/// the failure is answered, and an audience asked then is handed a name
+/// with no row.
+#[tokio::test]
+async fn a_bounded_delegation_asks_the_audience_about_its_helper_while_the_helper_is_seated() {
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let handle = MobBuilder::new(
+        MobDefinition::implicit("delegation-audience", "claude-sonnet-4-5"),
+        MobStorage::in_memory(),
+    )
+    .with_session_service(service.clone())
+    .with_member_tool_audience(Arc::new(HideSeatedMembers))
+    .create()
+    .await
+    .expect("create mob");
+    service.set_fail_start_turn(true);
+    let helper_id = AgentIdentity::from("delegation-audience-helper");
+    let request = DelegationExecutionRequest::new(
+        helper_id.clone(),
+        "fail this delegated turn",
+        BoundedResultSpec::new("delegation-audience", 256).expect("valid delegation result spec"),
+    );
+
+    let failure = DelegationExecutionService::new(handle.clone())
+        .execute_within(
+            request,
+            DelegationRunBounds::new(
+                std::time::Duration::from_secs(30),
+                std::time::Duration::from_secs(10),
+            ),
+        )
+        .await
+        .expect_err("the delegated turn fails");
+
+    assert!(
+        matches!(failure.error, DelegationExecutionError::Turn { .. }),
+        "the helper was seated and its turn failed: {}",
+        failure.error
+    );
+    assert_eq!(
+        failure.helper_hidden_from_caller,
+        Some(true),
+        "the audience was asked while the helper had its roster row"
+    );
+    assert!(
+        failure.helper_session_id.is_some(),
+        "the helper's session was read while it was seated"
+    );
+    assert!(
+        handle.get_member(&helper_id).await.unwrap().is_none(),
+        "the helper is retired when the failure is answered"
+    );
+    assert!(
+        handle
+            .members_hidden_from(None, std::slice::from_ref(&helper_id))
+            .await
+            .is_empty(),
+        "asked now, the audience is handed a name with no row"
     );
 }
 

@@ -298,7 +298,7 @@ launched under an older binding digest.
 | Tool | Purpose |
 |------|---------|
 | `workgraph_create` | Create a work item |
-| `workgraph_get` | Read one item |
+| `workgraph_get` | Read one item in full, or opt into recent evidence with `evidence_limit` (1 through 20) and continue with `evidence_cursor` |
 | `workgraph_list` | List items |
 | `workgraph_ready` | List machine-derived ready items |
 | `workgraph_snapshot` | Read items, edges, ready ids, scope, timestamp, and event high-water mark |
@@ -315,6 +315,30 @@ launched under an older binding digest.
 
 The last two tools are injected only when a turn carries a matching active
 attention projection. Their arguments cannot manufacture delegated authority.
+
+`workgraph_get` returns the unchanged full item when both `evidence_limit` and
+`evidence_cursor` are omitted. An explicit `evidence_limit` replaces
+`item.evidence_refs` in the reply with a separate `evidence_page`; all other
+item fields are unchanged. Its `order` is `append_position_desc`, `total` is
+the full evidence count, `returned` is this page's count, and `limit` is the
+requested bound. `entries` contains each original zero-based `position`, its
+`withdrawn` flag and its full `evidence` reference. `truncated` means older
+positions remain after this page. Pass `next_cursor` back as `evidence_cursor`
+with an explicit `evidence_limit` to continue; a final page has a null cursor.
+Only returned entry count is bounded, not text, bytes, tokens, storage reads or
+encoding; the full stored item is still loaded.
+
+Access is checked on every page before the paging options are read. The opaque
+cursor is validated, not authenticated, and binds an item, its realm and
+namespace, revision and append position. A continuation is refused after any
+item change: an append, withdrawal, update, claim, release or close changes the
+revision. On an often-written item a walk past the first page may not finish;
+restart without the cursor or omit both options to read the whole item.
+
+The public MCP server serves this same tool definition and handler. The tool's
+description and input schema change for every caller; the full-item default
+answer remains unchanged. These options do not change the stored item, RPC,
+REST, generated schema files or SDKs.
 
 ## RPC
 

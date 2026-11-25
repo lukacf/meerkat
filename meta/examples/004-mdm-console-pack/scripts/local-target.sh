@@ -23,7 +23,7 @@ Usage:
 
 Environment:
   MDM_TARGET_BINDINGS_FILE   Aggregated console binding file.
-  MDM_TARGET_MODEL           Target model, default gpt-6-astra.
+  MDM_TARGET_MODEL           Target model, default gpt-6.2-astra.
   MDM_TARGET_PROVIDER        Target provider, default openai.
 USAGE
 }
@@ -37,7 +37,7 @@ listen="127.0.0.1:5791"
 advertise=""
 site="local"
 platform="$(uname -s | tr '[:upper:]' '[:lower:]')-local"
-model="${MDM_TARGET_MODEL:-gpt-6-astra}"
+model="${MDM_TARGET_MODEL:-gpt-6.2-astra}"
 provider="${MDM_TARGET_PROVIDER:-openai}"
 
 while [[ $# -gt 0 ]]; do

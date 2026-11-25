@@ -13086,6 +13086,25 @@ impl MeerkatMachine {
         })
     }
 
+    /// The slot of the outer bound on the tool calls of `session_id`, from
+    /// the session's canonical bindings: the one its agent loop reads. A
+    /// host that runs the session for a bounded caller (a `delegate` that
+    /// waits for its helper) sets the bound in it. `None` for a session this
+    /// runtime holds no bindings for: one that runs on another host, or one
+    /// whose agent was not built yet.
+    pub async fn session_tool_call_outer_bound(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<Arc<meerkat_core::ToolCallOuterBoundSlot>> {
+        let sessions = self.sessions.read().await;
+        sessions.get(session_id).and_then(|entry| {
+            entry
+                .canonical_runtime_bindings
+                .as_ref()
+                .map(|bindings| Arc::clone(bindings.tool_call_outer_bound()))
+        })
+    }
+
     /// The run whose provisional (uncommitted) tail the runtime store holds
     /// for `session_id`, if any.
     pub(crate) async fn provisional_tail_run(
@@ -15493,6 +15512,9 @@ mod durability_gate_wait_tests;
 
 #[cfg(test)]
 mod commit_deadline_tests;
+
+#[cfg(test)]
+mod pending_resumed_run_read_tests;
 
 #[cfg(test)]
 mod lost_admission_ack_tests;

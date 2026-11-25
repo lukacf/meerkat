@@ -46,7 +46,7 @@ impl Pack for RedTeamPack {
         profiles.insert(
             ProfileName::from("adversary"),
             turn_driven_profile(
-                resolve_model(overrides, "adversary", "gpt-6-astra"),
+                resolve_model(overrides, "adversary", "gpt-6.2-astra"),
                 "adversary-skill",
                 "Adversary — argues against",
                 pp,

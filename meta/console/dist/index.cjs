@@ -34180,8 +34180,8 @@ function QuestionGroup({ setId, question, answer, disabled, onChange }) {
     ) : null
   ] });
 }
-function AnswerSummary({ set: set3, answers }) {
-  return /* @__PURE__ */ (0, import_jsx_runtime49.jsx)("dl", { className: "cc-question-set__summary", "data-testid": "question-set-summary:".concat(set3.pendingId), children: set3.questions.map((question) => {
+function AnswerSummary({ set: set3, answers, testId }) {
+  return /* @__PURE__ */ (0, import_jsx_runtime49.jsx)("dl", { className: "cc-question-set__summary", "data-testid": testId ?? "question-set-summary:".concat(set3.pendingId), children: set3.questions.map((question) => {
     const answer = Object.prototype.hasOwnProperty.call(answers, question.id) ? answers[question.id] : void 0;
     const words3 = !answer ? "Not answered" : answer.kind === "free_text" ? answer.text.trim() : question.choices.find((choice) => choice.id === answer.choiceId)?.label ?? "Not answered";
     return /* @__PURE__ */ (0, import_jsx_runtime49.jsxs)(React4.Fragment, { children: [
@@ -34345,9 +34345,9 @@ function QuestionSetCard({ set: set3, resourceStatus, readFailed = false, decisi
     ] })
   ] });
 }
-function QuestionSetList({ view, identity, readOnly = false, className, testId, onContent }) {
+function QuestionSetList({ view, identity, open = false, readOnly = false, className, testId, onContent }) {
   const shown = React4.useRef(/* @__PURE__ */ new Set());
-  const entries = view ? questionSetEntries(view.snapshot, identity) : [];
+  const entries = view ? questionSetEntries(view.snapshot, identity).filter((entry) => !open || entry.closed === void 0) : [];
   const notices = view?.snapshot.notices;
   React4.useEffect(() => {
     const places = /* @__PURE__ */ new Set();
@@ -34379,7 +34379,8 @@ function QuestionSetList({ view, identity, readOnly = false, className, testId, 
   React4.useEffect(() => {
     const left = leftFocused.current;
     leftFocused.current = false;
-    if (left) (lineRef.current ?? listRef.current)?.focus();
+    const active = typeof document === "undefined" ? null : document.activeElement;
+    if (left && (active === null || active === document.body)) (lineRef.current ?? listRef.current)?.focus();
   });
   if (!view || !shows2) return null;
   const { snapshot } = view;
@@ -34430,7 +34431,76 @@ function QuestionSetList({ view, identity, readOnly = false, className, testId, 
 function ConversationQuestionSets({ identity }) {
   const view = useQuestionSetsView();
   if (!view || !identity) return null;
-  return /* @__PURE__ */ (0, import_jsx_runtime49.jsx)(QuestionSetList, { view, identity });
+  return /* @__PURE__ */ (0, import_jsx_runtime49.jsx)(QuestionSetList, { view, identity, open: true });
+}
+var NO_RECEIPTS = Object.freeze([]);
+function questionReceiptPlacement(closed, turnStartsMs) {
+  const ordered = [...closed].sort((a2, b2) => a2.closedAtMs - b2.closedAtMs);
+  if (turnStartsMs.length === 0) return { byTurn: [], unplaced: ordered.map((entry) => entry.pendingId) };
+  const starts = [];
+  for (const start2 of turnStartsMs) {
+    const known = typeof start2 === "number" && Number.isFinite(start2);
+    starts.push(known ? start2 : starts.length > 0 ? starts[starts.length - 1] : Number.NEGATIVE_INFINITY);
+  }
+  const byTurn = turnStartsMs.map(() => []);
+  for (const entry of ordered) {
+    const decided = typeof entry.decidedAtMs === "number" && Number.isFinite(entry.decidedAtMs) ? entry.decidedAtMs : void 0;
+    let index3 = 0;
+    for (let turn = 0; turn < starts.length; turn += 1) {
+      if (decided !== void 0 ? starts[turn] < decided : starts[turn] <= entry.closedAtMs) index3 = turn;
+    }
+    byTurn[index3].push(entry.pendingId);
+  }
+  return { byTurn, unplaced: NO_RECEIPTS };
+}
+function useQuestionReceiptPlacement(identity, turnStartsMs) {
+  const snapshot = useQuestionSetsView()?.snapshot;
+  const closed = snapshot?.closed;
+  const decisions = snapshot?.decisions;
+  const previous3 = React4.useRef({ byTurn: [], unplaced: NO_RECEIPTS });
+  return React4.useMemo(() => {
+    const decidedAt = (pendingId) => decisions && Object.prototype.hasOwnProperty.call(decisions, pendingId) ? decisions[pendingId]?.decidedAtMs : void 0;
+    const mine = identity && closed ? closed.filter((entry) => entry.set.origin.identity === identity).map((entry) => ({ pendingId: entry.set.pendingId, closedAtMs: entry.closedAtMs, decidedAtMs: decidedAt(entry.set.pendingId) })) : [];
+    const placed = questionReceiptPlacement(mine, turnStartsMs);
+    const same = (a2, b2) => a2 !== void 0 && a2.length === b2.length && a2.every((id, index3) => id === b2[index3]);
+    const kept = (a2, b2) => b2.length === 0 ? NO_RECEIPTS : same(a2, b2) ? a2 : b2;
+    const next = {
+      byTurn: placed.byTurn.map((ids, index3) => kept(previous3.current.byTurn[index3], ids)),
+      unplaced: kept(previous3.current.unplaced, placed.unplaced)
+    };
+    previous3.current = next;
+    return next;
+  }, [closed, decisions, identity, turnStartsMs]);
+}
+function QuestionSetReceipt({ set: set3, outcome, answers, closedAtMs }) {
+  const directory = useAgentDirectory();
+  const title = set3.title || "Questions from ".concat(agentDisplayName(set3.origin.identity, directory) || "an agent");
+  const count2 = set3.questions.length === 1 ? "1 question" : "".concat(set3.questions.length, " questions");
+  const lineRef = React4.useRef(null);
+  React4.useEffect(() => {
+    const active = typeof document === "undefined" ? null : document.activeElement;
+    if (Date.now() - closedAtMs < ACTED_FOCUS_MS && (active === null || active === document.body)) lineRef.current?.focus();
+  }, []);
+  return /* @__PURE__ */ (0, import_jsx_runtime49.jsxs)("details", { className: "cc-question-set__receipt", "data-outcome": outcome, "data-testid": "question-set-receipt:".concat(set3.pendingId), children: [
+    /* @__PURE__ */ (0, import_jsx_runtime49.jsxs)("summary", { ref: lineRef, className: "cc-question-set__receipt-line", title: formatAbsoluteTime(closedAtMs), children: [
+      /* @__PURE__ */ (0, import_jsx_runtime49.jsx)("span", { className: "cc-question-set__receipt-state", children: outcome === "answered" ? "Answered" : "Dismissed" }),
+      /* @__PURE__ */ (0, import_jsx_runtime49.jsx)("span", { className: "cc-question-set__receipt-title", children: title }),
+      /* @__PURE__ */ (0, import_jsx_runtime49.jsx)("span", { className: "cc-question-set__receipt-count", children: count2 })
+    ] }),
+    /* @__PURE__ */ (0, import_jsx_runtime49.jsx)(AnswerSummary, { set: set3, answers: outcome === "answered" ? answers ?? {} : {}, testId: "question-set-receipt-summary:".concat(set3.pendingId) })
+  ] });
+}
+function ConversationQuestionReceipts({ identity, pendingIds }) {
+  const view = useQuestionSetsView();
+  if (!view || !identity || !pendingIds || pendingIds.length === 0) return null;
+  const closed = new Map(view.snapshot.closed.filter((entry) => entry.set.origin.identity === identity).map((entry) => [entry.set.pendingId, entry]));
+  const receipts = pendingIds.flatMap((pendingId) => {
+    const entry = closed.get(pendingId);
+    if (!entry) return [];
+    const decision = Object.prototype.hasOwnProperty.call(view.snapshot.decisions, pendingId) ? view.snapshot.decisions[pendingId] : void 0;
+    return [/* @__PURE__ */ (0, import_jsx_runtime49.jsx)(QuestionSetReceipt, { set: entry.set, outcome: entry.outcome, answers: decision?.answers, closedAtMs: entry.closedAtMs }, pendingId)];
+  });
+  return receipts.length > 0 ? /* @__PURE__ */ (0, import_jsx_runtime49.jsx)(import_jsx_runtime49.Fragment, { children: receipts }) : null;
 }
 
 // ../packages/console-components/src/conversation/conversation-approvals.tsx
@@ -34444,9 +34514,13 @@ function pendingApprovalTurns(turns, { approvalSnapshot, approvalIdentity, conve
   if (!approvalSnapshot || !approvalIdentity || approvalSnapshot.requests.length === 0) return [];
   return approvalInteractionIdsByTurn(turns).flatMap((interactionIds, index3) => interactionIds.length > 0 && approvalSnapshot.requests.some((request) => Boolean(request.origin?.interactionId) && approvalMatchesConversation(request, { identity: approvalIdentity, conversationId, interactionIds })) ? [index3] : []);
 }
-function ConversationApprovals({ approvalSnapshot, approvalIdentity, onApprovalDecision, conversationId, interactionIds }) {
+function ConversationApprovals({ approvalSnapshot, approvalIdentity, onApprovalDecision, conversationId, interactionIds, questionReceiptIds }) {
   const decideSources = useHostDecideSources();
-  const questionSets = interactionIds ? null : /* @__PURE__ */ (0, import_jsx_runtime50.jsx)(ConversationQuestionSets, { identity: approvalIdentity });
+  const receipts = /* @__PURE__ */ (0, import_jsx_runtime50.jsx)(ConversationQuestionReceipts, { identity: approvalIdentity, pendingIds: questionReceiptIds });
+  const questionSets = interactionIds ? receipts : /* @__PURE__ */ (0, import_jsx_runtime50.jsxs)(import_jsx_runtime50.Fragment, { children: [
+    receipts,
+    /* @__PURE__ */ (0, import_jsx_runtime50.jsx)(ConversationQuestionSets, { identity: approvalIdentity })
+  ] });
   if (!approvalSnapshot || !approvalIdentity) return questionSets;
   const requests = approvalSnapshot.requests.filter((request) => Boolean(request.origin?.interactionId) === Boolean(interactionIds) && approvalMatchesConversation(request, { identity: approvalIdentity, conversationId, interactionIds }));
   const readOnly = approvalSnapshot.readOnly || !onApprovalDecision;
@@ -62538,7 +62612,7 @@ function createTimelineFold(agent, frames, options) {
       }
       return;
     }
-    if (HIDDEN_EVENTS2.has(frame2.event)) {
+    if (HIDDEN_EVENTS2.has(frame2.event) || frame2.event === "request_reasoning_effort_resolved") {
       return;
     }
     flushPendingReasoning(true);
@@ -93457,6 +93531,7 @@ var TranscriptTurn = import_react101.default.memo(function TranscriptTurn2({
   onApprovalDecision,
   conversationId,
   approvalInteractionIds,
+  questionReceiptIds,
   setSize,
   parkedHeight
 }) {
@@ -93514,7 +93589,7 @@ var TranscriptTurn = import_react101.default.memo(function TranscriptTurn2({
           ] }, m3.scrollRowId ?? m3.id));
           return /* @__PURE__ */ (0, import_jsx_runtime125.jsx)(import_react101.default.Fragment, { children: run.tools.length >= 2 ? /* @__PURE__ */ (0, import_jsx_runtime125.jsx)(CompletedToolDisclosure, { blocks: run.tools, children: rows }) : rows }, run.rows[0].scrollRowId ?? run.rows[0].id);
         }),
-        /* @__PURE__ */ (0, import_jsx_runtime125.jsx)(ConversationRowStateScope, { rowId: "approvals:".concat(turn.id), children: /* @__PURE__ */ (0, import_jsx_runtime125.jsx)(ConversationApprovals, { approvalSnapshot, approvalIdentity: identity, onApprovalDecision, conversationId, interactionIds: approvalInteractionIds }) })
+        /* @__PURE__ */ (0, import_jsx_runtime125.jsx)(ConversationRowStateScope, { rowId: "approvals:".concat(turn.id), children: /* @__PURE__ */ (0, import_jsx_runtime125.jsx)(ConversationApprovals, { approvalSnapshot, approvalIdentity: identity, onApprovalDecision, conversationId, interactionIds: approvalInteractionIds, questionReceiptIds }) })
       ]
     }
   );
@@ -93563,6 +93638,11 @@ var TranscriptView = import_react101.default.memo(function TranscriptView2({
     approvalIdsRef.current = interned;
     return result;
   }, [windowedTurns]);
+  const turnStartsMs = import_react101.default.useMemo(() => turns.map((turn) => {
+    const at = Date.parse(turn.messages[0]?.createdAt ?? "");
+    return Number.isFinite(at) ? at : null;
+  }), [turns]);
+  const questionReceipts = useQuestionReceiptPlacement(identity, turnStartsMs);
   const previousDays = import_react101.default.useMemo(() => {
     let day = null;
     return windowedTurns.map((turn) => {
@@ -93592,6 +93672,7 @@ var TranscriptView = import_react101.default.memo(function TranscriptView2({
         onApprovalDecision,
         conversationId,
         approvalInteractionIds: approvalInteractions[offset],
+        questionReceiptIds: questionReceipts.byTurn[windowStart + offset],
         setSize,
         parkedHeight
       },
@@ -93685,7 +93766,7 @@ var TranscriptView = import_react101.default.memo(function TranscriptView2({
             "spacer:".concat(windowedTurns[slot.from].id)
           )
         ) : renderTurn(slot.index, slot.kind === "parked" ? slot.height : void 0)),
-        /* @__PURE__ */ (0, import_jsx_runtime125.jsx)(ConversationApprovals, { approvalSnapshot, approvalIdentity: identity, onApprovalDecision, conversationId }),
+        /* @__PURE__ */ (0, import_jsx_runtime125.jsx)(ConversationApprovals, { approvalSnapshot, approvalIdentity: identity, onApprovalDecision, conversationId, questionReceiptIds: questionReceipts.unplaced }),
         liveSpeech && liveSpeech.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime125.jsx)(
           "div",
           {
@@ -95891,7 +95972,7 @@ function useQuestionSets(input) {
 // src/lib/console-bundle.ts
 var APP_SCRIPT_VERSION = /\/console-app\.js\?(?:[^#]*&)?v=([0-9A-Za-z._-]+)/;
 function builtBeside() {
-  const named = true ? "8d9fc388d313".trim() : "";
+  const named = true ? "107559ef815a".trim() : "";
   return named || void 0;
 }
 function loadedByThePage(page) {

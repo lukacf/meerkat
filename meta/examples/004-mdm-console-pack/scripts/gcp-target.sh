@@ -2,7 +2,6 @@
 set -euo pipefail
 
 pack_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-repo_root="$(cd "${pack_dir}/../.." && pwd)"
 env_file="${MDM_GCP_ENV_FILE:-${pack_dir}/.env.gcp}"
 state_dir="${pack_dir}/.state"
 bindings_dir="${state_dir}/bindings"
@@ -32,7 +31,7 @@ Optional:
   GCP_IMAGE_FAMILY      default debian-12
   GCP_IMAGE_PROJECT     default debian-cloud
   GCP_SSH_USER
-  MDM_TARGET_MODEL      default gpt-6-astra
+  MDM_TARGET_MODEL      default gpt-6.2-astra
   MDM_TARGET_PROVIDER   default openai
   MDM_GCP_FORWARD_ENV   space-separated env names to copy to the VM
 USAGE
@@ -47,7 +46,7 @@ listen=""
 advertise=""
 site="gcp-live"
 platform="linux-gcp-vm"
-model="${MDM_TARGET_MODEL:-gpt-6-astra}"
+model="${MDM_TARGET_MODEL:-gpt-6.2-astra}"
 provider="${MDM_TARGET_PROVIDER:-openai}"
 
 while [[ $# -gt 0 ]]; do
@@ -66,6 +65,12 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$id" ]] || { echo "--id is required" >&2; usage; exit 2; }
+# Do not let a target use the directory reserved for cached Cargo output.
+# Keep fetch/stop available for a target created with an older launcher.
+if [[ "$command" == start && "$id" == cargo-target ]]; then
+  echo 'target ID cargo-target is reserved for the build cache; choose another ID' >&2
+  exit 2
+fi
 name="${name:-$id}"
 : "${GCP_PROJECT:?GCP_PROJECT is required}"
 : "${GCP_ZONE:?GCP_ZONE is required}"
@@ -109,16 +114,11 @@ internal_ip() {
 }
 
 sync_repo() {
-  tar -C "$repo_root" \
-    --exclude ./target \
-    --exclude ./node_modules \
-    --exclude ./examples/node_modules \
-    --exclude ./examples/004-mdm-console-pack/.state \
-    -czf - . | "${ssh_base[@]}" --command "
+  "${pack_dir}/scripts/gcp-source-archive.sh" | "${ssh_base[@]}" --command "
       set -euo pipefail
       rm -rf ~/meerkat-meta.next
       mkdir -p ~/meerkat-meta.next
-      tar -xzf - -C ~/meerkat-meta.next
+      tar -xmzf - -C ~/meerkat-meta.next
       rm -rf ~/meerkat-meta
       mv ~/meerkat-meta.next ~/meerkat-meta
     "
@@ -163,8 +163,7 @@ remote_start() {
     mkdir -p ~/.cache/mdm-mob-target /tmp/mdm-mob-target
     if [[ -f /tmp/mdm-${id}.pid ]]; then kill \"\$(cat /tmp/mdm-${id}.pid)\" 2>/dev/null || true; fi
     rm -f /tmp/mdm-mob-target/${id}.json
-    ./scripts/repo-cargo build -p meerkat-meta --example mdm_mob_target
-    target_bin=\"\$(./scripts/repo-cargo --print-env | awk -F= '\$1 == \"CARGO_TARGET_DIR\" { print \$2 }')/debug/examples/mdm_mob_target\"
+    target_bin=\"\$(./meta/examples/004-mdm-console-pack/scripts/build-gcp-target.sh)\"
     nohup \"\$target_bin\" \
       --id '${id}' \
       --name '${name}' \

@@ -137,6 +137,18 @@ pub struct PortableToolConfig {
     pub schedule: bool,
     #[serde(default)]
     pub image_generation: bool,
+    /// Profile-declared web search choice (`true` enables it for the member's
+    /// build, `false` disables it), carried so a member materialized from
+    /// this profile is built with the same choice.
+    ///
+    /// Omitted when unset, like `read_only` below and for the same two
+    /// reasons: a spec that states no choice keeps the exact digest-covered
+    /// bytes it had before the field existed, and a spec that states one,
+    /// sent to a host too old to know the field, is rejected by
+    /// `deny_unknown_fields` instead of materializing a member with another
+    /// web search than its profile declares.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_search: Option<bool>,
     /// Profile-declared read-only intent, carried so a member materialized on
     /// another host enforces the same execution gate.
     ///
@@ -481,6 +493,7 @@ pub(crate) fn sample_portable_member_spec() -> PortableMemberSpec {
                 mob: true,
                 schedule: false,
                 image_generation: false,
+                web_search: None,
                 read_only: false,
                 deny: Vec::new(),
                 mcp_servers: BTreeMap::from([(

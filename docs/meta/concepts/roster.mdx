@@ -4,7 +4,7 @@ description: "Understand Meta's lightweight roster projection, deep member statu
 icon: "users"
 ---
 
-*Mirrored from Meerkat Meta main at [70db4ab7b685](https://github.com/lukacf/meerkat/commit/70db4ab7b68552c8cbf6d1314502d656e70af071) on 2026-11-25; Meta version 0.9.18 at that commit.*
+*Mirrored from Meerkat Meta main at [17fa0f3ef553](https://github.com/lukacf/meerkat/commit/17fa0f3ef553e2770c7f74c212d58361ce90ce68) on 2026-11-25; Meta version 0.9.18 at that commit.*
 
 The mob roster is the operational view of the members known to a mob. Roster
 reads return lightweight `MobMemberListEntry` projections. Deep execution
@@ -305,13 +305,22 @@ answers the check from that WorkGraph:
   claimed again, and every later attempt of the same resume answers
   superseded too.
 - When the WorkGraph cannot be read, or the run's attention projection does
-  not decode, the check answers unavailable. It also answers unavailable when
-  the list of the mob's open work items is too slow: a run that named no item
-  is checked against that list, and the check stops reading it after seven
-  eighths of one attempt. The reason says which of these it was. Meerkat asks
-  again, up to three attempts. When none of them decides, the run is neither
-  resumed nor ended: it stays held, and Meerkat asks again the next time the
-  worker's runtime wakes or its session registers.
+  not decode, the check answers unavailable, and the reason says which it
+  was. A run that named no item is checked against the list of the mob's
+  open work items. When that list does not answer inside one attempt,
+  Meerkat ends the attempt and reports that the check did not answer in
+  time; what the check had read is in the log, in a warning it writes as
+  it is dropped. The warning goes by the check's own clock.
+  `durable resume gate: a claim scan was dropped at the attempt's limit`
+  says that the scan was unfinished after a whole attempt.
+  `durable resume gate: a claim scan was dropped before the attempt's limit`
+  is written when the scan was dropped earlier on that clock, and says
+  that the check does not know why. It may be that a caller gave the check
+  up, that the runtime shut down, or that Meerkat's attempt had begun more
+  than a millisecond before the check did.
+  Meerkat asks again, up to three attempts. When none of them decides, the
+  run is neither resumed nor ended: it stays held, and Meerkat asks again
+  the next time the worker's runtime wakes or its session registers.
 
 A mob runtime composed without a WorkGraph service has no check, and
 neither has one whose storage provider has no WorkGraph: there is no item

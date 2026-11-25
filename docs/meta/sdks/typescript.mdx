@@ -4,7 +4,7 @@ description: "TypeScript SDK for Meta with type-safe contracts, parity tests, an
 icon: "js"
 ---
 
-*Mirrored from Meerkat Meta main at [5f09cda4ef4a](https://github.com/lukacf/meerkat/commit/5f09cda4ef4ac96d41b72f5fe7413b7da4c4454c) on 2026-11-24; Meta version 0.9.18 at that commit.*
+*Mirrored from Meerkat Meta main at [140f84403642](https://github.com/lukacf/meerkat/commit/140f84403642fc5642c9e07fe8ad94879877f7c5) on 2026-11-25; Meta version 0.9.18 at that commit.*
 
 The TypeScript SDK (`@rkat/meta-sdk`) provides type-safe access to the Meta JSON-RPC gateway from Node.js.
 
@@ -1451,16 +1451,24 @@ the persistent mob storage was created. Its `kind` names the refusal
 lists the diverged definition fields as dotted paths, so a host can show what
 changed without parsing the message.
 
-In 0.9.15, with a gateway the SDK starts itself, `builder.build()` does not
-reject with the error of a refusal of the start itself, when the gateway
-refuses after it has accepted the init request; this refusal is one such. It
-rejects with `GatewayStartupCleanupError`, a `TransportError`, and the
-refusal is its `startupError` (also its `cause`): `instanceof
-CompositionProvenanceError` and `instanceof RpcError` are false for it (see
-Known limitations in the Meta changelog). Test for both, so the code keeps
-working when the refusal is thrown unwrapped (as it is where a host's own
-`gatewayTransport()` stops cleanly; read from the source, not run), and do
-not retry a start whose `startupError` is a typed refusal:
+If a gateway that the TypeScript SDK starts accepts init, reports a refusal
+and exits:
+
+- In 0.9.15 and 0.9.16, Node can exit on an unhandled `write EPIPE` even if
+  `build()` is inside a `try`/`catch`. See the [0.9.16 limitation and workaround](https://github.com/lukacf/meerkat/blob/v0.9.17/meta/CHANGELOG.md#L793).
+  When `build()` does reject, the refusal is the `startupError` of
+  `GatewayStartupCleanupError`, a transport error.
+- From 0.9.17, `builder.build()` rejects with the refusal itself when it
+  reads the failed settlement. If it writes a host callback reply after the
+  gateway exits but before it reads the settlement, cleanup also fails.
+  `build()` then rejects with `GatewayStartupCleanupError`; its `startupError`
+  is `InitOutcomeUnknownError` (source reading, not a run).
+
+This distinction does not describe a failure before acceptance or a gateway
+that exits without reporting a settlement.
+
+To support both forms, check for the underlying refusal as below. Do not
+retry a start just because a typed refusal arrived inside a transport error.
 
 ```typescript
 import { CompositionProvenanceError, GatewayStartupCleanupError } from "@rkat/meta-sdk";

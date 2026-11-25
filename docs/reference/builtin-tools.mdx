@@ -438,6 +438,15 @@ bounded result, and retires the helper. The tool owns its wait:
   - A mob that runs without the runtime adapter (a standalone embedding whose
     sessions are not runtime-backed): its helpers run under their own tool
     deadlines alone.
+  - Any other case in which the calling host's runtime holds no bound for the
+    helper when its tool call starts. Three are known: the helper's session
+    could not be read right after the helper was seated; the helper's agent
+    was not built yet at that moment, so its session had no bindings to carry
+    the bound; the helper's session is registered anew during the call, and
+    the new registration starts without the bound. The bound fails open in
+    all of them: the helper runs under its own tool deadlines alone, as
+    before, and the call's wait ends first. The host's log has a debug line
+    for the first two.
 - **A call that ends without the helper's result ends the helper.** When the
   wait elapses, the helper's run is cancelled and the helper is retired, and
   the call answers a typed tool error, `execution_failed` with `data.kind`
@@ -458,8 +467,12 @@ bounded result, and retires the helper. The tool owns its wait:
   seated. The refusal is `delegate_helper_ended` with `reason: not_started`,
   `helper: not_seated`, `max_run_secs` (what was left) and
   `max_run_limited_by: "call_deadline"`; it carries the `member_id` the call
-  gave and no `mob_id`, since no mob is involved. A caller's own short
-  `max_run_secs`, and an operator's short deadline, are not held to that floor.
+  gave and no `mob_id`, since no mob is involved. The floor is on what the
+  delegate above leaves, whatever `max_run_secs` the nested call names: a
+  nested call that asks for a short wait is refused too. A call is held to it
+  only when the bound of the delegate above is the narrowest of its deadlines:
+  a call that is not nested, and one under an operator's own shorter deadline,
+  wait what their `max_run_secs` and that deadline allow.
   When an outer call is dropped (its calling turn is interrupted), its helper's
   own waiting `delegate` call is dropped with the helper's turn, which ends
   the inner helper the same way.
@@ -521,8 +534,9 @@ own form instead: an implicit mob that did not restore (quarantined) answers
 as any quarantined mob does, with its id, and a mob registered under the
 implicit id that is not the session's own answers `access_denied` with no
 data. A permission refusal carries no ids at any point: a mob that refuses
-the helper's seat because the caller's principal lacks the control scope
-answers `access_denied` with no data too. The per-member tools are unchanged:
+the helper's seat, or the bind of the call's objective to its owner, because
+the caller's principal lacks the control scope answers `access_denied` with no
+data too. The per-member tools are unchanged:
 a member id looked up in a mob that
 does not hold it still answers `member_not_found` for that mob.
 

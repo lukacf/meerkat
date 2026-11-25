@@ -113,7 +113,11 @@ the call still waits, less room for the helper to report, so a helper's slow
 tool times out inside the helper and the helper reports it; a `delegate` the
 helper makes itself waits what is left, and is refused before anything is
 started when that is under 30 seconds. A helper's long model call, and a
-helper placed on another host, are not bounded that way. A helper stays only
+helper placed on another host, are not bounded that way, and in the rare
+cases in which the calling host holds no bound for the helper (the
+[reference](/reference/builtin-tools#delegate-its-wait-and-how-it-ends)
+lists them) the helper runs under its own tool deadlines alone. A helper
+stays only
 when the error says it
 could not be ended (`retirement_failed`, `mob_not_running`) or when its
 call ended with its host: a restarted host restores it seated and idle. It

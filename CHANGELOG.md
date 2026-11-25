@@ -105,7 +105,11 @@ them.
     (the bound is set in the calling host's process and does not travel:
     there the helper's tools run under that host's own tool deadlines); and
     a mob that runs without the runtime adapter (a standalone embedding
-    whose sessions are not runtime-backed).
+    whose sessions are not runtime-backed). The bound fails open in the
+    few other cases in which the calling host holds none for the helper
+    (its session could not be read right after it was seated, its agent
+    was not built yet, or its session is registered anew during the call):
+    the helper then runs under its own tool deadlines alone, as before.
   - A nested `delegate` (one a helper makes) inherits what the delegate
     above it has left: it reads that bound as its call's deadline, so with
     the defaults the levels wait 585, 540 and 495 seconds. When the bound
@@ -113,8 +117,10 @@ them.
     anything is started (no mob, no helper): `execution_failed` with
     `kind` `delegate_helper_ended`, `reason` `not_started`, `helper`
     `not_seated`, `max_run_secs` (what was left), `max_run_limited_by:
-    "call_deadline"` and no `mob_id`. A caller's own short `max_run_secs`
-    and an operator's short deadline are not held to that floor.
+    "call_deadline"` and no `mob_id`. The floor is on what the delegate
+    above leaves, whatever `max_run_secs` the nested call names. A call
+    that is not nested, and one whose narrowest deadline is an operator's
+    own, are not held to it.
   - The text of `delegate_helper_ended` says what the caller can do, by
     what became of the helper and by what the calling session may do, and
     the data carries the latter as `session_manages_mob`. A helper that is
@@ -125,8 +131,9 @@ them.
     does not is told that those tools are refused for it while the helper
     is a member, and that the ids are for the host. The ids grant nothing:
     the manage scope still leaves only with a result. A control-scope
-    refusal of the helper's seat now answers `access_denied` with no data,
-    where it answered `execution_failed` with the mob and member id.
+    refusal of the helper's seat, or of the bind of the call's objective
+    to its owner, now answers `access_denied` with no data, where 0.9.18
+    answered `execution_failed` with the mob's refusal text.
   - A bounded call owns ending its helper even when the call is dropped:
     when the calling turn is interrupted, or a deadline outside the tool
     cuts the call, the run cancels and retires its helper. The cancel and the

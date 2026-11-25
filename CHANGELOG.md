@@ -47,15 +47,31 @@ them.
   - `RequestUntilChangedSwitchTurnReasoningEffortRefusedAttached`
   - `RequestUntilChangedSwitchTurnReasoningEffortRefusedRunning`
 
+### Added
+
+- Rust API: a host can poll a run that waits for its resume gate. After a kill and a restart, a durable worker's run whose resume gate cannot decide (it answers `Unavailable`, or takes too long) is neither resumed nor settled and waits, as documented since 0.9.11; until now nothing a host could read said that it waits, for how long, or why. `MobHandle::members_with_pending_resumed_runs()` (`meerkat-mob`) lists the locally seated members whose session marks a run that has neither resumed nor settled, and `MeerkatMachine::pending_resumed_run(&session_id)` / `pending_resumed_runs()` (`meerkat-runtime`) answer one session or every session of the process. An answer (`PendingResumedRunRead::Pending`) carries the session, the run id that `stop_member_run` takes, how long the registration has marked the run (`marked_for`), whether a stop is recorded and not settled yet (`stop_requested`), and whether the machine holds the run for its gate (`ResumedRunAdmissionState::Held`) with the undecided rounds, the time since the first of them, the typed cause (`TimedOut` or `AnsweredUnavailable`) and the gate's own reason for the last round, cut at `RESUMED_RUN_ADMISSION_REASON_MAX_BYTES` (512 bytes). The poll is answered from memory: no store call, no ask of the gate, no wake and no change, so it answers for a worker whose runtime loop makes no pass and never moves the round count. It does not wait out a busy session: the read gives up its wait for a session's own state after `PENDING_RESUMED_RUN_READ_BOUND` and answers `PendingResumedRunRead::NotReadableNow`, as it does for a registration that needs a reload; that answer means "ask again", not "no run waits". The constant is the length of that one wait, not a bound on the call: the lookup of the session comes before it, and a poll of several sessions or members reads them one after another. The new types are `#[non_exhaustive]`. See [Durable runs: seeing a run that waits](docs/guides/durable-runs.mdx#seeing-a-run-that-waits).
+
+  What this does not change: nothing is emitted on any stream or wire surface, no SDK or RPC method is added, nothing asks the gate again on a timer, and a waiting run is never resumed or settled because time has passed. A host that wants an alert polls and raises its own. Whether a run is held, and which run, is the runtime machine's state; the rounds, the times, the cause and the reason are noted by the current registration and start over at every registration, so they count from one again after a restart.
+
 ### Changed
 
 - For a staged model switch, the compatibility check now covers the session's existing reasoning level when the target model's supported levels are available at decision time.
+
+- Configured self-hosted Chat Completions and Responses clients now describe an engine-authored closed set of string choices as a string enum in the outgoing tool schema. An optional parameter still stays out of `required`. The schema no longer advertises a description for each choice or an explicit `null` alternative.
+
+### Fixed
+
+- `meerkat-session`: `session/instruction_status` no longer fails while the session's run is in a tool round. From a run's first tool round until the run committed, the read (`SessionServiceInstructionExt::read_session_instructions`) answered the JSON-RPC internal error (`-32603`) with the store's transcript revision conflict as its text, and answered again by itself once the run had committed. `mob/instruction_status` still answered its page, but the row of a member in that state read `effective_read: unreadable` with the same text as its `reason`: its slots carried no `recorded` or `effective` view, so a slot in effect read `pending` (`delivery_owed`). Now both reads answer the session's last committed state for the whole run: the recorded target, the entries in effect and the model's lowering as the last committed turn left them, read from one committed snapshot. Nothing of the running run shows: a change that run applied at its start reads `pending` until the run commits, as it already did before the run's first tool round. Affected: 0.9.9 to 0.9.18 for the Rust reads (`SessionServiceInstructionExt::read_session_instructions`, `PersistentSessionService::read_sessions_instructions`, `MobHandle::operator_instruction_status`), and 0.9.11, which added `session/instruction_status` and `mob/instruction_status`, to 0.9.18 for those methods; durable sessions of a SQLite realm. The reads that decide a session's lifecycle (a resume, a cold rebuild, an archive, a spawn over a session, a mob's restore of its members) are unchanged and still refuse typed while a round commit stands. No error code, SDK error vocabulary or documented error form changes.
 
 ### Upgrade notes
 
 - After a denial, do not resend the input: it ran on the retained model. Changing or clearing the level does not revive the denied switch. To use the target, choose a supported level or explicitly clear the held level, then request the switch again.
 
 - Rust callers must supply both fields when constructing either switch-request input, update named patterns that omit `..`, and handle the six new variants in exhaustive `TransitionId` matches. An empty verdict field does not deliver a compatibility decision. A custom `SessionLlmReconfigureHost` that wants target identity inspection must implement `inspect_target_session_llm_identity`; otherwise the host remains responsible for its judge's acceptance.
+
+- If you inspect these request schemas, read the allowed strings from `enum`; do not rely on per-choice descriptions. Omission is still allowed for the optional parameter. This does not establish that sending `null` is equivalent to omitting it.
+
+  The tests inspected locally constructed requests for one built-in parameter. Unchanged controls included Chat Completions on the Copilot backend, one OpenAI Responses case at an alternate base URL, and non-engine schemas. No test used OpenAI at its default address or checked server acceptance. A boolean sub-schema (where the schema itself is the literal `true` or `false`) is outside this change.
 
 ### Known limitations
 
@@ -45750,6 +45766,13 @@ first ship in 0.8.49.
 - Hardened release publication with exact-tree semver evidence, complete binary
   asset/provenance checks, concurrent pre-push isolation, and a guarded
   tag-to-registry critical path.
+
+### Upgrade
+
+- Added 2026-11-24, after the release. The persistent mob restore scan now
+  selects only `mob--`-prefixed `.db` filenames. A 0.8.30 store such as
+  `team.db` is skipped by name. See [Upgrading to 0.8.31](https://docs.rkat.ai/guides/upgrading#upgrading-to-0-8-31)
+  for the filename rules and the limit of this source-only finding.
 
 ## [0.8.30] - 2026-08-26
 

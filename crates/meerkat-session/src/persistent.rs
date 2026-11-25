@@ -21484,7 +21484,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     /// [`meerkat_core::service::SessionServiceInstructionExt::read_session_instructions`]
     /// reads one: the lowering of each model and binding the sessions record
     /// is resolved once for the pass, not once per session. A mob's status
-    /// read asks for one page of its members this way. Wakes nothing.
+    /// read asks for one page of its members this way. Wakes nothing. A
+    /// session whose own run holds a round commit ahead of its boundary
+    /// answers its last committed state, as every answer here does.
     pub async fn read_sessions_instructions(
         &self,
         ids: &[SessionId],
@@ -21505,6 +21507,27 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         reads
     }
 
+    /// One session's committed operator-instruction state: the recorded
+    /// target, the effective set and the model's lowering, all three from
+    /// the one committed session this reads.
+    ///
+    /// An observation, so it reads as a public reader does
+    /// ([`Self::load_committed_session_tolerating_tail`]): while the
+    /// session's own durable run holds a round commit ahead of its boundary
+    /// (from its first tool round to its boundary commit) the strict read
+    /// refuses the boundary by contract, and this answers the committed
+    /// snapshot the round's tail sits on, read whole in one store
+    /// transaction. That snapshot is the session's last committed state and
+    /// carries nothing of the run: an operator-instruction write never lands
+    /// inside a run (it commits under the turn-finalization boundary), so
+    /// the target is the one every reader saw at the run's start, and the
+    /// entry the run's start appended is in the run's tail, so a change the
+    /// open run applied reads pending until the run's boundary commit, as
+    /// it does between the run's start and its first round commit.
+    ///
+    /// It decides nothing and settles nothing: the read takes no turn
+    /// boundary, and an ended run's tail is left to the strict readers, the
+    /// session's next start, attach or archive.
     async fn read_session_instructions_with(
         &self,
         id: &SessionId,
@@ -21514,7 +21537,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         meerkat_core::service::SessionInstructionError,
     > {
         let session = self
-            .load_authoritative_session(id)
+            .load_committed_session_tolerating_tail(id)
             .await?
             .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
         let target = session.instruction_target_state()?;
@@ -40380,6 +40403,200 @@ mod tests {
                 &service.observe_authoritative_session_body(&id).await
             ),
             "the observation wrote nothing: the round's tail still stands"
+        );
+    }
+
+    /// A session whose document records one pending operator instruction,
+    /// and whose own run then holds a round commit ahead of that document:
+    /// the run applied the instruction at its start, so the round's
+    /// provisional tail holds the entry row and the target that records it
+    /// as applied, and the committed snapshot holds neither. Returns the
+    /// service, the session and the instruction read of the committed
+    /// document, taken before the round commit.
+    async fn instruction_status_under_a_round_commit_fixture() -> (
+        tempfile::TempDir,
+        Arc<PersistentSessionService<DummyBuilder>>,
+        SessionId,
+        meerkat_core::service::SessionInstructionRead,
+    ) {
+        use meerkat_core::service::SessionServiceInstructionExt as _;
+
+        let (directory, service, checkpointer, seeded) =
+            caller_turn_fork_source_fixture(false).await;
+        let service = Arc::new(service);
+        let id = seeded.id().clone();
+        let receipt = Arc::clone(&service)
+            .set_session_instruction(
+                &id,
+                meerkat_core::SessionInstructionWrite {
+                    slot: meerkat_core::InstructionSlot {
+                        namespace: InstructionNamespace::new("app.example").unwrap(),
+                        key: InstructionKey::new("tone").unwrap(),
+                    },
+                    revision: meerkat_core::InstructionRevision::new(1).unwrap(),
+                    change: meerkat_core::SessionInstructionChange::Activate {
+                        body: "Answer formally.".to_string(),
+                        content_sha256: None,
+                    },
+                },
+            )
+            .await
+            .expect("the dormant session records the write in its document");
+        assert_eq!(
+            receipt.disposition,
+            meerkat_core::InstructionWriteDisposition::Recorded
+        );
+        let committed_read = service
+            .read_session_instructions(&id)
+            .await
+            .expect("the instruction read answers while no run holds a round commit");
+        assert_eq!(
+            committed_read
+                .target
+                .as_ref()
+                .map(meerkat_core::SessionInstructionState::target_generation),
+            Some(1),
+            "the committed document records the write"
+        );
+        assert!(
+            committed_read.effective.is_empty(),
+            "a write applies nothing: the change is pending"
+        );
+
+        let committed = service
+            .load_authoritative_session(&id)
+            .await
+            .expect("the strict read answers while no run holds a round commit")
+            .expect("the session is committed");
+        let run_id = RunId::new();
+        let mut running = committed.clone();
+        let applied = running
+            .apply_run_start_instructions(
+                meerkat_core::InstructionRunStart::FreshRun,
+                meerkat_core::InstructionLowering::MidConversation,
+                Some(run_id.clone()),
+            )
+            .expect("the run start decides the pending change");
+        assert!(
+            matches!(
+                applied,
+                meerkat_core::RunStartInstructionOutcome::Applied { .. }
+            ),
+            "the run start applies the pending change: {applied:?}"
+        );
+        commit_running_turn_round(&checkpointer, &mut running, &run_id).await;
+        assert!(
+            !meerkat_core::effective_operator_instructions(running.id(), running.messages())
+                .expect("the running turn's rows read")
+                .is_empty(),
+            "the round's tail holds the change as applied; the committed snapshot does not"
+        );
+        assert!(
+            service
+                .provisional_tail_stands(&id)
+                .await
+                .expect("the presence read answers"),
+            "the run holds a round commit ahead of its boundary"
+        );
+        (directory, service, id, committed_read)
+    }
+
+    /// The operator-instruction status read is a public reader. While the
+    /// session's own run holds a round commit ahead of its boundary, it
+    /// answers the last committed state, read whole from the one committed
+    /// snapshot under the round's tail: the target as the document recorded
+    /// it and the effective set of the committed rows. Nothing of the round
+    /// shows: the change the open run applied reads pending until the run's
+    /// boundary commit, exactly as it read before the round commit.
+    #[tokio::test]
+    async fn the_instruction_status_read_answers_the_committed_state_under_a_round_commit() {
+        use meerkat_core::service::SessionServiceInstructionExt as _;
+
+        let (_directory, service, id, committed_read) =
+            instruction_status_under_a_round_commit_fixture().await;
+
+        let read = service
+            .read_session_instructions(&id)
+            .await
+            .expect("the instruction read answers while the run holds a round commit");
+        assert_eq!(
+            read, committed_read,
+            "the read answers the last committed state, nothing of the round"
+        );
+        let page = service
+            .read_sessions_instructions(std::slice::from_ref(&id))
+            .await;
+        assert_eq!(page.len(), 1, "one answer per session");
+        assert_eq!(
+            page.into_iter()
+                .next()
+                .expect("one answer")
+                .expect("a page read answers for a member whose run holds a round commit"),
+            committed_read,
+            "a page read answers the same committed state"
+        );
+    }
+
+    /// The control of the row above: the instruction read is an observation
+    /// and decides nothing. In the same state, the strict read the lifecycle
+    /// deciders take (a resume, a cold rebuild, an archive's presence check,
+    /// a spawn over the session, a mob start's restore) still refuses with
+    /// the typed revision conflict, before the instruction read and after it:
+    /// the instruction read settled nothing and wrote nothing.
+    #[tokio::test]
+    async fn the_strict_read_still_refuses_typed_beside_the_instruction_status_read() {
+        use meerkat_core::service::SessionServiceInstructionExt as _;
+
+        let (_directory, service, id, _committed_read) =
+            instruction_status_under_a_round_commit_fixture().await;
+        let runtime_id = PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&id);
+        assert!(
+            PersistentSessionService::<DummyBuilder>::is_transcript_revision_conflict(
+                &service.load_authoritative_session(&id).await
+            ),
+            "the strict read refuses the boundary while the round's tail is ahead of it"
+        );
+        let durable_before = (
+            service
+                .runtime_store
+                .load_session_resume_observation(&runtime_id)
+                .await
+                .expect("observe the resume authority"),
+            service
+                .runtime_store
+                .load_head_canonical_provisional_tail(&runtime_id)
+                .await
+                .expect("read the provisional tail"),
+        );
+
+        // Whatever the instruction read answers, it changes nothing a
+        // decider reads.
+        let _ = service.read_session_instructions(&id).await;
+        let _ = service
+            .read_sessions_instructions(std::slice::from_ref(&id))
+            .await;
+
+        assert!(
+            PersistentSessionService::<DummyBuilder>::is_transcript_revision_conflict(
+                &service.load_authoritative_session(&id).await
+            ),
+            "the strict read still refuses typed: the instruction read settled nothing"
+        );
+        assert_eq!(
+            (
+                service
+                    .runtime_store
+                    .load_session_resume_observation(&runtime_id)
+                    .await
+                    .expect("observe the resume authority"),
+                service
+                    .runtime_store
+                    .load_head_canonical_provisional_tail(&runtime_id)
+                    .await
+                    .expect("read the provisional tail"),
+            ),
+            durable_before,
+            "the instruction read wrote nothing: the resume authority and the tail are unchanged"
         );
     }
 

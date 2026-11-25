@@ -48,6 +48,10 @@ use meerkat_mob::{EntryStanding, IdentityEntryRead, MobDefinition, ProfileName};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
+// This file uses the helper's check of a shutdown report only, not its wait.
+#[allow(dead_code)]
+#[path = "support/custody_wait.rs"]
+mod custody_wait;
 #[path = "support/llm_usage.rs"]
 mod llm_usage;
 
@@ -644,7 +648,28 @@ impl Rig {
     /// root still claimed is refused `AlreadyClaimed`. Stand down again,
     /// bounded, until the root is released.
     async fn shutdown_for_reopen(self) {
-        let mut outcome = self.runtime.shutdown().await.child_mob_stand_down;
+        let mut report = self.runtime.shutdown().await;
+        self.stand_child_root_down(&mut report).await;
+    }
+
+    /// [`Self::shutdown_for_reopen`] for a row whose next step probes the
+    /// state directory's execution custody at once, with no wait: the
+    /// shutdown's report must say the teardown settled
+    /// (`support/custody_wait.rs`), the mob's part before the child root is
+    /// stood down again and the whole report after it. The rig is consumed,
+    /// so this lifetime's handles are dropped when it returns.
+    async fn shutdown_settled_for_reopen(self) {
+        let mut report = self.runtime.shutdown().await;
+        custody_wait::mob_teardown_settled(&report);
+        self.stand_child_root_down(&mut report).await;
+        custody_wait::teardown_settled(&report);
+    }
+
+    /// The second half of [`Self::shutdown_for_reopen`]: stand the durable
+    /// child root down again, bounded, until it is released, and write its
+    /// last outcome into `report`.
+    async fn stand_child_root_down(&self, report: &mut meerkat_meta::UnifiedRuntimeShutdownReport) {
+        let mut outcome = report.child_mob_stand_down.clone();
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
         while !child_root_released(&outcome) && std::time::Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -658,6 +683,7 @@ impl Rig {
             child_root_released(&outcome),
             "the durable child root is released before the reopen: {outcome:?}"
         );
+        report.child_mob_stand_down = outcome;
     }
 }
 
@@ -1313,7 +1339,12 @@ async fn an_offline_identity_reset_gives_a_store_owned_identity_a_fresh_life_at_
     assert!(rig.turn(CREATED, "BEFORE-OFFLINE-RESET").await);
     let before = rig.life(CREATED).await;
     let row_before = rig.row(CREATED).await;
-    rig.shutdown_for_reopen().await;
+    // The offline reset below probes the state directory's execution custody
+    // at once, with no wait and no retry: after a teardown that settled every
+    // member, dropping the runtime releases it at once. So the shutdown's
+    // report is read first: a teardown that did not settle fails the row
+    // there, before any probe.
+    rig.shutdown_settled_for_reopen().await;
 
     let report = meerkat_meta::storage_migrate_native::reset_identity(
         &meerkat_meta::storage_migrate_native::IdentityResetRequest::new(temp.path(), CREATED)
@@ -1322,7 +1353,8 @@ async fn an_offline_identity_reset_gives_a_store_owned_identity_a_fresh_life_at_
     .await;
     assert!(
         report.refusal.is_none() && report.written,
-        "the offline reset takes the store-owned identity and writes its row: {report:?}"
+        "the teardown reported settled and the runtime is dropped: the offline reset takes the \
+         store-owned identity and writes its row: {report:?}"
     );
     let manifest = temp.path().join("storage-migrate-native.first-boot.json");
     assert!(manifest.exists(), "the first-boot manifest holds the row");

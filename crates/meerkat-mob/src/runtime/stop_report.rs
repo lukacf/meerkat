@@ -213,6 +213,21 @@ impl HostRunStartHoldReason {
     }
 }
 
+/// A member whose session marks a run its registration has neither resumed
+/// nor settled (a run a restart left open), as
+/// [`crate::MobHandle::members_with_pending_resumed_runs`] lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct MemberPendingResumedRun {
+    /// The member.
+    pub agent_identity: AgentIdentity,
+    /// What the member's runtime answers for its session: the marked run,
+    /// whether the machine holds it for its resume gate and whether its stop
+    /// was asked, or that the session cannot be read now
+    /// ([`meerkat_runtime::MeerkatMachine::pending_resumed_run`]).
+    pub run: meerkat_runtime::PendingResumedRunRead,
+}
+
 /// What [`MobHandle::drain_stopped_runs`](super::MobHandle::drain_stopped_runs)
 /// found for each member of a Stopped mob: whether the run each member had
 /// when the drain started ended within its bound.

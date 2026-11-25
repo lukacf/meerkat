@@ -53,7 +53,7 @@ fn any_other_failure_is_surfaced_with_or_without_the_admission() {
     let id = meerkat::SessionId::new();
     let failures: [(SessionError, Option<Admission>); 3] = [
         (SessionError::Busy { id: id.clone() }, Some(Admission(7))),
-        (SessionError::Busy { id: id.clone() }, None),
+        (SessionError::Busy { id }, None),
         (SessionError::Agent(meerkat::AgentError::Cancelled), None),
     ];
 

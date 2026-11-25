@@ -16298,6 +16298,22 @@ impl SessionAgentBuilder for StdioCallbackAgentBuilder {
         self.inner.instruction_lowering_for_identity(identity).await
     }
 
+    // Forwarded: the inner factory builder builds every agent and records a
+    // named auth binding stamped with the realm that declares it, so it is
+    // the builder that tells that form. This wrapper resolves no binding.
+    // The trait's default answers that there is no other form, and a session
+    // service over this builder would then compare the named form alone: a
+    // live session that recorded an inherited binding under its owning realm
+    // would not be recognised as running the binding its member names. The
+    // answer is the inner builder's, unchanged: its resolved form, and its
+    // own error for a binding it refuses.
+    async fn recorded_auth_binding(
+        &self,
+        auth_binding: &meerkat_core::AuthBindingRef,
+    ) -> Result<Option<meerkat_core::AuthBindingRef>, SessionError> {
+        self.inner.recorded_auth_binding(auth_binding).await
+    }
+
     async fn abort_absent_session_compaction_stages(
         &self,
         session_id: &meerkat_core::SessionId,

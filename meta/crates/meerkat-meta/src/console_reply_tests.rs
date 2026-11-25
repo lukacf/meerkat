@@ -32,6 +32,9 @@ use crate::console_replies::{
 use crate::runtime::{MetadataStoreError, PersistentMetadataStore};
 use crate::unified_runtime::{UnifiedRuntime, UnifiedRuntimeBuilder};
 
+#[path = "../tests/support/custody_wait.rs"]
+mod custody_wait;
+
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 type TestResult = Result<(), BoxError>;
 
@@ -1307,6 +1310,16 @@ async fn a_later_policy_withholds_the_earlier_item_like_the_thread() -> TestResu
     let dir = tempfile::tempdir()?;
     let mob_id = "mu16-later-policy";
     let alice = alice();
+    // The execution custody file of the runtime store in `dir`.
+    #[cfg(target_os = "linux")]
+    let custody = {
+        let mut custody = dir
+            .path()
+            .join(crate::storage_layout::RUNTIME_DB_FILE_NAME)
+            .into_os_string();
+        custody.push(".execution-custody");
+        std::path::PathBuf::from(custody)
+    };
     {
         let first = composition(
             dir.path(),
@@ -1334,7 +1347,35 @@ async fn a_later_policy_withholds_the_earlier_item_like_the_thread() -> TestResu
         assert!(is_attention(&as_item), "{as_item:?}");
         let items = attention(&app, &alice).await.expect("Alice's list");
         assert!(items.iter().any(carries_reply), "{items:#?}");
-        let _ = first.shutdown().await;
+        // The second composition below reopens `dir` in this process. The
+        // wait for the first one's execution custody returns at its bound
+        // and where the kernel's lock table cannot be read too, so its
+        // return is no observed release. What is observed: the table names
+        // the custody's holder while this composition is live (so it can
+        // name this file here), and names none after the wait.
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            custody_wait::custody_holder_named(&custody),
+            Some(true),
+            "the kernel's lock table names the live composition's execution custody: without \
+             that, no release of it can be observed on this host"
+        );
+        let report = first.shutdown().await;
+        // A teardown that did not settle fails the row here, not at a wait.
+        custody_wait::teardown_settled(&report);
+    }
+    custody_wait::predecessor_custody_released(dir.path()).await;
+    #[cfg(target_os = "linux")]
+    match custody_wait::custody_holder_named(&custody) {
+        Some(false) => {}
+        Some(true) => panic!(
+            "the teardown reported settled and its handles are dropped; the execution custody \
+             is still held after the wait ran to its bound"
+        ),
+        None => panic!(
+            "the kernel's lock table could not be read after the wait: no release of the \
+             execution custody was observed"
+        ),
     }
     let second = composition(
         dir.path(),

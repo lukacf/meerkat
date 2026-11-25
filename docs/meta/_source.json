@@ -4,10 +4,10 @@
   "source_path": "meta/docs",
   "source_branch": "main",
   "source_ref": "main",
-  "source_commit": "140f84403642fc5642c9e07fe8ad94879877f7c5",
+  "source_commit": "e0b6ee22c12037a5758ac45296c6238bacd357ef",
   "source_commit_date": "2026-11-25",
   "source_version": "0.9.18",
   "source_docs_dirty": false,
   "public_pages": 39,
-  "content_sha256": "5c9e82adf492d8a427c752b1e8e9201acde0bad21eba7c8d23dd5889ce7f6f27"
+  "content_sha256": "69992d4b940967e91c8f07b2d8b694c079b8a3e64cfd16d682771453dd33d48d"
 }

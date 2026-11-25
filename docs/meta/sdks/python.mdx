@@ -4,7 +4,7 @@ description: "Meta Python SDK — typed builder API, async runtime, and streamin
 icon: "python"
 ---
 
-*Mirrored from Meerkat Meta main at [140f84403642](https://github.com/lukacf/meerkat/commit/140f84403642fc5642c9e07fe8ad94879877f7c5) on 2026-11-25; Meta version 0.9.18 at that commit.*
+*Mirrored from Meerkat Meta main at [e0b6ee22c120](https://github.com/lukacf/meerkat/commit/e0b6ee22c12037a5758ac45296c6238bacd357ef) on 2026-11-25; Meta version 0.9.18 at that commit.*
 
 The Meta Python SDK provides a typed host API for launching and operating
 Meerkat mobs through the SDK-facing gateway. Apps own policy. Meerkat and
@@ -960,7 +960,7 @@ if health.last_delivery_error and health.last_delivery_error["class"] == "reload
 | `respawn_member(member_id)` | `None` | Respawn a previously retired member (identity-first: resets the identity onto a fresh session) |
 | `reload_member(member_id)` | `MemberReloadResult` | Non-destructive cold reload: same identity, same durable session, same generation (identity-first only) |
 | `member_health(member_id)` | `MemberHealth` | Lifecycle and delivery health from in-process reads; carries `actor_loop`, `open_stall_id`, and `last_delivery_error` |
-| `reconcile_edges()` | `ReconcileEdgesReport` | Converge mob.toml `[wiring]` (`auto_wire_orchestrator`, `role_wiring`) on the live roster. Needed after `runtime.reconcile()` or an identity-first boot only when the definition declares such wiring; `ensure_member` already runs it, and with no declared wiring the report is empty |
+| `reconcile_edges()` | `ReconcileEdgesReport` | Reconcile dynamic peer wiring. `desired_edges` lists the pairs this call targets, not all live connections. On an identity-first gateway it may be empty even when members are wired at spawn. For recorded peers, read `(await handle.get_member(member_id)).wired_to`. See [When to call `reconcile_edges`](/meta/concepts/roster#when-to-call-reconcile_edges). |
 
 `MemberSnapshot` exposes `agent_identity`, `role`, `state`, `wired_to`, and
 `labels`. Known state strings are exported from the top-level package as

@@ -5824,8 +5824,8 @@ async fn handle_meerkat_run_with_help_tools(
 /// What the plain resume does with a failed turn on the live session.
 ///
 /// A not-found answer does not prove that the turn did not run. The session
-/// service hands the turn's reserved admission back with an error when the
-/// turn did not take it, so only a not-found answer that came with the
+/// service hands the turn's reserved admission back with an error only when
+/// the turn did not take it, so only a not-found answer that came with the
 /// admission lets the resume submit its prompt again.
 enum LiveTurnFailure<A> {
     /// The session was not found and the turn's reserved admission came back

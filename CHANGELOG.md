@@ -63,6 +63,22 @@ them.
 
 - `meerkat-session`: `session/instruction_status` no longer fails while the session's run is in a tool round. From a run's first tool round until the run committed, the read (`SessionServiceInstructionExt::read_session_instructions`) answered the JSON-RPC internal error (`-32603`) with the store's transcript revision conflict as its text, and answered again by itself once the run had committed. `mob/instruction_status` still answered its page, but the row of a member in that state read `effective_read: unreadable` with the same text as its `reason`: its slots carried no `recorded` or `effective` view, so a slot in effect read `pending` (`delivery_owed`). Now both reads answer the session's last committed state for the whole run: the recorded target, the entries in effect and the model's lowering as the last committed turn left them, read from one committed snapshot. Nothing of the running run shows: a change that run applied at its start reads `pending` until the run commits, as it already did before the run's first tool round. Affected: 0.9.9 to 0.9.18 for the Rust reads (`SessionServiceInstructionExt::read_session_instructions`, `PersistentSessionService::read_sessions_instructions`, `MobHandle::operator_instruction_status`), and 0.9.11, which added `session/instruction_status` and `mob/instruction_status`, to 0.9.18 for those methods; durable sessions of a SQLite realm. The reads that decide a session's lifecycle (a resume, a cold rebuild, an archive, a spawn over a session, a mob's restore of its members) are unchanged and still refuse typed while a round commit stands. No error code, SDK error vocabulary or documented error form changes.
 
+### Security
+
+- `url` is updated from 2.5.8 to 2.5.9 for RUSTSEC-2026-0592, in
+  Cargo.lock and in the example workspaces' lockfiles; `form_urlencoded`
+  moves from 1.2.2 to 1.2.3 with it, because `url` 2.5.9 requires it. No
+  manifest changes: the workspace requirement `url = "2.5"` already admits
+  2.5.9, so a build that resolves `url` with a lock of its own can move
+  without waiting for a release. The advisory is about `Url::origin()` on a
+  `blob:` URL: through 2.5.8 it took the origin of the inner URL whatever
+  its scheme, calling itself once per nested `blob:` prefix without a
+  limit, so one long enough URL overflowed the stack and ended the process.
+  In 2.5.9 `Url::origin()` takes the inner URL's origin only when its
+  scheme is `http`, `https` or `file`, and returns an opaque origin
+  otherwise. `url` 2.5.9 also moves a few parser edge cases toward the URL
+  Standard, among them the percent-encoding of `^` in a path.
+
 ### Upgrade notes
 
 - After a denial, do not resend the input: it ran on the retained model. Changing or clearing the level does not revive the denied switch. To use the target, choose a supported level or explicitly clear the held level, then request the switch again.

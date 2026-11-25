@@ -4693,8 +4693,9 @@ struct DelegateArgs {
     #[serde(default)]
     member_id: Option<String>,
     /// The most the helper may run, in seconds. When it has elapsed the
-    /// helper's run is cancelled, the helper is retired, and the call
-    /// answers a typed error. Omit it to wait as long as the call itself
+    /// call starts the helper's cleanup (a cancel of its run, then its
+    /// retirement) and answers a typed error whose data says what became
+    /// of the helper. Omit it to wait as long as the call itself
     /// may; a value above that is clamped to it.
     #[serde(default)]
     #[schemars(range(min = 1))]
@@ -9085,6 +9086,33 @@ mod tests {
             ),
             "the usage text does not say what an ended wait does: {text}"
         );
+    }
+
+    /// A model is shown the description of `max_run_secs` in the tool's
+    /// input schema. It says of an elapsed wait what the description of the
+    /// tool says: the cleanup is started, and the error says what became of
+    /// the helper.
+    #[test]
+    fn the_max_run_secs_argument_says_that_an_elapsed_wait_starts_the_helpers_cleanup() {
+        let defs = build_tool_defs();
+        let delegate = defs.iter().find(|d| d.name == "delegate").unwrap();
+        let described = delegate.input_schema["properties"]["max_run_secs"]["description"]
+            .as_str()
+            .expect("the schema describes max_run_secs");
+        let text = described.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            !text.contains("the helper is retired"),
+            "the description of max_run_secs still says that the helper is retired: {text}"
+        );
+        for needle in [
+            "the call starts the helper's cleanup (a cancel of its run, then its retirement)",
+            "a typed error whose data says what became of the helper",
+        ] {
+            assert!(
+                text.contains(needle),
+                "the description of max_run_secs does not say `{needle}`: {text}"
+            );
+        }
     }
 
     #[test]

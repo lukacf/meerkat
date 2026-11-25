@@ -1694,10 +1694,12 @@ impl DelegationExecutionService {
     /// [`Self::execute`] under a run limit, with the run owned by a task of
     /// its own instead of the caller's future.
     ///
-    /// A delegation that ends without its helper's terminal result ends its
-    /// helper: when `bounds.max_run` elapses (counted from this call), or
-    /// when the caller stops listening (this future is dropped), the
-    /// helper's run is cancelled and the helper is retired. Both go through
+    /// A delegation that ends without its helper's terminal result starts
+    /// the end of its helper: when `bounds.max_run` elapses (counted from
+    /// this call), or when the caller stops listening (this future is
+    /// dropped), the run issues a cancel of the helper's work and then the
+    /// helper's retirement. Either can fail, and [`DelegationHelperEnded`]
+    /// says how they went. Both go through
     /// MobMachine, fenced on the incarnation this call's own spawn named:
     /// the cancel (`CancelAllWork`) names its runtime id and fence token,
     /// the retire the delivery scope MobMachine holds for that incarnation

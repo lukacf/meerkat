@@ -493,7 +493,7 @@ mod tests {
         agents.insert(
             "lead".to_string(),
             UserAgentConfig {
-                model: "gpt-6-astra".to_string(),
+                model: "gpt-6.2-astra".to_string(),
                 skill: "You lead the mob.".to_string(),
                 peer_description: "Lead".to_string(),
             },

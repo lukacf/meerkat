@@ -1167,6 +1167,11 @@ impl crate::console_schedules::ConsoleScheduleDoor for ConsoleSendDoor {
         crate::runtime::console_takes_a_persons_decision(&self.decisions, self.access.as_ref())
     }
 
+    /// As the Console's own configuration says.
+    fn refuses_every_caller(&self) -> bool {
+        crate::runtime::console_refuses_every_caller(&self.decisions)
+    }
+
     /// A fire is a `/console/send` by the schedule's sender, judged now. The
     /// Console first admits the sender as it admits a live request by it
     /// (`ConsoleScheduleSender::admitted_now`: the sign-in requirement, the

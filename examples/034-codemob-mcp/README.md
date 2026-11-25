@@ -84,7 +84,7 @@ consult(question: "What about the edge case?", session_id: "<id from previous ca
 **Parameters:**
 - `question` (required) — The question or topic
 - `context` — Background information, code snippets, file contents
-- `model` — LLM model (default: `gpt-6-astra`)
+- `model` — LLM model (default: `gpt-6.2-astra`)
 - `system_prompt` — Custom persona (default: general technical advisor)
 - `shell` — Enable shell access for running commands
 - `skills` — Inject domain knowledge (e.g. `["meerkat-platform", "rct-methodology"]`)
@@ -129,14 +129,14 @@ CRUD for user-created mob definitions. Saved to `.codemob-mcp/mobs/` and immedia
 
 | Pack | Agents | Pattern | Default Models |
 |------|--------|---------|---------------|
-| **advisor** | 1 | Single opinion | GPT-6 Astra |
-| **review** | 4 | 3 parallel reviewers → synthesis | Gemini 4 Argon, GPT-6 Astra, Gemini 3.5 Flash Lite, Opus |
-| **architect** | 3 | Plan → critique → revise → ADR | Opus, GPT-6 Astra, Gemini 4 Argon |
-| **brainstorm** | 4 | 3 diverse ideators → ranked synthesis | Gemini 4 Argon, GPT-6 Astra, Gemini 3.5 Flash Lite, Opus |
-| **red-team** | 3 | Advocate + adversary → judge | Gemini 3.5 Flash Lite, GPT-6 Astra, Opus |
-| **rct** | 6 | Plan → implement → 3 parallel gate reviews → aggregate | Opus, GPT-6 Astra, Gemini 4 Argon, GPT-6.1 Sol, Gemini 3.5 Flash Lite, Sonnet |
-| **implement** | 2 | Implement once, then emit one reviewer gate verdict | Sonnet, GPT-6 Astra |
-| **panel** | 5 | Moderator brief, 4 parallel viewpoints, moderator synthesis | Opus, Gemini 4 Argon, GPT-6 Astra, Gemini 3.5 Flash Lite, Sonnet |
+| **advisor** | 1 | Single opinion | GPT-6.2 Astra |
+| **review** | 4 | 3 parallel reviewers → synthesis | Gemini 4 Argon, GPT-6.2 Astra, Gemini 3.5 Flash Lite, Opus |
+| **architect** | 3 | Plan → critique → revise → ADR | Opus, GPT-6.2 Astra, Gemini 4 Argon |
+| **brainstorm** | 4 | 3 diverse ideators → ranked synthesis | Gemini 4 Argon, GPT-6.2 Astra, Gemini 3.5 Flash Lite, Opus |
+| **red-team** | 3 | Advocate + adversary → judge | Gemini 3.5 Flash Lite, GPT-6.2 Astra, Opus |
+| **rct** | 6 | Plan → implement → 3 parallel gate reviews → aggregate | Opus, GPT-6.2 Astra, Gemini 4 Argon, GPT-6.2 Sol, Gemini 3.5 Flash Lite, Sonnet |
+| **implement** | 2 | Implement once, then emit one reviewer gate verdict | Sonnet, GPT-6.2 Astra |
+| **panel** | 5 | Moderator brief, 4 parallel viewpoints, moderator synthesis | Opus, Gemini 4 Argon, GPT-6.2 Astra, Gemini 3.5 Flash Lite, Sonnet |
 
 Each pack uses a diverse set of models by default so its roles can contribute
 different perspectives.
@@ -147,8 +147,8 @@ different perspectives.
 |-------|----------|-----------|-------------------|
 | `claude-opus-5-5` | Anthropic | Advanced reasoning | Judge, moderator, synthesizer, orchestrator |
 | `claude-sonnet-5-5` | Anthropic | Fast + capable | RCT aggregator, implementer |
-| `gpt-6-astra` | OpenAI | General + code | Standalone consult, implementer, critic, advisor, security reviewer |
-| `gpt-6.1-sol` | OpenAI | Frontier capability and quality | RCT `integration_sheriff` |
+| `gpt-6.2-astra` | OpenAI | Most capable for the hardest projects | Standalone consult, implementer, critic, advisor, security reviewer |
+| `gpt-6.2-sol` | OpenAI | Everyday coding and agent workloads | RCT `integration_sheriff` |
 | `gpt-6.1-terra` | OpenAI | Balanced intelligence and cost | Available for override |
 | `gpt-6-luna` | OpenAI | Efficient high-volume work | Available for override |
 | `gemini-4-argon` | Google | Strong general | General reviewer, purist, guardian |
@@ -194,7 +194,7 @@ Override the default model for any role in a pack:
 deliberate(
   pack: "review",
   task: "...",
-  model_overrides: {"security": "claude-opus-5-5", "perf": "gpt-6.1-sol"}
+  model_overrides: {"security": "claude-opus-5-5", "perf": "gpt-6.2-sol"}
 )
 ```
 
@@ -231,7 +231,7 @@ deliberate(
 
 consult(
   question: "...",
-  model: "gpt-6.1-sol",
+  model: "gpt-6.2-sol",
   provider_params: {"reasoning_effort": "high"}
 )
 ```

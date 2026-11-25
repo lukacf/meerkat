@@ -258,6 +258,10 @@ function startMockConsoleServer(options = {}) {
   // Fails meta/gating/audit after this many successful calls (null: never).
   const failGatingAuditAfter = Number.isInteger(options.failGatingAuditAfter) ? options.failGatingAuditAfter : null;
   let gatingAuditCalls = 0;
+  // The open question sets agents asked (null: this gateway has no question
+  // sets). A decide that names one of them takes it off the list, as the
+  // gateway does once a person answered or dismissed it.
+  let openQuestionSets = Array.isArray(options.questionSets) ? [...options.questionSets] : null;
   const collapseWorkersSection = options.collapseWorkersSection === true;
   const extraSidebarAgents = Array.isArray(options.extraSidebarAgents) ? options.extraSidebarAgents : [];
   // The whole roster, in place of the stock rows above and `extraSidebarAgents`
@@ -592,6 +596,7 @@ function startMockConsoleServer(options = {}) {
                 "meta/gating/pending",
                 "meta/gating/audit",
                 "meta/gating/decide",
+                ...(openQuestionSets ? ["meta/gating/questions"] : []),
                 ...(topologyControl ? topologyControl.methods || [] : []),
                 ...(identityFamily ? identityFamily.methods : []),
               ],
@@ -800,6 +805,31 @@ function startMockConsoleServer(options = {}) {
                 actor: "console-browser-proof",
                 decided_at_ms: 1717171717,
               }],
+            },
+          }));
+          return;
+        }
+        if (openQuestionSets && payload.method === "meta/gating/questions") {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify({ jsonrpc: "2.0", id: rpcId, result: { question_sets: openQuestionSets } }));
+          return;
+        }
+        if (
+          openQuestionSets &&
+          payload.method === "meta/gating/decide" &&
+          openQuestionSets.some((set) => set.pending_id === payload.params?.pending_id)
+        ) {
+          // A person's reply to a question set: the set is no longer open.
+          openQuestionSets = openQuestionSets.filter((set) => set.pending_id !== payload.params.pending_id);
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify({
+            jsonrpc: "2.0",
+            id: rpcId,
+            result: {
+              pending_id: payload.params.pending_id,
+              kind: "question_set",
+              outcome: payload.params.decision === "approve" ? "answered" : "dismissed",
+              decided_at_ms: Date.now(),
             },
           }));
           return;
@@ -3492,6 +3522,173 @@ async function runGatingAuditRefreshErrorProof() {
   }
 }
 
+// A question set answered in the asking agent's chat leaves the place below
+// the newest turn and stays as one line with the turn it was answered
+// after, which opens to the question with the answer given: not drawn in
+// full again below a later turn, after going to another agent and back, or
+// after a reload. The same chat carries the runtime's record of the
+// reasoning effort a request was sent with: it is never a line of the chat,
+// read on load or arriving on the stream, while another runtime event and
+// a peer's message keep theirs.
+async function runQuestionSetAnsweredPlacementProof() {
+  const identity = "identity:luka";
+  const pendingId = `decision:${"a".repeat(64)}`;
+  const now = Date.now();
+  const effortResolved = (id, turnNumber, interactionId, timestampMs, cursor) => ({
+    id, kind: "request_reasoning_effort_resolved", identity, interaction_id: interactionId, timestamp_ms: timestampMs, cursor,
+    source: { kind: "console_event" },
+    payload: {
+      turn_number: turnNumber,
+      resolution: {
+        requested: "high", level: "high", provider: "openai", model: "gpt-5.5",
+        route: "responses", fields: ["reasoning.effort"], facts: "catalog", decided_by: "request",
+      },
+    },
+  });
+  const laterFrames = [
+    effortResolved("later-effort", 2, `turn-${identity}`, now + 59_000, "console:plan:8"),
+    { id: "later-done", kind: "interaction_complete", identity, interaction_id: `turn-${identity}`, timestamp_ms: now + 60_000, cursor: "console:plan:9", payload: { text: "Europe goes first." } },
+  ];
+  const server = await startMockConsoleServer({
+    questionSets: [{
+      pending_id: pendingId,
+      origin: { identity },
+      title: "Release plan",
+      questions: [{
+        id: "q-region",
+        prompt: "Which region goes first?",
+        choices: [{ id: "c-eu", label: "Europe" }, { id: "c-us", label: "United States" }],
+      }],
+      created_at_ms: now - 60_000,
+      deadline_at_ms: now + 3_600_000,
+      subject_digest: `sha256:${"b".repeat(64)}`,
+    }],
+    timelineFramesByIdentity: {
+      [identity]: [
+        { id: "plan-ask", kind: "user_input", identity, interaction_id: "plan-turn", timestamp_ms: now - 600_000, cursor: "console:plan:1", payload: { content: "Plan the release." } },
+        effortResolved("plan-effort", 1, "plan-turn", now - 599_500, "console:plan:2"),
+        { id: "plan-done", kind: "interaction_complete", identity, interaction_id: "plan-turn", timestamp_ms: now - 599_000, cursor: "console:plan:3", payload: { text: "One thing first: which region?" } },
+        // Controls: a runtime event without a renderer of its own, and a
+        // peer's message as the typed notice the runtime writes for it.
+        { id: "plan-skipped", kind: "requested_compaction_skipped", identity, timestamp_ms: now - 598_000, cursor: "console:plan:4", source: { kind: "console_event" }, payload: { reason: "Nothing to compact yet" } },
+        {
+          id: "plan-peer", kind: "system_notice", identity, timestamp_ms: now - 597_000, cursor: "console:plan:5",
+          payload: { message: {
+            role: "system_notice", kind: "comms", body: "Peer message", blocks: [{
+              type: "comms", direction: "incoming", kind: "message",
+              peer: { id: "reviewer-peer", display_name: "release/reviewer" },
+              content: [{ type: "text", text: "The plan reads well." }],
+            }],
+          } },
+        },
+      ],
+    },
+    // The later turn: the agent's answer to the person's next message. It
+    // reaches the page on the live stream, which this gateway keeps open,
+    // after the record of the effort its request was sent with.
+    holdTimelineStream: true,
+    timelineStreamFramesAfterSendByIdentity: { [identity]: laterFrames },
+    timelineFramesAfterSendByIdentity: { [identity]: laterFrames },
+  });
+  const decides = () => server.requests.filter((request) =>
+    request.url === "/console/rpc" && request.body.includes('"method":"meta/gating/decide"') && request.body.includes(pendingId)).length;
+  let browser;
+  try {
+    browser = await launchBrowser();
+    const page = await browser.newPage();
+    await gotoConsole(page, `${server.baseUrl}/console`);
+    const card = page.getByTestId(`question-set:${pendingId}`);
+    const receipt = page.getByTestId(`question-set-receipt:${pendingId}`);
+    const turn = (index) => page.getByTestId(`chat-turn:${identity}:${index}`);
+    const top = async (locator) => (await locator.boundingBox()).y;
+    const openChat = async () => {
+      await openSidebarAgentChat(page, /Identity Example/i);
+      await turn(0).waitFor({ timeout: 10_000 });
+    };
+    // The words of the chat's transcript, and the three kinds of line the
+    // same frames can make: none for the reasoning effort record, one for
+    // the other runtime event, one for the peer's message.
+    const transcript = page.getByLabel("Conversation transcript").first();
+    const eventLines = async (when) => {
+      await transcript.getByText("Requested compaction skipped").first().waitFor({ timeout: 10_000 });
+      await transcript.getByText("The plan reads well.").first().waitFor({ state: "attached", timeout: 10_000 });
+      const words = await transcript.innerText();
+      assert(!/reasoning effort/i.test(words), `the reasoning effort record is no line of the chat ${when}`);
+      assert(!words.includes("request_reasoning_effort_resolved"), `the reasoning effort record is not named in the chat ${when}`);
+    };
+
+    // The open set is in the chat, below its newest turn, and is answered there.
+    await openChat();
+    await eventLines("read on load");
+    await card.waitFor({ timeout: 10_000 });
+    assert((await top(card)) > (await top(turn(0))), "the open set stands below the newest turn");
+    await card.getByRole("radio", { name: "Europe" }).check();
+    await card.getByRole("button", { name: "Send answers" }).click();
+    await waitForRpcMethod(server, "meta/gating/decide");
+    await receipt.waitFor({ timeout: 10_000 });
+    assert.equal(await card.count(), 0, "the answered card left the chat");
+    assert.equal(await receipt.evaluate((element) => element.tagName === "DETAILS" && !element.open), true, "the receipt is one folded line");
+    const line = await receipt.locator("summary").innerText();
+    assert.match(line, /Answered/);
+    assert.match(line, /Release plan/);
+    // Opened from the keyboard, it reads as the question with the answer
+    // given, a term with its definition, and holds nothing to act on.
+    await receipt.locator("summary").focus();
+    await page.keyboard.press("Enter");
+    assert.equal(await receipt.evaluate((element) => element.open), true, "Enter on the line opens the row");
+    await page.getByTestId(`question-set-receipt-summary:${pendingId}`).waitFor({ state: "visible", timeout: 10_000 });
+    const opened = await receipt.innerText();
+    assert.match(opened, /Which region goes first\?/);
+    assert.match(opened, /Europe/);
+    assert(!opened.includes("United States"), "only the answer given is shown");
+    assert.deepEqual(await receipt.getByRole("term").allInnerTexts(), ["Which region goes first?"]);
+    assert.deepEqual(await receipt.getByRole("definition").allInnerTexts(), ["Europe"]);
+    assert.equal(await receipt.locator("input, textarea, select, button, a[href], [contenteditable]").count(), 0, "the answered row is read-only");
+    await page.keyboard.press("Enter");
+    assert.equal(await receipt.evaluate((element) => element.open), false, "Enter on the line folds the row again");
+
+    // A later turn: the receipt stays above it, and nothing is asked again.
+    await fillComposer(page, "Go on with Europe.");
+    await page.getByTestId(`chat-send:${identity}`).click();
+    await waitForRpcMethod(server, "meta/console/send");
+    await turn(1).waitFor({ timeout: 10_000 });
+    await page.getByText("Europe goes first.").first().waitFor({ timeout: 10_000 });
+    assert.equal(await card.count(), 0, "the answered card is not drawn again below the later turn");
+    assert.equal(await receipt.count(), 1);
+    assert((await top(receipt)) < (await top(turn(1))), "the receipt stays above the later turn");
+    assert.equal(await page.getByRole("button", { name: "Send answers" }).count(), 0);
+    assert.equal((await transcript.evaluate((element) => element.textContent)).split("Which region goes first?").length - 1, 1, "the question stands once in the chat, in its folded row");
+    // The later turn's own reasoning effort record came on the stream
+    // before its answer: no line of it either.
+    await eventLines("after it arrived on the stream");
+
+    // Another agent and back.
+    await openSidebarAgentChat(page, /Legacy Router/i);
+    await turn(0).waitFor({ state: "detached", timeout: 10_000 });
+    await openChat();
+    await receipt.waitFor({ timeout: 10_000 });
+    assert.equal(await card.count(), 0, "the answered card is not drawn again after going to another agent and back");
+
+    // The page loaded again: the answered set is not shown again.
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.waitForSelector('[data-testid="meerkat-console"], .cc-workbench, .cc-conversation-pane', { timeout: 30_000 });
+    await openChat();
+    await waitForRpcMethod(server, "meta/gating/questions", 2);
+    await page.waitForTimeout(500);
+    assert.equal(await card.count(), 0, "the answered card is not drawn again after a reload");
+    assert.equal(await page.getByRole("button", { name: "Send answers" }).count(), 0);
+    // The transcript built again from the frames the page read: the same lines.
+    await eventLines("after a reload");
+    await page.getByText("Europe goes first.").first().waitFor({ timeout: 10_000 });
+    // The reply was sent once.
+    assert.equal(decides(), 1);
+    process.stdout.write("browser question set answered placement ok\n");
+  } finally {
+    if (browser) await browser.close();
+    await server.close();
+  }
+}
+
 async function runTopologyUnavailableBrowserProof() {
   const server = await startMockConsoleServer();
   let browser;
@@ -5832,6 +6029,7 @@ const allScenarios = [
     ...require("./scenarios/real-identity-changes.cjs").scenarios,
     { id: "sidebar-mobs-and-mob-choice", family: "console", backend: "mock", run: runSidebarMobsProof },
     ...require("./scenarios/hosted-mobs.cjs").scenarios,
+    { id: "question-set-answered-placement", family: "console", backend: "mock", run: runQuestionSetAnsweredPlacementProof },
   ];
 
 module.exports = { scenarios: allScenarios };

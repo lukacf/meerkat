@@ -1,4 +1,5 @@
 import { approvalInteractionIdsByTurn, ConversationApprovals, type ConversationApprovalProps } from "./conversation-approvals";
+import { useQuestionReceiptPlacement } from "./question-set-card";
 import type { MarkdownUrlPolicy } from "./conversation-markdown";
 import clsx from "clsx";
 import { Fragment } from "react";
@@ -42,7 +43,18 @@ function groupDayKey(group: ConversationTimelineGroup): string | null {
   return null;
 }
 
-export function ConversationTranscript({
+/** A conversation's turns. A transcript with nothing to draw (no group, no
+ * turn diff, no pending request) renders nothing and reads nothing from the
+ * page around it: what it reads there (the question sets' receipts) is read
+ * only by the transcript that draws something. */
+export function ConversationTranscript(props: ConversationTranscriptProps) {
+  const { viewState, approvalSnapshot, showTurnDiff = true, onToggleDiffFile = null } = props;
+  const hasTurnDiff = Boolean(showTurnDiff && viewState.turnDiff && onToggleDiffFile);
+  if (!viewState.groups.length && !hasTurnDiff && !approvalSnapshot?.requests.length) return null;
+  return <ConversationTranscriptTurns {...props} />;
+}
+
+function ConversationTranscriptTurns({
   viewState,
   approvalSnapshot,
   approvalIdentity,
@@ -68,10 +80,22 @@ export function ConversationTranscript({
   const turns = groupConversationTranscriptTurns(groups);
   const approvalInteractions = approvalInteractionIdsByTurn(turns.map((turn) =>
     turn.groups.flatMap((group) => group.entries.flatMap((entry) => entry.interactionId ? [entry.interactionId] : []))));
-
-  if (!groups.length && !renderableTurnDiff && !approvalSnapshot?.requests.length) {
+  // A question set this console answered or dismissed is kept as a receipt
+  // after the turn that was the newest when it was closed. The placement is
+  // over all the conversation's turns: where only the newest groups are
+  // shown, the turns shown are the last of them, and a set that was closed
+  // after a turn that is not shown has no line here.
+  const allTurns = groups === viewState.groups ? turns : groupConversationTranscriptTurns(viewState.groups);
+  const hiddenTurns = Math.max(0, allTurns.length - turns.length);
+  const questionReceipts = useQuestionReceiptPlacement(approvalIdentity, allTurns.map((turn) => {
+    for (const group of turn.groups) {
+      for (const entry of group.entries) {
+        const at = Date.parse(entry.createdAt ?? "");
+        if (Number.isFinite(at)) return at;
+      }
+    }
     return null;
-  }
+  }));
 
   // Day separators before the first dated group and at each local
   // calendar-day change, so row times are never ambiguous.
@@ -117,7 +141,7 @@ export function ConversationTranscript({
                 />
               </Fragment>
             ))}
-            <ConversationApprovals approvalSnapshot={approvalSnapshot} approvalIdentity={approvalIdentity} onApprovalDecision={onApprovalDecision} conversationId={viewState.conversationId} interactionIds={approvalInteractions[turnIndex]} />
+            <ConversationApprovals approvalSnapshot={approvalSnapshot} approvalIdentity={approvalIdentity} onApprovalDecision={onApprovalDecision} conversationId={viewState.conversationId} interactionIds={approvalInteractions[turnIndex]} questionReceiptIds={questionReceipts.byTurn[hiddenTurns + turnIndex]} />
             {isLastTurn && renderableTurnDiff && onToggleDiffFile ? (
               <TurnDiffCard
                 expandedFile={expandedDiffFile}
@@ -128,7 +152,7 @@ export function ConversationTranscript({
           </section>
         );
       })}
-      <ConversationApprovals approvalSnapshot={approvalSnapshot} approvalIdentity={approvalIdentity} onApprovalDecision={onApprovalDecision} conversationId={viewState.conversationId} />
+      <ConversationApprovals approvalSnapshot={approvalSnapshot} approvalIdentity={approvalIdentity} onApprovalDecision={onApprovalDecision} conversationId={viewState.conversationId} questionReceiptIds={questionReceipts.unplaced} />
       {!turns.length && renderableTurnDiff && onToggleDiffFile ? (
         <section
           aria-label={`Turn ${turnIndexOffset + 1}`}

@@ -4,7 +4,7 @@ description: "Start a Meta application runtime with a matching gateway and SDK, 
 icon: "rocket"
 ---
 
-*Mirrored from Meerkat Meta main at [140f84403642](https://github.com/lukacf/meerkat/commit/140f84403642fc5642c9e07fe8ad94879877f7c5) on 2026-11-25; Meta version 0.9.18 at that commit.*
+*Mirrored from Meerkat Meta main at [b369115a60a9](https://github.com/lukacf/meerkat/commit/b369115a60a9d081cc2c96cd27c2739b2c459fdc) on 2026-11-25; Meta version 0.9.18 at that commit.*
 
 This guide starts with the Meta application runtime. If you only need to run an
 agent or a mob, [Core's quickstart](https://docs.rkat.ai/quickstart) is enough.
@@ -265,9 +265,12 @@ supply registered identities; bootstrap, full roster refresh/reconcile, and
 reset-time spec adoption currently pass an empty list. An empty list does not
 establish that no identities are registered.
 
-If the definition declares `[wiring]` (`auto_wire_orchestrator` or
-`role_wiring`), call `rt.mob_handle().reconcile_edges()` after boot and after
-each `rt.reconcile()`; `ensure_member` reconciles on its own. Pin
+On this identity-first runtime, `rt.mob_handle().reconcile_edges()` reconciles
+dynamic peer wiring; it does not list every connection made by `role_wiring`
+at spawn. To inspect the recorded peers, read `wired_to` on the roster entries
+returned by `await rt.mob_handle().list_members()`. See [When to call `reconcile_edges`](/meta/concepts/roster#when-to-call-reconcile_edges).
+
+Pin
 `runtime_mode = "turn_driven"` on profiles that back addressable identities:
 meerkat defaults to `autonomous_host`, which runs a kickoff turn at spawn and
 skips ambient per-turn recall for generic SDK/work delivery. Non-steer local

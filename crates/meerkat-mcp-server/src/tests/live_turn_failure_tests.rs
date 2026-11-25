@@ -2,9 +2,9 @@
 //! session (`live_turn_failure`).
 //!
 //! A not-found answer does not prove that the turn did not run. The session
-//! service hands the turn's reserved admission back with an error when the
-//! turn did not take it, so the resume submits the prompt again only on a
-//! not-found answer that came with that admission. Every other failure is
+//! service hands the turn's reserved admission back with an error only when
+//! the turn did not take it, so the resume submits the prompt again only on
+//! a not-found answer that came with that admission. Every other failure is
 //! the resume's result, in the tool error form a failed turn already has.
 #![allow(clippy::expect_used, clippy::panic)]
 

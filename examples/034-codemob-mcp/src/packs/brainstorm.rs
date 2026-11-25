@@ -44,7 +44,7 @@ impl Pack for BrainstormPack {
                 "ideator_b",
                 "ideator-b-skill",
                 "Creative ideator",
-                "gpt-6-astra",
+                "gpt-6.2-astra",
             ),
             (
                 "ideator_c",

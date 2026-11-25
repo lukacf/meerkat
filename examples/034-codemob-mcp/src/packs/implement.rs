@@ -49,7 +49,7 @@ impl Pack for ImplementPack {
         profiles.insert(
             ProfileName::from("reviewer"),
             turn_driven_profile(
-                resolve_model(overrides, "reviewer", "gpt-6-astra"),
+                resolve_model(overrides, "reviewer", "gpt-6.2-astra"),
                 "gate-reviewer-skill",
                 "Quality gate reviewer — approves or requests revision",
                 pp,

@@ -16,6 +16,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Console chat, two fixes. The notice for the reasoning effort a request was
+  sent with (`request_reasoning_effort_resolved`) no longer appears in a
+  chat. Telemetry of the event and peer notices are unchanged. And answering
+  or dismissing a question set no longer leaves its full card below every
+  later turn in the asking agent's chat. Only unanswered sets stay below the
+  newest turn. The page uses the decision time to place a one-line summary in
+  the conversation; expand it to review the questions and any answers,
+  without submitting them again. The page keeps the 20 most recently answered
+  or dismissed sets across all agents. These summaries are cleared when the
+  page reloads. Cards in the Pending tab of Approvals are unchanged.
+
 - An update of an agent's instructions that arrives while the agent's run is in a tool round answers by the agent's model, as one that arrives between runs does. Before, from the run's first tool round until the run committed, Meerkat's read of the agent's session failed and the update answered `applies_after_compaction` whatever the model: also for a model that takes the change at its next run (`applies_at_next_run`) and for a backend that takes it only with a fresh conversation (`applies_at_next_session`, reason `lowering_unavailable`). In the same state the agent's row of `meta/instruction_status` read `effective_read: unreadable`; it now shows the session's last committed state, in which a change the running run applied at its start reads `pending` until the run commits. Affected: 0.9.15 to 0.9.18 for the update's answer and 0.9.11 to 0.9.18 for the status row, agents on a SQLite realm. The change is in Meerkat's status read; no Meta code changed. Read from the source, not seen in a run.
 
 - An agent whose instructions have no section is no longer compared against its
@@ -44,6 +55,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   build sections could not be read is no longer logged for an agent with no
   section. Affected: Meta 0.9.15 and later up to this change (the comparison
   does not exist before 0.9.15).
+
+- The WorkGraph resume gate says why it could not read, where it used to
+  leave Meerkat's admission attempt to time out in silence. For a durable
+  member's interrupted run that carries no attention projection, the gate
+  pages through every open work item of the mob's WorkGraph namespace, and
+  each page is one full list of the store. Over a store whose list takes
+  longer than one admission attempt
+  (`RESUMED_RUN_ADMISSION_ATTEMPT_TIMEOUT`, 8 seconds), Meerkat dropped the
+  gate in the middle of its scan: the gate logged nothing, and the only
+  detail was that the admission did not answer in time. The gate now ends
+  its own scan a little before the attempt ends (after seven eighths of it)
+  and answers unavailable with a reason that names the open work item list
+  by realm and namespace, the pages it had read and the time it waited. An
+  operator sees that reason in the gate's own warning
+  (`durable resume gate: the gate cannot decide`) and as the detail of
+  Meerkat's `resumed run admission is unavailable` warning. A scan that is
+  ended draws no verdict from the pages it read and writes nothing.
+
+  This changes when the gate gives up, not only what it says. The scan used
+  to read until Meerkat cut the attempt (8 seconds); it now ends itself after
+  7. A scan that would have finished in the last eighth of an attempt was
+  decided before and is answered unavailable now, so that run is held until
+  an attempt reads the list faster. Over a list that does not answer, one
+  round of three attempts takes 27 seconds where it took 30. The number of
+  attempts and of rounds is unchanged, and no run is ended or resumed that
+  was not. The cut is what lets the gate answer at all: an attempt that
+  Meerkat cuts from outside says nothing. A host that reads the cause of a
+  held run sees a list that is too slow as the admission having answered
+  unavailable, with this reason; a slow read of a single item, of the
+  store's clock or of a lease write is still cut by Meerkat and reads as
+  not answered in time. Both mean that the WorkGraph was too slow.
+
+  Nothing else changes: the projected path is untouched, and a list that the
+  scan reads inside its budget decides as before.
+
+- The WorkGraph resume gate's unavailable reasons are the gate's own
+  sentences. A WorkGraph read that failed used to put the store's whole
+  error text into the reason, and a run's attention projection that does
+  not decode put the decoder's text there; a store may print a path or an
+  id in its error. The reason of a failed read now names the error's kind
+  (`store error`, `backing store unavailable`, `unsupported backend` and so
+  on) with the realm and the namespace, and the reason of a projection
+  that does not decode is one fixed sentence. The store's and the
+  decoder's own text is in the gate's log, in the warnings
+  `durable resume gate: a WorkGraph read failed` and
+  `durable resume gate: the run's WorkGraph attention projection does not
+  decode`. A reader that matched the old reason text for either case finds
+  it there. The realm and the namespace are the only text in an unavailable
+  reason that the gate does not write itself; they come last in it, and a
+  control character in either is replaced by `?`. The verdicts are
+  unchanged.
 
 ### Upgrade notes
 

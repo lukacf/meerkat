@@ -64,9 +64,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   operator sees that reason in the gate's own warning
   (`durable resume gate: the gate cannot decide`) and as the detail of
   Meerkat's `resumed run admission is unavailable` warning. A scan that is
-  ended draws no verdict from the pages it read and writes nothing. Nothing
-  else changes: while the list stays that slow the run is held as before,
-  and a list that answers in time decides as before.
+  ended draws no verdict from the pages it read and writes nothing.
+
+  This changes when the gate gives up, not only what it says. The scan used
+  to read until Meerkat cut the attempt (8 seconds); it now ends itself after
+  7. A scan that would have finished in the last eighth of an attempt was
+  decided before and is answered unavailable now, so that run is held until
+  an attempt reads the list faster. Over a list that does not answer, one
+  round of three attempts takes 27 seconds where it took 30. The number of
+  attempts and of rounds is unchanged, and no run is ended or resumed that
+  was not. The cut is what lets the gate answer at all: an attempt that
+  Meerkat cuts from outside says nothing. A host that reads the cause of a
+  held run sees a list that is too slow as the admission having answered
+  unavailable, with this reason; a slow read of a single item, of the
+  store's clock or of a lease write is still cut by Meerkat and reads as
+  not answered in time. Both mean that the WorkGraph was too slow.
+
+  Nothing else changes: the projected path is untouched, and a list that the
+  scan reads inside its budget decides as before.
 
 - The WorkGraph resume gate's unavailable reasons are the gate's own
   sentences. A WorkGraph read that failed used to put the store's whole

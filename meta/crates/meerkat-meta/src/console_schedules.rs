@@ -603,6 +603,11 @@ pub(crate) trait ConsoleScheduleDoor: Send + Sync {
     /// person and it takes changes. On one that cannot, nobody answers what
     /// an agent asks.
     fn takes_a_persons_decision(&self) -> bool;
+
+    /// Whether this Console refuses every caller as it is configured: it
+    /// requires sign-in and trusts no signing key. No person reaches such a
+    /// Console, whatever [`Self::takes_a_persons_decision`] says of it.
+    fn refuses_every_caller(&self) -> bool;
 }
 
 type DoorSender = watch::Sender<Option<Arc<dyn ConsoleScheduleDoor>>>;
@@ -663,6 +668,18 @@ impl ConsoleServed {
                 .borrow()
                 .as_ref()
                 .is_some_and(|door| door.takes_a_persons_decision())
+        })
+    }
+
+    /// Whether the runtime serves a Console now that refuses every caller
+    /// ([`ConsoleScheduleDoor::refuses_every_caller`]); false when it serves
+    /// none.
+    pub(crate) fn refuses_every_caller(&self) -> bool {
+        self.0.upgrade().is_some_and(|doors| {
+            doors
+                .borrow()
+                .as_ref()
+                .is_some_and(|door| door.refuses_every_caller())
         })
     }
 }
@@ -1465,6 +1482,10 @@ mod tests {
     impl ConsoleScheduleDoor for RecordingDoor {
         fn takes_a_persons_decision(&self) -> bool {
             true
+        }
+
+        fn refuses_every_caller(&self) -> bool {
+            false
         }
 
         async fn send(

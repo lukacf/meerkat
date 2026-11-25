@@ -91,16 +91,21 @@ on every pull request, push and dispatch that reaches Meta's paths
 (`scripts/ci-changes.py --monorepo`): `meta-checks`, `test-typescript` and
 lanes, of which a pull request runs only those its changed files reach:
 
-- A Rust change runs the `rust-unit` legs (the lib tests, one nextest
-  partition each), `rust-examples` (every example; on a pull request also
+- A Rust change runs `rust-unit-build` (the lib test harness, compiled once
+  into a nextest archive) and the `rust-unit` legs (the lib tests, one
+  nextest partition each, run from that archive without compiling),
+  `rust-examples` (every example; on a pull request also
   the bin tests and the `meta-extension-state` suite), `rust-conformance`
   (the `meta-store-conformance` suite), the `rust-integration` shards (the
   integration tests, by test target name) and `rust-features-check` (the
-  no-default-features check). `rust-unit`, `rust-conformance` and
-  `rust-integration` run on pull requests only, and so do the voice and
-  extension-state lanes' lib jobs: the root CI's push runs the same tests.
-  Each job compiles one configuration of `meerkat-meta`, so that every lane
-  fits the root CI's budget (1080 s of execution on a pull request).
+  no-default-features check). `rust-unit-build`, `rust-unit`,
+  `rust-conformance` and `rust-integration` run on pull requests only, and
+  so do the voice and extension-state lanes' lib jobs: the root CI's push
+  runs the same tests. Each job that compiles builds one configuration of
+  `meerkat-meta`, sized for the root CI's budget (1080 s of execution on a
+  pull request); the lib test harness alone compiles for longer than that
+  on a hosted runner, so the unit lane's path (the build, then a leg)
+  exceeds it.
 - A change to the build configuration (the root's `Cargo.toml`,
   `Cargo.lock`, `rust-toolchain.toml`, `.cargo/`, and
   `crates/meerkat-meta/Cargo.toml`) runs every lane that compiles Rust.

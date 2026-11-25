@@ -1152,12 +1152,13 @@ jobs:
     # meerkat-meta and lints every target runs ONE build job (see the swap
     # step below), so its two long checks, the library and the library
     # test target, run one after the other on one processor. Where such a
-    # row ended, its lint took 81 minutes on a pull request (run
-    # 45369560555, second attempt) and 110 on a push (run 45267846643);
-    # five of its first six pull request runs were cut at 90 minutes, two
-    # of them in the row's last targets. That row gets 150 minutes on every
-    # event: an estimate from eight job logs and those two results, not a
-    # guarantee. The limit selects the row by the swap step's condition.
+    # row ended, its lint took 80m 59s on a pull request (run 45369560555,
+    # second attempt) and 109m 35s on a push (run 45267846643). Its first
+    # six executions on a pull request, in four runs, were that one result
+    # and five cut at 90 minutes, two of them in the row's last targets.
+    # That row gets 150 minutes on every event: an estimate from eight job
+    # logs and those two results, not a guarantee. The limit selects the
+    # row by the swap step's condition.
     timeout-minutes: ${{ contains(matrix.packages, '-p meerkat-meta') && contains(matrix.targets, '--all-targets') && 150 || (github.event_name == 'pull_request' && 90 || 120) }}
     strategy:
       fail-fast: false

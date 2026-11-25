@@ -5821,6 +5821,29 @@ async fn handle_meerkat_run_with_help_tools(
     }
 }
 
+/// What the plain resume does with a failed turn on the live session.
+enum LiveTurnFailure<A> {
+    /// The session was not found and the turn's reserved admission came back
+    /// with the answer: the session is rebuilt and the prompt runs on that
+    /// admission.
+    Rebuild(A),
+    /// The session was not found and no admission came back: the session is
+    /// rebuilt and the prompt runs on a newly reserved admission.
+    RebuildOnNewAdmission,
+    /// Any other failure is the resume's result.
+    Surface(SessionError),
+}
+
+/// Classify a failed turn on the live session from the error and the
+/// reserved admission that came back with it.
+fn live_turn_failure<A>(error: SessionError, returned_admission: Option<A>) -> LiveTurnFailure<A> {
+    match (error, returned_admission) {
+        (SessionError::NotFound { .. }, Some(admission)) => LiveTurnFailure::Rebuild(admission),
+        (SessionError::NotFound { .. }, None) => LiveTurnFailure::RebuildOnNewAdmission,
+        (error, _admission) => LiveTurnFailure::Surface(error),
+    }
+}
+
 async fn handle_meerkat_resume(
     state: &MeerkatMcpState,
     input: MeerkatResumeInput,
@@ -6478,25 +6501,38 @@ async fn handle_meerkat_resume(
             .await;
         match turn_result {
             Ok(run_result) => Ok(run_result),
-            Err((SessionError::NotFound { .. }, recovered_admission)) => {
+            Err((error, returned_admission)) => {
                 // The live session ended under the turn: a help session is
                 // not rebuilt.
-                if let Some(refusal) = help_session.as_ref() {
+                if matches!(error, SessionError::NotFound { .. })
+                    && let Some(refusal) = help_session.as_ref()
+                {
                     return Err(help_session_not_resumable_tool_error(refusal));
                 }
-                let admission = match recovered_admission.or_else(|| resume_admission.take()) {
-                    Some(admission) => admission,
-                    None => state
-                        .service
-                        .reserve_runtime_turn_admission(&session_id)
-                        .await
-                        .map_err(|err| ToolCallError::internal(format!("Agent error: {err}")))?,
-                };
-                let outcome = materialize_resume(Some(admission)).await?;
-                runtime_materialization_committed = outcome.committed;
-                outcome.result
+                match live_turn_failure(error, returned_admission) {
+                    LiveTurnFailure::Rebuild(admission) => {
+                        let outcome = materialize_resume(Some(admission)).await?;
+                        runtime_materialization_committed = outcome.committed;
+                        outcome.result
+                    }
+                    LiveTurnFailure::RebuildOnNewAdmission => {
+                        let admission = match resume_admission.take() {
+                            Some(admission) => admission,
+                            None => state
+                                .service
+                                .reserve_runtime_turn_admission(&session_id)
+                                .await
+                                .map_err(|err| {
+                                    ToolCallError::internal(format!("Agent error: {err}"))
+                                })?,
+                        };
+                        let outcome = materialize_resume(Some(admission)).await?;
+                        runtime_materialization_committed = outcome.committed;
+                        outcome.result
+                    }
+                    LiveTurnFailure::Surface(error) => Err(error),
+                }
             }
-            Err((other, _admission)) => Err(other),
         }
     };
     // Presence and archive state, read body-free: a run still going on the

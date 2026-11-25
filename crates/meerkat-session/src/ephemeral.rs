@@ -2954,6 +2954,16 @@ impl Drop for StartTurnAdmissionClaim {
     }
 }
 
+/// The failure of a turn claim that was refused, as the execution start
+/// returns it: the claim's error, paired with the reserved admission its
+/// caller gets back.
+fn refused_turn_claim<A>(
+    error: SessionError,
+    _reserved_admission: &mut Option<A>,
+) -> (SessionError, Option<A>) {
+    (error, None)
+}
+
 impl SessionHandle {
     fn revoke_actor(&self) {
         self.tool_application_custody.close();
@@ -8488,7 +8498,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                     let turn_claim = match preclaimed_turn.take() {
                         Some(claim) => claim,
                         None => Self::claim_start_turn(id, handle, Some(identity))
-                            .map_err(|error| (error, None))?,
+                            .map_err(|error| refused_turn_claim(error, &mut reserved_admission))?,
                     };
 
                     let mut system_messages = req

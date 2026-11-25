@@ -61894,6 +61894,22 @@ async fn run_settlement_watchers(machine: &Arc<MeerkatMachine>, session_id: &Ses
     )
 }
 
+/// The session's driver, taken out of the registry: the registry guard is
+/// dropped before this returns, so a row that then holds the driver holds
+/// nothing of the registry while it asks a census.
+async fn session_driver_for_census(
+    machine: &Arc<MeerkatMachine>,
+    session_id: &SessionId,
+) -> crate::meerkat_machine::driver::SharedDriver {
+    let sessions = machine.sessions.read().await;
+    Arc::clone(
+        &sessions
+            .get(session_id)
+            .expect("registered session entry")
+            .driver,
+    )
+}
+
 async fn hold_a_run_after_its_terminal_commit() -> HeldAfterTerminalCommit {
     let machine = persistent_health_probe_machine();
     let session_id = SessionId::new();
@@ -62006,17 +62022,25 @@ async fn unsettled_run_session_count_sees_a_committed_run_whose_loop_stands() {
     // a lock miss alone is never published as a failed read: the census
     // answers with its last completed reading, the per-session read with
     // nothing.
+    //
+    // The row takes the driver OUT of the registry and drops its registry
+    // guard before it asks: the census reads the registry with `try_read`,
+    // which a writer queued behind a read guard this row still held would
+    // defeat, and that is no part of what is pinned here. The census is
+    // asked while the DRIVER is held; it asks again only while the registry
+    // itself could not be read (`None`), and a count other than the
+    // expected one fails at once.
     {
-        let sessions = machine.sessions.read().await;
-        let entry = sessions
-            .get(&held.session_id)
-            .expect("registered session entry");
-        let driver_held = entry.driver.lock().await;
+        let driver = session_driver_for_census(machine, &held.session_id).await;
+        let driver_held = driver.lock().await;
         assert_eq!(
-            machine.unsettled_run_session_count_at(
-                crate::run_progress::RUN_SETTLEMENT_NOTICE,
-                past_run_settlement_notice(),
-            ),
+            await_census_reading(|| {
+                machine.unsettled_run_session_count_at(
+                    crate::run_progress::RUN_SETTLEMENT_NOTICE,
+                    past_run_settlement_notice(),
+                )
+            })
+            .await,
             Some(1),
             "a lock miss with nothing read keeps the last completed reading"
         );
@@ -62047,18 +62071,19 @@ async fn unsettled_run_session_count_sees_a_committed_run_whose_loop_stands() {
     .await;
     // The same miss on a healthy session: the last completed reading is
     // zero, and that is what a busy healthy host publishes, not a failed
-    // read.
+    // read. As above, the registry guard is dropped before the census is
+    // asked, and the census is asked while the driver is held.
     {
-        let sessions = machine.sessions.read().await;
-        let entry = sessions
-            .get(&held.session_id)
-            .expect("registered session entry");
-        let driver_held = entry.driver.lock().await;
+        let driver = session_driver_for_census(machine, &held.session_id).await;
+        let driver_held = driver.lock().await;
         assert_eq!(
-            machine.unsettled_run_session_count_at(
-                crate::run_progress::RUN_SETTLEMENT_NOTICE,
-                past_run_settlement_notice(),
-            ),
+            await_census_reading(|| {
+                machine.unsettled_run_session_count_at(
+                    crate::run_progress::RUN_SETTLEMENT_NOTICE,
+                    past_run_settlement_notice(),
+                )
+            })
+            .await,
             Some(0),
             "a lock miss on a healthy session is not a failed read"
         );

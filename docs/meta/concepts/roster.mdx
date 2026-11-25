@@ -4,7 +4,7 @@ description: "Understand Meta's lightweight roster projection, deep member statu
 icon: "users"
 ---
 
-*Mirrored from Meerkat Meta main at [140f84403642](https://github.com/lukacf/meerkat/commit/140f84403642fc5642c9e07fe8ad94879877f7c5) on 2026-11-25; Meta version 0.9.18 at that commit.*
+*Mirrored from Meerkat Meta main at [613d4783cccc](https://github.com/lukacf/meerkat/commit/613d4783cccc30a6d8e28bed91373376f39c9d2a) on 2026-11-25; Meta version 0.9.18 at that commit.*
 
 The mob roster is the operational view of the members known to a mob. Roster
 reads return lightweight `MobMemberListEntry` projections. Deep execution
@@ -97,29 +97,40 @@ default.
 
 ### When to call `reconcile_edges`
 
-Declared definition wiring (`[wiring] auto_wire_orchestrator = true` or
-`role_wiring` rules) is applied by meerkat only at spawn time and, for the
-orchestrator rule, only from the non-orchestrator side, so the result depends on
-bring-up order. Meta installs the definition's wiring as a reconcilable edge
-policy and converges it with `meta/reconcile_edges` (Python
-`handle.reconcile_edges()`, TypeScript `handle.reconcileEdges()`).
+Use `meta/reconcile_edges` (Python `handle.reconcile_edges()`, TypeScript
+`handle.reconcileEdges()`) to reconcile the selected mob’s dynamic peer wiring.
+The report’s `desired_edges` lists the pairs this call is trying to connect,
+not every pair that can already communicate.
 
-- `meta/ensure_member` already runs that reconcile after every successful
-  ensure, on both the worker plane and the console identity plane. Calling
-  `reconcile_edges` after `ensure_member` is redundant.
-- `meta/reconcile_identity` (Python `runtime.reconcile()`) and the
-  identity-first gateway boot do not: the gateway reconciles definition edges
-  before the roster is materialized. When the definition declares wiring, call
-  `reconcile_edges` once after boot and after each `runtime.reconcile()`.
-- Without declared wiring there is no definition edge policy; the call returns
-  an empty report. Edges from a host `TopologyProvider` converge on every
-  identity restore and reconcile on their own.
-- With a `TopologyProvider`, the provider (plus operator topology intent) owns
-  the identities' edges: reconcile unwires every live edge between two
-  identities that neither the provider nor the definition's wiring declares,
-  including one wired before a restart. Declare an edge in your provider to
-  keep it. Without a provider, reconcile unwires only the edges it wired
-  itself.
+- **Classic gateway:** the default discovery policy matches the definition’s
+  `auto_wire_orchestrator` and `role_wiring` rules against eligible roster
+  members. Each successful worker-plane `meta/ensure_member` runs this
+  reconciliation, so a declared pair can be wired even when the orchestrator
+  is ensured after its workers. No extra call is needed after the ensure.
+  If the host or the spawn already wired a desired pair, it appears in
+  `preexisting_edges`; this policy does not claim that edge. It unwires
+  only edges it wired itself.
+- **Identity-first gateway:** this call uses the host topology provider’s
+  edges, or the identity runtime’s current desired edges if there is no
+  provider, together with operator topology changes. A `role_wiring` rule can
+  connect members at spawn without adding that pair to this dynamic set. An
+  empty `desired_edges` does not mean that the members have no peers. Do not
+  call it after boot or `runtime.reconcile()` just to enumerate spawn-time
+  wiring.
+
+On the identity-first path with a host `TopologyProvider`, an identity edge outside the desired set can
+be removed even if it predates this launch. An edge declared by the definition
+or owned by an identity’s stored declaration is not removed just because the
+provider omits it. Without a provider, identity reconciliation prunes only
+edges it manages.
+
+For the peers recorded on the roster, read `wired_to` from `meta/get_member`
+or `meta/list_members`. For live connectivity, `meta/member_status` instead
+returns `peer_connectivity` when available; it does not return `wired_to`. See [Lightweight roster entries](#lightweight-roster-entries).
+
+The `managed_edges` count belongs to `meta/reconcile_identity`, not to the
+`meta/reconcile_edges` report. See the [RPC reference](/meta/api/rpc#meta/reconcile_edges)
+for the fields returned by edge reconciliation.
 
 ## Roster operations
 
@@ -294,8 +305,13 @@ answers the check from that WorkGraph:
   claimed again, and every later attempt of the same resume answers
   superseded too.
 - When the WorkGraph cannot be read, or the run's attention projection does
-  not decode, the check answers unavailable. Meerkat asks again, up to three
-  attempts, then settles the run the same way.
+  not decode, the check answers unavailable. It also answers unavailable when
+  the list of the mob's open work items is too slow: a run that named no item
+  is checked against that list, and the check stops reading it after seven
+  eighths of one attempt. The reason says which of these it was. Meerkat asks
+  again, up to three attempts. When none of them decides, the run is neither
+  resumed nor ended: it stays held, and Meerkat asks again the next time the
+  worker's runtime wakes or its session registers.
 
 A mob runtime composed without a WorkGraph service has no check, and
 neither has one whose storage provider has no WorkGraph: there is no item

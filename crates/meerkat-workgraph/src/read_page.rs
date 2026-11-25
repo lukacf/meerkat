@@ -8,6 +8,8 @@
 //! returns the rows strictly after that key in the same order, so rows never
 //! shift between pages. The anchor is the event ledger's high-water mark when
 //! the walk began; every page reports whether the ledger has moved past it.
+//! Evidence pages instead bind their append position to one item's scope and
+//! revision, with no ledger anchor: a revision change refuses continuation.
 //!
 //! A cursor is not authority: every page is scoped by the namespace grant
 //! like the first one, so a forged cursor can only skip rows the caller may
@@ -36,6 +38,7 @@ pub(crate) enum PageRead {
     List,
     Ready,
     Snapshot,
+    Evidence,
 }
 
 impl PageRead {
@@ -44,6 +47,7 @@ impl PageRead {
             Self::List => "list",
             Self::Ready => "ready",
             Self::Snapshot => "snapshot",
+            Self::Evidence => "evidence",
         }
     }
 }

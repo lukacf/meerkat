@@ -11,6 +11,8 @@ use crate::types::{
 };
 use crate::{CreateWorkItemRequest, WorkGraphError, WorkGraphService};
 
+mod evidence_page;
+
 /// Typed tool-facing error class for WorkGraph operations.
 ///
 /// This is the closed set of semantic error outcomes a WorkGraph tool call can
@@ -119,7 +121,9 @@ impl WorkGraphToolContract {
     pub const fn description(self) -> &'static str {
         match self {
             Self::Create => "Create a durable WorkGraph item.",
-            Self::Get => "Read one WorkGraph item.",
+            Self::Get => {
+                "Read one WorkGraph item in full. An explicit evidence_limit instead returns a page of its newest evidence; pass evidence_page.next_cursor as evidence_cursor with evidence_limit to continue to older entries."
+            }
             Self::List => {
                 "List WorkGraph items, most recently updated first. A result that ends early has `truncated: true` and a `next_cursor` to pass back as `cursor`."
             }
@@ -149,7 +153,7 @@ impl WorkGraphToolContract {
     fn schema(self) -> Value {
         match self {
             Self::Create => create_schema(),
-            Self::Get => id_schema(false),
+            Self::Get => get_schema(),
             Self::List => list_schema(),
             Self::Ready => ready_schema(),
             Self::Snapshot => snapshot_schema(),
@@ -307,11 +311,13 @@ pub(crate) async fn handle_workgraph_tools_call(
         }
         WorkGraphToolContract::Get => {
             let request: IdParams = parse(arguments)?;
-            service
+            // Preserve the existing read and its scope refusal before parsing
+            // presentation options. A cursor never supplies read authority.
+            let item = service
                 .get(request.realm_id, request.namespace, request.id)
                 .await
-                .map(|item| json!({ "item": item }))
-                .map_err(map_error)
+                .map_err(map_error)?;
+            evidence_page::project(item, arguments)
         }
         WorkGraphToolContract::List => {
             let filter: WorkItemFilter = parse(arguments)?;
@@ -630,6 +636,30 @@ fn id_schema(include_revision: bool) -> Value {
 
 fn revision_id_schema() -> Value {
     id_schema(true)
+}
+
+fn get_schema() -> Value {
+    let mut properties = base_properties();
+    properties.extend([
+        ("id".to_string(), json!({ "type": "string" })),
+        (
+            "evidence_limit".to_string(),
+            json!({
+                "type": "integer",
+                "minimum": 1,
+                "maximum": evidence_page::MAX_EVIDENCE_LIMIT,
+                "description": "Opt in to a page of the newest evidence by append position. Omit this and evidence_cursor for the unchanged full item. The bounded reply omits item.evidence_refs and supplies evidence_page with original positions, withdrawn flags, full evidence refs, truncation and an opaque next_cursor. Only entry count is bounded, not text or bytes."
+            }),
+        ),
+        (
+            "evidence_cursor".to_string(),
+            json!({
+                "type": "string",
+                "description": "Pass back evidence_page.next_cursor with evidence_limit to read older evidence. Access is checked on every page. The cursor belongs to one item, scope and revision; if the item changes, restart without the cursor."
+            }),
+        ),
+    ]);
+    object(properties, &["id"])
 }
 
 fn attention_reassign_schema() -> Value {

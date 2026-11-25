@@ -143,6 +143,17 @@ them.
     bundled in adaptive packs is unchanged.
   See [Web search](docs/guides/mobs.mdx#web-search).
 
+- `workgraph_get` accepts an explicit `evidence_limit` (1 through 20) and
+  `evidence_cursor` for newest-first evidence pages. The bounded reply replaces
+  `item.evidence_refs` with a separate `evidence_page` carrying original append
+  positions, withdrawal flags and full evidence references. Omitting both
+  options preserves the full-item answer. Only returned entry count is bounded,
+  not bytes, tokens, storage reads or encoding. Every page checks access; any
+  item revision change refuses continuation. The tool description and input
+  schema change for every caller, including the public MCP server, which serves
+  the same tool definition. Storage, RPC, REST, generated schema files and SDKs
+  are unchanged.
+
 ### Changed
 
 - For a staged model switch, the compatibility check now covers the session's existing reasoning level when the target model's supported levels are available at decision time.

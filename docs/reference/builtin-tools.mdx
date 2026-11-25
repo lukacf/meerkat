@@ -427,8 +427,8 @@ bounded result, and retires the helper. The tool owns its wait:
 - **What the inner deadline does not cover.**
   - A helper's long model call. The helper's report is itself a model call, so
     no deadline can make the helper report a model call that does not return.
-    The call's wait ends first: the helper is cancelled and retired, and the
-    call answers the typed error with no partial output. (A model's own call
+    The call's wait ends first: the call starts the helper's cleanup (below)
+    and answers the typed error with no partial output. (A model's own call
     timeout, where it is shorter than the wait, fails the helper's turn
     instead, and the call answers `turn_failed`.)
   - A helper placed on another host (`placement`). The bound is set in the
@@ -447,13 +447,19 @@ bounded result, and retires the helper. The tool owns its wait:
     all of them: the helper runs under its own tool deadlines alone, as
     before, and the call's wait ends first. The host's log has a debug line
     for the first two.
-- **A call that ends without the helper's result ends the helper.** When the
-  wait elapses, the helper's run is cancelled and the helper is retired, and
-  the call answers a typed tool error, `execution_failed` with `data.kind`
-  `delegate_helper_ended` (below). When the call itself is dropped (the
-  calling turn is interrupted, a deadline outside the tool cuts the call), the
-  helper is cancelled and retired all the same; nobody is left to answer, and
-  the host's log says how it ended. The cancel and the retirement name the
+- **A call that ends without the helper's result starts the helper's
+  cleanup.** The cleanup is a cancel of the helper's run and then the
+  helper's retirement. When the wait elapses, the call starts it and answers
+  a typed tool error, `execution_failed` with `data.kind`
+  `delegate_helper_ended` (below). Starting the cleanup does not guarantee
+  that it is complete, or that it succeeded, when the call answers:
+  `data.helper` says what became of the helper, and can say that its end was
+  still under way (`end_pending`) or that it could not be retired
+  (`retirement_failed`, `mob_not_running`). When the call itself is dropped
+  (the calling turn is interrupted, a deadline outside the tool cuts the
+  call), the cleanup is started all the same; nobody is left to answer, so
+  no typed error is sent, and the host's log says how the cleanup went. The
+  cancel and the retirement name the
   exact member the call seated: the caller's other work, the helper of another
   call, and a later member under the same member id are not touched. A helper
   whose turn completed before the cancel reached it is answered as a completed
@@ -574,9 +580,10 @@ longer cuts it. A dispatcher that wraps the mob tools and forwards their
 cancel-all-work take effect at the member's next run boundary, and a turn
 that waits inside `delegate` reaches none until the call returns. Such a
 cancel therefore ends a waiting `delegate` only when the call's own wait
-ends; the helper is cancelled and retired then, and the turn is cancelled
-after it. An interrupt of the calling turn (a hard cancel) drops the call at
-once, and the helper is ended at once.
+ends; the call starts the helper's cleanup then and answers, and the turn is
+cancelled after the call has returned. An interrupt of the calling turn (a
+hard cancel) drops the call at once, and the helper's cleanup is started
+without it.
 
 ### `fork_off` and `council` delivery
 

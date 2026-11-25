@@ -61,12 +61,14 @@ them.
 
 - `meerkat-mob-mcp`, `meerkat-mob` (the agent `delegate` tool): `delegate`
   owns its wait, and a call that ends without its helper's result cancels
-  and retires the helper. What a user of an earlier release sees differently:
+  its helper's run and starts the helper's retirement. What a user of an
+  earlier release sees differently:
   - A `delegate` call that reaches its time limit no longer answers the agent
     loop's generic `Tool 'delegate' timed out after ...ms` (error `timeout`).
     It ends by itself a little before that limit (15 seconds, or a quarter
-    of the limit when that is shorter), cancels its helper's run, retires
-    the helper, and answers `execution_failed` with typed data: `kind`
+    of the limit when that is shorter), cancels its helper's run, starts
+    the helper's retirement, and answers `execution_failed` with typed
+    data: `kind`
     `delegate_helper_ended`, `reason` (`max_run_elapsed`, `turn_failed`,
     `not_started`, `run_lost`), `helper` (`cancelled_and_retired`, `retired`,
     `already_gone`, `not_seated`, `end_pending`, `mob_not_running`,
@@ -106,8 +108,9 @@ them.
     of the helper's session, carry the shorter number. Outside a
     `delegate` nothing changes. Not covered, and unchanged: a helper's long
     model call (the report is itself a model call, so the delegate's wait
-    ends first: the helper is cancelled and retired and the caller gets the
-    typed error, with no partial output); a helper placed on another host
+    ends first: the call cancels the helper's run, starts the helper's
+    retirement and answers the typed error, with no partial output); a
+    helper placed on another host
     (the bound is set in the calling host's process and does not travel:
     there the helper's tools run under that host's own tool deadlines); and
     a mob that runs without the runtime adapter (a standalone embedding
@@ -142,7 +145,9 @@ them.
     answered `execution_failed` with the mob's refusal text.
   - A bounded call owns ending its helper even when the call is dropped:
     when the calling turn is interrupted, or a deadline outside the tool
-    cuts the call, the run cancels and retires its helper. The cancel and the
+    cuts the call, the run still cancels its helper and starts the helper's
+    retirement; no typed error is sent then, and the host's log says how
+    that went. The cancel and the
     retirement name the exact member the call seated; the caller's other
     work, another call's helper and a later member under the same id are
     not touched.

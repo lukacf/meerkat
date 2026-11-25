@@ -104,11 +104,17 @@ The owned wait and the typed error in the rest of this paragraph are not in
 0.9.18: they come with the release that carries this change. From that
 release the call
 owns its wait: what the tool call's time limit allows (ten minutes by
-default), or a shorter `max_run_secs`. When the wait ends, or the calling
-turn is interrupted, before the helper has answered, the helper's run is
-cancelled and the helper is retired, and the call answers a typed error
-(`delegate_helper_ended`) that names the helper's mob and member id and says
-what became of the helper. A tool call the helper makes is bounded by what
+default), or a shorter `max_run_secs`. A call can end before the helper has
+answered in two ways. When the wait ends while the caller still waits, the
+call starts the helper's cleanup (a cancel of its run, then its retirement)
+and answers a typed error (`delegate_helper_ended`) that names the helper's
+mob and member id. Read the error's `helper` field for what became of the
+helper: the cleanup can still be under way when the call answers
+(`end_pending`), and it can have failed. When the call is dropped (the
+calling turn is interrupted, so the caller is gone), the cleanup goes ahead
+without it, and no typed error is sent: nobody is left to receive one, and
+the host's log says how the cleanup went. A tool call the helper makes is
+bounded by what
 the call still waits, less room for the helper to report, so a helper's slow
 tool times out inside the helper and the helper reports it; a `delegate` the
 helper makes itself waits what is left, and is refused before anything is
@@ -117,11 +123,14 @@ helper placed on another host, are not bounded that way, and in the rare
 cases in which the calling host holds no bound for the helper (the
 [reference](/reference/builtin-tools#delegate-its-wait-and-how-it-ends)
 lists them) the helper runs under its own tool deadlines alone. A helper
-stays only
-when the error says it
-could not be ended (`retirement_failed`, `mob_not_running`) or when its
-call ended with its host: a restarted host restores it seated and idle. It
-then stays until its owner's session is archived (for an owner that is a
+can still be a member after a call that ended without its result: the
+reference's
+[table of the error's fields](/reference/builtin-tools#delegate-its-wait-and-how-it-ends)
+says, for each value of `helper`, what became of it (`retirement_failed`
+and `mob_not_running` are two that leave it a member). A helper whose call
+ended with its host stays too: a restarted host restores it seated and
+idle. A helper that stays does so until its owner's session is archived
+(for an owner that is a
 mob member retired by its mob: until the host's next start) or it is
 retired with `mob_retire_member` by a session that manages the mob (the
 error's `session_manages_mob` says whether the caller does), or by the host.

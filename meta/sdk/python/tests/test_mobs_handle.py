@@ -41,6 +41,11 @@ import meerkat_meta
 import meerkat_meta.errors as errors_module
 import meerkat_meta.runtime as runtime_module
 import meerkat_meta.types as types_module
+from meerkat_meta.decisions import (
+    DecisionApproverAudience,
+    DecisionCanonicalPart,
+    DecisionPresentation,
+)
 from meerkat_meta.errors import (
     CapabilityUnavailableError,
     ContractMismatchError,
@@ -392,6 +397,16 @@ def _typed_values(handle: MobHandle) -> dict[str, Any]:
         "CompletionCursor": CompletionCursor(epoch=1, turns=1),
         "IdentityChangeRequest": AgentRef(
             name="worker-1", expected_spec_digest="digest-1", request_id="request-1"
+        ),
+        # The first member of ``decisions_present``'s parameter type: the typed
+        # presentation, so the handle's calls are driven with the typed form.
+        "DecisionPresentation": DecisionPresentation(
+            audience=DecisionApproverAudience("team:owners"),
+            subject_digest="sha256:" + "b" * 64,
+            parts_shown=[DecisionCanonicalPart(0, 1, "sha256:" + "b" * 64)],
+            channel_ref="chat:owners",
+            message_ref="message-1",
+            at_ms=1,
         ),
     }
 

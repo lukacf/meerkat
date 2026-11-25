@@ -782,6 +782,25 @@ program name or a loader variable such as `LD_PRELOAD` refuses that launch. A
 confined stdio skill source starts in the kind's working directory, as an MCP
 stdio server does; its own `cwd` does not apply.
 
+On macOS the profile allows a confined process a little beyond its grants and
+the baseline's program and library directories. Every confined process may
+read the host name and the kernel version, and the metadata (never the
+contents or a listing) of each directory above a path granted for reading or
+writing, of the `/etc`, `/tmp` and `/var` links and of the fixed directories
+`/private`, `/usr`, `/System` and `/dev`: the `uname` library call reads
+those two kernel names, and a program that resolves a path one component at a
+time, such as a script runtime resolving its main file or `realpath`, reads
+that metadata. With `network = "unrestricted"` the process may also create
+Unix sockets, connect to the system name resolver (its socket and its service
+name) and read `/private/etc/ssl` and everything under it, the directory of
+the system's TLS configuration and certificate authority files, without a
+`read` grant; beyond the Unix sockets its configuration grants, the
+resolver's is the only one it can connect to. Without IP access it gets none
+of these and reaches no resolver. A denied read (`deny_read`) still wins over
+the file and socket allowances. They reach no other system service and no
+keychain: a program that verifies certificates through the system trust
+service instead of a certificate file is not served by them.
+
 On Linux each confined launch runs in a pid namespace of its own. Its first
 process, the one the host holds (the launch's PID and the leader of its
 process group), runs the setup, starts the command as pid 2 of the namespace

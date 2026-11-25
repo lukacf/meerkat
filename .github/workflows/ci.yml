@@ -1148,7 +1148,17 @@ jobs:
     # needs about 65 minutes. A pull request gets 90: such a row fails the
     # pull-request execution budget (CI_MAX_EXEC_SECONDS) either way, but a
     # budget failure is reported while a cancelled row is a failed lane.
-    timeout-minutes: ${{ github.event_name == 'pull_request' && 90 || 120 }}
+    # One kind of row is not sized by its event: a row that names
+    # meerkat-meta and lints every target runs ONE build job (see the swap
+    # step below), so its two long checks, the library and the library
+    # test target, run one after the other on one processor. Where such a
+    # row ended, its lint took 81 minutes on a pull request (run
+    # 45369560555, second attempt) and 110 on a push (run 45267846643);
+    # five of its first six pull request runs were cut at 90 minutes, two
+    # of them in the row's last targets. That row gets 150 minutes on every
+    # event: an estimate from eight job logs and those two results, not a
+    # guarantee. The limit selects the row by the swap step's condition.
+    timeout-minutes: ${{ contains(matrix.packages, '-p meerkat-meta') && contains(matrix.targets, '--all-targets') && 150 || (github.event_name == 'pull_request' && 90 || 120) }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.changes.outputs.shard_matrix) }}
@@ -1214,13 +1224,13 @@ jobs:
       # gives every Clippy row of a push all targets. For example meta+2 in
       # the whole-workspace plan, meta when only meerkat-meta changed, and
       # meta+1 when meerkat-meta changed together with meta-extension-state.
-      # The job's bound there is 120 minutes.
+      # Such a row's bound is 150 minutes (the job's limit above).
       # Kind B: a pull request's downstream row that names meerkat-meta,
       # because the planner gives a downstream row all targets. For example
       # downstream meta+1 (meerkat-meta and meta-store-conformance), planned
       # when a pull request changes meerkat-mob-mcp,
-      # meerkat-store-conformance or mcp-test-server and no Meta crate. The
-      # job's bound there is 90 minutes.
+      # meerkat-store-conformance or mcp-test-server and no Meta crate. Such
+      # a row's bound is 150 minutes too.
       # Not selected: a pull request's own Meta row, which lints only the
       # library and binaries (for example meta, or meta+1 when meerkat-meta
       # and meta-store-conformance changed). It has no library test target
@@ -1345,7 +1355,7 @@ jobs:
     # a copy of that job, which scripts/ci-cargo-lanes-selftest.mjs checks.
     if: ${{ needs.changes.outputs.rust_changed == 'true' && needs.changes.outputs.shard_rest_count != '0' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: ${{ github.event_name == 'pull_request' && 90 || 120 }}
+    timeout-minutes: ${{ contains(matrix.packages, '-p meerkat-meta') && contains(matrix.targets, '--all-targets') && 150 || (github.event_name == 'pull_request' && 90 || 120) }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.changes.outputs.shard_rest_matrix) }}
@@ -1387,13 +1397,13 @@ jobs:
       # gives every Clippy row of a push all targets. For example meta+2 in
       # the whole-workspace plan, meta when only meerkat-meta changed, and
       # meta+1 when meerkat-meta changed together with meta-extension-state.
-      # The job's bound there is 120 minutes.
+      # Such a row's bound is 150 minutes (the job's limit above).
       # Kind B: a pull request's downstream row that names meerkat-meta,
       # because the planner gives a downstream row all targets. For example
       # downstream meta+1 (meerkat-meta and meta-store-conformance), planned
       # when a pull request changes meerkat-mob-mcp,
-      # meerkat-store-conformance or mcp-test-server and no Meta crate. The
-      # job's bound there is 90 minutes.
+      # meerkat-store-conformance or mcp-test-server and no Meta crate. Such
+      # a row's bound is 150 minutes too.
       # Not selected: a pull request's own Meta row, which lints only the
       # library and binaries (for example meta, or meta+1 when meerkat-meta
       # and meta-store-conformance changed). It has no library test target

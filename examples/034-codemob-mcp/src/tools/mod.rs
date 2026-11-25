@@ -54,16 +54,16 @@ const MODEL_DESCRIPTION: &str = "\
 Available models: \
 claude-opus-5-5 (Anthropic, advanced reasoning, built-in advanced-pack default), \
 claude-sonnet-5-5 (Anthropic, fast + capable), \
-gpt-6.2-astra (OpenAI, general + code, built-in default), \
-gpt-6.2-sol (OpenAI, frontier quality), \
+gpt-6.2-astra (OpenAI, most capable for the hardest projects, consult default in this example), \
+gpt-6.2-sol (OpenAI, everyday coding and agent workloads), \
 gpt-6.1-terra (OpenAI, balanced), \
 gpt-6-luna (OpenAI, efficient), \
 gemini-4-argon (Google, strong general), \
 gemini-4-hydrogen (Google, current fast model), \
 gemini-3.5-flash-lite (Google, fastest). \
-Default: gpt-6.2-astra. \
+Standalone consult default: gpt-6.2-astra. \
 Guidance: use claude-opus-5-5 for complex reasoning (architecture, judging). \
-Use sonnet/gpt-6.2-astra for code tasks. \
+For everyday coding, choose claude-sonnet-5-5 or gpt-6.2-sol; choose gpt-6.2-astra for the hardest projects. \
 Use gemini-3.5-flash-lite for speed-sensitive roles. \
 Mix providers in multi-agent packs for perspective diversity";
 

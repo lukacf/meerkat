@@ -147,8 +147,8 @@ different perspectives.
 |-------|----------|-----------|-------------------|
 | `claude-opus-5-5` | Anthropic | Advanced reasoning | Judge, moderator, synthesizer, orchestrator |
 | `claude-sonnet-5-5` | Anthropic | Fast + capable | RCT aggregator, implementer |
-| `gpt-6.2-astra` | OpenAI | General + code | Standalone consult, implementer, critic, advisor, security reviewer |
-| `gpt-6.2-sol` | OpenAI | Frontier capability and quality | RCT `integration_sheriff` |
+| `gpt-6.2-astra` | OpenAI | Most capable for the hardest projects | Standalone consult, implementer, critic, advisor, security reviewer |
+| `gpt-6.2-sol` | OpenAI | Everyday coding and agent workloads | RCT `integration_sheriff` |
 | `gpt-6.1-terra` | OpenAI | Balanced intelligence and cost | Available for override |
 | `gpt-6-luna` | OpenAI | Efficient high-volume work | Available for override |
 | `gemini-4-argon` | Google | Strong general | General reviewer, purist, guardian |

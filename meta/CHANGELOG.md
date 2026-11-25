@@ -53,6 +53,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   previously hid, such as comparing against an impossible outcome. The outcome
   strings, returned objects and behavior at run time are unchanged.
 
+- `DecisionAttestation.presentation` is now a union type in the Python and
+  TypeScript SDKs: the typed `DecisionPresentation` or the raw dictionary or
+  record. Code that reads the field as a dictionary or record needs a
+  narrowing check first; type checkers can report a read without one. Passing
+  a raw dictionary or record and the behavior at run time are unchanged.
+
 ### Changed
 
 - `ask_user` on a gateway whose Console requires sign-in and trusts no

@@ -22,6 +22,12 @@ All notable changes to the Python SDK are documented here.
   previously hid, such as comparing against an impossible outcome. The outcome
   strings, returned objects and behavior at run time are unchanged.
 
+- `DecisionAttestation.presentation` is now typed
+  `DecisionPresentation | dict[str, Any] | None`. Code that reads the field as
+  a dictionary needs a narrowing check first, such as
+  `isinstance(attestation.presentation, dict)`; type checkers can report a read
+  without one. Passing a dictionary and the behavior at run time are unchanged.
+
 ## 0.9.18
 
 - `PersistedEvent` gains `mob_id` and `mob_incarnation` (both `None` by

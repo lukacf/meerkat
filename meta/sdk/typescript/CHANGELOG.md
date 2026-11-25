@@ -7,6 +7,13 @@
   Existing raw records remain supported unchanged. The typed `atMs` value is
   an unsigned integer limited to `Number.MAX_SAFE_INTEGER` for exact JSON values.
 
+- Upgrade note: `DecisionAttestation.presentation` is now typed
+  `DecisionPresentation | Record<string, unknown>`. Code that reads the field
+  as a record needs a narrowing check first, such as
+  `!(presentation instanceof DecisionPresentation)`: under `strict` the
+  compiler rejects a read without one. Passing a record and the behavior at
+  run time are unchanged.
+
 ## 0.9.18
 
 - `PersistedEvent` gains `mobId` and `mobIncarnation` (`string | null`).

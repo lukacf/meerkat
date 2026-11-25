@@ -435,13 +435,17 @@ types each part, and `DecisionPresentationLink` types an optional
 `maxPartBytes` and `link` are omitted on the wire. The constructor checks the
 closed nested shape and unsigned integer widths; `atMs` is limited to
 `Number.MAX_SAFE_INTEGER` so JSON preserves its value exactly. The gateway
-still validates digests, coverage and authority. Existing raw `Record<string,
-unknown>` presentations remain supported in both wrappers: their snake_case
+still validates digests, coverage and authority. Existing raw `Record<string, unknown>`
+presentations remain supported in both wrappers: their snake_case
 fields are sent unchanged, without the typed constructor's local checks.
 The wrappers use `instanceof DecisionPresentation` to select typed conversion;
 a camelCase object literal or an instance from a second copy of the package
 follows the raw path, so the gateway rejects its non-wire shape instead of
-the wrapper validating or converting it.
+the wrapper validating or converting it. A failed constructor check throws the
+builtin `TypeError`, with a message that names the field or its container;
+there is no structured error and no field path, and a raw record gets the
+gateway's validation only. A `maxPartBytes` of `0` passes the constructor's
+check, but the gateway refuses a part size of 0.
 
 `decisionIngresses` declares the ingresses as `runtime_options.decisions`.
 `MetaRuntime.onDecisionNotice(handler)` receives each `meta/decisions/notice`.

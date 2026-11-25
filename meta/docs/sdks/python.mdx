@@ -2282,7 +2282,11 @@ check required fields, nested types and unsigned integer widths, while the
 gateway checks digest validity, coverage and authority. Existing raw mappings
 in `decisions_present` and raw dictionaries in `DecisionAttestation.presentation`
 remain supported without conversion or these local checks. Gateway results
-remain dictionaries.
+remain dictionaries. A failed typed check raises the builtin `TypeError` from
+the constructor, with a message that names the field or its container; there
+is no structured error and no field path, and a raw mapping or dictionary gets
+the gateway's validation only. A `max_part_bytes` of `0` passes the typed
+check, but the gateway refuses a part size of 0.
 
 `MetaRuntime.on_decision_notice(handler)` receives each `meta/decisions/notice`.
 The gateway writes the notices before a list answers; the SDK runs each

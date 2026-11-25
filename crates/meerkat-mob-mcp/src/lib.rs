@@ -6901,7 +6901,7 @@ impl MobMcpState {
                 .hosted
                 .write()
                 .await
-                .resolve_attempt(path, Err(quarantine));
+                .resolve_attempt(path, &attempt, Err(quarantine));
             drop(attempt);
         }
     }
@@ -7202,7 +7202,11 @@ impl MobMcpState {
     ) -> Result<StoreRestored, MobError> {
         let restored =
             meerkat_runtime::stack_relief::box_in_own_frame(|| self.restore_one_store(path)).await;
-        let answer = self.hosted.write().await.resolve_attempt(path, restored);
+        let answer = self
+            .hosted
+            .write()
+            .await
+            .resolve_attempt(path, &attempt, restored);
         drop(attempt);
         // A mob loaded after the set's own restore gets the fork_off re-link
         // the restore gives every mob it loads.
@@ -8659,7 +8663,11 @@ impl MobMcpState {
                 hold.release.notified().await;
             }
         }
-        let answer = self.hosted.write().await.resolve_attempt(path, restored);
+        let answer = self
+            .hosted
+            .write()
+            .await
+            .resolve_attempt(path, &attempt, restored);
         drop(attempt);
         // A mob a re-attempt brought out of its quarantine gets the same
         // fork_off re-link as a mob a lookup loaded: without it the fork
@@ -53814,6 +53822,408 @@ mod tests {
                 vec![mob_id],
                 "the id is managed once"
             );
+        }
+
+        /// The record of a store is resolved by the load or re-attempt it
+        /// admitted last, and by no other.
+        ///
+        /// Rows of the hosted set's own records. Every step is one call in
+        /// the row's own task, on a mob set over a temporary directory:
+        /// nothing races, and nothing waits on a clock. The late answer of
+        /// an earlier load is made by calling the resolution with that
+        /// load's own token after the record has moved on.
+        mod a_record_is_resolved_by_the_attempt_it_admitted {
+            use super::*;
+
+            /// One mob an earlier process left, dormant under a lazy state.
+            async fn a_dormant_mob(id: &str) -> (tempfile::TempDir, Arc<MobMcpState>, MobId) {
+                let svc = Arc::new(MockSessionSvc::new());
+                let root = tempfile::tempdir().expect("tempdir");
+                let mobs = mobs_of_an_earlier_process(&svc, root.path(), &[id]).await;
+                let state = lazy_state(&svc, root.path());
+                assert_eq!(inventory(&state).await.dormant, mobs);
+                let mob_id = mobs.into_iter().next().expect("the one mob");
+                (root, state, mob_id)
+            }
+
+            /// The record of the dormant mob `mob_id` admits its load: the
+            /// store's file and the load's token.
+            async fn an_admitted_load(
+                state: &MobMcpState,
+                mob_id: &MobId,
+            ) -> (std::path::PathBuf, Arc<hosted_set::AttemptToken>) {
+                let admission = state.hosted.write().await.admit_load_as_a_lookup(mob_id);
+                let hosted_set::LoadAdmission::Admitted { path, attempt } = admission else {
+                    panic!("the dormant store's record admits the load");
+                };
+                (path, attempt)
+            }
+
+            /// A load as it stands between the step that made its mob
+            /// managed and the resolution of its attempt: the record
+            /// admitted it, its restore ran and registered the mob, and it
+            /// has not resolved yet.
+            async fn a_load_that_made_its_mob_managed(
+                state: &MobMcpState,
+                mob_id: &MobId,
+            ) -> (std::path::PathBuf, Arc<hosted_set::AttemptToken>) {
+                let (path, attempt) = an_admitted_load(state, mob_id).await;
+                assert!(
+                    matches!(
+                        state.restore_one_store(&path).await,
+                        Ok(StoreRestored::Managed)
+                    ),
+                    "the restore makes the mob managed"
+                );
+                assert_eq!(
+                    managed_ids(&inventory(state).await),
+                    vec![mob_id.clone()],
+                    "the mob is managed before its load resolved"
+                );
+                (path, attempt)
+            }
+
+            /// The mob leaves the managed set: its idle unload is admitted
+            /// with no quiet time and its actor closes, so its record is
+            /// dormant.
+            async fn unload(state: &MobMcpState, mob_id: &MobId) {
+                assert_eq!(
+                    state.unload_idle_mobs().await,
+                    vec![mob_id.clone()],
+                    "the idle mob unloads"
+                );
+                assert_eq!(inventory(state).await.dormant, vec![mob_id.clone()]);
+            }
+
+            /// The step a load's or a re-attempt's task ends with: it
+            /// resolves the record of the store at `path` for its own
+            /// attempt.
+            async fn resolve(
+                state: &MobMcpState,
+                path: &std::path::Path,
+                attempt: &Arc<hosted_set::AttemptToken>,
+                restored: Result<StoreRestored, StoreQuarantine>,
+            ) -> Result<StoreRestored, MobError> {
+                state
+                    .hosted
+                    .write()
+                    .await
+                    .resolve_attempt(path, attempt, restored)
+            }
+
+            /// The fault of a restore that failed under `class`.
+            fn fault(class: meerkat_mob::MobQuarantineClass, why: &str) -> StoreQuarantine {
+                StoreQuarantine {
+                    mob_id: None,
+                    class,
+                    cause: MobError::Internal(why.to_string()),
+                }
+            }
+
+            /// The record of `mob_id` waits for its load, and nothing is
+            /// quarantined.
+            async fn its_load_is_in_flight(state: &MobMcpState, mob_id: &MobId, when: &str) {
+                let inventory = inventory(state).await;
+                assert!(
+                    inventory.quarantined.is_empty(),
+                    "{when}: nothing is quarantined: {:?}",
+                    inventory.quarantined
+                );
+                assert!(
+                    state.hosted.read().await.load_in_flight(mob_id),
+                    "{when}: the record waits for its load"
+                );
+                assert_eq!(
+                    inventory.dormant,
+                    vec![mob_id.clone()],
+                    "{when}: the mob is known and not loaded"
+                );
+            }
+
+            /// The mob `mob_id` is managed and handed out, and nothing is
+            /// quarantined.
+            async fn is_served(state: &MobMcpState, mob_id: &MobId, when: &str) {
+                if let Err(error) = state.handle_for(mob_id).await {
+                    panic!("{when}: the mob is served: {error}");
+                }
+                let inventory = inventory(state).await;
+                assert_eq!(
+                    managed_ids(&inventory),
+                    vec![mob_id.clone()],
+                    "{when}: the mob is managed"
+                );
+                assert!(
+                    inventory.quarantined.is_empty(),
+                    "{when}: nothing is quarantined: {:?}",
+                    inventory.quarantined
+                );
+            }
+
+            /// A load made its mob managed; the mob was unloaded and its
+            /// load admitted again; only then does the first load resolve
+            /// its attempt. The second load's record is left as it is, and
+            /// the second load completes it.
+            #[tokio::test]
+            async fn an_earlier_loads_answer_leaves_the_next_loads_record_as_it_is() {
+                let (_root, state, mob_id) = a_dormant_mob("answered-late").await;
+                let (path, first) = a_load_that_made_its_mob_managed(&state, &mob_id).await;
+                unload(&state, &mob_id).await;
+                let (_, second) = an_admitted_load(&state, &mob_id).await;
+
+                let answer = resolve(&state, &path, &first, Ok(StoreRestored::Managed)).await;
+                drop(first);
+
+                its_load_is_in_flight(&state, &mob_id, "after the first load's late answer").await;
+                assert!(
+                    matches!(answer, Ok(StoreRestored::Managed)),
+                    "the first load is answered what it did: {answer:?}"
+                );
+                assert!(
+                    matches!(
+                        state.run_admitted_load(&path, second).await,
+                        Ok(StoreRestored::Managed)
+                    ),
+                    "the second load makes the mob managed"
+                );
+                is_served(&state, &mob_id, "after the second load").await;
+            }
+
+            /// As above, and the record has moved on to a re-attempt: the
+            /// second load failed, the store is quarantined, and its
+            /// re-attempt is in flight when the first load resolves its
+            /// attempt. The re-attempt's record is left as it is, and the
+            /// re-attempt completes it.
+            #[tokio::test]
+            async fn an_earlier_loads_answer_leaves_a_later_re_attempts_record_as_it_is() {
+                let (_root, state, mob_id) = a_dormant_mob("answered-late-retry").await;
+                let (path, first) = a_load_that_made_its_mob_managed(&state, &mob_id).await;
+                unload(&state, &mob_id).await;
+                let (_, second) = an_admitted_load(&state, &mob_id).await;
+                let outage = meerkat_mob::MobQuarantineClass::StoreUnavailable;
+                resolve(
+                    &state,
+                    &path,
+                    &second,
+                    Err(fault(outage, "the second load met an outage")),
+                )
+                .await
+                .expect_err("the second load's own failure quarantines its store");
+                drop(second);
+                let admitted = state
+                    .hosted
+                    .write()
+                    .await
+                    .admit_retry(&mob_id, mob_store_dsl::MobStoreRetryTrigger::OnDemand)
+                    .expect("a store of the id is quarantined");
+                let Ok((retried, third)) = admitted else {
+                    panic!("the record admits a re-attempt of a store that could not serve");
+                };
+                assert_eq!(retried, path);
+                let before = quarantine_row(&state, &mob_id).await;
+                assert!(before.retrying, "the re-attempt is in flight");
+
+                let answer = resolve(&state, &path, &first, Ok(StoreRestored::Managed)).await;
+                drop(first);
+
+                let after = quarantine_row(&state, &mob_id).await;
+                assert!(
+                    after.retrying,
+                    "after the first load's late answer the re-attempt is still in flight"
+                );
+                assert_eq!(after.class, outage);
+                assert_eq!(
+                    after.attempts, before.attempts,
+                    "no re-attempt ended with the first load's late answer"
+                );
+                assert_eq!(
+                    after.cause.to_string(),
+                    before.cause.to_string(),
+                    "the quarantine keeps the second load's failure"
+                );
+                assert!(
+                    matches!(answer, Ok(StoreRestored::Managed)),
+                    "the first load is answered what it did: {answer:?}"
+                );
+                assert!(
+                    matches!(
+                        state.run_store_retry(&path, third).await,
+                        Ok(StoreRestored::Managed)
+                    ),
+                    "the re-attempt makes the mob managed"
+                );
+                is_served(&state, &mob_id, "after the re-attempt").await;
+            }
+
+            /// An earlier load that resolves its attempt as failed, after
+            /// the record has moved on to the next load, does not fail that
+            /// load. No order of the product is claimed in which a load that
+            /// made its mob managed then answers a failure: this is the
+            /// rule for the record, whatever the earlier load answers.
+            #[tokio::test]
+            async fn an_earlier_loads_failure_does_not_fail_the_next_load() {
+                let (_root, state, mob_id) = a_dormant_mob("failed-late").await;
+                let (path, first) = a_load_that_made_its_mob_managed(&state, &mob_id).await;
+                unload(&state, &mob_id).await;
+                let (_, second) = an_admitted_load(&state, &mob_id).await;
+
+                let answer = resolve(
+                    &state,
+                    &path,
+                    &first,
+                    Err(fault(
+                        meerkat_mob::MobQuarantineClass::ResumeRefused,
+                        "the first load failed late",
+                    )),
+                )
+                .await;
+                drop(first);
+
+                its_load_is_in_flight(&state, &mob_id, "after the first load's late failure").await;
+                assert!(
+                    matches!(&answer, Err(MobError::Internal(why)) if why == "the first load failed late"),
+                    "the first load is answered its own failure: {answer:?}"
+                );
+                assert!(
+                    matches!(
+                        state.run_admitted_load(&path, second).await,
+                        Ok(StoreRestored::Managed)
+                    ),
+                    "the second load makes the mob managed"
+                );
+                is_served(&state, &mob_id, "after the second load").await;
+            }
+
+            /// The load a record admitted last resolves it: a load that
+            /// made its mob managed leaves it managed.
+            #[tokio::test]
+            async fn the_load_a_record_admitted_completes_it() {
+                let (_root, state, mob_id) = a_dormant_mob("completed").await;
+                let (path, load) = a_load_that_made_its_mob_managed(&state, &mob_id).await;
+
+                let answer = resolve(&state, &path, &load, Ok(StoreRestored::Managed)).await;
+                drop(load);
+
+                assert!(
+                    matches!(answer, Ok(StoreRestored::Managed)),
+                    "the load is answered that its mob is managed: {answer:?}"
+                );
+                is_served(&state, &mob_id, "after the load").await;
+            }
+
+            /// The load a record admitted last quarantines its store when
+            /// it fails, under the class it met; and one that answers that
+            /// its mob is managed without having made it so is quarantined
+            /// as a store that could not serve.
+            #[tokio::test]
+            async fn the_load_a_record_admitted_quarantines_its_store_when_it_fails() {
+                let (_root, state, mob_id) = a_dormant_mob("failed").await;
+                let (path, load) = an_admitted_load(&state, &mob_id).await;
+                let unreadable = meerkat_mob::MobQuarantineClass::StoreUnreadable;
+                let answer = resolve(
+                    &state,
+                    &path,
+                    &load,
+                    Err(fault(unreadable, "the store did not read")),
+                )
+                .await;
+                drop(load);
+                assert!(
+                    matches!(&answer, Err(MobError::MobQuarantined { class, .. }) if *class == unreadable),
+                    "the load is answered the quarantine: {answer:?}"
+                );
+                let row = quarantine_row(&state, &mob_id).await;
+                assert_eq!(row.class, unreadable);
+                assert!(!row.retrying);
+                assert!(
+                    row.cause.to_string().contains("the store did not read"),
+                    "the quarantine keeps the load's failure: {}",
+                    row.cause
+                );
+
+                let (_root, state, mob_id) = a_dormant_mob("never-registered").await;
+                let (path, load) = an_admitted_load(&state, &mob_id).await;
+                let answer = resolve(&state, &path, &load, Ok(StoreRestored::Managed)).await;
+                drop(load);
+                assert!(
+                    matches!(answer, Err(MobError::MobQuarantined { .. })),
+                    "a load that registered no mob is answered the quarantine: {answer:?}"
+                );
+                let row = quarantine_row(&state, &mob_id).await;
+                assert_eq!(row.class, meerkat_mob::MobQuarantineClass::StoreUnavailable);
+                assert!(
+                    row.cause
+                        .to_string()
+                        .contains("ended without registering its mob"),
+                    "the quarantine says why: {}",
+                    row.cause
+                );
+            }
+
+            /// A re-attempt after a load that failed resolves its record:
+            /// one that fails leaves the store quarantined with its own
+            /// failure and no re-attempt in flight, and one that restores
+            /// the store makes its mob managed.
+            #[tokio::test]
+            async fn a_re_attempt_after_a_failed_load_resolves_its_record() {
+                let (_root, state, mob_id) = a_dormant_mob("retried").await;
+                let outage = meerkat_mob::MobQuarantineClass::StoreUnavailable;
+                let (path, load) = an_admitted_load(&state, &mob_id).await;
+                resolve(
+                    &state,
+                    &path,
+                    &load,
+                    Err(fault(outage, "the load met an outage")),
+                )
+                .await
+                .expect_err("the load's failure quarantines its store");
+                drop(load);
+
+                let admitted = state
+                    .hosted
+                    .write()
+                    .await
+                    .admit_retry(&mob_id, mob_store_dsl::MobStoreRetryTrigger::OnDemand)
+                    .expect("a store of the id is quarantined");
+                let Ok((_, retry)) = admitted else {
+                    panic!("the record admits a re-attempt of a store that could not serve");
+                };
+                assert!(quarantine_row(&state, &mob_id).await.retrying);
+                resolve(
+                    &state,
+                    &path,
+                    &retry,
+                    Err(fault(outage, "the outage lasts")),
+                )
+                .await
+                .expect_err("the re-attempt's failure keeps its store quarantined");
+                drop(retry);
+                let row = quarantine_row(&state, &mob_id).await;
+                assert!(!row.retrying, "the failed re-attempt resolved its record");
+                assert_eq!(row.class, outage);
+                assert!(
+                    row.cause.to_string().contains("the outage lasts"),
+                    "the quarantine keeps the re-attempt's failure: {}",
+                    row.cause
+                );
+
+                let admitted = state
+                    .hosted
+                    .write()
+                    .await
+                    .admit_retry(&mob_id, mob_store_dsl::MobStoreRetryTrigger::OnDemand)
+                    .expect("the store is still quarantined");
+                let Ok((_, retry)) = admitted else {
+                    panic!("the record admits another re-attempt after one that failed");
+                };
+                assert!(
+                    matches!(
+                        state.run_store_retry(&path, retry).await,
+                        Ok(StoreRestored::Managed)
+                    ),
+                    "the re-attempt makes the mob managed"
+                );
+                is_served(&state, &mob_id, "after the re-attempt").await;
+            }
         }
     }
 }

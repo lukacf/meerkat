@@ -335,6 +335,14 @@ impl HostedStore {
         self.attempt.upgrade().is_some()
     }
 
+    /// Whether `attempt` is the load, re-attempt or unload the record
+    /// admitted last: the one whose outcome the record waits for.
+    fn admitted_last(&self, attempt: &Arc<AttemptToken>) -> bool {
+        self.attempt
+            .upgrade()
+            .is_some_and(|admitted| Arc::ptr_eq(&admitted, attempt))
+    }
+
     /// The hold: `None` unless the record is Held.
     pub(crate) fn held(&self) -> Option<&HeldChildMob> {
         match self.phase() {
@@ -1652,21 +1660,31 @@ impl HostedStores {
         self.note_changed();
     }
 
-    /// The load or re-attempt admitted for the store at `path` ended as
-    /// `restored`. A mob it made managed or held resolved the record in the
-    /// step that moved it ([`Self::resolve_managed`], [`Self::resolve_held`]);
-    /// here a store that was swept or settled is gone and its record is
-    /// dropped, and a failed one is quarantined under the class it met, with
-    /// its failure. The answer is the caller's: how the store restored, or
-    /// the typed quarantine.
+    /// The load or re-attempt `attempt`, admitted for the store at `path`,
+    /// ended as `restored`. A mob it made managed or held resolved the
+    /// record in the step that moved it ([`Self::resolve_managed`],
+    /// [`Self::resolve_held`]); here a store that was swept or settled is
+    /// gone and its record is dropped, and a failed one is quarantined under
+    /// the class it met, with its failure. The answer is the caller's: how
+    /// the store restored, or the typed quarantine.
+    ///
+    /// Only the attempt the record admitted last resolves it. A load goes
+    /// on for a moment after the step that made its mob managed, and the mob
+    /// can be unloaded and its load admitted again before the first load
+    /// comes here: the record then waits for that later attempt, and the
+    /// first load's answer, whatever it is, changes nothing in it.
     pub(crate) fn resolve_attempt(
         &mut self,
         path: &Path,
+        attempt: &Arc<AttemptToken>,
         restored: Result<StoreRestored, StoreQuarantine>,
     ) -> Result<StoreRestored, MobError> {
         let Some(store) = self.live_at_mut(path) else {
             return restored.map_err(|quarantine| quarantine.cause);
         };
+        if !store.admitted_last(attempt) {
+            return restored.map_err(|quarantine| quarantine.cause);
+        }
         let retrying = match store.phase() {
             Phase::Loading => false,
             Phase::Retrying => true,

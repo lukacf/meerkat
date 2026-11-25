@@ -536,7 +536,13 @@ implicit id that is not the session's own answers `access_denied` with no
 data. A permission refusal carries no ids at any point: a mob that refuses
 the helper's seat, or the bind of the call's objective to its owner, because
 the caller's principal lacks the control scope answers `access_denied` with no
-data too. The per-member tools are unchanged:
+data too. (0.9.18 answers `execution_failed` at those two sites, with the
+message `tool 'delegate' failed: control scope denied: requires <scope>` and
+no typed data; a caller that serves both releases treats both answers as the
+scope refusal. A helper whose turn failed or was not admitted is a different
+answer in both: `execution_failed`, here with `data.kind`
+`delegate_helper_ended`.) The
+per-member tools are unchanged:
 a member id looked up in a mob that
 does not hold it still answers `member_not_found` for that mob.
 

@@ -149,6 +149,46 @@ pub const PENDING_RESUMED_RUN_READ_BOUND: Duration = Duration::from_millis(100);
 
 /// What [`crate::MeerkatMachine::pending_resumed_run`] answers for a session
 /// whose registration marks a run.
+///
+/// Matching it from another crate: the enum and its
+/// [`NotReadableNow`](Self::NotReadableNow) variant are both non-exhaustive,
+/// so the match keeps a wildcard arm and names that variant's field with
+/// `..`:
+///
+/// ```
+/// use meerkat_runtime::PendingResumedRunRead;
+///
+/// fn describe(read: &PendingResumedRunRead) -> String {
+///     match read {
+///         PendingResumedRunRead::Pending(run) => format!("run {} waits", run.run_id),
+///         PendingResumedRunRead::NotReadableNow { session_id, .. } => {
+///             format!("session {session_id} cannot be read now")
+///         }
+///         _ => "an answer this caller does not know".to_string(),
+///     }
+/// }
+/// ```
+///
+/// A pattern of that variant without `..` does not compile outside this
+/// crate:
+///
+/// ```compile_fail,E0638
+/// use meerkat_runtime::PendingResumedRunRead;
+///
+/// fn not_readable(read: &PendingResumedRunRead) -> bool {
+///     matches!(read, PendingResumedRunRead::NotReadableNow { session_id: _ })
+/// }
+/// ```
+///
+/// Neither does building the variant: the runtime is its only producer.
+///
+/// ```compile_fail,E0639
+/// use meerkat_runtime::PendingResumedRunRead;
+///
+/// fn build(session_id: meerkat_core::SessionId) -> PendingResumedRunRead {
+///     PendingResumedRunRead::NotReadableNow { session_id }
+/// }
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PendingResumedRunRead {
@@ -160,6 +200,10 @@ pub enum PendingResumedRunRead {
     /// store commit in flight, for example), or the session's registration
     /// needs a reload, whose in-memory state is not answered. Ask again.
     /// Whether the session marks a run is not known from this answer.
+    ///
+    /// The variant is non-exhaustive: another crate matches it with `..`
+    /// and cannot build it, which keeps its field list open.
+    #[non_exhaustive]
     NotReadableNow {
         /// The session that could not be read.
         session_id: SessionId,

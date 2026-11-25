@@ -6197,9 +6197,10 @@ ASCII letter, a digit, `-` or `_` becomes `%` followed by two uppercase
 hexadecimal digits, so a `.` in the ID is written `%2E`.
 
 `rkat storage doctor` and `rkat storage migrate` do not apply the scan's
-filter. Both list every `.db` file in the `mobs` directory, whatever its
-name, and neither reports that the scan skips one. A file in their output
-is therefore not necessarily a mob the host restored.
+filter. Both list every `.db` file in the `mobs` directory of each realm
+they inspect, whatever its name, and neither reports that the scan skips
+one. A file in their output is therefore not necessarily a mob the host
+restored.
 
 0.9.18 still filters by filename. If the old mob ID itself began with
 `mob--`, its old filename already passes that filter: for the mob

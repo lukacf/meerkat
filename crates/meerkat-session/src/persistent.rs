@@ -13281,6 +13281,15 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         .await
     }
 
+    /// Run one direct turn on the live session and commit it through the
+    /// machine's service-turn protocol.
+    ///
+    /// An error carries the reserved `admission` only when the turn did not
+    /// take it: a returned admission means that nothing of `req` ran. Its
+    /// absence proves nothing either way. Some refusals that ran nothing
+    /// answer without it, and so does every error of a turn that ran,
+    /// whatever the error is: a not-found answer without the admission does
+    /// not prove that the turn did not run.
     pub async fn run_machine_committed_live_turn(
         &self,
         protocol: MachineServiceTurnCommitProtocol<'_>,
@@ -13298,6 +13307,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             .await
     }
 
+    /// [`Self::run_machine_committed_live_turn`] for a caller that already
+    /// holds the session's runtime turn boundary. A returned admission, and
+    /// its absence, mean here what they mean there.
     pub async fn run_machine_committed_live_turn_under_runtime_turn_boundary(
         &self,
         protocol: MachineServiceTurnCommitProtocol<'_>,

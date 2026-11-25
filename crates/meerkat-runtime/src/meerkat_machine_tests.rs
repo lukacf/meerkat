@@ -39736,6 +39736,51 @@ async fn await_census_reading(mut sample: impl FnMut() -> Option<usize>) -> Opti
     .ok()
 }
 
+/// How many times [`census_count_within_tries`] asks.
+const CENSUS_COUNT_TRIES: usize = 10_000;
+
+/// [`await_census_reading`] for a row on a PAUSED clock, bounded by a count
+/// of tries: the first count the census answers, or a panic that says it
+/// never answered one.
+///
+/// A `tokio::time::timeout` bounds nothing there: paused time advances only
+/// when the runtime is idle, and a task that keeps yielding is never idle,
+/// so the timeout of [`await_census_reading`] would never fire. This asks
+/// at most [`CENSUS_COUNT_TRIES`] times, only while the answer is `None`.
+///
+/// Why a miss happens at all: `overdue_run_start_session_count` reads each
+/// entry's shared machine authority with `try_lock`. A registered session's
+/// runtime loop is served by the process-owned multi-thread runtime, outside
+/// the row's paused clock, and every machine input and machine read of its
+/// driver takes that same mutex for a moment (the loop reads the machine's
+/// state under the driver at the top of every pass, its first included). A
+/// probe that meets that moment answers `None`: nobody looked. It says
+/// nothing about the count.
+///
+/// Between tries the row yields twice, and sleeps never: to its own runtime
+/// (`tokio::task::yield_now`, for a holder that is a task of this runtime)
+/// and to the scheduler (`std::thread::yield_now`, for a holder on another
+/// thread that lost its time slice while holding). Neither advances the
+/// paused clock, so a retry cannot move a window across its notice bound.
+///
+/// A count is returned as it is read: the caller compares it at once, so a
+/// WRONG count fails on the first reading and is never retried away. Use it
+/// only where the assertion expects a count; a probe that expects `None`
+/// samples the accessor directly, once.
+async fn census_count_within_tries(
+    asked: &str,
+    mut sample: impl FnMut() -> Option<usize>,
+) -> usize {
+    for _ in 0..CENSUS_COUNT_TRIES {
+        if let Some(count) = sample() {
+            return count;
+        }
+        tokio::task::yield_now().await;
+        std::thread::yield_now();
+    }
+    panic!("the census never answered a count in {CENSUS_COUNT_TRIES} tries: {asked}")
+}
+
 fn machine_terminal_receipt(
     run_id: RunId,
     contributing_input_ids: Vec<InputId>,
@@ -61849,6 +61894,22 @@ async fn run_settlement_watchers(machine: &Arc<MeerkatMachine>, session_id: &Ses
     )
 }
 
+/// The session's driver, taken out of the registry: the registry guard is
+/// dropped before this returns, so a row that then holds the driver holds
+/// nothing of the registry while it asks a census.
+async fn session_driver_for_census(
+    machine: &Arc<MeerkatMachine>,
+    session_id: &SessionId,
+) -> crate::meerkat_machine::driver::SharedDriver {
+    let sessions = machine.sessions.read().await;
+    Arc::clone(
+        &sessions
+            .get(session_id)
+            .expect("registered session entry")
+            .driver,
+    )
+}
+
 async fn hold_a_run_after_its_terminal_commit() -> HeldAfterTerminalCommit {
     let machine = persistent_health_probe_machine();
     let session_id = SessionId::new();
@@ -61961,17 +62022,25 @@ async fn unsettled_run_session_count_sees_a_committed_run_whose_loop_stands() {
     // a lock miss alone is never published as a failed read: the census
     // answers with its last completed reading, the per-session read with
     // nothing.
+    //
+    // The row takes the driver OUT of the registry and drops its registry
+    // guard before it asks: the census reads the registry with `try_read`,
+    // which a writer queued behind a read guard this row still held would
+    // defeat, and that is no part of what is pinned here. The census is
+    // asked while the DRIVER is held; it asks again only while the registry
+    // itself could not be read (`None`), and a count other than the
+    // expected one fails at once.
     {
-        let sessions = machine.sessions.read().await;
-        let entry = sessions
-            .get(&held.session_id)
-            .expect("registered session entry");
-        let driver_held = entry.driver.lock().await;
+        let driver = session_driver_for_census(machine, &held.session_id).await;
+        let driver_held = driver.lock().await;
         assert_eq!(
-            machine.unsettled_run_session_count_at(
-                crate::run_progress::RUN_SETTLEMENT_NOTICE,
-                past_run_settlement_notice(),
-            ),
+            await_census_reading(|| {
+                machine.unsettled_run_session_count_at(
+                    crate::run_progress::RUN_SETTLEMENT_NOTICE,
+                    past_run_settlement_notice(),
+                )
+            })
+            .await,
             Some(1),
             "a lock miss with nothing read keeps the last completed reading"
         );
@@ -61993,6 +62062,15 @@ async fn unsettled_run_session_count_sees_a_committed_run_whose_loop_stands() {
         .await
         .expect("completion waiter should resolve")
         .expect("the noop turn should complete");
+    // The completion resolves inside the loop's pass, and the loop goes on
+    // under the session's driver for the rest of that pass. A census asked in
+    // that moment cannot read the session and answers its last completed
+    // reading, which is still the 1 of the unsettled run: a count that was
+    // true a moment earlier, and the helper below rightly refuses any count
+    // but the expected one. So the row first waits for the loop to park: a
+    // parked loop holds no driver, and the census then makes a completed
+    // reading. An ordering, not a retry.
+    await_runtime_loop_parked(machine, &held.session_id).await;
     run_settlement_census_settles_at(
         machine,
         past_run_settlement_notice,
@@ -62000,20 +62078,23 @@ async fn unsettled_run_session_count_sees_a_committed_run_whose_loop_stands() {
         "a run whose terminal work the loop settled owes nothing, however old its rows",
     )
     .await;
-    // The same miss on a healthy session: the last completed reading is
-    // zero, and that is what a busy healthy host publishes, not a failed
-    // read.
+    // A settled session with its driver held: the census answers 0, and not
+    // a failed read. No miss occurs here: a session whose machine holds no
+    // input in a terminal phase reads clear before its driver is tried, so
+    // the held driver is never asked for and the census makes a completed
+    // reading. As above, the registry guard is dropped before the census is
+    // asked, and the census is asked while the driver is held.
     {
-        let sessions = machine.sessions.read().await;
-        let entry = sessions
-            .get(&held.session_id)
-            .expect("registered session entry");
-        let driver_held = entry.driver.lock().await;
+        let driver = session_driver_for_census(machine, &held.session_id).await;
+        let driver_held = driver.lock().await;
         assert_eq!(
-            machine.unsettled_run_session_count_at(
-                crate::run_progress::RUN_SETTLEMENT_NOTICE,
-                past_run_settlement_notice(),
-            ),
+            await_census_reading(|| {
+                machine.unsettled_run_session_count_at(
+                    crate::run_progress::RUN_SETTLEMENT_NOTICE,
+                    past_run_settlement_notice(),
+                )
+            })
+            .await,
             Some(0),
             "a lock miss on a healthy session is not a failed read"
         );
@@ -62292,17 +62373,32 @@ async fn overdue_run_start_session_count_sees_a_wedged_staged_run() {
             );
     }
 
+    // The three probes that expect a COUNT ask through
+    // `census_count_within_tries`: the runtime loop registered above is
+    // alive on its own threads, and a probe that meets a moment in which it
+    // holds the authority answers `None`, which is "nobody looked" and not a
+    // reading. They ask again only while the answer is `None`, a bounded
+    // number of times; the first count answered is compared at once, so a
+    // count other than the expected one fails immediately. The one probe
+    // that expects `None` (the row itself holds the authority) is a single
+    // immediate ask, as before.
     assert_eq!(
-        machine.overdue_run_start_session_count(),
-        Some(0),
+        census_count_within_tries("inside the notice bound", || {
+            machine.overdue_run_start_session_count()
+        })
+        .await,
+        0,
         "inside the notice bound the same facts are ordinary staging latency"
     );
 
     tokio::time::advance(crate::run_progress::RUN_EXECUTION_START_NOTICE + Duration::from_secs(1))
         .await;
     assert_eq!(
-        machine.overdue_run_start_session_count(),
-        Some(1),
+        census_count_within_tries("past the notice bound", || {
+            machine.overdue_run_start_session_count()
+        })
+        .await,
+        1,
         "a staged run past the notice bound with its primitive provably \
          un-applied is exactly what this accessor exists to report"
     );
@@ -62335,8 +62431,11 @@ async fn overdue_run_start_session_count_sees_a_wedged_staged_run() {
         drop(held);
     }
     assert_eq!(
-        machine.overdue_run_start_session_count(),
-        Some(1),
+        census_count_within_tries("after the row dropped its guard on the authority", || {
+            machine.overdue_run_start_session_count()
+        })
+        .await,
+        1,
         "and the refusal is per-probe, not sticky: the wedge is visible again \
          the moment the authority is readable"
     );

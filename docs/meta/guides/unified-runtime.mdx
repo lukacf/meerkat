@@ -4,7 +4,7 @@ description: "Combine a Meerkat mob with Meta modules into a single managed runt
 icon: "layer-group"
 ---
 
-*Mirrored from Meerkat Meta main at [b0d2ce71a7ec](https://github.com/lukacf/meerkat/commit/b0d2ce71a7ec420f3163220785766194749e6737) on 2026-11-24; Meta version 0.9.18 at that commit.*
+*Mirrored from Meerkat Meta main at [17fa0f3ef553](https://github.com/lukacf/meerkat/commit/17fa0f3ef553e2770c7f74c212d58361ce90ce68) on 2026-11-25; Meta version 0.9.18 at that commit.*
 
 The unified runtime is the production entry point for Meta. It bootstraps a Meerkat mob and Meta's module subsystems together, merges their event streams, and manages the combined lifecycle through a single handle.
 
@@ -765,9 +765,9 @@ and `ready` do not cover it; the add's own result is its outcome.
 
 ### Shutdown
 
-In the mob/module teardown sequence, graceful shutdown quiesces and stops the
-mob while its router and module dependencies remain alive. It then closes the
-event router and shuts down the modules:
+Graceful shutdown requests a mob stop while the event router and modules are
+still available. It closes the router and shuts down the modules even if the
+mob stop fails.
 
 - **Flow runs:** the mob stop settles active flow runs first, because
   meerkat's Stop refuses while a flow run is active. It cancels each one,
@@ -784,12 +784,16 @@ event router and shuts down the modules:
 let report: UnifiedRuntimeShutdownReport = runtime.shutdown().await;
 ```
 
-The shutdown report includes status from both the mob and module runtimes.
-`shutdown` returns only once the root mob's actor task has returned (within
-the root mob's terminal shutdown budget), so after a teardown that settled
-every member, dropping the runtime releases Core's custody of the state
-directory at once, and a new runtime composed on it in the same process is
-not refused as in use (`StorageLayoutError::RuntimeInUse`).
+Read the report before assuming that shutdown completed. In Meta 0.9.18,
+if `report.mob_stop` is an error, `report.mob_terminal_shutdown` is
+`SkippedMobStopFailed`: the runtime did not attempt terminal teardown of the
+root mob or stand down any durable child mobs it owns.
+
+Even when `mob_terminal_shutdown` is `Completed`, check its member report:
+not every member necessarily settled. The runtime waits for the root actor
+task only until its terminal shutdown deadline. Receiving the report does
+not prove that the task has exited or that dropping the runtime will free
+the state directory immediately for another runtime in the same process.
 
 A runtime whose launch declares its mob to its mob set
 (`MobBootstrapSpec::declared`) is ended by `shutdown()`. In this release

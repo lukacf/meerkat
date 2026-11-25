@@ -124,7 +124,12 @@ pub enum DurableResumeVerdict {
     /// registration of its session, never on a timer. A gate that cannot
     /// decide never lets the run resume, and never ends it.
     Unavailable {
-        /// Why, for the runtime's log.
+        /// Why: for the runtime's log, and for a host that reads the held
+        /// run (`meerkat_runtime::ResumedRunAdmissionUndecided::reason`,
+        /// cut at `meerkat_runtime::RESUMED_RUN_ADMISSION_REASON_MAX_BYTES`).
+        /// Write nothing here that a reader of either must not see: say what
+        /// could not be read, and keep a store's own error text in the
+        /// gate's log.
         reason: String,
     },
 }

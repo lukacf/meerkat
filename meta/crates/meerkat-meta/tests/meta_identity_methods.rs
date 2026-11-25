@@ -2542,6 +2542,8 @@ use meerkat_mob::{MobDefinition, ProfileName, SpawnMemberSpec};
 use meerkat_runtime::input_authority::NativeAdmissionError;
 use meerkat_runtime::meerkat_machine::NativeGrantWorkConfiguration;
 
+#[path = "support/custody_wait.rs"]
+mod custody_wait;
 #[path = "support/llm_usage.rs"]
 mod llm_usage;
 
@@ -3820,8 +3822,13 @@ async fn an_approved_change_the_launchs_policy_now_denies_is_not_carried_out() {
         )
         .await;
     let decision_id = decision_of(&held);
-    let _ = runtime.shutdown().await;
+    let report = runtime.shutdown().await;
+    // The next launch reopens this state directory in this process
+    // (`support/custody_wait.rs`): a teardown that did not settle fails the
+    // row here, and the launch waits for this lifetime's execution custody.
+    custody_wait::teardown_settled(&report);
     drop(runtime);
+    custody_wait::predecessor_custody_released(temp.path()).await;
 
     // A launch without an identity policy carries nothing out: the person
     // the approver map names approves the decision there.
@@ -3879,8 +3886,12 @@ async fn an_approved_change_the_launchs_policy_now_denies_is_not_carried_out() {
     )
     .expect("answer JSON");
     assert!(answer["error"].is_null(), "{answer:#}");
-    let _ = runtime.shutdown().await;
+    let report = runtime.shutdown().await;
+    // The next launch reopens this state directory in this process: the
+    // teardown is read settled, and the launch waits for the custody.
+    custody_wait::teardown_settled(&report);
     drop((runtime, owner, connection));
+    custody_wait::predecessor_custody_released(temp.path()).await;
 
     // The launch that carries it out has a policy with no rule: it denies
     // every create.
@@ -5718,8 +5729,12 @@ async fn after_an_adoption_the_identity_runtime_serves_the_agent_from_its_record
             Some("Renamed"),
             "the registration follows the record at once"
         );
-        let _ = runtime.shutdown().await;
+        let report = runtime.shutdown().await;
+        // The next launch reopens this state directory in this process: the
+        // teardown is read settled, and the launch waits for the custody.
+        custody_wait::teardown_settled(&report);
     }
+    custody_wait::predecessor_custody_released(temp.path()).await;
     let (runtime, _asked, _fail_next_session) =
         launch_with(temp.path(), &mob_id, false, false).await;
     assert_eq!(
@@ -9604,9 +9619,13 @@ async fn an_agent_that_destroyed_its_mobs_is_archived_and_is_back_after_a_restar
         );
         let record = family_agent(&runtime, MAKER).await;
         assert!(record.agent.archived, "the agent reads archived");
-        let _ = runtime.shutdown().await;
+        let report = runtime.shutdown().await;
+        // The next launch reopens this state directory in this process: the
+        // teardown is read settled, and the launch waits for the custody.
+        custody_wait::teardown_settled(&report);
         (before, record.agent.spec_digest)
     };
+    custody_wait::predecessor_custody_released(temp.path()).await;
 
     let runtime = launch_owning(temp.path(), &mob_id, model.clone()).await;
     let mobs = runtime
@@ -9718,9 +9737,13 @@ async fn a_refused_archive_leaves_the_agent_managing_its_mob_after_a_turn_and_a_
         );
         let answers = own_tools_turn(&runtime, &model, MAKER, "before-restart", reads()).await;
         manages(&answers, "before the restart");
-        let _ = runtime.shutdown().await;
+        let report = runtime.shutdown().await;
+        // The next launch reopens this state directory in this process: the
+        // teardown is read settled, and the launch waits for the custody.
+        custody_wait::teardown_settled(&report);
         before
     };
+    custody_wait::predecessor_custody_released(temp.path()).await;
 
     let runtime = launch_owning(temp.path(), &mob_id, model.clone()).await;
     assert_eq!(
@@ -10000,8 +10023,12 @@ async fn an_archive_through_core_is_not_refused_and_the_agents_mob_ends_at_the_n
             Some(vec![OWNED_WORKER.to_owned()]),
             "in the same process the mob is still hosted with its member"
         );
-        let _ = runtime.shutdown().await;
+        let report = runtime.shutdown().await;
+        // The next launch reopens this state directory in this process: the
+        // teardown is read settled, and the launch waits for the custody.
+        custody_wait::teardown_settled(&report);
     }
+    custody_wait::predecessor_custody_released(temp.path()).await;
 
     let runtime = launch_owning(temp.path(), &mob_id, model.clone()).await;
     assert_eq!(
@@ -10113,8 +10140,12 @@ async fn a_mob_the_agent_creates_after_the_archives_check_is_not_seen() {
             Some(Vec::new()),
             "in the same process the mob is hosted"
         );
-        let _ = runtime.shutdown().await;
+        let report = runtime.shutdown().await;
+        // The next launch reopens this state directory in this process: the
+        // teardown is read settled, and the launch waits for the custody.
+        custody_wait::teardown_settled(&report);
     }
+    custody_wait::predecessor_custody_released(temp.path()).await;
 
     let (runtime, _asked, _fail_next_session) =
         launch_with(temp.path(), &mob_id, false, false).await;
@@ -10532,8 +10563,12 @@ async fn a_removal_through_core_is_not_refused_and_the_agents_mob_ends_at_the_ne
             Some(vec![OWNED_WORKER.to_owned()]),
             "in the same process the mob is still hosted with its member"
         );
-        let _ = runtime.shutdown().await;
+        let report = runtime.shutdown().await;
+        // The next launch reopens this state directory in this process: the
+        // teardown is read settled, and the launch waits for the custody.
+        custody_wait::teardown_settled(&report);
     }
+    custody_wait::predecessor_custody_released(temp.path()).await;
 
     let runtime = launch_owning(temp.path(), &mob_id, model.clone()).await;
     assert_eq!(

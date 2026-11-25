@@ -4,6 +4,9 @@ import { resolve } from "node:path";
 import { createServer } from "vite";
 import { chromium } from "playwright";
 
+import { verifyCache } from "../../webcm-cache.mjs";
+
+await verifyCache(resolve("public"));
 const work = resolve(".work/guest-smoke");
 await mkdir(work, { recursive: true });
 process.env.TMPDIR = work;

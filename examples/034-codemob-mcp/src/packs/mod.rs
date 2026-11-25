@@ -228,8 +228,8 @@ mod tests {
         }
 
         assert!(
-            models.iter().any(|model| model == "gpt-6-astra"),
-            "the OpenAI role mix should include gpt-6-astra: {models:?}"
+            models.iter().any(|model| model == "gpt-6.2-astra"),
+            "the OpenAI role mix should include gpt-6.2-astra: {models:?}"
         );
         assert!(
             models.iter().any(|model| model == "claude-opus-5-5"),

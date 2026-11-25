@@ -349,9 +349,9 @@ pub use runtime::remote_member_operator_tool_defs_for_test;
 #[cfg(feature = "runtime-adapter")]
 pub use runtime::run_mobpack_callable;
 pub use runtime::stop_report::{
-    HostRunStartHoldReason, MemberRunDrain, MemberRunDrainOutcome, MemberRunStarts,
-    MemberStopOutcome, MemberStopRun, MobRunDrainReport, MobStopReport, NotHoldableReason,
-    StopOptions,
+    HostRunStartHoldReason, MemberPendingResumedRun, MemberRunDrain, MemberRunDrainOutcome,
+    MemberRunStarts, MemberStopOutcome, MemberStopRun, MobRunDrainReport, MobStopReport,
+    NotHoldableReason, StopOptions,
 };
 pub use runtime::{AGENT_MOB_TOOL_NAMES, MemberToolAudience, agent_mob_tool_names};
 pub use runtime::{
@@ -549,5 +549,7 @@ pub type ExternalToolsProvider = std::sync::Arc<
     dyn Fn() -> Option<std::sync::Arc<dyn meerkat_core::agent::AgentToolDispatcher>> + Send + Sync,
 >;
 
+#[cfg(test)]
+mod profile_web_search_rows;
 #[cfg(test)]
 mod tests;

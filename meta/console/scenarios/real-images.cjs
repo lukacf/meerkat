@@ -5,6 +5,7 @@ const path = require("node:path");
 const { createHash, randomUUID } = require("node:crypto");
 const { chromium } = require("playwright");
 const { startFixture, eventually, rpc } = require("../acceptance-runtime.cjs");
+const { browserFailureMonitor } = require("./browser-failure-monitor.cjs");
 const evidence = path.join(__dirname, "../../output/playwright/console-acceptance");
 const identity = "router:main";
 const digest = bytes => createHash("sha256").update(bytes).digest("hex");
@@ -19,36 +20,21 @@ const transcript = page => pane(page).locator(".conv__body");
 const textContent = content => typeof content === "string" ? content : (content || []).filter(block => block.type === "text").map(block => block.text).join("");
 const interactionFrames = (current, accepted) => current.filter(frame => frame.interaction_id === accepted.interaction_id || frame.id === accepted.input_frame_id);
 
-function browserErrors(page) {
-  const errors = [], expected = [];
-  let allowed = null;
-  page.on("pageerror", error => errors.push(error.message));
-  page.on("requestfailed", request => {
-    const failure = { method: request.method(), url: request.url(), error: request.failure()?.errorText };
-    if (allowed?.matches(request)) expected.push({ ...failure, reason: allowed.reason });
-    else errors.push({ ...failure, payload: request.postData() });
-  });
-  return { errors, expected, async during(reason, action, matches) {
-    assert.equal(allowed, null);
-    allowed = { reason, matches };
-    try { return await action(); } finally { allowed = null; }
-  } };
-}
-function authorityCancellation(request) {
-  if (!request.failure()?.errorText?.includes("ERR_ABORTED")) return false;
-  if (new URL(request.url()).pathname.endsWith("/timeline/stream")) return true;
-  try {
-    const body = JSON.parse(request.postData() || "{}");
-    return body.method === "meta/console/query_timeline" && body.params?.mode === "recent" && body.params?.limit === 200 && !body.params?.identity;
-  } catch { return false; }
-}
+// The scenarios' failure monitor is the shared one, over the page's own
+// context (the diagram is drawn on a page of another context). Opening the
+// console and the explicit reload are its two initializing navigations: each
+// ends on the console's own last initializing start, not on the first "live",
+// so a start the console replaces after the page shows live is inside the
+// action, and any failed request outside the two actions is unexpected.
+const failureMonitor = (page, fixture) => browserFailureMonitor(page.context(), { origin: fixture.baseUrl });
 async function openStock(page, fixture, monitor, reload = false) {
-  return monitor.during(reload ? "explicit image scenario reload" : "initial host authority initialization", async () => {
-    if (reload) await page.reload(); else await page.goto(fixture.baseUrl + "/console");
+  return monitor.navigation(page, reload ? "explicit image scenario reload" : "initial host authority initialization", async () => {
+    const response = reload ? await page.reload() : await page.goto(fixture.baseUrl + "/console");
     if (!await pane(page).count()) await page.locator('.agent[role="button"], .cc-sidebar-row').filter({ hasText: /router:main|Router main/ }).first().click();
     await pane(page).getByTestId(`chat-composer:${identity}`).waitFor();
     await page.locator('[data-testid="console-transport-status"][data-phase="live"]').waitFor();
-  }, authorityCancellation);
+    return response;
+  });
 }
 function requestSendPayload(request) {
   if (request.method() !== "POST") return null;
@@ -234,7 +220,7 @@ async function uploadImage() {
   const fixture = await startFixture();
   const browser = await chromium.launch({ headless: true });
   const page = await browser.newPage({ viewport: { width: 1600, height: 1000 } });
-  const monitor = browserErrors(page);
+  const monitor = failureMonitor(page, fixture);
   try {
     const bytes = await diagram(browser);
     await fs.mkdir(evidence, { recursive: true });
@@ -303,7 +289,7 @@ async function uploadImage() {
     await fs.writeFile(path.join(evidence, "image-upload-evidence.json"), JSON.stringify({ sha256: digest(bytes), blobId: image.blob_id, accepted, inputFrameId: input.id, sourceRow, restoredRow, terminal,
       model: ingress.request.model, exactModelBytesInSameUserMessage: true, captures, errors: monitor.errors, expectedFailures: monitor.expected }, null, 2));
   } catch (error) { await saveFailure("image-upload", fixture, page, error, monitor); throw error; }
-  finally { await browser.close(); await fixture.close(); }
+  finally { monitor.stop(); await browser.close(); await fixture.close(); }
 }
 
 async function liveImage() {
@@ -311,7 +297,7 @@ async function liveImage() {
   const fixture = await startFixture({ liveImages: true });
   const browser = await chromium.launch({ headless: true });
   const page = await browser.newPage({ viewport: { width: 1600, height: 1000 } });
-  const monitor = browserErrors(page);
+  const monitor = failureMonitor(page, fixture);
   try {
     await openStock(page, fixture, monitor);
     const runId = `badge-${randomUUID().slice(0, 8)}`;
@@ -347,7 +333,7 @@ async function liveImage() {
     await fs.writeFile(path.join(evidence, "live-image-evidence.json"), JSON.stringify({ provider: "openai", modelChoice: "scripted", imageExecutor: "real provider API", runId, accepted,
       blobId, sha256: digest(bytes), byteLength: bytes.length, dimensions, frame: committed, completed: terminal, toolCall: calls[0], toolResults, captures, errors: monitor.errors, expectedFailures: monitor.expected }, null, 2));
   } catch (error) { await saveFailure("live-image", fixture, page, error, monitor); throw error; }
-  finally { await browser.close(); await fixture.close(); }
+  finally { monitor.stop(); await browser.close(); await fixture.close(); }
 }
 
 async function liveModel() {
@@ -357,7 +343,7 @@ async function liveModel() {
   const fixture = await startFixture({ liveModel: true, mode: "identity" });
   const browser = await chromium.launch({ headless: true });
   const page = await browser.newPage({ viewport: { width: 1600, height: 1000 } });
-  const monitor = browserErrors(page);
+  const monitor = failureMonitor(page, fixture);
   try {
     await openStock(page, fixture, monitor);
     const prompt = 'Use the WorkGraph tools in the authorized realm mob.console-acceptance to create exactly two independent tasks called Review diagram and Review badge, plus a third called Publish report. These are immediately available, unscheduled tasks. For each create call send only realm_id and title, for example {"realm_id":"mob.console-acceptance","title":"Review diagram"}. Do not send due_at, not_before or snoozed_until; absent scheduling is distinct from an epoch date or a distant-future date. Do not call workgraph_update. Link each review as a blocking prerequisite of Publish report. Read the ready set after creating both links. End with one Markdown table containing exactly these columns: Task, ID, Ready. Include all three tasks with exact tool-returned IDs; the Ready cells must be Yes or No from the ready set. Leave the tasks open; do not claim or close them. No other work is needed.';
@@ -400,10 +386,13 @@ async function liveModel() {
     await fs.writeFile(path.join(evidence, "live-model-workgraph.json"), JSON.stringify({ provider: "openai", model: "gpt-5.5", accepted, graph, ready, terminal, calls, readyResults, tableRows: rows, captures,
       frames: current, errors: monitor.errors, expectedFailures: monitor.expected }, null, 2));
   } catch (error) { await saveFailure("live-model", fixture, page, error, monitor); throw error; }
-  finally { await browser.close(); await fixture.close(); }
+  finally { monitor.stop(); await browser.close(); await fixture.close(); }
 }
 module.exports = {
   _oracles: { interactionCompletion, modelImageIngress, imageToolEvidence, assertOpenGraph, assertUnscheduledGraphCalls },
+  // For the rows of real-images.test.cjs: how a scenario of this file opens
+  // the console and which failure monitor it opens it under.
+  _rig: { openStock, failureMonitor },
   browserScenarios: [{ id: "real-stock-image-upload", family: "real-images", backend: "real", run: uploadImage }],
   liveScenarios: [
     { id: "live-stock-image-generation", family: "live-provider", backend: "real-provider", run: liveImage },

@@ -335,6 +335,19 @@ pub enum MobTerminalShutdownOutcome {
     Refused { error: String },
 }
 
+impl MobTerminalShutdownOutcome {
+    /// The outcome's kind, for a log line: no member, no error text.
+    pub(crate) fn diagnostic_label(&self) -> &'static str {
+        match self {
+            Self::SkippedMobStopFailed => "skipped_mob_stop_failed",
+            Self::Completed(members) if members.is_clean() => "completed",
+            Self::Completed(_) => "completed_with_unsettled_members",
+            Self::AlreadyShutDown => "already_shut_down",
+            Self::Refused { .. } => "refused",
+        }
+    }
+}
+
 /// What [`UnifiedRuntime::shutdown`](crate::UnifiedRuntime) observed of the
 /// MCP servers its members' routers owned, through the gateway's member MCP
 /// custody.

@@ -4,7 +4,7 @@ description: "Configuration reference for Meta: module definitions, runtime opti
 icon: "gear"
 ---
 
-*Mirrored from Meerkat Meta main at [b369115a60a9](https://github.com/lukacf/meerkat/commit/b369115a60a9d081cc2c96cd27c2739b2c459fdc) on 2026-11-25; Meta version 0.9.18 at that commit.*
+*Mirrored from Meerkat Meta main at [fe3f57e4482d](https://github.com/lukacf/meerkat/commit/fe3f57e4482d2eca4be0dae93ad73c51f0753cf8) on 2026-11-25; Meta version 0.9.18 at that commit.*
 
 Meta is configured through Rust types passed at startup. This page documents every configuration surface.
 
@@ -876,8 +876,9 @@ binding, rather than let it happen:
   session; the resume itself is not refused). Refused are: a member build
   on another binding or none (none is Meerkat's default binding selection:
   a fork seated before the launch, above); Meerkat's fallback web search,
-  enabled by the build or, on a member rebuilt on its session, by the
-  tooling that session recorded, where the provider's own web search does
+  enabled by the build (a spawn's own web search override, or the member's
+  profile with `tools.web_search = true`) or, on a member rebuilt on its
+  session, by the tooling that session recorded, where the provider's own web search does
   not serve it (a model without native search, judged as Meerkat's factory
   judges it on the model the build runs on and the `[models]` of the
   member's own mob definition; a copilot backend; or tool governance that
@@ -1485,6 +1486,7 @@ schedule = true
 | `mob` | `false` | Mob management tools (spawn, retire, wire, unwire, list). Without a host-supplied authority context the member is granted spawn authority over every profile in the definition. |
 | `schedule` | `false` | Durable schedule tools (create, list, update, pause, resume, delete). |
 | `image_generation` | `false` | Image generation tools; the profile's `image_generation_provider` names the backend. |
+| `web_search` | unset | Opt-in with limits on the released versions (the Meerkat mobs guide's Web search section labels each by its evidence): no new key is written when neither the profile sets the key nor a spawn's own web search override is kept for the member (a kept override is stored in a local member's stored profile); by source, and not as an observed result of running them, in 0.9.15, 0.9.16, 0.9.17 and 0.9.18 the mob profile struct ignores a set key and does not preserve it on a rewrite, so `false` is not enforced by that field there (do not rely on `web_search=false` in a JSON mob profile to keep search disabled after a downgrade to any of the four), and the strict stored and wire forms reject the key; what a host does after such a rejection was observed on 0.9.16 only, with a debug build made from that tag over state written by an older state of this feature; state written with the key read by a released 0.9.18 runtime is not verified. Optional. Unset changes nothing: the provider's own web search where the member's model has one and the provider's switch is on, and none for a member whose tools are governed. `true` is an explicit enable: the provider's own search where it serves the member, otherwise the ordinary `web_search` tool (served by a helper on the provider's default model through the realm's default binding), or a failed build where that helper cannot be provided. `false` disables web search (the profile's own tool grant gate that covers `web_search` still mounts the tool closed, and a grant then opens it). A spawn's own override wins. A gateway launched with `runtime_options.member_auth_binding` refuses a member whose enable would need that helper. A member whose enabled web search is served by the provider's own search is reported in the gateway's log, at each build, as a declared tool category missing from its tool catalog: a warning only, nothing is refused. See [Web search](https://docs.rkat.ai/guides/mobs#web-search). |
 | `read_only` | `false` | An enforcement declaration, not prompt guidance: a tool call executes only when its owning dispatcher declares it read-only, and the declaration wins over any per-spawn tool access policy. The category booleans above still decide what the model sees; this decides what may run. Provider-native tools, MCP tools and `shell` are outside the guarantee. |
 | `deny` | `[]` | Tool names a member built from this profile may not run. An enforcement declaration, like `read_only`: a denied tool is not offered to the model (every build, a resume included, removes it from the member's tool list) and every call to it is still refused with an `access_denied` tool error while the turn continues. Each name must be a tool the build composed or a name in a known vocabulary: Meerkat's built-in tool families, the mob operator and agent mob tools, the exposed `tool_names` of the profile's `mcp_servers`, and tool bundles. A known name the build does not mount is inert; a declared MCP server that maps no `tool_names` leaves its names to the call-time refusal. Any other name (a typo, a stale tool) fails the member build with `DeclaredToolUnknown`, the same way a `comms = false` profile fails. A call runs only when `read_only`, `deny` and any per-spawn tool access policy all allow it. |
 | `mcp` | `[]` | MCP server names this profile may use from the mob-wide default external-tools provider; an empty list means the full host surface. |

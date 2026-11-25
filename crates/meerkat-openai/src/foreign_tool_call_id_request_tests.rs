@@ -2,13 +2,16 @@
 //! wire. Request construction only, on synthetic transcripts: no row here
 //! sends anything.
 //!
-//! The Responses lowering writes a stored id it can carry as stored, and
-//! any other as a short id derived from it, in the request only. The Chat
+//! A request that carries the whole history writes a stored id it can carry
+//! as stored, and any other as a short id derived from it, in the request
+//! only. A continuation of a stored response carries only what followed the
+//! server's own last step and writes every id as stored. The Chat
 //! Completions lowering writes every stored id as stored.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use meerkat_core::{
-    AssistantBlock, BlockAssistantMessage, Message, StopReason, ToolResult, UserMessage,
+    AssistantBlock, BlockAssistantMessage, Message, ProviderMeta, StopReason, ToolResult,
+    UserMessage,
 };
 use meerkat_llm_core::{LlmClient, LlmRequest, PreparedLlmRequest};
 use serde_json::{Value, json};
@@ -230,25 +233,135 @@ fn responses_request_gives_a_repeated_long_stored_id_one_call_id() {
     assert!(ids.iter().all(|id| *id == ids[0]));
 }
 
-/// The `call_id` depends on the stored id alone: another request, another
-/// position, or a request that holds only the result (as a continuation's
-/// suffix does) gets the same one.
+/// In a request that carries the whole history the `call_id` depends on the
+/// stored id alone: another request, or another position in it, gets the
+/// same one.
 #[test]
-fn responses_request_derives_the_same_call_id_in_every_request() {
+fn responses_request_derives_the_same_call_id_in_every_full_request() {
     let stored = foreign_id("stable", 500);
     let other = foreign_id("other", 500);
     let alone = round_call_ids(transcript(&[&stored]));
     let later = round_call_ids(transcript(&["call_1", &other, &stored]));
     assert_eq!(alone[0], later[2]);
+}
 
-    let result_only = responses_call_ids(&responses_body(vec![
-        Message::tool_results(vec![tool_result(&stored)]),
-        Message::User(UserMessage::text("and again")),
-    ]));
+/// A history as a session on one Responses server holds it: the server's
+/// own last step called a tool under `issued`, an id that server issued,
+/// and the result is in. With `store` on, the next request is a
+/// continuation: it names that step's response and carries only what
+/// followed it.
+fn request_after_the_servers_own_step(issued: &str) -> LlmRequest {
+    let AssistantBlock::ToolUse { id, name, args, .. } = tool_use(issued) else {
+        panic!("a tool use");
+    };
+    LlmRequest::new(
+        "gpt-5.4",
+        vec![
+            Message::User(UserMessage::text("look it up")),
+            Message::BlockAssistant(BlockAssistantMessage::new(
+                vec![AssistantBlock::ToolUse {
+                    id,
+                    name,
+                    args,
+                    meta: Some(Box::new(ProviderMeta::OpenAiResponse {
+                        response_id: "resp_previous".to_string(),
+                    })),
+                }],
+                StopReason::ToolUse,
+            )),
+            Message::tool_results(vec![tool_result(issued)]),
+        ],
+    )
+    .with_openai_tag_merge(|tag| tag.store = Some(true))
+}
+
+/// The `(type, call_id)` items of the continuation request for `request`,
+/// after checking that it is one: it names the previous response.
+fn continuation_call_ids(request: &LlmRequest) -> Vec<(String, String)> {
+    let client = OpenAiClient::new("test-key".to_string()).having_received(&request.messages);
+    let (body, plan) = client
+        .build_request_body_with_continuation(request)
+        .expect("the continuation body");
+    assert!(plan.is_some(), "a continuation plan");
+    assert_eq!(body["previous_response_id"], "resp_previous");
+    responses_call_ids(&body)
+}
+
+/// A continuation carries the result without its call: the server holds
+/// the call in its stored response, under the id it issued. A server may
+/// issue an id over the bound; the result still names it as stored.
+#[test]
+fn responses_continuation_carries_the_result_under_the_servers_own_long_id() {
+    let issued = foreign_id("issued-by-the-server", 200);
     assert_eq!(
-        result_only,
-        [("function_call_output".to_string(), alone[0].clone())]
+        continuation_call_ids(&request_after_the_servers_own_step(&issued)),
+        [("function_call_output".to_string(), issued)]
     );
+}
+
+/// The same for an id the server issued that happens to have the derived
+/// shape.
+#[test]
+fn responses_continuation_carries_the_result_under_the_servers_own_derived_shaped_id() {
+    let issued = round_call_ids(transcript(&[&foreign_id("a", 7000)])).remove(0);
+    assert!(issued.len() <= RESPONSES_CALL_ID_BOUND);
+    assert_eq!(
+        continuation_call_ids(&request_after_the_servers_own_step(&issued)),
+        [("function_call_output".to_string(), issued)]
+    );
+}
+
+/// The full replay of the same two histories (what a refused continuation
+/// falls back to) carries the call and its result, and derives one
+/// `call_id` for the two.
+#[test]
+fn responses_full_replay_after_the_servers_own_step_derives_on_the_call_and_its_result() {
+    let long = foreign_id("issued-by-the-server", 200);
+    let derived_shaped = round_call_ids(transcript(&[&foreign_id("a", 7000)])).remove(0);
+    for issued in [long, derived_shaped] {
+        let request = request_after_the_servers_own_step(&issued);
+        let body = OpenAiClient::new("test-key".to_string())
+            .having_received(&request.messages)
+            .build_request_body(&request)
+            .expect("the full body");
+        assert!(body.get("previous_response_id").is_none());
+        let ids = responses_call_ids(&body);
+        assert_eq!(
+            ids.iter()
+                .map(|(kind, _)| kind.as_str())
+                .collect::<Vec<_>>(),
+            ["function_call", "function_call_output"],
+        );
+        assert_eq!(ids[0].1, ids[1].1, "the output names its call");
+        assert!(ids[0].1.len() <= RESPONSES_CALL_ID_BOUND);
+        assert_ne!(ids[0].1, issued);
+    }
+}
+
+/// The receive side: a `call_id` a Responses service returns is stored as
+/// it was returned, whatever its length or shape. Nothing is derived on
+/// the way in, and nothing looks a returned id up among the ids a request
+/// carried.
+#[test]
+fn responses_output_stores_a_returned_call_id_as_returned() {
+    let long = foreign_id("returned", 7000);
+    let derived_shaped = round_call_ids(transcript(&[&long])).remove(0);
+    for returned in [long.as_str(), derived_shaped.as_str(), "call_1"] {
+        let item = json!({
+            "type": "function_call",
+            "id": "fc_1",
+            "call_id": returned,
+            "name": "lookup",
+            "arguments": "{}",
+            "status": "completed"
+        });
+        let blocks = crate::responses_output::lower_items([&item], Some("resp_1"))
+            .expect("the returned call as a block");
+        assert!(
+            matches!(blocks.as_slice(), [AssistantBlock::ToolUse { id, .. }] if id == returned),
+            "the returned call_id is the stored id"
+        );
+    }
 }
 
 /// A stored id may be, byte for byte, the `call_id` this lowering derives

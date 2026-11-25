@@ -3718,6 +3718,8 @@ fn build_tool_defs_with_profile_support(
              - model (required): LLM model name, e.g. \"claude-sonnet-4-5\".\n\
              - tools: {builtins: bool, shell: bool, comms: bool, memory: bool, mob: bool, \
                schedule: bool, image_generation: bool, read_only: bool}. Each defaults to false. \
+               tools.web_search is an optional bool: omit it to leave web search to the \
+               member's build, true enables web search, false disables it. \
                read_only enforces at the execution gate that the member may only call tools \
                declared read-only (shell and MCP tools are refused; a spawn cannot widen it).\n\
              - skills: Array of skill names to load.\n\

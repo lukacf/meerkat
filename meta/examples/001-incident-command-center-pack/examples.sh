@@ -6,7 +6,7 @@ PACK_DIR="$ROOT/examples/001-incident-command-center-pack"
 SCENARIO="$PACK_DIR/scenario.yaml"
 
 : "${OPENAI_API_KEY:?Set OPENAI_API_KEY to run the live incident command center pack}"
-export RKAT_INCIDENT_MODEL="${RKAT_INCIDENT_MODEL:-gpt-6-astra}"
+export RKAT_INCIDENT_MODEL="${RKAT_INCIDENT_MODEL:-gpt-6.2-astra}"
 # Meerkat 0.7's machine-authority code allocates huge debug-build stack
 # frames. The example binary sizes its own threads, and the workspace
 # .cargo/config.toml covers cargo-invoked flows; this export is belt and

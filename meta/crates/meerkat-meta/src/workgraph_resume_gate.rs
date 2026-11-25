@@ -26,8 +26,12 @@
 //!   the worker holds no claim, the run continues.
 //! - A lapsed lease is first committed with `observe_lease_expiry`, as a
 //!   lease sweep would, so the item can be claimed again.
-//! - A WorkGraph read fault answers unavailable. Meerkat asks again a bounded
-//!   number of times and then settles the run as superseded.
+//! - A WorkGraph read fault answers unavailable. A claim scan that outlasts
+//!   the attempt is dropped by Meerkat unanswered (below). Meerkat asks again
+//!   a bounded number of times. When every attempt goes unanswered it neither
+//!   resumes the run nor settles it: the run stays held, and Meerkat asks the
+//!   gate again at the next wake of the worker's runtime loop or at the next
+//!   registration of its session.
 //!
 //! Meerkat drops an attempt that outlasts its timeout and asks again, so the
 //! gate is idempotent across the attempts of one resume: a superseded verdict
@@ -56,9 +60,42 @@
 //! seen, so the run continues, as in the known limit, and its later writes
 //! conflict on revision. An item comes back twice only after the store clock
 //! moved back; the scan then keeps the newest claimed sighting.
+//!
+//! The claim scan has no end of its own. One page is one full list of the
+//! namespace's open items, and the scan reads until its walk is done or
+//! until Meerkat drops the attempt at
+//! [`RESUMED_RUN_ADMISSION_ATTEMPT_TIMEOUT`]: a list that answers anywhere
+//! inside the attempt decides the run. A scan that Meerkat drops has
+//! answered nothing, so nothing is admitted, and Meerkat's own detail for
+//! that attempt is that the admission did not answer in time. The scan has
+//! drawn no verdict from the pages it read, because an earlier page may hold
+//! an older sighting of an item, and it has written nothing: a lapsed
+//! lease's expiry is committed only after the whole walk. The next attempt
+//! starts the scan again from its first page.
+//!
+//! A dropped answer cannot say why, so the gate says what it was reading in
+//! its log, as the scan is dropped ([`ClaimScanWatch`]). It is not told why
+//! it is dropped, and a scan is also dropped when its caller gives the
+//! check up or the runtime shuts down. The gate has only its own clock,
+//! started when it was entered, so its warning speaks of time and never of
+//! who dropped the scan or of why it took the time it took. A scan dropped
+//! within one timer tick of the attempt's limit is logged as dropped at the
+//! limit: unfinished after a whole attempt, with the pages read and the
+//! time. A scan dropped earlier is logged as dropped before the limit, with
+//! what it had read, and the gate says that it does not know why. A scan
+//! that ended logs neither.
+//!
+//! An unavailable answer's reason is the gate's own sentence. It is shown to
+//! whoever reads the held run, so it carries no text of a store's error or
+//! of a decoder's: a failed read names the error's kind, a projection that
+//! does not decode is said in one fixed sentence, and both texts go to the
+//! gate's log. The realm and the namespace come last in a reason, and in a
+//! warning about a dropped scan, so that a text cut for length keeps what
+//! it says.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use meerkat::{
@@ -68,11 +105,18 @@ use meerkat::{
 };
 use meerkat_core::SessionId;
 use meerkat_core::lifecycle::RunId;
+use meerkat_runtime::RESUMED_RUN_ADMISSION_ATTEMPT_TIMEOUT;
 
 /// How many non-terminal items one page of the claim scan reads: the
 /// WorkGraph's largest list page. The scan pages through every open item
 /// with the list cursor.
 const CLAIM_SCAN_PAGE: usize = 1000;
+
+/// One tick of the runtime's timers. A claim scan dropped within one tick of
+/// the attempt's limit, as the gate measures it from its own entry, is
+/// logged as dropped at the limit: Meerkat's cut and the gate's entry lie
+/// closer together than that unless the runtime was held up between them.
+const TIMER_TICK: Duration = Duration::from_millis(1);
 
 /// How many superseded runs the gate remembers. A superseded run is settled
 /// and never resumed again, so only the attempts of a resume still in
@@ -87,8 +131,9 @@ pub(crate) enum ResumeCheck {
     /// The work moved: Meerkat settles the run the way a stop does, and it
     /// never resumes.
     Superseded(String),
-    /// The gate cannot decide: Meerkat asks again, then settles the run as
-    /// superseded.
+    /// The gate cannot decide: Meerkat asks again a bounded number of times,
+    /// then holds the run, neither resumed nor settled, and asks again
+    /// later.
     Unavailable(String),
 }
 
@@ -190,6 +235,81 @@ impl<'a> WorkerKeys<'a> {
     }
 }
 
+/// A claim scan in flight, kept so that the gate can say what it was reading
+/// when the scan is dropped before its walk ended. Meerkat drops the gate's
+/// answer when an attempt outlasts its timeout, and a dropped answer can say
+/// nothing itself: the warning this writes as it is dropped is the gate's
+/// word then. A walk that ended, with its last page or with a failed read,
+/// has its own answer and writes none.
+///
+/// The gate is not told why it is dropped, and has only its own clock,
+/// started when it was entered. So the warning speaks of time, never of who
+/// dropped the scan and never of why the scan took that time: a list that
+/// is slow and a process that was held up read the same on that clock. A
+/// scan dropped within [`TIMER_TICK`] of the attempt's limit is logged as
+/// dropped at the limit, unfinished after a whole attempt. A scan dropped
+/// earlier is logged as dropped before the limit, with what it had read and
+/// no cause: it may be a caller that gave the check up, a shutdown, or
+/// Meerkat's cut of an attempt whose clock had been running for a while
+/// before the gate was entered.
+struct ClaimScanWatch<'a> {
+    gate: &'a WorkGraphResumeGate,
+    /// The run the scan is for, as [`SupersededRuns::key`] names it.
+    run: &'a str,
+    /// When the gate was entered.
+    entered: tokio::time::Instant,
+    pages_read: usize,
+    walk_ended: bool,
+}
+
+impl<'a> ClaimScanWatch<'a> {
+    fn start(gate: &'a WorkGraphResumeGate, run: &'a str, entered: tokio::time::Instant) -> Self {
+        Self {
+            gate,
+            run,
+            entered,
+            pages_read: 0,
+            walk_ended: false,
+        }
+    }
+
+    /// The walk is over: there is nothing to say when this is dropped.
+    fn end(mut self) {
+        self.walk_ended = true;
+    }
+}
+
+impl Drop for ClaimScanWatch<'_> {
+    fn drop(&mut self) {
+        if self.walk_ended {
+            return;
+        }
+        let waited = self.entered.elapsed();
+        let limit = RESUMED_RUN_ADMISSION_ATTEMPT_TIMEOUT;
+        if waited.saturating_add(TIMER_TICK) >= limit {
+            tracing::warn!(
+                run = %self.run,
+                pages_read = self.pages_read,
+                elapsed_ms = %waited.as_millis(),
+                attempt_limit_ms = %limit.as_millis(),
+                reason = %self.gate.scan_dropped_at_the_limit(self.pages_read, waited),
+                "durable resume gate: a claim scan was dropped at the attempt's limit; no \
+                 verdict was drawn"
+            );
+        } else {
+            tracing::warn!(
+                run = %self.run,
+                pages_read = self.pages_read,
+                elapsed_ms = %waited.as_millis(),
+                attempt_limit_ms = %limit.as_millis(),
+                reason = %self.gate.scan_dropped_early(self.pages_read, waited),
+                "durable resume gate: a claim scan was dropped before the attempt's limit; no \
+                 verdict was drawn"
+            );
+        }
+    }
+}
+
 /// [`meerkat_mob::DurableResumeGate`] over one mob realm's WorkGraph: the
 /// same mob-scoped service the mob's attention overlays read.
 pub(crate) struct WorkGraphResumeGate {
@@ -201,10 +321,10 @@ pub(crate) struct WorkGraphResumeGate {
 /// without a service, none over a backend that has no WorkGraph, and none
 /// on a candidate launch. With no gate bound Meerkat asks no resumed-run
 /// admission. A store without a WorkGraph refuses every read, so a gate
-/// over it could only answer unavailable until Meerkat settles the run as
-/// superseded; it holds no item and no claim, so there is nothing to
-/// check, as without a service. On a candidate, a run it holds stays
-/// parked with its mark: the gate's verdict, and the lease expiry it
+/// over it could only answer unavailable, and Meerkat would hold the run
+/// for as long as it asked; it holds no item and no claim, so there is
+/// nothing to check, as without a service. On a candidate, a run it holds
+/// stays parked with its mark: the gate's verdict, and the lease expiry it
 /// commits, belong to the authoritative launch.
 pub(crate) fn launch_resume_gate(
     service: Option<WorkGraphService>,
@@ -261,14 +381,27 @@ impl WorkGraphResumeGate {
     /// [`ResumeCheck::Unavailable`]. A run once superseded stays superseded
     /// on every later attempt of its resume.
     pub(crate) async fn check_worker(&self, worker: ResumingWorker<'_>) -> ResumeCheck {
+        // The gate's clock: Meerkat started the attempt's just before this.
+        let entered = tokio::time::Instant::now();
         let run = SupersededRuns::key(worker);
         if let Some(reason) = self.superseded.recall(&run) {
             return ResumeCheck::Superseded(reason);
         }
-        let check = match self.decide(worker, &run).await {
+        let check = match self.decide(worker, &run, entered).await {
             Ok(check) => check,
             Err(error) => {
-                ResumeCheck::Unavailable(format!("the WorkGraph could not be read: {error}"))
+                // The store's own words stay in this log line. The reason
+                // is shown to whoever reads the held run, so it holds the
+                // error's kind and no word of its text.
+                tracing::warn!(
+                    mob_id = %worker.mob_id,
+                    agent_identity = %worker.agent_identity,
+                    session_id = %worker.session_id,
+                    run_id = %worker.run_id,
+                    %error,
+                    "durable resume gate: a WorkGraph read failed"
+                );
+                self.read_fault(&error)
             }
         };
         if let ResumeCheck::Superseded(reason) = &check {
@@ -277,23 +410,64 @@ impl WorkGraphResumeGate {
         check
     }
 
+    /// The answer to a WorkGraph read that failed: unavailable, with the
+    /// error's kind and the realm and namespace the gate reads, the names
+    /// last as in [`Self::scan_dropped_at_the_limit`]. The error's own text is not in
+    /// it: a store may print a path, an id or anything else there, and the
+    /// reason is shown to a caller. The two names are the only text in the
+    /// reason that the gate did not write ([`Self::names_shown`]).
+    fn read_fault(&self, error: &WorkGraphError) -> ResumeCheck {
+        ResumeCheck::Unavailable(format!(
+            "the WorkGraph could not be read: {}; no verdict was drawn; {}",
+            read_fault_kind(error),
+            self.names_shown(),
+        ))
+    }
+
+    /// The realm and the namespace this gate reads, as each unavailable
+    /// reason ends: the only text in such a reason that the gate did not
+    /// write. It comes from the service the gate was built over, whose realm
+    /// id is any string, so every control character in the two names is
+    /// replaced: the reason is clean whatever they hold.
+    fn names_shown(&self) -> String {
+        format!(
+            "realm '{}' namespace '{}'",
+            without_control_characters(self.service.default_realm_id()),
+            without_control_characters(self.service.default_namespace().as_str()),
+        )
+    }
+
     async fn decide(
         &self,
         worker: ResumingWorker<'_>,
         run: &str,
+        entered: tokio::time::Instant,
     ) -> Result<ResumeCheck, WorkGraphError> {
         // The run executes under attention the gate cannot read, so it can
         // neither name the run's item nor treat the run as one without
-        // attention: it cannot decide.
-        if let Some(reason) = worker.attention_projection_unreadable {
+        // attention: it cannot decide. Why it does not decode is the
+        // decoder's text: it goes to the log, and the reason is the gate's
+        // own sentence, with the two names as its only other text.
+        if let Some(decode_error) = worker.attention_projection_unreadable {
+            tracing::warn!(
+                mob_id = %worker.mob_id,
+                agent_identity = %worker.agent_identity,
+                session_id = %worker.session_id,
+                run_id = %worker.run_id,
+                decode_error,
+                "durable resume gate: the run's WorkGraph attention projection does not decode"
+            );
             return Ok(ResumeCheck::Unavailable(format!(
-                "the run's WorkGraph attention projection does not decode: {reason}"
+                "the run's WorkGraph attention projection does not decode, so the resume gate \
+                 can neither name the run's work item nor treat the run as one without \
+                 attention; no verdict was drawn; {}",
+                self.names_shown(),
             )));
         }
         let keys = WorkerKeys::of(worker);
         match worker.attention_projection {
             Some(projection) => self.decide_projected(&keys, projection, run).await,
-            None => self.decide_by_claims(&keys, run).await,
+            None => self.decide_by_claims(&keys, run, entered).await,
         }
     }
 
@@ -379,29 +553,46 @@ impl WorkGraphResumeGate {
     }
 
     /// The run named no item: every claim the worker holds decides. The scan
-    /// pages through every open item with the list cursor.
+    /// pages through every open item with the list cursor and has no end of
+    /// its own: it reads until its walk is done, or until it is dropped,
+    /// and then [`ClaimScanWatch`] says what it was reading. `entered` is
+    /// when the gate was entered, the start of the gate's own clock.
     async fn decide_by_claims(
         &self,
         keys: &WorkerKeys<'_>,
         run: &str,
+        entered: tokio::time::Instant,
     ) -> Result<ResumeCheck, WorkGraphError> {
         if keys.member.is_none() && keys.session.is_none() {
             return Ok(ResumeCheck::Continue);
         }
+        let mut watch = ClaimScanWatch::start(self, run, entered);
         // The worker's claimed items by id. A walk returns an item twice only
         // when a write moved it back past the cursor; the newer revision
         // decides.
         let mut held = BTreeMap::<WorkItemId, WorkItem>::new();
         let mut cursor = None;
         loop {
-            let page = self
+            // A page is one full list of the store, and a single list can
+            // outlast the attempt. When Meerkat drops the attempt here,
+            // nothing below this loop has run: no verdict is drawn and
+            // nothing is written.
+            let read = self
                 .service
                 .list_page(WorkItemFilter {
                     limit: Some(CLAIM_SCAN_PAGE),
                     cursor,
                     ..WorkItemFilter::default()
                 })
-                .await?;
+                .await;
+            let page = match read {
+                Ok(page) => page,
+                Err(error) => {
+                    watch.end();
+                    return Err(error);
+                }
+            };
+            watch.pages_read += 1;
             // A page that took no item cannot move the walk on.
             let advanced = !page.items.is_empty();
             for item in page.items {
@@ -422,6 +613,7 @@ impl WorkGraphResumeGate {
                 _ => break,
             }
         }
+        watch.end();
         if held.is_empty() {
             return Ok(ResumeCheck::Continue);
         }
@@ -440,6 +632,43 @@ impl WorkGraphResumeGate {
             }
         }
         Ok(verdict)
+    }
+
+    /// What the gate's warning says of a claim scan that was dropped at the
+    /// limit of one attempt, its walk unfinished. It is a fact of time, as
+    /// the gate's clock has it, and gives no reason for the time. It is read
+    /// by an operator: it names the list by the realm and namespace the gate
+    /// reads, the number of pages read, the time waited and how long one
+    /// attempt lasts, and nothing of any item. The names come last, as in an
+    /// unavailable reason: where a long text is cut for display, what was
+    /// unfinished, the counts and the times are kept. They are the only text
+    /// in it that the gate did not write ([`Self::names_shown`]).
+    fn scan_dropped_at_the_limit(&self, pages_read: usize, waited: Duration) -> String {
+        format!(
+            "the resume gate's claim scan of the WorkGraph open work item list was unfinished \
+             after a whole admission attempt: {pages_read} page(s) of up to {CLAIM_SCAN_PAGE} \
+             items read in {} ms, one admission attempt lasts {} ms; the scan was dropped at \
+             that limit, no verdict was drawn from the pages read and nothing was written; {}",
+            waited.as_millis(),
+            RESUMED_RUN_ADMISSION_ATTEMPT_TIMEOUT.as_millis(),
+            self.names_shown(),
+        )
+    }
+
+    /// What the gate's warning says of a claim scan that was dropped before
+    /// the limit of one attempt. The gate is not told why, so it names no
+    /// cause: it says what it had read and for how long, with the names last
+    /// as in [`Self::scan_dropped_at_the_limit`].
+    fn scan_dropped_early(&self, pages_read: usize, waited: Duration) -> String {
+        format!(
+            "the resume gate's claim scan was dropped before the limit of one admission \
+             attempt: {pages_read} page(s) of up to {CLAIM_SCAN_PAGE} items read in {} ms, one \
+             admission attempt lasts {} ms; the gate does not know why it was dropped; no \
+             verdict was drawn from the pages read and nothing was written; {}",
+            waited.as_millis(),
+            RESUMED_RUN_ADMISSION_ATTEMPT_TIMEOUT.as_millis(),
+            self.names_shown(),
+        )
     }
 
     /// The item-level verdict for the run's item: terminal, claimed by
@@ -526,6 +755,42 @@ fn terminal_status_name(status: WorkStatus) -> Option<&'static str> {
     }
 }
 
+/// `name` with every control character replaced by `?`, for a reason that is
+/// shown to a caller: an escape sequence, a line break or a NUL in a name
+/// stays out of it.
+fn without_control_characters(name: &str) -> String {
+    name.chars()
+        .map(|character| {
+            if character.is_control() {
+                '?'
+            } else {
+                character
+            }
+        })
+        .collect()
+}
+
+/// The kind of a WorkGraph read fault, for the gate's reason: the error's
+/// variant in fixed words, and nothing the error carries.
+fn read_fault_kind(error: &WorkGraphError) -> &'static str {
+    match error {
+        WorkGraphError::NotFound { .. } => "work item not found",
+        WorkGraphError::AttentionNotFound { .. } => "attention binding not found",
+        WorkGraphError::StaleRevision { .. } => "stale revision",
+        WorkGraphError::Conflict(_) => "conflict",
+        WorkGraphError::InvalidTransition(_) => "invalid transition",
+        WorkGraphError::InvalidInput(_) => "invalid input",
+        WorkGraphError::InvalidTimestampMillis { .. } => "invalid timestamp",
+        WorkGraphError::Store(_) => "store error",
+        WorkGraphError::NamespaceAssignmentRequired { .. } => "namespace assignment required",
+        WorkGraphError::UnsupportedBackend(_) => "unsupported backend",
+        WorkGraphError::AttentionTargetRealmMismatch { .. } => "attention target realm mismatch",
+        WorkGraphError::BackingStoreUnavailable { .. } => "backing store unavailable",
+        WorkGraphError::UnpairedAdmissionIdentity { .. } => "unpaired admission identity",
+        WorkGraphError::SchemaMismatch { .. } => "schema mismatch",
+    }
+}
+
 #[async_trait::async_trait]
 impl meerkat_mob::DurableResumeGate for WorkGraphResumeGate {
     async fn check(
@@ -575,12 +840,15 @@ impl meerkat_mob::DurableResumeGate for WorkGraphResumeGate {
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     use meerkat::{
-        AttentionProjectionRequest, ClaimWorkItemRequest, CloseWorkItemRequest,
-        DisabledWorkGraphStore, GoalAttentionTarget, GoalCreateRequest, MemoryWorkGraphStore,
-        WorkItemId, WorkNamespace, WorkOwner,
+        AttentionListRequest, AttentionProjectionRequest, ClaimWorkItemRequest,
+        CloseWorkItemRequest, DisabledWorkGraphStore, GoalAttentionTarget, GoalCreateRequest,
+        MemoryWorkGraphStore, ReleaseWorkItemRequest, WorkAttentionBinding, WorkEdge,
+        WorkGraphEvent, WorkGraphEventFilter, WorkGraphStore, WorkGraphStoreKind, WorkItemId,
+        WorkNamespace, WorkOwner,
     };
 
     use super::*;
@@ -1309,6 +1577,1091 @@ mod tests {
         );
     }
 
+    /// The memory store behind a list of the open items that can be made
+    /// slow: from a chosen `list_items` call on, each list waits a set time
+    /// before it reads. Nothing fails. It counts the writes it passes on, so
+    /// a row can assert that the gate wrote nothing.
+    struct SlowListStore {
+        inner: Arc<MemoryWorkGraphStore>,
+        /// The first slow `list_items` call, counted from 1; 0 for none.
+        slow_from_call: AtomicUsize,
+        slow_for: Mutex<Duration>,
+        list_calls: AtomicUsize,
+        writes: AtomicUsize,
+        /// Signalled each time a slow list starts to wait.
+        stalled: tokio::sync::Notify,
+        /// When set, every read of an item or of the item list fails with a
+        /// store error of this text.
+        failing_with: Mutex<Option<String>>,
+    }
+
+    impl SlowListStore {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                inner: Arc::new(MemoryWorkGraphStore::new()),
+                slow_from_call: AtomicUsize::new(0),
+                slow_for: Mutex::new(Duration::ZERO),
+                list_calls: AtomicUsize::new(0),
+                writes: AtomicUsize::new(0),
+                stalled: tokio::sync::Notify::new(),
+                failing_with: Mutex::new(None),
+            })
+        }
+
+        /// From now on every read of an item or of the item list fails with
+        /// a store error of the text `text`.
+        fn fail_reads_with(&self, text: &str) {
+            *self.failing_with.lock().unwrap() = Some(text.to_string());
+        }
+
+        fn read_fault(&self) -> Result<(), WorkGraphError> {
+            match self.failing_with.lock().unwrap().clone() {
+                Some(text) => Err(WorkGraphError::Store(text)),
+                None => Ok(()),
+            }
+        }
+
+        /// The service a gate reads this store through.
+        fn service(self: &Arc<Self>) -> WorkGraphService {
+            let store: Arc<dyn WorkGraphStore> = self.clone();
+            WorkGraphService::with_scope(store, mob_realm(), WorkNamespace::default())
+        }
+
+        /// The same items through the memory store itself: a row's setup,
+        /// and its reads of what the gate left.
+        fn direct(&self) -> WorkGraphService {
+            let store: Arc<dyn WorkGraphStore> = self.inner.clone();
+            WorkGraphService::with_scope(store, mob_realm(), WorkNamespace::default())
+        }
+
+        /// From the `call`th list made after this on, each list of the items
+        /// waits `wait` before it reads.
+        fn slow_from(&self, call: usize, wait: Duration) {
+            self.list_calls.store(0, Ordering::SeqCst);
+            *self.slow_for.lock().unwrap() = wait;
+            self.slow_from_call.store(call, Ordering::SeqCst);
+        }
+
+        fn fast_again(&self) {
+            self.slow_from_call.store(0, Ordering::SeqCst);
+        }
+
+        /// The lists of the items made since the last [`Self::slow_from`].
+        fn lists(&self) -> usize {
+            self.list_calls.load(Ordering::SeqCst)
+        }
+
+        /// The writes that went through this store, the gate's only way in.
+        fn writes(&self) -> usize {
+            self.writes.load(Ordering::SeqCst)
+        }
+
+        /// The newest event of the gate's namespace: every write appends one.
+        async fn ledger_mark(&self) -> Option<i64> {
+            self.inner
+                .latest_event_seq(WorkGraphEventFilter {
+                    realm_id: Some(mob_realm()),
+                    namespace: Some(WorkNamespace::default()),
+                    all_namespaces: false,
+                    after_seq: None,
+                    limit: None,
+                })
+                .await
+                .expect("read the ledger")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl WorkGraphStore for SlowListStore {
+        fn kind(&self) -> WorkGraphStoreKind {
+            self.inner.kind()
+        }
+
+        async fn get_store_time_utc(&self) -> Result<DateTime<Utc>, WorkGraphError> {
+            self.inner.get_store_time_utc().await
+        }
+
+        async fn insert_item(
+            &self,
+            item: WorkItem,
+            event: WorkGraphEvent,
+        ) -> Result<WorkItem, WorkGraphError> {
+            self.writes.fetch_add(1, Ordering::SeqCst);
+            self.inner.insert_item(item, event).await
+        }
+
+        async fn update_item_cas(
+            &self,
+            item: WorkItem,
+            expected_previous_revision: u64,
+            event: WorkGraphEvent,
+        ) -> Result<WorkItem, WorkGraphError> {
+            self.writes.fetch_add(1, Ordering::SeqCst);
+            self.inner
+                .update_item_cas(item, expected_previous_revision, event)
+                .await
+        }
+
+        async fn update_item_and_attention_cas(
+            &self,
+            item: WorkItem,
+            expected_previous_revision: u64,
+            item_event: WorkGraphEvent,
+            attention_updates: Vec<(WorkAttentionBinding, u64, WorkGraphEvent)>,
+        ) -> Result<WorkItem, WorkGraphError> {
+            self.writes.fetch_add(1, Ordering::SeqCst);
+            self.inner
+                .update_item_and_attention_cas(
+                    item,
+                    expected_previous_revision,
+                    item_event,
+                    attention_updates,
+                )
+                .await
+        }
+
+        async fn get_item(
+            &self,
+            realm_id: &str,
+            namespace: &WorkNamespace,
+            id: &WorkItemId,
+        ) -> Result<Option<WorkItem>, WorkGraphError> {
+            self.read_fault()?;
+            self.inner.get_item(realm_id, namespace, id).await
+        }
+
+        async fn list_items(
+            &self,
+            filter: WorkItemFilter,
+        ) -> Result<Vec<WorkItem>, WorkGraphError> {
+            self.read_fault()?;
+            let call = self.list_calls.fetch_add(1, Ordering::SeqCst) + 1;
+            let slow_from = self.slow_from_call.load(Ordering::SeqCst);
+            if slow_from != 0 && call >= slow_from {
+                let wait = *self.slow_for.lock().unwrap();
+                self.stalled.notify_one();
+                tokio::time::sleep(wait).await;
+            }
+            self.inner.list_items(filter).await
+        }
+
+        async fn list_attention_matching_bounded(
+            &self,
+            filter: AttentionListRequest,
+            observed_at: DateTime<Utc>,
+            limit: usize,
+        ) -> Result<Vec<WorkAttentionBinding>, WorkGraphError> {
+            self.inner
+                .list_attention_matching_bounded(filter, observed_at, limit)
+                .await
+        }
+
+        async fn insert_edge(
+            &self,
+            edge: WorkEdge,
+            event: WorkGraphEvent,
+        ) -> Result<WorkEdge, WorkGraphError> {
+            self.writes.fetch_add(1, Ordering::SeqCst);
+            self.inner.insert_edge(edge, event).await
+        }
+
+        async fn list_edges(
+            &self,
+            realm_id: &str,
+            namespace: &WorkNamespace,
+        ) -> Result<Vec<WorkEdge>, WorkGraphError> {
+            self.inner.list_edges(realm_id, namespace).await
+        }
+
+        async fn list_events(
+            &self,
+            filter: WorkGraphEventFilter,
+        ) -> Result<Vec<WorkGraphEvent>, WorkGraphError> {
+            self.inner.list_events(filter).await
+        }
+
+        async fn latest_event_seq(
+            &self,
+            filter: WorkGraphEventFilter,
+        ) -> Result<Option<i64>, WorkGraphError> {
+            self.inner.latest_event_seq(filter).await
+        }
+    }
+
+    /// Meerkat's request for a resume of [`WORKER`] with no attention
+    /// projection.
+    fn plain_resume_request() -> meerkat_mob::DurableResumeRequest {
+        meerkat_mob::DurableResumeRequest::new(
+            meerkat_mob::MobId::from(MOB),
+            meerkat_mob::AgentIdentity::from(WORKER),
+            meerkat_mob::ProfileName::from("worker"),
+            SessionId::new(),
+            RunId::new(),
+            vec![meerkat_core::lifecycle::InputId::new()],
+        )
+    }
+
+    /// The control of the rows around it: a list that answers in time, at
+    /// once or slowly, is read to its end and decides as before. A live claim
+    /// keeps the run; a lapsed one supersedes it, and its expiry is written
+    /// through the same store (so the rows' write count is a live reading).
+    #[tokio::test]
+    async fn a_claim_scan_that_ends_in_time_decides_as_before() {
+        let store = SlowListStore::new();
+        let direct = store.direct();
+        let live = plain_item(&direct).await;
+        claim(&direct, &live, member_key(WORKER), in_an_hour()).await;
+        let gate = WorkGraphResumeGate::new(store.service());
+        let worker = Worker::named(WORKER);
+
+        assert_eq!(
+            gate.check_worker(worker.resuming(None)).await,
+            ResumeCheck::Continue,
+            "a list that answers at once"
+        );
+
+        // A slow list that still ends inside an attempt: a quarter of
+        // Meerkat's attempt timeout.
+        let slow = meerkat_runtime::RESUMED_RUN_ADMISSION_ATTEMPT_TIMEOUT / 4;
+        tokio::time::pause();
+        store.slow_from(1, slow);
+        let asked = tokio::time::Instant::now();
+        assert_eq!(
+            gate.check_worker(worker.resuming(None)).await,
+            ResumeCheck::Continue,
+            "a slow list that ends in time"
+        );
+        assert!(asked.elapsed() >= slow, "the list was waited for");
+        tokio::time::resume();
+        store.fast_again();
+        assert_eq!(store.writes(), 0, "a run that continues writes nothing");
+
+        let lapsing = plain_item(&direct).await;
+        claim(&direct, &lapsing, member_key(WORKER), lapsing_soon()).await;
+        let_the_lease_lapse().await;
+        let check = gate.check_worker(worker.resuming(None)).await;
+        assert!(superseded_reason(&check).contains("lapsed"), "{check:?}");
+        assert_eq!(
+            store.writes(),
+            1,
+            "the lapsed claim's expiry went through this store"
+        );
+    }
+
+    /// A scan dropped after its first page draws no verdict, whatever that
+    /// page held. Here it held the worker's live claim, which is released
+    /// while the second page is awaited: the sighting is older than the item,
+    /// and a verdict drawn from it would let the run continue on work the
+    /// worker no longer holds. The second page does not answer, Meerkat cuts
+    /// the attempt, nothing is admitted, and the gate's warning counts the
+    /// one page it read.
+    #[tokio::test(start_paused = true)]
+    async fn a_dropped_claim_scan_never_continues_on_a_claim_it_sighted_earlier() {
+        let attempt = meerkat_runtime::RESUMED_RUN_ADMISSION_ATTEMPT_TIMEOUT;
+        let store = SlowListStore::new();
+        let direct = store.direct();
+        // A full page of older open items puts one item on a second page.
+        for _ in 0..CLAIM_SCAN_PAGE {
+            plain_item(&direct).await;
+        }
+        let item = plain_item(&direct).await;
+        let claimed = claim(&direct, &item, member_key(WORKER), in_an_hour()).await;
+        let gate = WorkGraphResumeGate::new(store.service());
+        let request = plain_resume_request();
+
+        store.slow_from(2, attempt * 100);
+        let (asked, ()) = tokio::join!(one_attempt(&gate, &request), async {
+            store.stalled.notified().await;
+            direct
+                .release(ReleaseWorkItemRequest {
+                    id: claimed.id.clone(),
+                    realm_id: None,
+                    namespace: None,
+                    expected_revision: claimed.revision,
+                })
+                .await
+                .expect("release the claim");
+        });
+        assert_eq!(store.lists(), 2, "the scan was on its second page");
+        assert!(
+            asked.answer.is_none(),
+            "a dropped scan draws no verdict from the page it read: {:?}",
+            asked.answer
+        );
+        assert_eq!(
+            asked.waited, attempt,
+            "Meerkat cut the attempt at its limit"
+        );
+        let &[warning] = asked.dropped_at_the_limit().as_slice() else {
+            panic!(
+                "one warning says the scan was dropped at the attempt's limit: {}",
+                asked.log
+            );
+        };
+        assert!(
+            warning.contains("pages_read=1") && warning.contains("1 page(s)"),
+            "the warning counts the page that was read: {warning}"
+        );
+        assert_eq!(store.writes(), 0, "a dropped scan wrote nothing");
+    }
+
+    /// As above, with the worker's lapsed claim on the first page: a dropped
+    /// scan answers no superseded verdict, writes no expiry and remembers
+    /// nothing for the run, so the same run asked again over a list that
+    /// answers is decided then.
+    #[tokio::test]
+    async fn a_dropped_claim_scan_never_supersedes_and_writes_nothing() {
+        let attempt = meerkat_runtime::RESUMED_RUN_ADMISSION_ATTEMPT_TIMEOUT;
+        let store = SlowListStore::new();
+        let direct = store.direct();
+        for _ in 0..CLAIM_SCAN_PAGE {
+            plain_item(&direct).await;
+        }
+        let item = plain_item(&direct).await;
+        let claimed = claim(&direct, &item, member_key(WORKER), lapsing_soon()).await;
+        let_the_lease_lapse().await;
+        let ledger = store.ledger_mark().await;
+        let gate = WorkGraphResumeGate::new(store.service());
+        let request = plain_resume_request();
+
+        tokio::time::pause();
+        store.slow_from(2, attempt * 100);
+        let asked = one_attempt(&gate, &request).await;
+        assert_eq!(store.lists(), 2, "the scan was on its second page");
+        assert!(
+            asked.answer.is_none(),
+            "a dropped scan draws no verdict from the page it read: {:?}",
+            asked.answer
+        );
+        let &[warning] = asked.dropped_at_the_limit().as_slice() else {
+            panic!(
+                "one warning says the scan was dropped at the attempt's limit: {}",
+                asked.log
+            );
+        };
+        assert!(
+            warning.contains("pages_read=1") && warning.contains("1 page(s)"),
+            "the warning counts the page that was read: {warning}"
+        );
+        assert_eq!(store.writes(), 0, "a dropped scan wrote nothing");
+        assert_eq!(
+            store.ledger_mark().await,
+            ledger,
+            "the ledger gained no event"
+        );
+        let after = direct
+            .get(None, None, item.id.clone())
+            .await
+            .expect("read the item");
+        assert_eq!(after.revision, claimed.revision, "the item is as it was");
+        assert_eq!(after.claim, claimed.claim, "the lapsed claim is unobserved");
+
+        store.fast_again();
+        let again = one_attempt(&gate, &request).await;
+        let Some(meerkat_mob::DurableResumeVerdict::Superseded { reason }) = &again.answer else {
+            panic!(
+                "nothing was remembered for the run: it is decided now: {:?}",
+                again.answer
+            );
+        };
+        assert!(reason.contains("lapsed"), "{reason}");
+        assert_eq!(store.writes(), 1, "and the expiry is written now");
+    }
+
+    /// How one attempt of the gate ended, as the rows below read it.
+    struct Attempt {
+        /// The gate's answer, or `None` when its answer was dropped first.
+        answer: Option<meerkat_mob::DurableResumeVerdict>,
+        /// From the start of the attempt's clock to its end.
+        waited: Duration,
+        /// Every warning logged while the attempt ran, the ones written as
+        /// a dropped answer is torn down included.
+        log: String,
+    }
+
+    impl Attempt {
+        /// The warnings that say a claim scan was dropped at the attempt's
+        /// limit: the gate's word about a list that had not answered when
+        /// one attempt had passed.
+        fn dropped_at_the_limit(&self) -> Vec<&str> {
+            self.lines_with("durable resume gate: a claim scan was dropped at the attempt's limit")
+        }
+
+        /// The warnings that say a claim scan was dropped before the
+        /// attempt's limit, for a cause the gate does not know.
+        fn dropped_early(&self) -> Vec<&str> {
+            self.lines_with(
+                "durable resume gate: a claim scan was dropped before the attempt's limit",
+            )
+        }
+
+        /// The gate's warning beside an unavailable answer of its own: a
+        /// failed read, or a projection that does not decode.
+        fn answered_unavailable(&self) -> Vec<&str> {
+            self.lines_with("durable resume gate: the gate cannot decide")
+        }
+
+        fn lines_with(&self, text: &str) -> Vec<&str> {
+            self.log
+                .lines()
+                .filter(|line| line.contains(text))
+                .collect()
+        }
+
+        /// Nothing in the log says that a scan was dropped or unfinished.
+        fn assert_no_word_of_a_drop(&self, when: &str) {
+            assert!(
+                self.dropped_at_the_limit().is_empty() && self.dropped_early().is_empty(),
+                "{when}: no warning says a scan was dropped: {}",
+                self.log
+            );
+            assert!(
+                !self.log.contains("unfinished") && !self.log.contains("dropped"),
+                "{when}: nothing says a scan was unfinished or dropped: {}",
+                self.log
+            );
+        }
+
+        /// No line of the log gives a reason for the time a scan took: the
+        /// gate's warnings speak of time only.
+        fn assert_no_word_that_anything_was_slow(&self, when: &str) {
+            assert!(
+                !self.log.contains("slow"),
+                "{when}: nothing is called slow: {}",
+                self.log
+            );
+        }
+
+        fn unavailable_reason(&self, when: &str) -> &str {
+            match &self.answer {
+                Some(meerkat_mob::DurableResumeVerdict::Unavailable { reason }) => reason,
+                other => panic!("{when}: the gate answers unavailable: {other:?}"),
+            }
+        }
+    }
+
+    /// One attempt of `gate`, asked the way Meerkat asks: the gate's answer
+    /// inside [`meerkat_runtime::RESUMED_RUN_ADMISSION_ATTEMPT_TIMEOUT`], cut
+    /// by a timeout around the gate's own call. The attempt's clock starts
+    /// `entered_after` before the gate is entered: zero when both start in
+    /// the same instant.
+    async fn one_attempt_entered_after(
+        gate: &WorkGraphResumeGate,
+        request: &meerkat_mob::DurableResumeRequest,
+        entered_after: Duration,
+    ) -> Attempt {
+        use meerkat_mob::DurableResumeGate as _;
+
+        let asked = tokio::time::Instant::now();
+        let (answer, log) = crate::test_diagnostics::capture_warnings(async {
+            tokio::time::timeout(
+                meerkat_runtime::RESUMED_RUN_ADMISSION_ATTEMPT_TIMEOUT,
+                async {
+                    if !entered_after.is_zero() {
+                        tokio::time::sleep(entered_after).await;
+                    }
+                    gate.check(request).await
+                },
+            )
+            .await
+            .ok()
+        })
+        .await;
+        Attempt {
+            answer,
+            waited: asked.elapsed(),
+            log,
+        }
+    }
+
+    /// One attempt whose clock and whose gate start in the same instant.
+    async fn one_attempt(
+        gate: &WorkGraphResumeGate,
+        request: &meerkat_mob::DurableResumeRequest,
+    ) -> Attempt {
+        one_attempt_entered_after(gate, request, Duration::ZERO).await
+    }
+
+    /// The gate asked by a caller that drops its answer `after`, well before
+    /// one of Meerkat's attempts would end: a cancellation, not a timeout.
+    async fn dropped_by_its_caller(
+        gate: &WorkGraphResumeGate,
+        request: &meerkat_mob::DurableResumeRequest,
+        after: Duration,
+    ) -> Attempt {
+        use meerkat_mob::DurableResumeGate as _;
+
+        let asked = tokio::time::Instant::now();
+        let (answer, log) = crate::test_diagnostics::capture_warnings(async {
+            tokio::time::timeout(after, gate.check(request)).await.ok()
+        })
+        .await;
+        Attempt {
+            answer,
+            waited: asked.elapsed(),
+            log,
+        }
+    }
+
+    /// SUCCESS. The released gate read the list until Meerkat cut the
+    /// attempt, so a list that answers anywhere inside the attempt decides
+    /// the run. Here one list of the open items answers in the last eighth
+    /// of the attempt (after fifteen sixteenths of it): the worker's live
+    /// claim keeps the run, nothing is written, and no warning speaks of a
+    /// dropped or unfinished scan.
+    #[tokio::test(start_paused = true)]
+    async fn success_a_claim_scan_that_ends_in_the_last_eighth_of_the_attempt_is_decided() {
+        let attempt = meerkat_runtime::RESUMED_RUN_ADMISSION_ATTEMPT_TIMEOUT;
+        let store = SlowListStore::new();
+        let direct = store.direct();
+        let item = plain_item(&direct).await;
+        claim(&direct, &item, member_key(WORKER), in_an_hour()).await;
+        let gate = WorkGraphResumeGate::new(store.service());
+        let request = plain_resume_request();
+
+        let slow = attempt.saturating_sub(attempt / 16);
+        assert!(
+            slow > attempt.saturating_sub(attempt / 8) && slow < attempt,
+            "the list answers inside the last eighth of the attempt: {slow:?} of {attempt:?}"
+        );
+        store.slow_from(1, slow);
+        let asked = one_attempt(&gate, &request).await;
+        assert!(
+            matches!(
+                asked.answer,
+                Some(meerkat_mob::DurableResumeVerdict::Continue)
+            ),
+            "a list that answers inside the attempt decides the run: {:?}",
+            asked.answer
+        );
+        assert_eq!(asked.waited, slow, "the answer came when the list did");
+        assert_eq!(store.lists(), 1, "one list was read");
+        assert_eq!(store.writes(), 0, "a run that continues writes nothing");
+        asked.assert_no_word_of_a_drop("a scan that ended");
+    }
+
+    /// SUCCESS, at the edge of the window. A list that answers one timer
+    /// tick (a millisecond) before the attempt's limit decides the run. So
+    /// does one that answers in the very tick of the limit: Meerkat's cut
+    /// tries the gate before its own timer, so an answer that is ready then
+    /// is taken, as in the released version.
+    #[tokio::test(start_paused = true)]
+    async fn success_a_claim_scan_that_ends_one_tick_before_the_limit_or_in_its_tick_is_decided() {
+        let attempt = meerkat_runtime::RESUMED_RUN_ADMISSION_ATTEMPT_TIMEOUT;
+        let tick = Duration::from_millis(1);
+        let store = SlowListStore::new();
+        let gate = WorkGraphResumeGate::new(store.service());
+
+        for slow in [attempt.saturating_sub(tick), attempt] {
+            let request = plain_resume_request();
+            store.slow_from(1, slow);
+            let asked = one_attempt(&gate, &request).await;
+            assert!(
+                matches!(
+                    asked.answer,
+                    Some(meerkat_mob::DurableResumeVerdict::Continue)
+                ),
+                "a list that answers after {slow:?} of {attempt:?} decides: {:?}",
+                asked.answer
+            );
+            assert_eq!(asked.waited, slow, "the answer came when the list did");
+            asked.assert_no_word_of_a_drop("a scan that ended");
+        }
+    }
+
+    /// SUCCESS, with a write. A list that answers one tick before the limit
+    /// holds the worker's lapsed claim: the run is superseded, and the
+    /// lapsed lease's expiry, written after the walk, is written whole
+    /// before the attempt ends. Nothing is left half done, and nothing is
+    /// logged about a drop.
+    #[tokio::test]
+    async fn success_a_claim_scan_that_ends_one_tick_before_the_limit_completes_its_write() {
+        let attempt = meerkat_runtime::RESUMED_RUN_ADMISSION_ATTEMPT_TIMEOUT;
+        let store = SlowListStore::new();
+        let direct = store.direct();
+        let item = plain_item(&direct).await;
+        let claimed = claim(&direct, &item, member_key(WORKER), lapsing_soon()).await;
+        let_the_lease_lapse().await;
+        let gate = WorkGraphResumeGate::new(store.service());
+        let request = plain_resume_request();
+
+        tokio::time::pause();
+        store.slow_from(1, attempt.saturating_sub(Duration::from_millis(1)));
+        let asked = one_attempt(&gate, &request).await;
+        let Some(meerkat_mob::DurableResumeVerdict::Superseded { reason }) = &asked.answer else {
+            panic!(
+                "a list that answers a tick before the limit decides: {:?}",
+                asked.answer
+            );
+        };
+        assert!(reason.contains("lapsed"), "{reason}");
+        assert_eq!(store.writes(), 1, "the lapsed claim's expiry was written");
+        let after = direct
+            .get(None, None, item.id.clone())
+            .await
+            .expect("read the item");
+        assert_eq!(after.claim, None, "the expiry is committed whole");
+        assert_eq!(
+            after.status,
+            WorkStatus::Open,
+            "the item can be claimed again"
+        );
+        assert!(
+            after.revision > claimed.revision,
+            "the item moved on: revision {} after {}",
+            after.revision,
+            claimed.revision
+        );
+        asked.assert_no_word_of_a_drop("a scan that ended");
+    }
+
+    /// TIMEOUT, through a whole round, the attempt's clock and the gate
+    /// started in the same instant. A list of the open items that does not
+    /// answer: the gate has no end of its own, so Meerkat's cut ends every
+    /// attempt at its limit and the gate never answers. Nothing is admitted
+    /// and nothing is written, and what the caller has after the round is
+    /// what the released version gave it: no answer in any attempt, which
+    /// Meerkat counts as timed out. The round lasts as in the released
+    /// version. Each time its scan is dropped the gate writes one warning:
+    /// dropped at the attempt's limit, unfinished after a whole attempt, with
+    /// the run, the pages read and the time waited, and no word of why. The
+    /// same run asked again once the list answers is decided as ever.
+    #[tokio::test(start_paused = true)]
+    async fn timeout_through_a_whole_round_meerkats_cut_wins_and_the_gate_logs_each_drop() {
+        let attempt = meerkat_runtime::RESUMED_RUN_ADMISSION_ATTEMPT_TIMEOUT;
+        let attempts = meerkat_runtime::RESUMED_RUN_ADMISSION_ATTEMPTS;
+        let pause = meerkat_runtime::RESUMED_RUN_ADMISSION_RETRY_DELAY;
+        let store = SlowListStore::new();
+        let direct = store.direct();
+        let item = plain_item(&direct).await;
+        let claimed = claim(&direct, &item, member_key(WORKER), in_an_hour()).await;
+        let ledger = store.ledger_mark().await;
+        let gate = WorkGraphResumeGate::new(store.service());
+        let request = plain_resume_request();
+
+        store.slow_from(1, attempt * 100);
+        let round = tokio::time::Instant::now();
+        let mut answers = Vec::new();
+        for number in 1..=attempts {
+            let asked = one_attempt(&gate, &request).await;
+            let when = format!("attempt {number}");
+            assert!(
+                asked.answer.is_none(),
+                "{when}: the gate has no end of its own, Meerkat cuts the attempt and nothing \
+                 is admitted: {:?}",
+                asked.answer
+            );
+            assert_eq!(
+                asked.waited, attempt,
+                "{when}: the scan had the whole attempt, and not more"
+            );
+            let &[warning] = asked.dropped_at_the_limit().as_slice() else {
+                panic!(
+                    "{when}: one warning says the scan was dropped at the attempt's limit: {}",
+                    asked.log
+                );
+            };
+            for part in [
+                format!("run={}/{}", request.session_id, request.run_id),
+                "pages_read=0".to_string(),
+                format!("elapsed_ms={}", attempt.as_millis()),
+                format!("attempt_limit_ms={}", attempt.as_millis()),
+                "open work item list was unfinished after a whole admission attempt".to_string(),
+                format!("0 page(s) of up to {CLAIM_SCAN_PAGE} items"),
+                "no verdict was drawn from the pages read and nothing was written".to_string(),
+                format!(
+                    "realm '{}' namespace '{}'",
+                    mob_realm(),
+                    WorkNamespace::default()
+                ),
+            ] {
+                assert!(
+                    warning.contains(&part),
+                    "{when}: the warning holds \"{part}\": {warning}"
+                );
+            }
+            assert!(
+                asked.dropped_early().is_empty() && asked.answered_unavailable().is_empty(),
+                "{when}: the drop is logged once, as a drop at the limit, and the gate answered \
+                 nothing: {}",
+                asked.log
+            );
+            asked.assert_no_word_that_anything_was_slow(&when);
+            answers.push(asked.answer);
+            if number < attempts {
+                tokio::time::sleep(pause).await;
+            }
+        }
+        assert!(
+            answers.iter().all(Option::is_none),
+            "the caller's result of the round: no answer in any attempt, as released: {answers:?}"
+        );
+        assert_eq!(
+            round.elapsed(),
+            attempt * attempts + pause * (attempts - 1),
+            "a round over a list that does not answer lasts as in the released version"
+        );
+        assert_eq!(
+            u32::try_from(store.lists()).expect("a small count"),
+            attempts,
+            "each attempt read the list afresh"
+        );
+        assert_eq!(store.writes(), 0, "a dropped scan wrote nothing");
+        assert_eq!(
+            store.ledger_mark().await,
+            ledger,
+            "the ledger gained no event"
+        );
+        let after = direct
+            .get(None, None, item.id.clone())
+            .await
+            .expect("read the item");
+        assert_eq!(after.revision, claimed.revision, "the item is as it was");
+        assert_eq!(after.claim, claimed.claim, "the claim is as it was");
+
+        store.fast_again();
+        let again = one_attempt(&gate, &request).await;
+        assert!(
+            matches!(
+                again.answer,
+                Some(meerkat_mob::DurableResumeVerdict::Continue)
+            ),
+            "the same run, asked again over a list that answers, continues: {:?}",
+            again.answer
+        );
+        again.assert_no_word_of_a_drop("a scan that ended");
+    }
+
+    /// TIMEOUT, the attempt's clock started one timer tick before the gate
+    /// was entered. Meerkat's cut ends the attempt at its limit, one tick
+    /// short of a whole attempt on the gate's own clock: the gate never
+    /// answers, nothing is admitted and nothing is written, as in the
+    /// released version. The gate's word is the warning it writes as its
+    /// scan is dropped. A drop within one tick of the limit is still
+    /// logged as a drop at the limit, the scan unfinished after a whole
+    /// attempt, with the run, the pages read and the time waited.
+    #[tokio::test(start_paused = true)]
+    async fn timeout_not_aligned_meerkats_cut_wins_and_the_gate_logs_the_drop_at_the_limit() {
+        let attempt = meerkat_runtime::RESUMED_RUN_ADMISSION_ATTEMPT_TIMEOUT;
+        let tick = Duration::from_millis(1);
+        let store = SlowListStore::new();
+        let direct = store.direct();
+        let item = plain_item(&direct).await;
+        let claimed = claim(&direct, &item, member_key(WORKER), in_an_hour()).await;
+        let gate = WorkGraphResumeGate::new(store.service());
+        let request = plain_resume_request();
+
+        store.slow_from(1, attempt * 100);
+        let asked = one_attempt_entered_after(&gate, &request, tick).await;
+        assert!(
+            asked.answer.is_none(),
+            "Meerkat's cut ends the attempt and nothing is admitted: {:?}",
+            asked.answer
+        );
+        assert_eq!(
+            asked.waited, attempt,
+            "the attempt ended at its limit, not later"
+        );
+        let &[warning] = asked.dropped_at_the_limit().as_slice() else {
+            panic!(
+                "one warning says the scan was dropped at the attempt's limit: {}",
+                asked.log
+            );
+        };
+        for part in [
+            format!("run={}/{}", request.session_id, request.run_id),
+            "pages_read=0".to_string(),
+            format!("elapsed_ms={}", attempt.saturating_sub(tick).as_millis()),
+            format!("attempt_limit_ms={}", attempt.as_millis()),
+            "open work item list was unfinished after a whole admission attempt".to_string(),
+            format!("0 page(s) of up to {CLAIM_SCAN_PAGE} items"),
+            "no verdict was drawn from the pages read and nothing was written".to_string(),
+            format!(
+                "realm '{}' namespace '{}'",
+                mob_realm(),
+                WorkNamespace::default()
+            ),
+        ] {
+            assert!(
+                warning.contains(&part),
+                "the warning holds \"{part}\": {warning}"
+            );
+        }
+        assert!(
+            asked.dropped_early().is_empty() && asked.answered_unavailable().is_empty(),
+            "the drop is logged once, as a drop at the limit: {}",
+            asked.log
+        );
+        asked.assert_no_word_that_anything_was_slow("a scan dropped at the limit");
+        assert_eq!(store.writes(), 0, "a dropped scan wrote nothing");
+        let after = direct
+            .get(None, None, item.id.clone())
+            .await
+            .expect("read the item");
+        assert_eq!(after.revision, claimed.revision, "the item is as it was");
+        assert_eq!(after.claim, claimed.claim, "the claim is as it was");
+    }
+
+    /// TIMEOUT that the gate cannot tell from a cancellation. The gate's
+    /// clock starts when it is entered. Here Meerkat's attempt had already
+    /// run for a quarter of its time by then, so Meerkat's cut drops the
+    /// scan well before the limit as the gate measures it. The cut wins,
+    /// nothing is admitted and nothing is written. The gate's warning says
+    /// what it knows: a scan dropped before the attempt's limit, the pages
+    /// read and the time waited. It names no cause, and it is not the
+    /// warning of a scan unfinished after a whole attempt.
+    #[tokio::test(start_paused = true)]
+    async fn timeout_after_a_late_entry_the_gate_logs_a_drop_without_a_cause() {
+        let attempt = meerkat_runtime::RESUMED_RUN_ADMISSION_ATTEMPT_TIMEOUT;
+        let late = attempt / 4;
+        let store = SlowListStore::new();
+        let gate = WorkGraphResumeGate::new(store.service());
+        let request = plain_resume_request();
+
+        store.slow_from(1, attempt * 100);
+        let asked = one_attempt_entered_after(&gate, &request, late).await;
+        assert!(
+            asked.answer.is_none(),
+            "Meerkat's cut ends the attempt and nothing is admitted: {:?}",
+            asked.answer
+        );
+        assert_eq!(asked.waited, attempt, "the attempt ended at its limit");
+        let &[warning] = asked.dropped_early().as_slice() else {
+            panic!(
+                "one warning says the scan was dropped before the attempt's limit: {}",
+                asked.log
+            );
+        };
+        for part in [
+            format!("run={}/{}", request.session_id, request.run_id),
+            "pages_read=0".to_string(),
+            format!("elapsed_ms={}", attempt.saturating_sub(late).as_millis()),
+            format!("attempt_limit_ms={}", attempt.as_millis()),
+            "the gate does not know why".to_string(),
+        ] {
+            assert!(
+                warning.contains(&part),
+                "the warning holds \"{part}\": {warning}"
+            );
+        }
+        assert!(
+            asked.dropped_at_the_limit().is_empty()
+                && !asked.log.contains("unfinished after a whole"),
+            "a drop before the limit is not said to be a scan unfinished after a whole \
+             attempt: {}",
+            asked.log
+        );
+        asked.assert_no_word_that_anything_was_slow("a scan dropped before the limit");
+        assert_eq!(store.writes(), 0, "a dropped scan wrote nothing");
+    }
+
+    /// UNRELATED DROP. A caller that drops the gate's answer early, after a
+    /// quarter of an attempt, has cancelled the check; no attempt timed out.
+    /// The gate's warning says that its scan was dropped before the
+    /// attempt's limit, with the pages read and the time waited, and that it
+    /// does not know why. Nothing says that a whole attempt had passed or
+    /// that anything was slow, and nothing is written. The same run asked
+    /// again is decided as ever.
+    #[tokio::test(start_paused = true)]
+    async fn unrelated_drop_a_claim_scan_dropped_early_is_never_logged_as_a_timeout() {
+        let attempt = meerkat_runtime::RESUMED_RUN_ADMISSION_ATTEMPT_TIMEOUT;
+        let early = attempt / 4;
+        let store = SlowListStore::new();
+        let direct = store.direct();
+        let item = plain_item(&direct).await;
+        claim(&direct, &item, member_key(WORKER), in_an_hour()).await;
+        let gate = WorkGraphResumeGate::new(store.service());
+        let request = plain_resume_request();
+
+        store.slow_from(1, attempt * 100);
+        let asked = dropped_by_its_caller(&gate, &request, early).await;
+        assert!(
+            asked.answer.is_none(),
+            "the caller dropped the answer: {:?}",
+            asked.answer
+        );
+        assert_eq!(asked.waited, early, "the caller dropped it early");
+        let &[warning] = asked.dropped_early().as_slice() else {
+            panic!(
+                "one warning says the scan was dropped before the attempt's limit: {}",
+                asked.log
+            );
+        };
+        for part in [
+            format!("run={}/{}", request.session_id, request.run_id),
+            "pages_read=0".to_string(),
+            format!("elapsed_ms={}", early.as_millis()),
+            format!("attempt_limit_ms={}", attempt.as_millis()),
+            "the gate does not know why".to_string(),
+        ] {
+            assert!(
+                warning.contains(&part),
+                "the warning holds \"{part}\": {warning}"
+            );
+        }
+        assert!(
+            asked.dropped_at_the_limit().is_empty()
+                && !asked.log.contains("unfinished after a whole"),
+            "a cancellation is not said to be a scan unfinished after a whole attempt: {}",
+            asked.log
+        );
+        asked.assert_no_word_that_anything_was_slow("a scan its caller dropped");
+        assert_eq!(store.writes(), 0, "a dropped scan wrote nothing");
+
+        store.fast_again();
+        let again = one_attempt(&gate, &request).await;
+        assert!(
+            matches!(
+                again.answer,
+                Some(meerkat_mob::DurableResumeVerdict::Continue)
+            ),
+            "the same run, asked again, continues: {:?}",
+            again.answer
+        );
+        again.assert_no_word_of_a_drop("a scan that ended");
+    }
+
+    /// ANSWERED ERROR. A read of the list that fails, and a run whose
+    /// attention projection does not decode, are answered at once with
+    /// their own reasons, and neither is logged as a dropped or unfinished
+    /// scan.
+    #[tokio::test(start_paused = true)]
+    async fn answered_error_a_failed_read_and_an_unreadable_projection_are_answered_at_once() {
+        let store = SlowListStore::new();
+        let gate = WorkGraphResumeGate::new(store.service());
+
+        store.fail_reads_with("the store's own words");
+        let failed = one_attempt(&gate, &plain_resume_request()).await;
+        let reason = failed.unavailable_reason("a failed read");
+        assert!(
+            reason.contains("the WorkGraph could not be read: store error")
+                && !reason.contains("the store's own words"),
+            "a failed read is answered with its kind: {reason}"
+        );
+        assert_eq!(failed.waited, Duration::ZERO, "it is answered at once");
+        failed.assert_no_word_of_a_drop("a failed read");
+
+        let undecodable = one_attempt(
+            &gate,
+            &plain_resume_request().with_attention_projection_unreadable(Some("bad".to_string())),
+        )
+        .await;
+        let reason = undecodable.unavailable_reason("a projection that does not decode");
+        assert!(
+            reason.contains("attention projection does not decode") && !reason.contains("bad"),
+            "a projection that does not decode is answered in the gate's sentence: {reason}"
+        );
+        assert_eq!(undecodable.waited, Duration::ZERO, "it is answered at once");
+        undecodable.assert_no_word_of_a_drop("a projection that does not decode");
+    }
+
+    /// The first `bytes` bytes of `text`, cut back to a character boundary:
+    /// how a reason that is too long is shortened where it is reported.
+    fn cut_at(text: &str, bytes: usize) -> &str {
+        let mut end = bytes.min(text.len());
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        &text[..end]
+    }
+
+    /// Meerkat reports an unavailable reason cut at 512 bytes, and a log line
+    /// may be cut where it is shown. The warning about a scan dropped at the
+    /// attempt's limit keeps the order of the reasons: what was unfinished,
+    /// the counts and the times come before the realm and the namespace, so a
+    /// very long realm id costs it its tail only, and with the largest
+    /// numbers there are.
+    #[test]
+    fn a_dropped_scans_warning_keeps_its_facts_ahead_of_a_very_long_realm_id() {
+        let realm = format!("mob.{}", "r".repeat(4096));
+        let store: Arc<dyn WorkGraphStore> = Arc::new(MemoryWorkGraphStore::new());
+        let gate = WorkGraphResumeGate::new(WorkGraphService::with_scope(
+            store,
+            realm.clone(),
+            WorkNamespace::default(),
+        ));
+
+        let said = gate.scan_dropped_at_the_limit(usize::MAX, Duration::MAX);
+        assert!(
+            said.contains(&realm),
+            "the gate itself names the realm whole: {} bytes",
+            said.len()
+        );
+        let kept = cut_at(&said, 512);
+        for part in [
+            "open work item list was unfinished after a whole admission attempt".to_string(),
+            format!("{} page(s)", usize::MAX),
+            format!("read in {} ms", Duration::MAX.as_millis()),
+            format!(
+                "one admission attempt lasts {} ms",
+                RESUMED_RUN_ADMISSION_ATTEMPT_TIMEOUT.as_millis()
+            ),
+            "no verdict was drawn from the pages read and nothing was written".to_string(),
+            "realm '".to_string(),
+        ] {
+            assert!(
+                kept.contains(&part),
+                "the cut text holds \"{part}\": {kept}"
+            );
+        }
+    }
+
+    /// The realm id and the namespace are the only text in an unavailable
+    /// reason, and in a warning about a dropped scan, that the gate did not
+    /// write, and the service takes any string for a realm id. Whatever it
+    /// holds, none of them carries a control character: each one is
+    /// replaced.
+    #[tokio::test]
+    async fn an_unavailable_reason_holds_no_control_character_of_a_name() {
+        let realm = "mob.\u{1b}[31mred\r\nsecond line\ttab\u{0}";
+        let store: Arc<dyn WorkGraphStore> = Arc::new(MemoryWorkGraphStore::new());
+        let gate = WorkGraphResumeGate::new(WorkGraphService::with_scope(
+            store,
+            realm,
+            WorkNamespace::default(),
+        ));
+        let worker = Worker::named(WORKER);
+
+        let reason_of = |which: &str, check: ResumeCheck| match check {
+            ResumeCheck::Unavailable(reason) => reason,
+            other => panic!("{which} answers unavailable: {other:?}"),
+        };
+        let fault = gate.read_fault(&WorkGraphError::Store("down".to_string()));
+        let undecodable = gate
+            .check_worker(ResumingWorker {
+                attention_projection_unreadable: Some("bad"),
+                ..worker.resuming(None)
+            })
+            .await;
+        for (which, text) in [
+            (
+                "the warning about a scan dropped at the limit",
+                gate.scan_dropped_at_the_limit(1, Duration::from_secs(8)),
+            ),
+            (
+                "the warning about a scan dropped early",
+                gate.scan_dropped_early(1, Duration::from_secs(2)),
+            ),
+            ("a failed read", reason_of("a failed read", fault)),
+            (
+                "a projection that does not decode",
+                reason_of("a projection that does not decode", undecodable),
+            ),
+        ] {
+            assert!(
+                !text.chars().any(char::is_control),
+                "the text of {which} holds no control character: {text:?}"
+            );
+            assert!(
+                text.ends_with("realm 'mob.?[31mred??second line?tab?' namespace 'default'"),
+                "the text of {which} ends with the two names, cleaned: {text:?}"
+            );
+        }
+    }
+
+    /// A projection that does not decode is never read as a run without
+    /// attention: the gate answers unavailable, in its own sentence. What the
+    /// decoder said is in the gate's log, not in the reason.
     #[tokio::test]
     async fn an_unreadable_projection_is_unavailable() {
         let service = service();
@@ -1321,8 +2674,81 @@ mod tests {
 
         let check = gate.check_worker(resuming).await;
         assert!(
-            matches!(&check, ResumeCheck::Unavailable(reason) if reason.contains("binding_id")),
-            "never read as a run without attention: {check:?}"
+            matches!(
+                &check,
+                ResumeCheck::Unavailable(reason)
+                    if reason.contains("attention projection does not decode")
+                        && !reason.contains("binding_id")
+            ),
+            "never read as a run without attention, and in the gate's own words: {check:?}"
+        );
+    }
+
+    /// No unavailable reason carries a word of a store's error or of a
+    /// decoder's. A store may print a path, an id or anything else in its
+    /// error, and the reason is shown to whoever reads the held run. The
+    /// reason of a failed read names the error's kind and the realm and
+    /// namespace; the reason of a projection that does not decode is one
+    /// sentence of the gate. Both texts go to the gate's log.
+    #[tokio::test]
+    async fn an_unavailable_reason_carries_no_text_of_a_store_or_a_decoder() {
+        const MARKER: &str = "marker-7f3a";
+
+        let store = SlowListStore::new();
+        let direct = store.direct();
+        let worker = Worker::named(WORKER);
+        let (_item, projection) = goal_for(
+            &direct,
+            GoalAttentionTarget::Owner {
+                owner_key: member_key(WORKER),
+            },
+        )
+        .await;
+        let gate = WorkGraphResumeGate::new(store.service());
+        store.fail_reads_with(&format!("no such file /var/lib/{MARKER}/items.db"));
+
+        // The claim scan's list fails, and then the projected item's read.
+        for (read, projection) in [
+            ("the item list", None),
+            ("the projected item", Some(&projection)),
+        ] {
+            let check = gate.check_worker(worker.resuming(projection)).await;
+            let ResumeCheck::Unavailable(reason) = &check else {
+                panic!("a failed read of {read} is unavailable: {check:?}");
+            };
+            assert!(
+                !reason.contains(MARKER) && !reason.contains("/var/lib"),
+                "no word of the store's error after a failed read of {read}: {reason}"
+            );
+            for part in [
+                "the WorkGraph could not be read: store error".to_string(),
+                format!("realm '{}'", mob_realm()),
+                format!("namespace '{}'", WorkNamespace::default()),
+            ] {
+                assert!(
+                    reason.contains(&part),
+                    "the reason of a failed read of {read} holds \"{part}\": {reason}"
+                );
+            }
+        }
+
+        let decoder_said = format!("missing field `binding_id` at {MARKER}");
+        let check = gate
+            .check_worker(ResumingWorker {
+                attention_projection_unreadable: Some(decoder_said.as_str()),
+                ..worker.resuming(None)
+            })
+            .await;
+        let ResumeCheck::Unavailable(reason) = &check else {
+            panic!("a projection that does not decode is unavailable: {check:?}");
+        };
+        assert!(
+            !reason.contains(MARKER) && !reason.contains("binding_id"),
+            "no word of the decoder's: {reason}"
+        );
+        assert!(
+            reason.contains("attention projection does not decode"),
+            "the gate's own sentence: {reason}"
         );
     }
 

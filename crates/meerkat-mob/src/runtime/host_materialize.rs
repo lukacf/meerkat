@@ -703,6 +703,7 @@ fn decompile_portable_spec_with_env(
             mob: spec.profile.tools.mob,
             schedule: spec.profile.tools.schedule,
             image_generation: spec.profile.tools.image_generation,
+            web_search: spec.profile.tools.web_search,
             read_only: spec.profile.tools.read_only,
             deny: spec.profile.tools.deny.clone(),
             // The host-surface MCP allowlist and rust bundles are
@@ -737,6 +738,10 @@ fn decompile_portable_spec_with_env(
     profile.tools.image_generation = category_overrides
         .image_generation
         .resolve(profile.tools.image_generation);
+    profile.tools.web_search = category_overrides
+        .web_search
+        .to_override()
+        .or(profile.tools.web_search);
 
     // Minimal definition shim: exactly the extract facts the compiler reads.
     let mut definition = MobDefinition::explicit(spec.mob_id.as_str());
@@ -3126,7 +3131,7 @@ impl HostMemberMaterializer {
         config.keep_alive = true;
         // Realm-scoped auth binding resolves on THIS host at factory build.
         config.auth_binding = decompiled.auth_binding.clone();
-        config.override_web_search = decompiled.web_search_override;
+        crate::build::apply_spawn_web_search_override(&mut config, decompiled.web_search_override);
         config.application_tool_policy = decompiled.application_tool_policy.clone();
         config.tool_consequence_policy_registry =
             self.substrate.tool_consequence_policy_registry.clone();
@@ -3458,6 +3463,7 @@ mod tests {
                     mob: true,
                     schedule: false,
                     image_generation: false,
+                    web_search: None,
                     read_only: false,
                     deny: Vec::new(),
                     mcp_servers: BTreeMap::new(),

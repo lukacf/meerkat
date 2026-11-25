@@ -1332,6 +1332,121 @@ async fn a_restart_with_no_change_writes_nothing() {
     rig.shutdown().await;
 }
 
+/// An agent whose spec has no instructions: a restart writes no record and
+/// appends nothing, before and after a run, and a text it is given later
+/// is recorded as any first change is. (A start does not read such an
+/// agent's session to learn this: a session built with any sections was not
+/// built with other sections than none.)
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restart_of_an_agent_with_no_instructions_writes_nothing() {
+    let temp = tempfile::tempdir().unwrap();
+    let mob = fresh_mob_id();
+    let none = vec![configured_spec(&[])];
+    let mut rig = boot(temp.path(), &mob, none.clone()).await;
+    rig.turn(CONFIGURED, "FIRST-TURN").await;
+    rig.shutdown_for_reopen().await;
+
+    let mut rig = boot(temp.path(), &mob, none).await;
+    assert_eq!(
+        rig.record(CONFIGURED).await,
+        None,
+        "no record of an agent that never had instructions"
+    );
+    assert!(rig.dormant(CONFIGURED), "the start woke nothing");
+    rig.turn(CONFIGURED, "SECOND-TURN").await;
+    assert!(
+        entries(&rig.transcript(CONFIGURED).await).is_empty(),
+        "nothing is appended after a restart"
+    );
+
+    rig.configure(&["Answer in ALPHA style."]).await;
+    rig.recorded(CONFIGURED).await;
+    rig.turn(CONFIGURED, "THIRD-TURN").await;
+    let request = entries(&rig.request_messages("THIRD-TURN"));
+    assert!(
+        request
+            .last()
+            .is_some_and(|entry| carries(entry, &["Answer in ALPHA style."])),
+        "a first text given later is recorded and carried: {request:#?}"
+    );
+    rig.shutdown().await;
+}
+
+/// A text given while the gateway was down to an agent that was built with
+/// none, and that the mob holds no record of: the start compares it with
+/// the sections the agent's session was built with (none), records it, and
+/// wakes nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_first_text_given_while_the_gateway_was_down_to_an_agent_built_with_none_is_recorded_at_start()
+ {
+    let temp = tempfile::tempdir().unwrap();
+    let mob = fresh_mob_id();
+    let mut rig = boot(temp.path(), &mob, vec![configured_spec(&[])]).await;
+    rig.turn(CONFIGURED, "FIRST-TURN").await;
+    rig.shutdown_for_reopen().await;
+
+    let alpha = vec![configured_spec(&["Answer in ALPHA style."])];
+    let mut rig = boot(temp.path(), &mob, alpha).await;
+    let record = rig.record(CONFIGURED).await.expect("the agent's record");
+    assert_eq!(
+        record["revision"],
+        json!(1),
+        "the start recorded the first text: {record:#?}"
+    );
+    assert!(rig.dormant(CONFIGURED), "the start woke nothing");
+    rig.recorded(CONFIGURED).await;
+    rig.turn(CONFIGURED, "SECOND-TURN").await;
+    let request = entries(&rig.request_messages("SECOND-TURN"));
+    assert!(
+        request
+            .last()
+            .is_some_and(|entry| carries(entry, &["Answer in ALPHA style."])),
+        "the next run carries the text: {request:#?}"
+    );
+    rig.shutdown().await;
+}
+
+/// A text withdrawn while the gateway was down, for an agent the mob holds
+/// a record of: the start writes the record's next revision with the fixed
+/// withdrawal, wakes nothing, and the agent's next run carries it. The
+/// record decides this, not the session: an agent whose current text has no
+/// section is still reconciled with the record the mob holds.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_withdrawal_made_while_the_gateway_was_down_is_recorded_at_start() {
+    let temp = tempfile::tempdir().unwrap();
+    let mob = fresh_mob_id();
+    let mut rig = boot(
+        temp.path(),
+        &mob,
+        vec![configured_spec(&["Answer in ALPHA style."])],
+    )
+    .await;
+    rig.turn(CONFIGURED, "FIRST-TURN").await;
+    rig.configure(&["Answer in BETA style."]).await;
+    rig.recorded(CONFIGURED).await;
+    rig.turn(CONFIGURED, "SECOND-TURN").await;
+    rig.shutdown_for_reopen().await;
+
+    let mut rig = boot(temp.path(), &mob, vec![configured_spec(&[])]).await;
+    let record = rig.record(CONFIGURED).await.expect("the agent's record");
+    assert_eq!(
+        record["revision"],
+        json!(2),
+        "the start wrote the withdrawal: {record:#?}"
+    );
+    assert!(rig.dormant(CONFIGURED), "the start woke nothing");
+    rig.recorded(CONFIGURED).await;
+    rig.turn(CONFIGURED, "THIRD-TURN").await;
+    let request = entries(&rig.request_messages("THIRD-TURN"));
+    assert!(
+        request
+            .last()
+            .is_some_and(|entry| carries_body(entry, WITHDRAWN_BODY)),
+        "the next run carries the withdrawal: {request:#?}"
+    );
+    rig.shutdown().await;
+}
+
 /// A text that changed while the gateway was down, for an agent the mob
 /// holds a record of: the start writes the record's next revision,
 /// wakes nothing, and the agent's next run carries the text.
@@ -4649,4 +4764,593 @@ fn one_function_owns_the_instruction_records() {
          recorded sections, and each delivery and each change of an agent compares an \
          agent this process has not compared yet: {violations:#?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// What a start loads of its agents' sessions from a host store
+// ---------------------------------------------------------------------------
+
+/// The session bodies a gateway start loads from the realm's store, and the
+/// per-scope reads it makes of its agents' sessions, on a realm kept in a
+/// host store.
+///
+/// Three counts are kept apart:
+///
+/// - The REAL STORE READ COUNT is what this module's rows assert: the
+///   per-scope calls a start makes on the host's storage interface
+///   (`meerkat_core::host_store::HostStore`) that name a session's scope
+///   (`load_head` and `read_rows`), recorded by a wrapper of that interface
+///   over Core's reference in-memory host store, from the realm's open to
+///   the end of the build. On such a realm the first read of a session's
+///   runtime in a process loads the scope's body from the host (`read_rows`
+///   on the session's scope), and the build sections a start compares are
+///   read from that body.
+/// - The PROXY POLL COUNT is the unit row
+///   `a_text_with_no_section_makes_no_build_state_read_and_one_with_a_section_makes_one`
+///   beside the comparison: it counts polls of a stand-in future handed to
+///   the decision, and reaches no store.
+/// - A host's own AGGREGATE on its own realm (its agents, its store, its
+///   time to ready) is not reproduced here.
+///
+/// What the count leaves out, and its resolution:
+///
+/// - The listing of heads is not counted. A realm lists the heads of every
+///   scope when it opens (`list_heads`, by kind, in pages), the session
+///   scopes among them, whatever the agents' instructions are: that is how
+///   it learns which scopes exist. The listing names no scope, and its
+///   calls follow the pages of the listing, not what a start compares. So
+///   the rows say that a start loads no session body and makes no per-scope
+///   read of such a session, not that it reads nothing of it.
+/// - A load of a scope's body is counted as a `read_rows` call from the
+///   lowest row index a start read of that scope: a load reads the rows
+///   from the first row of the scope's window on. A second load within one
+///   start that began at a later row would not be counted as a load. The
+///   calls themselves still are, and for an agent with no section the rows
+///   require that there is no call at all.
+/// - Chunks a session's body may spill to are not attributed to an agent:
+///   only calls that name the session's own scope are.
+///
+/// A realm kept under a state directory (the rig of the rows above, whose
+/// runtime store is a local database) is not covered: a start makes the
+/// same comparison there, over another store, and no row counts that
+/// store's reads.
+mod host_store_start_reads {
+    use meerkat_core::host_store::{
+        AcquireMode, CommitBatch, FenceGrant, FenceTiming, FenceToken, HeadPage, HostStore,
+        HostStoreError, Row, RowIndex, ScopeKind, ScopeName, ScopeRef, VersionedHead,
+    };
+    use meerkat_core::types::SessionId;
+    use meerkat_meta::{HostStoreMetaStorageProvider, HostStoreMetaStores};
+    use meerkat_runtime::LogicalRuntimeId;
+    use meerkat_runtime::store::spi::{RUNTIME_FAMILY, SpiRealmConfig};
+    use meerkat_store_conformance::InMemoryHostStore;
+
+    use super::*;
+
+    /// The agents with a section in the smaller and in the larger roster.
+    const WITH_A_SECTION: usize = 2;
+    /// The agents with no section in the smaller roster.
+    const FEW_WITH_NO_SECTION: usize = 6;
+    /// The agents with no section in the larger roster.
+    const MANY_WITH_NO_SECTION: usize = 12;
+    /// The agent, with no section, whose run a start resumes in the row
+    /// that has one.
+    const RUNNING: &str = "running-00";
+    /// Heads asked of the reference store per listing the row makes itself.
+    const HEADS_PER_LIST: usize = 512;
+
+    /// One read of one scope that a process made of the host store.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum HostRead {
+        /// `load_head` of the scope.
+        Head { kind: ScopeKind, scope: String },
+        /// `read_rows` of the scope, from row `from`.
+        Rows {
+            kind: ScopeKind,
+            scope: String,
+            from: u64,
+        },
+    }
+
+    impl HostRead {
+        fn names(&self) -> (ScopeKind, &str) {
+            match self {
+                Self::Head { kind, scope } | Self::Rows { kind, scope, .. } => (*kind, scope),
+            }
+        }
+    }
+
+    /// One process's handle on the realm's host store: the reference store,
+    /// which both starts of a row share, and every read of one scope this
+    /// process made of it.
+    struct CountingHost {
+        store: Arc<InMemoryHostStore>,
+        reads: Mutex<Vec<HostRead>>,
+    }
+
+    impl CountingHost {
+        fn over(store: &Arc<InMemoryHostStore>) -> Arc<Self> {
+            Arc::new(Self {
+                store: Arc::clone(store),
+                reads: Mutex::new(Vec::new()),
+            })
+        }
+
+        fn record(&self, read: HostRead) {
+            self.reads.lock().unwrap().push(read);
+        }
+
+        /// Every read of one scope this process made so far.
+        fn reads(&self) -> Vec<HostRead> {
+            self.reads.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl HostStore for CountingHost {
+        async fn acquire_fence(&self, mode: AcquireMode) -> Result<FenceGrant, HostStoreError> {
+            self.store.acquire_fence(mode).await
+        }
+
+        async fn renew_fence(&self, token: FenceToken) -> Result<(), HostStoreError> {
+            self.store.renew_fence(token).await
+        }
+
+        fn fence_timing(&self) -> FenceTiming {
+            self.store.fence_timing()
+        }
+
+        async fn load_head(
+            &self,
+            scope: &ScopeRef,
+        ) -> Result<Option<VersionedHead>, HostStoreError> {
+            self.record(HostRead::Head {
+                kind: scope.kind,
+                scope: scope.name.as_str().to_string(),
+            });
+            self.store.load_head(scope).await
+        }
+
+        /// Forwarded and not recorded: a listing names no scope (see the
+        /// module).
+        async fn list_heads(
+            &self,
+            kind: ScopeKind,
+            after: Option<&ScopeName>,
+            limit: usize,
+        ) -> Result<HeadPage, HostStoreError> {
+            self.store.list_heads(kind, after, limit).await
+        }
+
+        async fn read_rows(
+            &self,
+            scope: &ScopeRef,
+            from: RowIndex,
+            limit: usize,
+        ) -> Result<Vec<Row>, HostStoreError> {
+            self.record(HostRead::Rows {
+                kind: scope.kind,
+                scope: scope.name.as_str().to_string(),
+                from: from.get(),
+            });
+            self.store.read_rows(scope, from, limit).await
+        }
+
+        async fn commit(&self, batch: &CommitBatch) -> Result<(), HostStoreError> {
+            self.store.commit(batch).await
+        }
+    }
+
+    /// The host's own stores beside the host store, in memory and declared
+    /// so, as the host supplies them to every open of the realm.
+    fn host_stores() -> HostStoreMetaStores {
+        HostStoreMetaStores {
+            schedule_store: Arc::new(meerkat_schedule::MemoryScheduleStore::new()),
+            workgraph_store: Arc::new(meerkat::MemoryWorkGraphStore::new()),
+            job_store: None,
+            blob_store: Arc::new(meerkat_meta::blob_store::ObjectStoreBlobStore::memory()),
+            console_log_store: None,
+            agent_memory_provider: None,
+            event_log_store: None,
+            durability: ["schedule", "workgraph", "blobs"]
+                .into_iter()
+                .map(|domain| {
+                    meerkat_core::DurabilityDeclaration::durable(
+                        domain,
+                        meerkat_core::DurabilityResolution::DeclaredEphemeral,
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    /// Open the realm over `host` as one process does, and boot the
+    /// gateway's runtime composition over it for the mob `mob_id`, with
+    /// `roster` as the host's configuration and `cache` as the per-host
+    /// cache directory. The provider is the process's one handle on the
+    /// realm: a restart drops it.
+    async fn boot_on_host_store(
+        host: Arc<CountingHost>,
+        cache: &Path,
+        mob_id: &str,
+        roster: Vec<DurableAgentSpec>,
+    ) -> (Rig, Arc<HostStoreMetaStorageProvider>) {
+        let provider = Arc::new(
+            HostStoreMetaStorageProvider::open(
+                "counting-host",
+                host as Arc<dyn HostStore>,
+                SpiRealmConfig::default(),
+                host_stores(),
+            )
+            .await
+            .expect("the realm opens over the host store"),
+        );
+        let (asked_tx, asked) = mpsc::unbounded_channel();
+        let (release, released) = watch::channel(false);
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let roster = Arc::new(MutableRosterProvider::new(roster));
+        let builder = UnifiedRuntimeBuilder::default()
+            .definition(definition(mob_id))
+            .storage_provider(provider.clone())
+            .scratch_dir(cache)
+            .roster_provider(roster.clone())
+            .identity_runtime_instance_id("meta-instruction-append")
+            .default_llm_client(Arc::new(RecordingClient {
+                asked: asked_tx,
+                requests: Arc::clone(&requests),
+                released,
+            }));
+        let runtime = Box::pin(builder.build())
+            .await
+            .expect("build the gateway-shaped UnifiedRuntime over the host store realm");
+        let rig = Rig {
+            runtime,
+            state: cache.to_path_buf(),
+            roster,
+            asked,
+            requests,
+            release,
+        };
+        (rig, provider)
+    }
+
+    /// The name of the host store scope that holds `session`'s runtime, read
+    /// from the reference store itself: no process's reads record it.
+    async fn session_scope(store: &InMemoryHostStore, session: &SessionId) -> String {
+        let runtime = LogicalRuntimeId::for_session(session).to_string();
+        let mut after: Option<ScopeName> = None;
+        loop {
+            let page = store
+                .list_heads(ScopeKind::Session, after.as_ref(), HEADS_PER_LIST)
+                .await
+                .expect("the reference store lists its session scopes");
+            for head in &page.heads {
+                let decoded: Value =
+                    serde_json::from_slice(&head.head.head).expect("a session scope head is JSON");
+                if decoded["fam"] == RUNTIME_FAMILY.tag && decoded["key"] == runtime.as_str() {
+                    return head.name.as_str().to_string();
+                }
+            }
+            match page.next {
+                Some(next) => after = Some(next),
+                None => panic!("the host store holds a scope for the runtime {runtime}"),
+            }
+        }
+    }
+
+    /// The per-scope reads one start made of one session scope.
+    #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+    struct ScopeReads {
+        /// `load_head` calls that named the scope.
+        heads: usize,
+        /// `read_rows` calls that named the scope.
+        row_calls: usize,
+        /// Loads of the scope's body: a load reads the scope's rows from
+        /// their first row on, in as many `read_rows` calls as the rows
+        /// take, so each load makes one call from that first row. Counted
+        /// as the calls from the lowest row index read (see the module).
+        loads: usize,
+    }
+
+    impl ScopeReads {
+        fn of(reads: &[HostRead], scope: &str) -> Self {
+            let froms: Vec<u64> = reads
+                .iter()
+                .filter_map(|read| match read {
+                    HostRead::Rows {
+                        scope: named, from, ..
+                    } if named == scope => Some(*from),
+                    _ => None,
+                })
+                .collect();
+            let first = froms.iter().min().copied();
+            Self {
+                heads: reads
+                    .iter()
+                    .filter(|read| {
+                        matches!(read, HostRead::Head { scope: named, .. } if named == scope)
+                    })
+                    .count(),
+                row_calls: froms.len(),
+                loads: froms.iter().filter(|from| Some(**from) == first).count(),
+            }
+        }
+
+        /// No per-scope read at all: no head load, no row read.
+        fn none(self) -> bool {
+            self == Self::default()
+        }
+    }
+
+    /// The real store read count of one second start: the per-scope reads
+    /// the start made of each configured agent's session scope, and the
+    /// body loads over every scope of the session kind.
+    #[derive(Debug)]
+    struct StartReads {
+        /// By agent: the agents whose current text has no section.
+        with_no_section: BTreeMap<String, ScopeReads>,
+        /// By agent: the agents whose current text has a section.
+        with_a_section: BTreeMap<String, ScopeReads>,
+        /// The agent whose run the start resumed ([`RUNNING`]), when the
+        /// first lifetime stopped with its run in flight.
+        resumed: Option<ScopeReads>,
+        /// Body loads of scopes of the session kind, whatever they hold.
+        session_kind_loads: usize,
+    }
+
+    impl StartReads {
+        /// Session body loads over the configured agents.
+        fn agent_loads(&self) -> usize {
+            self.with_no_section
+                .values()
+                .chain(self.with_a_section.values())
+                .chain(&self.resumed)
+                .map(|reads| reads.loads)
+                .sum()
+        }
+
+        fn summary(&self) -> String {
+            let loads = |agents: &BTreeMap<String, ScopeReads>| -> usize {
+                agents.values().map(|reads| reads.loads).sum()
+            };
+            format!(
+                "{} agents with no section and {} with a section: {} and {} session body \
+                 loads from the host store, {} over every scope of the session kind{}",
+                self.with_no_section.len(),
+                self.with_a_section.len(),
+                loads(&self.with_no_section),
+                loads(&self.with_a_section),
+                self.session_kind_loads,
+                self.resumed.map_or_else(String::new, |reads| format!(
+                    ", and {} of the agent whose run the start resumed",
+                    reads.loads
+                )),
+            )
+        }
+    }
+
+    fn agent(name: &str, instructions: &[&str]) -> DurableAgentSpec {
+        DurableAgentSpec {
+            identity: AgentIdentity::parse(name).unwrap(),
+            ..configured_spec(instructions)
+        }
+    }
+
+    /// Start a mob of `with_no_section` configured agents whose text has no
+    /// section and [`WITH_A_SECTION`] whose text has one, give every agent
+    /// one run (so each has a conversation, and the mob holds no instruction
+    /// record of any), stop it, and start it again as a new process on the
+    /// same realm with the same configuration. Answers which per-scope
+    /// reads that second start, from the realm's open to the end of its
+    /// build, made of the agents' session scopes.
+    ///
+    /// With `a_run_to_resume` the mob has one agent more, [`RUNNING`], whose
+    /// text has no section: the first lifetime stops while a run of it
+    /// waits for its model, the second start resumes that run, and the
+    /// reads are counted until the resumed run calls its model.
+    async fn second_start_reads(with_no_section: usize, a_run_to_resume: bool) -> StartReads {
+        let store = Arc::new(InMemoryHostStore::new());
+        let cache = tempfile::tempdir().unwrap();
+        let mob = fresh_mob_id();
+        let plain: Vec<String> = (0..with_no_section)
+            .map(|index| format!("plain-{index:02}"))
+            .collect();
+        let titled: Vec<String> = (0..WITH_A_SECTION)
+            .map(|index| format!("titled-{index:02}"))
+            .collect();
+        let running: Vec<String> = a_run_to_resume
+            .then(|| RUNNING.to_string())
+            .into_iter()
+            .collect();
+        let roster: Vec<DurableAgentSpec> = plain
+            .iter()
+            .chain(&running)
+            .map(|name| agent(name, &[]))
+            .chain(
+                titled
+                    .iter()
+                    .map(|name| agent(name, &["Answer in ALPHA style."])),
+            )
+            .collect();
+
+        // The first start. Nothing of it is counted.
+        let (mut rig, provider) = boot_on_host_store(
+            CountingHost::over(&store),
+            cache.path(),
+            &mob,
+            roster.clone(),
+        )
+        .await;
+        let mut scopes = BTreeMap::new();
+        for name in plain.iter().chain(&titled).chain(&running) {
+            rig.turn(name, &format!("FIRST-TURN-OF-{name}")).await;
+            let session = rig
+                .mob()
+                .resolve_bridge_session_id(&Rig::member(name))
+                .await
+                .expect("the agent's run left it a conversation");
+            scopes.insert(name.clone(), session_scope(&store, &session).await);
+        }
+        if a_run_to_resume {
+            // A run in flight at the stop: its model call waits, and the
+            // stop keeps the run for the next start.
+            send_only(&rig, RUNNING, &format!("{HOLD} until the next start")).await;
+            assert!(rig.asked(HOLD).await, "the run is in flight at the stop");
+        }
+        // The reopen follows a teardown that settled, with or without a run
+        // in flight: the helper fails the row unless the shutdown's report
+        // says the mob stopped and every member was unregistered, so
+        // nothing of the first lifetime still runs a member (the held model
+        // call included) or writes the realm when the next process opens
+        // it. On a realm kept in a host store that report is the condition
+        // a reopen in this process waits for: the realm's custody is its
+        // fence, which lapses below on the store's own clock, and the cache
+        // directory holds no custody file.
+        rig.shutdown_for_reopen().await;
+        drop(provider);
+        // The stopped process's lease is still recorded on the store's
+        // clock: the next process opens once it lapsed.
+        store.lapse_fence_leases();
+
+        // The second start, as a new process: counted from the realm's
+        // open to the end of the build and, where the start resumes a run,
+        // on until that run calls its model.
+        let host = CountingHost::over(&store);
+        let (mut rig, provider) =
+            boot_on_host_store(Arc::clone(&host), cache.path(), &mob, roster).await;
+        if a_run_to_resume {
+            assert!(
+                rig.asked(HOLD).await,
+                "the start resumed the run: its model is called again"
+            );
+        }
+        let reads = host.reads();
+        assert!(
+            provider.readiness().is_ready(),
+            "the realm serves after the second start: {:?}",
+            provider.readiness()
+        );
+        for name in plain.iter().chain(&titled) {
+            assert!(rig.dormant(name), "the start woke nothing: {name}");
+        }
+        rig.release.send_replace(true);
+        rig.shutdown().await;
+        drop(provider);
+
+        let of = |names: &[String]| -> BTreeMap<String, ScopeReads> {
+            names
+                .iter()
+                .map(|name| (name.clone(), ScopeReads::of(&reads, &scopes[name])))
+                .collect()
+        };
+        let mut session_scopes: Vec<&str> = reads
+            .iter()
+            .map(HostRead::names)
+            .filter(|(kind, _)| *kind == ScopeKind::Session)
+            .map(|(_, scope)| scope)
+            .collect();
+        session_scopes.sort_unstable();
+        session_scopes.dedup();
+        StartReads {
+            with_no_section: of(&plain),
+            with_a_section: of(&titled),
+            resumed: running
+                .first()
+                .map(|name| ScopeReads::of(&reads, &scopes[name])),
+            session_kind_loads: session_scopes
+                .into_iter()
+                .map(|scope| ScopeReads::of(&reads, scope).loads)
+                .sum(),
+        }
+    }
+
+    /// A start loads the session body of no configured agent whose text has
+    /// no section and makes no per-scope read of its session, and loads the
+    /// session body of each agent whose text has a section once: so the
+    /// session bodies a start loads do not grow with the configured agents
+    /// that have no instructions. (The realm's listing of heads at its open
+    /// is not counted: see the module.) Measured on a realm kept in a host
+    /// store, where a session is one scope the store serves, for a mob of 6
+    /// such agents and for one of 12, each beside 2 agents with a section.
+    /// Every agent has a conversation and the mob holds no instruction
+    /// record, which is the state in which a start compares an agent with
+    /// the sections its session was built with.
+    ///
+    /// Not shown here: a realm kept under a state directory (the same
+    /// comparison over another store), and how long a start takes.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_start_loads_no_session_of_an_agent_with_no_section_and_does_not_grow_with_them() {
+        let few = second_start_reads(FEW_WITH_NO_SECTION, false).await;
+        let many = second_start_reads(MANY_WITH_NO_SECTION, false).await;
+        let measured = format!("{}; {}", few.summary(), many.summary());
+
+        for start in [&few, &many] {
+            for (name, reads) in &start.with_no_section {
+                assert!(
+                    reads.none(),
+                    "a start loads no session body of {name}, whose text has no section, and \
+                     makes no per-scope read of its session: {reads:?} ({measured})"
+                );
+            }
+            for (name, reads) in &start.with_a_section {
+                assert_eq!(
+                    reads.loads, 1,
+                    "a start loads the session body of {name}, whose text has a section, \
+                     once: {reads:?} ({measured})"
+                );
+            }
+        }
+        assert_eq!(
+            (few.agent_loads(), many.agent_loads()),
+            (WITH_A_SECTION, WITH_A_SECTION),
+            "the session bodies a start loads are those of the agents with a section, \
+             however many agents have none ({measured})"
+        );
+        assert_eq!(
+            few.session_kind_loads, many.session_kind_loads,
+            "the session bodies a start loads do not grow with the agents that have no \
+             section ({measured})"
+        );
+    }
+
+    /// A start that resumes an agent's run loads that agent's session body
+    /// once, whatever its text: the run needs it. Beside it the start still
+    /// loads no session body of an agent with no section and no run to
+    /// resume and makes no per-scope read of its session, and loads the
+    /// session body of each agent with a section once. So the session
+    /// bodies a start loads are at most those of the agents with a run to
+    /// resume and those of the agents with a section.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_start_loads_the_session_of_an_agent_whose_run_it_resumes_once() {
+        let start = second_start_reads(FEW_WITH_NO_SECTION, true).await;
+        let measured = start.summary();
+
+        for (name, reads) in &start.with_no_section {
+            assert!(
+                reads.none(),
+                "a start loads no session body of {name}, whose text has no section and \
+                 which has no run to resume, and makes no per-scope read of its session: \
+                 {reads:?} ({measured})"
+            );
+        }
+        for (name, reads) in &start.with_a_section {
+            assert_eq!(
+                reads.loads, 1,
+                "a start loads the session body of {name}, whose text has a section, once: \
+                 {reads:?} ({measured})"
+            );
+        }
+        let resumed = start.resumed.expect("the row has an agent with a run");
+        assert_eq!(
+            resumed.loads, 1,
+            "a start loads the session body of {RUNNING}, whose run it resumes, once: \
+             {resumed:?} ({measured})"
+        );
+        assert_eq!(
+            start.agent_loads(),
+            WITH_A_SECTION + 1,
+            "the session bodies a start loads are those of the agents with a section and \
+             of the agent whose run it resumes ({measured})"
+        );
+    }
 }

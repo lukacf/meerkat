@@ -506,7 +506,7 @@ Important files:
 - `<store_path>/approvals.json` (RPC approval-record sidecar when the persistence bundle exposes a store path)
 - `<store_path>/approval_decisions.sqlite3` (durable decisions, created by the first hold)
 - `<store_path>/approval_decisions.executor.lock` and `<store_path>/approval_decisions.executor.<kind>.lock` (the decision executors' OS locks, one per decision kind, created when an executor starts; they hold no data)
-- `mobs/` (per-mob `<mob_id>.db` SQLite storage plus `realm_profiles.db`)
+- `mobs/` (per-mob SQLite files named `mob--<escaped-mob-id>.db`, plus `realm_profiles.db`; see [Upgrading to 0.8.31](/guides/upgrading#upgrading-to-0-8-31) for older filenames)
 
 `<store_path>/approvals.json` is not an eighth `RealmStorageProvider` durability domain.
 The current `storage doctor` and `storage migrate` commands do not inventory or

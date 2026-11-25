@@ -230,6 +230,19 @@ sets are read with [`meta/gating/questions`](/api/rpc#meta%2Fgating%2Fquestions)
   persistent state directory); on a candidate launch; and when no answer
   can be routed back to the asker, as for a member of a mob other than the
   runtime's own (a sub-mob an agent created, for one).
+- **When the Console admits nobody.** A Console that requires sign-in and
+  trusts no signing key refuses every caller. That is what a launch gets
+  with neither `auth_config` nor `console_require_app_auth = false`, the
+  SDKs' default. No person can answer a set in such a Console. Where a set
+  is held at all (the cases above still answer `no_human_surface`, a launch
+  without a persistent state directory among them), the call still answers
+  `asked` and the set is held, because the embedding host can read and
+  answer it over the SDK transport (`meta/gating/questions`,
+  `meta/gating/decide`). The result's `note`, which the asking agent's model
+  reads, says so there: it names the Console that cannot answer, the
+  embedding host that may, and the deadline `answer_by`, after which the
+  result is `timed_out`. It does not say that a person is being asked. The
+  gateway's start warning for such a Console names the same consequence.
 - **A member with its own `ask_user`.** A member whose build already has a
   tool named `ask_user` among its external tools (the tools its host
   supplies to the build) keeps it, and Meta mounts none for that member.

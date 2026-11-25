@@ -98,7 +98,7 @@ async fn run() -> anyhow::Result<()> {
              [--experimental-hive-mob]"
         );
         eprintln!(
-            "The hive model defaults to gpt-6-astra; API-key environment variables do not select it."
+            "The hive model defaults to gpt-6.2-astra; API-key environment variables do not select it."
         );
         eprintln!(
             "WARNING: hive RPC is unauthenticated plaintext on 0.0.0.0 and exposes shell-capable sessions."
@@ -1559,7 +1559,7 @@ mod tests {
             host.runtime.set_default_llm_client(Some(Arc::new(
                 meerkat_client::TestClient::for_provider(meerkat_core::Provider::OpenAI),
             )));
-            let mut build = meerkat::AgentBuildConfig::new("gpt-6-astra");
+            let mut build = meerkat::AgentBuildConfig::new("gpt-6.2-astra");
             build.provider = Some(meerkat_core::Provider::OpenAI);
             let session_id = host
                 .managed_session("hive", build, Vec::new())

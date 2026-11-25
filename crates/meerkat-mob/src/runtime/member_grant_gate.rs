@@ -142,6 +142,8 @@ pub(crate) fn family_switch(tools: &ToolConfig, family: &str) -> Option<bool> {
         "workgraph" => Some(tools.workgraph),
         "schedule" => Some(tools.schedule),
         "image_generation" => Some(tools.image_generation),
+        // Unset is `None`: the build decides whether the family mounts.
+        "web_search" => tools.web_search,
         "comms" => Some(tools.comms),
         "tasks" | "utility" => Some(tools.builtins),
         _ => None,

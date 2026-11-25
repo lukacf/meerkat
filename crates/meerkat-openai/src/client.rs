@@ -375,6 +375,106 @@ fn invalid_replay(message: impl Into<String>) -> LlmError {
     }
 }
 
+/// The longest `call_id`, in bytes, that a Responses request is given.
+///
+/// The limit is the provider's. It is not documented in this tree: it was
+/// observed in the provider's refusal of a request whose `call_id` was
+/// longer, which named a maximum length of 64. Change it here if the
+/// provider's limit changes. Bytes are counted, and an id never has more
+/// characters than bytes, so an id within this bound is within the
+/// provider's whichever of the two it counts.
+const RESPONSES_CALL_ID_MAX_BYTES: usize = 64;
+
+/// What every derived `call_id` starts with.
+const DERIVED_CALL_ID_PREFIX: &str = "call_sha256_";
+
+/// How many lowercase hex digits of the stored id's SHA-256 follow the
+/// prefix of a derived `call_id`.
+const DERIVED_CALL_ID_HEX_DIGITS: usize = 32;
+
+const _: () = assert!(
+    DERIVED_CALL_ID_PREFIX.len() + DERIVED_CALL_ID_HEX_DIGITS <= RESPONSES_CALL_ID_MAX_BYTES
+);
+
+/// Whether `id` has the shape of a derived `call_id`: the prefix, then
+/// exactly [`DERIVED_CALL_ID_HEX_DIGITS`] lowercase hex digits.
+fn has_derived_call_id_shape(id: &str) -> bool {
+    id.strip_prefix(DERIVED_CALL_ID_PREFIX)
+        .is_some_and(|digits| {
+            digits.len() == DERIVED_CALL_ID_HEX_DIGITS
+                && digits
+                    .bytes()
+                    .all(|digit| matches!(digit, b'0'..=b'9' | b'a'..=b'f'))
+        })
+}
+
+/// The `call_id` derived from a stored tool-use id: the prefix and the
+/// first [`DERIVED_CALL_ID_HEX_DIGITS`] hex digits of the id's SHA-256. It
+/// depends on the stored id alone, so it is the same in a call, in its
+/// output and in every request.
+fn derived_call_id(stored: &str) -> String {
+    let digest = meerkat_core::approval::decision::Sha256Digest::of(stored.as_bytes());
+    let digits = digest.as_str();
+    let digits = digits.rsplit(':').next().unwrap_or(digits);
+    let mut call_id =
+        String::with_capacity(DERIVED_CALL_ID_PREFIX.len() + DERIVED_CALL_ID_HEX_DIGITS);
+    call_id.push_str(DERIVED_CALL_ID_PREFIX);
+    call_id.extend(digits.chars().take(DERIVED_CALL_ID_HEX_DIGITS));
+    call_id
+}
+
+/// The `call_id`s one Responses lowering writes for stored tool-use ids.
+///
+/// A stored tool-use id belongs to the conversation: another provider, or
+/// another server, may have issued it under no length rule, and the
+/// provider refuses a whole request for one `call_id` over its limit. An
+/// id the request can carry is written as stored. Any other is replaced,
+/// in the request only, by a short id derived from it
+/// ([`derived_call_id`]). The stored transcript keeps the id it has, so
+/// every other wire still reads the stored one.
+///
+/// No two stored ids of one lowering are written as one `call_id`:
+///
+/// - A stored id written as stored never equals a derived `call_id`. Every
+///   derived `call_id` has the derived shape
+///   ([`has_derived_call_id_shape`]), and a stored id of that shape is not
+///   written as stored: it is derived again, whatever its length.
+/// - Two stored ids that derive one `call_id` are refused
+///   ([`Self::admit`]); the request is not built.
+#[derive(Default)]
+struct ResponsesCallIds<'m> {
+    /// Each derived `call_id` of this lowering, and the stored id it is for.
+    derived: HashMap<String, &'m str>,
+}
+
+impl<'m> ResponsesCallIds<'m> {
+    /// The `call_id` this lowering writes for `stored`, in a call item and
+    /// in its output item alike.
+    fn lower(&mut self, stored: &'m str) -> Result<Cow<'m, str>, LlmError> {
+        if stored.len() <= RESPONSES_CALL_ID_MAX_BYTES && !has_derived_call_id_shape(stored) {
+            return Ok(Cow::Borrowed(stored));
+        }
+        self.admit(stored, derived_call_id(stored)).map(Cow::Owned)
+    }
+
+    /// Record that `derived` stands for `stored` in this lowering. A
+    /// `call_id` that already stands for another stored id is refused as an
+    /// invalid request, in words that hold nothing of either id: sent, it
+    /// would pair an output with another id's call.
+    fn admit(&mut self, stored: &'m str, derived: String) -> Result<String, LlmError> {
+        match self.derived.get(derived.as_str()) {
+            Some(other) if *other != stored => Err(invalid_replay(
+                "two stored tool-use ids of this request derive the same Responses call_id",
+            )),
+            Some(_) => Ok(derived),
+            None => {
+                self.derived.insert(derived.clone(), stored);
+                Ok(derived)
+            }
+        }
+    }
+}
+
 /// Return only message annotations that prove OpenAI web-search provenance.
 ///
 /// The Responses API includes `annotations: []` on ordinary output text and
@@ -2339,6 +2439,9 @@ impl OpenAiClient {
         let mut items = Vec::new();
         let mut instructions = None;
         let mut authored_boundaries = Vec::new();
+        // A call item and its output item take their `call_id` from here,
+        // so the two always carry the same one.
+        let mut call_ids = ResponsesCallIds::default();
         let leading_system_count = messages
             .iter()
             .take_while(|message| matches!(message, Message::System(_)))
@@ -2498,9 +2601,10 @@ impl OpenAiClient {
                                 }
                             }
                             AssistantBlock::ToolUse { id, name, args, .. } => {
+                                let call_id = call_ids.lower(id)?;
                                 items.push(serde_json::json!({
                                     "type": "function_call",
-                                    "call_id": id,
+                                    "call_id": call_id,
                                     "name": name,
                                     "arguments": args.get()  // Already JSON string
                                 }));
@@ -2535,9 +2639,10 @@ impl OpenAiClient {
                     let first_result_item = items.len();
                     for r in results {
                         let output = Self::tool_result_responses_output(r)?;
+                        let call_id = call_ids.lower(&r.tool_use_id)?;
                         items.push(serde_json::json!({
                             "type": "function_call_output",
-                            "call_id": r.tool_use_id,
+                            "call_id": call_id,
                             "output": output
                         }));
                     }
@@ -12838,6 +12943,100 @@ mod tests {
             serde_json::from_str::<Value>(parts[3]["text"].as_str().unwrap()).unwrap(),
             mcp_structured_payload()
         );
+    }
+
+    /// A derived `call_id` has the derived shape and fits the bound,
+    /// whatever the stored id. The value for a known input is pinned: the
+    /// derivation is part of what a request carries from one turn to the
+    /// next.
+    #[test]
+    fn derived_call_id_has_the_derived_shape_and_fits_the_bound() {
+        let long = "x".repeat(10_000);
+        for stored in ["", "call_1", long.as_str()] {
+            let derived = derived_call_id(stored);
+            assert!(has_derived_call_id_shape(&derived));
+            assert_eq!(
+                derived.len(),
+                DERIVED_CALL_ID_PREFIX.len() + DERIVED_CALL_ID_HEX_DIGITS
+            );
+            assert!(derived.len() <= RESPONSES_CALL_ID_MAX_BYTES);
+            assert_eq!(derived, derived_call_id(stored));
+        }
+        assert_eq!(
+            derived_call_id("abc"),
+            "call_sha256_ba7816bf8f01cfea414140de5dae2223"
+        );
+    }
+
+    /// The derived shape is the prefix and exactly the hex digits: nothing
+    /// shorter, longer, upper case or under another prefix has it.
+    #[test]
+    fn derived_call_id_shape_is_the_prefix_and_exactly_the_hex_digits() {
+        let derived = derived_call_id("abc");
+        assert!(has_derived_call_id_shape(&derived));
+        assert!(!has_derived_call_id_shape(&derived[..derived.len() - 1]));
+        assert!(!has_derived_call_id_shape(&format!("{derived}0")));
+        assert!(!has_derived_call_id_shape(&derived.to_uppercase()));
+        assert!(!has_derived_call_id_shape(
+            &derived.replace("call_sha256_", "call_sha512_")
+        ));
+        assert!(!has_derived_call_id_shape(
+            "call_sha256_ba7816bf8f01cfea414140de5dae222g"
+        ));
+        assert!(!has_derived_call_id_shape("call_1"));
+        assert!(!has_derived_call_id_shape(""));
+    }
+
+    /// An id within the bound that has not the derived shape is written as
+    /// stored and borrowed; any other is derived.
+    #[test]
+    fn responses_call_ids_write_an_id_the_request_can_carry_as_stored() {
+        let at_bound = "b".repeat(RESPONSES_CALL_ID_MAX_BYTES);
+        let over_bound = "b".repeat(RESPONSES_CALL_ID_MAX_BYTES + 1);
+        let lookalike = derived_call_id(&over_bound);
+        let mut ids = ResponsesCallIds::default();
+
+        assert!(matches!(ids.lower("call_1"), Ok(Cow::Borrowed("call_1"))));
+        assert!(matches!(ids.lower(""), Ok(Cow::Borrowed(""))));
+        assert!(matches!(ids.lower(&at_bound), Ok(Cow::Borrowed(id)) if id == at_bound.as_str()));
+        assert_eq!(ids.lower(&over_bound).unwrap(), lookalike.as_str());
+        assert_eq!(
+            ids.lower(&lookalike).unwrap(),
+            derived_call_id(&lookalike).as_str()
+        );
+        assert_ne!(derived_call_id(&lookalike), lookalike);
+    }
+
+    /// Two stored ids that derive one `call_id` in a lowering are refused
+    /// as an invalid request, and the refusal holds nothing of either id.
+    /// No two known inputs derive one value, so the row hands the second
+    /// id the first one's derived `call_id`.
+    #[test]
+    fn responses_call_ids_refuse_one_derived_call_id_for_two_stored_ids() {
+        let mut ids = ResponsesCallIds::default();
+        let first = "first-stored-id-of-the-row";
+        let second = "second-stored-id-of-the-row";
+        let derived = derived_call_id(first);
+
+        assert_eq!(ids.admit(first, derived.clone()).unwrap(), derived);
+        assert_eq!(
+            ids.admit(first, derived.clone()).unwrap(),
+            derived,
+            "the same stored id again is the same call_id"
+        );
+        let error = ids
+            .admit(second, derived.clone())
+            .expect_err("another stored id under the same call_id");
+        let LlmError::InvalidRequest { message } = &error else {
+            panic!("expected an invalid request, got {error:?}");
+        };
+        assert_eq!(
+            message,
+            "two stored tool-use ids of this request derive the same Responses call_id"
+        );
+        for held in [first, second, derived.as_str()] {
+            assert!(!message.contains(held));
+        }
     }
 }
 

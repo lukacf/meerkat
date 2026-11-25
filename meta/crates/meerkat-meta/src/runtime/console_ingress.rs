@@ -676,6 +676,17 @@ pub(crate) fn console_takes_a_persons_decision(
     console_identifies_people(decisions, access) && !decisions.console.read_only
 }
 
+/// Whether this console refuses every caller as it is configured: it
+/// requires sign-in and its trusted key set holds no key, so no token can
+/// verify ([`crate::gateway_composition::ConsoleAuthPosture`], the one
+/// classifier of that). Such a console still counts as one that identifies
+/// people ([`console_identifies_people`]), and nothing here changes that:
+/// this is for the words a host uses of it, where it says who can answer.
+pub(crate) fn console_refuses_every_caller(decisions: &RuntimeDecisionState) -> bool {
+    crate::gateway_composition::ConsoleAuthPosture::of(decisions)
+        == crate::gateway_composition::ConsoleAuthPosture::ClosedToEveryCaller
+}
+
 /// The view of a caller whose request carries no audience the Console
 /// resolved (an embedder's own REST route): the view of the subject the
 /// route's authentication resolved, or, where sign-in is optional, of the

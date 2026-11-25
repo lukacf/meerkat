@@ -102,9 +102,11 @@ is in use by another Meta runtime`: that is the refusal the step asks for.
   cannot be mistaken for the answer. This works because the profile is
   `turn_driven`. On an `autonomous_host` agent the turn cannot be tracked and
   the SDK says so with a warning.
-- **A refused start arrives wrapped.** In the 0.9.15 Python SDK a start that
-  the gateway refuses is raised as `GatewayStartupCleanupError`; the sentence
-  that says why is in its `startup_error`. The program reads it there.
+- **Handle the state-in-use refusal.** On Meta 0.9.18 the second start
+  raises `StorageResolutionError` directly. On 0.9.15 the SDK wrapped the
+  refusal in `GatewayStartupCleanupError`; read its `startup_error` in
+  that case. The example checks for the expected state-in-use message
+  and re-raises other failures.
 - **After the gateway is gone, `shutdown()` raises.** The program still
   calls it, to release what the runtime holds on its side. It lets the error
   pass only when `runtime.last_gateway_termination` says the process has

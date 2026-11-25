@@ -26,8 +26,12 @@
 //!   the worker holds no claim, the run continues.
 //! - A lapsed lease is first committed with `observe_lease_expiry`, as a
 //!   lease sweep would, so the item can be claimed again.
-//! - A WorkGraph read fault answers unavailable. Meerkat asks again a bounded
-//!   number of times and then settles the run as superseded.
+//! - A WorkGraph read fault answers unavailable, and so does a claim scan
+//!   that outlasts its budget (below). Meerkat asks again a bounded number
+//!   of times. When every attempt goes unanswered it neither resumes the run
+//!   nor settles it: the run stays held, and Meerkat asks the gate again at
+//!   the next wake of the worker's runtime loop or at the next registration
+//!   of its session.
 //!
 //! Meerkat drops an attempt that outlasts its timeout and asks again, so the
 //! gate is idempotent across the attempts of one resume: a superseded verdict
@@ -56,9 +60,29 @@
 //! seen, so the run continues, as in the known limit, and its later writes
 //! conflict on revision. An item comes back twice only after the store clock
 //! moved back; the scan then keeps the newest claimed sighting.
+//!
+//! The claim scan ends itself. One page is one full list of the namespace's
+//! open items, and Meerkat drops an attempt that outlasts
+//! [`RESUMED_RUN_ADMISSION_ATTEMPT_TIMEOUT`] without a word from the gate. So
+//! the scan reads for that timeout less a margin at most
+//! ([`CLAIM_SCAN_BUDGET`]). A scan that is not done by then, between two
+//! pages or in the middle of one, answers unavailable with a reason that
+//! names the list, the pages it read and the time it waited. It draws no
+//! verdict from the pages it read, because an earlier page may hold an older
+//! sighting of an item, and it has written nothing: a lapsed lease's expiry
+//! is committed only after the whole walk. The next attempt starts the scan
+//! again from its first page.
+//!
+//! An unavailable answer's reason is the gate's own sentence. It is shown to
+//! whoever reads the held run, so it carries no text of a store's error or
+//! of a decoder's: a failed read names the error's kind, a projection that
+//! does not decode is said in one fixed sentence, and both texts go to the
+//! gate's log. The realm and the namespace come last in a reason, so that a
+//! reason cut for length keeps what it says.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use meerkat::{
@@ -68,11 +92,28 @@ use meerkat::{
 };
 use meerkat_core::SessionId;
 use meerkat_core::lifecycle::RunId;
+use meerkat_runtime::RESUMED_RUN_ADMISSION_ATTEMPT_TIMEOUT;
 
 /// How many non-terminal items one page of the claim scan reads: the
 /// WorkGraph's largest list page. The scan pages through every open item
 /// with the list cursor.
 const CLAIM_SCAN_PAGE: usize = 1000;
+
+/// The part of one of Meerkat's admission attempts the claim scan leaves
+/// unused, so that the gate's own answer about a slow list arrives before
+/// Meerkat cuts the attempt: an eighth of
+/// [`RESUMED_RUN_ADMISSION_ATTEMPT_TIMEOUT`]. A share of that timeout, not a
+/// fixed time, so that the budget follows the timeout wherever it is set.
+const CLAIM_SCAN_MARGIN: Duration = match RESUMED_RUN_ADMISSION_ATTEMPT_TIMEOUT.checked_div(8) {
+    Some(margin) => margin,
+    None => Duration::ZERO,
+};
+
+/// How long the claim scan may read before the gate ends it and answers
+/// unavailable: one of Meerkat's admission attempts less
+/// [`CLAIM_SCAN_MARGIN`].
+const CLAIM_SCAN_BUDGET: Duration =
+    RESUMED_RUN_ADMISSION_ATTEMPT_TIMEOUT.saturating_sub(CLAIM_SCAN_MARGIN);
 
 /// How many superseded runs the gate remembers. A superseded run is settled
 /// and never resumed again, so only the attempts of a resume still in
@@ -87,8 +128,9 @@ pub(crate) enum ResumeCheck {
     /// The work moved: Meerkat settles the run the way a stop does, and it
     /// never resumes.
     Superseded(String),
-    /// The gate cannot decide: Meerkat asks again, then settles the run as
-    /// superseded.
+    /// The gate cannot decide: Meerkat asks again a bounded number of times,
+    /// then holds the run, neither resumed nor settled, and asks again
+    /// later.
     Unavailable(String),
 }
 
@@ -201,10 +243,10 @@ pub(crate) struct WorkGraphResumeGate {
 /// without a service, none over a backend that has no WorkGraph, and none
 /// on a candidate launch. With no gate bound Meerkat asks no resumed-run
 /// admission. A store without a WorkGraph refuses every read, so a gate
-/// over it could only answer unavailable until Meerkat settles the run as
-/// superseded; it holds no item and no claim, so there is nothing to
-/// check, as without a service. On a candidate, a run it holds stays
-/// parked with its mark: the gate's verdict, and the lease expiry it
+/// over it could only answer unavailable, and Meerkat would hold the run
+/// for as long as it asked; it holds no item and no claim, so there is
+/// nothing to check, as without a service. On a candidate, a run it holds
+/// stays parked with its mark: the gate's verdict, and the lease expiry it
 /// commits, belong to the authoritative launch.
 pub(crate) fn launch_resume_gate(
     service: Option<WorkGraphService>,
@@ -268,13 +310,51 @@ impl WorkGraphResumeGate {
         let check = match self.decide(worker, &run).await {
             Ok(check) => check,
             Err(error) => {
-                ResumeCheck::Unavailable(format!("the WorkGraph could not be read: {error}"))
+                // The store's own words stay in this log line. The reason
+                // is shown to whoever reads the held run, so it holds the
+                // error's kind and no word of its text.
+                tracing::warn!(
+                    mob_id = %worker.mob_id,
+                    agent_identity = %worker.agent_identity,
+                    session_id = %worker.session_id,
+                    run_id = %worker.run_id,
+                    %error,
+                    "durable resume gate: a WorkGraph read failed"
+                );
+                self.read_fault(&error)
             }
         };
         if let ResumeCheck::Superseded(reason) = &check {
             self.superseded.remember(&run, reason);
         }
         check
+    }
+
+    /// The answer to a WorkGraph read that failed: unavailable, with the
+    /// error's kind and the realm and namespace the gate reads, the names
+    /// last as in [`Self::claim_scan_cut`]. The error's own text is not in
+    /// it: a store may print a path, an id or anything else there, and the
+    /// reason is shown to a caller. The two names are the only text in the
+    /// reason that the gate did not write ([`Self::names_shown`]).
+    fn read_fault(&self, error: &WorkGraphError) -> ResumeCheck {
+        ResumeCheck::Unavailable(format!(
+            "the WorkGraph could not be read: {}; no verdict was drawn; {}",
+            read_fault_kind(error),
+            self.names_shown(),
+        ))
+    }
+
+    /// The realm and the namespace this gate reads, as each unavailable
+    /// reason ends: the only text in such a reason that the gate did not
+    /// write. It comes from the service the gate was built over, whose realm
+    /// id is any string, so every control character in the two names is
+    /// replaced: the reason is clean whatever they hold.
+    fn names_shown(&self) -> String {
+        format!(
+            "realm '{}' namespace '{}'",
+            without_control_characters(self.service.default_realm_id()),
+            without_control_characters(self.service.default_namespace().as_str()),
+        )
     }
 
     async fn decide(
@@ -284,10 +364,23 @@ impl WorkGraphResumeGate {
     ) -> Result<ResumeCheck, WorkGraphError> {
         // The run executes under attention the gate cannot read, so it can
         // neither name the run's item nor treat the run as one without
-        // attention: it cannot decide.
-        if let Some(reason) = worker.attention_projection_unreadable {
+        // attention: it cannot decide. Why it does not decode is the
+        // decoder's text: it goes to the log, and the reason is the gate's
+        // own sentence, with the two names as its only other text.
+        if let Some(decode_error) = worker.attention_projection_unreadable {
+            tracing::warn!(
+                mob_id = %worker.mob_id,
+                agent_identity = %worker.agent_identity,
+                session_id = %worker.session_id,
+                run_id = %worker.run_id,
+                decode_error,
+                "durable resume gate: the run's WorkGraph attention projection does not decode"
+            );
             return Ok(ResumeCheck::Unavailable(format!(
-                "the run's WorkGraph attention projection does not decode: {reason}"
+                "the run's WorkGraph attention projection does not decode, so the resume gate \
+                 can neither name the run's work item nor treat the run as one without \
+                 attention; no verdict was drawn; {}",
+                self.names_shown(),
             )));
         }
         let keys = WorkerKeys::of(worker);
@@ -379,7 +472,9 @@ impl WorkGraphResumeGate {
     }
 
     /// The run named no item: every claim the worker holds decides. The scan
-    /// pages through every open item with the list cursor.
+    /// pages through every open item with the list cursor, for
+    /// [`CLAIM_SCAN_BUDGET`] at most: a scan that is not done by then is
+    /// ended and answers unavailable ([`Self::claim_scan_cut`]).
     async fn decide_by_claims(
         &self,
         keys: &WorkerKeys<'_>,
@@ -388,20 +483,34 @@ impl WorkGraphResumeGate {
         if keys.member.is_none() && keys.session.is_none() {
             return Ok(ResumeCheck::Continue);
         }
+        let started = tokio::time::Instant::now();
+        let deadline = started + CLAIM_SCAN_BUDGET;
         // The worker's claimed items by id. A walk returns an item twice only
         // when a write moved it back past the cursor; the newer revision
         // decides.
         let mut held = BTreeMap::<WorkItemId, WorkItem>::new();
         let mut cursor = None;
+        let mut pages_read = 0_usize;
         loop {
-            let page = self
-                .service
-                .list_page(WorkItemFilter {
-                    limit: Some(CLAIM_SCAN_PAGE),
-                    cursor,
-                    ..WorkItemFilter::default()
-                })
-                .await?;
+            // The scan ends at its deadline, between two pages or in the
+            // middle of one: a page is one full list of the store, and a
+            // single list can outlast the budget. Nothing below this loop
+            // has run then, so no verdict is drawn and nothing is written.
+            if tokio::time::Instant::now() >= deadline {
+                return Ok(self.claim_scan_cut(pages_read, started.elapsed()));
+            }
+            let read = self.service.list_page(WorkItemFilter {
+                limit: Some(CLAIM_SCAN_PAGE),
+                cursor,
+                ..WorkItemFilter::default()
+            });
+            let page = match tokio::time::timeout_at(deadline, read).await {
+                Ok(page) => page?,
+                Err(_elapsed) => {
+                    return Ok(self.claim_scan_cut(pages_read, started.elapsed()));
+                }
+            };
+            pages_read += 1;
             // A page that took no item cannot move the walk on.
             let advanced = !page.items.is_empty();
             for item in page.items {
@@ -440,6 +549,26 @@ impl WorkGraphResumeGate {
             }
         }
         Ok(verdict)
+    }
+
+    /// The answer of a claim scan that reached [`CLAIM_SCAN_BUDGET`] before
+    /// its last page: unavailable, with what was slow. The reason is read by
+    /// an operator: it names the list by the realm and namespace the gate
+    /// reads, the number of pages read and the time waited, and nothing of
+    /// any item. The names come last: where a long reason is cut for
+    /// display, what was slow, the counts and the times are kept. They are
+    /// the only text in the reason that the gate did not write
+    /// ([`Self::names_shown`]).
+    fn claim_scan_cut(&self, pages_read: usize, waited: Duration) -> ResumeCheck {
+        ResumeCheck::Unavailable(format!(
+            "the WorkGraph open work item list was too slow for the resume gate's claim scan: \
+             {pages_read} page(s) of up to {CLAIM_SCAN_PAGE} items read in {} ms, scan budget \
+             {} ms; the scan was ended, no verdict was drawn from the pages read and nothing \
+             was written; {}",
+            waited.as_millis(),
+            CLAIM_SCAN_BUDGET.as_millis(),
+            self.names_shown(),
+        ))
     }
 
     /// The item-level verdict for the run's item: terminal, claimed by
@@ -526,6 +655,42 @@ fn terminal_status_name(status: WorkStatus) -> Option<&'static str> {
     }
 }
 
+/// `name` with every control character replaced by `?`, for a reason that is
+/// shown to a caller: an escape sequence, a line break or a NUL in a name
+/// stays out of it.
+fn without_control_characters(name: &str) -> String {
+    name.chars()
+        .map(|character| {
+            if character.is_control() {
+                '?'
+            } else {
+                character
+            }
+        })
+        .collect()
+}
+
+/// The kind of a WorkGraph read fault, for the gate's reason: the error's
+/// variant in fixed words, and nothing the error carries.
+fn read_fault_kind(error: &WorkGraphError) -> &'static str {
+    match error {
+        WorkGraphError::NotFound { .. } => "work item not found",
+        WorkGraphError::AttentionNotFound { .. } => "attention binding not found",
+        WorkGraphError::StaleRevision { .. } => "stale revision",
+        WorkGraphError::Conflict(_) => "conflict",
+        WorkGraphError::InvalidTransition(_) => "invalid transition",
+        WorkGraphError::InvalidInput(_) => "invalid input",
+        WorkGraphError::InvalidTimestampMillis { .. } => "invalid timestamp",
+        WorkGraphError::Store(_) => "store error",
+        WorkGraphError::NamespaceAssignmentRequired { .. } => "namespace assignment required",
+        WorkGraphError::UnsupportedBackend(_) => "unsupported backend",
+        WorkGraphError::AttentionTargetRealmMismatch { .. } => "attention target realm mismatch",
+        WorkGraphError::BackingStoreUnavailable { .. } => "backing store unavailable",
+        WorkGraphError::UnpairedAdmissionIdentity { .. } => "unpaired admission identity",
+        WorkGraphError::SchemaMismatch { .. } => "schema mismatch",
+    }
+}
+
 #[async_trait::async_trait]
 impl meerkat_mob::DurableResumeGate for WorkGraphResumeGate {
     async fn check(
@@ -575,12 +740,15 @@ impl meerkat_mob::DurableResumeGate for WorkGraphResumeGate {
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     use meerkat::{
-        AttentionProjectionRequest, ClaimWorkItemRequest, CloseWorkItemRequest,
-        DisabledWorkGraphStore, GoalAttentionTarget, GoalCreateRequest, MemoryWorkGraphStore,
-        WorkItemId, WorkNamespace, WorkOwner,
+        AttentionListRequest, AttentionProjectionRequest, ClaimWorkItemRequest,
+        CloseWorkItemRequest, DisabledWorkGraphStore, GoalAttentionTarget, GoalCreateRequest,
+        MemoryWorkGraphStore, ReleaseWorkItemRequest, WorkAttentionBinding, WorkEdge,
+        WorkGraphEvent, WorkGraphEventFilter, WorkGraphStore, WorkGraphStoreKind, WorkItemId,
+        WorkNamespace, WorkOwner,
     };
 
     use super::*;
@@ -1309,6 +1477,561 @@ mod tests {
         );
     }
 
+    /// The memory store behind a list of the open items that can be made
+    /// slow: from a chosen `list_items` call on, each list waits a set time
+    /// before it reads. Nothing fails. It counts the writes it passes on, so
+    /// a row can assert that the gate wrote nothing.
+    struct SlowListStore {
+        inner: Arc<MemoryWorkGraphStore>,
+        /// The first slow `list_items` call, counted from 1; 0 for none.
+        slow_from_call: AtomicUsize,
+        slow_for: Mutex<Duration>,
+        list_calls: AtomicUsize,
+        writes: AtomicUsize,
+        /// Signalled each time a slow list starts to wait.
+        stalled: tokio::sync::Notify,
+        /// When set, every read of an item or of the item list fails with a
+        /// store error of this text.
+        failing_with: Mutex<Option<String>>,
+    }
+
+    impl SlowListStore {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                inner: Arc::new(MemoryWorkGraphStore::new()),
+                slow_from_call: AtomicUsize::new(0),
+                slow_for: Mutex::new(Duration::ZERO),
+                list_calls: AtomicUsize::new(0),
+                writes: AtomicUsize::new(0),
+                stalled: tokio::sync::Notify::new(),
+                failing_with: Mutex::new(None),
+            })
+        }
+
+        /// From now on every read of an item or of the item list fails with
+        /// a store error of the text `text`.
+        fn fail_reads_with(&self, text: &str) {
+            *self.failing_with.lock().unwrap() = Some(text.to_string());
+        }
+
+        fn read_fault(&self) -> Result<(), WorkGraphError> {
+            match self.failing_with.lock().unwrap().clone() {
+                Some(text) => Err(WorkGraphError::Store(text)),
+                None => Ok(()),
+            }
+        }
+
+        /// The service a gate reads this store through.
+        fn service(self: &Arc<Self>) -> WorkGraphService {
+            let store: Arc<dyn WorkGraphStore> = self.clone();
+            WorkGraphService::with_scope(store, mob_realm(), WorkNamespace::default())
+        }
+
+        /// The same items through the memory store itself: a row's setup,
+        /// and its reads of what the gate left.
+        fn direct(&self) -> WorkGraphService {
+            let store: Arc<dyn WorkGraphStore> = self.inner.clone();
+            WorkGraphService::with_scope(store, mob_realm(), WorkNamespace::default())
+        }
+
+        /// From the `call`th list made after this on, each list of the items
+        /// waits `wait` before it reads.
+        fn slow_from(&self, call: usize, wait: Duration) {
+            self.list_calls.store(0, Ordering::SeqCst);
+            *self.slow_for.lock().unwrap() = wait;
+            self.slow_from_call.store(call, Ordering::SeqCst);
+        }
+
+        fn fast_again(&self) {
+            self.slow_from_call.store(0, Ordering::SeqCst);
+        }
+
+        /// The lists of the items made since the last [`Self::slow_from`].
+        fn lists(&self) -> usize {
+            self.list_calls.load(Ordering::SeqCst)
+        }
+
+        /// The writes that went through this store, the gate's only way in.
+        fn writes(&self) -> usize {
+            self.writes.load(Ordering::SeqCst)
+        }
+
+        /// The newest event of the gate's namespace: every write appends one.
+        async fn ledger_mark(&self) -> Option<i64> {
+            self.inner
+                .latest_event_seq(WorkGraphEventFilter {
+                    realm_id: Some(mob_realm()),
+                    namespace: Some(WorkNamespace::default()),
+                    all_namespaces: false,
+                    after_seq: None,
+                    limit: None,
+                })
+                .await
+                .expect("read the ledger")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl WorkGraphStore for SlowListStore {
+        fn kind(&self) -> WorkGraphStoreKind {
+            self.inner.kind()
+        }
+
+        async fn get_store_time_utc(&self) -> Result<DateTime<Utc>, WorkGraphError> {
+            self.inner.get_store_time_utc().await
+        }
+
+        async fn insert_item(
+            &self,
+            item: WorkItem,
+            event: WorkGraphEvent,
+        ) -> Result<WorkItem, WorkGraphError> {
+            self.writes.fetch_add(1, Ordering::SeqCst);
+            self.inner.insert_item(item, event).await
+        }
+
+        async fn update_item_cas(
+            &self,
+            item: WorkItem,
+            expected_previous_revision: u64,
+            event: WorkGraphEvent,
+        ) -> Result<WorkItem, WorkGraphError> {
+            self.writes.fetch_add(1, Ordering::SeqCst);
+            self.inner
+                .update_item_cas(item, expected_previous_revision, event)
+                .await
+        }
+
+        async fn update_item_and_attention_cas(
+            &self,
+            item: WorkItem,
+            expected_previous_revision: u64,
+            item_event: WorkGraphEvent,
+            attention_updates: Vec<(WorkAttentionBinding, u64, WorkGraphEvent)>,
+        ) -> Result<WorkItem, WorkGraphError> {
+            self.writes.fetch_add(1, Ordering::SeqCst);
+            self.inner
+                .update_item_and_attention_cas(
+                    item,
+                    expected_previous_revision,
+                    item_event,
+                    attention_updates,
+                )
+                .await
+        }
+
+        async fn get_item(
+            &self,
+            realm_id: &str,
+            namespace: &WorkNamespace,
+            id: &WorkItemId,
+        ) -> Result<Option<WorkItem>, WorkGraphError> {
+            self.read_fault()?;
+            self.inner.get_item(realm_id, namespace, id).await
+        }
+
+        async fn list_items(
+            &self,
+            filter: WorkItemFilter,
+        ) -> Result<Vec<WorkItem>, WorkGraphError> {
+            self.read_fault()?;
+            let call = self.list_calls.fetch_add(1, Ordering::SeqCst) + 1;
+            let slow_from = self.slow_from_call.load(Ordering::SeqCst);
+            if slow_from != 0 && call >= slow_from {
+                let wait = *self.slow_for.lock().unwrap();
+                self.stalled.notify_one();
+                tokio::time::sleep(wait).await;
+            }
+            self.inner.list_items(filter).await
+        }
+
+        async fn list_attention_matching_bounded(
+            &self,
+            filter: AttentionListRequest,
+            observed_at: DateTime<Utc>,
+            limit: usize,
+        ) -> Result<Vec<WorkAttentionBinding>, WorkGraphError> {
+            self.inner
+                .list_attention_matching_bounded(filter, observed_at, limit)
+                .await
+        }
+
+        async fn insert_edge(
+            &self,
+            edge: WorkEdge,
+            event: WorkGraphEvent,
+        ) -> Result<WorkEdge, WorkGraphError> {
+            self.writes.fetch_add(1, Ordering::SeqCst);
+            self.inner.insert_edge(edge, event).await
+        }
+
+        async fn list_edges(
+            &self,
+            realm_id: &str,
+            namespace: &WorkNamespace,
+        ) -> Result<Vec<WorkEdge>, WorkGraphError> {
+            self.inner.list_edges(realm_id, namespace).await
+        }
+
+        async fn list_events(
+            &self,
+            filter: WorkGraphEventFilter,
+        ) -> Result<Vec<WorkGraphEvent>, WorkGraphError> {
+            self.inner.list_events(filter).await
+        }
+
+        async fn latest_event_seq(
+            &self,
+            filter: WorkGraphEventFilter,
+        ) -> Result<Option<i64>, WorkGraphError> {
+            self.inner.latest_event_seq(filter).await
+        }
+    }
+
+    /// Meerkat's request for a resume of [`WORKER`] with no attention
+    /// projection.
+    fn plain_resume_request() -> meerkat_mob::DurableResumeRequest {
+        meerkat_mob::DurableResumeRequest::new(
+            meerkat_mob::MobId::from(MOB),
+            meerkat_mob::AgentIdentity::from(WORKER),
+            meerkat_mob::ProfileName::from("worker"),
+            SessionId::new(),
+            RunId::new(),
+            vec![meerkat_core::lifecycle::InputId::new()],
+        )
+    }
+
+    /// One list of the open items that takes longer than the gate allows its
+    /// claim scan. Asked the way Meerkat asks (one attempt, cut at
+    /// `RESUMED_RUN_ADMISSION_ATTEMPT_TIMEOUT`), the gate answers before that
+    /// cut: unavailable, with a reason that names the list, the pages it had
+    /// read and how long it waited. It wrote nothing, and the same run asked
+    /// again once the list answers is decided as ever.
+    #[tokio::test(start_paused = true)]
+    async fn a_claim_scan_slower_than_its_budget_answers_unavailable_and_says_why() {
+        use meerkat_mob::DurableResumeGate as _;
+
+        let store = SlowListStore::new();
+        let direct = store.direct();
+        let item = plain_item(&direct).await;
+        let claimed = claim(&direct, &item, member_key(WORKER), in_an_hour()).await;
+        let ledger = store.ledger_mark().await;
+        let gate = WorkGraphResumeGate::new(store.service());
+        let request = plain_resume_request();
+
+        store.slow_from(1, Duration::from_secs(45));
+        let asked = tokio::time::Instant::now();
+        let answer = tokio::time::timeout(
+            meerkat_runtime::RESUMED_RUN_ADMISSION_ATTEMPT_TIMEOUT,
+            gate.check(&request),
+        )
+        .await;
+        let waited = asked.elapsed();
+        let reason = match answer {
+            Ok(meerkat_mob::DurableResumeVerdict::Unavailable { reason }) => reason,
+            other => panic!(
+                "the gate answers unavailable itself, before Meerkat cuts the attempt: {other:?}"
+            ),
+        };
+        for part in [
+            "open work item list".to_string(),
+            format!("realm '{}'", mob_realm()),
+            format!("namespace '{}'", WorkNamespace::default()),
+            "0 page(s)".to_string(),
+            format!("read in {} ms", waited.as_millis()),
+        ] {
+            assert!(
+                reason.contains(&part),
+                "the reason holds \"{part}\": {reason}"
+            );
+        }
+        assert_eq!(store.writes(), 0, "a cut scan wrote nothing");
+        assert_eq!(
+            store.ledger_mark().await,
+            ledger,
+            "the ledger gained no event"
+        );
+        let after = direct
+            .get(None, None, item.id.clone())
+            .await
+            .expect("read the item");
+        assert_eq!(after.revision, claimed.revision, "the item is as it was");
+        assert_eq!(after.claim, claimed.claim, "the claim is as it was");
+
+        store.fast_again();
+        let again = gate.check(&request).await;
+        assert!(
+            matches!(again, meerkat_mob::DurableResumeVerdict::Continue),
+            "the same run, asked again over a list that answers, continues: {again:?}"
+        );
+    }
+
+    /// The control of the rows around it: a list that answers in time, at
+    /// once or slowly, is read to its end and decides as before. A live claim
+    /// keeps the run; a lapsed one supersedes it, and its expiry is written
+    /// through the same store (so the rows' write count is a live reading).
+    #[tokio::test]
+    async fn a_claim_scan_that_ends_in_time_decides_as_before() {
+        let store = SlowListStore::new();
+        let direct = store.direct();
+        let live = plain_item(&direct).await;
+        claim(&direct, &live, member_key(WORKER), in_an_hour()).await;
+        let gate = WorkGraphResumeGate::new(store.service());
+        let worker = Worker::named(WORKER);
+
+        assert_eq!(
+            gate.check_worker(worker.resuming(None)).await,
+            ResumeCheck::Continue,
+            "a list that answers at once"
+        );
+
+        // A slow list that still ends inside an attempt: a quarter of
+        // Meerkat's attempt timeout.
+        let slow = meerkat_runtime::RESUMED_RUN_ADMISSION_ATTEMPT_TIMEOUT / 4;
+        tokio::time::pause();
+        store.slow_from(1, slow);
+        let asked = tokio::time::Instant::now();
+        assert_eq!(
+            gate.check_worker(worker.resuming(None)).await,
+            ResumeCheck::Continue,
+            "a slow list that ends in time"
+        );
+        assert!(asked.elapsed() >= slow, "the list was waited for");
+        tokio::time::resume();
+        store.fast_again();
+        assert_eq!(store.writes(), 0, "a run that continues writes nothing");
+
+        let lapsing = plain_item(&direct).await;
+        claim(&direct, &lapsing, member_key(WORKER), lapsing_soon()).await;
+        let_the_lease_lapse().await;
+        let check = gate.check_worker(worker.resuming(None)).await;
+        assert!(superseded_reason(&check).contains("lapsed"), "{check:?}");
+        assert_eq!(
+            store.writes(),
+            1,
+            "the lapsed claim's expiry went through this store"
+        );
+    }
+
+    /// A scan cut after its first page answers unavailable, whatever that
+    /// page held. Here it held the worker's live claim, which is released
+    /// while the second page is awaited: the sighting is older than the item,
+    /// and a verdict drawn from it would let the run continue on work the
+    /// worker no longer holds.
+    #[tokio::test(start_paused = true)]
+    async fn a_cut_claim_scan_never_continues_on_a_claim_it_sighted_earlier() {
+        let store = SlowListStore::new();
+        let direct = store.direct();
+        // A full page of older open items puts one item on a second page.
+        for _ in 0..CLAIM_SCAN_PAGE {
+            plain_item(&direct).await;
+        }
+        let item = plain_item(&direct).await;
+        let claimed = claim(&direct, &item, member_key(WORKER), in_an_hour()).await;
+        let gate = WorkGraphResumeGate::new(store.service());
+        let worker = Worker::named(WORKER);
+
+        store.slow_from(2, Duration::from_secs(45));
+        let (check, ()) = tokio::join!(gate.check_worker(worker.resuming(None)), async {
+            store.stalled.notified().await;
+            direct
+                .release(ReleaseWorkItemRequest {
+                    id: claimed.id.clone(),
+                    realm_id: None,
+                    namespace: None,
+                    expected_revision: claimed.revision,
+                })
+                .await
+                .expect("release the claim");
+        });
+        assert_eq!(store.lists(), 2, "the scan was on its second page");
+        assert!(
+            matches!(&check, ResumeCheck::Unavailable(reason) if reason.contains("1 page(s)")),
+            "a cut scan draws no verdict from the page it read: {check:?}"
+        );
+        assert_eq!(store.writes(), 0, "a cut scan wrote nothing");
+    }
+
+    /// As above, with the worker's lapsed claim on the first page: a cut scan
+    /// answers no superseded verdict, writes no expiry and remembers nothing
+    /// for the run, so the same run asked again over a list that answers is
+    /// decided then.
+    #[tokio::test]
+    async fn a_cut_claim_scan_never_supersedes_and_writes_nothing() {
+        let store = SlowListStore::new();
+        let direct = store.direct();
+        for _ in 0..CLAIM_SCAN_PAGE {
+            plain_item(&direct).await;
+        }
+        let item = plain_item(&direct).await;
+        let claimed = claim(&direct, &item, member_key(WORKER), lapsing_soon()).await;
+        let_the_lease_lapse().await;
+        let ledger = store.ledger_mark().await;
+        let gate = WorkGraphResumeGate::new(store.service());
+        let worker = Worker::named(WORKER);
+
+        tokio::time::pause();
+        store.slow_from(2, Duration::from_secs(45));
+        let check = gate.check_worker(worker.resuming(None)).await;
+        assert_eq!(store.lists(), 2, "the scan was on its second page");
+        assert!(
+            matches!(&check, ResumeCheck::Unavailable(reason) if reason.contains("1 page(s)")),
+            "a cut scan draws no verdict from the page it read: {check:?}"
+        );
+        assert_eq!(store.writes(), 0, "a cut scan wrote nothing");
+        assert_eq!(
+            store.ledger_mark().await,
+            ledger,
+            "the ledger gained no event"
+        );
+        let after = direct
+            .get(None, None, item.id.clone())
+            .await
+            .expect("read the item");
+        assert_eq!(after.revision, claimed.revision, "the item is as it was");
+        assert_eq!(after.claim, claimed.claim, "the lapsed claim is unobserved");
+
+        store.fast_again();
+        let again = gate.check_worker(worker.resuming(None)).await;
+        assert!(
+            superseded_reason(&again).contains("lapsed"),
+            "nothing was remembered for the run: it is decided now: {again:?}"
+        );
+        assert_eq!(store.writes(), 1, "and the expiry is written now");
+    }
+
+    /// The scan's budget is Meerkat's attempt timeout less a margin: against
+    /// a list that does not answer, the gate's own answer comes after more
+    /// than half of an attempt and before its end.
+    #[tokio::test(start_paused = true)]
+    async fn the_claim_scan_ends_inside_meerkats_attempt_timeout() {
+        let attempt = meerkat_runtime::RESUMED_RUN_ADMISSION_ATTEMPT_TIMEOUT;
+        let store = SlowListStore::new();
+        let gate = WorkGraphResumeGate::new(store.service());
+        let worker = Worker::named(WORKER);
+
+        store.slow_from(1, attempt * 100);
+        let asked = tokio::time::Instant::now();
+        let check = gate.check_worker(worker.resuming(None)).await;
+        let waited = asked.elapsed();
+        assert!(
+            matches!(check, ResumeCheck::Unavailable(_)),
+            "the gate ends its scan itself: {check:?}"
+        );
+        assert!(
+            waited < attempt,
+            "the gate answers before Meerkat cuts the attempt: waited {waited:?} of {attempt:?}"
+        );
+        assert!(
+            waited > attempt / 2,
+            "most of an attempt is left to the read: waited {waited:?} of {attempt:?}"
+        );
+        assert_eq!(
+            CLAIM_SCAN_BUDGET + CLAIM_SCAN_MARGIN,
+            attempt,
+            "the budget is Meerkat's attempt timeout less the margin"
+        );
+        assert!(!CLAIM_SCAN_MARGIN.is_zero(), "the margin is not empty");
+        assert!(
+            waited >= CLAIM_SCAN_BUDGET,
+            "the scan had its whole budget: waited {waited:?} of {CLAIM_SCAN_BUDGET:?}"
+        );
+    }
+
+    /// The first `bytes` bytes of `text`, cut back to a character boundary:
+    /// how a reason that is too long is shortened where it is reported.
+    fn cut_at(text: &str, bytes: usize) -> &str {
+        let mut end = bytes.min(text.len());
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        &text[..end]
+    }
+
+    /// Meerkat reports a reason cut at 512 bytes. The scan's reason holds
+    /// what was slow, the counts and the times before the realm and the
+    /// namespace, so a very long realm id costs it its tail only, and with
+    /// the largest numbers there are.
+    #[test]
+    fn a_cut_scans_reason_keeps_its_facts_ahead_of_a_very_long_realm_id() {
+        let realm = format!("mob.{}", "r".repeat(4096));
+        let store: Arc<dyn WorkGraphStore> = Arc::new(MemoryWorkGraphStore::new());
+        let gate = WorkGraphResumeGate::new(WorkGraphService::with_scope(
+            store,
+            realm.clone(),
+            WorkNamespace::default(),
+        ));
+
+        let check = gate.claim_scan_cut(usize::MAX, Duration::MAX);
+        let ResumeCheck::Unavailable(reason) = &check else {
+            panic!("a cut scan answers unavailable: {check:?}");
+        };
+        assert!(
+            reason.contains(&realm),
+            "the gate itself names the realm whole: {} bytes",
+            reason.len()
+        );
+        let kept = cut_at(reason, 512);
+        for part in [
+            "open work item list was too slow".to_string(),
+            format!("{} page(s)", usize::MAX),
+            format!("read in {} ms", Duration::MAX.as_millis()),
+            format!("scan budget {} ms", CLAIM_SCAN_BUDGET.as_millis()),
+            "no verdict was drawn from the pages read and nothing was written".to_string(),
+            "realm '".to_string(),
+        ] {
+            assert!(
+                kept.contains(&part),
+                "the cut reason holds \"{part}\": {kept}"
+            );
+        }
+    }
+
+    /// The realm id and the namespace are the only text in an unavailable
+    /// reason that the gate did not write, and the service takes any string
+    /// for a realm id. Whatever it holds, no reason carries a control
+    /// character: each one is replaced.
+    #[tokio::test]
+    async fn an_unavailable_reason_holds_no_control_character_of_a_name() {
+        let realm = "mob.\u{1b}[31mred\r\nsecond line\ttab\u{0}";
+        let store: Arc<dyn WorkGraphStore> = Arc::new(MemoryWorkGraphStore::new());
+        let gate = WorkGraphResumeGate::new(WorkGraphService::with_scope(
+            store,
+            realm,
+            WorkNamespace::default(),
+        ));
+        let worker = Worker::named(WORKER);
+
+        let scan = gate.claim_scan_cut(1, Duration::from_secs(7));
+        let fault = gate.read_fault(&WorkGraphError::Store("down".to_string()));
+        let undecodable = gate
+            .check_worker(ResumingWorker {
+                attention_projection_unreadable: Some("bad"),
+                ..worker.resuming(None)
+            })
+            .await;
+        for (which, check) in [
+            ("a cut scan", scan),
+            ("a failed read", fault),
+            ("a projection that does not decode", undecodable),
+        ] {
+            let ResumeCheck::Unavailable(reason) = &check else {
+                panic!("{which} answers unavailable: {check:?}");
+            };
+            assert!(
+                !reason.chars().any(char::is_control),
+                "the reason of {which} holds no control character: {reason:?}"
+            );
+            assert!(
+                reason.ends_with("realm 'mob.?[31mred??second line?tab?' namespace 'default'"),
+                "the reason of {which} ends with the two names, cleaned: {reason:?}"
+            );
+        }
+    }
+
+    /// A projection that does not decode is never read as a run without
+    /// attention: the gate answers unavailable, in its own sentence. What the
+    /// decoder said is in the gate's log, not in the reason.
     #[tokio::test]
     async fn an_unreadable_projection_is_unavailable() {
         let service = service();
@@ -1321,8 +2044,81 @@ mod tests {
 
         let check = gate.check_worker(resuming).await;
         assert!(
-            matches!(&check, ResumeCheck::Unavailable(reason) if reason.contains("binding_id")),
-            "never read as a run without attention: {check:?}"
+            matches!(
+                &check,
+                ResumeCheck::Unavailable(reason)
+                    if reason.contains("attention projection does not decode")
+                        && !reason.contains("binding_id")
+            ),
+            "never read as a run without attention, and in the gate's own words: {check:?}"
+        );
+    }
+
+    /// No unavailable reason carries a word of a store's error or of a
+    /// decoder's. A store may print a path, an id or anything else in its
+    /// error, and the reason is shown to whoever reads the held run. The
+    /// reason of a failed read names the error's kind and the realm and
+    /// namespace; the reason of a projection that does not decode is one
+    /// sentence of the gate. Both texts go to the gate's log.
+    #[tokio::test]
+    async fn an_unavailable_reason_carries_no_text_of_a_store_or_a_decoder() {
+        const MARKER: &str = "marker-7f3a";
+
+        let store = SlowListStore::new();
+        let direct = store.direct();
+        let worker = Worker::named(WORKER);
+        let (_item, projection) = goal_for(
+            &direct,
+            GoalAttentionTarget::Owner {
+                owner_key: member_key(WORKER),
+            },
+        )
+        .await;
+        let gate = WorkGraphResumeGate::new(store.service());
+        store.fail_reads_with(&format!("no such file /var/lib/{MARKER}/items.db"));
+
+        // The claim scan's list fails, and then the projected item's read.
+        for (read, projection) in [
+            ("the item list", None),
+            ("the projected item", Some(&projection)),
+        ] {
+            let check = gate.check_worker(worker.resuming(projection)).await;
+            let ResumeCheck::Unavailable(reason) = &check else {
+                panic!("a failed read of {read} is unavailable: {check:?}");
+            };
+            assert!(
+                !reason.contains(MARKER) && !reason.contains("/var/lib"),
+                "no word of the store's error after a failed read of {read}: {reason}"
+            );
+            for part in [
+                "the WorkGraph could not be read: store error".to_string(),
+                format!("realm '{}'", mob_realm()),
+                format!("namespace '{}'", WorkNamespace::default()),
+            ] {
+                assert!(
+                    reason.contains(&part),
+                    "the reason of a failed read of {read} holds \"{part}\": {reason}"
+                );
+            }
+        }
+
+        let decoder_said = format!("missing field `binding_id` at {MARKER}");
+        let check = gate
+            .check_worker(ResumingWorker {
+                attention_projection_unreadable: Some(decoder_said.as_str()),
+                ..worker.resuming(None)
+            })
+            .await;
+        let ResumeCheck::Unavailable(reason) = &check else {
+            panic!("a projection that does not decode is unavailable: {check:?}");
+        };
+        assert!(
+            !reason.contains(MARKER) && !reason.contains("binding_id"),
+            "no word of the decoder's: {reason}"
+        );
+        assert!(
+            reason.contains("attention projection does not decode"),
+            "the gate's own sentence: {reason}"
         );
     }
 

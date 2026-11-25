@@ -17,7 +17,7 @@ import {
 } from "../../sdk/typescript/src/index.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const repoRoot = resolve(here, "../..");
+const repoRoot = resolve(here, "../../..");
 const configDir = join(here, "config");
 const scenarioPath = join(here, "scenario.yaml");
 

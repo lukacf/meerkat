@@ -6,7 +6,7 @@ up the work again when the answer comes. The question waits in the state directo
 so the answer may come much later, and after a restart. Python and
 TypeScript, the same six steps.
 
-**Needs Meta 0.9.15 or later, gateway and SDKs, and a provider key**
+**Needs Meta 0.9.17 or later, gateway and SDKs, and a provider key**
 (`OPENAI_API_KEY`): only an agent can ask a question. `examples.sh` builds a
 gateway from this repository when `META_GATEWAY_BIN` names none.
 

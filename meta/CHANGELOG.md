@@ -79,39 +79,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   section. Affected: Meta 0.9.15 and later up to this change (the comparison
   does not exist before 0.9.15).
 
-- The WorkGraph resume gate says why it could not read, where it used to
-  leave Meerkat's admission attempt to time out in silence. For a durable
+- The WorkGraph resume gate says in its log what it was reading when
+  Meerkat's admission attempt ends without its answer. For a durable
   member's interrupted run that carries no attention projection, the gate
   pages through every open work item of the mob's WorkGraph namespace, and
   each page is one full list of the store. Over a store whose list takes
   longer than one admission attempt
-  (`RESUMED_RUN_ADMISSION_ATTEMPT_TIMEOUT`, 8 seconds), Meerkat dropped the
-  gate in the middle of its scan: the gate logged nothing, and the only
-  detail was that the admission did not answer in time. The gate now ends
-  its own scan a little before the attempt ends (after seven eighths of it)
-  and answers unavailable with a reason that names the open work item list
-  by realm and namespace, the pages it had read and the time it waited. An
-  operator sees that reason in the gate's own warning
-  (`durable resume gate: the gate cannot decide`) and as the detail of
-  Meerkat's `resumed run admission is unavailable` warning. A scan that is
-  ended draws no verdict from the pages it read and writes nothing.
+  (`RESUMED_RUN_ADMISSION_ATTEMPT_TIMEOUT`, 8 seconds), Meerkat drops the
+  gate in the middle of its scan: the gate used to log nothing, and the
+  only detail was that the admission did not answer in time.
 
-  This changes when the gate gives up, not only what it says. The scan used
-  to read until Meerkat cut the attempt (8 seconds); it now ends itself after
-  7. A scan that would have finished in the last eighth of an attempt was
-  decided before and is answered unavailable now, so that run is held until
-  an attempt reads the list faster. Over a list that does not answer, one
-  round of three attempts takes 27 seconds where it took 30. The number of
-  attempts and of rounds is unchanged, and no run is ended or resumed that
-  was not. The cut is what lets the gate answer at all: an attempt that
-  Meerkat cuts from outside says nothing. A host that reads the cause of a
-  held run sees a list that is too slow as the admission having answered
-  unavailable, with this reason; a slow read of a single item, of the
-  store's clock or of a lease write is still cut by Meerkat and reads as
-  not answered in time. Both mean that the WorkGraph was too slow.
+  What a caller reads is unchanged. The scan reads until it is done or
+  until Meerkat cuts the attempt, so a list that answers anywhere inside
+  the attempt decides the run, a round of three attempts over a list that
+  does not answer lasts as long as it did (30 seconds), and no run is
+  ended, resumed or held that was not. For an attempt that ran out,
+  Meerkat's detail is still that the admission did not answer in time.
+  Meerkat keeps the cause of a round's last attempt only, so a host that
+  reads the cause of a held run reads not answered in time when the
+  round's last attempt ran out, and answered unavailable when the last
+  attempt was answered so, whatever the earlier attempts did. The gate's
+  own word about a scan that ran out is in the log only.
 
-  Nothing else changes: the projected path is untouched, and a list that the
-  scan reads inside its budget decides as before.
+  That word is one warning, written as the gate's scan is dropped, with
+  the run (its session and run id), the pages it had read, the time it
+  waited, how long one attempt lasts, and the realm and namespace of the
+  open work item list. The gate is not told why its scan is dropped, and a
+  scan is also dropped when a caller gives the check up or the runtime
+  shuts down. It has only its own clock, started when the gate was
+  entered, so the warning speaks of time, never of who dropped the scan
+  and never of why the scan took the time it took:
+
+  - `durable resume gate: a claim scan was dropped at the attempt's limit`
+    when the scan was dropped within one millisecond of a whole attempt
+    on the gate's clock. Its reason says that the scan was unfinished
+    after a whole attempt.
+  - `durable resume gate: a claim scan was dropped before the attempt's limit`
+    when it was dropped earlier. Its reason says what had been read and
+    that the gate does not know why it was dropped. Meerkat's cut of an
+    attempt whose clock had been running for more than a millisecond
+    before the gate was entered is logged this way too.
+
+  A scan that ended logs neither. The warning covers the scan of the open
+  work item list only: an attempt that runs out elsewhere, in the reads of
+  a run that carries an attention projection, in the read of the store's
+  clock or in the write of a lapsed lease's expiry, leaves no warning of
+  the gate. A dropped scan draws no verdict from the pages it read and
+  writes nothing. The projected path is untouched.
 
 - The WorkGraph resume gate's unavailable reasons are the gate's own
   sentences. A WorkGraph read that failed used to put the store's whole

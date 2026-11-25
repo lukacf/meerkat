@@ -278,6 +278,47 @@ fn other_sections(recorded: &[String], current: &[String]) -> bool {
     !sections(recorded).starts_with(&sections(current))
 }
 
+/// Whether the session whose build sections `read` reads was built with
+/// other sections than `current` ([`other_sections`]). `read` is the read
+/// itself, not its answer: it is awaited at most once, and not at all for a
+/// `current` with no section.
+async fn other_sections_by_read<Read>(
+    identity: &AgentIdentity,
+    current: &[String],
+    read: Read,
+) -> bool
+where
+    Read: std::future::Future<
+            Output = Result<Option<Vec<String>>, meerkat_core::service::SessionError>,
+        >,
+{
+    // A text with no section: no session was built with other sections
+    // than none (`other_sections` is `!recorded.starts_with(current)`,
+    // and every list starts with the empty one), and a session whose
+    // record does not say, or cannot be read, answers `false` as well.
+    // So the answer is `false` whatever the read would give, and the
+    // read is not made: on a store that keeps a session as one document
+    // it is the session's whole committed body, and a start would make
+    // it for every configured agent that has a conversation, one after
+    // another.
+    if sections(current).is_empty() {
+        return false;
+    }
+    match read.await {
+        Ok(Some(recorded)) => other_sections(&recorded, current),
+        Ok(None) => false,
+        Err(error) => {
+            tracing::warn!(
+                %identity,
+                %error,
+                "the sections an agent's session was built with could not be read; its \
+                 instructions are compared again at the next start"
+            );
+            false
+        }
+    }
+}
+
 /// What a refused write means for the change.
 fn outcome_of_refusal(error: &OperatorInstructionError) -> InstructionOutcome {
     use InstructionNextSessionReason as Reason;
@@ -517,7 +558,9 @@ impl IdentityRuntime {
     /// (its metadata; no transcript row). A session whose record does not
     /// say, as one built or resumed through 0.9.14 does not, was built with
     /// nobody knows what: it answers `false`, and nothing is written for it
-    /// until a change is observed.
+    /// until a change is observed. For a `current` with no section the
+    /// answer is `false` without the read, at a start and in the
+    /// comparison alike.
     async fn built_with_other_sections(
         &self,
         session_id: &SessionId,
@@ -531,19 +574,12 @@ impl IdentityRuntime {
         else {
             return false;
         };
-        match sessions.recorded_build_instructions(session_id).await {
-            Ok(Some(recorded)) => other_sections(&recorded, current),
-            Ok(None) => false,
-            Err(error) => {
-                tracing::warn!(
-                    %identity,
-                    %error,
-                    "the sections an agent's session was built with could not be read; its \
-                     instructions are compared again at the next start"
-                );
-                false
-            }
-        }
+        other_sections_by_read(
+            identity,
+            current,
+            sessions.recorded_build_instructions(session_id),
+        )
+        .await
     }
 
     /// After the store commit of an update of a store-owned agent that
@@ -1069,6 +1105,79 @@ mod tests {
         ));
         assert!(!is_reserved_instruction_namespace("meerkat.identity"));
         assert!(!is_reserved_instruction_namespace("app.example"));
+    }
+
+    /// A read of a session's build sections that counts how often it is
+    /// made.
+    async fn counted(
+        reads: &std::sync::atomic::AtomicUsize,
+        answer: Result<Option<Vec<String>>, meerkat_core::service::SessionError>,
+    ) -> Result<Option<Vec<String>>, meerkat_core::service::SessionError> {
+        reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        answer
+    }
+
+    /// The answers a read of a session's build sections can give, by
+    /// number: sections that are none, sections, a record that does not
+    /// say, and a failed read.
+    const READ_ANSWERS: usize = 4;
+    fn read_answer(
+        number: usize,
+    ) -> Result<Option<Vec<String>>, meerkat_core::service::SessionError> {
+        match number {
+            0 => Ok(Some(text(&[]))),
+            1 => Ok(Some(text(&["Answer briefly."]))),
+            2 => Ok(None),
+            _ => Err(meerkat_core::service::SessionError::Unsupported(
+                "the store could not be read".to_string(),
+            )),
+        }
+    }
+
+    /// For an agent whose text has no section the build-state read is not
+    /// made, whatever it would answer, a failing read included; an agent
+    /// whose text has a section is read once, and a failed read answers
+    /// `false` for it as before.
+    #[tokio::test]
+    async fn a_text_with_no_section_makes_no_build_state_read_and_one_with_a_section_makes_one() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let identity = AgentIdentity::parse("host-a").expect("an identity");
+
+        let reads = AtomicUsize::new(0);
+        for number in 0..READ_ANSWERS {
+            for current in [text(&[]), text(&[""])] {
+                assert!(
+                    !other_sections_by_read(
+                        &identity,
+                        &current,
+                        counted(&reads, read_answer(number))
+                    )
+                    .await,
+                    "a text with no section was built with no other sections (answer {number})"
+                );
+            }
+        }
+        assert_eq!(
+            reads.load(Ordering::SeqCst),
+            0,
+            "no build-state read for a text with no section, a failing one included"
+        );
+
+        let current = text(&["Answer at length."]);
+        for (number, expected) in [true, true, false, false].into_iter().enumerate() {
+            let reads = AtomicUsize::new(0);
+            assert_eq!(
+                other_sections_by_read(&identity, &current, counted(&reads, read_answer(number)))
+                    .await,
+                expected,
+                "answer {number} against {current:?}"
+            );
+            assert_eq!(
+                reads.load(Ordering::SeqCst),
+                1,
+                "a text with a section is read once (answer {number})"
+            );
+        }
     }
 
     /// A change is one of the sections that count: an added empty section

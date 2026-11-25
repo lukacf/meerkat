@@ -8193,7 +8193,7 @@ async fn a_held_runs_settlement_whose_write_fails_is_polled_as_not_readable_unti
     assert!(
         matches!(
             &read,
-            Some(meerkat_runtime::PendingResumedRunRead::NotReadableNow { session_id: named })
+            Some(meerkat_runtime::PendingResumedRunRead::NotReadableNow { session_id: named, .. })
                 if named == &session_id
         ),
         "a registration that needs a reload is polled as not readable now, never as no run: \
@@ -8203,7 +8203,7 @@ async fn a_held_runs_settlement_whose_write_fails_is_polled_as_not_readable_unti
     assert!(
         matches!(
             all.as_slice(),
-            [meerkat_runtime::PendingResumedRunRead::NotReadableNow { session_id: named }]
+            [meerkat_runtime::PendingResumedRunRead::NotReadableNow { session_id: named, .. }]
                 if named == &session_id
         ),
         "the poll of every session lists it the same way: {all:?}"

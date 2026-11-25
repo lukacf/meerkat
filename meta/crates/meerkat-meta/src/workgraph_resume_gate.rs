@@ -2119,9 +2119,9 @@ mod tests {
         let gate = WorkGraphResumeGate::new(store.service());
         let request = plain_resume_request();
 
-        let slow = attempt - attempt / 16;
+        let slow = attempt.saturating_sub(attempt / 16);
         assert!(
-            slow > attempt - attempt / 8 && slow < attempt,
+            slow > attempt.saturating_sub(attempt / 8) && slow < attempt,
             "the list answers inside the last eighth of the attempt: {slow:?} of {attempt:?}"
         );
         store.slow_from(1, slow);
@@ -2152,7 +2152,7 @@ mod tests {
         let store = SlowListStore::new();
         let gate = WorkGraphResumeGate::new(store.service());
 
-        for slow in [attempt - tick, attempt] {
+        for slow in [attempt.saturating_sub(tick), attempt] {
             let request = plain_resume_request();
             store.slow_from(1, slow);
             let asked = one_attempt(&gate, &request).await;
@@ -2186,7 +2186,7 @@ mod tests {
         let request = plain_resume_request();
 
         tokio::time::pause();
-        store.slow_from(1, attempt - Duration::from_millis(1));
+        store.slow_from(1, attempt.saturating_sub(Duration::from_millis(1)));
         let asked = one_attempt(&gate, &request).await;
         let Some(meerkat_mob::DurableResumeVerdict::Superseded { reason }) = &asked.answer else {
             panic!(
@@ -2371,7 +2371,7 @@ mod tests {
         for part in [
             format!("run={}/{}", request.session_id, request.run_id),
             "pages_read=0".to_string(),
-            format!("elapsed_ms={}", (attempt - tick).as_millis()),
+            format!("elapsed_ms={}", attempt.saturating_sub(tick).as_millis()),
             format!("attempt_limit_ms={}", attempt.as_millis()),
             "open work item list was unfinished after a whole admission attempt".to_string(),
             format!("0 page(s) of up to {CLAIM_SCAN_PAGE} items"),
@@ -2435,7 +2435,7 @@ mod tests {
         for part in [
             format!("run={}/{}", request.session_id, request.run_id),
             "pages_read=0".to_string(),
-            format!("elapsed_ms={}", (attempt - late).as_millis()),
+            format!("elapsed_ms={}", attempt.saturating_sub(late).as_millis()),
             format!("attempt_limit_ms={}", attempt.as_millis()),
             "the gate does not know why".to_string(),
         ] {

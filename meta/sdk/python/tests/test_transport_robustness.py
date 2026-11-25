@@ -188,6 +188,57 @@ def test_callback_without_handler_is_answered_at_once():
     }
 
 
+def _answered_callback(transport: PersistentTransport, callback_id: str) -> dict:
+    """Hand one callback to the transport as its reader does; return the answer."""
+    answers: queue.Queue = queue.Queue()
+    transport._write_line = lambda obj, **_kwargs: answers.put(obj)
+    transport._handle_callback(
+        {"jsonrpc": "2.0", "id": callback_id, "method": "callback/call_tool", "params": {}}
+    )
+    return answers.get(timeout=5)
+
+
+@pytest.mark.parametrize("loop_state", ["none", "stopped"])
+def test_callback_without_a_running_loop_is_answered_with_an_error(loop_state):
+    transport = PersistentTransport("unused")
+    transport._process = MagicMock()
+    transport._callback_handler = AsyncMock()
+    loop = asyncio.new_event_loop() if loop_state == "stopped" else None
+    transport._loop = loop
+    try:
+        response = _answered_callback(transport, "cb-9")
+    finally:
+        if loop is not None:
+            loop.close()
+
+    assert response["id"] == "cb-9"
+    assert "no running event loop" in response["error"]["message"]
+    transport._callback_handler.assert_not_called()
+
+
+def test_a_refused_hand_off_is_answered_and_its_invocation_closed(monkeypatch):
+    transport = PersistentTransport("unused")
+    transport._process = MagicMock()
+    transport._callback_handler = AsyncMock()
+    transport._loop = MagicMock()
+    transport._loop.is_running.return_value = True
+    refused = []
+
+    def refuse(coroutine, _loop):
+        refused.append(coroutine)
+        raise RuntimeError("the loop is closed")
+
+    monkeypatch.setattr("meerkat_meta._transport.asyncio.run_coroutine_threadsafe", refuse)
+
+    response = _answered_callback(transport, "cb-10")
+
+    assert response["id"] == "cb-10"
+    assert response["error"]["message"] == "the loop is closed"
+    # Closed, so it is never reported as a coroutine that was never awaited.
+    assert len(refused) == 1 and refused[0].cr_frame is None
+    transport._callback_handler.assert_not_called()
+
+
 def test_notification_without_handler_writes_nothing():
     transport = PersistentTransport("unused")
     transport._write_line = MagicMock()

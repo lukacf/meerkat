@@ -98,7 +98,7 @@ async fn run() -> anyhow::Result<()> {
              [--experimental-hive-mob]"
         );
         eprintln!(
-            "The hive model defaults to gpt-6-astra; API-key environment variables do not select it."
+            "The hive model defaults to gpt-6.2-astra; API-key environment variables do not select it."
         );
         eprintln!(
             "WARNING: hive RPC is unauthenticated plaintext on 0.0.0.0 and exposes shell-capable sessions."
@@ -228,8 +228,10 @@ async fn run() -> anyhow::Result<()> {
         build.system_prompt = meerkat::SystemPromptOverride::Set(
             "You are the hive orchestrator for a fleet of managed target agents.\n\
                  Use the 'peers' tool to discover which targets are connected.\n\
-                 Use 'send_request' to dispatch tasks to targets and collect responses.\n\
-                 Use 'send_message' for fire-and-forget notifications.\n\
+                 Use 'send_message' to dispatch a task to a target; the target acts on it \
+                 and can answer with a message of its own.\n\
+                 Use 'send_request' only with an intent the tool itself lists; it has no \
+                 free-form task intent.\n\
                  Always use 'peers' as the source of truth for available targets \
                  before dispatching work."
                 .to_string(),
@@ -1557,7 +1559,7 @@ mod tests {
             host.runtime.set_default_llm_client(Some(Arc::new(
                 meerkat_client::TestClient::for_provider(meerkat_core::Provider::OpenAI),
             )));
-            let mut build = meerkat::AgentBuildConfig::new("gpt-6-astra");
+            let mut build = meerkat::AgentBuildConfig::new("gpt-6.2-astra");
             build.provider = Some(meerkat_core::Provider::OpenAI);
             let session_id = host
                 .managed_session("hive", build, Vec::new())

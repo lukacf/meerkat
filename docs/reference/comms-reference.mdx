@@ -144,9 +144,16 @@ handling mode only when its status is terminal (`completed` or `failed`);
 A peer steer is durable: its comms notice is written into the running turn's
 transcript at the next model boundary, every later model request of the run
 sees it, it commits with the run, and the runner publishes one
-`peer_content_ingested` event for it. A steer that waits behind another one
-joins the following boundary; one that finds no boundary before the run ends
-is written by exactly one follow-up turn. A directed (host-residency-fenced)
+`peer_content_ingested` event for it. Since 0.9.18: at a
+boundary where a steer has registered its claim, the eligible steers that
+wait together join it, in admission order, each with its own notice and
+event. An acknowledged send is not inclusion in the next model request.
+A steer that finds no boundary before the run ends
+is written by exactly one follow-up turn. A steer that still waits when its
+session is loaded again from the store joins the resumed run's next model
+request when that run resumes, and a steer admitted after the load and
+before the waiting steer's work has begun joins that request behind it. A
+directed (host-residency-fenced)
 peer delivery always takes the follow-up turn. See
 [Durable steer](/reference/session-contracts#durable-steer).
 

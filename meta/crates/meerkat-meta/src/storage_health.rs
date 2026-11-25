@@ -275,7 +275,7 @@ pub fn scratch_ring_buffer_slots() -> Vec<StorageSlotSummary> {
         StorageSlotSummary::scratch(
             "delivery_history",
             "in-process ring buffer",
-            "drop-oldest retention (200 entries)",
+            "drop-oldest retention (200 entries per mob)",
         ),
         StorageSlotSummary::scratch(
             "routing_resolutions",

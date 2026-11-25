@@ -69,6 +69,7 @@ EXEMPT: dict[str, str] = {}
 ROUTE_EXEMPT: dict[str, str] = {
     "ProbeClient": "test double: mob_handle_runtime_prepared_attempt_tests.rs is a #[cfg(test)] module",
     "OrderWitness": "test double: mob_handle_runtime_prepared_attempt_tests.rs is a #[cfg(test)] module",
+    "Answers": "test double: unified_runtime/mob_memory_firewall_tests.rs is a #[cfg(test)] module",
 }
 
 

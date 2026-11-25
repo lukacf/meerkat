@@ -4,7 +4,7 @@ description: "HTTP endpoints for console access, experience metadata, module ins
 icon: "globe"
 ---
 
-*Mirrored from Meerkat Meta main at [d5cab02de5b7](https://github.com/lukacf/meerkat/commit/d5cab02de5b7831af23df8bd862c80448b3c6f36) on 2026-11-20; Meta version 0.9.17 at that commit.*
+*Mirrored from Meerkat Meta main at [70db4ab7b685](https://github.com/lukacf/meerkat/commit/70db4ab7b68552c8cbf6d1314502d656e70af071) on 2026-11-25; Meta version 0.9.18 at that commit.*
 
 Meta serves a REST API over HTTP using Axum. The API provides console access, runtime inspection, timeline replay, JSON-RPC ingress, legacy console send compatibility, multipart upload/send, and blob retrieval.
 
@@ -46,6 +46,90 @@ Returns the console stylesheet.
 
 ## JSON API endpoints
 
+### The mob of a request (`mob_id`)
+
+A request to the Console names the mob it is for with `mob_id`. A request
+without it is for the launch mob (the mob the gateway's launch names). Send
+`mob_id` only to a gateway that lists the feature capability
+`mob_addressing` in [`meta/capabilities`](/meta/api/rpc): an earlier gateway
+ignores the parameter on the GET routes and on `POST /console/send`, and
+refuses the body member on `POST /console/send/recover` and the
+`/console/mcp-apps/*` routes.
+
+| Routes | Where `mob_id` goes |
+|--------|---------------------|
+| `POST /console/rpc`, `POST /console/rpc/multipart` | a top-level member of the request's `params` |
+| `GET /console/experience`, `/console/modules`, `/console/identities`, `/console/timeline`, `/console/timeline/stream`, `/console/identity/{identity}/stream`, `/console/gating/stream` | a query parameter |
+| `POST /console/send`, `/console/send/recover`, `/console/mcp-apps/resolve`, `/console/mcp-apps/read-resource`, `/console/mcp-apps/call-tool` | a member of the JSON body |
+
+- No `mob_id`, the launch mob's id, or `null` in a body or in `params`: the
+  request is served as one that names no mob.
+- Any other id, an empty one included: HTTP **404** with
+  `{"error":"foreign_mob_target","requested_mob_id":"<id>"}` on a route, and
+  on the request doors a JSON-RPC error `-32602` whose `data` is
+  `{"kind":"foreign_mob_target","requested_mob_id":"<id>"}`. The answer is
+  the same for an id no mob has and for a mob the caller may not address,
+  and it names the requested id and no other mob. A Console that requires
+  sign-in answers a request without valid credentials **401** first,
+  whatever the request names.
+- A body member `mob_id` that is neither a string nor `null`: HTTP **400**
+  with `{"error":"invalid_request","message":"mob_id must be a string"}`
+  (on the request doors `-32602`).
+
+A caller may address a mob other than the launch mob when access control is
+not enforced, when the caller is an administrator, or when an allow rule
+that applies to the caller lists that mob in `mobs`. Every caller the
+Console lets in addresses the launch mob.
+
+The announcement methods that carry a `mob_id` of their own
+(`meta/mob_announcements/announce`, `get`, `audit/list` and the
+`sources/*` methods) name the mob they act on with it. That id is judged
+with the caller in the same way: a mob other than the launch mob that the
+caller may not address is answered the refusal above. So is the `mob_id`
+of the four methods over the mobs of a host that act on one mob
+(`meta/mobs/get`, `meta/mobs/lifecycle`, `meta/mobs/redefine` and
+`meta/mobs/destroy`).
+
+Of the twelve routes of the last two rows, the two send routes
+(`POST /console/send`, `POST /console/send/recover`) serve the mob a
+request names and the other ten serve the launch mob only in this
+release. The request doors serve another mob on these methods only:
+`meta/status`, `meta/find_members`, `meta/get_member`, `meta/list_members`,
+`meta/stop_member_run`, `meta/delivery/history`, four `meta/console/*`
+methods (`inspect_identity`, `query_timeline`, `send`, `recover_send`),
+two `meta/mob_events/*` methods (`query`, `subscribe`; the address
+`subscribe` hands back is of the named mob's stream), the six
+`meta/schedule/*` methods of an agent's console schedules (`create`,
+`delete`, `list`, `pause`, `resume`, `update`), the five
+`meta/topology/*` methods (`query`, `plan`, `apply`, `operation/get`,
+`audit/query`), thirteen `meta/identity/*` methods (`adopt`, `archive`,
+`changes_hold`, `create`, `directory`, `get`, `list`, `operation`, `plan`,
+`remove`, `unarchive`, `update`, `withdraw`) and twenty-five
+`meta/workgraph/*` methods (`attention/break_glass_reassign`,
+`attention/list`, `attention/pause`, `attention/prune`,
+`attention/reassign`, `attention/resume`, `block`, `claim`, `close`,
+`create`, `events`, `evidence/add`, `facts`, `get`, `goal/confirm`,
+`goal/create`, `goal/request_close`, `goal/status`, `link`, `list`,
+`policy/escalate`, `ready`, `release`, `snapshot`, `update`). A request on one of
+those ten routes, or of any other method that is neither a method of the
+host nor one whose own parameter names the mob it acts on (the voice
+methods included), that names another mob is answered the refusal above
+for every caller. A method of the host, such as `meta/console/whoami`,
+takes no mob as a selector: an id beside it is judged with the caller as
+on every method (a mob the caller may not address, and an id no mob has,
+are answered the refusal above) and then selects nothing, so the request
+is answered as one that names no mob. The methods whose own parameter
+names the mob they act on are the announcement methods and the four
+methods over the mobs of a host named above: that id is judged with the
+caller. A client that works with
+another mob sends `mob_id` on the listed methods and leaves it out
+elsewhere.
+
+A Console mounted without a runtime knows no mob by an id: it refuses every
+`mob_id` a request names, its own mob's included, and does not list
+`mob_addressing`. A client therefore does not send `mob_id` on every
+request: it sends it to a gateway that lists the capability.
+
 ### `GET /console/experience`
 
 Returns experience metadata describing the current runtime state. This is the primary data source for the console UI.
@@ -62,7 +146,8 @@ Returns experience metadata describing the current runtime state. This is the pr
           "agent_id": "agent-001",
           "member_id": "lead-1",
           "label": "Team Lead",
-          "kind": "autonomous_host"
+          "kind": "autonomous_host",
+          "mob_id": "ops-team"
         }
       ]
     }
@@ -74,7 +159,17 @@ Returns experience metadata describing the current runtime state. This is the pr
     "live_snapshot": {
       "nodes": [...],
       "node_count": 5,
-      "mob_id": "ops-team"
+      "mob_id": "ops-team",
+      "mobs": [
+        { "mob_id": "ops-team", "state": "running", "member_count": 4 },
+        {
+          "mob_id": "research",
+          "parent_mob_id": "ops-team",
+          "host_identity": "lead-1",
+          "state": "running",
+          "member_count": 1
+        }
+      ]
     }
   },
   "health_overview": {
@@ -117,6 +212,64 @@ on a shared console over several runtimes or none, and from a snapshot a host
 builds without it. The console names the topology's team from it, never from
 `runtime_id`.
 
+After 0.9.17, `topology.live_snapshot.mobs` lists every mob a runtime's console shows the
+caller: its own mob and each mob one of its members created (nested under
+that member's mob, at any depth). A mob the host created is a mob of its
+own, served by its own id: this list does not hold it, and a read over
+every mob (`mobs=*`, below) lists it to a caller who may address it.
+Each entry has:
+
+| Field | Meaning |
+|-------|---------|
+| `mob_id` | The mob's id. A mob definition names no title, so the console puts the id in words. |
+| `parent_mob_id` | The mob it is nested under: the mob of the member that created it or, when the caller is listed no member of that mob, the nearest mob above it the caller is listed. Absent for a top-level mob. |
+| `host_identity` | The identity of the member that created the mob, as the experience lists that member. Absent when the experience does not list that member to the caller. |
+| `state` | `running` or `stopped`; `unknown` when nothing observed it. Treat a value you do not know as `unknown`. |
+| `member_count` | How many of its members the experience lists for the caller. Never zero. |
+
+Every agent row and every topology node of such a console carries `mob_id`,
+the mob it is a member of.
+
+**Member identities.** A member of the console's own mob is named by its bare
+name in `agent_id`, `member_id` and `identity`, as before. A member of any
+other mob is named by its mob and its name in one string, `<mob id>/<name>`
+(for example `research/analyst-1`), in those same fields, in a node's
+`identity`, in `wired_to`, in `mobs[].host_identity`, in the identities read,
+on its frames and in every request that names it: send that string back as you
+read it. A mob's id never holds `/`, so the first `/` ends it; the name after
+it may hold any character. A bare name names a member of the console's own
+mob only, so two members with one name in two mobs never share an identity
+and a request with a bare name never reaches a member of another mob. The
+row's `label` is the member's display name, never the string that holds its
+mob.
+
+A member of a mob other than the console's own carries the labels
+`source_mob_id` (its mob) and `group`, and `delegate_host_identity` (the member
+that created its mob) while the experience lists that member to the caller.
+The console writes these labels itself from the mob the member's roster row
+belongs to and from the mob's creation record: a value a spawn wrote under
+either name is discarded.
+
+A mob is listed only through members the experience lists for the caller. A
+mob in which the caller is listed no member is absent, also when a mob nested
+under it is listed, and also for an access admin: nothing tells a caller that
+a mob exists in which that caller sees no member. So a mob with no member at
+all is listed to no one, and so is a mob whose members the console's
+visibility policy hides, such as the mob the `delegate` tool runs its helpers
+in on the stock console.
+
+Which mobs a console can list comes from each mob's creation record: a mob a
+member created (with its own `mob_create`, with `delegate`, or through a
+create the host made for that member's session).
+A mob created for a session that is no member's is not listed, and none of
+its members is: a temporary council's mob is such a mob, and so is a mob a
+session created with its own create capability while no roster named it, and
+a mob from a store older than 0.9.4, whose creation was not recorded. The
+list is absent from a console that lists no mob (a shared console over
+several runtimes, or a snapshot a host builds without it). Reading it wakes
+no member and loads no mob: a dormant member is listed from its mob's roster
+like a live one.
+
 `health_overview.live_snapshot.running` is the mob owner's answer when the
 experience is read. A console served from the console aggregator answers for
 its registered runtimes: `true` only while every registered runtime's mob is
@@ -139,6 +292,187 @@ found and names them in an `unobserved` marker with reason
 on the topology node. Access and visibility still decide on the last
 observed facts, so a label-scoped deny keeps such a member hidden.
 
+### Every mob the caller may address (`mobs=*`)
+
+A gateway that hosts more than one mob lists `mob_addressing` in the
+feature capabilities of [`meta/capabilities`](/meta/api/rpc). Send `mobs` only
+to such a gateway. Three reads take the query parameter `mobs=*`:
+`GET /console/experience`, `GET /console/timeline/stream`, and
+`GET /console/timeline` on a request without `identity`
+(`meta/console/query_timeline` takes `"mobs": "*"` in its `params` the same
+way). Without `mobs` each of them answers for the launch mob alone, as
+before.
+
+With `mobs=*` the experience lists, in `topology.live_snapshot.mobs`, the
+launch mob and every other mob the gateway hosts that the caller may
+address, loaded or not, each at the top level, with the mobs nested under
+each. An entry:
+
+| Field | Meaning |
+|-------|---------|
+| `mob_id` | The mob's id, unique on the gateway. |
+| `parent_mob_id` | The nearest listed mob it is nested under. Absent for a top-level mob. |
+| `host_identity` | The row key of the member that created it, while that member is listed to the caller. |
+| `state` | `running`, `stopped`, `dormant` (known and not loaded: no member rows, no `member_count`; a request that names the mob loads it), `unavailable` (its store did not load) or `unknown`. Read a value you do not know as `unknown`. |
+| `member_count` | How many of the mob's members the document lists to the caller. Absent for a mob that is not loaded. |
+| `provenance` | `host` (the gateway's host created it: a top-level mob with a door of its own) or `member` (a member created it). An open list. |
+| `default` | `true` for the launch mob. |
+| `incarnation` | An opaque token of this creation of the mob. When it differs from the value last seen for the same `mob_id`, the mob was created again: drop what you kept under that id. |
+
+A member row (`agent_sidebar.live_snapshot.agents[]`) is keyed by
+`identity`, by the door it was read on: on the launch mob's door the
+member's name as that door knows it (the bare name for a member of the
+launch mob, `<nested mob id>/<name>` for a member of a mob nested under
+it), and on the door of another hosted mob `<that mob's id>/<the name as
+that door knows it>`. A row states three more things, the same on every
+read of the experience: `mob_id` is the door (the launch mob's id on the
+launch mob's door, never the member's own mob), `member_mob_id` is the mob
+the member sits in, and `member_name` is its bare name there. Take a
+member's own mob and name from these two members, never from the key: two
+members of one door can spell one key (a member named
+`<nested mob id>/<name>` beside the member `<name>` of that nested mob),
+and the two differ in `member_mob_id` and `member_name` alone. In this
+version a console that lists the members of nested mobs lists neither
+member of such a pair as a row; `meta/console/list_identities` lists each
+of the two to a caller it answers for that member.
+
+A request for a member carries `mob_id` = its door (absent for the launch
+mob's door) and names the member in one of two ways: by `member_mob_id`
+and its bare name in the member word, which names the member of exactly
+that mob; or by the one string its door knows it by. A request that names
+by one string a spelling two members share, where its method would answer
+the caller for both, is refused (`-32602`, `data.kind`
+`member_mob_id_required`, with the string in `data.identity`) by a method
+that takes `member_mob_id` and reads the name from `identity`; every other
+method reads it for the member of the door's own mob. Four methods of this
+contract take `member_mob_id`: `meta/console/inspect_identity`,
+`meta/console/query_timeline`, `meta/console/send` and `meta/retire`. A
+request that carries `member_mob_id` on a method that does not take it is
+refused (`data.kind` `member_mob_id_not_accepted`, with `data.method`).
+No route takes it: `POST /console/send`, `POST /console/send/recover`,
+`GET /console/timeline`, `GET /console/timeline/stream` and
+`GET /console/identity/{identity}/stream` refuse a request that carries it
+(the two `POST` routes in the body, once it parses; the three `GET`
+routes in the query) with HTTP 400 and `error`
+`member_mob_id_not_accepted`; a body member that is `null` is read as no
+member. Send `member_mob_id`
+only to a gateway that lists `mob_addressing`.
+
+Every name a member row carries of its own member (`identity`,
+`member_id`, `agent_id`) is the row key; the bare name stands in
+`member_name` alone. An
+entry of a host list that names a member (a pending approval, an audit
+record) names it by the pair a frame carries: `mob_id`, absent for the
+launch mob, beside the member's name as that mob knows it.
+
+The contract document lists, for each method, the member of `params` that
+names a member (`member_params`: `identity` for most, `member_id` for
+`meta/stop_member_run`, `source_member_id` for `meta/fork_member`, `name`
+for the `meta/identity/*` changes). On a request to a hosted mob it carries
+the member's name as that mob knows it. A method that serves one mob and
+names no member takes `mob_id` alone. In the answer of a method served for
+one mob every member it names, in any field, is named as that mob knows
+it: turn it into a row key with the request's mob, as for a frame. A
+method of the host takes no mob;
+the one that names a member, `meta/access/preview`, takes the member's row
+key in `identity` and is judged in that member's own mob.
+
+There is no load request. An ordinary request that names `mob_id` loads a
+mob that is not loaded, and a console opens a mob a person chose with
+`meta/status` naming it; any caller who may address the mob may send it.
+Send no request of your own accord (a periodic read, a gap repair) that
+names a mob listed `dormant` or `unavailable`.
+
+A member's own stream (`GET /console/identity/{identity}/stream`, and the
+timeline stream or `GET /console/timeline` with `mob_id`) and the
+`/console/mcp-apps/*` routes serve the launch mob's members only in this
+release. Read another mob's member from the one stream with `mobs=*` and
+from `meta/console/query_timeline` naming `mob_id` and `identity`.
+
+The lists of the host that name members (`meta/gating/pending`,
+`meta/gating/audit`, `meta/gating/questions`, `meta/console/attention`, and
+the console audit read `meta/console/audit`) take `"mobs": "*"` too.
+Without it a list answers, of the entries members made, those of the launch
+mob's members alone, as before; with it the entries of every mob the caller
+may address, each entry a member made naming its mob beside its member's
+name. A request made
+with no origin is no member's entry: with the selector and without it,
+`meta/gating/pending` and `meta/gating/audit` serve it to the callers who
+may address the mob it was made for, as a request of the mob that stands
+under that mob's id. `meta/decisions/list` takes no
+selector: a decision row names no member and no mob.
+
+The two kinds of read differ in this. A list of the host that names
+members answers the entries of another mob's members only to a request
+that carries `"mobs": "*"`. The host's own records of its mobs, the storage doctor
+(`meta/storage/doctor`) and the route list (`meta/routing/routes/list`),
+take no selector. A request to either that names the launch mob's id is
+served as one that names no mob, and one that names another mob's id is
+refused for every caller. Which mobs' stores and routes a caller is
+answered is the rule of each method's own entry in the
+[method reference](/meta/api/rpc).
+
+Limits of this release. Each of these serves the launch mob only, and a
+request on it that names another mob is refused for every caller, unless
+its item says how the request is answered:
+
+- ten of the twelve console routes for `mob_id`,
+  `GET /console/gating/stream` among them; the two send routes
+  (`POST /console/send`, `POST /console/send/recover`) serve the mob a
+  request names (another mob is reached through `POST /console/rpc`, the
+  two send routes and the reads that take `mobs=*`);
+- `GET /console/gating/stream` takes no selector: of the entries members
+  made it signals a change only for an entry of the launch mob's members,
+  and it signals a change of a request made with no origin to the callers
+  `meta/gating/audit` serves that request's rows to;
+- a member's own stream and `GET /console/timeline` with `mob_id`;
+- the `/console/mcp-apps/*` routes (an interactive view of another mob's
+  member is not loaded);
+- the voice methods;
+- every method of the request doors that the contract document gives the
+  scope `launch_mob_only`: `meta/capabilities`, the identity list, a
+  member's retire, respawn, reset and fork, the routes list, the memory
+  panel and `meta/identity/settle_preparation`;
+- every other method of the contract document that is neither of its
+  scope `one_mob` nor a method of the host. The
+  request doors serve another mob on the methods of that scope (a
+  mob's status, its timeline, schedules, topology, delivery history, mob
+  events and WorkGraph, a send to a member and its recovery, a member's
+  stop, an identity's inspection, and thirteen
+  methods of `meta/identity/`: `adopt`, `archive`, `changes_hold`,
+  `create`, `directory`, `get`, `list`, `operation`, `plan`, `remove`,
+  `unarchive`, `update` and `withdraw`) and on no other method of that
+  document, of that prefix or any other. The doors serve further
+  methods the document does not list, some of them for another mob: the
+  list above names those;
+- of a send to a member of another mob: a governed send and its recovery,
+  on a gateway whose Console sends can be governed (refused with
+  `foreign_mob_target` that carries `hosted: true`); a send on
+  `POST /console/rpc/multipart`, with uploads or without; a member named
+  by a runtime member id, or with `member_mob_id` in a mob nested under
+  that mob (an unknown identity). A mob whose identity plane is not
+  attached yet holds a send and its recovery (`-32004`, 503 on a route).
+
+Reading with `mobs=*` loads no mob and is no use of a mob: a periodic read
+never keeps a mob loaded. A mob the caller may not address is not listed,
+its members are no rows, and no count includes it.
+
+A timeline read with `mobs=*` (`GET /console/timeline`,
+`meta/console/query_timeline` and the timeline stream) answers no frame of
+a mob that is not loaded, and its cursor moves past that mob's stored
+frames: following the cursor does not bring them once the mob is loaded. A
+client that opens such a mob (the request that loads it) reads that mob's
+timeline, or a member's, from no cursor with `meta/console/query_timeline`
+naming `mob_id`.
+
+`mobs` with any value but `*`, together with `mob_id`, together with
+`identity` on the timeline read, or on any other route or `meta/*` method is
+refused: HTTP **400** with `{"error":"invalid_request","message":"..."}` on
+a route, `-32602` on the request doors. The announcement methods
+(`meta/mob_announcements/*`) are apart: `mobs` is a member of their own
+requests (the mobs a subscription or a declaration is for), and the mobs
+it names are judged with the caller.
+
 ### `GET /console/modules`
 
 Returns the configured module IDs from `RuntimeDecisionState`. This response
@@ -148,7 +482,7 @@ does not contain per-module health or startup state.
 
 ```json
 {
-  "contract_version": "0.5.0",
+  "contract_version": "0.6.0",
   "modules": [
     "router",
     "delivery",
@@ -174,7 +508,11 @@ binding of the identity and on records of raw runtime members),
 `visibility`, `addressable`, `health`, `labels`, and
 `topology_peers` when non-empty. `labels.role` is the member's role, and, from
 0.9.15, for an identity with no live member its profile unless its declared
-labels name a role. Use
+labels name a role. Address a member by `identity`: for a
+member of a nested mob both `identity` and `runtime_member_id` are its mob
+and name, `<mob id>/<name>` (see Member identities under `GET /console/experience`),
+and an access rule `agents = ["<bare name>"]` matches a member of the
+console's own mob only. Use
 [`meta/console/inspect_identity`](/meta/api/rpc#meta%2Fconsole%2Finspect_identity)
 for identity/peer inspection and `/console/experience` for affordances;
 neither identities nor inspection records contain an affordances field.
@@ -231,12 +569,47 @@ Identity-filtered convenience route for the same console timeline stream. It set
 
 Legacy console send route backed by the console aggregator. New clients should prefer `POST /console/rpc` with `meta/console/send`.
 
+With `mob_id` in the body the send is for a member of the mob it names,
+for a caller the checks of a send admit in that mob: the caller may
+address the mob, may know of the member and holds `agent.send` on it
+there. The send is recorded and recovered under that mob: one
+idempotency key for the members of one name in two mobs is two sends.
+For a member of a mob other than the launch mob:
+
+- a governed send, on a gateway whose Console sends can be governed, is
+  refused with HTTP **404** and
+  `{"error":"foreign_mob_target","requested_mob_id":"<id>","hosted":true}`
+  beside a `message` (on the request door `-32602` with `data.hosted`).
+  The kind is the one of a mob the gateway does not serve to the caller:
+  a client tells the two apart by `hosted`;
+- every send on `POST /console/rpc/multipart` serves the launch mob only,
+  with uploads or without, and one that names another mob is refused
+  with `foreign_mob_target`;
+- a member named by a runtime member id, and a member of a mob nested
+  under that mob, is an unknown identity (HTTP **404**
+  `{"error":"unknown_identity"}`, `-32001` on the request door);
+- a mob whose identity plane is not attached yet holds the send: HTTP
+  **503** `{"error":"unavailable"}` (`-32004` on the request door),
+  and the client asks again.
+
+A steer (`handling_mode` `steer`) to a member whose start has not
+settled yet is refused, in every mob: HTTP **409**
+`{"error":"host_human_input_refused"}` whose `data.kind` is
+`host_human_input_unsupported` (`-32000` on the request door). Its frame
+is marked `delivery_failed` under its mob; send the steer again once the
+member has started.
+
 ### `POST /console/send/recover`
 
 REST twin of [`meta/console/recover_send`](/meta/api/rpc):
-the body is `{identity, origin, idempotency_key}` and the caller is the
+the body is `{identity, origin, idempotency_key}`, with `mob_id` for the
+send of a member of the mob it names, and the caller is the
 request's authenticated principal. It runs the same gate as `/console/send`
-(read-only and `agent.send` refusals). A send the caller does not own, or
+(read-only and `agent.send` refusals), in the mob the request names: the
+recovery acts on that mob's send of the key and on no other mob's, and
+is served for another mob on both request doors too. The recovery of a
+governed send, and a mob whose identity plane is not attached yet, are
+answered as the send is. A send the caller does not own, or
 never made, answers HTTP **404** with `{"error":"send_not_found"}`. A
 candidate launch (`runtime_options.mob_composition.authority =
 "candidate"`) settles no send and answers HTTP **409** with

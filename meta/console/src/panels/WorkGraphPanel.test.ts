@@ -771,6 +771,72 @@ test("the glance strip answers what is done, moving, blocked, ready and how far 
   assert.match(summary.replace(/<[^>]+>/g, " "), /6 items .*1 in progress .*1 blocked .*1 ready/);
 });
 
+/// The number the Ready figure shows.
+function readyFigure(html: string): number {
+  const found = /\bReady\s+(\d+)\s/.exec(figureText(html, "ready"));
+  assert.ok(found, "the Ready figure shows a number");
+  return Number(found[1]);
+}
+
+/// The opening tag of the Ready figure's tile, where its hover is written.
+function readyTileTag(html: string): string {
+  const at = html.indexOf('data-testid="workgraph-glance:ready"');
+  assert.ok(at >= 0, "the Ready figure renders");
+  return html.slice(html.lastIndexOf("<", at), html.indexOf(">", at) + 1);
+}
+
+test("the Ready figure leaves out an item the runtime reports ready when the snapshot records a blocker for it", () => {
+  const free = item("free", "2026-07-08T08:00:00Z");
+  const waiting = item("waiting", "2026-07-08T08:01:00Z");
+  const blocker = item("blocker", "2026-07-08T08:02:00Z", { status: "in_progress" });
+  const stale = item("stale", "2026-07-08T08:03:00Z");
+  const staleCounted = item("stale", "2026-07-08T08:03:00Z", { machine_state: { unresolved_blocker_count: 2 } });
+  const link: WorkGraphWireEdge = { kind: "blocks", from_id: "blocker", to_id: "waiting" };
+  // The runtime reports the same three ready in every snapshot below.
+  const readyItemIds = ["free", "waiting", "stale"];
+  const shown = (items: WorkGraphWireItem[], edges: WorkGraphWireEdge[]) =>
+    readyFigure(renderPanel(panelData({ items, edges, readyItemIds })));
+
+  // No blocker recorded: the figure is the runtime's three.
+  assert.equal(shown([free, waiting, blocker, stale], []), 3);
+  // An unresolved link in the snapshot leaves its item out.
+  assert.equal(shown([free, waiting, blocker, stale], [link]), 2);
+  // A stored blocker count above zero leaves its item out.
+  assert.equal(shown([free, waiting, blocker, staleCounted], []), 2);
+  // Both at once: one item is left.
+  const both = renderPanel(panelData({ items: [free, waiting, blocker, staleCounted], edges: [link], readyItemIds }));
+  assert.equal(readyFigure(both), 1);
+  assert.match(figureText(both, "ready"), /can start now/);
+  // The summary says the same number in words.
+  const summary = both.slice(both.indexOf('data-testid="workgraph-summary"')).replace(/<[^>]+>/g, " ");
+  assert.match(summary, /\b1 ready\b/);
+});
+
+test("the Ready figure's hover says what is counted, and only when the runtime sent its ready set", () => {
+  const hover = "Counts loaded items that the runtime reports as ready and for which the snapshot records no blockers. Panel filters do not change this count.";
+  // Plain ASCII, so the comparison of the text below is a comparison of its bytes.
+  assert.ok(/^[\x20-\x7e]+$/.test(hover));
+  const title = (html: string): string | null => {
+    const found = / title="([^"]*)"/.exec(readyTileTag(html));
+    return found ? found[1] : null;
+  };
+
+  // The runtime sent its ready set: the exact sentence, also when the set is empty.
+  assert.equal(title(renderPanel(chainFixture())), hover);
+  assert.equal(title(renderPanel({ ...chainFixture(), readyItemIds: [] })), hover);
+  assert.equal(readyFigure(renderPanel({ ...chainFixture(), readyItemIds: [] })), 0);
+
+  // No ready set from the runtime (null, or the member absent): no hover at all.
+  const withoutSet = chainFixture();
+  delete withoutSet.readyItemIds;
+  for (const data of [{ ...chainFixture(), readyItemIds: null }, withoutSet]) {
+    const tag = readyTileTag(renderPanel(data));
+    assert.equal(title(renderPanel(data)), null);
+    assert.ok(!tag.includes("title="), "the tile carries no title attribute");
+    assert.ok(!renderPanel(data).includes(hover));
+  }
+});
+
 test("a full snapshot says it is truncated: the first N, or N of M when the runtime reports the total", () => {
   const first = renderPanel({ ...chainFixture(), truncated: true });
   assert.ok(first.includes('data-testid="workgraph-truncated"'));

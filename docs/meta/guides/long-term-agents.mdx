@@ -4,7 +4,7 @@ description: "Move an agent your configuration declares to run-time changes, the
 icon: "users-gear"
 ---
 
-*Mirrored from Meerkat Meta main at [d5cab02de5b7](https://github.com/lukacf/meerkat/commit/d5cab02de5b7831af23df8bd862c80448b3c6f36) on 2026-11-20; Meta version 0.9.17 at that commit.*
+*Mirrored from Meerkat Meta main at [70db4ab7b685](https://github.com/lukacf/meerkat/commit/70db4ab7b68552c8cbf6d1314502d656e70af071) on 2026-11-25; Meta version 0.9.18 at that commit.*
 
 Available from Meerkat Meta 0.9.15.
 
@@ -324,82 +324,134 @@ removal of an agent that still owns mobs it created are refused
 `owns_mobs`, until the agent has destroyed them (**Archive and unarchive**
 below). The agent in this block has created none.
 
+Each step uses the digest returned by the preceding change. If a step is
+pending, the example returns its outcome without starting the next change:
+
+- `pending_decision`: a person must decide; the change has not committed.
+  Read [the operation](#3-read-an-operation-later) using the returned operation
+  ID before continuing. Do not submit the change under a new request ID.
+- `pending_preparation`: the create committed, but the agent is not ready.
+  Prepare it and call `settle_preparation` (TypeScript: `settlePreparation`)
+  as described under **Host preparation** below. Before the next change,
+  read the agent with `get` for its current digest.
+
 <CodeGroup>
 
 ```python Python
-from meerkat_meta import AgentSet, AgentSpec, IdentityDone
+from meerkat_meta import AgentSet, AgentSpec, IdentityChangeResult, IdentityDone
 
-created = await identities.create(
-    [
-        AgentSpec(
-            name="editor",
-            profile="writer",
-            display_name="Editor",
-            instructions=["Edit for clarity."],
-            peers=["scout"],
-            first_message="Introduce yourself to scout.",
-        )
-    ],
-    request_id="create-editor-1",
-)
-digest = ""
-if isinstance(created, IdentityDone):
-    digest = created.agents[0].spec_digest or ""
 
-updated = await identities.update(
-    "editor",
-    expected_spec_digest=digest,
-    request_id="update-editor-1",
-    set=AgentSet(instructions=["Edit for clarity.", "Keep the author's voice."]),
-)
-if isinstance(updated, IdentityDone):
-    agent = updated.agents[0]
-    if agent.instructions:
-        # "applies_at_next_run", "applies_after_compaction", ...
-        agent.instructions.kind
-    digest = agent.spec_digest or digest
+def digest_after(change: IdentityDone) -> str:
+    digest = change.agents[0].spec_digest if change.agents else None
+    if not digest:
+        raise ValueError("The change returned no spec digest for editor")
+    return digest
 
-await identities.archive("editor", expected_spec_digest=digest, request_id="archive-editor-1")
-await identities.unarchive("editor", expected_spec_digest=digest, request_id="unarchive-editor-1")
-await identities.remove("editor", expected_spec_digest=digest, request_id="remove-editor-1")
+
+async def manage_editor() -> IdentityChangeResult:
+    created = await identities.create(
+        [
+            AgentSpec(
+                name="editor",
+                profile="writer",
+                display_name="Editor",
+                instructions=["Edit for clarity."],
+                peers=["scout"],
+                first_message="Introduce yourself to scout.",
+            )
+        ],
+        request_id="create-editor-1",
+    )
+    if not isinstance(created, IdentityDone):
+        return created
+
+    updated = await identities.update(
+        "editor",
+        expected_spec_digest=digest_after(created),
+        request_id="update-editor-1",
+        set=AgentSet(instructions=["Edit for clarity.", "Keep the author's voice."]),
+    )
+    if not isinstance(updated, IdentityDone):
+        return updated
+    updated_digest = digest_after(updated)
+    instructions = updated.agents[0].instructions
+    if instructions:
+        print(instructions.kind)  # e.g. applies_at_next_run
+
+    archived = await identities.archive(
+        "editor", expected_spec_digest=updated_digest, request_id="archive-editor-1"
+    )
+    if not isinstance(archived, IdentityDone):
+        return archived
+    unarchived = await identities.unarchive(
+        "editor", expected_spec_digest=digest_after(archived), request_id="unarchive-editor-1"
+    )
+    if not isinstance(unarchived, IdentityDone):
+        return unarchived
+    return await identities.remove(
+        "editor", expected_spec_digest=digest_after(unarchived), request_id="remove-editor-1"
+    )
+
+
+result = await manage_editor()
+print(result.outcome, result.operation_id)
 ```
 
 ```typescript TypeScript
-const created = await identities.create(
-  [
-    {
-      name: "editor",
-      profile: "writer",
-      displayName: "Editor",
-      instructions: ["Edit for clarity."],
-      peers: ["scout"],
-      firstMessage: "Introduce yourself to scout.",
-    },
-  ],
-  { requestId: "create-editor-1" },
-);
-let digest = created.outcome === "done" ? created.agents[0].specDigest! : "";
+import type { IdentityDone } from "@rkat/meta-sdk";
 
-const updated = await identities.update("editor", {
-  expectedSpecDigest: digest,
-  requestId: "update-editor-1",
-  set: { instructions: ["Edit for clarity.", "Keep the author's voice."] },
-});
-if (updated.outcome === "done") {
-  const agent = updated.agents[0];
-  // "applies_at_next_run", "applies_after_compaction", ...
-  agent.instructions?.kind;
-  digest = agent.specDigest!;
+function digestAfter(change: IdentityDone): string {
+  const digest = change.agents[0]?.specDigest;
+  if (!digest) throw new Error("The change returned no spec digest for editor");
+  return digest;
 }
 
-await identities.archive("editor", { expectedSpecDigest: digest, requestId: "archive-editor-1" });
-await identities.unarchive("editor", { expectedSpecDigest: digest, requestId: "unarchive-editor-1" });
-await identities.remove("editor", { expectedSpecDigest: digest, requestId: "remove-editor-1" });
+async function manageEditor() {
+  const created = await identities.create(
+    [
+      {
+        name: "editor",
+        profile: "writer",
+        displayName: "Editor",
+        instructions: ["Edit for clarity."],
+        peers: ["scout"],
+        firstMessage: "Introduce yourself to scout.",
+      },
+    ],
+    { requestId: "create-editor-1" },
+  );
+  if (created.outcome !== "done") return created;
+
+  const updated = await identities.update("editor", {
+    expectedSpecDigest: digestAfter(created),
+    requestId: "update-editor-1",
+    set: { instructions: ["Edit for clarity.", "Keep the author's voice."] },
+  });
+  if (updated.outcome !== "done") return updated;
+  const updatedDigest = digestAfter(updated);
+  const instructions = updated.agents[0]?.instructions;
+  if (instructions) console.log(instructions.kind); // e.g. applies_at_next_run
+
+  const archived = await identities.archive("editor", {
+    expectedSpecDigest: updatedDigest, requestId: "archive-editor-1",
+  });
+  if (archived.outcome !== "done") return archived;
+  const unarchived = await identities.unarchive("editor", {
+    expectedSpecDigest: digestAfter(archived), requestId: "unarchive-editor-1",
+  });
+  if (unarchived.outcome !== "done") return unarchived;
+  return identities.remove("editor", {
+    expectedSpecDigest: digestAfter(unarchived), requestId: "remove-editor-1",
+  });
+}
+
+const result = await manageEditor();
+console.log(result.outcome, result.operationId);
 ```
 
 </CodeGroup>
 
-This block archives and removes the agent moments after changing its
+On the `done` path, this block archives and removes the agent moments after changing its
 instructions, so the gateway log may show one or two
 `operator_instruction_delivery` warnings (`failure=AGENT_ERROR`,
 `failure=SESSION_NOT_FOUND`): the change was on its way into the agent's
@@ -583,15 +635,21 @@ of a refused change was written.
 | `retryable` | Whether the same request may succeed later unchanged. |
 | `details` | The kind's own members, for example `current_digest` for `stale_spec`. |
 
+This separate example assumes `editor` still exists. Read its current digest
+before asking for the update. If the specification changes between the read
+and the update, review the new specification before deciding whether the
+change still applies.
+
 <CodeGroup>
 
 ```python Python
+digest = (await identities.get("editor")).spec_digest
 try:
     await identities.update("editor", expected_spec_digest=digest, request_id="update-editor-2",
                             set=AgentSet(display_name="Chief editor"))
 except IdentityRefusedError as refused:
     if refused.kind == "stale_spec":
-        digest = refused.details["current_digest"]   # read again, then ask anew
+        print("The specification changed; review editor before requesting another update.")
     elif refused.retryable:
         ...                                          # same request, later
     else:
@@ -599,6 +657,7 @@ except IdentityRefusedError as refused:
 ```
 
 ```typescript TypeScript
+const digest = (await identities.get("editor")).specDigest;
 try {
   await identities.update("editor", {
     expectedSpecDigest: digest,
@@ -608,7 +667,7 @@ try {
 } catch (error) {
   if (!(error instanceof IdentityRefusedError)) throw error;
   if (error.kind === "stale_spec") {
-    digest = String(error.details.current_digest); // read again, then ask anew
+    console.warn("The specification changed; review editor before requesting another update.");
   } else if (error.retryable) {
     // same request, later
   } else {

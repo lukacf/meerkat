@@ -27,7 +27,7 @@ services:
       - --data-dir
       - /data/kennel
       - --hive-model
-      - ${MDM_HIVE_MODEL:-gpt-6-astra}
+      - ${MDM_HIVE_MODEL:-gpt-6.2-astra}
       - --hive-provider
       - ${MDM_HIVE_PROVIDER:-openai}
     ports:
@@ -53,7 +53,7 @@ services:
       - --name
       - target-a
       - --model
-      - ${MDM_TARGET_A_MODEL:-${MDM_MODEL:-gpt-6-astra}}
+      - ${MDM_TARGET_A_MODEL:-${MDM_MODEL:-gpt-6.2-astra}}
       - --provider
       - ${MDM_TARGET_A_PROVIDER:-${MDM_PROVIDER:-openai}}
       - --data-dir
@@ -80,7 +80,7 @@ services:
       - --name
       - target-b
       - --model
-      - ${MDM_TARGET_B_MODEL:-${MDM_MODEL:-gpt-6-astra}}
+      - ${MDM_TARGET_B_MODEL:-${MDM_MODEL:-gpt-6.2-astra}}
       - --provider
       - ${MDM_TARGET_B_PROVIDER:-${MDM_PROVIDER:-openai}}
       - --data-dir

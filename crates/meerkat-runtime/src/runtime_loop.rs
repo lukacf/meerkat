@@ -5574,6 +5574,31 @@ impl Drop for RunSettlementPublication {
 }
 
 impl RuntimeLoopAuthorityBinding {
+    /// Start the boundary work of a durable steer that waits beside the run
+    /// `run_id` this loop has just resumed. `queue_authority` is the loop's
+    /// queue authority, which is the session mutation gate.
+    async fn start_waiting_steer_boundary_work(
+        &self,
+        driver: &crate::meerkat_machine::SharedDriver,
+        run_id: &RunId,
+        queue_authority: &crate::tokio::sync::OwnedMutexGuard<()>,
+    ) {
+        #[cfg(test)]
+        if self.detached_test_gate.is_some() {
+            return;
+        }
+        if let Some(machine) = self.machine.upgrade() {
+            machine
+                .start_waiting_steer_boundary_work(
+                    &self.session_id,
+                    driver,
+                    run_id,
+                    queue_authority,
+                )
+                .await;
+        }
+    }
+
     /// Require a cold reload of this loop's session runtime: nothing the live
     /// runtime realizes is committed until registration reloads it from
     /// durable state.
@@ -7732,12 +7757,19 @@ async fn admit_resumed_run(
             )
             .await
         }
-        crate::resumed_run_admission::ResumedRunAdmissionVerdict::Undecided { detail } => {
+        crate::resumed_run_admission::ResumedRunAdmissionVerdict::Undecided { cause, detail } => {
             // Neither resumed nor settled: the run stays marked, its inputs
             // bound and none ended, and the machine holds it until a later
             // answer. The next wake of the loop, or the session's next
-            // registration, asks again; nothing asks on a timer.
-            match driver.lock().await.hold_resumed_run_for_admission(&run_id) {
+            // registration, asks again; nothing asks on a timer. The driver
+            // notes the round, once the machine has accepted the hold, for a
+            // host that reads the held run; the note keeps the reason cut at
+            // its bound.
+            let held = driver
+                .lock()
+                .await
+                .hold_resumed_run_for_admission(&run_id, cause, &detail);
+            match held {
                 Ok(()) => {
                     tracing::warn!(
                         session_id = %authority_binding.session_id,
@@ -9494,6 +9526,15 @@ async fn process_queue(
                         FailedBatchBacklogOutcome::Park => return false,
                         FailedBatchBacklogOutcome::Stopped(should_stop) => return should_stop,
                     }
+                }
+                // A durable steer that was waiting for this run's boundary
+                // when the run stopped running has no work left to register
+                // it there. Start that work under queue authority, before the
+                // resumed run is dispatched.
+                if resumed_run_id.is_some() {
+                    authority_binding
+                        .start_waiting_steer_boundary_work(driver, &run_id, &queue_authority_guard)
+                        .await;
                 }
                 drop(queue_authority_guard);
 

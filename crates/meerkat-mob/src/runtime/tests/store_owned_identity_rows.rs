@@ -30,6 +30,9 @@ mod cycle;
 // A definition update against the created agents' rows (0.9.15): an update
 // that drops a profile a row names is refused.
 mod definition_update;
+// Where a created identity's lineage goes: its record's requester and
+// consent.
+mod lineage;
 mod owned_edges;
 
 const STEP: Duration = Duration::from_mins(1);
@@ -7195,6 +7198,12 @@ const ORIGIN_READERS: &[(&str, &[&str], &str)] = &[
         "the roster writer's custody guard of a store-owned update",
     ),
     (
+        "runtime/seat_lineage.rs",
+        &["pub async fn member_lineage_step("],
+        "the lineage read, which shows it and allows nothing: a declared identity's member is \
+         its mob's own, and a created identity's goes by its identity record",
+    ),
+    (
         "roster.rs",
         &["impl Roster { > pub fn apply("],
         "the roster's fold of an adoption's binding row: its Created origin makes the member a \
@@ -7785,6 +7794,35 @@ async fn a_crash_during_a_removal_finishes_it_after_restart() {
     mob.restart_as(MobCompositionAuthority::Authoritative).await;
     hold.release();
     removal.abort();
+    // No caller holds this removal's receipt: the resumed mob finishes the
+    // retirement on its own, and the retirement's settlement is its signal.
+    // `Retired` is published once the member's terminal fact is journaled
+    // and its roster entry removed. The resumed actor holds no settlement
+    // for the member until it first publishes one, so wake on its
+    // machine-state changes until the watch exists.
+    let member = id(&name);
+    let mut changes = mob.handle.machine_state_changes();
+    let settled = tokio::time::timeout(STEP, async {
+        loop {
+            if let Some(mut watch) = mob.handle.retirement_settlement(&member) {
+                break watch.settled().await;
+            }
+            changes.changed().await.expect("the resumed actor is alive");
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "{name}'s retirement did not settle after the restart: {:?}",
+            mob.handle
+                .retirement_settlement(&member)
+                .map(|watch| watch.current())
+        )
+    });
+    assert!(
+        matches!(settled, Some(crate::runtime::RetirementSettlement::Retired)),
+        "{name}'s retirement settles retired after the restart: {settled:?}"
+    );
     mob.removed(&name).await;
     assert!(!mob.is_member(&name).await);
     assert_eq!(

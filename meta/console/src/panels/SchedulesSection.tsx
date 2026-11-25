@@ -1,5 +1,6 @@
 import React from "react";
 
+import { AUTOMATIC, isConsoleMobNotLoaded, type ConsoleRequestBy } from "../../../packages/console-core/src/mob-door";
 import {
   CONSOLE_SCHEDULE_COMMANDS,
   describeLatestTakeover,
@@ -412,8 +413,13 @@ export interface SchedulesSectionProps {
   identity: string;
   /** Whether the viewer may change them, and why not. */
   editing: ConsoleScheduleEditing;
-  /** Runs one schedule command for `identity`; rejects with the console's typed error. */
-  run: (command: ConsoleScheduleCommand, params: Record<string, unknown>) => Promise<unknown>;
+  /**
+   * Runs one schedule command for `identity`; rejects with the console's
+   * typed error. `by` is passed for the section's own reads (when it opens,
+   * when the pane refreshes): the console does not make those for an agent
+   * whose mob is not loaded. A person's act passes nothing.
+   */
+  run: (command: ConsoleScheduleCommand, params: Record<string, unknown>, by?: ConsoleRequestBy) => Promise<unknown>;
   /**
    * A value that changes whenever the pane refreshes: the list is read
    * again, at most once every 15 seconds.
@@ -422,6 +428,12 @@ export interface SchedulesSectionProps {
   now?: () => Date;
   timezone?: string;
   formatTime?: (iso: string) => string;
+  /** The agent's team is unavailable (not asleep): the note for schedules
+   * that were not read says that. */
+  teamUnavailable?: boolean;
+  /** Whether the agent's team is listed as not loaded. When it is loaded
+   * again, schedules that were not read are read. */
+  teamNotLoaded?: boolean;
 }
 
 interface ScheduleFormState {
@@ -446,10 +458,14 @@ export function SchedulesSection({
   now = () => new Date(),
   timezone,
   formatTime = formatScheduleTime,
+  teamUnavailable = false,
+  teamNotLoaded = false,
 }: SchedulesSectionProps): React.JSX.Element {
   const [schedules, setSchedules] = React.useState<ConsoleSchedule[]>([]);
   const [status, setStatus] = React.useState<"loading" | "ready" | "failed">("loading");
   const [loadError, setLoadError] = React.useState<string | null>(null);
+  // The section's own read was not made: the agent's mob is not loaded.
+  const [notLoaded, setNotLoaded] = React.useState(false);
   const [actionError, setActionError] = React.useState<string | null>(null);
   const [busy, setBusy] = React.useState<string | null>(null);
   // A sender that is an agent reads by its display name, a console identity
@@ -475,17 +491,28 @@ export function SchedulesSection({
     };
   }, []);
 
-  const load = React.useCallback(async () => {
+  const load = React.useCallback(async (by?: ConsoleRequestBy) => {
     const seq = ++loadSeq.current;
     lastLoadAt.current = nowRef.current().getTime();
     try {
-      const result = await runRef.current(CONSOLE_SCHEDULE_COMMANDS.list, {});
+      const result = await runRef.current(CONSOLE_SCHEDULE_COMMANDS.list, {}, by);
       if (!alive.current || seq !== loadSeq.current) return;
       setSchedules(parseConsoleScheduleList(result));
       setStatus("ready");
       setLoadError(null);
+      setNotLoaded(false);
     } catch (error) {
       if (!alive.current || seq !== loadSeq.current) return;
+      // The section's own read was held back: the agent's mob is asleep.
+      // Nothing was asked, and nothing failed; a person's Refresh reads.
+      if (isConsoleMobNotLoaded(error)) {
+        setSchedules([]);
+        setStatus("ready");
+        setLoadError(null);
+        setNotLoaded(true);
+        return;
+      }
+      setNotLoaded(false);
       // A list that cannot be read now is not shown as it was: the viewer
       // may have lost sight of the agent.
       setSchedules([]);
@@ -494,15 +521,25 @@ export function SchedulesSection({
     }
   }, []);
 
+  // The section's own reads: when it opens, and when the pane refreshes.
   React.useEffect(() => {
-    void load();
+    void load(AUTOMATIC);
   }, [identity, load]);
 
   React.useEffect(() => {
     const last = lastLoadAt.current;
     if (last !== null && nowRef.current().getTime() - last < AUTO_REFRESH_INTERVAL_MS) return;
-    void load();
+    void load(AUTOMATIC);
   }, [refreshToken, load]);
+
+  // The section's read was held back because the agent's team was not
+  // loaded: once the console lists the team as loaded, the schedules are
+  // read, without waiting for the pane's next refresh.
+  const notLoadedRef = React.useRef(notLoaded);
+  notLoadedRef.current = notLoaded;
+  React.useEffect(() => {
+    if (!teamNotLoaded && notLoadedRef.current) void load(AUTOMATIC);
+  }, [teamNotLoaded, load]);
 
   React.useEffect(() => {
     if (!editing.canChange) {
@@ -679,6 +716,13 @@ export function SchedulesSection({
           {loadError}
         </Notice>
       ) : null}
+      {notLoaded ? (
+        <p className="console-schedules__note" data-testid={`schedules-not-loaded:${identity}`}>
+          {teamUnavailable
+            ? "This agent's team is unavailable, so its schedules were not read."
+            : "This agent's team is asleep, so its schedules were not read. Refresh reads them and wakes the team."}
+        </p>
+      ) : null}
       {actionError ? (
         <Notice tone="crit" role="alert" className="console-schedules__error" testId={`schedules-error:${identity}`}>
           {actionError}
@@ -735,7 +779,7 @@ export function SchedulesSection({
         />
       ) : null}
       {status === "loading" && schedules.length === 0 ? <LoadingState label="Loading schedules" rows={2} /> : null}
-      {status === "ready" && schedules.length === 0 ? (
+      {status === "ready" && schedules.length === 0 && !notLoaded ? (
         <EmptyState inline title="No schedules for this agent." testId={`schedules-empty:${identity}`} />
       ) : null}
       {schedules.length > 0 ? (

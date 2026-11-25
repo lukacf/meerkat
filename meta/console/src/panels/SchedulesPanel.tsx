@@ -1,5 +1,6 @@
 import React from "react";
 
+import { AUTOMATIC, type ConsoleRequestBy } from "../../../packages/console-core/src/mob-door";
 import type { ConsoleAgent } from "../types";
 import { agentDisplayTitle } from "../lib/agents";
 import { isAgentRetired } from "../lib/agent-status";
@@ -77,6 +78,7 @@ import {
   SegmentedControl,
   StatusPill,
   StatusRow,
+  agentDisplayName,
   formatCountdown,
   plural,
   standardPanelMenu,
@@ -85,6 +87,7 @@ import {
   usePanelDensity,
   usePanelPreference,
   useShowTechnicalIds,
+  type AgentDirectory,
   type SummaryFact,
 } from "../../../packages/console-components/src/panel-kit";
 
@@ -110,8 +113,12 @@ export interface SchedulesPanelProps {
   offer: ConsoleScheduleOffer;
   readOnly: boolean;
   accessEnforcing: boolean;
-  /** Runs one schedule command for an agent; rejects with the console's typed error. */
-  run: (identity: string, command: ConsoleScheduleCommand, params: Record<string, unknown>) => Promise<unknown>;
+  /**
+   * Runs one schedule command for an agent; rejects with the console's typed
+   * error. `by` is passed for the panel's own reads of each agent's list:
+   * the console does not make those for an agent whose mob is not loaded.
+   */
+  run: (identity: string, command: ConsoleScheduleCommand, params: Record<string, unknown>, by?: ConsoleRequestBy) => Promise<unknown>;
   /** Changes when the pane refreshes: stale lists are read again. */
   refreshToken?: unknown;
   now?: () => Date;
@@ -122,6 +129,11 @@ export interface SchedulesPanelProps {
   /** Opens the New schedule form once the lists are read; a string picks
    * the agent (a link to "schedule a message for this agent"). */
   openNew?: boolean | string;
+  /** The agent directory to read the names inside one agent's schedules
+   * with (who a schedule sends as): a host with agents of several teams
+   * reads such a name as an agent of the schedule's own agent's team.
+   * Absent, the panel's directory serves every agent. */
+  directoryFor?: (identity: string) => AgentDirectory;
 }
 
 /** One agent's list as the panel last read it. */
@@ -217,8 +229,12 @@ export function SchedulesPanel({
   formatTime = formatScheduleTime,
   defaultView = "agenda",
   openNew: openNewOnLoad,
+  directoryFor,
 }: SchedulesPanelProps): React.JSX.Element {
   const directory = useAgentDirectory();
+  /** The name of who a schedule of `identity` sends as, when it is an agent. */
+  const senderLabelOf = (identity: string) => (raw: string): string | undefined =>
+    (directoryFor?.(identity) ?? directory).lookup(raw)?.label;
   const sharedNow = useNow();
   const nowMs = now ? now().getTime() : sharedNow;
   const nowMinute = Math.floor(nowMs / 60_000) * 60_000;
@@ -267,7 +283,7 @@ export function SchedulesPanel({
   );
   const nameOf = (identity: string) => {
     const agent = agentOf(identity);
-    return agent ? agentDisplayTitle(agent) : directory.lookup(identity)?.label || identity;
+    return agent ? agentDisplayTitle(agent) : agentDisplayName(identity, directory) || identity;
   };
   const editingOf = (identity: string): ConsoleScheduleEditing =>
     consoleScheduleEditing({ offer, readOnly, accessEnforcing, agent: agentOf(identity) });
@@ -293,7 +309,7 @@ export function SchedulesPanel({
         next += 1;
         let entry: AgentSchedules;
         try {
-          const result = await runRef.current(identity, CONSOLE_SCHEDULE_COMMANDS.list, {});
+          const result = await runRef.current(identity, CONSOLE_SCHEDULE_COMMANDS.list, {}, AUTOMATIC);
           const at = clock();
           entry = { status: "ready", schedules: parseConsoleScheduleList(result), error: null, at, okAt: at };
         } catch (error) {
@@ -783,7 +799,7 @@ export function SchedulesPanel({
     const name = schedule.name || "Untitled schedule";
     const isPaused = schedule.phase !== "active";
     const working = busy !== null;
-    const sender = schedule.senderHidden ? null : describeScheduleSender(schedule.sender, (raw) => directory.lookup(raw)?.label);
+    const sender = schedule.senderHidden ? null : describeScheduleSender(schedule.sender, senderLabelOf(schedule.identity));
     const pauseReason = describeSchedulePause(schedule);
     const actions = editing.canChange ? (
       <span className="schedules__actions">
@@ -878,7 +894,7 @@ export function SchedulesPanel({
       busy={busy !== null}
       onConfirm={confirmTakeover}
       onCancel={() => setTakeover(null)}
-      agentName={(raw) => directory.lookup(raw)?.label}
+      agentName={senderLabelOf(takeover.identity)}
       testId="schedules-takeover"
       confirmTestId="schedules-takeover-confirm"
       cancelTestId="schedules-takeover-cancel"
@@ -1009,7 +1025,7 @@ export function SchedulesPanel({
           {schedule.senderHidden ? null : (
             <DrawerSection label="Sends as">
               <p className="schedules__detail-text" title={schedule.sender || undefined}>
-                {describeScheduleSender(schedule.sender, (raw) => directory.lookup(raw)?.label)}
+                {describeScheduleSender(schedule.sender, senderLabelOf(schedule.identity))}
               </p>
             </DrawerSection>
           )}
@@ -1018,7 +1034,7 @@ export function SchedulesPanel({
               <ol className="schedules__runs" data-testid={`schedules-sender-history:${schedule.scheduleId}`}>
                 {schedule.senderHistory.map((former, index) => (
                   <li key={`${index}:${former.replacedAt ?? ""}`} title={former.sender || undefined}>
-                    {describeFormerSender(former, (raw) => directory.lookup(raw)?.label, formatTime)}
+                    {describeFormerSender(former, senderLabelOf(schedule.identity), formatTime)}
                   </li>
                 ))}
               </ol>

@@ -149,7 +149,8 @@ impl UnifiedRuntime {
             decoded_specs.push(spec);
         }
         let desired_specs = decoded_specs;
-        self.mob_runtime
+        self.default_mob()
+            .mob_runtime
             .set_baseline_member_specs(desired_specs.clone())
             .await;
         // Spec member ids arrive in the public alias space (identity-first
@@ -224,24 +225,11 @@ impl UnifiedRuntime {
     /// desired vs managed edges, and calls wire/unwire as needed. On a
     /// candidate launch it is a dry run: nothing is wired, unwired or
     /// pruned, and the report names what would be.
+    ///
+    /// This is the default mob's form of the operation: it reconciles the
+    /// edges of the mob the launch names.
     pub async fn reconcile_edges(&self) -> UnifiedRuntimeReconcileEdgesReport {
-        let report = self.topology_runtime_handle().reconcile().await;
-        if let Some(alert) = reconcile_incomplete_alert(&report) {
-            self.fire_error(alert);
-            log_reconcile_failures(&report.failures);
-        } else if !report.skipped_missing_members.is_empty() {
-            // INFO, not WARN: an edge waits until both endpoints are members
-            // of Core's mob (an identity not seated yet, or a placed or
-            // externally bound one its host has not materialized), so a
-            // reconcile skips such edges by design and a warning would fire
-            // each time.
-            tracing::info!(
-                skipped = report.skipped_missing_members.len(),
-                "edge reconcile left edges pending until both endpoints are members; \
-                 nothing failed"
-            );
-        }
-        report
+        self.default_mob_resolved().reconcile_edges().await
     }
 
     pub(super) async fn reconcile_edges_from_members(
@@ -251,25 +239,36 @@ impl UnifiedRuntime {
         // Member reconcile and public edge reconcile must share the same
         // admission lock as operator topology mutation. Otherwise an ordinary
         // reconcile can observe and overwrite a half-applied intent journal.
-        let _admission = self.topology_controller.mutation_guard().await;
+        let _admission = self
+            .default_mob()
+            .topology_controller
+            .mutation_guard()
+            .await;
         // A candidate launch's reconcile is a dry run: it rewires nothing and
         // touches no topology journal.
-        let dry_run = !self.mob_runtime.speaks_for_composition();
-        if !dry_run && let Err(error) = self.topology_controller.prepare_pending_recovery().await {
+        let dry_run = !self.default_mob().mob_runtime.speaks_for_composition();
+        if !dry_run
+            && let Err(error) = self
+                .default_mob()
+                .topology_controller
+                .prepare_pending_recovery()
+                .await
+        {
             tracing::error!(error = %error, "failed to prepare topology recovery rollback");
             return crate::topology_control::recovery_failure_report(error);
         }
         let report = reconcile_edges_over_members(
             &self.mob_handle(),
-            self.edge_discovery.as_deref(),
-            &self.managed_dynamic_edges,
-            Some(&self.topology_controller),
+            self.default_mob().edge_discovery.as_deref(),
+            &self.default_mob().managed_dynamic_edges,
+            Some(&self.default_mob().topology_controller),
             active_members,
             dry_run,
         )
         .await;
         if !dry_run
             && let Err(error) = self
+                .default_mob()
                 .topology_controller
                 .finalize_recovered_pending(report.is_complete())
                 .await
@@ -320,6 +319,7 @@ impl UnifiedRuntime {
                 let route_key = format!("{ROSTER_ROUTE_PREFIX}{member_id}");
                 rt.add_runtime_route(RuntimeRoute {
                     route_key: route_key.clone(),
+                    mob_id: None,
                     recipient: member_id.clone(),
                     channel: Some(ROSTER_ROUTE_CHANNEL.to_string()),
                     sink: ROSTER_ROUTE_SINK.to_string(),
@@ -401,6 +401,30 @@ pub async fn reconcile_definition_edges_with_topology(
         tracing::error!(error = %error, "failed to finalize recovered topology operation");
     }
     report
+}
+
+/// What follows an edge reconcile of a mob of `runtime`, whichever mob it
+/// was: an incomplete one is reported on the host's error hook and logged,
+/// and edges left pending are noted.
+pub(super) fn note_edge_reconcile(
+    runtime: &UnifiedRuntime,
+    report: &UnifiedRuntimeReconcileEdgesReport,
+) {
+    if let Some(alert) = reconcile_incomplete_alert(report) {
+        runtime.fire_error(alert);
+        log_reconcile_failures(&report.failures);
+    } else if !report.skipped_missing_members.is_empty() {
+        // INFO, not WARN: an edge waits until both endpoints are members
+        // of Core's mob (an identity not seated yet, or a placed or
+        // externally bound one its host has not materialized), so a
+        // reconcile skips such edges by design and a warning would fire
+        // each time.
+        tracing::info!(
+            skipped = report.skipped_missing_members.len(),
+            "edge reconcile left edges pending until both endpoints are members; \
+             nothing failed"
+        );
+    }
 }
 
 /// The `meta/reconcile_edges` result: the report, and `"applied": false`

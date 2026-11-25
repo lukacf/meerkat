@@ -55,7 +55,7 @@ class KeyedTransport:
                 methods.append("meta/send_status")
             features = ["keyed_send_handling_mode"] if self.steer else []
             result = {
-                "contract_version": "0.5.0",
+                "contract_version": "0.6.0",
                 "methods": methods,
                 "feature_capabilities": features,
                 "loaded_modules": [],

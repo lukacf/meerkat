@@ -256,6 +256,20 @@ pub struct EphemeralRuntimeDriver {
     /// runtime loop paces its re-asks by it and ends a row whose budget ran
     /// out. Rollback snapshots never restore it.
     controller_hold_clock: ControllerHoldClock,
+    /// When this registration's driver applied the machine's mark of the run
+    /// it keeps resumable (`resumable_run_id`), with that run. Shell timing
+    /// only, for a host that reads how long the run has waited: the machine
+    /// owns which run is marked, the stamp counts only while the machine's
+    /// mark names its run, and no decision reads it.
+    resumable_mark_clock: Option<(RunId, meerkat_core::time_compat::Instant)>,
+    /// What the undecided rounds of the run the machine holds for its
+    /// admission were in this registration (`resumed_run_admission_hold`):
+    /// written in the step that holds the run, after the machine accepted
+    /// the hold. Diagnostics only, for a host that reads the held run: the
+    /// machine alone says whether a run is held and which, the note counts
+    /// only while the machine's hold names its run, and no decision reads
+    /// it.
+    resumed_run_admission_note: Option<crate::resumed_run_admission::UndecidedRoundsNote>,
 }
 
 /// The timing of the machine's controller holds of one registration (see
@@ -305,14 +319,19 @@ impl KeptInputKind {
 
 /// Session-local order of durable-class live-boundary Steer deliveries.
 ///
-/// Each boundary of a running run accepts one durable delivery, so durable
-/// Steer inputs prepare one at a time, oldest first in the steer lane. A
-/// durable Steer whose live-boundary work finds an older durable Steer still
-/// in the lane waits until that one's work settles, then reads the lane
-/// again: once the older one has joined the run it prepares for the next
-/// boundary, and if the older one went back to its follow-up turn it follows
-/// it there. The generated lanes stay the order authority; this only
-/// sequences the live ingress tasks and is never persisted.
+/// Each boundary of a running run has one durable claim, so durable Steer
+/// inputs prepare one at a time, oldest first in the steer lane: the
+/// preparing one holds the claim for the lane. Once the runner has parked at
+/// the boundary, the holder's work joins its own input and every durable
+/// Steer waiting behind it in the lane to the run and publishes them
+/// together. A durable Steer whose live-boundary work finds an older durable
+/// Steer still in the lane waits until that one's work settles, then reads
+/// the lane again: if the holder joined it, it is done; if it is still
+/// queued it prepares for the next boundary; and if an older one went back
+/// to its follow-up turn it follows it there. A holder whose own input is
+/// recalled while it waits keeps the claim for the steers behind it. The
+/// generated lanes stay the order authority; this only sequences the live
+/// ingress tasks and is never persisted.
 #[derive(Debug, Default)]
 pub(crate) struct DurableSteerOrder {
     state: std::sync::Mutex<DurableSteerOrderState>,
@@ -363,6 +382,11 @@ impl DurableSteerOrder {
             order: Arc::clone(self),
             input_id: input_id.clone(),
         }
+    }
+
+    /// Whether `input_id`'s live-boundary work is running.
+    pub(crate) fn is_working(&self, input_id: &InputId) -> bool {
+        self.state().working.contains(input_id)
     }
 }
 
@@ -549,6 +573,8 @@ impl EphemeralRuntimeDriver {
             staged_retained_work: StagedRetainedWork::default(),
             durable_steer_order: Arc::new(DurableSteerOrder::default()),
             controller_hold_clock: ControllerHoldClock::default(),
+            resumable_mark_clock: None,
+            resumed_run_admission_note: None,
         }
     }
 
@@ -1009,21 +1035,48 @@ impl EphemeralRuntimeDriver {
         })
     }
 
+    /// What this registration noted of the undecided rounds of a held run
+    /// (see `resumed_run_admission_note`). The caller reads the machine's
+    /// hold first and shows the note only for the run the machine holds.
+    pub(crate) fn resumed_run_admission_note(
+        &self,
+    ) -> Option<&crate::resumed_run_admission::UndecidedRoundsNote> {
+        self.resumed_run_admission_note.as_ref()
+    }
+
     /// Hold the run `run_id` marked resumable through the machine
-    /// (`HoldResumedRunForAdmission`): its resumed-run admission could not
-    /// decide, so the run stays marked, with its inputs bound and none
-    /// ended, and neither `ResumeRun` nor the resumed-run plan admits it
-    /// until a later answer releases it.
+    /// (`HoldResumedRunForAdmission`): one more round of its resumed-run
+    /// admission ended undecided, by `cause` and with `reason`. The run
+    /// stays marked, with its inputs bound and none ended, and neither
+    /// `ResumeRun` nor the resumed-run plan admits it until a later answer
+    /// releases it.
+    ///
+    /// Once the machine has accepted the hold, the round is noted for a host
+    /// that reads the held run: counted, with how and why it ended. A note
+    /// of another run starts over. A hold the machine refuses notes nothing
+    /// and forgets nothing: a run the machine already holds, whose stop
+    /// arrived during the ask, keeps what its earlier rounds noted until its
+    /// settlement drops the hold.
     pub(crate) fn hold_resumed_run_for_admission(
         &mut self,
         run_id: &RunId,
+        cause: crate::resumed_run_admission::ResumedRunAdmissionUndecidedCause,
+        reason: &str,
     ) -> Result<(), RuntimeDriverError> {
         self.dsl_apply(
             mm_dsl::MeerkatMachineInput::HoldResumedRunForAdmission {
                 run_id: mm_dsl::RunId::from_domain(run_id),
             },
             "HoldResumedRunForAdmission",
-        )
+        )?;
+        crate::resumed_run_admission::UndecidedRoundsNote::note_round(
+            &mut self.resumed_run_admission_note,
+            run_id,
+            cause,
+            reason,
+            meerkat_core::time_compat::Instant::now(),
+        );
+        Ok(())
     }
 
     /// Release the admission hold of the run `run_id`
@@ -2964,6 +3017,25 @@ impl EphemeralRuntimeDriver {
         self.dsl_steer_lane()
     }
 
+    /// The first input of the steer lane for which the machine holds a
+    /// durable live-boundary delivery, when no live-boundary work runs for
+    /// it. Such a steer still waits for a boundary of its run with nothing
+    /// to register it there: the work its admission started did not outlive
+    /// the process.
+    pub(crate) fn durable_steer_waiting_without_work(&self) -> Option<InputId> {
+        let lane = self.dsl_steer_lane();
+        let head = self.with_dsl_state(|state| {
+            lane.into_iter().find(|input_id| {
+                state
+                    .input_live_boundary_delivery
+                    .get(&Self::dsl_key(input_id))
+                    .copied()
+                    == Some(mm_dsl::LiveBoundaryDelivery::DurableAppend)
+            })
+        })?;
+        (!self.durable_steer_order.is_working(&head)).then_some(head)
+    }
+
     /// DSL-tracked lifecycle phase for the given input, if known.
     pub fn ingress_lifecycle(&self, input_id: &InputId) -> Option<InputLifecycleState> {
         self.input_phase(input_id)
@@ -3339,6 +3411,12 @@ impl EphemeralRuntimeDriver {
         let lane = matches!(lifecycle_state, InputLifecycleState::Queued)
             .then_some(recovery_lane)
             .flatten();
+        // The delivery class the machine stamped on the row at admission goes
+        // back with the row's other admission stamps. The machine decides
+        // whether the recovered input keeps it.
+        let live_boundary_delivery = runtime_grouping
+            .and_then(|(runtime_semantics, _)| runtime_semantics.live_boundary_delivery())
+            .map(mm_dsl::LiveBoundaryDelivery::from);
         let (
             runtime_boundary,
             runtime_execution_kind,
@@ -3395,6 +3473,7 @@ impl EphemeralRuntimeDriver {
                 runtime_execution_kind,
                 runtime_peer_response_terminal_apply_intent,
                 is_prompt,
+                live_boundary_delivery,
             },
             "RecoverInputLifecycle",
         )
@@ -5866,6 +5945,11 @@ impl EphemeralRuntimeDriver {
         // The machine keeps its controller holds across a recycle, and their
         // budgets keep running from their first answer.
         let controller_hold_clock = std::mem::take(&mut self.controller_hold_clock);
+        // The machine keeps its mark of a resumable run and its admission
+        // hold across a recycle: the run has waited since that mark, and the
+        // hold's undecided rounds stay those this registration noted.
+        let resumable_mark_clock = self.resumable_mark_clock.take();
+        let resumed_run_admission_note = self.resumed_run_admission_note.take();
 
         *self = Self::new_with_control(runtime_id, control);
         self.work_authorization_host = work_host;
@@ -5884,6 +5968,8 @@ impl EphemeralRuntimeDriver {
         self.reservation_key = preserved_reservation_key;
         self.policy_snapshot = preserved_policy_snapshot;
         self.controller_hold_clock = controller_hold_clock;
+        self.resumable_mark_clock = resumable_mark_clock;
+        self.resumed_run_admission_note = resumed_run_admission_note;
 
         self.recover_ephemeral()?;
 
@@ -7286,13 +7372,55 @@ impl EphemeralRuntimeDriver {
     /// changed, when the machine refuses it: no Initializing, Idle or
     /// Attached phase, a current run, or another run already marked.
     pub(crate) fn mark_run_resumable(&mut self, run_id: &RunId) -> bool {
-        self.dsl_apply(
-            mm_dsl::MeerkatMachineInput::MarkRunResumable {
-                run_id: mm_dsl::RunId::from_domain(run_id),
-            },
-            "MarkRunResumable",
-        )
-        .is_ok()
+        let marked = self
+            .dsl_apply(
+                mm_dsl::MeerkatMachineInput::MarkRunResumable {
+                    run_id: mm_dsl::RunId::from_domain(run_id),
+                },
+                "MarkRunResumable",
+            )
+            .is_ok();
+        if marked {
+            self.note_resumable_mark(run_id);
+        }
+        marked
+    }
+
+    /// The machine has just marked `run_id` resumable in this registration
+    /// (see `resumable_mark_clock`). A run the stamp already names keeps its
+    /// stamp: a mark restored after a reset or a destroy that failed is the
+    /// mark the run had all along. Any other run waits from now.
+    pub(crate) fn note_resumable_mark(&mut self, run_id: &RunId) {
+        if self
+            .resumable_mark_clock
+            .as_ref()
+            .is_some_and(|(marked, _)| marked == run_id)
+        {
+            return;
+        }
+        self.restamp_resumable_mark(run_id);
+    }
+
+    /// The machine has just marked `run_id` resumable by suspending it while
+    /// it ran: it waits from now, whatever an earlier mark of it stamped.
+    pub(crate) fn restamp_resumable_mark(&mut self, run_id: &RunId) {
+        self.resumable_mark_clock =
+            Some((run_id.clone(), meerkat_core::time_compat::Instant::now()));
+    }
+
+    /// How long this registration has marked `run_id` resumable at `now`, by
+    /// the stamp taken when its mark was applied. `None` for a run the stamp
+    /// does not name: not stamped is not zero. The caller reads the
+    /// machine's mark first.
+    pub(crate) fn resumable_mark_elapsed(
+        &self,
+        run_id: &RunId,
+        now: meerkat_core::time_compat::Instant,
+    ) -> Option<std::time::Duration> {
+        self.resumable_mark_clock
+            .as_ref()
+            .filter(|(marked, _)| marked == run_id)
+            .map(|(_, at)| now.saturating_duration_since(*at))
     }
 
     /// The inputs `run_id` still holds: associated with it and Staged,
@@ -10724,6 +10852,7 @@ mod tests {
                     runtime_execution_kind: None,
                     runtime_peer_response_terminal_apply_intent: None,
                     is_prompt: false,
+                    live_boundary_delivery: None,
                 },
                 "RecoverInputLifecycle(test)",
             )
@@ -10877,6 +11006,241 @@ mod tests {
                 .end_resumable_run(&run_id, &InputAbandonReason::Retired)
                 .is_err(),
             "an ended run is no longer resumable"
+        );
+    }
+
+    /// Where the driver's marked run stands with its admission, as a host's
+    /// poll composes it: the machine's mark, the machine's hold and the
+    /// registration's note, read together.
+    fn admission_state_of(
+        driver: &EphemeralRuntimeDriver,
+    ) -> Option<crate::resumed_run_admission::ResumedRunAdmissionState> {
+        let mark = driver.with_dsl_state(|state| {
+            state
+                .resumable_run_id
+                .as_ref()
+                .and_then(crate::meerkat_machine::dsl_authority::current_run_id_from_dsl)
+        });
+        crate::resumed_run_admission::resumed_run_admission_state(
+            mark.as_ref(),
+            driver.resumed_run_admission_held().as_ref(),
+            driver.resumed_run_admission_note(),
+            meerkat_core::time_compat::Instant::now(),
+        )
+    }
+
+    /// The rounds, cause and reason of a held run, or `None` for a held run
+    /// with no note; panics for a run that is not held.
+    fn held_rounds_of(
+        driver: &EphemeralRuntimeDriver,
+    ) -> Option<(
+        u64,
+        crate::resumed_run_admission::ResumedRunAdmissionUndecidedCause,
+        String,
+    )> {
+        match admission_state_of(driver) {
+            Some(crate::resumed_run_admission::ResumedRunAdmissionState::Held(held)) => held
+                .undecided
+                .map(|undecided| (undecided.rounds, undecided.cause, undecided.reason)),
+            other => panic!("the run reads held: {other:?}"),
+        }
+    }
+
+    fn hold_unavailable(driver: &mut EphemeralRuntimeDriver, run_id: &RunId, reason: &str) {
+        driver
+            .hold_resumed_run_for_admission(
+                run_id,
+                crate::resumed_run_admission::ResumedRunAdmissionUndecidedCause::AnsweredUnavailable,
+                reason,
+            )
+            .expect("the machine holds the marked run");
+    }
+
+    /// Held is the machine's: a run the machine holds for which this
+    /// registration noted no round reads held, with its rounds absent, never
+    /// as not held. A hold then notes the round.
+    #[test]
+    fn a_run_the_machine_holds_with_no_note_reads_held_with_its_rounds_absent() {
+        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("held-no-note"));
+        let run_id = RunId::new();
+        assert_eq!(admission_state_of(&driver), None, "no mark, no answer");
+        assert!(driver.mark_run_resumable(&run_id));
+        assert_eq!(
+            admission_state_of(&driver),
+            Some(crate::resumed_run_admission::ResumedRunAdmissionState::MarkedNotHeld)
+        );
+        driver
+            .dsl_apply(
+                mm_dsl::MeerkatMachineInput::HoldResumedRunForAdmission {
+                    run_id: mm_dsl::RunId::from_domain(&run_id),
+                },
+                "HoldResumedRunForAdmission",
+            )
+            .expect("the machine holds the marked run");
+        assert_eq!(
+            held_rounds_of(&driver),
+            None,
+            "the machine's hold alone reads held, its rounds absent"
+        );
+        hold_unavailable(&mut driver, &run_id, "first round");
+        assert_eq!(
+            held_rounds_of(&driver),
+            Some((
+                1,
+                crate::resumed_run_admission::ResumedRunAdmissionUndecidedCause::AnsweredUnavailable,
+                "first round".to_string()
+            ))
+        );
+    }
+
+    /// A second run held in the same registration starts over: the first
+    /// run's rounds, cause and reason are never shown for it, before or
+    /// after its own first round.
+    #[test]
+    fn a_second_run_held_in_one_registration_starts_its_rounds_over() {
+        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("second-held-run"));
+        let first = RunId::new();
+        assert!(driver.mark_run_resumable(&first));
+        hold_unavailable(&mut driver, &first, "first run, round one");
+        hold_unavailable(&mut driver, &first, "first run, round two");
+        assert_eq!(
+            held_rounds_of(&driver).map(|(rounds, _, reason)| (rounds, reason)),
+            Some((2, "first run, round two".to_string()))
+        );
+        driver
+            .end_resumable_run(&first, &InputAbandonReason::Retired)
+            .expect("the first run is settled");
+        assert_eq!(
+            admission_state_of(&driver),
+            None,
+            "a settled run is answered no more"
+        );
+
+        let second = RunId::new();
+        assert!(driver.mark_run_resumable(&second));
+        assert_eq!(
+            admission_state_of(&driver),
+            Some(crate::resumed_run_admission::ResumedRunAdmissionState::MarkedNotHeld),
+            "the first run's note does not make the second run held"
+        );
+        driver
+            .dsl_apply(
+                mm_dsl::MeerkatMachineInput::HoldResumedRunForAdmission {
+                    run_id: mm_dsl::RunId::from_domain(&second),
+                },
+                "HoldResumedRunForAdmission",
+            )
+            .expect("the machine holds the second run");
+        assert_eq!(
+            held_rounds_of(&driver),
+            None,
+            "the first run's rounds are never the second run's"
+        );
+        driver
+            .hold_resumed_run_for_admission(
+                &second,
+                crate::resumed_run_admission::ResumedRunAdmissionUndecidedCause::TimedOut,
+                "second run, round one",
+            )
+            .expect("the machine holds the second run");
+        assert_eq!(
+            held_rounds_of(&driver),
+            Some((
+                1,
+                crate::resumed_run_admission::ResumedRunAdmissionUndecidedCause::TimedOut,
+                "second run, round one".to_string()
+            )),
+            "its rounds count from one, with its own cause and reason"
+        );
+    }
+
+    /// A hold the machine refuses notes nothing: a run that is not marked
+    /// gets no note, and the note of the run that is held stays as it was.
+    #[test]
+    fn a_hold_the_machine_refuses_notes_nothing_and_forgets_nothing() {
+        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("refused-hold"));
+        let held = RunId::new();
+        assert!(driver.mark_run_resumable(&held));
+        hold_unavailable(&mut driver, &held, "the held run's round");
+        let unmarked = RunId::new();
+        assert!(
+            driver
+                .hold_resumed_run_for_admission(
+                    &unmarked,
+                    crate::resumed_run_admission::ResumedRunAdmissionUndecidedCause::TimedOut,
+                    "a run the machine does not mark",
+                )
+                .is_err(),
+            "the machine refuses to hold a run it does not mark"
+        );
+        assert_eq!(
+            held_rounds_of(&driver),
+            Some((
+                1,
+                crate::resumed_run_admission::ResumedRunAdmissionUndecidedCause::AnsweredUnavailable,
+                "the held run's round".to_string()
+            )),
+            "the refused hold changed nothing of the held run's note"
+        );
+    }
+
+    /// A recycle of the driver keeps the machine's mark and hold, and with
+    /// them the registration's note of the held run and the time since its
+    /// mark.
+    #[test]
+    fn a_recycle_keeps_the_held_runs_note_and_the_time_since_its_mark() {
+        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("recycled-hold"));
+        let run_id = RunId::new();
+        assert!(driver.mark_run_resumable(&run_id));
+        hold_unavailable(&mut driver, &run_id, "before the recycle");
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        let before = driver
+            .resumable_mark_elapsed(&run_id, meerkat_core::time_compat::Instant::now())
+            .expect("the mark of the run is stamped");
+        driver
+            .recycle_preserving_work()
+            .expect("the driver recycles");
+        assert_eq!(
+            held_rounds_of(&driver).map(|(rounds, _, reason)| (rounds, reason)),
+            Some((1, "before the recycle".to_string())),
+            "the recycle keeps the held run's note"
+        );
+        assert!(
+            driver
+                .resumable_mark_elapsed(&run_id, meerkat_core::time_compat::Instant::now())
+                .is_some_and(|elapsed| elapsed >= before),
+            "and the time since its mark goes on"
+        );
+    }
+
+    /// The time since a run's mark starts at the mark, goes on when the same
+    /// run is marked again (a mark restored after a reset or a destroy that
+    /// failed), starts over for a suspension's mark, and is not known (never
+    /// zero) for a run the stamp does not name.
+    #[test]
+    fn the_time_since_a_mark_goes_on_for_the_same_run_and_starts_over_for_a_suspension() {
+        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("mark-stamp"));
+        let run_id = RunId::new();
+        assert!(driver.mark_run_resumable(&run_id));
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        driver.note_resumable_mark(&run_id);
+        assert!(
+            driver
+                .resumable_mark_elapsed(&run_id, meerkat_core::time_compat::Instant::now())
+                .is_some_and(|elapsed| elapsed >= std::time::Duration::from_millis(30)),
+            "the same run marked again keeps its stamp"
+        );
+        assert_eq!(
+            driver.resumable_mark_elapsed(&RunId::new(), meerkat_core::time_compat::Instant::now()),
+            None,
+            "another run has no time of this stamp: not known, never zero"
+        );
+        driver.restamp_resumable_mark(&run_id);
+        assert!(
+            driver
+                .resumable_mark_elapsed(&run_id, meerkat_core::time_compat::Instant::now())
+                .is_some_and(|elapsed| elapsed < std::time::Duration::from_millis(30)),
+            "a suspension's mark starts the time over"
         );
     }
 

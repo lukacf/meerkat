@@ -10,7 +10,9 @@
 //!
 //! Only child mobs are governed. Mobs the host creates, same-mob `fork_off`
 //! and `mob_spawn_member`, and temporary councils keep their own member
-//! bindings.
+//! bindings. A mob the host creates is built by the host's own composition
+//! instead, when it installed one (`HostMobComposition`): which of the two
+//! a mob gets is decided by who created it, and no mob gets both.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};

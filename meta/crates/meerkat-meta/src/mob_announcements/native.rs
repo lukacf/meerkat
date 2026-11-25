@@ -20,7 +20,7 @@ use super::availability::{
     BlockCause, EvidenceClass, MemberDeparture, NotServedHereCause, SuspendCause,
 };
 use super::remote::RemoteMemberDelivery;
-use super::sources::MemberFacts;
+use super::sources::{MemberFacts, MemberPerson};
 pub use super::types::MemberRoute;
 use super::types::{
     Batch, Member, MemberIdentity, MemberRouteRecord, MobId, MobIncarnation, SubscriptionEnd,
@@ -35,8 +35,40 @@ pub const ANNOUNCEMENT_CONTINUATION_NAMESPACE: &str = "meta.mob_announcements";
 
 /// A native read or preparation that could not be made now. Never evidence
 /// that something did or did not happen.
+///
+/// The text is for people. The one cause its owner states typed is a mob
+/// that is hosted here and not loaded ([`Self::not_loaded_mob`]); no cause
+/// is ever read from the text, and an error without the typed one is of no
+/// stated cause.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NativeUnavailable(pub String);
+pub struct NativeUnavailable(pub String, Option<MobId>);
+
+impl NativeUnavailable {
+    /// An unavailable read or preparation of no stated cause.
+    pub fn new(detail: impl Into<String>) -> Self {
+        Self(detail.into(), None)
+    }
+
+    /// The read of the mob `mob_id`, which is hosted here and of which the
+    /// mob set hands out no handle now: it knows the mob and has not loaded
+    /// it, or it withholds the handle while it asks the mob whether it is
+    /// idle. A read loads nothing; whatever addresses the mob loads it.
+    pub fn mob_not_loaded(mob_id: &MobId) -> Self {
+        Self(
+            format!("{mob_id} is hosted here but not running: it is not loaded"),
+            Some(mob_id.clone()),
+        )
+    }
+
+    /// The mob that is hosted here and not loaded, when that is why the
+    /// read could not be made ([`Self::mob_not_loaded`]). Nothing is wrong
+    /// with such a mob and nothing is to be done about it: a pass that
+    /// loads nothing meets it at every pass while the mob sleeps. `None`
+    /// for every other error: its cause is not stated.
+    pub fn not_loaded_mob(&self) -> Option<&MobId> {
+        self.1.as_ref()
+    }
+}
 
 impl std::fmt::Display for NativeUnavailable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -194,7 +226,12 @@ enum ChildMob {
     /// resolves, or a persisted mob whose store did not restore, kept
     /// quarantined. It may run again.
     Held,
-    /// Neither running nor held: destroyed, or never created here.
+    /// Hosted here with no handle to hand out now: the mob set knows it
+    /// and has not loaded it, or withholds its handle while it asks the mob
+    /// whether it is idle. A lookup of the mob by its id serves it.
+    NotLoaded,
+    /// Neither running, held nor known to the mob set: destroyed, or never
+    /// created here.
     Gone,
 }
 
@@ -233,8 +270,8 @@ pub enum MemberMobScan {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum MobPresence {
-    /// Managed by this gateway and not destroyed, or restored and held
-    /// until its owner resolves.
+    /// Managed by this gateway and not destroyed, restored and held until
+    /// its owner resolves, or known to its mob set and not loaded.
     Hosted,
     /// Not hosted here: destroyed, or never created here. A mob created
     /// later under the same id is another mob.
@@ -292,6 +329,11 @@ pub(crate) enum ParentRecord {
     },
     /// Restored and held until its owner resolves: it may run again.
     Held,
+    /// Known to the mob set, which hands out no handle of it now: it is not
+    /// loaded, or its handle is withheld while the set asks it whether it
+    /// is idle. It is hosted here, and its records are read once it has a
+    /// handle again.
+    NotLoaded,
     /// Neither running nor held.
     NotHosted,
 }
@@ -377,7 +419,36 @@ pub(crate) fn origin_from(records: &OriginRecords) -> Result<MobOrigin, String> 
             "its parent {parent} is hosted here but not running: held until its owner \
              resolves, or quarantined"
         )),
+        // Hosted here, and nothing of it can be read without a handle: not
+        // a parent that is gone. The origin is not answerable now, so no
+        // lineage is written from it, and the next read tries again.
+        Some(ParentRecord::NotLoaded) => Err(format!(
+            "its parent {parent} is hosted here and not loaded: its record is read once it is \
+             loaded"
+        )),
         Some(ParentRecord::NotHosted) | None => Ok(MobOrigin::ParentNotHosted(parent)),
+    }
+}
+
+/// How the creating mob `parent`, of which the listings gave no handle, is
+/// hosted here: held (`held`, the ids [`hosted_handles`] read), known to
+/// the mob set without a handle now ([`hosted_without_a_handle`]: it is not
+/// loaded, or its handle is withheld while the set asks it whether it is
+/// idle), or not hosted. An id the announcements cannot hold names no mob
+/// hosted here.
+pub(crate) async fn parent_without_a_handle<L: HostedListings>(
+    listings: &L,
+    held: &BTreeSet<String>,
+    parent: &str,
+) -> Result<ParentRecord, NativeUnavailable> {
+    if held.contains(parent) {
+        return Ok(ParentRecord::Held);
+    }
+    match MobId::new(parent.to_string()) {
+        Ok(parent_id) if hosted_without_a_handle(listings, &parent_id).await? => {
+            Ok(ParentRecord::NotLoaded)
+        }
+        _ => Ok(ParentRecord::NotHosted),
     }
 }
 
@@ -481,7 +552,7 @@ pub trait NativeDelivery: Send + Sync {
     /// The current cursor of the event log of a mob a member created: a
     /// subscription made now is made at it.
     async fn member_mob_cursor(&self, mob_id: &MobId) -> Result<u64, NativeUnavailable> {
-        Err(NativeUnavailable(format!(
+        Err(NativeUnavailable::new(format!(
             "{mob_id} keeps no event log here"
         )))
     }
@@ -523,6 +594,17 @@ pub trait NativeDelivery: Send + Sync {
     ) -> Result<Option<MemberFacts>, NativeUnavailable> {
         let _ = member;
         Ok(None)
+    }
+
+    /// What the record of who this gateway's members are private to holds
+    /// for `member`, whether it still runs or has ended. Unavailable while
+    /// that record has not been read and does not hold the member. A
+    /// gateway that keeps no such record holds no member: the owner then
+    /// leaves out, at a seal and at the replay of an earlier start, what a
+    /// member announced once the roster no longer names that member.
+    async fn member_person(&self, member: &Member) -> Result<MemberPerson, NativeUnavailable> {
+        let _ = member;
+        Ok(MemberPerson::NotKnown)
     }
 
     /// The members `mob_id`'s roster records with `role` (the profile they
@@ -804,6 +886,22 @@ pub(crate) trait HostedListings: Send + Sync {
     async fn mob_handles_snapshot(
         &self,
     ) -> Result<Vec<(meerkat_mob::MobId, Self::Handle)>, meerkat_mob::MobError>;
+
+    /// The mobs the mob set has an actor for, with their state, and the
+    /// mobs it knows and has not loaded, from ONE read of the set: a mob
+    /// that is loaded or unloaded meanwhile is in one of the two. Fails
+    /// until the restore is done.
+    async fn known_mobs(&self) -> Result<KnownMobs, meerkat_mob::MobError>;
+}
+
+/// The mobs a mob set knows at one read ([`HostedListings::known_mobs`]).
+pub(crate) struct KnownMobs {
+    /// The mobs an actor runs for, with their state, as the managed listing
+    /// names them.
+    pub(crate) managed: Vec<(meerkat_mob::MobId, meerkat_mob::MobState)>,
+    /// The mobs the set knows and has not loaded: stored here, with no
+    /// actor until something addresses them.
+    pub(crate) not_loaded: Vec<meerkat_mob::MobId>,
 }
 
 #[async_trait]
@@ -843,10 +941,24 @@ impl HostedListings for meerkat_mob_mcp::MobMcpState {
     ) -> Result<Vec<(meerkat_mob::MobId, meerkat_mob::MobHandle)>, meerkat_mob::MobError> {
         meerkat_mob_mcp::MobMcpState::mob_handles_snapshot(self).await
     }
+
+    async fn known_mobs(&self) -> Result<KnownMobs, meerkat_mob::MobError> {
+        let inventory = meerkat_mob_mcp::MobMcpState::mob_inventory(self).await?;
+        Ok(KnownMobs {
+            managed: inventory
+                .managed
+                .into_iter()
+                .map(|(mob_id, observation)| (mob_id, observation.phase))
+                .collect(),
+            not_loaded: inventory.dormant,
+        })
+    }
 }
 
 /// Every mob hosted here, this gateway's own included: managed and not
-/// destroyed, or restored and held until its owner resolves.
+/// destroyed, restored and held until its owner resolves, or known to the
+/// mob set and not loaded. A mob that is not loaded is hosted: it is stored
+/// here, and whatever addresses it loads it.
 ///
 /// The managed listing is read first to finish the restore of persisted
 /// mobs: every listing fails rather than answer before the restore. The
@@ -855,17 +967,24 @@ impl HostedListings for meerkat_mob_mcp::MobMcpState {
 /// before it drops it from the earlier one (a restore re-attempt adds a
 /// quarantined mob to the held or managed ones, an activation a held mob to
 /// the managed ones): a mob that moves between the reads is in one of them.
+/// The managed mobs and the mobs that are not loaded are one read of the
+/// set, so a mob that is loaded or unloaded meanwhile is in one of them.
 pub(crate) async fn hosted_set<L: HostedListings>(
     listings: &L,
 ) -> Result<BTreeSet<String>, NativeUnavailable> {
     managed_listing(listings).await?;
     let held = idle_listing(listings).await?;
-    let managed = managed_listing(listings)
-        .await?
+    let known = known_listing(listings).await?;
+    let managed = known
+        .managed
         .into_iter()
         .filter(|(_, state)| *state != meerkat_mob::MobState::Destroyed)
         .map(|(mob_id, _)| mob_id.as_str().to_string());
-    Ok(held.into_iter().chain(managed).collect())
+    let not_loaded = known
+        .not_loaded
+        .into_iter()
+        .map(|mob_id| mob_id.as_str().to_string());
+    Ok(held.into_iter().chain(managed).chain(not_loaded).collect())
 }
 
 /// The mobs hosted here that do not run (quarantined or held) and the
@@ -880,7 +999,7 @@ pub(crate) async fn hosted_handles<L: HostedListings>(
     let running = listings
         .mob_handles_snapshot()
         .await
-        .map_err(|error| NativeUnavailable(error.to_string()))?;
+        .map_err(|error| NativeUnavailable::new(error.to_string()))?;
     Ok((held, running))
 }
 
@@ -919,7 +1038,34 @@ async fn managed_listing<L: HostedListings>(
     listings
         .mob_list()
         .await
-        .map_err(|error| NativeUnavailable(error.to_string()))
+        .map_err(|error| NativeUnavailable::new(error.to_string()))
+}
+
+/// The mobs the mob set has an actor for and the ones it knows and has not
+/// loaded, in one read, once the restore of persisted mobs is finished.
+async fn known_listing<L: HostedListings>(listings: &L) -> Result<KnownMobs, NativeUnavailable> {
+    listings
+        .known_mobs()
+        .await
+        .map_err(|error| NativeUnavailable::new(error.to_string()))
+}
+
+/// Whether the mob set knows the mob `mob_id` and hands out no handle of it
+/// now: it is not loaded, or its handle is withheld while the set asks the
+/// mob whether it is idle. Asked for a mob that is neither running nor
+/// held: such a mob is hosted here, and a lookup of it by its id serves it.
+pub(crate) async fn hosted_without_a_handle<L: HostedListings>(
+    listings: &L,
+    mob_id: &MobId,
+) -> Result<bool, NativeUnavailable> {
+    let known = known_listing(listings).await?;
+    Ok(known
+        .not_loaded
+        .iter()
+        .any(|known| known.as_str() == mob_id.as_str())
+        || known.managed.iter().any(|(known, state)| {
+            known.as_str() == mob_id.as_str() && *state != meerkat_mob::MobState::Destroyed
+        }))
 }
 
 /// The ids of the mobs hosted here that do not run, once the restore of
@@ -931,7 +1077,7 @@ async fn idle_listing<L: HostedListings>(
     let mut idle: BTreeSet<String> = listings
         .quarantined_mobs()
         .await
-        .map_err(|error| NativeUnavailable(error.to_string()))?
+        .map_err(|error| NativeUnavailable::new(error.to_string()))?
         .into_iter()
         .map(|mob_id| mob_id.as_str().to_string())
         .collect();
@@ -947,7 +1093,7 @@ async fn held_listing<L: HostedListings>(
     Ok(listings
         .held_child_mobs()
         .await
-        .map_err(|error| NativeUnavailable(error.to_string()))?
+        .map_err(|error| NativeUnavailable::new(error.to_string()))?
         .into_iter()
         .map(|(mob_id, _)| mob_id.as_str().to_string())
         .collect())
@@ -1006,7 +1152,7 @@ impl MobNativeDelivery {
 
     fn service(&self) -> Result<Arc<meerkat::ContinuationOwnerService>, NativeUnavailable> {
         self.mob_tools.continuation_service().ok_or_else(|| {
-            NativeUnavailable("the mob's continuation service is not bound".to_string())
+            NativeUnavailable::new("the mob's continuation service is not bound".to_string())
         })
     }
 
@@ -1022,7 +1168,7 @@ impl MobNativeDelivery {
         identity: &MemberIdentity,
     ) -> Result<crate::identity_first::AgentIdentity, NativeUnavailable> {
         crate::identity_first::AgentIdentity::parse(identity.as_str())
-            .map_err(|error| NativeUnavailable(error.to_string()))
+            .map_err(|error| NativeUnavailable::new(error.to_string()))
     }
 
     /// Whether this gateway's runtime refuses host continuations.
@@ -1036,20 +1182,38 @@ impl MobNativeDelivery {
     /// may say so of a member whose registered row does not). A peer
     /// gateway's keyed delivery answers such an identity as one that is not
     /// registered here; this gateway's own deliveries are not asked.
+    ///
+    /// Where the record has not read the durable records of the seam's mob
+    /// it cannot tell, and the question asks the mob before the name: it is
+    /// answered as a read that cannot be made now for EVERY name, a name
+    /// the record already holds a person for and a name no identity has
+    /// alike, so that the answer tells no name apart. The caller is told it
+    /// as such and may ask again; nothing is delivered meanwhile. That is
+    /// never so for the launch's own mob: its identities are answered by
+    /// the record's person and the registered row, as before, also while
+    /// the record's first read is owed.
     pub(crate) async fn kept_apart(
         &self,
         identity: &MemberIdentity,
     ) -> Result<bool, NativeUnavailable> {
         let identity = Self::agent_identity(identity)?;
-        if let Some(record) = &self.members_apart
-            && record
+        if let Some(record) = &self.members_apart {
+            if !record.has_read_the_mob(self.mob_id.as_str()) {
+                return Err(NativeUnavailable::new(format!(
+                    "this gateway has not read who the identities of the mob '{}' are yet; \
+                     nothing is implied",
+                    self.mob_id
+                )));
+            }
+            if record
                 .owner_of(
                     self.mob_id.as_str(),
                     crate::member_comms_id::mob_member_id(identity.as_str()).as_str(),
                 )
                 .is_some()
-        {
-            return Ok(true);
+            {
+                return Ok(true);
+            }
         }
         Ok(self
             .identities
@@ -1078,7 +1242,7 @@ impl MobNativeDelivery {
             Err(crate::identity_first::IdentityRuntimeError::UnknownIdentity(_)) => {
                 Ok(IdentityService::Unknown)
             }
-            Err(error) => Err(NativeUnavailable(error.to_string())),
+            Err(error) => Err(NativeUnavailable::new(error.to_string())),
         }
     }
 
@@ -1118,8 +1282,9 @@ impl MobNativeDelivery {
             .map_err(|error| PrepareError::Unavailable(error.to_string()))
     }
 
-    /// Whether each named mob is hosted here: managed and not destroyed, or
-    /// restored and held until its owner resolves.
+    /// Whether each named mob is hosted here: managed and not destroyed,
+    /// restored and held until its owner resolves, or known to the mob set
+    /// and not loaded.
     pub async fn hosted_mobs(
         &self,
         mobs: &BTreeSet<MobId>,
@@ -1156,7 +1321,7 @@ impl MobNativeDelivery {
         &self,
         mob_id: &MobId,
     ) -> Result<Option<MobOriginFacts>, NativeUnavailable> {
-        let unavailable = |error: &dyn std::fmt::Display| NativeUnavailable(error.to_string());
+        let unavailable = |error: &dyn std::fmt::Display| NativeUnavailable::new(error.to_string());
         // A parent in neither listing is not one still being restored, nor
         // one about to run.
         let (held, handles) = hosted_handles(&*self.mob_tools).await?;
@@ -1228,13 +1393,14 @@ impl MobNativeDelivery {
                                 )
                             }),
                     },
-                    None if held.contains(&binding.mob_id) => ParentRecord::Held,
-                    None => ParentRecord::NotHosted,
+                    None => {
+                        parent_without_a_handle(&*self.mob_tools, &held, &binding.mob_id).await?
+                    }
                 });
             }
             records.owner_metadata = Some(metadata);
         }
-        let origin = origin_from(&records).map_err(NativeUnavailable)?;
+        let origin = origin_from(&records).map_err(NativeUnavailable::new)?;
         Ok(Some(MobOriginFacts {
             incarnation,
             origin,
@@ -1251,10 +1417,10 @@ impl MobNativeDelivery {
             .events()
             .poll(0, 1)
             .await
-            .map_err(|error| NativeUnavailable(error.to_string()))?
+            .map_err(|error| NativeUnavailable::new(error.to_string()))?
             .first()
             .map(|event| u64::try_from(event.timestamp.timestamp_millis()).unwrap_or(0))
-            .ok_or_else(|| NativeUnavailable(format!("mob {mob_id} has no events yet")))?;
+            .ok_or_else(|| NativeUnavailable::new(format!("mob {mob_id} has no events yet")))?;
         Ok(MobIncarnation {
             owner_session: handle
                 .owner_bridge_session_lifecycle_authority()
@@ -1264,10 +1430,13 @@ impl MobNativeDelivery {
     }
 
     /// A mob hosted here other than this gateway's own: running, held until
-    /// its owner resolves, or gone.
+    /// its owner resolves, known to the mob set with no handle to hand out
+    /// now, or gone.
     ///
     /// Read through [`hosted_handles`]: a mob that is neither held nor
-    /// running is not one still being restored, nor one about to run.
+    /// running is not one still being restored, nor one about to run. It is
+    /// gone only when the mob set does not know it either: a mob the set
+    /// knows and has not loaded is hosted here.
     async fn child_mob(&self, mob_id: &MobId) -> Result<ChildMob, NativeUnavailable> {
         let (held, running) = hosted_handles(&*self.mob_tools).await?;
         let handle = running
@@ -1277,6 +1446,11 @@ impl MobNativeDelivery {
         Ok(match handle {
             Some(handle) => ChildMob::Running(Box::new(handle)),
             None if held.contains(mob_id.as_str()) => ChildMob::Held,
+            None if *mob_id != self.mob_id
+                && hosted_without_a_handle(&*self.mob_tools, mob_id).await? =>
+            {
+                ChildMob::NotLoaded
+            }
             None => ChildMob::Gone,
         })
     }
@@ -1295,7 +1469,7 @@ impl MobNativeDelivery {
                     registered.spec.labels,
                 ))),
                 Err(crate::identity_first::IdentityRuntimeError::UnknownIdentity(_)) => Ok(None),
-                Err(error) => Err(NativeUnavailable(error.to_string())),
+                Err(error) => Err(NativeUnavailable::new(error.to_string())),
             };
         }
         let Some(handle) = self.running_child(&member.mob_id).await? else {
@@ -1307,7 +1481,31 @@ impl MobNativeDelivery {
         {
             Ok(Some(entry)) => Ok(Some(MemberFacts::new(entry.role.as_str(), entry.labels))),
             Ok(None) => Ok(None),
-            Err(error) => Err(NativeUnavailable(error.to_string())),
+            Err(error) => Err(NativeUnavailable::new(error.to_string())),
+        }
+    }
+
+    /// What the record of who this runtime's members are private to holds
+    /// for `member`: a member of this gateway's mob under its roster name,
+    /// a member of a mob hosted here a member created under its name there.
+    /// Unavailable while the record's first read has not landed and the
+    /// record does not hold the member. A seam built without the record
+    /// (`Self::with_members_apart`) holds no member.
+    pub fn member_person(&self, member: &Member) -> Result<MemberPerson, NativeUnavailable> {
+        let Some(record) = &self.members_apart else {
+            return Ok(MemberPerson::NotKnown);
+        };
+        let name = if member.mob_id == self.mob_id {
+            crate::member_comms_id::roster_member_id_for_identity(member.identity.as_str())
+                .to_string()
+        } else {
+            member.identity.as_str().to_string()
+        };
+        match record.person_of(member.mob_id.as_str(), &name) {
+            MemberPerson::NotKnown if record.first_read_pending() => Err(NativeUnavailable::new(
+                "who this gateway's members are private to has not been read yet".to_string(),
+            )),
+            person => Ok(person),
         }
     }
 
@@ -1368,14 +1566,43 @@ impl MobNativeDelivery {
     }
 
     /// The running handle of a mob hosted here other than this gateway's
-    /// own; `None` when it is gone; unavailable while it is held.
+    /// own; `None` when it is gone; unavailable while it is held, and while
+    /// it is not loaded: a read of a mob loads nothing, and a mob that is
+    /// not loaded is not gone.
     async fn running_child(
         &self,
         mob_id: &MobId,
     ) -> Result<Option<meerkat_mob::MobHandle>, NativeUnavailable> {
         match self.child_mob(mob_id).await? {
             ChildMob::Running(handle) => Ok(Some(*handle)),
-            ChildMob::Held => Err(NativeUnavailable(format!(
+            ChildMob::Held => Err(NativeUnavailable::new(format!(
+                "{mob_id} is hosted here but not running: held until its owner resolves, \
+                 or quarantined"
+            ))),
+            ChildMob::NotLoaded => Err(NativeUnavailable::mob_not_loaded(mob_id)),
+            ChildMob::Gone => Ok(None),
+        }
+    }
+
+    /// The running handle of a mob hosted here other than this gateway's
+    /// own, for a call that addresses that one mob (a member is subscribed
+    /// in it, a delivery is prepared for one of its members): a mob that is
+    /// not loaded is loaded by it, through the mob set's lookup by id.
+    /// `None` when it is gone; unavailable while it is held, and when its
+    /// load fails.
+    async fn addressed_child(
+        &self,
+        mob_id: &MobId,
+    ) -> Result<Option<meerkat_mob::MobHandle>, NativeUnavailable> {
+        match self.child_mob(mob_id).await? {
+            ChildMob::NotLoaded => self
+                .mob_tools
+                .handle_for(&meerkat_mob::MobId::from(mob_id.as_str()))
+                .await
+                .map(Some)
+                .map_err(|error| NativeUnavailable::new(error.to_string())),
+            ChildMob::Running(handle) => Ok(Some(*handle)),
+            ChildMob::Held => Err(NativeUnavailable::new(format!(
                 "{mob_id} is hosted here but not running: held until its owner resolves, \
                  or quarantined"
             ))),
@@ -1383,14 +1610,17 @@ impl MobNativeDelivery {
         }
     }
 
-    /// The incarnation of a running mob hosted here other than this
-    /// gateway's own, or `None` when it is gone. Unavailable while the mob
-    /// is held until its owner resolves.
+    /// The incarnation of a mob hosted here other than this gateway's own,
+    /// or `None` when it is gone. Unavailable while the mob is held until
+    /// its owner resolves. Asked for the route of a member that is being
+    /// subscribed, so a mob that is not loaded is loaded for it: a mob keeps
+    /// its incarnation across an unload and a load, and a member of a mob
+    /// that is not loaded is never routed as a peer's.
     pub async fn child_incarnation(
         &self,
         mob_id: &MobId,
     ) -> Result<Option<MobIncarnation>, NativeUnavailable> {
-        match self.running_child(mob_id).await? {
+        match self.addressed_child(mob_id).await? {
             Some(handle) => Ok(Some(Self::incarnation_of(&handle, mob_id).await?)),
             None => Ok(None),
         }
@@ -1450,9 +1680,11 @@ impl MobNativeDelivery {
     /// runs and has not completed, and the member is on its roster now. Its
     /// absence later ends nothing: a respawn takes it off for a while. A mob
     /// whose actor has stopped admits nothing until a restart recovers it.
+    /// A mob that is not loaded is loaded for the request: it names the
+    /// member's mob.
     async fn check_child_member(&self, member: &Member) -> Result<(), MemberProblem> {
         let Some(handle) = self
-            .running_child(&member.mob_id)
+            .addressed_child(&member.mob_id)
             .await
             .map_err(|error| MemberProblem::Unavailable(error.0))?
         else {
@@ -1489,9 +1721,10 @@ impl MobNativeDelivery {
 
     /// A member of a mob a member created is ready while that mob runs here;
     /// once it is gone for good the member's subscriptions end. A held mob
-    /// may run again: its members wait.
+    /// may run again: its members wait. A mob that is not loaded is loaded
+    /// here: a delivery to one of its members addresses it.
     async fn prepare_child_member(&self, member: &Member) -> Result<(), PrepareError> {
-        match self.running_child(&member.mob_id).await {
+        match self.addressed_child(&member.mob_id).await {
             Ok(Some(_)) => Ok(()),
             Ok(None) => Err(PrepareError::Gone(SubscriptionEnd::MemberMobEnded {
                 why: "destroyed".to_string(),
@@ -1509,17 +1742,18 @@ impl MobNativeDelivery {
         continuation_owner(&self.mob_id, member, route)
     }
 
-    /// The current cursor of a running child mob's event log.
+    /// The current cursor of a running child mob's event log. A mob that is
+    /// not loaded is loaded for it: a subscription is being made in it.
     pub async fn member_mob_cursor(&self, mob_id: &MobId) -> Result<u64, NativeUnavailable> {
         let handle = self
-            .running_child(mob_id)
+            .addressed_child(mob_id)
             .await?
-            .ok_or_else(|| NativeUnavailable(format!("{mob_id} does not run here")))?;
+            .ok_or_else(|| NativeUnavailable::new(format!("{mob_id} does not run here")))?;
         handle
             .events()
             .latest_cursor()
             .await
-            .map_err(|error| NativeUnavailable(error.to_string()))
+            .map_err(|error| NativeUnavailable::new(error.to_string()))
     }
 
     /// The running handle of the mob a member was subscribed in, or the
@@ -1570,7 +1804,7 @@ impl MobNativeDelivery {
             let page = view
                 .poll(through, MEMBER_MOB_EVENT_PAGE)
                 .await
-                .map_err(|error| NativeUnavailable(error.to_string()))?;
+                .map_err(|error| NativeUnavailable::new(error.to_string()))?;
             for event in &page {
                 let why = match event.kind {
                     meerkat_mob::event::MobEventKind::MobCompleted => "completed",
@@ -1699,15 +1933,15 @@ impl MobNativeDelivery {
     ) -> Result<Option<Value>, NativeUnavailable> {
         use meerkat_runtime::SessionServiceRuntimeExt as _;
         let session = meerkat_core::types::SessionId::parse(session_id)
-            .map_err(|error| NativeUnavailable(error.to_string()))?;
+            .map_err(|error| NativeUnavailable::new(error.to_string()))?;
         let input = uuid::Uuid::parse_str(input_id)
             .map(meerkat_core::lifecycle::InputId)
-            .map_err(|error| NativeUnavailable(error.to_string()))?;
+            .map_err(|error| NativeUnavailable::new(error.to_string()))?;
         let Some(state) = self
             .runtime
             .input_state(&session, &input)
             .await
-            .map_err(|error| NativeUnavailable(error.to_string()))?
+            .map_err(|error| NativeUnavailable::new(error.to_string()))?
         else {
             return Ok(None);
         };
@@ -1808,6 +2042,10 @@ impl NativeDelivery for MobNativeDelivery {
         member: &Member,
     ) -> Result<Option<MemberFacts>, NativeUnavailable> {
         MobNativeDelivery::member_facts(self, member).await
+    }
+
+    async fn member_person(&self, member: &Member) -> Result<MemberPerson, NativeUnavailable> {
+        MobNativeDelivery::member_person(self, member)
     }
 
     async fn members_with_role(
@@ -2001,6 +2239,11 @@ impl NativeDelivery for AnnouncementNativeDelivery {
         self.local.member_facts(member).await
     }
 
+    /// The record is this gateway's: it holds no member of a peer's mob.
+    async fn member_person(&self, member: &Member) -> Result<MemberPerson, NativeUnavailable> {
+        self.local.member_person(member)
+    }
+
     /// A mob on a peer gateway has no roster here: a template of its
     /// members takes none.
     async fn members_with_role(
@@ -2137,7 +2380,12 @@ impl NativeDelivery for AnnouncementNativeDelivery {
             MemberRoute::Local | MemberRoute::Child => {
                 self.local.input_state(session_id, input_id).await
             }
-            MemberRoute::Peer => self.remote().map_err(NativeUnavailable)?.input(batch).await,
+            MemberRoute::Peer => {
+                self.remote()
+                    .map_err(NativeUnavailable::new)?
+                    .input(batch)
+                    .await
+            }
         }
     }
 

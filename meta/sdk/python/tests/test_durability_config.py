@@ -173,7 +173,7 @@ class TestStorageCensusModel:
 
     def test_status_result_carries_storage(self):
         raw = {
-            "contract_version": "0.5.0",
+            "contract_version": "0.6.0",
             "running": True,
             "loaded_modules": [],
             "storage": self.WIRE,
@@ -185,7 +185,7 @@ class TestStorageCensusModel:
     def test_status_result_ignores_fields_it_does_not_model(self):
         status = StatusResult.from_dict(
             {
-                "contract_version": "0.5.0",
+                "contract_version": "0.6.0",
                 "running": True,
                 "loaded_modules": [],
                 "reserved_identity_members": [
@@ -197,14 +197,14 @@ class TestStorageCensusModel:
                 ],
             }
         )
-        assert status.contract_version == "0.5.0"
+        assert status.contract_version == "0.6.0"
         assert status.running is True
         assert status.storage is None
 
     def test_status_result_ignores_non_expiring_console_principals(self):
         status = StatusResult.from_dict(
             {
-                "contract_version": "0.5.0",
+                "contract_version": "0.6.0",
                 "running": True,
                 "loaded_modules": [],
                 "non_expiring_console_principals": [
@@ -212,33 +212,33 @@ class TestStorageCensusModel:
                 ],
             }
         )
-        assert status.contract_version == "0.5.0"
+        assert status.contract_version == "0.6.0"
         assert status.running is True
         assert status.storage is None
 
     def test_status_result_ignores_the_mob_failure(self):
         status = StatusResult.from_dict(
             {
-                "contract_version": "0.5.0",
+                "contract_version": "0.6.0",
                 "running": True,
                 "loaded_modules": [],
                 "mob_state": "Some(Running)",
                 "mob_failure": "the mob's actor stopped",
             }
         )
-        assert status.contract_version == "0.5.0"
+        assert status.contract_version == "0.6.0"
         assert status.running is True
         assert status.storage is None
 
     def test_status_result_without_storage_is_none(self):
         status = StatusResult.from_dict(
-            {"contract_version": "0.5.0", "running": True, "loaded_modules": []}
+            {"contract_version": "0.6.0", "running": True, "loaded_modules": []}
         )
         assert status.storage is None
 
     def test_capabilities_result_carries_storage(self):
         raw = {
-            "contract_version": "0.5.0",
+            "contract_version": "0.6.0",
             "methods": ["meta/status"],
             "loaded_modules": [],
             "storage": self.WIRE,

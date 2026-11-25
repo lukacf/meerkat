@@ -170,7 +170,32 @@ ancestry produces a typed authority-unavailable result inside the host and an
 appropriate non-disclosing tool failure, never a silently reduced allowlist.
 
 Durable application identities keep ownership across restore and respawn.
-Their principal key is `(realm_id, application_agent_identity)`. Worker
+Their principal key is `(realm_id, mob_id, application_agent_identity)`:
+identities are names inside a mob, and two mobs of one host may each have an
+identity of the same name. The mob is a value of its own in the principal,
+never part of the identity string. An identity of the host's default mob (the
+mob its launch names) is stored without a mob,
+`{"kind":"agent","value":"<identity>"}`, the form every stored principal had
+while a host served one mob, so a stored principal without a mob is the
+default mob's and none is rewritten. An identity of another mob is stored as
+`{"kind":"mob_agent","value":{"mob_id":"<mob id>","identity":"<identity>"}}`.
+The default mob's identity has that one stored form. Tool input is read from
+the caller's side before it reaches a store (`Principal::stored_form`): an
+identity named without a mob is an identity of the caller's own mob, and an
+identity named with the default mob's id is the default mob's stored form. A
+document that is read is given in the same naming, so reading it and writing
+its owner or access back changes nothing. A worker of a mob that a member
+created names the identities of the mob its owner belongs to; when that owner
+cannot be read, or a mob on the way to its top-level mob is destroyed,
+quarantined or not loaded, a write that names an identity is refused. A grant
+or a deny
+that names an identity the caller's mob does not have is stored and reaches
+nobody; an owner that names one is refused. Realm-wide audiences and realm
+ownership span every mob of the host, since one realm holds them all.
+A document names the mob of another mob's
+identity by the mob's id alone, like a mob owner or a mob audience, so a new
+mob under that id is refused while a live document names one of its
+identities. Worker
 principals are `(realm_id, mob_id, member_identity, member_creation_id)`, where
 `member_creation_id` is a runtime-issued immutable creation token persisted
 with the member-created event. A restored incarnation retains that token;
@@ -342,6 +367,24 @@ document ACL can narrow those rights but cannot grant a tool denied by native
 execution policy. Namespaced access subjects are `agent:<stable identity>` or
 `worker:<creation UUID>`; resource identity selectors still receive the actual
 stable application identity, and labels come from the current native roster.
+`agent:<stable identity>` is the default mob's identity. An identity of
+another mob has no subject of its own: it is judged under its member's
+`worker:<creation UUID>` subject, so a rule or an admin entry written for the
+default mob's identity of the same name never applies to it. This is a limit:
+a rule cannot yet name another mob's identity by a stable subject, and
+selects it by its mob, identity, role or labels instead.
+
+Host access is judged in the caller's own mob, read through the access
+rules' `mobs` selector: an allow that lists no mobs grants in the default mob
+only, a deny that lists none holds in every mob, and a rule that lists mobs
+reaches the callers of those mobs. A caller's mob is the top-level mob its
+mob belongs to: a mob no member owns (one the host created, or one a session
+outside every mob created) is judged as itself, and a mob a
+member created (a helper mob, a council, an agent's own mob) is judged in the
+mob of its owner, so the default mob's members and the workers of the mobs
+they create are judged in the default mob. A caller whose mob's owner cannot
+be read is refused rather than judged in a mob that was guessed. A controller
+that is not enabled judges nobody and reads no mob.
 
 A stable application `AgentIdentity` denotes the same logical agent across
 reset, deletion and host re-registration. Applications must mint a different

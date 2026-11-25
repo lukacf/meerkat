@@ -917,7 +917,10 @@ process.stdout.write(JSON.stringify(fixture[path]));
       .map(([key, value]) => [key, value.replace(/^"(.*)"$/, "$1")]),
   );
   assert.equal(metaEnv.GATE_JOB_NAME, "Meta gate");
-  assert.equal(metaEnv.LANE_UPSTREAMS, "console=console-backends;console-browser*=console-backends");
+  assert.equal(
+    metaEnv.LANE_UPSTREAMS,
+    "console=console-backends;console-browser*=console-backends;rust-unit*=rust-unit-build",
+  );
   // The backends waited 100 s for a runner and ran 500 s; the console job
   // ran 400 s after them, a browser leg 300 s after a 63 s queue.
   const metaRun = (consoleSeconds) => [
@@ -949,6 +952,50 @@ process.stdout.write(JSON.stringify(fixture[path]));
   // alone after the classification, and pass.
   budget = runBudget([0], metaRun(600), { ...metaEnv, LANE_UPSTREAMS: "" });
   assert.equal(budget.outputs.exec_path_seconds, "630");
+  // The unit lane is a chain too: rust-unit-build compiles the lib test
+  // harness once and each rust-unit leg runs one partition of its archive.
+  // A leg's path holds the build's and the classification's. The build job
+  // is not one of the legs ("rust-unit*" names "rust-unit" and "rust-unit
+  // (...)" only), so its own path is its run time after the classification.
+  // The build ran buildSeconds after a 4 s queue; leg 1 ran 200 s after a
+  // 4 s queue, leg 4 250 s after a 10 s queue.
+  const metaUnitRun = (buildSeconds) => [
+    job(metaEnv.CLASSIFICATION_JOB_NAME, 0, 5, 35),
+    job("rust-unit-build", 36, 40, 40 + buildSeconds),
+    job("rust-unit (1/4)", 41 + buildSeconds, 45 + buildSeconds, 245 + buildSeconds),
+    job("rust-unit (4/4)", 41 + buildSeconds, 51 + buildSeconds, 301 + buildSeconds),
+    job("test-typescript", 36, 40, 100),
+    { name: metaEnv.GATE_JOB_NAME, created_at: at(2500), started_at: at(2504), completed_at: null, conclusion: null },
+  ];
+  budget = runBudget([0], metaUnitRun(600), metaEnv);
+  assert.equal(budget.status, 0, `a unit chain within the budget: ${budget.stdout}${budget.stderr}`);
+  assert.deepEqual(
+    budget.outputs,
+    {
+      exec_path_seconds: "880", terminal_seconds: "901", terminal_excluding_queue_seconds: "882",
+      queue_seconds: "19", budget_verdict: "within_budget", guard_lanes_outside_budget: "[]",
+    },
+    `a unit leg's path holds the build's and the classification's: ${budget.stdout}`,
+  );
+  assert.match(budget.stdout, /^\| rust-unit \(4\/4\) \| 1 \| 10 \| 250 \| 880 \| 901 \| 882 \| success \|$/m, "a unit leg waits for the build");
+  assert.match(budget.stdout, /^\| rust-unit \(1\/4\) \| 1 \| 4 \| 200 \| 830 \| 845 \| 832 \| success \|$/m, "so does every other leg");
+  assert.match(budget.stdout, /^\| rust-unit-build \| 1 \| 4 \| 600 \| 630 \| 640 \| 631 \| success \|$/m, "the build job waits only for the classification");
+  // Building once does not shorten the path: a build that alone takes more
+  // than the budget fails the run by its legs' path, which is longer than
+  // the build's own.
+  budget = runBudget([0], metaUnitRun(1900), metaEnv);
+  assert.equal(budget.status, 1, `a unit chain over the budget fails: ${budget.stdout}`);
+  assert.equal(budget.outputs.exec_path_seconds, "2180", "250 s of the leg, 1900 s of the build, 30 s of classification");
+  assert.equal(budget.outputs.terminal_excluding_queue_seconds, "2182");
+  assert.equal(budget.outputs.budget_verdict, "runaway");
+  // Without the unit lane's wait named, the same run's path would stop at
+  // the build job and leave the legs' run time out.
+  budget = runBudget(
+    [0],
+    metaUnitRun(1900),
+    { ...metaEnv, LANE_UPSTREAMS: "console=console-backends;console-browser*=console-backends" },
+  );
+  assert.equal(budget.outputs.exec_path_seconds, "1930");
 
   // An exact-profile lane the plan ran only because the change touched its
   // inputs or changed its definition is outside a pull request's budget:

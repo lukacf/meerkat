@@ -326,11 +326,40 @@ fmt:
 # Connect's binaries (connect/scripts/connect-candidate.py builds them with
 # `--features console,toolkit-mobkit/native-host`; the root deny.toml). A
 # default-feature audit alone never sees the crates those features bring in.
+# All three commands run even when an earlier one fails. After each one the
+# recipe prints `audit verdict: <name>: passed|failed|not run (exit N)` under
+# the tool's own summary line ("not run" is exit 126 or 127: the command could
+# not start), and it ends with one `audit aggregate:` line that counts the
+# verdicts recorded and names the commands that failed or did not run; the
+# target fails unless three verdicts were recorded and all three are passed.
+# With GITHUB_STEP_SUMMARY set the same lines are also appended to that file;
+# a failed append changes nothing.
 audit:
 	@echo "$(GREEN)Running security audit...$(NC)"
-	$(CARGO) deny check
-	$(CARGO) deny --manifest-path meta/crates/meerkat-meta/Cargo.toml check
-	$(CARGO) deny --manifest-path connect/crates/meerkat-connect/Cargo.toml --features console,toolkit-mobkit/native-host check
+	@verdicts=0; bad=0; names=""; \
+	say() { \
+		echo "$$1"; \
+		if [ -n "$${GITHUB_STEP_SUMMARY:-}" ]; then { echo "- $$1" >> "$$GITHUB_STEP_SUMMARY"; } 2>/dev/null || true; fi; \
+	}; \
+	verdict() { \
+		verdicts=$$((verdicts + 1)); \
+		case "$$2" in \
+			0) state="passed" ;; \
+			126|127) state="not run" ;; \
+			*) state="failed" ;; \
+		esac; \
+		if [ "$$state" != "passed" ]; then bad=$$((bad + 1)); names="$$names$${names:+, }$$1"; fi; \
+		say "audit verdict: $$1: $$state (exit $$2)"; \
+	}; \
+	( set -x; $(CARGO) deny check ); verdict "root" $$?; \
+	( set -x; $(CARGO) deny --manifest-path meta/crates/meerkat-meta/Cargo.toml check ); verdict "Meta manifest" $$?; \
+	( set -x; $(CARGO) deny --manifest-path connect/crates/meerkat-connect/Cargo.toml --features console,toolkit-mobkit/native-host check ); verdict "Connect manifest" $$?; \
+	if [ "$$verdicts" -eq 3 ] && [ "$$bad" -eq 0 ]; then \
+		say "audit aggregate: passed (3 of 3 verdicts, 0 failed or not run)"; \
+	else \
+		say "audit aggregate: FAILED ($$verdicts of 3 verdicts, $$bad failed or not run$${names:+: $$names})"; \
+		exit 1; \
+	fi
 
 # Alternative audit using cargo-audit (if cargo-deny not available)
 audit-alt:
@@ -582,7 +611,8 @@ machine-codegen: xtask-build
 # does not fit any local or CI budget. MACHINE_VERIFY_PART runs one part of
 # the lane: machine-verify (the bounded adaptive witness, then
 # `machine-verify --all` with those skips) or one audit shard
-# (audits-a..audits-o, audits-q..audits-y); without it every part runs.
+# (audits-a..audits-o, audits-q..audits-z, audits-aa, audits-ab); without it
+# every part runs.
 # Nightly runs the machine-verify part, and ci.yml's tlc-audits job runs the
 # audit shards on every machine-authority change.
 machine-verify: xtask-build

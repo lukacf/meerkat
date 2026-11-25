@@ -54,7 +54,7 @@ export interface MobRuntime {
 
 /**
  * Resolve model assignments based on available API keys.
- * Preferred: main=claude-opus-5-5, planner=gpt-6-astra, coder=gpt-5.3-codex, reviewer=gemini-4-hydrogen.
+ * Preferred: main=claude-opus-5-5, planner=gpt-6.2-astra, coder=gpt-5.3-codex, reviewer=gemini-4-hydrogen.
  * Falls back to available providers when keys are missing.
  */
 // The one Gemini model used here. gemini-4-hydrogen answers on the free tier
@@ -71,11 +71,11 @@ export function resolveModels(keys: ApiKeys): ModelAssignments {
   let main: string;
   let mainKey: string;
   if (hasAnthropic) { main = "claude-opus-5-5"; mainKey = keys.anthropic!; }
-  else if (hasOpenAI) { main = "gpt-6-astra"; mainKey = keys.openai!; }
+  else if (hasOpenAI) { main = "gpt-6.2-astra"; mainKey = keys.openai!; }
   else { main = GEMINI_FALLBACK; mainKey = keys.gemini!; }
 
-  // Planner: prefer OpenAI gpt-6-astra
-  const planner = hasOpenAI ? "gpt-6-astra"
+  // Planner: prefer OpenAI gpt-6.2-astra
+  const planner = hasOpenAI ? "gpt-6.2-astra"
     : hasAnthropic ? "claude-sonnet-5-5"
     : GEMINI_FALLBACK;
 
@@ -87,7 +87,7 @@ export function resolveModels(keys: ApiKeys): ModelAssignments {
   // Reviewer: prefer Gemini (schema issues fixed in PR #93)
   const reviewer = hasGemini ? GEMINI_FALLBACK
     : hasAnthropic ? "claude-sonnet-5-5"
-    : "gpt-6-astra";
+    : "gpt-6.2-astra";
 
   return { main, mainKey, planner, coder, reviewer };
 }

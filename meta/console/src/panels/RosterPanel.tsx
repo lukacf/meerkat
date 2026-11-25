@@ -1,7 +1,8 @@
 import React from "react";
 import type { ConsoleAgent } from "../types";
 import { agentDisplayTitle, responsePhaseWords } from "../lib/agents";
-import { restartOffered } from "../lib/side-chat";
+import { memberReferenceKeys, nestedMobIdsOfMembers } from "../../../packages/console-core/src/member-ref";
+import { resetOffered, restartOffered } from "../lib/side-chat";
 import { AGENT_BUCKET_ORDER as BUCKET_ORDER, bucketOf, type AgentBucket } from "../lib/agent-buckets";
 import { agentStateWord as stateWord, isAgentRetired as isRetired, isAgentWorking as isWorking, type AgentHealth } from "../lib/agent-status";
 import { useActivityLedger, type ActivityLedgerReader } from "../lib/activity-ledger";
@@ -237,11 +238,20 @@ function peerKey(peer: unknown): string {
   return "";
 }
 
+/**
+ * The roster's agent a peer key names: by the key itself, else by its last
+ * path segment ("team/role/member"). A key that starts with a listed nested
+ * mob names that mob's member only, never a member of the same name in
+ * another mob.
+ */
 function findAgent(agents: ConsoleAgent[], key: string): ConsoleAgent | undefined {
-  const bare = key.split("/").pop() || key;
-  return agents.find((agent) =>
-    agent.identity === key || agent.member_id === key || agent.agent_id === key
-    || agent.identity === bare || agent.member_id === bare);
+  const exact = agents.find((agent) => agent.identity === key || agent.member_id === key || agent.agent_id === key);
+  if (exact) return exact;
+  for (const candidate of memberReferenceKeys(key, nestedMobIdsOfMembers(agents)).keys) {
+    const found = agents.find((agent) => agent.identity === candidate || agent.member_id === candidate);
+    if (found) return found;
+  }
+  return undefined;
 }
 
 /** Who started a helper: the topology's lineage, else the agent's own label. */
@@ -945,7 +955,7 @@ function RosterDrawer({
   const change = lastChange(agent);
   const inFlight = agent.progress?.in_flight_work ?? 0;
   const showRespawn = actionVisibility?.respawn !== false && agent.affordances?.can_respawn && restartOffered(agent);
-  const showReset = actionVisibility?.reset !== false && canResetLifecycle && restartOffered(agent);
+  const showReset = actionVisibility?.reset !== false && canResetLifecycle && resetOffered(agent);
   const showRetire = actionVisibility?.retire !== false && agent.affordances?.can_retire;
   const sideChatOf = agent.side_chat_of || agent.labels?.side_chat_of;
   const spawnedBy = entry.spawnedBy;

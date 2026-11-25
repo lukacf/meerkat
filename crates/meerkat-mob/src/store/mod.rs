@@ -25,13 +25,15 @@ pub use realm_profile::{RealmProfileStore, StoredRealmProfile};
 pub use sqlite::{
     IDENTITY_CENSUS_TEST_MOB, IDENTITY_CENSUS_TEST_OTHER_MOB, ParkedStoreReadForTest,
     StoreReadReleaseForTest, park_next_store_read_for_test, seed_identity_census_rows_for_test,
+    seed_store_that_predates_creation_records_for_test,
 };
 #[cfg(all(test, feature = "runtime-adapter", not(target_arch = "wasm32")))]
 pub(crate) use sqlite::{IDENTITY_RUNTIME_WRITE_FENCE_WAIT, identity_fence_test_hooks};
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use sqlite::{
-    MemberBindingStoreRead, read_definition_journal_at, read_identity_record_rows_at,
-    read_member_binding_store_at,
+    MemberBindingStoreRead, StoredCreationRecord, read_definition_journal_at,
+    read_identity_record_rows_at, read_member_binding_store_at, read_stored_creation_at,
+    read_stored_events_at,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use sqlite::{

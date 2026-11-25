@@ -294,6 +294,7 @@ fn profile_from_wire(profile: WireMobProfile) -> Result<Profile, meerkat_core::S
             mob: tools.mob,
             schedule: tools.schedule,
             image_generation: tools.image_generation,
+            web_search: tools.web_search,
             read_only: tools.read_only,
             deny: tools.deny,
             mcp: tools.mcp,
@@ -4029,6 +4030,35 @@ mod tests {
             "an ordinary wire profile does not write the field"
         );
         assert!(!profile_from_wire(wire).expect("decode").durable);
+    }
+
+    /// A spawn's override profile keeps its web search choice across the
+    /// wire form, both ways, and a profile that states none writes no key.
+    #[test]
+    fn override_profile_keeps_its_web_search_choice_across_the_wire() {
+        for stated in [Some(true), Some(false), None] {
+            let mut profile: Profile = serde_json::from_value(serde_json::json!({
+                "model": "claude-sonnet-4-5"
+            }))
+            .expect("a profile");
+            profile.tools.web_search = stated;
+            let encoded =
+                serde_json::to_value(meerkat_mob::profile_to_wire(&profile)).expect("encode");
+            assert_eq!(
+                encoded
+                    .get("tools")
+                    .and_then(|tools| tools.get("web_search"))
+                    .and_then(serde_json::Value::as_bool),
+                stated,
+                "the wire profile writes the key only when the profile states it"
+            );
+            let wire: WireMobProfile = serde_json::from_value(encoded).expect("the wire reads");
+            assert_eq!(
+                profile_from_wire(wire).expect("decode").tools.web_search,
+                stated,
+                "the profile read from the wire states the same choice"
+            );
+        }
     }
 
     fn rpc_destroy_test_definition(mob_id: &MobId) -> MobDefinition {

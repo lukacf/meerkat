@@ -6,6 +6,7 @@ import {
 } from "@console-core";
 import type { ConsoleAgent, ConsoleExperience, ConsoleExperienceAgentSnapshotRow } from "../types";
 import { agentDisplayTitle } from "../../../packages/console-core/src/agent-title";
+import { parseNestedMemberIdentity } from "../../../packages/console-core/src/member-ref";
 
 /// Alias to canonical identity for one roster. Built once per roster change
 /// and consulted per frame; the per-frame path used to rebuild a four-entry
@@ -103,13 +104,14 @@ export function responsePhaseWords(phase: string | null | undefined): string {
  * call the same agent two different things.
  */
 export function agentDirectoryEntry(
-  agent: Pick<ConsoleAgent, "label" | "identity" | "member_id" | "agent_id" | "session_id" | "labels" | "role" | "group">,
-): { id: string; label: string; role?: string; aliases: (string | undefined)[] } {
+  agent: Pick<ConsoleAgent, "label" | "identity" | "member_id" | "agent_id" | "session_id" | "labels" | "role" | "group" | "mob_id">,
+): { id: string; label: string; role?: string; aliases: (string | undefined)[]; mobId?: string } {
   return {
     id: agent.identity || agent.agent_id,
     label: agentDisplayTitle(agent),
     role: agent.role,
     aliases: [agent.member_id, agent.agent_id, agent.session_id],
+    ...(agent.mob_id ? { mobId: agent.mob_id } : {}),
   };
 }
 
@@ -153,8 +155,14 @@ export function normalizeAgents(
         entry.labels && typeof entry.labels === "object"
           ? entry.labels as Record<string, unknown>
           : {};
+      // A member of a nested mob is named by its own identity alone
+      // (`<mob id>/<member name>`): no label names it another identity, so
+      // it never takes a primary member's status row or identity.
+      const entryMobId = typeof entry.mob_id === "string" ? entry.mob_id.trim() : "";
+      const nestedMember = Boolean(entryMobId)
+        && parseNestedMemberIdentity(entryIdentity || entryMemberId)?.mobId === entryMobId;
       const durableAgentIdentity =
-        typeof entryLabels.agent_identity === "string"
+        !nestedMember && typeof entryLabels.agent_identity === "string"
           ? entryLabels.agent_identity.trim()
           : "";
       const statusRow =
@@ -217,6 +225,7 @@ export function normalizeAgents(
           : {}),
         ...sideChatAudienceField(entry.side_chat_audience),
         ...lastActivityField(entry.last_activity_ms, statusRow?.last_activity_ms),
+        ...(typeof entry.mob_id === "string" && entry.mob_id.trim() ? { mob_id: entry.mob_id.trim() } : {}),
         model_capabilities: modelCapabilities,
         ...watchFields,
         ...((): Pick<ConsoleAgent, "unobserved"> => {

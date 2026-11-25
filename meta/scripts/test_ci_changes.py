@@ -288,6 +288,11 @@ CROSS_AREA_READS = {
     ("flow-editor/", "crates/"): {"flow_editor"},
     ("sdk/python/", "crates/"): {"python"},
     ("examples/", "crates/"): {"rust", "integration", "console"},
+    # The console core package's member reference test (the console job's
+    # vitest run) parses the cases file the crate's own unit test parses,
+    # crates/meerkat-meta/src/console_member_ref_cases.json, so the Rust and
+    # the TypeScript form of a nested member's identity cannot drift.
+    ("packages/", "crates/"): {"console"},
     # test-typescript runs on every run, fmt-lint runs the scripts and the
     # hooks' configuration, and the workspace manifest names its members.
     ("sdk/typescript/", "crates/"): set(),

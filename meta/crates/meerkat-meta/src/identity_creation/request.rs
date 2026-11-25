@@ -577,16 +577,40 @@ pub enum PeerVerdict {
 /// What the peer rules give `peer`, of these facts: the strictest outcome
 /// of every rule whose target selects it (the first such rule in
 /// declaration order decides the basis), or the default when none does.
+///
+/// Under a policy as a mob beside the launch mob applies it, a rule whose
+/// target names peers only tightens: the rules that name none decide
+/// first, with the default when none of them selects the peer, and a rule
+/// that names the peer decides only when it is stricter than that.
 pub fn evaluate_peer(rules: &PeerPolicy, peer: &str, facts: &PeerFacts) -> PeerVerdict {
-    let mut decisive: Option<&PeerRule> = None;
-    for rule in rules.rules() {
-        let selected = rule.target().matches(
+    let names_only_tighten = rules.names_only_tighten();
+    let selects = |rule: &PeerRule| {
+        rule.target().matches(
             Some(peer),
             facts.profile.as_deref(),
             &facts.authority_labels,
-        );
-        if selected && decisive.is_none_or(|current| rule.outcome() > current.outcome()) {
+        )
+    };
+    let mut decisive: Option<&PeerRule> = None;
+    for rule in rules.rules() {
+        if names_only_tighten && rule.target().names_identities() {
+            continue;
+        }
+        if selects(rule) && decisive.is_none_or(|current| rule.outcome() > current.outcome()) {
             decisive = Some(rule);
+        }
+    }
+    if names_only_tighten {
+        let mut strictest = decisive.map_or(rules.default_outcome(), PeerRule::outcome);
+        for rule in rules
+            .rules()
+            .iter()
+            .filter(|rule| rule.target().names_identities())
+        {
+            if selects(rule) && rule.outcome() > strictest {
+                strictest = rule.outcome();
+                decisive = Some(rule);
+            }
         }
     }
     let outcome = decisive.map_or(rules.default_outcome(), PeerRule::outcome);

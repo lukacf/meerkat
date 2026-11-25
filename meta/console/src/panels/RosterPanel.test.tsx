@@ -248,6 +248,23 @@ describe("RosterPanel", () => {
     expect(view.queryByTestId("roster-retire-confirm:identity:coordinator") === null).toBe(true);
   });
 
+  it("offers an agent of a nested mob only the lifecycle action its row offers: Retire", () => {
+    // The row of a nested mob's member: the gateway retires it, and neither
+    // respawns nor resets it.
+    const nested = agent({
+      member_id: "research-team/archivist",
+      label: "Archivist",
+      role: "archivist",
+      mob_id: "research-team",
+      affordances: { can_retire: true, can_respawn: false, can_reset: false, can_stop_run: false, can_fork_side_chat: false },
+    });
+    const { view } = renderRoster([coordinator, nested]);
+    fireEvent.click(hit(view.getByTestId("roster-row:research-team/archivist")));
+    const detail = view.getByTestId("roster-detail:research-team/archivist");
+    expect(within(detail).getByRole("group", { name: "Lifecycle" }).textContent).toBe("Retire");
+    expect(within(detail).queryByRole("button", { name: "Open chat" }) !== null).toBe(true);
+  });
+
   it("keeps focus inside the Retire confirmation, cancels on Escape and returns focus to Retire", () => {
     const { view, onLifecycle } = renderRoster([coordinator]);
     fireEvent.click(hit(view.getByTestId("roster-row:identity:coordinator")));

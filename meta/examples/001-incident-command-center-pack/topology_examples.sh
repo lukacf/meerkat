@@ -151,10 +151,10 @@ if [[ -n "${META_EXAMPLE_BIN_DIR:-}" ]]; then
   export PATH="${META_EXAMPLE_BIN_DIR}:${PATH}"
   echo "[incident-topology] using prebuilt binaries from ${META_EXAMPLE_BIN_DIR}"
 else
-  INCIDENT_COMMAND_CENTER_CMD=(./scripts/repo-cargo run -p meerkat-meta --example incident_command_center)
+  INCIDENT_COMMAND_CENTER_CMD=("$ROOT/../scripts/repo-cargo" run -p meerkat-meta --example incident_command_center)
   echo "[incident-topology] building the deterministic Rust example"
   (cd "$ROOT" && RUST_LANE_ID="$RUST_LANE_ID" CARGO_INCREMENTAL="$CARGO_INCREMENTAL" \
-    ./scripts/repo-cargo build -p meerkat-meta \
+    "$ROOT/../scripts/repo-cargo" build -p meerkat-meta \
       --example incident_command_center --bin mcp_fixture)
 fi
 

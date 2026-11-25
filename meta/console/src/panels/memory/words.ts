@@ -6,6 +6,7 @@
 
 import { accessActionLabel, isKnownAccessAction } from "../../lib/access-actions";
 import { humanizeEnum, joinMeta } from "../../../../packages/console-components/src/panel-kit/format";
+import { mobDisplayName } from "../../../../packages/console-core/src/mobs";
 import type { Tone } from "../../../../packages/console-components/src/panel-kit/tone";
 import { stripAgentKeyPrefix } from "../../../../packages/console-components/src/panel-kit/agents";
 import type {
@@ -297,12 +298,12 @@ export function scopeKeyOf(scope: MemoryRecordScope): string {
   }
 }
 
-/// A team named from its key: "ops-team" reads "Ops team", "research" reads
-/// "Research team". The key itself stays the tooltip.
+/// A team named from its key, the mob's id: "ops-team" reads "Ops team",
+/// "research" reads "Research team". The key itself stays the tooltip. The
+/// roster's mob headers and the topology name a mob by the same rule
+/// (`mobDisplayName`).
 export function teamName(key: string): string {
-  const words = humanizeEnum(key);
-  if (!words) return "Team";
-  return /\bteam$/i.test(words) ? words : `${words} team`;
+  return mobDisplayName(key);
 }
 
 /// The owner of a scope by name: the agent's display name, the team's name

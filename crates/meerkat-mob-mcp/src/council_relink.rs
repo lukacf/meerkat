@@ -19,7 +19,17 @@
 //!    real result when it finished before the restart;
 //! 3. if a record was skipped because the previous process's claim lease had
 //!    not been observed expired (a restart inside the lease is the common
-//!    case), waits until that lease expires and runs another pass.
+//!    case), waits until that lease expires and runs another pass;
+//! 4. if an outcome is owed to a member of a mob this host knows and does
+//!    not serve (the default mob that awaits its launch's serve, or a mob
+//!    that is held or quarantined), leaves it owed, never committing it to
+//!    the member's session as a plain session, and runs another pass when
+//!    that mob is served. An ordinary mob that is merely not loaded is
+//!    loaded for the delivery. While the default mob awaits its launch's
+//!    serve, the unfinished councils over its members are left for the pass
+//!    after the serve too, so they do not hold the others. Each pass logs
+//!    what it leaves owed, one line per mob: the mob, the number of
+//!    outcomes, and the state that holds them.
 //!
 //! The waiting is bounded: a record whose lease keeps being renewed belongs
 //! to a live coordinator and stops being waited for, and the sweep stops
@@ -81,6 +91,11 @@ pub enum CouncilRelinkAction {
     /// The convener is gone (retired, or its session archived or deleted):
     /// the outcome can never be delivered, so the job is settled.
     OwnerGone,
+    /// The convener is a member of mob `mob_id` of this host, which is not
+    /// loaded: the outcome is owed to that member and is not committed to
+    /// its session as a plain session. It stays owed; the sweep delivers it
+    /// once the mob is served.
+    AwaitingMob { mob_id: meerkat_mob::MobId },
     /// Delivery failed; a later re-link retries it.
     Failed(String),
 }
@@ -107,6 +122,10 @@ pub(crate) async fn restore_sweep(state: Weak<MobMcpState>) {
         // Subscribed before the re-link below, so a mob registered after it
         // still wakes this pass's wait.
         let mut mob_set = strong.mob_set_changes();
+        // Read before the pass: while the default mob awaits its launch's
+        // serve, the pass leaves what is owed to its members (and the
+        // unfinished councils over them) for a pass after the serve.
+        let serve_awaited = strong.launch_serve_awaited().await.is_some();
         let held = match strong.temporary_council().sweep_unfinished().await {
             Ok(sweep) => {
                 if !sweep.recovered.is_empty() {
@@ -141,6 +160,27 @@ pub(crate) async fn restore_sweep(state: Weak<MobMcpState>) {
         let awaiting_mob_set = reports
             .iter()
             .any(|report| matches!(report.action, CouncilRelinkAction::Failed(_)));
+        // An outcome owed to a member of a mob that is not served waits for
+        // that mob, not for any change of the set: the loads of other mobs
+        // wake no pass for it, so they cannot use the sweep's passes up.
+        let awaited_mobs = reports
+            .iter()
+            .filter_map(|report| match &report.action {
+                CouncilRelinkAction::AwaitingMob { mob_id } => Some(mob_id.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        // What the pass leaves owed, said once per mob and pass (not once
+        // per outcome), with the state that holds it. Nothing owed is no
+        // line.
+        for owed in strong.owed_outcomes_by_mob(&awaited_mobs).await {
+            tracing::info!(
+                mob_id = %owed.mob_id,
+                outcomes = owed.outcomes,
+                state = owed.state.as_str(),
+                "council outcomes left owed to members of this mob by this sweep pass; a later pass decides them again"
+            );
+        }
         let delivered = reports
             .iter()
             .filter(|report| report.action == CouncilRelinkAction::Delivered)
@@ -171,7 +211,7 @@ pub(crate) async fn restore_sweep(state: Weak<MobMcpState>) {
             }));
         }
         strong.note_temporary_council_sweep_pass();
-        if next_expiry.is_none() && !awaiting_mob_set {
+        if next_expiry.is_none() && !awaiting_mob_set && awaited_mobs.is_empty() && !serve_awaited {
             return;
         }
         let lease_wait = next_expiry.map(|next_expiry| {
@@ -182,6 +222,30 @@ pub(crate) async fn restore_sweep(state: Weak<MobMcpState>) {
         });
         // Wait without keeping the state alive.
         drop(strong);
+        // A change of the managed mobs that this sweep has a reason to act
+        // on. A failed re-link is retried at any change (a mob that was
+        // registered may seat its convener). Otherwise the sweep waits for
+        // the launch's serve to end, when it awaited it, or for one of the
+        // mobs an outcome waits for to be served or gone. A dropped state
+        // closes the channel, and the next pass then ends the sweep.
+        let set_changed = async {
+            loop {
+                if mob_set.changed().await.is_err() || awaiting_mob_set {
+                    return;
+                }
+                let Some(strong) = state.upgrade() else {
+                    return;
+                };
+                if serve_awaited && strong.launch_serve_awaited().await.is_none() {
+                    return;
+                }
+                for mob_id in &awaited_mobs {
+                    if strong.awaited_mob_settled(mob_id).await {
+                        return;
+                    }
+                }
+            }
+        };
         tokio::select! {
             () = async {
                 match lease_wait {
@@ -190,10 +254,7 @@ pub(crate) async fn restore_sweep(state: Weak<MobMcpState>) {
                 }
             } => {}
             _ = clock.changed() => {}
-            // A mob was registered or removed: it may seat a convener the
-            // re-link could not resolve. A dropped state closes the channel,
-            // and the next pass then ends the sweep.
-            _ = mob_set.changed(), if awaiting_mob_set => {}
+            () = set_changed, if awaiting_mob_set || serve_awaited || !awaited_mobs.is_empty() => {}
         }
     }
     tracing::warn!(
@@ -318,14 +379,19 @@ async fn deliver(
     }
     // A convener seated in a mob here is owed the outcome as that member, a
     // convener seated in none (a top-level RPC, REST or CLI convener) as its
-    // session. A membership read that fails decides nothing: the re-link
-    // fails and is retried.
-    let owner = match state
-        .member_handle_for_bridge_session(owner_session_id)
-        .await
-    {
-        Ok(Some((_, handle, identity))) => DetachedCompletionOwner::Member(handle, identity),
-        Ok(None) => DetachedCompletionOwner::Session,
+    // session. A convener that is, or may be, a member of a mob this host
+    // knows and does not serve is never taken for a plain session: its mob
+    // is loaded for the delivery, or the outcome stays owed until the mob
+    // is served ([`MobMcpState::detached_outcome_owner`]). A membership read
+    // that fails decides nothing: the re-link fails and is retried.
+    let owner = match state.detached_outcome_owner(owner_session_id).await {
+        Ok(crate::DetachedOutcomeOwner::Member(handle, identity)) => {
+            DetachedCompletionOwner::Member(handle, identity)
+        }
+        Ok(crate::DetachedOutcomeOwner::Session) => DetachedCompletionOwner::Session,
+        Ok(crate::DetachedOutcomeOwner::AwaitingMob(mob_id)) => {
+            return CouncilRelinkAction::AwaitingMob { mob_id };
+        }
         Err(error) => return CouncilRelinkAction::Failed(error.to_string()),
     };
     match sink

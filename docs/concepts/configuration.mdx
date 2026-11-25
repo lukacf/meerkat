@@ -373,8 +373,8 @@ event re-arms the window, so long-but-alive responses are unaffected. Set
 (`"120s"`) for an explicit window for every model. Like `call_timeout`, an
 omitted value inherits from the model profile: a model whose provider
 documents responses that can stay silent for minutes has its own catalog
-window (`gemini-4-carbon`, `gemini-4-argon` and, from 0.9.15,
-`gemini-4-hydrogen`: 900 s,
+window (`gemini-4-carbon`, `gemini-4-argon`,
+`gemini-4-hydrogen`: 900 s; `gemini-4-neon`: 900 s from 0.9.18;
 `gpt-5.5-pro`: 7200 s), a self-hosted model
 can declare one with `stream_inactivity_timeout_secs` (at least 60 seconds;
 config validation refuses a shorter one), and every other model uses the
@@ -781,6 +781,27 @@ receives only its configured environment, never the host's; a relative
 program name or a loader variable such as `LD_PRELOAD` refuses that launch. A
 confined stdio skill source starts in the kind's working directory, as an MCP
 stdio server does; its own `cwd` does not apply.
+
+On macOS the profile allows a confined process a little beyond its grants and
+the baseline's program and library directories. Every confined process may
+read the host name and the kernel version, and the metadata (never the
+contents or a listing) of each directory above a path granted for reading or
+writing, of the `/etc`, `/tmp` and `/var` links and of the fixed directories
+`/private`, `/usr`, `/System` and `/dev`: the `uname` library call reads
+those two kernel names, and a program that resolves a path one component at a
+time, such as a script runtime resolving its main file or `realpath`, reads
+that metadata. With `network = "unrestricted"` the process may also create
+Unix sockets, connect to the system name resolver (its socket and its service
+name) and read `/private/etc/ssl` and everything under it, the directory of
+the system's TLS configuration and certificate authority files, without a
+`read` grant; beyond the Unix sockets its configuration grants, the
+resolver's is the only one it can connect to. Without IP access the profile
+adds none of these: a process then creates Unix sockets, and connects to one,
+only where its requirement grants a Unix socket (a `custom` requirement can;
+the `workspace` mode grants none). A denied read (`deny_read`) still wins over
+the file and socket allowances. They reach no other system service and no
+keychain: a program that verifies certificates through the system trust
+service instead of a certificate file is not served by them.
 
 On Linux each confined launch runs in a pid namespace of its own. Its first
 process, the one the host holds (the launch's PID and the leader of its

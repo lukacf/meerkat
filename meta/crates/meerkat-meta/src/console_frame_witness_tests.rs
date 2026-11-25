@@ -266,6 +266,7 @@ fn frame_with(
     provenance: Option<crate::ConsoleFrameMemberProvenance>,
 ) -> NewConsoleFrame {
     NewConsoleFrame {
+        mob_id: None,
         id: None,
         dedupe_key: format!("witness-row:{identity}:{canary}"),
         timestamp_ms: 2_000,

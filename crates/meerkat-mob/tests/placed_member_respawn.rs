@@ -28,7 +28,8 @@ use meerkat_mob::runtime::{
 };
 use support::{
     HostFixtureOptions, REAL_COMMS_TEST_LOCK, create_controlling_mob,
-    create_controlling_mob_with_customizer, spawn_host_daemon_fixture,
+    create_controlling_mob_with_customizer, create_controlling_mob_with_definition,
+    placed_spawn_spec, spawn_host_daemon_fixture,
 };
 
 // ===========================================================================
@@ -140,6 +141,195 @@ async fn respawn_verb_rematerializes_placed_member_at_replacement_tuple() {
         .send("post-respawn turn", HandlingMode::Queue)
         .await
         .expect("the replacement serves through its host");
+
+    fixture.shutdown().await;
+}
+
+// ===========================================================================
+// A placed spawn's own web search choice: carried by the spec's overlay,
+// never written into the spec's profile
+// ===========================================================================
+
+/// The spec the controlling host stored for the placed member `member`.
+async fn stored_spec(
+    controlling: &support::ControllingMob,
+    member: &str,
+) -> meerkat_contracts::wire::PortableMemberSpec {
+    controlling
+        .storage_metadata
+        .load_placed_spawn(&controlling.mob_id, member)
+        .await
+        .expect("placed spawn record read")
+        .expect("placed spawn record present")
+        .spec
+}
+
+/// A placed spawn's own web search choice travels in the spec's overlay
+/// only. The spec's profile states what the member's profile states (for a
+/// profile without the key: nothing, so the profile's stored form names no
+/// such key), the member host builds the member with the spawn's choice,
+/// and the spec of a respawn states none either.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_placed_spawns_web_search_choice_travels_in_the_overlay_only() {
+    use meerkat_core::ToolCategoryOverride;
+
+    let _guard = REAL_COMMS_TEST_LOCK.lock().await;
+    let mut options = HostFixtureOptions::named("placed-search-host").with_member_build();
+    options.record_member_creates = true;
+    let fixture = spawn_host_daemon_fixture(options)
+        .await
+        .expect("member-build fixture");
+    let controlling = create_controlling_mob("placed-search").await;
+    let report = controlling.bind_fixture(&fixture).await;
+
+    let mut spec = placed_spawn_spec("worker", "b2", &report.host_id);
+    spec.tool_category_overrides.web_search = ToolCategoryOverride::Disable;
+    controlling
+        .handle
+        .spawn_spec(spec)
+        .await
+        .expect("the placed spawn commits");
+
+    let stored = stored_spec(&controlling, "b2").await;
+    assert_eq!(
+        stored.overlay.tool_category_overrides.web_search,
+        ToolCategoryOverride::Disable,
+        "the overlay carries the spawn's choice"
+    );
+    assert_eq!(
+        stored.profile.tools.web_search, None,
+        "the spec's profile states no web search choice of its own"
+    );
+    assert!(
+        serde_json::to_value(&stored.profile)
+            .expect("the stored profile encodes")
+            .get("tools")
+            .is_some_and(|tools| tools.get("web_search").is_none()),
+        "the profile's stored form names no `web_search` key"
+    );
+    let creates = fixture
+        .failing_create
+        .as_ref()
+        .expect("the fixture records member creates")
+        .recorded_creates();
+    let create = creates
+        .iter()
+        .rev()
+        .find(|create| {
+            create
+                .mob_member_binding
+                .as_ref()
+                .is_some_and(|binding| binding.member == "b2")
+        })
+        .unwrap_or_else(|| panic!("the member host's create of b2: {creates:#?}"));
+    assert_eq!(
+        create.override_web_search,
+        Some(ToolCategoryOverride::Disable),
+        "the member host builds the member with the spawn's choice"
+    );
+
+    controlling
+        .handle
+        .respawn(AgentIdentity::from("b2"), None)
+        .await
+        .expect("the placed member respawns");
+    let respawned = stored_spec(&controlling, "b2").await;
+    assert_eq!(
+        respawned.profile.tools.web_search, None,
+        "the respawn's spec states no web search choice in its profile either"
+    );
+    assert_eq!(
+        respawned.overlay.tool_category_overrides.web_search,
+        ToolCategoryOverride::Inherit,
+        "a respawn compiles a new spec, which does not carry the first spawn's choice"
+    );
+
+    fixture.shutdown().await;
+}
+
+/// A placed member of a profile that states the web search key is stored
+/// with the key in two places: the controlling host's placed spawn record
+/// and the member host's binding record. Retiring the member removes both,
+/// so neither host then stores a spec that names the key.
+#[tokio::test(flavor = "multi_thread")]
+async fn retiring_a_placed_member_removes_both_stored_specs_that_state_web_search() {
+    let _guard = REAL_COMMS_TEST_LOCK.lock().await;
+    let fixture = spawn_host_daemon_fixture(
+        HostFixtureOptions::named("placed-search-retire-host").with_member_build(),
+    )
+    .await
+    .expect("member-build fixture");
+    let controlling = create_controlling_mob_with_definition(
+        "placed-search-retire",
+        |definition| match definition
+            .profiles
+            .get_mut(&meerkat_mob::ProfileName::from("worker"))
+        {
+            Some(meerkat_mob::ProfileBinding::Inline(profile)) => {
+                profile.tools.web_search = Some(false);
+            }
+            _ => panic!("the fixture's worker profile is inline"),
+        },
+    )
+    .await;
+    let report = controlling.bind_fixture(&fixture).await;
+    controlling
+        .spawn_placed("worker", "b2", &report.host_id)
+        .await
+        .expect("the placed spawn commits");
+
+    assert_eq!(
+        stored_spec(&controlling, "b2")
+            .await
+            .profile
+            .tools
+            .web_search,
+        Some(false),
+        "the controlling host's placed spawn record states the profile's choice"
+    );
+    let on_host = fixture
+        .host_binding_record(controlling.mob_id.as_ref())
+        .await;
+    assert_eq!(
+        on_host
+            .materialized
+            .get("b2")
+            .expect("the member host's materialized row")
+            .spec
+            .profile
+            .tools
+            .web_search,
+        Some(false),
+        "the member host's binding record states the profile's choice"
+    );
+
+    controlling
+        .handle
+        .retire(AgentIdentity::from("b2"))
+        .await
+        .expect("the placed member retires");
+
+    assert!(
+        controlling
+            .storage_metadata
+            .load_placed_spawn(&controlling.mob_id, "b2")
+            .await
+            .expect("placed spawn record read")
+            .is_none(),
+        "the retire deletes the controlling host's placed spawn record"
+    );
+    let on_host = fixture
+        .host_binding_record(controlling.mob_id.as_ref())
+        .await;
+    assert!(
+        !on_host.materialized.contains_key("b2"),
+        "the retire removes the member host's materialized row"
+    );
+    let stored = serde_json::to_string(&on_host).expect("the binding record encodes");
+    assert!(
+        !stored.contains("web_search"),
+        "the member host's binding record names web search nowhere after the retire: {stored}"
+    );
 
     fixture.shutdown().await;
 }

@@ -236,11 +236,7 @@ fn surface_with_owners(
             .implicit_delegate_retirement_overrides()
             .expect("the runtime installs the agent mob tools"),
         console_spawn_sink: new_console_spawn_sink_slot(),
-        identity_runtime: runtime
-            .identity_runtime_slot
-            .clone()
-            .expect("the identity authority slot"),
-        protected_mob_id: runtime.handle().mob_id().to_string(),
+        identity_plane: runtime.identity_plane().clone(),
         spawner_comms_name: None,
         member_auth_binding: None,
         member_auth_binding_recorded: None,
@@ -791,4 +787,169 @@ async fn the_identity_tools_are_deferred_entries_of_the_wrappers_catalog() {
         "the session's catalog defers them"
     );
     runtime.clear_identity_runtime_authority();
+}
+
+/// A table of the mobs a host serves beside its launch mob that holds one
+/// mob: it answers that mob's identity plane for a session a member of
+/// that mob holds, as the runtime's table answers for its entries.
+struct OneHostMob(MobRuntime);
+
+#[async_trait]
+impl HostMobEntryWiring for OneHostMob {
+    async fn release_before_create(&self, _mob_id: &meerkat_mob::MobId) -> Result<(), MobError> {
+        Ok(())
+    }
+
+    async fn member_wiring(
+        &self,
+        _mob_id: &meerkat_mob::MobId,
+    ) -> Result<HostMobMemberWiring, MobError> {
+        Ok(HostMobMemberWiring::default())
+    }
+
+    fn after_destroy(&self, _destroyed: &meerkat_mob::MobId) {}
+
+    fn identity_plane_of_session(
+        &self,
+        session: &meerkat_core::types::SessionId,
+    ) -> Option<MobIdentityPlane> {
+        futures::FutureExt::now_or_never(self.0.handle().member_of_session(session))
+            .flatten()
+            .map(|_| self.0.identity_plane().clone())
+    }
+}
+
+/// A launch mob and a mob the host serves beside it, each with a family
+/// that takes changes and counts its calls, and the wrapper as the launch's
+/// one factory builds it for a member of the second mob: it holds the
+/// launch mob's identity plane, which was given the table of the host's
+/// other mobs.
+struct TwoMobs {
+    launch: MobRuntime,
+    second: MobRuntime,
+    of_the_launch: Arc<CountingFamily>,
+    of_the_second: Arc<CountingFamily>,
+    /// Keeps the table alive: the plane holds it weakly.
+    _table: Arc<dyn HostMobEntryWiring>,
+    surface_of_a_second_mobs_member: AutoWireParentMobToolDispatcher,
+}
+
+async fn two_mobs(launch_dir: &Path, second_dir: &Path) -> TwoMobs {
+    let of_the_launch = Arc::new(CountingFamily::default());
+    let of_the_second = Arc::new(CountingFamily::default());
+    let (launch, _) = runtime_with(launch_dir, Some(Arc::clone(&of_the_launch))).await;
+    let (second, _) = runtime_with(second_dir, Some(Arc::clone(&of_the_second))).await;
+    let session = member_session(&second, "shared", &[]).await;
+    let table: Arc<dyn HostMobEntryWiring> = Arc::new(OneHostMob(second.clone()));
+    let mut surface_of_a_second_mobs_member = surface(&launch, session);
+    surface_of_a_second_mobs_member.identity_plane = launch
+        .identity_plane()
+        .clone()
+        .with_host_mobs(Some(Arc::downgrade(&table)));
+    TwoMobs {
+        launch,
+        second,
+        of_the_launch,
+        of_the_second,
+        _table: table,
+        surface_of_a_second_mobs_member,
+    }
+}
+
+/// A member of a mob the host serves beside the launch mob is offered the
+/// identity tools of its own mob, and its call reaches its own mob's
+/// family: the launch mob's family is never asked. The mob is the one
+/// whose roster names the member's session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_member_of_a_mob_beside_the_launch_mob_calls_the_identity_tools_of_its_own_mob() {
+    let (launch_dir, second_dir) = (
+        tempfile::tempdir().expect("state dir"),
+        tempfile::tempdir().expect("state dir"),
+    );
+    let mobs = two_mobs(launch_dir.path(), second_dir.path()).await;
+    let member = &mobs.surface_of_a_second_mobs_member;
+
+    assert_eq!(
+        identity_tools_of(member),
+        IDENTITY_TOOLS,
+        "the member is offered the identity tools of its own mob"
+    );
+    let listed = call(member, IDENTITY_LIST, json!({})).await;
+    assert!(
+        listed.is_ok(),
+        "its list is answered: {:?}",
+        listed.as_ref().err()
+    );
+    assert_eq!(
+        (
+            mobs.of_the_second.calls.load(Ordering::SeqCst),
+            mobs.of_the_launch.calls.load(Ordering::SeqCst)
+        ),
+        (1, 0),
+        "the call reached the family of the member's own mob and not the launch mob's"
+    );
+    mobs.launch.clear_identity_runtime_authority();
+    mobs.second.clear_identity_runtime_authority();
+}
+
+/// An identity tool is never routed by a mob its arguments name: the tools
+/// take no mob, so a call that carries the launch mob's id is refused as a
+/// call with an argument the tool does not have, and neither mob's family
+/// is asked.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_identity_tool_is_never_routed_by_a_mob_its_arguments_name() {
+    let (launch_dir, second_dir) = (
+        tempfile::tempdir().expect("state dir"),
+        tempfile::tempdir().expect("state dir"),
+    );
+    let mobs = two_mobs(launch_dir.path(), second_dir.path()).await;
+    let member = &mobs.surface_of_a_second_mobs_member;
+    let launch_mob = mobs.launch.handle().mob_id().to_string();
+
+    let refused = call(member, IDENTITY_LIST, json!({"mob_id": launch_mob})).await;
+    let said = format!("{refused:?}");
+    assert!(
+        said.contains("invalid_request"),
+        "a call that names a mob is refused for its arguments: {said}"
+    );
+    assert_eq!(
+        (
+            mobs.of_the_second.calls.load(Ordering::SeqCst),
+            mobs.of_the_launch.calls.load(Ordering::SeqCst)
+        ),
+        (0, 0),
+        "no family was asked"
+    );
+    mobs.launch.clear_identity_runtime_authority();
+    mobs.second.clear_identity_runtime_authority();
+}
+
+/// The raw mob tools destroy neither the mob of the member that calls them
+/// nor the launch mob while an identity runtime is attached to it: a
+/// member of a mob the host serves beside the launch mob is refused both.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_member_of_a_mob_beside_the_launch_mob_destroys_neither_its_own_mob_nor_the_launch_mob() {
+    let (launch_dir, second_dir) = (
+        tempfile::tempdir().expect("state dir"),
+        tempfile::tempdir().expect("state dir"),
+    );
+    let mobs = two_mobs(launch_dir.path(), second_dir.path()).await;
+    let member = &mobs.surface_of_a_second_mobs_member;
+    for mob in [&mobs.second, &mobs.launch] {
+        let mob_id = mob.handle().mob_id().to_string();
+        let refused = call(member, "mob_destroy", json!({"mob_id": mob_id})).await;
+        assert_eq!(
+            refused.err(),
+            Some(ToolError::invalid_arguments(
+                "mob_destroy",
+                format!(
+                    "mob '{mob_id}' is owned by the attached IdentityRuntime and cannot be \
+                     destroyed through raw agent tools"
+                ),
+            )),
+            "the destroy of {mob_id} is refused"
+        );
+    }
+    mobs.launch.clear_identity_runtime_authority();
+    mobs.second.clear_identity_runtime_authority();
 }

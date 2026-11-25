@@ -173,6 +173,247 @@ async fn an_identity_kept_apart_answers_the_keyed_verbs_as_a_name_no_identity_ha
     runtime.shutdown().await;
 }
 
+/// What kind of answer a keyed delivery got: that it was delivered, or its
+/// refusal.
+fn kind_of<T, E: std::fmt::Debug>(answer: &Result<T, E>) -> String {
+    match answer {
+        Ok(_) => "delivered".to_string(),
+        Err(refusal) => format!("{refusal:?}"),
+    }
+}
+
+/// A host of one mob, a keyed delivery while the record's first read is
+/// still owed: an identity this process has not built is answered as it is
+/// once the read has landed, by its registered row, and not as an identity
+/// the record cannot tell yet. The launch's own mob keeps the answers it
+/// had.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_keyed_delivery_on_a_host_of_one_mob_is_answered_as_before_while_the_first_read_is_owed()
+{
+    let state = tempfile::tempdir().expect("state dir");
+    let (runtime, server) = server(state.path(), "mob-k-owed").await;
+    let scope = KeyedInjectCallerScope::for_grant_label("peer-gateway");
+    let digest = content_digest("a body");
+    let deadline = NOW_MS + WINDOW_MS;
+    let record = runtime.mob_runtime().private_owners().clone();
+    assert_eq!(
+        record.owner_of(
+            &runtime.mob_id(),
+            crate::member_comms_id::mob_member_id(OPEN).as_str()
+        ),
+        None,
+        "the identity has no member yet: the record does not hold it"
+    );
+
+    let owed = record.owe_a_first_read_in_tests();
+    assert!(
+        record.first_read_pending(),
+        "the record's first read is owed"
+    );
+    let to_the_open_identity = server
+        .deliver(&scope, delivery(OPEN, &digest), deadline)
+        .await;
+    let to_the_identity_kept_apart = server
+        .deliver(&scope, delivery(APART, &digest), deadline)
+        .await;
+    let to_no_identity = server
+        .deliver(&scope, delivery(NOBODY, &digest), deadline)
+        .await;
+    drop(owed);
+    record
+        .first_attempts_settled(std::time::Duration::from_secs(30))
+        .await;
+    assert!(
+        !record.first_read_pending(),
+        "the record's first read has landed"
+    );
+
+    // The same delivery again, once nothing is owed: the same kind of
+    // answer.
+    let to_the_open_identity_again = server
+        .deliver(&scope, delivery(OPEN, &digest), deadline)
+        .await;
+    assert_eq!(
+        kind_of(&to_the_open_identity),
+        kind_of(&to_the_open_identity_again),
+        "while the first read is owed the identity is answered as once it has landed"
+    );
+    assert!(
+        !kind_of(&to_the_open_identity).contains("has not read who the identities"),
+        "and not as an identity the record cannot tell yet: {}",
+        kind_of(&to_the_open_identity)
+    );
+    assert_eq!(
+        kind_of(&to_the_identity_kept_apart).replace(APART, "<identity>"),
+        kind_of(&to_no_identity).replace(NOBODY, "<identity>"),
+        "the identity its registered row keeps apart is refused as a name no identity has, as \
+         before"
+    );
+    assert!(
+        to_no_identity.is_err(),
+        "a name no identity has is refused: {}",
+        kind_of(&to_no_identity)
+    );
+    runtime.shutdown().await;
+}
+
+/// A member spawn log whose read does not return until the row opens it,
+/// and then holds no spawn.
+struct HeldLog(tokio::sync::watch::Receiver<bool>);
+
+#[async_trait]
+impl crate::private_owners::MemberSpawnLog for HeldLog {
+    async fn spawns_after(
+        &self,
+        _cursor: u64,
+        _limit: usize,
+    ) -> Result<Option<crate::private_owners::MemberSpawnPage>, String> {
+        let mut opened = self.0.clone();
+        let _ = opened.wait_for(|opened| *opened).await;
+        Ok(None)
+    }
+}
+
+/// A delivery seam whose record cannot tell yet whose the identities of its
+/// mob are: the record has not read that mob, as the record of a mob beside
+/// the launch's own has not until the mob is read. A keyed delivery to an
+/// identity that exists is answered as a read that cannot be made now, the
+/// same as a delivery to a name no identity has, and not by the identity's
+/// registered row. Once the record has read, the identity is answered by
+/// its row again.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_keyed_delivery_for_a_mob_the_record_has_not_read_is_answered_as_a_read_that_cannot_be_made()
+ {
+    let state = tempfile::tempdir().expect("state dir");
+    let (runtime, _server) = server(state.path(), "mob-k-unread").await;
+    let scope = KeyedInjectCallerScope::for_grant_label("peer-gateway");
+    let digest = content_digest("a body");
+    let deadline = NOW_MS + WINDOW_MS;
+
+    // A record that is not the launch's own: this mob is to it a mob it
+    // reads, and its read is held.
+    let (open, opened) = tokio::sync::watch::channel(false);
+    let record = crate::private_owners::PrivateOwners::default();
+    let read = {
+        let record = record.clone();
+        tokio::spawn(async move { record.seeded(&HeldLog(opened)).await.landed() })
+    };
+    while !record.first_read_pending() {
+        tokio::task::yield_now().await;
+    }
+    let seam = Arc::new(
+        super::local_delivery(&runtime)
+            .expect("the gateway's native seam")
+            .with_members_apart(record.clone()),
+    );
+    let server = KeyedInjectServer::with_clock(seam, WINDOW_MS, Arc::new(|| NOW_MS));
+
+    let to_the_identity = server
+        .deliver(&scope, delivery(OPEN, &digest), deadline)
+        .await;
+    let to_no_identity = server
+        .deliver(&scope, delivery(NOBODY, &digest), deadline)
+        .await;
+    assert!(
+        kind_of(&to_the_identity).contains("NativeUnavailable"),
+        "an identity the record cannot tell yet is answered as a read that cannot be made now: \
+         {}",
+        kind_of(&to_the_identity)
+    );
+    assert_eq!(
+        kind_of(&to_the_identity).replace(OPEN, "<identity>"),
+        kind_of(&to_no_identity).replace(NOBODY, "<identity>"),
+        "the same answer for every name the record does not hold"
+    );
+
+    open.send(true).expect("the read is waiting");
+    assert!(read.await.expect("the read ends"), "the read landed");
+    let to_the_identity_again = server
+        .deliver(&scope, delivery(OPEN, &digest), deadline)
+        .await;
+    assert_ne!(
+        kind_of(&to_the_identity_again),
+        kind_of(&to_the_identity),
+        "once the record has read, the identity is answered by its registered row"
+    );
+    let to_no_identity_again = server
+        .deliver(&scope, delivery(NOBODY, &digest), deadline)
+        .await;
+    assert!(
+        !kind_of(&to_no_identity_again).contains("NativeUnavailable"),
+        "and a name no identity has is refused as such: {}",
+        kind_of(&to_no_identity_again)
+    );
+    runtime.shutdown().await;
+}
+
+/// While the record has not read the seam's mob, a keyed delivery and a
+/// status read tell no name apart: a name the record already holds a
+/// person for (a member built in this process) is answered as a name no
+/// identity has is, as a read that cannot be made now.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_keyed_request_tells_no_name_apart_while_the_record_has_not_read_the_mob() {
+    let state = tempfile::tempdir().expect("state dir");
+    let (runtime, _server) = server(state.path(), "mob-k-held").await;
+    let scope = KeyedInjectCallerScope::for_grant_label("peer-gateway");
+    let digest = content_digest("a body");
+    let deadline = NOW_MS + WINDOW_MS;
+
+    // A record that is not the launch's own, its read of this mob held; it
+    // holds one member with a person, as a build in this process records.
+    let (_open, opened) = tokio::sync::watch::channel(false);
+    let record = crate::private_owners::PrivateOwners::default();
+    let _read = {
+        let record = record.clone();
+        tokio::spawn(async move { record.seeded(&HeldLog(opened)).await.landed() })
+    };
+    while !record.first_read_pending() {
+        tokio::task::yield_now().await;
+    }
+    record.record(
+        &runtime.mob_id(),
+        crate::member_comms_id::mob_member_id(RECORDED).as_str(),
+        Some(&BTreeMap::from([(
+            crate::access::PRIVATE_TO_LABEL.to_string(),
+            "someone".to_string(),
+        )])),
+    );
+    let seam = Arc::new(
+        super::local_delivery(&runtime)
+            .expect("the gateway's native seam")
+            .with_members_apart(record.clone()),
+    );
+    let server = KeyedInjectServer::with_clock(seam, WINDOW_MS, Arc::new(|| NOW_MS));
+
+    let to_the_held_name = server
+        .deliver(&scope, delivery(RECORDED, &digest), deadline)
+        .await;
+    let to_no_identity = server
+        .deliver(&scope, delivery(NOBODY, &digest), deadline)
+        .await;
+    assert_eq!(
+        kind_of(&to_the_held_name).replace(RECORDED, "<identity>"),
+        kind_of(&to_no_identity).replace(NOBODY, "<identity>"),
+        "a delivery to a name the record holds a person for is answered as one to a name no \
+         identity has"
+    );
+    let of_the_held_name = server
+        .status(&scope, RECORDED, "batch-1", true)
+        .await
+        .map(|answer| (answer.status, answer.input));
+    let of_no_identity = server
+        .status(&scope, NOBODY, "batch-1", true)
+        .await
+        .map(|answer| (answer.status, answer.input));
+    assert_eq!(
+        format!("{of_the_held_name:?}").replace(RECORDED, "<identity>"),
+        format!("{of_no_identity:?}").replace(NOBODY, "<identity>"),
+        "the status of a name the record holds a person for reads as that of a name no identity \
+         has"
+    );
+    runtime.shutdown().await;
+}
+
 // The member verbs of the control channel, for the same identities: the
 // runtime has an identity runtime, and each identity is registered and has
 // no member until something reaches it.

@@ -4,7 +4,7 @@ description: "JSON-RPC 2.0 protocol for Meta runtime operations: gating, memory,
 icon: "plug"
 ---
 
-*Mirrored from Meerkat Meta main at [d5cab02de5b7](https://github.com/lukacf/meerkat/commit/d5cab02de5b7831af23df8bd862c80448b3c6f36) on 2026-11-20; Meta version 0.9.17 at that commit.*
+*Mirrored from Meerkat Meta main at [defd2cd35cbf](https://github.com/lukacf/meerkat/commit/defd2cd35cbf1ae360558a32deaad26d0b55706c) on 2026-11-25; Meta version 0.9.18 at that commit.*
 
 Meta exposes its operational API over JSON-RPC 2.0. SDK gateways use JSON lines over stdio, while the embedded console uses `POST /console/rpc` for console-specific methods and explicitly implemented runtime operations. The HTTP dispatcher is not a general stdio passthrough; check `meta/capabilities` on the surface you use.
 
@@ -13,7 +13,7 @@ Meta exposes its operational API over JSON-RPC 2.0. SDK gateways use JSON lines 
 - **SDK transport:** JSON lines over stdio (one JSON object per line)
 - **Console transport:** HTTP `POST /console/rpc`
 - **Version:** JSON-RPC 2.0
-- **Contract version:** `0.5.0`
+- **Contract version:** `0.6.0`
 
 ### Initialization handshake
 
@@ -107,7 +107,7 @@ not opt in never receives `accepted`.
 
    ```json
    { "jsonrpc": "2.0", "method": "meta/init_settled",
-     "params": { "init_id": "init-6f1c...", "outcome": "ready", "http_base_url": "http://127.0.0.1:41234", "contract_version": "0.5.0", "...": "..." } }
+     "params": { "init_id": "init-6f1c...", "outcome": "ready", "http_base_url": "http://127.0.0.1:41234", "contract_version": "0.6.0", "...": "..." } }
    ```
 
    A `failed` settlement carries the error that the legacy response would have
@@ -271,6 +271,167 @@ conflicting pair raises `ValueError`, and an omitted or empty list emits no
 The optional `data` field carries structured context for typed
 errors. SDKs surface it on `RpcError.data`.
 
+### Addressing a mob
+
+A request names the mob it is for with a top-level `mob_id` in its `params`.
+A request without one addresses the default mob, the mob the launch names. A
+gateway serves the default mob and the mobs its host created; those are the
+ids it serves.
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "meta/list_members",
+  "params": { "mob_id": "support-desk" }
+}
+```
+
+Which methods take it: every `meta/*` method except `meta/init`,
+`meta/shutdown` and the six job callbacks (`meta/jobs/heartbeat`,
+`meta/jobs/progress`, `meta/jobs/checkpoint`, `meta/jobs/complete`,
+`meta/jobs/fail`, `meta/jobs/cancel_ack`), and `live/webrtc/answer`. The six
+job callbacks address a job by its `authority`, take no `mob_id`, and ignore
+one.
+
+What a gateway does with it:
+
+- The default mob's id, or `null`: the id is taken off the params and the
+  request is answered as one that names no mob. A method whose params refuse
+  members they do not know never sees it.
+- Any other id, an empty one included: the request is refused before the
+  method runs, with `-32602`.
+  - On the stdio gateway `data` is
+    `{"kind": "foreign_mob_target", "requested_mob_id": "...", "gateway_mob_id": "..."}`:
+    the id the request named and the id of the mob the gateway serves.
+  - On the Console's request doors (`POST /console/rpc` and its multipart
+    route) `data` is `{"kind": "foreign_mob_target", "requested_mob_id": "..."}`:
+    the id the request named and no other. It is the same for every caller
+    and does not say why the id is not served.
+- A `mob_id` that is not a string: refused with `-32602`
+  (`Invalid params: mob_id must be a string`) before the method reads its
+  params.
+
+On five methods `mob_id` is also the method's own parameter and stays in the
+params: `meta/mob_events/query`, `meta/mob_events/subscribe`,
+`mob/adopt_member_identity_declaration`, `mob/apply_member_tool_declaration`
+and `mob/member_tool_declaration`. On the stdio gateway a request of one of
+these names its mob by position (params that are an array) as it does by
+name. The mob announcement methods that carry a mob of their own keep their
+family's answer. On the stdio gateway one mob announcement method reads the
+mob a request names: `meta/mob_announcements/subscriptions/put` without
+`mobs` takes that mob's announcements, the launch mob's when the request
+names no mob. The family's other methods that carry no mob of their own
+(its lists and gets, and its declaration, delivery and subscription
+methods) answer the host's announcement records, whatever served mob a
+request names.
+
+On the stdio gateway some methods answer for the host and not for one mob,
+whatever served mob a request names: the gating methods (the gating state
+is the host's, one for all its mobs).
+The routing methods act on the routes of the mob the request names, and the
+delivery methods (`meta/delivery/send`, `meta/delivery/history`) on that
+mob's deliveries: a send takes a resolution made for its own mob, and a
+history lists one mob's deliveries.
+`meta/events/subscribe` and `meta/query_events` select in the mob the
+request names: with `mob_id` they answer the events of the members of that
+mob of the host, and without it the launch mob's events and those of the
+mobs its members created, as on a host of one mob. They have no form that
+selects every mob at once. The events of a mob that a member of a second
+mob of the host created, and of every mob below it, are answered to no
+request of the two methods. A request of one of the two that names a mob
+is answered the events of the mob that runs under that id now: a mob
+created under an id an earlier mob had is answered none of the earlier
+mob's events. Neither method loads a mob: a mob that is not loaded is
+answered what is kept of it (the events the gateway still buffers, the
+rows of the event log) at the incarnation the mob set's records name for
+it, and stays not loaded. While the mob set has not read the record of a
+mob that is not loaded, a request that names that mob is answered no
+event. A request that names a mob can also be answered no event, without
+an error, while that mob is being loaded or is closing (it is being
+unloaded, destroyed or shut down); the answer cannot be told from that of
+a mob with no events, so ask again.
+
+On the stdio gateway some methods are served for the launch mob alone until a
+later release: the live methods (`meta/live/*`, and `live/webrtc/answer` on a
+gateway built with OpenAI Live: the gateway's one live transport is the
+launch mob's) and `meta/spawn_member` with `module_id` (the gateway's module
+runtime is the launch mob's). For another mob the gateway hosts they are
+refused with `-32602` and `data`
+`{"kind": "foreign_mob_target", "requested_mob_id": "...", "gateway_mob_id": "...", "hosted": true}`,
+before the mob is looked at: a module spawn is refused so whatever the named
+mob holds. The family that changes and reads a mob's long-term agents (the
+`meta/identity/*` methods of [Agent changes](#agent-changes)) is served for
+the mob a request names, by that mob's own family, where the host created the
+mob. The member `hosted` says that the gateway hosts the mob
+and that the request is not served for it; the refusal of an id the gateway
+does not have carries no such member. `meta/capabilities` asked about
+another mob lists no live method and no live feature capability, lists that
+family's methods when the mob has a family of its own, and offers `profile`
+as the only spawn mode
+(`runtime_capabilities.available_spawn_modes`). It still lists the
+delivery methods (`meta/delivery/send`, `meta/delivery/history`): they are
+served for the mob a request names.
+
+Every method that works with an agent's identity (the member, identity and
+instruction methods, the sends to a member and their waits, the agent
+memory methods, `meta/registered_spec`, `meta/status_identity_bootstrap`,
+the member declaration and tool grant families) is
+served with the identity context of the mob the request names: that mob's
+own agents, their bindings and their memory. A mob of a host that composed
+no identity context is served without one, as the launch mob of that host
+is. Only where the launch composed an identity context and the named mob
+holds none is such a method refused: with `-32602` and `data`
+`{"kind": "foreign_mob_target", "requested_mob_id": "...", "gateway_mob_id": "...", "hosted": true, "identity_context": false}`.
+It is not the `-32601` of a method the gateway does not have, so no client
+takes it for an older gateway.
+`meta/status` and `meta/capabilities` report on the mob they are asked
+about, with that mob's own identity context or without one, and are never
+refused for want of one. An agent memory request that carries no `realm` is
+for the memory realm of the mob it names: `"default"` for the launch mob,
+and for any other mob the realm that mob's own agent memory is configured
+with; a `realm` the request names is used as given, for either mob.
+`meta/compact_member`,
+`meta/bound_member_transcript` and the agent memory methods
+`meta/capabilities` lists need a service the host gave the named mob; where
+it gave none, the two methods answer that they are not wired on this
+gateway and no agent memory method is listed. The five requests that wire,
+unwire and send across mobs (`meta/cross_mob/wire`, `meta/cross_mob/unwire`,
+`meta/cross_mob/send`, `meta/cross_mob/wire_local`,
+`meta/cross_mob/unwire_local`) act on the member of the mob the request
+names.
+
+What six of these methods record for the Console is kept per mob too:
+`meta/interact` and `meta/send_message` reserve an interaction and record
+the input, and `meta/respawn`, `meta/retire`, `meta/reset` and
+`meta/delete_identity` record the change, which ends the interactions the
+agent still had pending. A request for an agent of one mob records in that
+mob's own console events and leaves an agent of the same name in another
+mob as it was. The console events of a mob that is not the launch mob are
+stored in the host's console log under that mob. Of a running gateway's
+Console, the request method `meta/console/query_timeline` shows them for a
+request that names that mob; no Console route and no stream shows them yet,
+and the answer of `meta/interact` for such a mob carries no `stream`.
+
+#### The capability
+
+`meta/capabilities` lists `mob_addressing` in `feature_capabilities` when the
+gateway judges the `mob_id` of a request as described here. A gateway that
+does not list it ignores the id on most methods, answers for its only mob,
+and refuses the id as an unknown member on the methods whose params refuse
+members they do not know. Send `mob_id` only to a gateway that lists
+`mob_addressing`.
+
+`mob_addressing` says that the gateway judges `mob_id`; it does not say that
+the gateway hosts more than one mob. A second capability for that, and one
+refusal code with a closed set of kinds for the methods that create and
+manage hosted mobs, come with those methods and are not part of this
+contract yet. A client that matches error codes needs no new arm today: the
+refusal of a mob id is `-32602` with `data.kind = "foreign_mob_target"`,
+with `data.hosted` where the gateway hosts the mob and the request is not
+served for it, and with `data.identity_context = false` where that is
+because the mob has no identity context.
+
 ### Meta-specific error codes
 
 | Code | Meaning | `data` shape |
@@ -432,6 +593,306 @@ storage declarations (`runtime_store`, `event_log`) are documented in
 
 ---
 
+## Mobs of a host
+
+A gateway hosts the mob its launch names, the launch mob, and any number of
+mobs beside it. These six methods list and read the mobs of the host, create
+one, stop and resume one, replace the definition of a stopped one, and
+destroy one. They are the host's own methods: they act on the host's set of
+mobs, not on one mob's members.
+
+`meta/capabilities` lists `hosted_mobs` in `feature_capabilities`, and the
+methods in `methods`, when the gateway serves them. A gateway serves them
+only where a mob created with `meta/mobs/create` can then be asked about by
+the other methods: where its requests address a mob beside the launch mob
+([Addressing a mob](#addressing-a-mob)). A gateway that addresses the launch
+mob alone lists neither the feature nor the methods. A gateway that does not
+list the feature answers each of them `-32601` (method not found). Call a
+method of this family only on a gateway that lists `hosted_mobs`.
+
+| Method | Params | Result |
+|--------|--------|--------|
+| `meta/mobs/list` | none | `{mobs: [<entry>, ...]}`: the launch mob first, then the others by id |
+| `meta/mobs/get` | `{mob_id}` | `{mob: <entry>}` |
+| `meta/mobs/create` | `{mob_config}` | `{mob: <entry>}` |
+| `meta/mobs/lifecycle` | `{mob_id, action}`; `action` is `"stop"` or `"resume"` | `{mob: <entry>}`, and `stop_report` for a stop |
+| `meta/mobs/redefine` | `{mob_id, mob_config, expected_revision}` | `{mob: <entry>, receipt}` |
+| `meta/mobs/destroy` | `{mob_id}` | `{mob_id, destroy_report}` |
+
+On `get`, `lifecycle`, `redefine` and `destroy` the `mob_id` is required and
+is the mob the method acts on. A request without one is refused `-32602`; it
+never means the launch mob. `list` and `create` name no mob; on them a
+`mob_id` is the addressing id of [Addressing a mob](#addressing-a-mob), as on
+every other method of the host.
+
+### The entry of a mob
+
+```json
+{
+  "mob_id": "support-desk",
+  "default": false,
+  "state": "stopped",
+  "provenance": "host",
+  "revision": 2
+}
+```
+
+| Member | Meaning |
+|--------|---------|
+| `mob_id` | The mob's id. |
+| `default` | `true` for the launch mob, `false` for every other mob. |
+| `state` | Where the mob stands, see below. |
+| `provenance` | Who created the mob: `host` for the launch mob and for a mob created with `meta/mobs/create`, `member` for a mob one of the host's agents created, or another kind of the mob's creation record. Absent while the host has not read that record: for a mob that is not loaded and whose store this process has not read yet (a short time after a start), and for a quarantined or held one. |
+| `revision` | The revision of the mob's definition: `1` for a mob whose definition was never replaced, and one more after each `meta/mobs/redefine`. It is the value `expected_revision` has to name. Present on `meta/mobs/get` for a loaded mob (a `get` loads a mob the host created) and on the entry a `create`, a `lifecycle` or a `redefine` answers. A `meta/mobs/list` entry never carries it. Each read of it replays the mob's event log. |
+| `failure` | Present when a loaded mob's actor has stopped: why. |
+| `quarantine` | Present with the state `quarantined`: the class of the fault and what the host kept. |
+
+`state` is one of:
+
+| State | Meaning |
+|-------|---------|
+| `creating`, `running`, `completed`, `destroyed` | The lifecycle of a loaded mob. |
+| `stopped` | The mob is stopped. A stop is the mob's own lifecycle and holds whether the host has the mob loaded or not. |
+| `dormant` | The host knows the mob, has not loaded it, and its records do not say that the mob is stopped. |
+| `quarantined` | The mob's store could not be opened or restored. The store is kept as it was found and no agent of the mob runs. |
+| `held` | A mob one of the host's agents created, kept before activation until its owner is resolved. |
+
+A stopped mob stays stopped until it is resumed: across a restart of the
+host, and while the host does not have it loaded (a host unloads a mob that
+is idle, and a start loads no mob that nothing addresses). The host's
+records keep the stop, so such a mob reads `stopped`, not `dormant`.
+`dormant` says that the host has not loaded the mob and does not know it as
+stopped. For a short time after a start that includes a stopped mob the host
+created: until the host has read the mob's store once, which it does by
+itself after its start, the mob reads `dormant` and its entry carries no
+`provenance`.
+
+`meta/mobs/list` loads nothing: it answers from what the host's records
+keep. `meta/mobs/get` loads the mob it names when the host created it and it
+is not loaded. The mob loads as its store has it: a stopped mob loads
+stopped, no agent of it runs and nothing is started, and its entry carries
+its `revision`. Where the host's records do not say yet who created the mob,
+a `get` reads that from the mob's store first, without loading the mob. A
+mob one of the host's agents created is answered from the records and is not
+loaded by a `get`. A load that fails is answered as a `lifecycle` of that
+mob would answer it, unless the host's records show what became of the mob:
+a store that cannot be opened is kept quarantined, and the entry says so.
+`lifecycle`, `redefine` and `destroy` act on a mob and load one that is not
+loaded. Where the host's records do not say who created a mob that is not
+loaded, the mob is loaded to read that: a mob one of the host's agents
+created is then answered as an id the host does not have, and nothing else
+about it changes.
+
+### `meta/mobs/create`
+
+`mob_config` is the TOML of a mob definition, as `meta/init` takes it, and is
+checked the same way: a definition that does not parse or validate is
+refused `-32602` with the text `meta/init` answers. The mob is created under
+the definition's `[mob] id`, with the host as its creator, and runs. The
+result is its entry. A create under an id whose WorkGraph realm in the host's
+store (`mob.<id>`) holds work is refused `invalid_mob_id`, with nothing
+created or changed: choose another id.
+
+A mob created this way has no agents yet, and whether requests can address
+it is a separate question: see [Addressing a mob](#addressing-a-mob) and the
+`mob_addressing` capability.
+
+### `meta/mobs/lifecycle`
+
+`stop` stops the named mob and answers its entry with the stop's report of
+what it did to each member; `resume` runs it again. Each acts on the mob it
+names and on no other. The family acts on the mobs a host created beside
+its launch mob: a `stop` or a `resume` of the launch mob is refused with the
+kind `default_mob`, and the launch mob runs on. The host stops its own mob
+by its own means, as before.
+
+### `meta/mobs/redefine`
+
+Replaces the definition of a stopped mob the host created. `mob_config` is
+the new definition, checked as `meta/mobs/create` checks it, and its
+`[mob] id` must be the `mob_id`. `expected_revision` is the `revision` the
+caller read with `meta/mobs/get`: the definition is replaced only if the mob
+is still at that revision.
+
+The mob is unloaded, the definition is committed, and the mob is loaded
+again with it. It is still stopped; `meta/mobs/lifecycle` with `resume` runs
+it with the new definition. The result is the mob's entry, at the next
+revision, and the receipt of the commit:
+
+```json
+{
+  "mob": { "mob_id": "support-desk", "default": false, "state": "stopped", "provenance": "host", "revision": 2 },
+  "receipt": {
+    "mob_id": "support-desk",
+    "previous_revision": 1,
+    "committed_revision": 2,
+    "projection_revision": 2,
+    "event_cursor": 4,
+    "declared_fields": ["profiles.reviewer"]
+  }
+}
+```
+
+`declared_fields` names the parts of the definition that changed.
+
+A request repeated after its commit (the same definition, the revision it
+named before) is answered the same receipt, and nothing is committed again.
+The redefinition acts on the mob the host read for the request: a mob
+created under the id in between is not redefined, and the request is
+answered as one for an id the host does not have.
+
+A stopped mob that still holds something does not close for the change and
+is refused with the kind `mob_busy`: the one refusal of the family whose
+request can succeed unchanged later. Repeat it once what its `detail` names
+has ended.
+
+When the mob cannot be loaded again after the change was asked, the answer
+is the failed load's own error and the mob is listed `quarantined`. If the
+definition was committed first, `data.committed_revision` names the revision
+it is at; if it was not, the message says that the definition was not
+replaced and the mob was not loaded again.
+
+The launch mob's definition is replaced by its launch
+(`runtime_options.declare_spec_update` of `meta/init`), not by this method.
+
+### `meta/mobs/destroy`
+
+Destroys the named mob and removes its storage. The result carries the
+destroy's report. The launch mob is not destroyed while the host runs it.
+The destroy acts on the mob the host read for the request: a mob created
+under the id in between is not destroyed, and the request is answered as
+one for an id the host does not have. A mob whose store is quarantined
+cannot be destroyed through this method: its id stays taken until the store
+is repaired or removed by an operator.
+
+A destroy that finished also removes the topology state the host kept for
+the mob beside its store (the mob's topology state file and its lock, on a
+host with [topology control](#topology-control) whose mobs are stored). A
+removal that fails is logged by the host and does not change the destroy's
+answer: the mob is destroyed.
+
+A destroy that finished also releases the agent memory the host kept for
+the mob (on a host that keeps agent memory for the mobs it hosts): the mob's
+own memory directory goes, with every file in it, and a mob created under
+the id later starts with none of it. The launch mob's memory and every other
+mob's stay as they are. A release of the memory that fails is shown: the
+destroy answers `-32603` with
+`data = {kind: "mob_destroy_release_failed", mob_id, release: "memory", destroy_report}`
+(`destroy_report` as the result would carry it), and the host logs the
+cause. The mob is destroyed and is listed no more, and this method retries
+nothing. The answer calls for no repeat: a `meta/mobs/destroy` repeated
+after it is answered as one for an id the host does not have, unless a mob
+was created under the id meanwhile, which the repeat would then destroy. A
+`meta/mobs/create` under the id releases that memory first and is refused
+until the release succeeds.
+
+A destroy that could not finish its storage cleanup (something still holds
+the mob's store open) answers `-32603` with the destroy's report in `data`.
+The mob is destroyed and is listed no more, and until the cleanup is done a
+`meta/mobs/create` under its id is refused. Repeat the `meta/mobs/destroy`:
+the repeat continues that cleanup, destroys nothing else, and answers the
+destroy's report once the cleanup is done (or `-32603` again). The id is
+free from then on. A `meta/mobs/destroy` repeated after the destroy
+finished, at once or through such a repeat, is answered as one for an id
+the host does not have.
+
+### What the hosting methods refuse
+
+The family's own refusals are one code, `-32059`, with
+`data = {kind, mob_id, retryable, detail}`. `kind` is one of a closed list;
+a client reads no other kind under this code. `detail` repeats the
+`message`. `retryable` is `true` for `mob_busy` and `false` for every other
+kind.
+
+| `kind` | When |
+|--------|------|
+| `mob_exists` | `create`: a mob of this host has the id, loaded or not, the launch mob included. |
+| `invalid_mob_id` | `create`: the definition names an id the host cannot give a mob: an empty or blank one, or one the `meta/mobs/create` section above names. |
+| `default_mob` | `destroy`, `redefine` or `lifecycle` of the launch mob. |
+| `mob_not_stopped` | `redefine` of a mob that is not stopped. |
+| `mob_busy` | `redefine` of a stopped mob that does not close for the change. Its `detail` ends with `held: ` and one word for each thing the mob holds, comma separated, in this order: `work` (a run, input that is queued, held or parked, a delivery or a member effect in flight), `roster` (a member being spawned, retired, revived or respawned, or a stop, resume or shutdown of the mob still in progress), `owner` (a foreground operation holds the mob). A mob that did not say in time is the one word `unanswered`. The words are a closed list and name no member. |
+
+Not under that code, because each has a form already:
+
+- An id the host does not have, and a mob one of the host's agents created
+  (it is its owner's to stop, redefine and destroy), on `get`, `lifecycle`,
+  `redefine` and `destroy`: the refusal of a mob id of
+  [Addressing a mob](#addressing-a-mob), `-32602` with
+  `data.kind = "foreign_mob_target"`. `get` reads a mob an agent created.
+- A mob whose store is quarantined, on `lifecycle`, `redefine` and
+  `destroy`, and a `create` under its id: the host's refusal of a
+  quarantined mob, with `data.kind = "mob_quarantined"` and its `class`. The
+  id stays taken until the store is repaired.
+- `redefine` with a revision the mob is not at (the sentence names the
+  revision it found), with the definition the mob has already, or with a
+  definition whose id is not the `mob_id`, and `redefine` of a mob that
+  lives in memory (a host without persistent state has no store to load the
+  mob from again): `-32014`, with the sentence a launch answers when a
+  definition update it declared is refused
+  (`declared mob spec update refused: ...`). `-32014` is the code the SDKs
+  raise as their storage resolution error, so a revision that moved reaches
+  a caller as that error with this sentence.
+- A `create` the host's create admission refuses: Meerkat's own refusal of
+  a create, passed through unchanged, with
+  `data.kind = "mob_create_refused"`, the `mob_id`, `retryable: false` and
+  its `reason`.
+- A destroy that could not finish: `-32603` with the destroy's report in
+  `data`.
+- A destroy that finished while the release of the memory the host kept for
+  the mob failed: `-32603` with `data.kind = "mob_destroy_release_failed"`,
+  the `mob_id`, `release: "memory"` and the destroy's report in
+  `data.destroy_report`. The mob is destroyed.
+
+### The hosting methods on the Console
+
+`POST /console/rpc` serves the six methods. Every one of them, the reads
+included, needs the `runtime.admin` grant, with no resource: they show the
+mobs of the host and change which mobs it has. On a Console with access
+rules a caller without the grant is refused each of them with the Console's
+access refusal (`-32030`, `data.kind = "access_denied"`), and
+`meta/capabilities` lists neither the feature nor the methods to that
+caller.
+
+The grant lets a caller in; the mob a request names is then judged with the
+caller, as the `mob_id` of any other Console request is. The launch mob is
+every such caller's. A mob beside it is the caller's to address when access
+is not enforced, when the caller is an administrator, or when an allow rule
+that applies to the caller lists that mob in `mobs`. `get`, `lifecycle`,
+`redefine` and `destroy` name their mob in `mob_id`, and `create` names it
+in the `[mob] id` of its definition, so, where access is enforced, a caller
+who is no administrator creates a mob only under an id a rule already lists
+for it. A request that
+names a mob its caller may not address is answered the `foreign_mob_target`
+refusal (`-32602`, with the requested id and nothing else), the same answer
+as for an id no mob has, before anything of the mob is read or loaded.
+`list` answers the launch mob and the mobs the caller may address, and
+leaves every other mob out. To let a caller who is no administrator manage
+a mob, give the caller a separate allow rule that lists that mob in `mobs`
+and leave the rule that gives `runtime.admin` without `mobs`: a rule with
+`mobs` matches no check without an agent.
+
+The address of a mob is given by an allow rule that lists the mob, whatever
+actions that rule allows, and a deny rule does not withdraw it: a deny rule
+that lists a mob refuses checks on the agents of that mob, and the hosting
+methods make none. So a caller who holds `runtime.admin`, whom an allow rule
+lists a mob for and whom a deny rule lists the same mob for, is served the
+family for that mob. A caller whom no allow rule lists the mob for is not,
+and a deny of `runtime.admin` that lists no mob refuses a caller every
+method of the family.
+
+`create`, `lifecycle`, `redefine` and `destroy` are console changes: a
+read-only console refuses them with `-32010`, and right before the change is
+made the caller's sign-in is checked again (`-32056`) and its grants and the
+mobs its rules list are read again, so a grant or a rule withdrawn meanwhile
+refuses the change. A read-only console lists only the two reads in
+`meta/capabilities` and still lists `hosted_mobs`. The multipart route does
+not serve the family.
+
+A launch that must act nowhere (a candidate launch) refuses the four changes
+and answers the two reads.
+
+---
+
 ## Topology control
 
 Topology mutation is an optional Meta control plane. It is disabled by
@@ -573,7 +1034,8 @@ Scan the meerkat structural-event ledger and return matches.
 |-------|------|----------|-------------|
 | `after_seq` | `u64` | no | Resume after this cursor (exclusive). Without it, returns the **latest N** matching events. |
 | `limit` | `usize` | no | Cap on returned events (default 256). |
-| `mob_id` / `run_id` / `step_id` | `string` | no | Filter by id |
+| `mob_id` | `string` | no | The mob the request names; judged as described in [Addressing a mob](#addressing-a-mob) |
+| `run_id` / `step_id` | `string` | no | Filter by id |
 | `identity` / `member_id` | `string` | no | Filter by agent identity |
 | `event_types` | `string[]` | no | E.g. `["flow_started", "step_completed"]` |
 | `since_ms` / `until_ms` | `u64` | no | Inclusive / exclusive timestamp filters |
@@ -824,10 +1286,12 @@ profiles](/meta/concepts/roster#ensure_member-gateway-profiles)).
 | `backend` / `binding` | `string` / `object` | no | Backend kind and runtime binding overrides |
 </Accordion>
 
-After every successful ensure the gateway runs `reconcile_edges`, so declared
-definition wiring (`auto_wire_orchestrator`, `role_wiring`) converges
-regardless of the order members are brought up; calling `reconcile_edges`
-right after `ensure_member` is redundant.
+On a classic gateway with the default definition policy, every successful
+worker-plane `meta/ensure_member` runs edge reconciliation before it returns.
+This fills in declared wiring that spawn order can miss (for example, when
+the orchestrator is ensured last). You need not call `meta/reconcile_edges`
+again just because of the ensure. On an identity-first gateway, the [edge
+report](#meta/reconcile_edges) uses different inputs.
 
 Worker-plane spawn refusals use `-32602` on stdio and `-32000` on HTTP,
 with the meerkat error in the message,
@@ -971,17 +1435,22 @@ no execution or retry verdict and omit backend refusal details.
 
 ### `meta/reconcile_edges`
 
-Converge the definition-derived edge policy over the live roster and return
-`{desired_edges, wired_edges, unwired_edges, retained_edges,
-preexisting_edges, skipped_missing_members, pruned_stale_managed_edges,
-failures}`. The definition-policy reconciler only unwires edges it wired
-itself. In an identity-first runtime with a host `TopologyProvider`, the
-provider owns identity edges: an identity edge that neither the provider nor
-the definition's wiring declares is unwired, including an edge wired before a
-restart (see [Roster](/meta/concepts/roster)). It is needed
-after `meta/reconcile_identity` or an identity-first gateway boot when the
-definition declares wiring, because neither of those converges definition
-edges after materialization; without declared wiring the report is empty.
+Reconcile the selected mob’s dynamic peer edges. The report contains
+`desired_edges`, `wired_edges`, `unwired_edges`, `retained_edges`,
+`preexisting_edges`, `skipped_missing_members`, `pruned_stale_managed_edges`
+and `failures`.
+
+`desired_edges` is the input to this reconciliation, not a list of all live
+connections. On a classic gateway the definition policy only unwires edges it
+wired itself. If a desired pair was already wired at spawn or by the host,
+the reconciler reports it in `preexisting_edges` and does not take ownership.
+
+On an identity-first gateway, the dynamic input comes from the topology
+provider (or the identity runtime’s current desired edges) together with
+operator topology changes. It can be empty even when `role_wiring` connected
+members at spawn. To see the peers recorded for a member, read `wired_to`
+from `meta/get_member` or `meta/list_members`. The `managed_edges` count is
+returned by `meta/reconcile_identity`, not by `meta/reconcile_edges`.
 
 On a candidate launch (`runtime_options.mob_composition.authority =
 "candidate"`) the reconcile is a dry run: it wires, unwires and prunes
@@ -1251,9 +1720,16 @@ Available from Meerkat Meta 0.9.15.
 
 A mob's long-term agents can be created, changed, archived, removed and
 released from configuration while the mob runs. One family of methods does
-it, `meta/identity/*`, on the stdio gateway and on `POST /console/rpc`.
+it, `meta/identity/*`, on the stdio gateway and on `POST /console/rpc`
+(the methods of the table below; `meta/identity/warm`,
+`meta/identity/resolved_tools` and `meta/identity/routing_status` share the
+prefix and are not of the family).
 Every launch whose mob has long-term agents serves the family and lists it
-in `meta/capabilities`. Its changes need the host's
+in `meta/capabilities`. Each mob the host created has the family of its own
+long-term agents: a request names the mob with `mob_id`, on the stdio
+gateway and on the Console (see [Addressing a mob](#addressing-a-mob)), and
+a request that names none is for the launch mob. Its changes need the
+host's
 [identity policy](/meta/reference/identity-policy)
 (`runtime_options.identity_creation`): the policy says who may make which
 change, and with no rule the answer is deny. A launch without a policy, or
@@ -1982,7 +2458,7 @@ are false whenever it is false.
 
 ## Console timeline
 
-Console-specific RPC methods are handled by the HTTP console dispatcher and are also listed in the console contract `v0.5.0`.
+Console-specific RPC methods are handled by the HTTP console dispatcher and are also listed in the console contract `v0.6.0`.
 
 **Surface split:** `meta/console/*` methods are served ONLY by the HTTP
 console dispatcher (`POST /console/rpc`). The stdio JSON-RPC surface
@@ -2243,8 +2719,24 @@ hidden from the reader by its private owner (another person's private side
 chat, or a member one created; see
 [Side chats](/meta/concepts/access-control#side-chats)): a change row whose
 target or receipt names one, and an MCP app tool call on one, as every
-other console read leaves that member out. `next_after_seq` and `has_more`
-still move past them, so a page can hold fewer rows than `limit`.
+other console read leaves that member out. A row is also shown by the mob
+its target names (`target.mob_id`): a row that names no mob, or the launch
+mob, to every reader; a row that names another mob to a reader who may
+address that mob (an administrator, every reader where access rules are not
+enforced, or a reader an allow rule of whom lists that mob in `mobs`), with
+the member it names judged in that mob when the host serves it; a row
+whose `mob_id` is blank or no string to an administrator only where access
+rules are enforced. A row that names another mob is a row of the mob that
+stands under that mob's id when it was written at or after that mob's
+creation. A
+reader an allow rule lists the mob for is served the standing mob's rows,
+and no row of an id under which no mob stands or of a mob whose creation
+the gateway cannot read; an administrator, and every reader where access
+rules are not enforced, is served every row.
+A page is cut to `limit` after the rows left out: it holds up to `limit`
+rows shown to the reader, `next_after_seq` names the last row shown to the
+reader (this read's own cursor when the page holds none), and `has_more`
+says that another row shown to the reader follows.
 
 The log keeps two record sets, each with a bound of its own, so however
 many tool calls an app makes, no change row gives way to them: `changes`
@@ -2261,10 +2753,10 @@ read names the set it reads.
 |--------------|------|-------------|
 | `log` | `string` | The record set read |
 | `records` | `object[]` | The rows, oldest first (below) |
-| `next_after_seq` | `integer` | The `after_seq` of the next read: the last row's `seq`, or this read's own cursor when it found none |
+| `next_after_seq` | `integer` | The `after_seq` of the next read: the `seq` of the last row shown to the reader, or this read's own cursor when the page holds none |
 | `oldest_available_seq` | `integer` or `null` | The oldest row the set keeps; `null` while it keeps none |
 | `latest_seq` | `integer` | The set's newest row; `0` before the first |
-| `has_more` | `boolean` | More rows follow this read |
+| `has_more` | `boolean` | Another row shown to the reader follows this read |
 | `gap` | `boolean` | `after_seq` named rows the set does not keep (pruned, or past the newest row): the read starts at the oldest row kept, and the reader resynchronizes |
 | `retention` | `string` | How long the log keeps its rows, from the metadata store the gateway opened: `durable` (across restarts) or `process` (for the life of the gateway process) |
 
@@ -2652,6 +3144,11 @@ target set and are neither reset nor retired.
 
 ## Gating methods
 
+The gating state is the host's, one for all the mobs of a gateway: on the
+stdio gateway these methods answer the host's gating state whatever mob of
+the host a request names with `mob_id`. An id the gateway does not serve is
+refused.
+
 ### `meta/gating/evaluate`
 
 Apply gating policy to a proposed action and its caller-supplied or
@@ -2864,6 +3361,23 @@ retryable, with no `identity` field) on this method, `meta/gating/audit`,
 long as such a read keeps failing, not only right after a start. For the one
 operator of a console that identifies nobody, who holds a name now decides
 alone meanwhile.
+
+A request made for a mob beside the launch mob, or by a member of one, is a
+request of the mob that stands under that mob's id when it was made at or
+after that mob's creation. An HTTP console lists, shows and takes the
+decision of the standing mob's requests for a caller who addresses the mob
+by an access rule, on this method, `meta/gating/audit`, `meta/gating/decide`
+and the approval notices of `meta/delivery/history`, and the gating stream
+signals a change of such a request made with no origin to the callers
+`meta/gating/audit` serves its rows to; a caller who may address every mob
+(an administrator, every caller where access rules are not enforced) is
+served every request. A request's time is the time of the audit row that
+opens it, for a request that was escalated too; where the audit holds no
+row of the request, the creation time of its pending entry. Where no mob
+stands under the id, the gateway cannot read the standing mob's creation, or
+it holds no time of the request's own, a caller who addresses the mob by a
+rule is not served the request. The rows of the console audit log are
+served by the same rule (`meta/console/audit`).
 
 ### `meta/gating/questions`
 
@@ -3221,7 +3735,18 @@ control is enforced, and no access rule widens it:
   sees no decision;
 - from 0.9.15 a question set (kind `ask_user.questions`) is read, and
   withdrawn, only by a caller who may view its asking agent; to anyone
-  else, an administrator included, it is a decision that is not there.
+  else, an administrator included, it is a decision that is not there;
+- a held change of an agent (the `identity.*` kinds) of a mob beside the
+  launch mob is read, and withdrawn, only by a caller who may address that
+  mob; a caller who addresses it by an access rule reads and withdraws it
+  only while the mob the change is held for stands under that mob's id.
+
+Which mob a decision is about plays no part in the rule for a kind of a
+host's own. On a gateway that hosts more than one mob, a native host
+that holds a decision of such a kind for a member of another mob
+chooses its readers by the approver id it names: every holder of that
+approver id reads it whole, as does, while access control is enforced,
+a caller allowed `decisions.admin`, and its requester reads its status.
 
 While access control is enforced, the reads need `decisions.view` and the
 withdraw `decisions.admin`; a caller without them is refused `-32030`
@@ -3330,7 +3855,7 @@ Write an identity-scoped agent memory record for later per-turn and build-contex
 | `identity` | `string` | yes | Durable `AgentIdentity` that owns the memory |
 | `title` | `string` | yes | Short record title, max 200 bytes |
 | `body` | `string` | yes | Memory body to inject later as a quoted observation, max 64 KiB |
-| `realm` | `string` | no | Memory realm, default `"default"` |
+| `realm` | `string` | no | Memory realm. Without one: `"default"` for the launch mob; for any other mob the request names with `mob_id` on the stdio gateway, that mob's own memory realm. A realm the request names is used as given |
 | `tags` | `string[]` | no | Optional labels for provider-side retrieval, max 32 entries and 64 bytes each |
 </Accordion>
 
@@ -3348,7 +3873,7 @@ use [`meta/agent_memory/manifest`](#meta%2Fagent_memory%2Fmanifest).
 | Param | Type | Required | Description |
 |-------|------|----------|-------------|
 | `identity` | `string` | yes | Durable `AgentIdentity` that owns the memory |
-| `realm` | `string` | no | Memory realm, default `"default"` |
+| `realm` | `string` | no | Memory realm. Without one: `"default"` for the launch mob; for any other mob the request names with `mob_id` on the stdio gateway, that mob's own memory realm. A realm the request names is used as given |
 | `selection` | `"always" \| "contextual"` | no | Retrieval mode, default `"contextual"` |
 | `query_text` | `string` | no | Raw query text for contextual providers, max 16 KiB |
 | `query_terms` | `string[]` | no | Additional deterministic terms for contextual providers |
@@ -3433,7 +3958,7 @@ stays and how a realm's memory is removed.
 | Param | Type | Required | Description |
 |-------|------|----------|-------------|
 | `identity` | `string` | yes | Durable `AgentIdentity` that owns the memory |
-| `realm` | `string` | no | Memory realm, default `"default"` |
+| `realm` | `string` | no | Memory realm. Without one: `"default"` for the launch mob; for any other mob the request names with `mob_id` on the stdio gateway, that mob's own memory realm. A realm the request names is used as given |
 | `memory_id` | `string` | yes | Durable memory record id returned by `remember` or `recall` |
 </Accordion>
 
@@ -3485,7 +4010,24 @@ confuse it with an authored route's `route_key`.
 
 List all registered routes. On the console, a route that names a member
 hidden from the caller (its recipient, its key or any other field) is left
-out; access admins and the member's owner read every route.
+out; access admins and the member's owner are answered those routes.
+
+The routing table is the host's, for all its mobs. On the console a route
+of a mob the host created beside its launch mob, or of a mob made under
+one, is answered to a caller who may address the mob the host created
+(access is not enforced, the caller is an administrator, or an allow rule
+that applies to the caller lists that mob in `mobs`), and is left out for
+any other caller. A route of the launch mob is answered to every caller who
+holds the grant, and so is a route of a mob that a member of the launch mob
+made, of a mob a session created, and of a mob whose store predates
+creation records and has been resumed since, while the host's records say
+so. A route of a mob whose reach the host's records do not decide is judged
+by that mob's own id. When the host's own records of its mobs cannot be
+read, a caller who may not address every mob is answered the launch mob's
+routes alone. A route
+of a mob the host's mob set does not list is answered to a caller who may
+address every mob. On the stdio gateway a request is answered the routes of
+its own mob.
 
 ### `meta/routing/routes/add`
 
@@ -4158,6 +4700,13 @@ gate and every check; Meta keeps no grant state.
 The methods serve the identities the gateway's identity runtime knows, on the
 stdio gateway (to its SDK host, the operator) and on `POST /console/rpc`.
 
+A grant-gated member can see `request_tool_grant` even when the host does
+not accept grant requests from agents. On the stock Meta 0.9.17 gateway,
+a call then returns the tool error `this host takes no tool grant requests`.
+It does not open an approval request or issue a grant. If the operator
+approves access, the SDK host or an authorized Console caller can issue a
+scoped grant with `meta/tool_grants/grant`, described below.
+
 ### `meta/tool_grants/grant`
 
 ```json
@@ -4342,7 +4891,10 @@ Typed outcomes, by `error.data.kind` (nothing written unless marked):
 ## WorkGraph methods
 
 The `meta/workgraph/*` group exposes meerkat's WorkGraph (the shared-work
-ledger) for this runtime's realm. Results serialize meerkat's typed results
+ledger) for this runtime's realm. A request that names a mob (`mob_id`) is
+answered from that mob's own realm (`mob.<mob_id>`): each mob the gateway
+serves has its own items, goals and attention bindings. Results serialize
+meerkat's typed results
 verbatim (`WorkItem`, `WorkGraphSnapshot`, `WorkAttentionBinding`,
 `WorkEdge`, ...); `expected_revision` is the compare-and-swap token for
 revision-checked item/binding mutations, as specified by each method below.
@@ -4648,7 +5200,10 @@ The threshold is on the member's seat, so it survives a gateway restart and
 does not end by itself: the member compacts again every third model request,
 and an ordinary turn whose compaction cannot shrink the request fails as
 above. Later calls for the identity answer `compact_member_busy` until the
-gateway restarts. What clears it:
+gateway restarts. A restart alone clears only the busy refusal, not the
+threshold. On Meta 0.9.9 through 0.9.14, if the identity created mobs or
+delegates, use the creator-specific guidance below instead of the general
+remedies. Otherwise, what clears the threshold depends on the agent:
 
 - either kind of agent: after a gateway restart, a second
   `meta/compact_member` that completes, whether or not it compacts (a
@@ -4660,16 +5215,42 @@ gateway restarts. What clears it:
   seen in a run and in a test run before this fix);
 - either kind: `meta/reset`, which ends the conversation.
 
-A gateway restart alone clears only the busy refusal.
+On 0.9.14, a configured identity that created no mobs or delegates was
+respawned with and without a later restart (one run each); both cleared
+the threshold. The wider affected version range is from the released source.
+Restarting first was needed for the separate second-compact remedy, not
+for the respawn.
 
-For an identity that created mobs each clearing step has a cost of its own:
+**If the identity created mobs or delegates (Meta 0.9.9 through 0.9.14 inclusive):**
+First check whether the identity still lists the mobs it created. The failed
+call already rebuilt the identity before its maintenance turn, so it may
+already have lost management (source reading). If it still lists a mob it
+must keep managing, do not respawn it: none of these remedies was shown to
+preserve that management. A mob that is no longer listed can still have
+running members.
 
-- a respawn on 0.9.9 through 0.9.14: a stop or restart after it, before the
-  identity has woken on the same session, is followed by the loss of the mobs
-  its session owns. Restart first (that ends the busy refusal), respawn while
-  the identity's provider is available, and do not stop or restart the
-  gateway again until the respawn has answered without an error and the
-  identity has then answered one message;
+If you choose to proceed on these releases, first have the identity destroy
+any mob it created that has members acting on their own, while it can still
+manage that mob. On 0.9.14, `mob_destroy` removed the mob; retiring its
+members did not remove the mob. This avoids leaving a running mob the
+creator can no longer manage. It is not a general upgrade step.
+
+Use `meta/respawn` only while the provider is available. If it returns an
+error, retry the respawn before stopping the gateway. Wait for the call to
+succeed **and** for the identity to answer one message before any stop or
+restart. If the gateway stops before the identity wakes successfully on the
+same session, its next start can permanently remove the stores of mobs that
+session owns.
+
+For a creator on these affected releases, do not issue a second
+`meta/compact_member`: it rebuilds the identity twice.
+Do not use `meta/reset`: it ends the session, and the mobs that session owns
+end no later than the next gateway start. This order is read from the
+source, not tested on a creator with this failure.
+See the first and fourth known issues in the release notes for Meta 0.9.14.
+
+The effect on management is separate from the threshold:
+
 - a respawn on 0.9.9 through 0.9.14: after it has completed, the
   identity no longer lists a mob it created, and the calls tried that name
   the mob were refused, while the mob's members can go on running; the mobs'
@@ -4683,15 +5264,6 @@ For an identity that created mobs each clearing step has a cost of its own:
 - a reset: it ends the identity's session, and the mobs that session owns end
   with it, no later than the gateway's next start (read from the source, not
   run).
-
-A `meta/compact_member` that failed has rebuilt the identity once before its
-maintenance turn, so on 0.9.9 through 0.9.14 the identity has probably paid
-that cost already (read from the source, not run): check whether it still
-lists the mobs it created. If it does and must go on managing them, weigh
-that against the failing messages before you respawn: on 0.9.9 through
-0.9.14 none of the three steps is known to keep it; and before the respawn
-have it retire the members of, or destroy, a mob it created whose members
-act on their own (not run).
 
 ### `meta/bound_member_transcript`
 
@@ -5100,7 +5672,9 @@ place (below).
 target names the agent, oldest first: the ones an agent's schedule tools or
 the host wrote for it, as a member of the mob (`target: "member"`), by an
 identity (`"identity"`), by one of its sessions (`"session"`), or as the
-source of a fork helper (`"fork_helper"`). Each has `schedule_id`,
+source of a fork helper (`"fork_helper"`). A schedule that names an agent by
+its name alone, without a mob, is listed on the view of the default mob's
+agent of that name only. Each has `schedule_id`,
 `identity`, `name`, `target`, `content` (the text it sends, when it sends
 text), `trigger`, `phase`, `revision`, `created_at_utc`, `updated_at_utc`
 and `next_due_at_utc`. They are listed to read: the Console's create,
@@ -5194,7 +5768,7 @@ long as it fails; ask again.
 | `-32001` | `unknown_identity` | A create, update or resume names an agent the console does not know |
 | `-32002` | `not_addressable` | A create, update or resume names an agent that takes no console sends |
 | `-32004` | `governed_target` | The agent's input is governed: a governed send needs its Console human present, and a fire has none. A capability refusal, unlike the `-32003` a live send to a governed agent answers, since no human can be present at a fire |
-| `-32004` | `schedule_host_unavailable` | No schedule firing host sends the gateway's schedules, or the schedule store is unavailable |
+| `-32004` | `schedule_host_unavailable` | No schedule firing host sends the gateway's schedules, or the schedule store is unavailable. Also a create, update or resume that names an agent of a mob other than the default mob: the gateway sends the console schedules of its default mob's agents only, the schedule would never be sent, and the message says so; nothing is stored or changed |
 | `-32603` | `identity_archived` | From 0.9.15. A create or an update names an archived agent (with `identity` and `remedy: "unarchive_identity"`); nothing changed. A pause, a resume and a delete of its schedules stay |
 | `-32009` | `schedule_revision_conflict` | An update or resume named an `expected_revision` the schedule moved past, or raced another change of the schedule (with `expected_revision` and `actual_revision`); nothing changed |
 | `-32009` | `sender_takeover_required` | An update or resume by another caller than the schedule's sender without `take_over_sender: true` (with `sender`, who it sends as now); nothing changed |
@@ -5464,7 +6038,9 @@ fence.
 
 Read-only storage diagnosis over a Meta state directory (the diagnose half
 of Meerkat's `StorageMigrator` seam). Safe against a live gateway: read-only
-SQLite opens, no file creation, no leases, no schema-ledger runs. Reports the
+SQLite opens, no leases, no schema-ledger runs (no migration) and no row
+written; a read of a database in WAL mode can create or update that
+database's `-wal` and `-shm` files. Reports the
 per-directory database inventory (with schema-ledger versions), file-name
 twins (`sessions.db` beside `sessions.sqlite`, `continuity.db` beside
 `identity_continuity.sqlite`, `agent-memory/` beside `agent-memory-sqlite/`,
@@ -5476,8 +6052,9 @@ cold directory reports `durability-census-unavailable`.
 
 It also takes the rollback census of the directory: what a rollback to a
 release on Core 0.9.8 or earlier (Meta 0.9.7 or earlier) does not read,
-counted read-only by Core's own rules, as Info findings that carry counts
-only (never a session id, an identity or a mob name):
+counted read-only by Core's own rules, as Info findings whose messages
+carry counts only (never a session id, an identity or a mob name; a finding
+for one file has that file as its `path`):
 
 | Code | Counts |
 |------|--------|
@@ -5490,11 +6067,66 @@ the total, 0 included, and one more for each file that counts above 0 or
 could not be counted (its `path` is the file). The census never fails the
 doctor, and `identity` does not narrow it.
 
+One more census, `host-created-mobs`, counts for a later rollback target, a
+release from before a gateway hosted mobs beside its launch mob: the mob
+stores under `mobs/` whose mob the host created (the launch mob's own store
+is not counted). A mob any host created with no caller session counts: one
+`meta/mobs/create` made, and one an embedding host created itself, also in
+an earlier release. Such a release restores each of them as a plain mob,
+without Meta's identity plane. To keep one from running there, destroy the
+mob, or move its database out of `mobs/`, before the rollback. The census
+reads every database file under `mobs/` but the host's own two (its realm
+profiles and its record of forked participants), whatever the file is
+named; one that is no mob store is reported as not read. A store that
+predates creation records (one an earlier release wrote that no later
+release has opened for writing since) records nowhere who created its mob:
+it is reported in a finding of its own that says so and is not counted, so
+the total says it is partial. It reports
+as the censuses above do: Info, the directory's total and one finding for
+each such store or store that could not be read or counted. Its messages
+carry counts
+only; a store's finding has the store's file as its `path`, and that file's
+name carries the mob's id.
+
 Available on the module-only, unified, and console (`POST /console/rpc`,
 read method, `runtime.admin` grant) surfaces. Additive method — no
 `contract_version` bump. On the console, a finding or inventory row that
 names a member hidden from the caller, or its session, is left out; access
-admins and the member's owner read the whole diagnosis.
+admins and the member's owner are answered those rows.
+
+On the console the diagnosis covers the launch mob's stores and the stores
+of the mobs the caller may address. A mob the host created beside its
+launch mob, and every mob made under it, is the caller's when access is not
+enforced, when the caller is an administrator, or when an allow rule that
+applies to the caller lists the mob the host created in `mobs`. For any
+other caller that mob's store under `mobs/`, its memory directory under
+`hosted-mobs.d` and the files beside them are not swept: they are on no
+inventory row and in no finding, and the three counts of mob stores count
+the stores in the answer. A mob that a member of the launch mob made, a mob
+a session created, and a mob whose store predates creation records and has
+been resumed since are in the launch mob's own reach: the store of such a
+mob is answered to every caller who holds the grant, while the host's
+records say so. A mob whose reach the host's records do not decide is
+judged by its own id. When the host's own records of its mobs cannot be
+read, a caller who may not address every mob is shown no mob store but the
+launch mob's. On a host whose launch declares its mob to a mob set, such a
+caller is shown a file beside a mob's store under `mobs/` (a lock file, a
+backup, a quarantined copy) only when a mob stands under the store's id and
+that store is shown to the caller, and a backup or a quarantined copy only
+when the time its name holds is not before that mob's creation: a file of
+an id under which no mob stands is in no finding of that caller's answer.
+A store or a memory directory of an id the host's mob set lists no mob
+under is shown to no such caller either: it is on no inventory row and in
+none of the three counts of that caller's answer. A backup or a quarantined
+copy beside a memory database follows the rule of one beside a store.
+The
+module-only and unified surfaces, whose one caller is the host, and the
+library functions sweep every store of the directory. A console router that
+an embedding host builds with `console_json_router_with_runtime` has no
+access controller and no host resolver: it enforces no access rule, serves
+the one mob it was built over and refuses every other mob id, and its
+diagnosis covers the whole directory for every caller it lets in, as on
+every console that does not enforce access.
 
 <Accordion title="Parameters">
 | Param | Type | Required | Description |
@@ -5538,6 +6170,10 @@ Scopes have these meanings:
 | `agent` | Agent events matching `agent_id`; module events are excluded |
 | `interaction` | Agent or module events whose `event_type` starts with `interaction` |
 
+On a host of more than one mob every scope selects among the events of
+the mob the request names, and no scope selects every mob at once (see
+[Addressing a mob](#addressing-a-mob)).
+
 The server applies the scope first, then retains at most the three newest
 matching events. With no `last_event_id`, all retained events are returned.
 With a checkpoint, replay starts at that event, inclusively. A checkpoint that
@@ -5562,6 +6198,90 @@ buffer has expired like any other: call again without `last_event_id`.
 | `events` | `object[]` | Replayed `EventEnvelope<UnifiedEvent>` values |
 </Accordion>
 
+### `meta/query_events`
+
+Return rows of the operational event log: the agent and module events the
+gateway ingested since it started, each with a sequence number. The method
+reads the log's store and opens no stream. To read every event of a period
+(every tool call of an agent's turn, for one), page through this method;
+`meta/events/subscribe` returns only the three newest matching events.
+
+The method answers rows only on a host that was started with an event log.
+The SDK gateway ingests events when it is launched with
+`runtime_options.event_log` (see
+[Configuration](/meta/reference/configuration)): `storage: "memory"` keeps the
+rows in the gateway process, with no size limit; `storage: "null"` ingests
+and drops them, so every query is answered no row. Without the option
+nothing is ingested, and the method answers the result
+`{"status": "no_event_log_configured", "events": []}`, which is not an
+error.
+
+<Accordion title="Parameters">
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| `mob_id` | `string` | no | The addressing id (see [Addressing a mob](#addressing-a-mob)): the mob whose rows are selected. Without it, the launch mob's rows and those of the mobs its members created. |
+| `member_id` | `string` | no | Rows of one agent. It is matched exactly against a row's `member_id`, the projected agent id, which can end in a generation suffix (for example `desk:0`). Unlike the `agent_id` of `meta/events/subscribe`, a bare alias does not match a suffixed id. |
+| `after_seq` | `integer` | no | Exclusive cursor: only rows whose `seq` is greater. |
+| `limit` | `integer` | no | At most this many rows, lowest `seq` first. The mob is selected before the limit cuts the answer. |
+| `since_ms` | `integer` | no | Only rows whose `timestamp_ms` is this or later. |
+| `until_ms` | `integer` | no | Only rows whose `timestamp_ms` is earlier than this. |
+| `event_types` | `string[]` | no | Only rows whose event type is one of these (an agent event's `event.event_type`, or a module event's type). |
+| `identity`, `run_id`, `step_id` | `string` | no | Accepted. The stock gateway's store ignores them; a store a Rust host supplies may apply them. |
+</Accordion>
+
+A `mob_incarnation` in the params is ignored: the gateway sets it.
+
+The result is an array of rows in `seq` order:
+
+<Accordion title="Row">
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | `string` | The event's `event_id` |
+| `seq` | `integer` | Sequence number given at ingestion; the paging cursor |
+| `timestamp_ms` | `integer` | The event's own time |
+| `member_id` | `string \| null` | The agent of an agent event; `null` for a module event |
+| `mob_id` | `string` | Only on a row of a mob other than the launch mob: that mob's id |
+| `mob_incarnation` | `string` | Only where `mob_id` is: the incarnation of that mob the event came from |
+| `event` | `object` | The event: `{"kind": "agent", "agent_id", "event_type", "payload"}` or a module event with `"kind": "module"` |
+</Accordion>
+
+The `payload` of an agent event is the agent's event as the runtime
+serializes it, whole: a `tool_call_requested` row carries `id`, `name` and
+`args`, a `tool_result_received` row `id`, `name`, `content` and `is_error`.
+The gateway adds `tool_call_id` (the same value as `id`) to tool events, a
+flat `result` string (the text of `content`) to `tool_result_received`, and
+to every agent event `session_id`, `source_sequence` and `source_epoch`: the
+session the event was published in, its number in that publisher's stream,
+and the life of that stream (this gateway process and the agent's
+generation). Nothing on this path shortens `args` or `content`.
+
+**Paging.** Ask with `limit`, then again with `after_seq` set to the last
+row's `seq`, until an answer is empty. A row appears after the gateway has
+drained the event and the log has flushed it (`flush_interval_ms`, 1000 by
+default), so a reader that follows a running turn asks again until the
+turn's closing event (`run_completed` or `run_failed`) is there.
+
+**A tool event names no run.** Bind it to its run by position: the events
+of one `session_id` between a `run_started` and the next `run_completed` or
+`run_failed`, ordered by `source_sequence` within one `source_epoch`.
+
+**A gap is marked.** When the gateway was cut off from an agent's event
+stream it writes one row of `event_type` `stream_truncated`; the events of
+the gap are not in the log.
+
+**Across a restart.** No stock gateway keeps this log durably, on
+persistent state either: after a restart the log is empty, and `seq` starts
+at 1 again. Events of before the restart cannot be read; events after it
+are told apart by `source_epoch`, whose first part is new in every gateway
+process, not by `seq`.
+
+**A mob that is not loaded.** The method loads no mob (see
+[Addressing a mob](#addressing-a-mob)): a request that names a mob that is
+not loaded is answered the rows kept of it and the mob stays not loaded.
+
+Invalid params are refused with JSON-RPC `-32602`; a store that fails
+answers `-32603` (`query_events failed: ...`).
+
 ---
 
 ## Console ingress
@@ -5578,7 +6298,26 @@ methods answer `-32044`. The console serves the same methods on
 `POST /console/rpc` through the same handler, so a runtime without mob
 announcements answers them there exactly as `rpc_gateway` does:
 `-32044` `mob_announcements_unavailable`. On the console every method, the
-reads included, requires the `runtime.admin` grant, and a read-only console
+reads included, requires the `runtime.admin` grant. Every mob a request
+names (its `mob_id`, the `mob_id` of a member or of a role selector, an
+entry of `mobs`, an audience grant, a declaration) is judged with the
+caller: a mob other than the launch mob that the caller may not address is
+answered `-32602` with `data.kind = "foreign_mob_target"` and the id the
+request named, like an id no mob has. A member of such a mob, and every
+record of one, is answered as a member private to another person is: the
+listings leave the member's rows out and fill their pages from the rows
+the caller may see, and a subscription or a delivery of the member reached
+by its id is answered as an id nobody holds. What that caller is shown of
+a member it may see names no such mob: a subscription's `selector.mobs`,
+`frontier` and `ended_mobs`, a role template's `mobs` and an
+announcement's `causes` are shown without the entries of such a mob, an
+escalation about a source of such a mob is not listed, and a role template
+whose `members.mob_id` is such a mob is answered under its id as an id
+nobody holds by `subscriptions/get`, `pause`, `resume` and `cancel`.
+For a caller who may not
+address every
+mob, a member, a role selector or a grant given as a list instead of an
+object is refused with `-32602` `Invalid params`. A read-only console
 refuses the ones that change state (`announce`,
 `subscriptions/{put,pause,resume,cancel}`, `deliveries/{reconcile,redeliver,dismiss}`,
 `sources/{put,pause,resume,end,advance,record_failure}` and

@@ -55,7 +55,7 @@ LINES: tuple[tuple[str, str], ...] = (
     (r"gpt-live-(?P<v>\d+)", "gpt-live"),
     (r"gpt-live-(?P<v>\d+)-codex", "gpt-live-codex"),
     (r"gpt-realtime-(?P<v>\d+)", "gpt-realtime"),
-    (r"gemini-(?P<v>\d+)-(?P<line>carbon|argon|hydrogen)", "gemini-{line}"),
+    (r"gemini-(?P<v>\d+)-(?P<line>carbon|argon|hydrogen|neon)", "gemini-{line}"),
     (r"gemini-(?P<v>\d+(?:\.\d+)?)-flash", "gemini-hydrogen"),
     (r"gemini-(?P<v>\d+(?:\.\d+)?)-pro(?:-preview)?", "gemini-argon"),
     (r"gemini-(?P<v>\d+(?:\.\d+)?)-flash-lite(?:-preview)?", "gemini-flash-lite"),
@@ -64,7 +64,9 @@ LINES: tuple[tuple[str, str], ...] = (
 # A model name as it stands in a text: one of the three families, then a digit
 # or the live and realtime words.
 NAME = re.compile(
-    r"(?<![A-Za-z0-9_.-])"
+    # A shell default like ${MODEL:-gpt-...} begins after its operator,
+    # not inside a hyphenated model name. Keep the ordinary boundary elsewhere.
+    r"(?:(?<![A-Za-z0-9_.-])|(?<=:-))"
     r"(?:claude-(?:fable|opus|sonnet|haiku)-\d|gpt-(?:\d|live-|realtime-)|gemini-\d)"
     r"[A-Za-z0-9.-]*"
 )

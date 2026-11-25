@@ -56,7 +56,23 @@ pub struct Revision(pub String);
     deny_unknown_fields
 )]
 pub enum Principal {
+    /// A stable application identity of the host's default mob (the mob its
+    /// launch names). Identities are names inside a mob, and this variant
+    /// carries none: it is the form every principal had while a host served
+    /// one mob, so a stored principal without a mob is the default mob's
+    /// and none is rewritten.
+    ///
+    /// That is its meaning where it is stored and in a caller's own
+    /// principal. In what a caller names (an owner or an audience in tool
+    /// input), an identity without a mob is an identity of the caller's own
+    /// mob: [`Self::stored_form`] reads it.
     Agent(String),
+    /// A stable application identity of another mob of the host: the mob
+    /// and the identity, each as its own value. Two mobs may each have an
+    /// identity of the same name, and they are two principals. The default
+    /// mob's identities are never stored this way ([`Self::agent`],
+    /// [`Self::stored_form`]), so each has exactly one stored form.
+    MobAgent { mob_id: String, identity: String },
     Worker {
         mob_id: String,
         member_id: String,
@@ -64,9 +80,50 @@ pub enum Principal {
     },
 }
 impl Principal {
+    /// The principal of the stable application identity `identity` of a
+    /// mob: `mob_id` is `None` for the host's default mob and the mob's id
+    /// for any other, the way a host stores the mob of a record.
+    pub fn agent(mob_id: Option<&str>, identity: impl Into<String>) -> Self {
+        match mob_id {
+            None => Self::Agent(identity.into()),
+            Some(mob_id) => Self::MobAgent {
+                mob_id: mob_id.to_owned(),
+                identity: identity.into(),
+            },
+        }
+    }
+    /// The stored form of a principal that a caller of the mob
+    /// `callers_mob` names, on a host whose default mob is `default_mob`.
+    ///
+    /// An identity named without a mob ([`Self::Agent`]) is an identity of
+    /// the caller's own mob: from a caller of another mob than the default
+    /// mob it is that mob's [`Self::MobAgent`]. An identity named with the
+    /// default mob's id is the default mob's [`Self::Agent`], whoever names
+    /// it, so the default mob's identity keeps its one stored form. Every
+    /// other principal is stored as it is named.
+    ///
+    /// A host applies this once to every principal that tool input names
+    /// (an owner, an audience) before it validates or stores it. It is not
+    /// idempotent for a caller of another mob: what it returns is a stored
+    /// form, and a stored form is not named input.
+    #[must_use]
+    pub fn stored_form(self, default_mob: &str, callers_mob: &str) -> Self {
+        match self {
+            Self::Agent(identity) if callers_mob != default_mob => Self::MobAgent {
+                mob_id: callers_mob.to_owned(),
+                identity,
+            },
+            Self::MobAgent { mob_id, identity } if mob_id == default_mob => Self::Agent(identity),
+            other => other,
+        }
+    }
     pub(crate) fn validate(&self) -> Result<()> {
         match self {
             Self::Agent(identity) => identifier(identity),
+            Self::MobAgent { mob_id, identity } => {
+                identifier(mob_id)?;
+                identifier(identity)
+            }
             Self::Worker {
                 mob_id,
                 member_id,
@@ -248,21 +305,27 @@ impl HostAccessContext {
         self.authority_generation
     }
     /// The mob ids this context's authority names: the mobs the caller is a
-    /// member of, the mobs it manages, and the mob of every owner it was
-    /// validated for ([`Self::with_valid_owners`]), a worker's mob included.
-    /// A host that orders changes of which mob holds an id checks each of
-    /// them against [`Self::authority_generation`].
+    /// member of, the mobs it manages, the mob of a caller that is another
+    /// mob's identity ([`Principal::MobAgent`]), and the mob of every owner
+    /// it was validated for ([`Self::with_valid_owners`]), a worker's and
+    /// another mob's identity's included. A host that orders changes of
+    /// which mob holds an id checks each of them against
+    /// [`Self::authority_generation`].
     pub fn authority_mob_ids(&self) -> BTreeSet<&str> {
         let owners = self.valid_owners.iter().filter_map(|owner| match owner {
-            Owner::Mob(id) => Some(id.as_str()),
             Owner::Agent(Principal::Worker { mob_id, .. }) => Some(mob_id.as_str()),
-            Owner::Agent(Principal::Agent(_)) | Owner::Realm => None,
+            owner => owner.named_mob(),
         });
+        let caller = match &self.principal {
+            Principal::MobAgent { mob_id, .. } => Some(mob_id.as_str()),
+            Principal::Agent(_) | Principal::Worker { .. } => None,
+        };
         self.member_mobs
             .iter()
             .chain(&self.managed_mobs)
             .map(String::as_str)
             .chain(owners)
+            .chain(caller)
             .collect()
     }
     pub(crate) fn owner_is_valid(&self, owner: &Owner) -> bool {
@@ -327,6 +390,31 @@ pub enum Owner {
     Mob(String),
     Realm,
 }
+impl Owner {
+    /// The mob id this owner names by the id alone: the owning mob
+    /// ([`Self::Mob`]), or the mob of an owning identity of another mob
+    /// ([`Principal::MobAgent`]). A new mob under that id would be named the
+    /// same way. A worker owner names none: its creation token tells it
+    /// from every later member of its name.
+    pub fn named_mob(&self) -> Option<&str> {
+        match self {
+            Self::Mob(mob_id) | Self::Agent(Principal::MobAgent { mob_id, .. }) => {
+                Some(mob_id.as_str())
+            }
+            Self::Agent(Principal::Agent(_) | Principal::Worker { .. }) | Self::Realm => None,
+        }
+    }
+    /// The stored form of an owner that a caller of the mob `callers_mob`
+    /// names, on a host whose default mob is `default_mob`
+    /// ([`Principal::stored_form`]).
+    #[must_use]
+    pub fn stored_form(self, default_mob: &str, callers_mob: &str) -> Self {
+        match self {
+            Self::Agent(principal) => Self::Agent(principal.stored_form(default_mob, callers_mob)),
+            other => other,
+        }
+    }
+}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "kind",
@@ -342,6 +430,34 @@ pub enum Audience {
     },
     Mob(String),
     Realm,
+}
+impl Audience {
+    /// The mob id this audience names by the id alone: the mob whose
+    /// members it reaches ([`Self::Mob`]), or the mob of an identity of
+    /// another mob ([`Principal::MobAgent`]). See [`Owner::named_mob`].
+    pub fn named_mob(&self) -> Option<&str> {
+        match self {
+            Self::Mob(mob_id)
+            | Self::Agent {
+                principal: Principal::MobAgent { mob_id, .. },
+                ..
+            } => Some(mob_id.as_str()),
+            Self::Agent {
+                principal: Principal::Agent(_) | Principal::Worker { .. },
+                ..
+            }
+            | Self::Realm => None,
+        }
+    }
+    fn stored_form(self, default_mob: &str, callers_mob: &str) -> Self {
+        match self {
+            Self::Agent { principal, reach } => Self::Agent {
+                principal: principal.stored_form(default_mob, callers_mob),
+                reach,
+            },
+            other => other,
+        }
+    }
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -372,6 +488,31 @@ pub struct DocumentAccess {
     pub denies: Vec<Deny>,
 }
 impl DocumentAccess {
+    /// The stored form of an access that a caller of the mob `callers_mob`
+    /// names, on a host whose default mob is `default_mob`: every audience
+    /// principal in its stored form ([`Principal::stored_form`]).
+    #[must_use]
+    pub fn stored_form(self, default_mob: &str, callers_mob: &str) -> Self {
+        Self {
+            owner_reach: self.owner_reach,
+            grants: self
+                .grants
+                .into_iter()
+                .map(|grant| Grant {
+                    audience: grant.audience.stored_form(default_mob, callers_mob),
+                    role: grant.role,
+                })
+                .collect(),
+            denies: self
+                .denies
+                .into_iter()
+                .map(|deny| Deny {
+                    audience: deny.audience.stored_form(default_mob, callers_mob),
+                    operation: deny.operation,
+                })
+                .collect(),
+        }
+    }
     pub(crate) fn validate(&self) -> Result<()> {
         if self.grants.len() + self.denies.len() > 256 {
             return Err(Error::Invalid("too many access entries".into()));
@@ -433,36 +574,31 @@ pub struct Document {
 impl Document {
     /// Whether this document names the mob `mob_id`: as its owner
     /// ([`Owner::Mob`]) or in an audience entry ([`Audience::Mob`]), a grant
-    /// or a deny. Ownership and audiences name a mob by its id alone, so a
-    /// new mob under that id would be named the same way.
+    /// or a deny, or through an identity of that mob that owns it or that
+    /// an audience entry names ([`Principal::MobAgent`]). Ownership and
+    /// audiences name a mob, and another mob's identity, by the mob's id
+    /// alone, so a new mob under that id, and its identity of the same
+    /// name, would be named the same way.
     pub fn names_mob(&self, mob_id: &str) -> bool {
-        matches!(&self.owner, Owner::Mob(owner) if owner == mob_id)
-            || self
-                .access
-                .grants
-                .iter()
-                .map(|grant| &grant.audience)
-                .chain(self.access.denies.iter().map(|deny| &deny.audience))
-                .any(|audience| matches!(audience, Audience::Mob(id) if id == mob_id))
+        self.mob_names().any(|named| named == mob_id)
     }
     /// Every mob id this document names, as its owner or in an audience
     /// grant or deny ([`Self::names_mob`]).
     pub(crate) fn named_mobs(&self) -> BTreeSet<&str> {
-        let owner = match &self.owner {
-            Owner::Mob(id) => Some(id.as_str()),
-            Owner::Agent(_) | Owner::Realm => None,
-        };
+        self.mob_names().collect()
+    }
+    /// The mob ids this document's owner and audience entries name, one for
+    /// each entry that names one ([`Owner::named_mob`],
+    /// [`Audience::named_mob`]).
+    fn mob_names(&self) -> impl Iterator<Item = &str> {
         let audiences = self
             .access
             .grants
             .iter()
             .map(|grant| &grant.audience)
             .chain(self.access.denies.iter().map(|deny| &deny.audience))
-            .filter_map(|audience| match audience {
-                Audience::Mob(id) => Some(id.as_str()),
-                Audience::Agent { .. } | Audience::Realm => None,
-            });
-        owner.into_iter().chain(audiences).collect()
+            .filter_map(Audience::named_mob);
+        self.owner.named_mob().into_iter().chain(audiences)
     }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -578,6 +714,46 @@ pub enum Mutation {
         id: DocumentId,
         expected_revision: Revision,
     },
+}
+impl Mutation {
+    /// The stored form of a mutation that a caller of the mob `callers_mob`
+    /// asks for, on a host whose default mob is `default_mob`: every
+    /// principal its new owner and access name in its stored form
+    /// ([`Principal::stored_form`]). A content replace and a delete name
+    /// none.
+    #[must_use]
+    pub fn stored_form(self, default_mob: &str, callers_mob: &str) -> Self {
+        match self {
+            Self::Create(new) => Self::Create(NewDocument {
+                content: new.content,
+                owner: new
+                    .owner
+                    .map(|owner| owner.stored_form(default_mob, callers_mob)),
+                access: new.access.stored_form(default_mob, callers_mob),
+            }),
+            Self::SetAccess {
+                id,
+                expected_revision,
+                access,
+            } => Self::SetAccess {
+                id,
+                expected_revision,
+                access: access.stored_form(default_mob, callers_mob),
+            },
+            Self::Transfer {
+                id,
+                expected_revision,
+                owner,
+                access,
+            } => Self::Transfer {
+                id,
+                expected_revision,
+                owner: owner.stored_form(default_mob, callers_mob),
+                access: access.map(|access| access.stored_form(default_mob, callers_mob)),
+            },
+            other @ (Self::Replace { .. } | Self::Delete { .. }) => other,
+        }
+    }
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MutationReceipt {

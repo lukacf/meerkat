@@ -9,19 +9,21 @@ use rand_core::RngCore;
 use tokio::sync::watch;
 
 use super::engine::{
-    AccessDecision, AccessPrincipal, AccessResource, AttributeKnowledge, KnownResource,
-    evaluate_access, groups_for_subject, principal_may_perform,
+    AccessDecision, AccessPrincipal, AccessResource, AccessResourceMob, AttributeKnowledge,
+    KnownResource, evaluate_access, groups_for_subject, principal_may_perform,
 };
 use super::model::{
     ACTION_AGENT_VIEW, AccessConfigError, AccessControlConfig, AccessGroup, AccessRule,
-    check_declared_ingresses, private_owner, private_to_another, validate_access_config,
+    UNDECIDED_PRIVATE_OWNER, check_declared_ingresses, private_owner, validate_access_config,
 };
 use crate::console_aggregator::ConsoleAggregatorId;
-use crate::private_owners::{HeldBy, NameSeatings, PrivateOwnerRecordId};
+use crate::member_key::DefaultMob;
+use crate::private_owners::{HeldBy, NameSeatings, PrivateOwnerRecordId, PrivateOwners};
+use meerkat_mob::MobId;
 
 /// The members seated under each name over time, as one runtime's record
-/// holds them: for each name, one list per mob.
-pub(crate) type NameSeatingsByName = BTreeMap<String, Vec<NameSeatings>>;
+/// holds them: for each name, one list per mob, with the mob's id.
+pub(crate) type NameSeatingsByName = BTreeMap<String, Vec<(MobId, NameSeatings)>>;
 
 /// What the members seated under an origin's name say of a record made
 /// under it at a moment ([`origin_at`]).
@@ -35,7 +37,8 @@ enum OriginAt<'a> {
     Private(&'a str),
     /// The record is its asking member's and that member cannot be named:
     /// members private to different people held the name at the moment (in
-    /// different mobs), or a member private to a person was seated under
+    /// different mobs, which decide a record that names no mob together),
+    /// or a member private to a person was seated under
     /// the name and the moment is not known or is before the name's first
     /// known seating. Shown to administrators only.
     AdministratorsOnly,
@@ -88,7 +91,10 @@ fn origin_at<'a>(
     }
 }
 
-/// Cached resource attributes for one agent, keyed by console identity.
+/// Cached resource attributes for one agent, keyed by its mob and its
+/// console identity: two mobs of one host may each have an agent of the
+/// same name, and each keeps its own entry
+/// ([`AccessController::record_agent_attributes_in`]).
 ///
 /// The console surfaces refresh this cache opportunistically whenever they
 /// project a roster snapshot, so label/role selectors evaluate against the
@@ -129,16 +135,21 @@ impl CachedAgent {
         }
     }
 
-    /// This agent as one link of a lineage a rule is matched against, with
-    /// what is known of it. `fallback_agent_id` stands in for a runtime id
-    /// the attributes do not carry.
-    fn resource<'a>(&'a self, fallback_agent_id: Option<&'a str>) -> KnownResource<'a> {
+    /// This agent, an agent of `mob`, as one link of a lineage a rule is
+    /// matched against, with what is known of it. `fallback_agent_id`
+    /// stands in for a runtime id the attributes do not carry.
+    fn resource<'a>(
+        &'a self,
+        mob: AccessResourceMob<'a>,
+        fallback_agent_id: Option<&'a str>,
+    ) -> KnownResource<'a> {
         KnownResource {
             resource: AccessResource {
                 identity: Some(self.attributes.identity.as_str()),
                 agent_id: self.attributes.agent_id.as_deref().or(fallback_agent_id),
                 role: self.attributes.role.as_deref(),
                 labels: Some(&self.attributes.labels),
+                mob,
             },
             knowledge: self.knowledge,
         }
@@ -153,7 +164,8 @@ impl std::ops::Deref for CachedAgent {
     }
 }
 
-/// The attribute cache: one value per agent, keyed by console identity.
+/// One mob's agents in the attribute cache: one value per agent, keyed by
+/// console identity.
 type AttributeCache = BTreeMap<String, Arc<CachedAgent>>;
 
 /// Administrative edit precondition, never an authorization grant.
@@ -282,17 +294,37 @@ pub(crate) enum PrivateOwnerRecordReader {
     ServedRuntime(ConsoleAggregatorId),
 }
 
-/// The readings that found a runtime owing the first read of who its
-/// members are private to.
+/// A hand-over of who held a runtime's member names
+/// ([`AccessController::record_name_seatings`]): which reading of the
+/// runtime hands it, and the identity namespace the names are keyed under
+/// (the one a console gives the runtime; empty for a route that holds it).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct NameSeatingsHandOver<'a> {
+    pub(crate) reader: PrivateOwnerRecordReader,
+    pub(crate) namespace: &'a str,
+}
+
+#[cfg(test)]
+impl NameSeatingsHandOver<'static> {
+    /// The hand-over of a route that holds the runtime itself.
+    pub(crate) const OWN_ROUTE: Self = Self {
+        reader: PrivateOwnerRecordReader::OwnRuntime,
+        namespace: "",
+    };
+}
+
+/// The readings of a runtime that stand behind what this controller holds
+/// of it: those that found it owing the first read of who its members are
+/// private to, or those that handed over who held its members' names.
 #[derive(Debug, Default)]
-struct OwedReadFinders {
-    /// A route that holds the runtime itself found the read owed.
+struct RecordReadings {
+    /// A route that holds the runtime itself.
     own_route: bool,
-    /// The aggregators whose reading of their served runtimes found it owed.
+    /// The aggregators whose reading of their served runtimes it was.
     served_by: BTreeSet<ConsoleAggregatorId>,
 }
 
-impl OwedReadFinders {
+impl RecordReadings {
     /// Whether `reader` is one of these readings.
     fn holds(&self, reader: PrivateOwnerRecordReader) -> bool {
         match reader {
@@ -312,6 +344,220 @@ impl OwedReadFinders {
             }
         }
     }
+
+    /// Whether any reading stands, once `aggregator`'s is taken back where
+    /// it serves the runtime no longer (`served` false).
+    fn stand_for(&mut self, aggregator: ConsoleAggregatorId, served: bool) -> bool {
+        if !served {
+            self.served_by.remove(&aggregator);
+        }
+        self.own_route || !self.served_by.is_empty()
+    }
+}
+
+/// What this controller holds of who held a runtime's member names, as one
+/// identity namespace keys them ([`AccessController::record_name_seatings`]).
+struct HeldNameSeatings {
+    /// The runtime's private-owner record, asked, when a record that names
+    /// a mob is decided, whether it has read that mob's durable records
+    /// ([`PrivateOwners::has_read_the_mob`]): the answer is the record's at
+    /// that moment, never one kept here.
+    record: PrivateOwners,
+    /// How many journal rows the record had noted when it handed these.
+    noted: u64,
+    /// For each name, one list of seatings per mob, with the mob's id.
+    seatings: Arc<NameSeatingsByName>,
+    /// The readings that handed them: they are kept while one stands.
+    handed_by: RecordReadings,
+}
+
+/// An identity namespace as names are keyed under it: without the blanks
+/// and slashes around it.
+fn keyed_namespace(namespace: &str) -> &str {
+    namespace.trim().trim_matches('/')
+}
+
+/// Whether a name keyed under the identity namespace `namespace` can be
+/// `key`: every key under the empty namespace, and under another one a key
+/// that starts with it and a slash.
+fn namespace_keys(namespace: &str, key: &str) -> bool {
+    namespace.is_empty()
+        || key
+            .strip_prefix(namespace)
+            .is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// A mob nested under a mob of the host: a mob a member of that mob made.
+/// It names where the entries of that mob's members are recorded.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct NestedMobRef<'a> {
+    /// The mob of the host it is nested under: none for the host's default
+    /// mob.
+    pub(crate) under: Option<&'a MobId>,
+    /// The nested mob.
+    pub(crate) mob: &'a MobId,
+}
+
+/// A member of a nested mob that the door of the outer mob can give no
+/// name: its mob's id or its name there cannot be composed into one
+/// ([`crate::console_member_ref::nested_member_identity`]). Nothing was
+/// recorded for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct NestedMemberUnnamed;
+
+impl NestedMobRef<'_> {
+    /// The attributes of the member `name` of this mob: its identity and
+    /// its agent id are the name the door of the outer mob gives it.
+    fn member(
+        &self,
+        name: &str,
+        role: Option<String>,
+        labels: BTreeMap<String, String>,
+    ) -> Result<AgentResourceAttributes, NestedMemberUnnamed> {
+        let identity = crate::console_member_ref::nested_member_identity(self.mob.as_str(), name)
+            .ok_or(NestedMemberUnnamed)?;
+        Ok(AgentResourceAttributes {
+            agent_id: Some(identity.clone()),
+            identity,
+            role,
+            labels,
+        })
+    }
+}
+
+/// A value per mob of the host: the default mob's, and each other mob's by
+/// its id; and a value per mob nested under one of them (a mob a member
+/// of that mob made), by the mob of the host it is nested under and its
+/// own id. The mob is half of an agent's key, so nothing recorded for one
+/// mob is read, replaced or evicted for another: a member of a nested mob
+/// and a member of the mob it is nested under keep an entry each,
+/// whatever their names spell.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct PerMob<T> {
+    default_mob: T,
+    other_mobs: BTreeMap<MobId, T>,
+    /// The mobs nested under the default mob, each by its id.
+    nested_under_default: BTreeMap<MobId, T>,
+    /// The mobs nested under another mob of the host, by that mob's id and
+    /// then their own.
+    nested_under_other: BTreeMap<MobId, BTreeMap<MobId, T>>,
+}
+
+impl<T: Default> PerMob<T> {
+    /// `mob`'s value; `None` for a mob nothing was recorded for.
+    fn of(&self, mob: &ViewMob) -> Option<&T> {
+        match mob {
+            ViewMob::Default(_) => Some(&self.default_mob),
+            ViewMob::Other(mob_id) => self.other_mobs.get(mob_id),
+        }
+    }
+
+    fn of_mut(&mut self, mob: &ViewMob) -> &mut T {
+        match mob {
+            ViewMob::Default(_) => &mut self.default_mob,
+            ViewMob::Other(mob_id) => self.other_mobs.entry(mob_id.clone()).or_default(),
+        }
+    }
+
+    /// The value of the mob `nested`, a mob nested under the mob of the
+    /// host `under`; `None` for a mob nothing was recorded for.
+    fn nested_of(&self, under: &ViewMob, nested: &MobId) -> Option<&T> {
+        match under {
+            ViewMob::Default(_) => self.nested_under_default.get(nested),
+            ViewMob::Other(mob_id) => self.nested_under_other.get(mob_id)?.get(nested),
+        }
+    }
+
+    fn nested_of_mut(&mut self, under: &ViewMob, nested: &MobId) -> &mut T {
+        match under {
+            ViewMob::Default(_) => self.nested_under_default.entry(nested.clone()).or_default(),
+            ViewMob::Other(mob_id) => self
+                .nested_under_other
+                .entry(mob_id.clone())
+                .or_default()
+                .entry(nested.clone())
+                .or_default(),
+        }
+    }
+
+    /// Whether a value is held for the mob `mob_id` as another mob of the
+    /// host, or as a mob nested under a mob of the host.
+    fn holds(&self, mob_id: &MobId) -> bool {
+        self.other_mobs.contains_key(mob_id)
+            || self.nested_under_default.contains_key(mob_id)
+            || self
+                .nested_under_other
+                .values()
+                .any(|nested| nested.contains_key(mob_id))
+    }
+
+    /// Forget the value of the mob `mob_id`: as another mob of the host,
+    /// and as a mob nested under any mob of the host. The default mob's
+    /// value stays, and so do the values of the mobs nested under
+    /// `mob_id`: each is another mob's.
+    fn forget(&mut self, mob_id: &MobId) {
+        self.other_mobs.remove(mob_id);
+        self.nested_under_default.remove(mob_id);
+        self.nested_under_other.retain(|_, nested| {
+            nested.remove(mob_id);
+            !nested.is_empty()
+        });
+    }
+}
+
+/// The mob whose agents a view, or a write to the attribute cache, names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ViewMob {
+    /// The host's default mob, with its id where the controller knows it.
+    Default(Option<MobId>),
+    /// Another mob of the host.
+    Other(MobId),
+}
+
+impl ViewMob {
+    /// The mob `mob_id` on a host whose default mob is `default_mob`; a
+    /// controller that was never told its default mob knows none (`None`),
+    /// and every mob named there is another mob.
+    fn of(default_mob: Option<&MobId>, mob_id: &MobId) -> Self {
+        match default_mob {
+            Some(default_mob) if default_mob == mob_id => Self::Default(Some(mob_id.clone())),
+            _ => Self::Other(mob_id.clone()),
+        }
+    }
+
+    /// The mob as the rules' `mobs` selector reads it.
+    fn resource(&self) -> AccessResourceMob<'_> {
+        match self {
+            Self::Default(mob_id) => AccessResourceMob::Default(mob_id.as_ref().map(MobId::as_str)),
+            Self::Other(mob_id) => AccessResourceMob::Other(mob_id.as_str()),
+        }
+    }
+
+    /// Whether the mob is one whose id is blank: it names no mob
+    /// ([`crate::member_key::names_a_mob`]).
+    fn is_blank(&self) -> bool {
+        match self {
+            Self::Default(mob_id) => mob_id
+                .as_ref()
+                .is_some_and(|mob_id| !crate::member_key::names_a_mob(mob_id)),
+            Self::Other(mob_id) => !crate::member_key::names_a_mob(mob_id),
+        }
+    }
+
+    /// Whether the seatings of the mob `mob_id` under a name decide a
+    /// record of this mob. A record of another mob names its mob: that
+    /// mob's seatings alone decide it. A record of the default mob may name
+    /// no mob, and a host that names no mob records the action of every
+    /// member so, whatever mob the member is in: such a record is decided
+    /// by every mob's seatings under the name (the closed direction: where
+    /// a member private to a person held the name then in any of them, the
+    /// record is that person's, or an administrator's alone).
+    fn reads_seatings_of(&self, mob_id: &MobId) -> bool {
+        match self {
+            Self::Default(_) => true,
+            Self::Other(own) => own == mob_id,
+        }
+    }
 }
 
 struct AccessControllerInner {
@@ -320,7 +566,7 @@ struct AccessControllerInner {
     checked_probe: Mutex<Option<Arc<CheckedMutationProbe>>>,
     state: RwLock<AccessState>,
     persist_path: RwLock<Option<PathBuf>>,
-    attributes: RwLock<AttributeCache>,
+    attributes: RwLock<PerMob<AttributeCache>>,
     /// The runtimes that still owe the first read of who their members are
     /// private to, each by its record, as the last priming of each found it
     /// ([`AccessController::record_private_owner_record`]), with the
@@ -329,22 +575,30 @@ struct AccessControllerInner {
     /// aggregator's reading of its served runtimes found lasts while that
     /// aggregator serves the runtime
     /// ([`AccessController::keep_served_private_owner_records`]).
-    unread_private_owner_records: RwLock<BTreeMap<PrivateOwnerRecordId, OwedReadFinders>>,
+    unread_private_owner_records: RwLock<BTreeMap<PrivateOwnerRecordId, RecordReadings>>,
     /// The runtimes a priming of this controller found with their first
     /// read done, each by its record. A runtime in neither set has not
     /// been primed here yet ([`AccessController::has_private_owner_record`]).
     read_private_owner_records: RwLock<BTreeSet<PrivateOwnerRecordId>>,
     /// The runtime alias of each durable identity's current incarnation,
-    /// keyed like `attributes` (console namespace included).
-    current_runtime_aliases: RwLock<BTreeMap<String, String>>,
+    /// keyed like `attributes` (console namespace included). Nothing
+    /// writes the values of the nested mobs.
+    current_runtime_aliases: RwLock<PerMob<BTreeMap<String, String>>>,
+    /// The host's default mob (the mob its launch names), once the host has
+    /// said which it is ([`AccessController::bind_default_mob`]). Every
+    /// view reads a mob through it, so a rule that names the default mob
+    /// by its id and a record that names no mob meet one value.
+    default_mob: std::sync::OnceLock<MobId>,
     /// Who held each member name over time, for each runtime a priming of
-    /// this controller read (by its private-owner record): how many journal
-    /// rows that reading had noted, and for each name (keyed like
-    /// `attributes`) one list of seatings per mob
+    /// this controller read, by its private-owner record and the identity
+    /// namespace that priming keys its names under (as `attributes` are
+    /// keyed), with the record itself and the readings that handed it
     /// ([`AccessController::record_name_seatings`]). A record of a moment
     /// is its asking member's, whoever holds the name now
-    /// ([`AccessView::sees_origin`]).
-    name_seatings: RwLock<BTreeMap<PrivateOwnerRecordId, (u64, Arc<NameSeatingsByName>)>>,
+    /// ([`AccessView::sees_origin`]). What an aggregator's reading handed
+    /// lasts while that aggregator serves the runtime
+    /// ([`AccessController::keep_served_private_owner_records`]).
+    name_seatings: RwLock<BTreeMap<(PrivateOwnerRecordId, String), HeldNameSeatings>>,
     /// Serializes the read-modify-write of every config mutation so two
     /// concurrent admin edits can't lose an update (clone-under-read then
     /// unconditional swap would otherwise drop one writer's delta) and so
@@ -425,10 +679,11 @@ impl AccessController {
                     last_edit: None,
                 }),
                 persist_path: RwLock::new(None),
-                attributes: RwLock::new(BTreeMap::new()),
+                attributes: RwLock::new(PerMob::default()),
                 unread_private_owner_records: RwLock::new(BTreeMap::new()),
                 read_private_owner_records: RwLock::new(BTreeSet::new()),
-                current_runtime_aliases: RwLock::new(BTreeMap::new()),
+                current_runtime_aliases: RwLock::new(PerMob::default()),
+                default_mob: std::sync::OnceLock::new(),
                 name_seatings: RwLock::new(BTreeMap::new()),
                 mutation: Mutex::new(()),
                 publication: OnceLock::new(),
@@ -563,7 +818,8 @@ impl AccessController {
         self.mutate(AccessMutation::Replace(config))
     }
 
-    /// Insert or update one rule by id.
+    /// Insert one rule, or replace the rule of the same id whole: no field
+    /// of the rule it replaces is kept, the mobs it lists included.
     pub fn upsert_rule(&self, rule: AccessRule) -> Result<u64, AccessConfigError> {
         self.mutate(AccessMutation::UpsertRule(rule))
     }
@@ -915,15 +1171,155 @@ impl AccessController {
                 .map(str::trim)
                 .filter(|key| !key.is_empty())
                 .map(str::to_string),
+            mob: ViewMob::Default(self.inner.default_mob.get().cloned()),
+            nested_mob: None,
         }
     }
 
-    /// Refresh the cached resource attributes for one agent. The record is
-    /// of the whole agent: its role, its labels and its spawner are known
-    /// as given, and an earlier record of the agent with a field that was
-    /// not known (`Self::record_ended_agent_attributes`) ends with it.
+    /// Tell the controller which mob is the host's default mob (the mob its
+    /// launch names). A runtime does this when the controller is installed
+    /// on it. The controller learns it once: the first mob stays, and a
+    /// later call that names another mob changes nothing. So one
+    /// controller belongs to one host: installed on runtimes that serve
+    /// different mobs, it reads the agents of every one of them as agents
+    /// of the first runtime's mob, and a rule that names that mob by its id
+    /// selects them all.
+    ///
+    /// Until it is told, the controller cannot tell whether a mob a rule
+    /// lists is the default mob, and stays closed both ways: an allow that
+    /// lists mobs grants nothing on the default mob's agents, and a deny
+    /// that lists mobs holds on them.
+    pub fn bind_default_mob(&self, default_mob: &DefaultMob) {
+        let bound = self
+            .inner
+            .default_mob
+            .get_or_init(|| default_mob.mob_id().clone());
+        if !default_mob.is(bound) {
+            tracing::warn!(
+                default_mob = %bound,
+                ignored = %default_mob.mob_id(),
+                "the access controller already knows its default mob"
+            );
+        }
+    }
+
+    /// The mob `mob_id` as this controller reads it.
+    fn view_mob(&self, mob_id: &MobId) -> ViewMob {
+        ViewMob::of(self.inner.default_mob.get(), mob_id)
+    }
+
+    /// Refresh the cached resource attributes for one agent of the default
+    /// mob. The record is of the whole agent: its role, its labels and its
+    /// spawner are known as given, and an earlier record of the agent with
+    /// a field that was not known (`Self::record_ended_agent_attributes`)
+    /// ends with it.
     pub fn record_agent_attributes(&self, attributes: AgentResourceAttributes) {
-        self.record_agent(CachedAgent::whole(attributes));
+        self.record_agent(&ViewMob::Default(None), CachedAgent::whole(attributes));
+    }
+
+    /// Refresh the cached resource attributes for one agent of the mob
+    /// `mob_id` (the host's default mob by its id, or another), as
+    /// [`Self::record_agent_attributes`] does for the default mob's. An
+    /// agent of the same name in another mob keeps its own entry.
+    pub fn record_agent_attributes_in(&self, mob_id: &MobId, attributes: AgentResourceAttributes) {
+        self.record_agent(&self.view_mob(mob_id), CachedAgent::whole(attributes));
+    }
+
+    /// Refresh the cached resource attributes for the member `name` of the
+    /// mob `nested` names: a mob nested under a mob of the host. The mob
+    /// and the name are the host's record of where the member sits, never
+    /// a name or a label an agent supplied; the member's identity, as the
+    /// door of the outer mob names it, is composed here from the two
+    /// ([`crate::console_member_ref::nested_member_identity`]), so no
+    /// record can name another mob than the one it is recorded for. The
+    /// record is of the whole member, as [`Self::record_agent_attributes`]
+    /// records one. A member the door can give no name is not recorded:
+    /// the caller is told, and decides what stands for it.
+    pub(crate) fn record_nested_agent_attributes(
+        &self,
+        nested: NestedMobRef<'_>,
+        name: &str,
+        role: Option<String>,
+        labels: BTreeMap<String, String>,
+    ) -> Result<(), NestedMemberUnnamed> {
+        let attributes = nested.member(name, role, labels)?;
+        self.record_nested_agent(nested, CachedAgent::whole(attributes));
+        Ok(())
+    }
+
+    /// Put `agent` in the cache as a member of the mob `nested` names,
+    /// under its identity, in that mob's own entries: a member of the
+    /// mob it is nested under whose name spells the same string keeps its
+    /// own entry. Before the controller is told its default mob
+    /// ([`Self::bind_default_mob`]), a mob nested under the default mob
+    /// named by its id is kept apart from one nested under it named by
+    /// none, as an agent recorded for the default mob by its id is.
+    fn record_nested_agent(&self, nested: NestedMobRef<'_>, agent: CachedAgent) {
+        self.record_nested_agent_unless(nested, agent, |_| false);
+    }
+
+    /// [`Self::record_nested_agent`], unless the entry that mob holds
+    /// under the identity is one that `stays`. The entry is read again
+    /// under the write, as [`Self::record_agent_unless`] reads it.
+    fn record_nested_agent_unless(
+        &self,
+        nested: NestedMobRef<'_>,
+        agent: CachedAgent,
+        stays: fn(&CachedAgent) -> bool,
+    ) {
+        let under = match nested.under {
+            None => ViewMob::Default(None),
+            Some(mob_id) => self.view_mob(mob_id),
+        };
+        let settled = self
+            .inner
+            .attributes
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .nested_of(&under, nested.mob)
+            .and_then(|members| members.get(&agent.attributes.identity))
+            .is_some_and(|recorded| **recorded == agent || stays(recorded));
+        if settled {
+            return;
+        }
+        let _published = self.publish_owner_change();
+        let mut cache = self
+            .inner
+            .attributes
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let members = cache.nested_of_mut(&under, nested.mob);
+        if members
+            .get(&agent.attributes.identity)
+            .is_some_and(|recorded| stays(recorded))
+        {
+            return;
+        }
+        members.insert(agent.attributes.identity.clone(), Arc::new(agent));
+    }
+
+    /// [`Self::record_agent_spawn_facts_not_known`] for the member `name`
+    /// of the mob `nested` names, as
+    /// [`Self::record_nested_agent_attributes`] names it.
+    pub(crate) fn record_nested_agent_spawn_facts_not_known(
+        &self,
+        nested: NestedMobRef<'_>,
+        name: &str,
+        role: Option<String>,
+        labels: BTreeMap<String, String>,
+    ) -> Result<(), NestedMemberUnnamed> {
+        let attributes = nested.member(name, role, labels)?;
+        self.record_nested_agent(
+            nested,
+            CachedAgent {
+                attributes,
+                knowledge: AttributeKnowledge {
+                    role: super::engine::Knowledge::Known,
+                    ..AttributeKnowledge::IDENTITY_AND_HELD_LABELS
+                },
+            },
+        );
+        Ok(())
     }
 
     /// Record an agent that has ended and that nothing describes any more
@@ -938,12 +1334,50 @@ impl AccessController {
     /// them: it is of the last spawn a tool made under the name, which need
     /// not be the agent that ended. The same record is made of a member
     /// seated in a mob the console does not list: the console reads no
-    /// roster row of it.
+    /// roster row of it. The agent is recorded as an agent of the default
+    /// mob.
     pub(crate) fn record_ended_agent_attributes(&self, attributes: AgentResourceAttributes) {
-        self.record_agent(CachedAgent {
-            attributes,
-            knowledge: AttributeKnowledge::IDENTITY_AND_HELD_LABELS,
-        });
+        self.record_ended_agent(&ViewMob::Default(None), attributes);
+    }
+
+    /// [`Self::record_ended_agent_attributes`] for an agent of the mob
+    /// `mob_id` (the host's default mob by its id, or another).
+    pub(crate) fn record_ended_agent_attributes_in(
+        &self,
+        mob_id: &MobId,
+        attributes: AgentResourceAttributes,
+    ) {
+        self.record_ended_agent(&self.view_mob(mob_id), attributes);
+    }
+
+    /// [`Self::record_ended_agent_attributes`] for the member `name` of the
+    /// mob `nested` names, as [`Self::record_nested_agent_attributes`]
+    /// names it: `labels` are the labels that are held of it.
+    pub(crate) fn record_ended_nested_agent_attributes(
+        &self,
+        nested: NestedMobRef<'_>,
+        name: &str,
+        labels: BTreeMap<String, String>,
+    ) -> Result<(), NestedMemberUnnamed> {
+        let attributes = nested.member(name, None, labels)?;
+        self.record_nested_agent(
+            nested,
+            CachedAgent {
+                attributes,
+                knowledge: AttributeKnowledge::IDENTITY_AND_HELD_LABELS,
+            },
+        );
+        Ok(())
+    }
+
+    fn record_ended_agent(&self, mob: &ViewMob, attributes: AgentResourceAttributes) {
+        self.record_agent(
+            mob,
+            CachedAgent {
+                attributes,
+                knowledge: AttributeKnowledge::IDENTITY_AND_HELD_LABELS,
+            },
+        );
     }
 
     /// Record a live agent of which what a spawn registered cannot be told
@@ -953,15 +1387,33 @@ impl AccessController {
     /// keyed on a label that is not held or on another agent is decided
     /// closed for it ([`AccessView::decide_agent`]). The next request that
     /// can tell records the agent whole
-    /// ([`Self::record_agent_attributes`]).
+    /// ([`Self::record_agent_attributes`]). The agent is recorded as an
+    /// agent of the default mob.
     pub(crate) fn record_agent_spawn_facts_not_known(&self, attributes: AgentResourceAttributes) {
-        self.record_agent(CachedAgent {
-            attributes,
-            knowledge: AttributeKnowledge {
-                role: super::engine::Knowledge::Known,
-                ..AttributeKnowledge::IDENTITY_AND_HELD_LABELS
+        self.record_agent_without_spawn_facts(&ViewMob::Default(None), attributes);
+    }
+
+    /// [`Self::record_agent_spawn_facts_not_known`] for an agent of the mob
+    /// `mob_id` (the host's default mob by its id, or another).
+    pub(crate) fn record_agent_spawn_facts_not_known_in(
+        &self,
+        mob_id: &MobId,
+        attributes: AgentResourceAttributes,
+    ) {
+        self.record_agent_without_spawn_facts(&self.view_mob(mob_id), attributes);
+    }
+
+    fn record_agent_without_spawn_facts(&self, mob: &ViewMob, attributes: AgentResourceAttributes) {
+        self.record_agent(
+            mob,
+            CachedAgent {
+                attributes,
+                knowledge: AttributeKnowledge {
+                    role: super::engine::Knowledge::Known,
+                    ..AttributeKnowledge::IDENTITY_AND_HELD_LABELS
+                },
             },
-        });
+        );
     }
 
     /// Record an agent from a row of a walk that was made earlier and kept
@@ -971,24 +1423,67 @@ impl AccessController {
     /// ([`Self::record_ended_agent_attributes`]), which stays until a
     /// priming that reads the roster records the agent whole
     /// ([`Self::record_agent_attributes`]). Any other entry it replaces, and
-    /// an agent the cache does not know it records.
+    /// an agent the cache does not know it records. The row is the default
+    /// mob's: that walk is of the console's own runtime.
     pub(crate) fn record_snapshot_agent_attributes(&self, attributes: AgentResourceAttributes) {
-        self.record_agent_unless(CachedAgent::whole(attributes), |recorded| {
+        self.record_agent_unless(
+            &ViewMob::Default(None),
+            CachedAgent::whole(attributes),
+            |recorded| recorded.knowledge != AttributeKnowledge::WHOLE,
+        );
+    }
+
+    /// [`Self::record_snapshot_agent_attributes`] for a row of a kept walk
+    /// of the mob `mob_id` (the host's default mob by its id, or another):
+    /// the console experience's snapshot of that mob.
+    pub(crate) fn record_snapshot_agent_attributes_in(
+        &self,
+        mob_id: &MobId,
+        attributes: AgentResourceAttributes,
+    ) {
+        self.record_agent_unless(
+            &self.view_mob(mob_id),
+            CachedAgent::whole(attributes),
+            |recorded| recorded.knowledge != AttributeKnowledge::WHOLE,
+        );
+    }
+
+    /// [`Self::record_snapshot_agent_attributes`] for the member `name` of
+    /// the mob `nested` names, as [`Self::record_nested_agent_attributes`]
+    /// names it: a row of a kept walk that holds a member of a nested mob.
+    /// It never takes the place of an entry of that member that is not
+    /// whole: one recorded as ended, or without its spawn facts.
+    pub(crate) fn record_snapshot_nested_agent_attributes(
+        &self,
+        nested: NestedMobRef<'_>,
+        name: &str,
+        role: Option<String>,
+        labels: BTreeMap<String, String>,
+    ) -> Result<(), NestedMemberUnnamed> {
+        let attributes = nested.member(name, role, labels)?;
+        self.record_nested_agent_unless(nested, CachedAgent::whole(attributes), |recorded| {
             recorded.knowledge != AttributeKnowledge::WHOLE
         });
+        Ok(())
     }
 
-    /// Put `agent` in the cache under its identity: its attributes and what
-    /// is known of them in one write.
-    fn record_agent(&self, agent: CachedAgent) {
-        self.record_agent_unless(agent, |_| false);
+    /// Put `agent` in the cache as an agent of `mob`, under its identity:
+    /// its attributes and what is known of them in one write. An agent of
+    /// the same name in another mob keeps its own entry.
+    fn record_agent(&self, mob: &ViewMob, agent: CachedAgent) {
+        self.record_agent_unless(mob, agent, |_| false);
     }
 
-    /// Put `agent` in the cache under its identity unless the entry held
-    /// under it is one that `stays`. The entry is read again under the
-    /// write, so a record that stays is never replaced by a writer that
-    /// read the cache before it was made.
-    fn record_agent_unless(&self, agent: CachedAgent, stays: fn(&CachedAgent) -> bool) {
+    /// Put `agent` in the cache as an agent of `mob`, under its identity,
+    /// unless the entry that mob holds under it is one that `stays`. The
+    /// entry is read again under the write, so a record that stays is
+    /// never replaced by a writer that read the cache before it was made.
+    fn record_agent_unless(
+        &self,
+        mob: &ViewMob,
+        agent: CachedAgent,
+        stays: fn(&CachedAgent) -> bool,
+    ) {
         if agent.attributes.identity.is_empty() {
             return;
         }
@@ -997,7 +1492,8 @@ impl AccessController {
             .attributes
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&agent.attributes.identity)
+            .of(mob)
+            .and_then(|cache| cache.get(&agent.attributes.identity))
             .is_some_and(|recorded| **recorded == agent || stays(recorded));
         if settled {
             return;
@@ -1008,6 +1504,7 @@ impl AccessController {
             .attributes
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let cache = cache.of_mut(mob);
         if cache
             .get(&agent.attributes.identity)
             .is_some_and(|recorded| stays(recorded))
@@ -1015,6 +1512,43 @@ impl AccessController {
             return;
         }
         cache.insert(agent.attributes.identity.clone(), Arc::new(agent));
+    }
+
+    /// Test builds only: the identities these records hold for the agents
+    /// of the mob a stored record names by `mob` (none: the host's default
+    /// mob), and for the members of each mob nested under it, by that
+    /// mob's id. A row reads by it what a priming recorded, entry by
+    /// entry, where the views answer one identity at a time.
+    #[cfg(test)]
+    pub(crate) fn recorded_identities_in_tests(
+        &self,
+        mob: Option<&MobId>,
+    ) -> (Vec<String>, BTreeMap<String, Vec<String>>) {
+        let view = match mob {
+            None => ViewMob::Default(self.inner.default_mob.get().cloned()),
+            Some(mob_id) => self.view_mob(mob_id),
+        };
+        let cache = self
+            .inner
+            .attributes
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let own = cache
+            .of(&view)
+            .map(|agents| agents.keys().cloned().collect())
+            .unwrap_or_default();
+        let nested = match &view {
+            ViewMob::Default(_) => Some(&cache.nested_under_default),
+            ViewMob::Other(mob_id) => cache.nested_under_other.get(mob_id),
+        };
+        let nested = nested
+            .map(|mobs| {
+                mobs.iter()
+                    .map(|(mob_id, agents)| (mob_id.to_string(), agents.keys().cloned().collect()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        (own, nested)
     }
 
     /// Whether a priming of this controller has recorded the runtime whose
@@ -1092,97 +1626,182 @@ impl AccessController {
     }
 
     /// Count no longer, for one aggregator, the owed first reads of the
-    /// runtimes it serves no longer. `served` lists the records of the
-    /// runtimes `aggregator` serves now, or `None` when they cannot be
-    /// listed, which changes nothing. What that aggregator's reading found
-    /// owing ([`PrivateOwnerRecordReader::ServedRuntime`]) is taken back
-    /// for every runtime it does not list: none of its later readings
-    /// reaches that runtime, so none would find its read done. A runtime
-    /// stays counted while any other reading that found it owing stands: a
-    /// route that holds the runtime, or another aggregator that serves it.
-    /// The list is taken again under the write, so a runtime registered and
-    /// read meanwhile is kept.
+    /// runtimes it serves no longer, and keep no longer what its reading
+    /// handed of who held their members' names. `served` lists the records
+    /// of the runtimes `aggregator` serves now, or `None` when they cannot
+    /// be listed, which changes nothing. What that aggregator's reading
+    /// found owing or handed over
+    /// ([`PrivateOwnerRecordReader::ServedRuntime`]) is taken back for
+    /// every runtime it does not list: none of its later readings reaches
+    /// that runtime, so none would find its read done or hand its names
+    /// again. A runtime stays counted, and its names kept, while any other
+    /// reading of it stands: a route that holds the runtime, or another
+    /// aggregator that serves it. The list is taken again under each
+    /// write, so a runtime registered and read meanwhile is kept.
     pub(crate) fn keep_served_private_owner_records(
         &self,
         aggregator: ConsoleAggregatorId,
         served: impl Fn() -> Option<BTreeSet<PrivateOwnerRecordId>>,
     ) {
-        let drops = {
-            let unread = self
-                .inner
-                .unread_private_owner_records
+        // The runtimes this aggregator's reading stands behind here.
+        let mut read_by_it: BTreeSet<PrivateOwnerRecordId> = self
+            .inner
+            .unread_private_owner_records
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .filter(|(_, finders)| finders.served_by.contains(&aggregator))
+            .map(|(record, _)| *record)
+            .collect();
+        read_by_it.extend(
+            self.inner
+                .name_seatings
                 .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            unread
-                .values()
-                .any(|finders| finders.served_by.contains(&aggregator))
-                && served().is_some_and(|served| {
-                    unread.iter().any(|(record, finders)| {
-                        finders.served_by.contains(&aggregator) && !served.contains(record)
-                    })
-                })
-        };
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+                .filter(|(_, held)| held.handed_by.served_by.contains(&aggregator))
+                .map(|((record, _), _)| *record),
+        );
+        let drops = !read_by_it.is_empty()
+            && served()
+                .is_some_and(|served| read_by_it.iter().any(|record| !served.contains(record)));
         if !drops {
             return;
         }
         let _published = self.publish_owner_change();
-        let mut unread = self
+        {
+            let mut unread = self
+                .inner
+                .unread_private_owner_records
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let Some(served) = served() else {
+                return;
+            };
+            unread.retain(|record, finders| finders.stand_for(aggregator, served.contains(record)));
+        }
+        let mut held = self
             .inner
-            .unread_private_owner_records
+            .name_seatings
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(served) = served() else {
             return;
         };
-        unread.retain(|record, finders| {
-            if !served.contains(record) {
-                finders.served_by.remove(&aggregator);
-            }
-            finders.own_route || !finders.served_by.is_empty()
+        held.retain(|(record, _), held| {
+            held.handed_by
+                .stand_for(aggregator, served.contains(record))
         });
     }
 
     /// How many journal rows the reading of the runtime `record` had noted
     /// when this controller last recorded who held its members' names
-    /// ([`Self::record_name_seatings`]); `None` before the first record.
-    pub(crate) fn name_seatings_noted(&self, record: PrivateOwnerRecordId) -> Option<u64> {
+    /// under the identity namespace `namespace`
+    /// ([`Self::record_name_seatings`]); `None` before the first record,
+    /// and once no reading of the runtime stands. Rows read it.
+    #[cfg(test)]
+    pub(crate) fn name_seatings_noted(
+        &self,
+        record: PrivateOwnerRecordId,
+        namespace: &str,
+    ) -> Option<u64> {
         self.inner
             .name_seatings
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&record)
-            .map(|(noted, _)| *noted)
+            .get(&(record, keyed_namespace(namespace).to_string()))
+            .map(|held| held.noted)
     }
 
     /// Record who held each member name of the runtime `record` over time,
     /// as its private-owner record reads it after `noted` journal rows:
-    /// `seatings` holds, for each name (keyed like the cached attributes,
-    /// console namespace included), one list of seatings per mob. A record
+    /// `seatings` answers, for each name (keyed like the cached attributes,
+    /// under the hand-over's identity namespace), one list of seatings per
+    /// mob, with the mob's id. Every priming of the runtime hands them:
+    /// the reading is noted each time, and `seatings` is asked only when
+    /// the record noted a journal row since they were last taken under
+    /// that namespace. A record
     /// made under a name at a moment (a gating entry of an origin, a
     /// question set of an asker) is decided by who held the name then
-    /// ([`AccessView::sees_origin`]).
+    /// ([`AccessView::sees_origin`]). The record itself is kept beside its
+    /// seatings: a record that names a mob is decided only once the
+    /// runtime whose names can be its own has read that mob's durable
+    /// records ([`PrivateOwners::has_read_the_mob`]).
     pub(crate) fn record_name_seatings(
         &self,
-        record: PrivateOwnerRecordId,
+        record: &PrivateOwners,
+        hand_over: NameSeatingsHandOver<'_>,
         noted: u64,
-        seatings: NameSeatingsByName,
+        seatings: impl FnOnce() -> NameSeatingsByName,
     ) {
-        if self.name_seatings_noted(record) == Some(noted) {
+        let key = (
+            record.record_id(),
+            keyed_namespace(hand_over.namespace).to_string(),
+        );
+        // What most primings find: nothing to note.
+        if self
+            .inner
+            .name_seatings
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&key)
+            .is_some_and(|held| held.noted == noted && held.handed_by.holds(hand_over.reader))
+        {
             return;
         }
+        {
+            let mut held = self
+                .inner
+                .name_seatings
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(held) = held.get_mut(&key) {
+                held.handed_by.add(hand_over.reader);
+                if held.noted == noted {
+                    return;
+                }
+            }
+        }
+        // Read under no lock of this controller: the record reads its own.
+        let seatings = Arc::new(seatings());
         let _published = self.publish_owner_change();
-        self.inner
+        let mut held = self
+            .inner
             .name_seatings
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(record, (noted, Arc::new(seatings)));
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let held = held.entry(key).or_insert_with(|| HeldNameSeatings {
+            record: record.clone(),
+            noted,
+            seatings: Arc::clone(&seatings),
+            handed_by: RecordReadings::default(),
+        });
+        held.noted = noted;
+        held.seatings = seatings;
+        held.handed_by.add(hand_over.reader);
     }
 
     /// Record which runtime alias is each durable identity's current
     /// incarnation: `(identity, Some(alias))` sets it, `(identity, None)`
     /// forgets it. Keys and aliases use the cached attributes' console
-    /// namespace.
+    /// namespace. The identities are the default mob's.
     pub(crate) fn record_current_runtime_aliases<I>(&self, aliases: I)
+    where
+        I: IntoIterator<Item = (String, Option<String>)>,
+    {
+        self.record_runtime_aliases(&ViewMob::Default(None), aliases);
+    }
+
+    /// [`Self::record_current_runtime_aliases`] for the identities of the
+    /// mob `mob_id`.
+    pub(crate) fn record_current_runtime_aliases_in<I>(&self, mob_id: &MobId, aliases: I)
+    where
+        I: IntoIterator<Item = (String, Option<String>)>,
+    {
+        self.record_runtime_aliases(&self.view_mob(mob_id), aliases);
+    }
+
+    fn record_runtime_aliases<I>(&self, mob: &ViewMob, aliases: I)
     where
         I: IntoIterator<Item = (String, Option<String>)>,
     {
@@ -1193,9 +1812,10 @@ impl AccessController {
                 .current_runtime_aliases
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            aliases
-                .iter()
-                .all(|(identity, alias)| current.get(identity) == alias.as_ref())
+            let current = current.of(mob);
+            aliases.iter().all(|(identity, alias)| {
+                current.and_then(|current| current.get(identity)) == alias.as_ref()
+            })
         };
         if unchanged {
             return;
@@ -1206,6 +1826,7 @@ impl AccessController {
             .current_runtime_aliases
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let current = current.of_mut(mob);
         for (identity, alias) in aliases {
             match alias {
                 Some(alias) => {
@@ -1218,16 +1839,40 @@ impl AccessController {
         }
     }
 
-    /// Replace the entire attribute cache from a fresh roster projection.
+    /// Replace the default mob's attribute cache from a fresh roster
+    /// projection.
     ///
-    /// Used by the per-request priming at the SSE/RPC/timeline seams: it
+    /// For a host that feeds the cache from its own roster (the console's
+    /// own primings record agent by agent and do not call it): it
     /// both fills attributes for label/role evaluation and evicts entries
     /// for agents no longer in the roster, so a retired-then-reused identity
     /// can't keep stale role/labels alive and the cache can't grow without
     /// bound. A no-op when given an empty roster, so a transient empty
-    /// projection never blanks a populated cache.
+    /// projection never blanks a populated cache. The entries of the mobs
+    /// nested under the mob are neither replaced nor evicted: a nested
+    /// member that left keeps its entry until its end is recorded
+    /// (`record_ended_nested_agent_attributes`).
     pub fn replace_agent_attributes(
         &self,
+        attributes: impl IntoIterator<Item = AgentResourceAttributes>,
+    ) {
+        self.replace_attributes(&ViewMob::Default(None), attributes);
+    }
+
+    /// [`Self::replace_agent_attributes`] for the mob `mob_id`: that mob's
+    /// entries are replaced by its roster projection, and every other
+    /// mob's stay as they are.
+    pub fn replace_agent_attributes_in(
+        &self,
+        mob_id: &MobId,
+        attributes: impl IntoIterator<Item = AgentResourceAttributes>,
+    ) {
+        self.replace_attributes(&self.view_mob(mob_id), attributes);
+    }
+
+    fn replace_attributes(
+        &self,
+        mob: &ViewMob,
         attributes: impl IntoIterator<Item = AgentResourceAttributes>,
     ) {
         // Every entry is a roster row's: each agent is known whole.
@@ -1237,12 +1882,13 @@ impl AccessController {
             .map(|entry| (entry.identity.clone(), Arc::new(CachedAgent::whole(entry))))
             .collect();
         if next.is_empty()
-            || *self
+            || self
                 .inner
                 .attributes
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                == next
+                .of(mob)
+                == Some(&next)
         {
             return;
         }
@@ -1251,7 +1897,55 @@ impl AccessController {
             .inner
             .attributes
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = next;
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .of_mut(mob) = next;
+    }
+
+    /// Forget what these records hold of the mob `mob_id`: every agent
+    /// recorded for it and every current runtime alias of its identities,
+    /// as another mob of the host and as a mob nested under a mob of the
+    /// host. A host asks it when a mob is created under the id: what is
+    /// held under the id is an earlier mob's, and the mob created under it
+    /// is recorded by the reads of its own roster.
+    ///
+    /// The entries of every other mob stay, those of the mobs nested under
+    /// `mob_id` among them. An id that names the default mob forgets
+    /// nothing.
+    pub(crate) fn forget_mob(&self, mob_id: &MobId) {
+        let ViewMob::Other(mob_id) = self.view_mob(mob_id) else {
+            return;
+        };
+        let agents_held = self
+            .inner
+            .attributes
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .holds(&mob_id);
+        let aliases_held = self
+            .inner
+            .current_runtime_aliases
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .holds(&mob_id);
+        if !agents_held && !aliases_held {
+            return;
+        }
+        let _published = self.publish_owner_change();
+        self.inner
+            .attributes
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .forget(&mob_id);
+        self.inner
+            .current_runtime_aliases
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .forget(&mob_id);
+    }
+
+    /// Whether `other` is a handle to these same records.
+    pub(crate) fn shares_records_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
     }
 }
 
@@ -1295,6 +1989,12 @@ fn persist_config(path: &Path, config: &AccessControlConfig) -> Result<(), Acces
 struct LineageLink {
     identity: String,
     attributes: Option<Arc<CachedAgent>>,
+    /// Whether the link takes no grant of its own: it was reached through
+    /// a parent's string that two members hold (an agent of the mob of
+    /// the host and a member of a mob nested under it), or it is an
+    /// ancestor of such a link. An ambiguous name never grants; a deny on
+    /// the link still refuses, and its private owner still hides.
+    takes_no_grant: bool,
 }
 
 /// One link of a member's spawn lineage as the console owner captured it
@@ -1311,7 +2011,7 @@ pub(crate) struct CapturedLineageLink {
 /// attributes held read-locked (see [`AccessController::decision_fence`]).
 pub(crate) struct AccessDecisionFence<'a> {
     view: AccessView,
-    attributes: RwLockReadGuard<'a, AttributeCache>,
+    attributes: RwLockReadGuard<'a, PerMob<AttributeCache>>,
     _state: RwLockReadGuard<'a, AccessState>,
 }
 
@@ -1328,14 +2028,34 @@ impl AccessDecisionFence<'_> {
         self.view.held_approver_ids()
     }
 
-    /// `agent.view` on an agent, resolving lineage from the held attributes.
-    pub(crate) fn can_view_agent(&self, identity: &str) -> bool {
-        let alias = self.view.runtime_alias_member(identity);
-        let lineage = AccessView::lineage_in(&self.attributes, alias.member_key(identity));
-        if self.view.private_owner_hides(&lineage) {
+    /// [`AccessView::may_address_every_mob`], on the configuration this
+    /// fence holds.
+    pub(crate) fn may_address_every_mob(&self) -> bool {
+        self.view.may_address_every_mob()
+    }
+
+    /// [`AccessView::may_address_other_mob`], on the configuration this
+    /// fence holds.
+    pub(crate) fn may_address_other_mob(&self, mob_id: &MobId) -> bool {
+        self.view.may_address_other_mob(mob_id)
+    }
+
+    /// [`AccessView::stored_mob_is_the_default_mob`].
+    pub(crate) fn stored_mob_is_the_default_mob(&self, stored: &MobId) -> bool {
+        self.view.stored_mob_is_the_default_mob(stored)
+    }
+
+    /// `agent.view` on the agent `identity` of the mob a stored record
+    /// names (`stored`: none for the default mob's record), resolving
+    /// lineage from the held attributes of that mob's agents.
+    pub(crate) fn can_view_agent_in(&self, stored: Option<&MobId>, identity: &str) -> bool {
+        let view = &self.view.in_stored_mob(stored);
+        let alias = view.runtime_alias_member(identity);
+        let lineage = AccessView::lineage_in(&self.attributes, view, alias.member_key(identity));
+        if view.private_owner_hides(&lineage) {
             return false;
         }
-        if !self.view.config.enabled {
+        if !view.config.enabled {
             return true;
         }
         // A runtime alias is judged as the member it names, as in
@@ -1345,10 +2065,10 @@ impl AccessDecisionFence<'_> {
             RuntimeAliasMember::Current(member_key) => {
                 // A deny written against the requested spelling still holds.
                 if super::engine::matching_deny_rule(
-                    &self.view.config,
-                    &self.view.principal,
+                    &view.config,
+                    &view.principal,
                     ACTION_AGENT_VIEW,
-                    &KnownResource::whole(AccessResource::for_identity(identity)),
+                    &KnownResource::whole(view.agent(identity)),
                 )
                 .is_some()
                 {
@@ -1356,55 +2076,98 @@ impl AccessDecisionFence<'_> {
                 }
                 member_key.as_str()
             }
-            RuntimeAliasMember::NotCurrent(_) => return self.view.is_admin,
+            RuntimeAliasMember::NotCurrent(_) => return view.is_admin,
         };
         if lineage.is_empty() {
-            return self
-                .view
-                .decide_unrecorded_agent(ACTION_AGENT_VIEW, identity, self.view.unknown_agents)
+            return view
+                .decide_unrecorded_agent(ACTION_AGENT_VIEW, identity, view.unknown_agents)
                 .is_allow();
         }
-        self.view
-            .decide_agent_lineage(ACTION_AGENT_VIEW, identity, &lineage)
+        view.decide_agent_lineage(ACTION_AGENT_VIEW, identity, &lineage)
             .is_allow()
     }
 
     /// Whether this caller may see a gating request recorded with the origin
-    /// `identity` at `made_at_ms` (`None` when the request's time is not
-    /// known), as the pending list and the audit read decide it
-    /// ([`AccessView::sees_origin`]): `agent.view` on the agent
-    /// ([`Self::can_view_agent`]); for a caller the console keeps apart from
-    /// other people ([`AccessView::kept_apart_from_other_people`]), only an
-    /// agent the held attributes know
+    /// `identity` of the mob a stored record names (`stored`: none for the
+    /// default mob's record) at `made_at_ms` (`None` when the request's time
+    /// is not known), as the pending list and the audit read decide it
+    /// ([`AccessView::sees_origin`], of the view of that mob): `agent.view`
+    /// on the agent ([`Self::can_view_agent_in`]); for a caller the console
+    /// keeps apart from other people
+    /// ([`AccessView::kept_apart_from_other_people`]), only an agent the
+    /// held attributes of that mob know
     /// ([`AccessView::withholds_unknown_member`]): an origin the console
     /// does not know may have been private to a person; and the request is
     /// its asking member's ([`AccessView::origin_then_allows`]).
-    pub(crate) fn can_see_origin(&self, identity: &str, made_at_ms: Option<u64>) -> bool {
-        self.can_view_agent(identity)
-            && !self.withholds_unknown_member(identity)
-            && match self.view.origin_then(identity, made_at_ms) {
+    pub(crate) fn can_see_origin_in(
+        &self,
+        stored: Option<&MobId>,
+        identity: &str,
+        made_at_ms: Option<u64>,
+    ) -> bool {
+        let view = self.view.in_stored_mob(stored);
+        self.can_view_agent_in(stored, identity)
+            && !self.withholds_unknown_member_in(stored, identity)
+            && match view.origin_then(identity, made_at_ms) {
                 OriginThen::Allowed => true,
                 OriginThen::Refused => false,
-                // Decided on the held attributes: the view's own method
-                // would take the cache this fence holds.
+                // Decided on the held attributes of that mob: the view's
+                // own method would take the cache this fence holds.
                 OriginThen::SharedThen(holders) => holders.iter().all(|holder| {
-                    let lineage = AccessView::lineage_of_attributes_in(&self.attributes, holder);
+                    let lineage =
+                        AccessView::lineage_of_attributes_in(&self.attributes, &view, holder);
                     matches!(
-                        self.view
-                            .decide_attributes_on(ACTION_AGENT_VIEW, holder, &lineage),
+                        view.decide_attributes_on(ACTION_AGENT_VIEW, holder, &lineage),
                         AccessDecision::Allow
                     )
                 }),
             }
     }
 
-    /// [`AccessView::withholds_unknown_member`], with the agent looked up in
-    /// the held attributes.
-    fn withholds_unknown_member(&self, identity: &str) -> bool {
-        let alias = self.view.runtime_alias_member(identity);
-        self.view.kept_apart_from_other_people()
-            && !AccessView::known_in(&self.attributes, alias.member_key(identity))
+    /// Test builds only: [`Self::can_see_origin_in`] for an origin recorded
+    /// by its identity alone, which is a member of the default mob.
+    #[cfg(test)]
+    pub(crate) fn can_see_origin(&self, identity: &str, made_at_ms: Option<u64>) -> bool {
+        self.can_see_origin_in(None, identity, made_at_ms)
     }
+
+    /// [`AccessView::withholds_unknown_member`] for the agent `identity` of
+    /// the mob a stored record names, with the agent looked up in the held
+    /// attributes of that mob.
+    fn withholds_unknown_member_in(&self, stored: Option<&MobId>, identity: &str) -> bool {
+        let view = self.view.in_stored_mob(stored);
+        let alias = view.runtime_alias_member(identity);
+        view.kept_apart_from_other_people()
+            && !AccessView::known_in(&self.attributes, &view, alias.member_key(identity))
+    }
+}
+
+/// `config` with no allow rule that selects an agent by one of `strings`:
+/// each is taken out of every allow rule's `agents`, and an allow rule
+/// that is left with none of the agents it named is left out, since it
+/// selected by those strings alone. A rule that names no agent, a
+/// wildcard, and every deny rule stay as they are.
+fn allows_without_agent_strings(
+    config: &AccessControlConfig,
+    strings: &BTreeSet<&str>,
+) -> AccessControlConfig {
+    let mut narrowed = config.clone();
+    narrowed.rules.retain_mut(|rule| {
+        if rule.effect != super::model::AccessEffect::Allow || rule.agents.is_empty() {
+            return true;
+        }
+        rule.agents
+            .retain(|agent| !strings.contains(agent.as_str()));
+        !rule.agents.is_empty()
+    });
+    narrowed
+}
+
+/// Whether `key` has the form of the name the door of an outer mob gives a
+/// member of the nested mob `nested`: that mob's id, `/`, and a name.
+fn names_member_of(nested: &MobId, key: &str) -> bool {
+    crate::console_member_ref::parse_nested_member_identity(key)
+        .is_some_and(|(mob_id, _)| mob_id == nested.as_str())
 }
 
 /// How a decision judges an agent the attribute cache does not know.
@@ -1428,7 +2191,7 @@ enum UnknownAgent {
 /// held cache.
 pub(crate) struct HeldAccessView<'a> {
     view: &'a AccessView,
-    attributes: RwLockReadGuard<'a, AttributeCache>,
+    attributes: RwLockReadGuard<'a, PerMob<AttributeCache>>,
 }
 
 impl HeldAccessView<'_> {
@@ -1443,7 +2206,7 @@ impl HeldAccessView<'_> {
         action: &str,
         attributes: &AgentResourceAttributes,
     ) -> AccessDecision {
-        let lineage = AccessView::lineage_of_attributes_in(&self.attributes, attributes);
+        let lineage = AccessView::lineage_of_attributes_in(&self.attributes, self.view, attributes);
         self.view.decide_attributes_on(action, attributes, &lineage)
     }
 
@@ -1455,10 +2218,10 @@ impl HeldAccessView<'_> {
     pub(crate) fn refuses_view_of_known_agent(&self, identity: &str) -> bool {
         let alias = self.view.runtime_alias_member(identity);
         let member_key = alias.member_key(identity);
-        if !AccessView::known_in(&self.attributes, member_key) {
+        if !AccessView::known_in(&self.attributes, self.view, member_key) {
             return false;
         }
-        let lineage = AccessView::lineage_in(&self.attributes, member_key);
+        let lineage = AccessView::lineage_in(&self.attributes, self.view, member_key);
         !self
             .view
             .decide_agent_on(
@@ -1475,7 +2238,9 @@ impl HeldAccessView<'_> {
 /// The most links an access decision walks along an agent's lineage: the
 /// agent and seven ancestors. A lineage deeper than that is refused for
 /// everyone but an admin, so no ancestor's deny is out of the walk's reach.
-/// The console owner captures a frame's lineage to the same depth.
+/// The console owner captures a frame's lineage to the same depth. Where
+/// the last parent's string the walk looks up names two members, the walk
+/// holds both and so one link more than this.
 pub(crate) const MAX_LINEAGE_DEPTH: usize = 8;
 
 /// Whether an allow rule that matches `resource`, one link of an agent's
@@ -1549,6 +2314,14 @@ pub struct AccessView {
     /// The private-owner key this caller owns private agents under
     /// ([`super::PRIVATE_TO_LABEL`]); `None` for a caller who owns none.
     private_owner_key: Option<String>,
+    /// The mob whose agents this view's agent checks name: the default
+    /// mob's unless the view was taken for another ([`Self::in_mob`]).
+    mob: ViewMob,
+    /// The mob nested under `mob` whose members this view's agent checks
+    /// name ([`Self::in_nested_mob`]); none: the agents of `mob`. The
+    /// rules are asked about a nested mob's member as about an agent of
+    /// `mob`.
+    nested_mob: Option<MobId>,
     /// How this view judges an agent the attribute cache does not know:
     /// closed, unless the view was handed to a reader whose request
     /// primed nothing ([`Self::judging_unknown_agents_by_name`]).
@@ -1587,6 +2360,145 @@ impl AccessView {
         self
     }
 
+    /// This principal's view of the agents of the mob `mob_id` (the host's
+    /// default mob by its id, or another): the same configuration and
+    /// principal, with every agent check ([`Self::decide_agent`],
+    /// [`Self::hides_agent`], [`Self::knows_agent`] and the rest) reading
+    /// the name it is given as an agent of that mob. Identities are names
+    /// inside a mob, so an agent of the same name in another mob is another
+    /// agent: its cached attributes are not read, and a rule selects it
+    /// through its own mob (an allow that lists no `mobs` in the default
+    /// mob only, a deny that lists none in every mob, a rule that lists
+    /// mobs in those).
+    #[must_use]
+    pub fn in_mob(&self, mob_id: &MobId) -> AccessView {
+        self.of_mob(ViewMob::of(self.inner.default_mob.get(), mob_id))
+    }
+
+    /// This view for the members of the mob `nested`, a mob nested under
+    /// this view's mob ([`AccessController::record_nested_agent_attributes`]).
+    /// A member is named there by its name in that mob, or by its mob and
+    /// that name as the door of this view's mob names it: a string that
+    /// begins with the nested mob's id and `/` is the door's string, and
+    /// any other string is a name there. Every reading that takes a
+    /// string takes either, and asks the records and the rules by the
+    /// door's string ([`Self::asked`]); a reading that takes attributes
+    /// or a captured lineage takes the identities in them as the door's
+    /// strings they are. The view names that mob's members and no agent
+    /// of the mob it is nested under. A reader that holds a name there
+    /// that may begin with the mob's id asks by [`Self::nested_member`].
+    /// Such a view is for members: it composes every string it is given,
+    /// also one that is no member's name (a topology endpoint, a reserved
+    /// name of the console's own records), so a reader of such names asks
+    /// the view of the mob of the host.
+    /// A view of a nested mob names its mob anew: a mob made by a member
+    /// of a nested mob is recorded under the same mob of the host.
+    #[must_use]
+    pub(crate) fn in_nested_mob(&self, nested: &MobId) -> AccessView {
+        let mut view = AccessView {
+            nested_mob: Some(nested.clone()),
+            ..self.clone()
+        };
+        // A blank id names no mob: such a view is withheld from everyone
+        // but an administrator, as a view of a blank mob of the host is.
+        if !crate::member_key::names_a_mob(nested) {
+            let mut config = (*view.config).clone();
+            config.enabled = true;
+            config.rules.clear();
+            view.config = Arc::new(config);
+        }
+        view
+    }
+
+    /// The string the door of this view's mob names the member `name` of
+    /// this view's nested mob by, composed as that member's recorder
+    /// composes it ([`AccessController::record_nested_agent_attributes`]):
+    /// the string to ask this view by for a member whose name there is
+    /// held, whatever the name begins with. `None` in a view of no nested
+    /// mob, and for a member the door can give no name.
+    pub(crate) fn nested_member(&self, name: &str) -> Option<String> {
+        crate::console_member_ref::nested_member_identity(self.nested_mob.as_ref()?.as_str(), name)
+    }
+
+    /// [`Self::in_mob`] for the mob a stored record names (`stored`: the
+    /// mob it carries, none for the default mob's record). A record written
+    /// before records carried a mob has no mob at all and is the default
+    /// mob's. A record whose mob is blank is no release's record
+    /// ([`Self::of_mob`]).
+    pub(crate) fn in_stored_mob(&self, stored: Option<&MobId>) -> AccessView {
+        let default_mob = self.inner.default_mob.get();
+        self.of_mob(match stored {
+            None => ViewMob::Default(default_mob.cloned()),
+            Some(mob_id) => ViewMob::of(default_mob, mob_id),
+        })
+    }
+
+    /// Whether the mob `stored`, as a stored record names it, is the
+    /// default mob this view's controller was told: such a record is the
+    /// default mob's, as a record that names no mob is
+    /// ([`Self::in_stored_mob`]). `false` for a controller that was told
+    /// no default mob.
+    pub(crate) fn stored_mob_is_the_default_mob(&self, stored: &MobId) -> bool {
+        self.inner.default_mob.get() == Some(stored)
+    }
+
+    /// This view for the agents of `mob`. A mob whose id is blank (empty or
+    /// only white space, [`crate::member_key::names_a_mob`]) names no mob,
+    /// and no release writes a record with one. A view taken for it is
+    /// withheld from everyone but an administrator: it keeps the
+    /// configuration's administrators and none of its rules, so no rule
+    /// reaches such a record, one that lists every mob included, and it is
+    /// never read as the default mob's.
+    fn of_mob(&self, mob: ViewMob) -> AccessView {
+        let mut view = AccessView {
+            mob,
+            nested_mob: None,
+            ..self.clone()
+        };
+        if view.mob.is_blank() {
+            let mut config = (*view.config).clone();
+            config.enabled = true;
+            config.rules.clear();
+            view.config = Arc::new(config);
+        }
+        view
+    }
+
+    /// Whether this caller may address every mob, whatever its id: when
+    /// access is not enforced, or when the caller is an administrator. An
+    /// allow rule never gives this, one that lists every mob in its `mobs`
+    /// included: a door that asks it of a caller who may not judges each
+    /// mob by [`Self::may_address_other_mob`], which reads that rule.
+    pub(crate) fn may_address_every_mob(&self) -> bool {
+        !self.config.enabled || self.is_admin
+    }
+
+    /// Whether this caller may address the mob `mob_id`, a mob other than
+    /// the one a request door serves to every caller it lets in (the launch
+    /// mob, which is never asked of this). The caller may when access is
+    /// not enforced, when the caller is an administrator, or when an allow
+    /// rule that applies to the caller selects that mob in its `mobs`
+    /// ([`super::engine::allow_rule_selects_other_mob`]).
+    ///
+    /// It reads this view's configuration and principal alone: no mob, no
+    /// roster and no cached attribute, and not the default mob the
+    /// controller was told. What the caller may see or do in the mob is the
+    /// door's own rules, judged afterwards on the caller's view in that mob
+    /// ([`Self::in_mob`]); a deny rule neither gives nor takes the address.
+    pub(crate) fn may_address_other_mob(&self, mob_id: &MobId) -> bool {
+        self.may_address_every_mob()
+            || super::engine::allow_rule_selects_other_mob(
+                &self.config,
+                &self.principal,
+                mob_id.as_str(),
+            )
+    }
+
+    /// The bare resource of the agent `identity` of this view's mob.
+    fn agent<'a>(&'a self, identity: &'a str) -> AccessResource<'a> {
+        AccessResource::for_identity(identity).in_mob(self.mob.resource())
+    }
+
     /// True when this view actually enforces anything.
     pub fn enforced(&self) -> bool {
         self.config.enabled
@@ -1618,6 +2530,32 @@ impl AccessView {
         }
     }
 
+    /// Whether an agent private to `owner` is kept from this caller, who is
+    /// not an admin: `owner` is not the caller's own key. The owner of a
+    /// member whose mob's owner cannot be told
+    /// ([`UNDECIDED_PRIVATE_OWNER`]) is no caller's key. It keeps every
+    /// caller out but one: the one operator of a console that identifies
+    /// nobody and has no access control (the caller
+    /// [`Self::withholds_unknown_member`] withholds nothing from). That
+    /// operator is kept out as well while a runtime this view's controller
+    /// was primed from still owes the first read of who its members are
+    /// private to, until that read settles it. The
+    /// console decides that, never whether this caller carries a subject:
+    /// the caller a console with optional sign-in did not identify is kept
+    /// out as its signed-in people are
+    /// ([`Self::kept_apart_from_other_people`]). While access control is
+    /// on, the admins the configuration names see such a member (they are
+    /// not asked here). A signed-in caller of a console with access control
+    /// off is kept out: that console names no admin and keeps what is
+    /// private per person, and the member may belong to a mob a private
+    /// member created.
+    fn owner_keeps_out(&self, owner: &str) -> bool {
+        if owner == UNDECIDED_PRIVATE_OWNER {
+            return self.config.enabled || self.kept_apart_from_other_people();
+        }
+        self.private_owner_key.as_deref() != Some(owner)
+    }
+
     /// Whether the private-owner rule keeps this caller out of an agent whose
     /// lineage is `lineage`: a link of it is private to a person
     /// ([`super::PRIVATE_TO_LABEL`]) whose key is not this caller's, and the
@@ -1626,9 +2564,10 @@ impl AccessView {
     fn private_owner_hides(&self, lineage: &[LineageLink]) -> bool {
         !self.is_admin
             && lineage.iter().any(|link| {
-                link.attributes.as_deref().is_some_and(|attributes| {
-                    private_to_another(&attributes.labels, self.private_owner_key.as_deref())
-                })
+                link.attributes
+                    .as_deref()
+                    .and_then(|attributes| private_owner(&attributes.labels))
+                    .is_some_and(|owner| self.owner_keeps_out(owner))
             })
     }
 
@@ -1674,7 +2613,34 @@ impl AccessView {
 
     /// Full check against explicit resource attributes.
     pub fn decide(&self, action: &str, resource: &AccessResource<'_>) -> AccessDecision {
-        evaluate_access(&self.config, &self.principal, action, resource)
+        evaluate_access(
+            &self.config,
+            &self.principal,
+            action,
+            &self.resolved(*resource),
+        )
+    }
+
+    /// `resource` with its mob read through this view. A resource that
+    /// names no mob is an agent of the view's mob. One that names a mob by
+    /// its id is the default mob's only when that id is the default mob
+    /// the controller was told ([`AccessController::bind_default_mob`]),
+    /// whichever way the resource spells it: the view does not take a
+    /// check's word for which mob is the default mob, and a controller that
+    /// was never told reads every named mob as another mob.
+    fn resolved<'a>(&'a self, resource: AccessResource<'a>) -> AccessResource<'a> {
+        let default_mob = self.inner.default_mob.get().map(MobId::as_str);
+        let mob = match resource.mob {
+            AccessResourceMob::Default(None) => self.mob.resource(),
+            AccessResourceMob::Default(Some(mob_id)) | AccessResourceMob::Other(mob_id) => {
+                if default_mob == Some(mob_id) {
+                    AccessResourceMob::Default(Some(mob_id))
+                } else {
+                    AccessResourceMob::Other(mob_id)
+                }
+            }
+        };
+        resource.in_mob(mob)
     }
 
     /// Check an action with no resource (e.g. `gating.decide`).
@@ -1789,7 +2755,11 @@ impl AccessView {
                     &self.config,
                     &self.principal,
                     action,
-                    &KnownResource::whole(AccessResource::for_identity(identity)),
+                    // In a view of a nested mob the spelling is asked as the
+                    // door's string too. No row holds this line there:
+                    // nothing records a current alias for a member of a
+                    // nested mob.
+                    &KnownResource::whole(self.agent(&self.asked(identity))),
                 ) {
                     return AccessDecision::Deny {
                         reason: format!("denied by rule {rule}"),
@@ -1841,6 +2811,7 @@ impl AccessView {
                 &self.principal,
                 action,
                 identity,
+                &self.mob.resource(),
             )
         {
             return AccessDecision::Deny {
@@ -1882,9 +2853,11 @@ impl AccessView {
         if !self.config.enabled {
             return true;
         }
-        !self.has_deny_undecidable_by_identity(action, identity)
+        // The rules are asked by the string this view names the member by.
+        let asked = self.asked(identity);
+        !self.has_deny_undecidable_by_identity(action, &asked)
             && self
-                .decide(action, &AccessResource::for_identity(identity))
+                .decide(action, &AccessResource::for_identity(&asked))
                 .is_allow()
     }
 
@@ -1969,25 +2942,66 @@ impl AccessView {
                 // labels or spawner are not known is decided closed by a
                 // rule keyed on them, whether it is the agent or one of its
                 // ancestors.
-                Some(agent) => agent.resource((index == 0).then_some(fallback_identity)),
+                Some(agent) => agent.resource(
+                    self.mob.resource(),
+                    (index == 0).then_some(fallback_identity),
+                ),
                 // An ancestor the cache does not hold is an identity and
                 // nothing more.
-                None => KnownResource::whole(AccessResource::for_identity(link.identity.as_str())),
+                None => KnownResource::whole(self.agent(link.identity.as_str())),
             })
             .collect::<Vec<_>>();
+        // A link reached through a parent's string that two members hold,
+        // and every link above it, takes no grant of its own. The engine
+        // asks about a link by the resource it was given for it, so the
+        // link is told by that resource's place among `resources`; a
+        // resource that is none of them grants nothing.
+        let grants = |resource: &AccessResource<'_>| {
+            console_link_grants(resource)
+                && resources
+                    .iter()
+                    .zip(lineage)
+                    .find(|(known, _)| std::ptr::eq(&raw const known.resource, resource))
+                    .is_some_and(|(_, link)| !link.takes_no_grant)
+        };
         super::engine::evaluate_access_lineage(
             &self.config,
             &self.principal,
             action,
             &resources,
-            &console_link_grants,
+            &grants,
         )
+    }
+
+    /// The string this view asks its records and the rules by for the agent
+    /// `key` names. In a view of a mob of the host it is `key`. In a view
+    /// of a nested mob a member is named by its name in that mob, or by
+    /// the name the door of the mob it is nested under gives it (its mob
+    /// and its name): its entry is recorded under the latter, and the
+    /// rules know it by the latter. A string that begins with the mob's id
+    /// and `/` is the door's string; any other is a name there, and the
+    /// door's string is composed from it. A key the door cannot compose
+    /// stays as it is, and names no member ([`Self::own_entry`]).
+    fn asked<'a>(&self, key: &'a str) -> std::borrow::Cow<'a, str> {
+        match &self.nested_mob {
+            Some(nested) if !names_member_of(nested, key) => {
+                crate::console_member_ref::nested_member_identity(nested.as_str(), key)
+                    .map_or(std::borrow::Cow::Borrowed(key), std::borrow::Cow::Owned)
+            }
+            _ => std::borrow::Cow::Borrowed(key),
+        }
     }
 
     /// Classify an agent spelling: not a runtime alias, the current alias of
     /// a known identity (with that member's cache key), or a runtime alias
     /// that is stale, unknown, or malformed.
     fn runtime_alias_member(&self, key: &str) -> RuntimeAliasMember {
+        // A view of a nested mob classifies the door's string of the
+        // member: the alias table it reads is the outer mob's, keyed like
+        // its agents, and nothing records a current alias for a member of
+        // a nested mob there.
+        let asked = self.asked(key);
+        let key = &*asked;
         // A console namespace (`<namespace>/<identity>`) keeps its prefix: an
         // identity holds no `/`, so the last one ends the namespace.
         let (namespace, alias) = match key.rfind('/') {
@@ -2017,7 +3031,8 @@ impl AccessView {
             .current_runtime_aliases
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&member_key)
+            .of(&self.mob)
+            .and_then(|current| current.get(&member_key))
             .is_some_and(|current| *current == alias_key);
         if current {
             RuntimeAliasMember::Current(member_key)
@@ -2051,22 +3066,105 @@ impl AccessView {
             .attributes
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        Self::lineage_in(&cache, identity)
+        Self::lineage_in(&cache, self, identity)
     }
 
-    fn lineage_in(cache: &AttributeCache, identity: &str) -> Vec<LineageLink> {
-        let resolve = |key: &str| {
-            cache.get(key).cloned().or_else(|| {
-                cache
-                    .values()
-                    .find(|attributes| attributes.agent_id.as_deref() == Some(key))
-                    .cloned()
-            })
-        };
-        let Some(own) = resolve(identity) else {
+    /// The agent `key` names among `members`, one mob's agents: by its
+    /// identity, else by its projected `agent_id`.
+    fn agent_in(members: &AttributeCache, key: &str) -> Option<Arc<CachedAgent>> {
+        members.get(key).cloned().or_else(|| {
+            members
+                .values()
+                .find(|attributes| attributes.agent_id.as_deref() == Some(key))
+                .cloned()
+        })
+    }
+
+    /// The entries the string `key` names for a reader of the mob of the
+    /// host `mob`, in `maps`, each with the nested mob whose entries hold it
+    /// (none: an agent of `mob`): the member of a mob nested under `mob`
+    /// that the string spells by its mob and its name (the name the door of
+    /// `mob` gives that member, read in that one mob's entries by its
+    /// identity alone), and the agent of `mob` that holds the string, by
+    /// its identity and then by its projected `agent_id`.
+    ///
+    /// A string that names a parent says nothing of the mob the parent sits
+    /// in: a console spawn sink that knows its runtime's mob writes a
+    /// spawner of another mob by its mob and its name
+    /// ([`crate::console_spawn`]'s spawner name), and a member of `mob` can
+    /// hold that very string as its name. A bare name is an agent of `mob`:
+    /// a side chat names its source by its roster name, and no door forks a
+    /// member of a nested mob. So a reader of a parent, or of an ancestor a
+    /// captured record names, takes both where both hold the string
+    /// ([`Self::lineage_from_attributes`]).
+    fn ancestors_in(
+        maps: &PerMob<AttributeCache>,
+        mob: &ViewMob,
+        key: &str,
+    ) -> [Option<(Arc<CachedAgent>, Option<MobId>)>; 2] {
+        let nested =
+            crate::console_member_ref::parse_nested_member_identity(key).and_then(|(mob_id, _)| {
+                let nested = MobId::from(mob_id);
+                let agent = maps.nested_of(mob, &nested)?.get(key)?.clone();
+                Some((agent, Some(nested)))
+            });
+        let outer = maps
+            .of(mob)
+            .and_then(|members| Self::agent_in(members, key))
+            .map(|agent| (agent, None));
+        [nested, outer]
+    }
+
+    /// The entry the string `key` names for `view`: the agent the view's
+    /// own readings decide. A view of a nested mob names that mob's members
+    /// and no agent of the mob it is nested under: a string of that mob's
+    /// own form (its id, `/`, a name) names a member of it, by its identity
+    /// alone, and a string that has not that form (one [`Self::asked`]
+    /// could not compose) names no member. A view of a mob of the host
+    /// names an agent of that mob, by its identity and then by its
+    /// projected `agent_id`, as before; a string no agent of that mob holds
+    /// names the member of a nested mob that the string spells, so a reader
+    /// that takes no view of a nested mob reads a nested member as before,
+    /// and a string an agent of the mob holds names that agent. Once an
+    /// agent of the mob held the string its entry stands, also after it
+    /// ended: a door that means the nested member asks the view of the
+    /// nested mob.
+    fn own_entry(
+        maps: &PerMob<AttributeCache>,
+        view: &AccessView,
+        key: &str,
+    ) -> Option<(Arc<CachedAgent>, Option<MobId>)> {
+        match view.nested_mob.as_ref() {
+            Some(nested) => {
+                if !names_member_of(nested, key) {
+                    return None;
+                }
+                maps.nested_of(&view.mob, nested)?
+                    .get(key)
+                    .map(|agent| (agent.clone(), Some(nested.clone())))
+            }
+            None => {
+                let [nested, outer] = Self::ancestors_in(maps, &view.mob, key);
+                outer.or(nested)
+            }
+        }
+    }
+
+    /// The lineage of the agent `identity` names for `view`, over `maps`.
+    fn lineage_in(
+        maps: &PerMob<AttributeCache>,
+        view: &AccessView,
+        identity: &str,
+    ) -> Vec<LineageLink> {
+        let Some((own, within)) = Self::own_entry(maps, view, identity) else {
             return Vec::new();
         };
-        Self::lineage_from_attributes(own, &resolve)
+        Self::lineage_from_attributes(maps, &view.mob, own, within)
+    }
+
+    /// Whether `maps` holds the agent `identity` names for `view`.
+    fn known_in(maps: &PerMob<AttributeCache>, view: &AccessView, identity: &str) -> bool {
+        Self::own_entry(maps, view, identity).is_some()
     }
 
     /// Resolve spawn ancestors while pinning the first lineage link to the
@@ -2078,56 +3176,98 @@ impl AccessView {
             .attributes
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        Self::lineage_of_attributes_in(&cache, attributes)
+        Self::lineage_of_attributes_in(&cache, self, attributes)
     }
 
-    /// [`Self::lineage_for_attributes`] over a cache that is already held.
+    /// [`Self::lineage_for_attributes`] for `view` over a cache that is
+    /// already held.
     fn lineage_of_attributes_in(
-        cache: &AttributeCache,
+        maps: &PerMob<AttributeCache>,
+        view: &AccessView,
         attributes: &AgentResourceAttributes,
     ) -> Vec<LineageLink> {
-        let resolve = |key: &str| {
-            cache.get(key).cloned().or_else(|| {
-                cache
-                    .values()
-                    .find(|candidate| candidate.agent_id.as_deref() == Some(key))
-                    .cloned()
-            })
-        };
-        Self::lineage_from_attributes(Arc::new(CachedAgent::whole(attributes.clone())), &resolve)
+        Self::lineage_from_attributes(
+            maps,
+            &view.mob,
+            Arc::new(CachedAgent::whole(attributes.clone())),
+            view.nested_mob.clone(),
+        )
     }
 
+    /// The lineage that starts at `own`, an agent of the mob of the host
+    /// `mob`, or of the mob `within` nested under it: `own`, then every
+    /// ancestor its parents' strings name ([`Self::ancestors_in`]), each
+    /// link's parent looked up in turn. A link is seen once by the mob it
+    /// sits in and its identity: a member of a nested mob and the member of
+    /// the outer mob that the door spells with the same string are two
+    /// links. A parent no entry describes is a link of its string alone.
+    ///
+    /// A parent's string that two members hold names both: each is a link,
+    /// so a deny on either refuses and either's private owner hides, and
+    /// neither grants, nor does any link above them (the link's
+    /// `takes_no_grant`): an ambiguous name never grants.
+    ///
+    /// The walk stops once it holds [`MAX_LINEAGE_DEPTH`] links, or one
+    /// more where the last string it looked up named two. A link whose
+    /// parent it did not look up then stands last, so that a walk that left
+    /// an ancestor out is told from one that did not
+    /// ([`lineage_exceeds_walk`]); such a link is reported also when its
+    /// parent is among the links already, which refuses more and never
+    /// less. The order of the ancestors decides nothing else.
     fn lineage_from_attributes(
+        maps: &PerMob<AttributeCache>,
+        mob: &ViewMob,
         own: Arc<CachedAgent>,
-        resolve: &impl Fn(&str) -> Option<Arc<CachedAgent>>,
+        within: Option<MobId>,
     ) -> Vec<LineageLink> {
-        let mut visited = BTreeSet::from([own.identity.clone()]);
+        let parent_of = |link: &LineageLink| {
+            link.attributes
+                .as_deref()
+                .and_then(|attributes| crate::console_spawn::lineage_parent(&attributes.labels))
+                .map(|parent| parent.identity.to_string())
+        };
+        let mut visited = BTreeSet::from([(within, own.identity.clone())]);
         let mut lineage = vec![LineageLink {
             identity: own.identity.clone(),
             attributes: Some(own),
+            takes_no_grant: false,
         }];
-        while lineage.len() < MAX_LINEAGE_DEPTH {
+        // The links before `looked_up` have had their parent looked up.
+        let mut looked_up = 0;
+        while looked_up < lineage.len() && lineage.len() < MAX_LINEAGE_DEPTH {
             // The spawner, else a side chat's source.
-            let Some(parent) = lineage
-                .last()
-                .and_then(|link| link.attributes.as_deref())
-                .and_then(|attributes| crate::console_spawn::lineage_parent(&attributes.labels))
-                .map(|parent| parent.identity.to_string())
-            else {
-                break;
+            let parent = parent_of(&lineage[looked_up]);
+            let child_takes_no_grant = lineage[looked_up].takes_no_grant;
+            looked_up += 1;
+            let Some(parent) = parent else {
+                continue;
             };
-            let attributes = resolve(&parent);
-            let parent_identity = attributes
-                .as_deref()
-                .map(|attributes| attributes.identity.clone())
-                .unwrap_or(parent);
-            if !visited.insert(parent_identity.clone()) {
-                break;
+            let found = Self::ancestors_in(maps, mob, &parent);
+            if found.iter().all(Option::is_none) {
+                if visited.insert((None, parent.clone())) {
+                    lineage.push(LineageLink {
+                        identity: parent,
+                        attributes: None,
+                        takes_no_grant: child_takes_no_grant,
+                    });
+                }
+                continue;
             }
-            lineage.push(LineageLink {
-                identity: parent_identity,
-                attributes,
-            });
+            let named_two = found.iter().all(Option::is_some);
+            for (agent, sits_in) in found.into_iter().flatten() {
+                if visited.insert((sits_in, agent.identity.clone())) {
+                    lineage.push(LineageLink {
+                        identity: agent.identity.clone(),
+                        attributes: Some(agent),
+                        takes_no_grant: child_takes_no_grant || named_two,
+                    });
+                }
+            }
+        }
+        if let Some(left) = (looked_up..lineage.len()).find(|at| parent_of(&lineage[*at]).is_some())
+        {
+            let last = lineage.len() - 1;
+            lineage.swap(left, last);
         }
         lineage
     }
@@ -2135,6 +3275,61 @@ impl AccessView {
     /// Convenience: can this principal see the given agent at all?
     pub fn can_view_agent(&self, identity: &str) -> bool {
         self.allows_agent(ACTION_AGENT_VIEW, identity)
+    }
+
+    /// For each link of a captured lineage, the two members that hold its
+    /// name now, where the owner captured the link as a name alone (it
+    /// could not confirm the ancestor) and both an agent of this view's
+    /// mob and the member of a nested mob that the string spells hold it
+    /// ([`Self::ancestors_in`]); none for every other link.
+    fn captured_names_two_hold_now(
+        &self,
+        lineage: &[CapturedLineageLink],
+    ) -> Vec<Option<[Arc<CachedAgent>; 2]>> {
+        let cache = self
+            .inner
+            .attributes
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        lineage
+            .iter()
+            .map(|link| {
+                if link.attributes.is_some() {
+                    return None;
+                }
+                match Self::ancestors_in(&cache, &self.mob, &link.identity) {
+                    [Some((nested, _)), Some((outer, _))] => Some([nested, outer]),
+                    _ => None,
+                }
+            })
+            .collect()
+    }
+
+    /// The strings of the ancestors of a captured lineage that the owner
+    /// confirmed (captured with their attributes) and that two members
+    /// hold now: an agent of this view's mob and the member of a nested
+    /// mob that the string spells ([`Self::ancestors_in`]). The record's
+    /// own member, the first link, is none of them.
+    fn confirmed_ancestors_two_hold_now<'a>(
+        &self,
+        lineage: &'a [CapturedLineageLink],
+    ) -> BTreeSet<&'a str> {
+        let cache = self
+            .inner
+            .attributes
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        lineage
+            .iter()
+            .skip(1)
+            .filter(|link| {
+                link.attributes.is_some()
+                    && Self::ancestors_in(&cache, &self.mob, &link.identity)
+                        .iter()
+                        .all(Option::is_some)
+            })
+            .map(|link| link.identity.as_str())
+            .collect()
     }
 
     /// `agent.view` on a record a member wrote, decided by the member
@@ -2153,7 +3348,29 @@ impl AccessView {
     /// - an ancestor the shared cache knows now may only add a deny: its
     ///   current entry can be a later incarnation under the same identity;
     /// - a captured lineage that reached the walk's bound
-    ///   ([`MAX_LINEAGE_DEPTH`] links) with an ancestor left refuses it.
+    ///   ([`MAX_LINEAGE_DEPTH`] links) with an ancestor left refuses it;
+    /// - a captured ancestor whose incarnation could not be confirmed is a
+    ///   name alone: where two members hold that name now (an agent of
+    ///   this view's mob and the member of a nested mob that the string
+    ///   spells), either of them that is another person's own hides the
+    ///   record, and the name grants nothing, nor does a link above it:
+    ///   an ambiguous name never grants. The owner of a name's one
+    ///   holder is not asked, as before: its current entry can be a
+    ///   later incarnation under the same identity;
+    /// - an ancestor the owner confirmed (captured with its attributes,
+    ///   which the owner takes only from the member whose session the
+    ///   child's lineage is bound to) is that ancestor and no name. It
+    ///   grants as before while no member or one member holds its
+    ///   string now. Once two members hold the string, the grant flows
+    ///   through what was captured of the ancestor and no longer by the
+    ///   string: no allow rule selects it by that string, a rule that
+    ///   matches its captured role or labels grants as before, and a
+    ///   deny that names the string refuses as before. It grants
+    ///   nothing where it stands above a name that two hold. While the
+    ///   cache still knows the record's member, its current lineage must
+    ///   allow the record too (above), and that walk has no session to
+    ///   tell two holders of a parent's string by: what was captured
+    ///   decides alone only for a member the cache no longer knows.
     ///
     /// So a relabel never reveals a record its captured attributes hide, and
     /// a member relabelled into a denied class hides its earlier records.
@@ -2169,7 +3386,7 @@ impl AccessView {
                 link.attributes
                     .as_ref()
                     .and_then(|attributes| private_owner(&attributes.labels))
-                    .is_some_and(|owner| self.private_owner_key.as_deref() != Some(owner))
+                    .is_some_and(|owner| self.owner_keeps_out(owner))
             })
         {
             return false;
@@ -2177,6 +3394,17 @@ impl AccessView {
         if lineage
             .first()
             .is_some_and(|own| self.hides_agent(&own.identity))
+        {
+            return false;
+        }
+        // The captured names that two members hold now. The owner's capture
+        // stops at the first link it cannot confirm (the lineage capture
+        // of `console_aggregator`), so it writes no link above such a name.
+        let held_by_two = self.captured_names_two_hold_now(lineage);
+        if !self.is_admin
+            && held_by_two.iter().flatten().flatten().any(|holder| {
+                private_owner(&holder.labels).is_some_and(|owner| self.owner_keeps_out(owner))
+            })
         {
             return false;
         }
@@ -2212,17 +3440,39 @@ impl AccessView {
                             .or((index == 0).then_some(link.identity.as_str())),
                         role: attributes.role.as_deref(),
                         labels: Some(&attributes.labels),
+                        mob: self.mob.resource(),
                     },
-                    None => AccessResource::for_identity(link.identity.as_str()),
+                    None => self.agent(link.identity.as_str()),
                 })
             })
             .collect::<Vec<_>>();
+        // A name that two members hold now grants nothing, and no link
+        // above it does: the capture of this build ends at such a name,
+        // and a stored lineage that holds a link above one all the same
+        // takes no grant through it. The engine asks about a link by the
+        // resource it was given for it, so the link is told by that
+        // resource's place among `resources`; a resource that is none of
+        // them grants nothing.
+        let first_held_by_two = held_by_two.iter().position(Option::is_some);
+        let grants = |resource: &AccessResource<'_>| {
+            console_link_grants(resource)
+                && resources
+                    .iter()
+                    .position(|known| std::ptr::eq(&raw const known.resource, resource))
+                    .is_some_and(|at| first_held_by_two.is_none_or(|first| at < first))
+        };
+        // A confirmed ancestor whose string two members hold now is not
+        // selected by that string for a grant: the rules are asked without
+        // it in their allows.
+        let by_string = self.confirmed_ancestors_two_hold_now(lineage);
+        let narrowed =
+            (!by_string.is_empty()).then(|| allows_without_agent_strings(&self.config, &by_string));
         if !super::engine::evaluate_access_lineage(
-            &self.config,
+            narrowed.as_ref().unwrap_or(&*self.config),
             &self.principal,
             ACTION_AGENT_VIEW,
             &resources,
-            &console_link_grants,
+            &grants,
         )
         .is_allow()
         {
@@ -2235,6 +3485,7 @@ impl AccessView {
                     &self.principal,
                     ACTION_AGENT_VIEW,
                     &link.identity,
+                    &self.mob.resource(),
                 )
                 .is_some()
         }) {
@@ -2249,22 +3500,17 @@ impl AccessView {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         !lineage.iter().skip(1).any(|link| {
-            let current = cache.get(&link.identity).cloned().or_else(|| {
-                cache
-                    .values()
-                    .find(|attributes| {
-                        attributes.agent_id.as_deref() == Some(link.identity.as_str())
-                    })
-                    .cloned()
-            });
+            // Every entry the ancestor's string names now, as the walk
+            // takes them: what is found here can only add a deny.
+            let current = Self::ancestors_in(&cache, &self.mob, &link.identity);
             // With what is known of the ancestor now: a deny its current
             // entry cannot rule out refuses, as a deny that matches it.
-            current.is_some_and(|current| {
+            current.into_iter().flatten().any(|(current, _)| {
                 super::engine::matching_deny_rule(
                     &self.config,
                     &self.principal,
                     ACTION_AGENT_VIEW,
-                    &current.resource(None),
+                    &current.resource(self.mob.resource(), None),
                 )
                 .is_some()
             })
@@ -2282,6 +3528,8 @@ impl AccessView {
     /// applicable deny the bare identity cannot decide refuses it, otherwise
     /// the identity decides.
     pub(crate) fn can_view_uncaptured_member(&self, identity: &str) -> bool {
+        let asked = self.asked(identity);
+        let identity = &*asked;
         if self.kept_apart_from_other_people() {
             return false;
         }
@@ -2291,6 +3539,7 @@ impl AccessView {
                 &self.principal,
                 ACTION_AGENT_VIEW,
                 identity,
+                &self.mob.resource(),
             )
             .is_some()
         {
@@ -2308,12 +3557,15 @@ impl AccessView {
     /// means withholds it ([`Self::can_view_uncaptured_member`] does so for
     /// `agent.view`). An admin, and a disabled config, have none.
     pub(crate) fn has_deny_undecidable_by_identity(&self, action: &str, identity: &str) -> bool {
+        let asked = self.asked(identity);
+        let identity = &*asked;
         self.config.enabled
             && super::engine::deny_undecidable_by_identity(
                 &self.config,
                 &self.principal,
                 action,
                 identity,
+                &self.mob.resource(),
             )
             .is_some()
     }
@@ -2336,16 +3588,30 @@ impl AccessView {
             .attributes
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        Self::known_in(&cache, identity)
+        Self::known_in(&cache, self, identity)
     }
 
-    /// Whether `cache` holds the agent `identity` names, by its identity or
-    /// its projected `agent_id`.
-    fn known_in(cache: &AttributeCache, identity: &str) -> bool {
-        cache.contains_key(identity)
-            || cache
-                .values()
-                .any(|attributes| attributes.agent_id.as_deref() == Some(identity))
+    /// Whether this view's own mob holds an agent under `identity`: for a
+    /// view of a mob of the host, an agent of that mob, and never the
+    /// member of a mob nested under it that the string spells; for a view
+    /// of a nested mob, a member of that mob. A door that reads one string
+    /// two members can spell asks this of the view of the mob of the host,
+    /// and [`Self::knows_agent`] of the view of the nested mob, to tell
+    /// which of the two the cache holds.
+    pub(crate) fn knows_own_agent(&self, identity: &str) -> bool {
+        let alias = self.runtime_alias_member(identity);
+        let identity = alias.member_key(identity);
+        let cache = self
+            .inner
+            .attributes
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match self.nested_mob {
+            Some(_) => Self::known_in(&cache, self, identity),
+            None => cache
+                .of(&self.mob)
+                .is_some_and(|members| Self::agent_in(members, identity).is_some()),
+        }
     }
 
     /// Whether this caller may see a record made under the name `identity`
@@ -2384,7 +3650,10 @@ impl AccessView {
     /// - a name under which a member private to a person was seated, when
     ///   the record's time is not known or is before the name's first known
     ///   seating, or when members private to different people held it then
-    ///   in different mobs: no caller but an administrator.
+    ///   in different mobs: no caller but an administrator. A record that
+    ///   names a mob other than the default mob is decided by the members
+    ///   seated under the name in that mob alone; a record that names no
+    ///   mob by the members seated under it in every mob.
     ///
     /// - a moment at which a member private to no one held the name, where
     ///   a member was seated under the name since (another member that
@@ -2417,9 +3686,13 @@ impl AccessView {
         if self.is_admin {
             return OriginThen::Allowed;
         }
-        if self.awaits_private_owner_record() {
+        let alias = self.runtime_alias_member(identity);
+        let member_key = alias.member_key(identity);
+        if self.awaits_private_owner_record() || self.awaits_the_read_of_its_mob(member_key) {
             // Who held a name cannot be told yet. A person is told to ask
-            // again ([`Self::awaits_first_read`]); for the one operator of a
+            // again ([`Self::awaits_first_read`]) while a first read is
+            // owed, and is withheld a record of a mob whose own records are
+            // not read; for the one operator of a
             // console that identifies nobody the rule on the holder now
             // decides alone meanwhile.
             return if self.console_identifies_people {
@@ -2428,20 +3701,20 @@ impl AccessView {
                 OriginThen::Allowed
             };
         }
-        let alias = self.runtime_alias_member(identity);
-        let member_key = alias.member_key(identity);
         let records: Vec<Arc<NameSeatingsByName>> = self
-            .inner
-            .name_seatings
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .values()
-            .map(|(_, seatings)| Arc::clone(seatings))
+            .hand_overs_keying(member_key)
+            .into_iter()
+            .map(|(_, _, seatings)| seatings)
             .collect();
+        // The seatings that decide a record of this view's mob: a record
+        // that names another mob is that mob's own; one that names no mob
+        // is decided by every mob's ([`ViewMob::reads_seatings_of`]).
         let seatings = records
             .iter()
             .filter_map(|names| names.get(member_key))
-            .flatten();
+            .flatten()
+            .filter(|(mob_id, _)| self.mob.reads_seatings_of(mob_id))
+            .map(|(_, seatings)| seatings);
         match origin_at(seatings.clone(), made_at_ms) {
             OriginAt::HolderNow => {
                 let holders: Vec<AgentResourceAttributes> = made_at_ms
@@ -2532,6 +3805,70 @@ impl AccessView {
             .is_empty()
     }
 
+    /// Whether this view is of a mob other than the default mob whose
+    /// seatings under the name `member_key` this controller cannot tell
+    /// yet. The runtimes asked are those whose names can be that one: the
+    /// hand-overs under the most specific identity namespace that can key
+    /// it ([`Self::hand_overs_keying`]). None of them
+    /// has read that mob's durable records (the mob's read is owed: its
+    /// host is about to build it, or built it a moment ago; or the mob was
+    /// never read in that process; or no such runtime handed anything
+    /// yet), or the one that has read them noted a journal row since it
+    /// last handed its seatings over, so the seatings held here may lack
+    /// that mob's. A runtime whose names are keyed under another namespace
+    /// is not asked: it does not stand for the read of this one's mob.
+    /// Runtimes keyed under one namespace are not told apart here, as
+    /// their members' names are not. A record that
+    /// names that mob is decided by the members seated under its name in
+    /// that mob, which are not known until then. The default mob's records
+    /// are the seed's, and a record that names no mob is not held back by
+    /// another mob's read.
+    fn awaits_the_read_of_its_mob(&self, member_key: &str) -> bool {
+        let ViewMob::Other(mob_id) = &self.mob else {
+            return false;
+        };
+        // In this order: a record notes a mob's journal rows before it
+        // answers that it has read the mob, so a record that answers so
+        // has counted every row of that mob, and the count is read
+        // after. The count held here was taken before either: seatings
+        // handed since are of a later count, and are asked again.
+        !self
+            .hand_overs_keying(member_key)
+            .into_iter()
+            .any(|(record, noted, _)| {
+                record.has_read_the_mob(mob_id.as_str()) && noted == record.name_seatings_noted()
+            })
+    }
+
+    /// What this controller holds of the runtimes whose names can be the
+    /// name `member_key`: the hand-overs under the most specific identity
+    /// namespace that can key it (the longest), each with its record, the
+    /// count it had noted and its seatings. A name under a namespace is
+    /// its namespace's: the empty namespace can key every name, and a
+    /// runtime handed under it does not stand for the runtimes handed
+    /// under the namespace the name is under.
+    fn hand_overs_keying(
+        &self,
+        member_key: &str,
+    ) -> Vec<(PrivateOwners, u64, Arc<NameSeatingsByName>)> {
+        let held = self
+            .inner
+            .name_seatings
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let most_specific = held
+            .keys()
+            .filter(|(_, namespace)| namespace_keys(namespace, member_key))
+            .map(|(_, namespace)| namespace.len())
+            .max();
+        held.iter()
+            .filter(|((_, namespace), _)| {
+                namespace_keys(namespace, member_key) && Some(namespace.len()) == most_specific
+            })
+            .map(|(_, held)| (held.record.clone(), held.noted, Arc::clone(&held.seatings)))
+            .collect()
+    }
+
     /// Can this principal read and edit the access configuration?
     ///
     /// Named admins always can. While enforcement is enabled, subjects
@@ -2581,7 +3918,13 @@ impl AccessView {
         let mut refreshed = self
             .controller()
             .view_for_caller(self.subject(), self.private_owner_key())
-            .on_console(self.console_identifies_people);
+            .on_console(self.console_identifies_people)
+            .of_mob(self.mob.clone());
+        // A view of a nested mob stays one; a view of one whose id is
+        // blank is withheld again.
+        if let Some(nested) = &self.nested_mob {
+            refreshed = refreshed.in_nested_mob(nested);
+        }
         refreshed.unknown_agents = self.unknown_agents;
         refreshed
     }
@@ -3802,6 +5145,58 @@ mod tests {
         let root = configured.view_for_subject(Some("root@example.test"));
         assert!(!root.kept_apart_from_other_people());
         assert!(root.can_view_uncaptured_member("anyone"));
+    }
+
+    /// Who held the names of a runtime's members, as a console aggregator's
+    /// reading recorded it here, is kept while that aggregator serves the
+    /// runtime, as its owed first read is counted; what a route that holds
+    /// the runtime recorded is kept whatever an aggregator serves.
+    #[test]
+    fn name_seatings_are_kept_while_their_runtime_is_served() {
+        let controller = AccessController::disabled();
+        let console = ConsoleAggregatorId::mint();
+        let by_serving = |namespace| NameSeatingsHandOver {
+            reader: PrivateOwnerRecordReader::ServedRuntime(console),
+            namespace,
+        };
+        let record = crate::private_owners::PrivateOwners::default;
+        let (own, team, other_team) = (record(), record(), record());
+        let hand = |record: &crate::private_owners::PrivateOwners, hand_over| {
+            controller.record_name_seatings(
+                record,
+                hand_over,
+                record.name_seatings_noted(),
+                || record.name_seatings(),
+            );
+        };
+        // The console's own runtime, which its aggregator serves as well,
+        // and two runtimes only that aggregator serves.
+        hand(&own, NameSeatingsHandOver::OWN_ROUTE);
+        hand(&own, by_serving(""));
+        hand(&team, by_serving("team"));
+        hand(&other_team, by_serving("other"));
+        let noted = |record: &crate::private_owners::PrivateOwners, namespace| {
+            controller.name_seatings_noted(record.record_id(), namespace)
+        };
+
+        // Served runtimes that cannot be listed change nothing.
+        controller.keep_served_private_owner_records(console, || None);
+        assert_eq!(noted(&other_team, "other"), Some(0));
+        // The aggregator serves `team` only from here on.
+        controller.keep_served_private_owner_records(console, || {
+            Some(BTreeSet::from([team.record_id()]))
+        });
+        assert_eq!(noted(&team, "team"), Some(0));
+        assert_eq!(
+            noted(&other_team, "other"),
+            None,
+            "nothing is kept of the runtime its aggregator no longer serves"
+        );
+        assert_eq!(
+            noted(&own, ""),
+            Some(0),
+            "the route that holds the runtime still stands behind its names"
+        );
     }
 
     /// The decision fence sees the origin of a gating request as the
@@ -5274,11 +6669,11 @@ mod tests {
                 assert!(!owner.hides_agent(identity));
                 assert!(other.hides_agent(identity) && anonymous.hides_agent(identity));
                 let fence = controller.decision_fence(Some("bob@example.test"), Some("other-key"));
-                assert!(!fence.can_view_agent(identity), "{identity}");
+                assert!(!fence.can_view_agent_in(None, identity), "{identity}");
                 drop(fence);
                 let fence =
                     controller.decision_fence(Some("alice@example.test"), Some("owner-key"));
-                assert!(fence.can_view_agent(identity), "{identity}");
+                assert!(fence.can_view_agent_in(None, identity), "{identity}");
                 drop(fence);
             }
             assert!(
@@ -5322,6 +6717,880 @@ mod tests {
             assert!(owner.can_view_captured_member(&captured));
             assert!(!other.can_view_captured_member(&captured));
         }
+    }
+
+    fn member_keyed_default_mob() -> DefaultMob {
+        DefaultMob::new(MobId::from("launch"))
+    }
+
+    fn member_keyed_attributes(role: &str) -> AgentResourceAttributes {
+        AgentResourceAttributes {
+            identity: "alice".to_string(),
+            agent_id: None,
+            role: Some(role.to_string()),
+            labels: BTreeMap::new(),
+        }
+    }
+
+    /// Two mobs of one host each have an agent named `alice`. Each keeps
+    /// its own cached attributes: a rule on the role of one is never decided
+    /// by the role of the other, and a roster projection of one mob neither
+    /// replaces nor evicts the other mob's agents.
+    #[test]
+    fn member_keyed_access_two_mobs_agents_of_one_name_keep_their_own_attributes() {
+        let default_mob = member_keyed_default_mob();
+        let second = MobId::from("second");
+        let mut config = enabled_config();
+        config.rules.push(AccessRule {
+            id: "leads-are-viewable".to_string(),
+            actions: vec!["agent.view".to_string()],
+            subjects: vec!["bob@example.test".to_string()],
+            roles: vec!["lead".to_string()],
+            mobs: vec!["*".to_string()],
+            ..AccessRule::default()
+        });
+        let controller = AccessController::new(config).expect("controller");
+        controller.bind_default_mob(&default_mob);
+        controller.record_agent_attributes(member_keyed_attributes("lead"));
+        controller.record_agent_attributes_in(&second, member_keyed_attributes("worker"));
+        let view = controller.view_for_subject(Some("bob@example.test"));
+        let in_second = view.in_mob(&second);
+        assert!(
+            view.can_view_agent("alice"),
+            "the default mob's alice is a lead"
+        );
+        assert!(
+            !in_second.can_view_agent("alice"),
+            "the second mob's alice is a worker: the default mob's role is not hers"
+        );
+        assert!(
+            view.in_mob(default_mob.mob_id()).can_view_agent("alice"),
+            "naming the default mob reads the same agent as naming no mob"
+        );
+        assert!(view.knows_agent("alice") && in_second.knows_agent("alice"));
+        assert!(
+            !view.in_mob(&MobId::from("third")).knows_agent("alice"),
+            "a mob with no agent of the name knows none"
+        );
+
+        // The second mob's roster projection replaces its own agents only.
+        controller.replace_agent_attributes_in(
+            &second,
+            [AgentResourceAttributes {
+                identity: "carol".to_string(),
+                agent_id: None,
+                role: Some("lead".to_string()),
+                labels: BTreeMap::new(),
+            }],
+        );
+        let view = controller.view_for_subject(Some("bob@example.test"));
+        let in_second = view.in_mob(&second);
+        assert!(
+            view.knows_agent("alice") && view.can_view_agent("alice"),
+            "the default mob's alice is still cached"
+        );
+        assert!(!in_second.knows_agent("alice") && in_second.can_view_agent("carol"));
+        assert!(!view.knows_agent("carol"));
+        // And the default mob's projection leaves the second mob's alone.
+        controller.replace_agent_attributes([member_keyed_attributes("worker")]);
+        let view = controller.view_for_subject(Some("bob@example.test"));
+        assert!(!view.can_view_agent("alice"));
+        assert!(view.in_mob(&second).can_view_agent("carol"));
+    }
+
+    /// A private member of one mob hides the agent of that name there, and
+    /// not the agent of the same name in another mob.
+    #[test]
+    fn member_keyed_access_a_private_agent_of_one_mob_hides_no_other_mobs_agent() {
+        let default_mob = member_keyed_default_mob();
+        let second = MobId::from("second");
+        let controller = AccessController::disabled();
+        controller.bind_default_mob(&default_mob);
+        controller.record_agent_attributes(member_keyed_attributes("worker"));
+        controller.record_agent_attributes_in(
+            &second,
+            AgentResourceAttributes {
+                labels: BTreeMap::from([(
+                    crate::access::PRIVATE_TO_LABEL.to_string(),
+                    "person:dana".to_string(),
+                )]),
+                ..member_keyed_attributes("worker")
+            },
+        );
+        let view = controller.view_for_subject(Some("bob@example.test"));
+        assert!(!view.hides_agent("alice"));
+        assert!(view.in_mob(&second).hides_agent("alice"));
+        let fence = controller.decision_fence(Some("bob@example.test"), None);
+        assert!(fence.can_view_agent_in(None, "alice"));
+        assert!(fence.can_view_agent_in(Some(default_mob.mob_id()), "alice"));
+        assert!(!fence.can_view_agent_in(Some(&second), "alice"));
+    }
+
+    /// A configuration stored before rules could list mobs means what it
+    /// meant for the default mob and grants nothing in another mob: with
+    /// access control enabled a new mob is visible to admins only until a
+    /// rule names it.
+    #[test]
+    fn member_keyed_access_a_stored_configuration_grants_nothing_in_another_mob() {
+        let second = MobId::from("second");
+        let stored = r#"enabled = true
+admins = ["root@example.test"]
+
+[[rules]]
+id = "everyone-views"
+actions = ["agent.view"]
+subjects = ["*"]
+"#;
+        let config: AccessControlConfig = toml::from_str(stored).expect("stored config parses");
+        let controller = AccessController::new(config).expect("controller");
+        controller.record_agent_attributes(member_keyed_attributes("worker"));
+        controller.record_agent_attributes_in(&second, member_keyed_attributes("worker"));
+        let bob = controller.view_for_subject(Some("bob@example.test"));
+        assert!(bob.can_view_agent("alice"));
+        assert!(!bob.in_mob(&second).can_view_agent("alice"));
+        let admin = controller.view_for_subject(Some("root@example.test"));
+        assert!(admin.in_mob(&second).can_view_agent("alice"));
+
+        controller
+            .upsert_rule(AccessRule {
+                id: "everyone-views-second".to_string(),
+                actions: vec!["agent.view".to_string()],
+                subjects: vec!["*".to_string()],
+                mobs: vec!["second".to_string()],
+                ..AccessRule::default()
+            })
+            .expect("rule");
+        let bob = controller.view_for_subject(Some("bob@example.test"));
+        assert!(bob.in_mob(&second).can_view_agent("alice"));
+        // A refreshed view keeps reading the mob it was taken for: `dora`
+        // is an agent of the second mob only.
+        controller.record_agent_attributes_in(
+            &second,
+            AgentResourceAttributes {
+                identity: "dora".to_string(),
+                ..member_keyed_attributes("worker")
+            },
+        );
+        let refreshed = bob.in_mob(&second).refreshed();
+        assert!(refreshed.knows_agent("dora") && refreshed.can_view_agent("dora"));
+        assert!(!bob.refreshed().knows_agent("dora"));
+    }
+
+    /// A runtime alias names one incarnation of a member. Which alias is
+    /// current is recorded per mob: the current alias of one mob's `alice`
+    /// is not an alias of the other mob's.
+    #[test]
+    fn member_keyed_access_a_runtime_alias_is_current_in_its_own_mob_only() {
+        let second = MobId::from("second");
+        let retire = crate::access::ACTION_AGENT_RETIRE;
+        let controller = AccessController::new(AccessControlConfig {
+            enabled: true,
+            admins: vec!["root@example.test".to_string()],
+            rules: vec![AccessRule {
+                id: "retire-all".to_string(),
+                actions: vec![retire.to_string()],
+                agents: vec!["*".to_string()],
+                mobs: vec!["*".to_string()],
+                ..AccessRule::default()
+            }],
+            ..AccessControlConfig::default()
+        })
+        .expect("controller");
+        controller.record_agent_attributes(member_keyed_attributes("worker"));
+        controller.record_agent_attributes_in(&second, member_keyed_attributes("worker"));
+        controller.record_current_runtime_aliases([(
+            "alice".to_string(),
+            Some("rt:alice:2".to_string()),
+        )]);
+        controller.record_current_runtime_aliases_in(
+            &second,
+            [("alice".to_string(), Some("rt:alice:5".to_string()))],
+        );
+        let view = controller.view_for_subject(None);
+        let in_second = view.in_mob(&second);
+        assert_eq!(
+            [
+                view.allows_agent(retire, "rt:alice:2"),
+                view.allows_agent(retire, "rt:alice:5"),
+                in_second.allows_agent(retire, "rt:alice:5"),
+                in_second.allows_agent(retire, "rt:alice:2"),
+            ],
+            [true, false, true, false],
+            "each mob's alice has her own current incarnation"
+        );
+    }
+
+    fn member_keyed_rules(rules: Vec<AccessRule>) -> AccessController {
+        AccessController::new(AccessControlConfig {
+            enabled: true,
+            admins: vec!["root@example.test".to_string()],
+            rules,
+            ..AccessControlConfig::default()
+        })
+        .expect("controller")
+    }
+
+    fn member_keyed_view_rule(id: &str, effect: AccessEffect, mobs: &[&str]) -> AccessRule {
+        AccessRule {
+            id: id.to_string(),
+            effect,
+            actions: vec!["agent.view".to_string()],
+            mobs: mobs.iter().map(|mob| (*mob).to_string()).collect(),
+            ..AccessRule::default()
+        }
+    }
+
+    /// How a row takes one caller's view of a controller.
+    type MemberKeyedCaller = fn(&AccessController) -> AccessView;
+
+    /// The one operator of a console that identifies nobody: the caller
+    /// for whom the rules alone decide a record whose member attributes
+    /// were not captured.
+    fn member_keyed_operator(controller: &AccessController) -> AccessView {
+        controller.view_for_subject(None).on_console(false)
+    }
+
+    /// Callers a console keeps apart from other people, each by the way
+    /// its view is taken.
+    fn member_keyed_kept_apart_callers() -> [(&'static str, MemberKeyedCaller); 4] {
+        [
+            ("a person who is not an admin", |controller| {
+                controller.view_for_subject(Some("bob@example.test"))
+            }),
+            ("a person, whatever is said of the console", |controller| {
+                controller
+                    .view_for_subject(Some("bob@example.test"))
+                    .on_console(false)
+            }),
+            ("a caller the console did not identify", |controller| {
+                controller.view_for_subject(None).on_console(true)
+            }),
+            ("a caller of a console nothing was said of", |controller| {
+                controller.view_for_subject(None)
+            }),
+        ]
+    }
+
+    /// Every agent is viewable in every mob, and a deny on the role
+    /// `secret` lists the default mob `launch` only.
+    fn member_keyed_secret_role_denied_in_launch() -> AccessController {
+        member_keyed_rules(vec![
+            member_keyed_view_rule("all-view", AccessEffect::Allow, &["*"]),
+            AccessRule {
+                roles: vec!["secret".to_string()],
+                ..member_keyed_view_rule("launch-secret-role", AccessEffect::Deny, &["launch"])
+            },
+        ])
+    }
+
+    /// An allow that names the default mob `launch` by its id.
+    fn member_keyed_launch_allowed_by_id() -> AccessController {
+        member_keyed_rules(vec![member_keyed_view_rule(
+            "launch-views",
+            AccessEffect::Allow,
+            &["launch"],
+        )])
+    }
+
+    /// A deny that names the default mob `launch` by its id, under an allow
+    /// for every mob.
+    fn member_keyed_launch_denied_by_id() -> AccessController {
+        member_keyed_rules(vec![
+            member_keyed_view_rule("all-view", AccessEffect::Allow, &["*"]),
+            member_keyed_view_rule("launch-hidden", AccessEffect::Deny, &["launch"]),
+        ])
+    }
+
+    /// One caller's answers on `alice`, an agent of the default mob
+    /// `launch` and of the mob `second`:
+    ///
+    /// - `agent.view` on the default mob's agent, on every path that reads
+    ///   her: a plain view (roster, send, timeline) by its three checks, a
+    ///   view of the default mob taken by its id, and the views a stored
+    ///   record is judged in (gating, timeline), one that names no mob and
+    ///   one that names the default mob by its id;
+    /// - `agent.view` on a record of hers whose member attributes were not
+    ///   captured, on the same four views;
+    /// - both questions on the second mob's `alice`.
+    fn member_keyed_default_mob_by_id_answers(
+        controller: &AccessController,
+        caller: MemberKeyedCaller,
+    ) -> ([bool; 6], [bool; 4], [bool; 2]) {
+        let default_mob = member_keyed_default_mob();
+        let second = MobId::from("second");
+        controller.bind_default_mob(&default_mob);
+        controller.record_agent_attributes(member_keyed_attributes("worker"));
+        controller.record_agent_attributes_in(&second, member_keyed_attributes("worker"));
+        controller.record_agent_attributes_in(
+            default_mob.mob_id(),
+            AgentResourceAttributes {
+                identity: "dora".to_string(),
+                ..member_keyed_attributes("worker")
+            },
+        );
+        let plain = caller(controller);
+        assert!(
+            plain.knows_agent("dora"),
+            "recorded by the default mob's id"
+        );
+        let by_id = plain.in_mob(default_mob.mob_id());
+        let stored = plain.in_stored_mob(None);
+        let stored_by_id = plain.in_stored_mob(Some(default_mob.mob_id()));
+        let in_second = plain.in_mob(&second);
+        (
+            [
+                plain.can_view_agent("alice"),
+                plain.allows_agent("agent.view", "alice"),
+                plain
+                    .decide("agent.view", &AccessResource::for_identity("alice"))
+                    .is_allow(),
+                by_id.can_view_agent("alice"),
+                stored.can_view_agent("alice"),
+                stored_by_id.can_view_agent("alice"),
+            ],
+            [
+                plain.can_view_uncaptured_member("alice"),
+                by_id.can_view_uncaptured_member("alice"),
+                stored.can_view_uncaptured_member("alice"),
+                stored_by_id.can_view_uncaptured_member("alice"),
+            ],
+            [
+                in_second.can_view_agent("alice"),
+                in_second.can_view_uncaptured_member("alice"),
+            ],
+        )
+    }
+
+    /// A rule may name the default mob by its id. It is one rule on every
+    /// path: a plain view (roster, send, timeline), a view of the default
+    /// mob taken by its id, and the view a stored record is judged in
+    /// (gating, timeline) give one answer, for an allow and for a deny, on
+    /// the agent and on a record of hers whose member attributes were not
+    /// captured. The caller is the one operator of a console that
+    /// identifies nobody: the rules decide every one of these answers for
+    /// it. A caller a console keeps apart from other people is the next
+    /// row's.
+    #[test]
+    fn member_keyed_access_a_rule_naming_the_default_mob_by_id_is_one_answer_on_every_path() {
+        assert_eq!(
+            member_keyed_default_mob_by_id_answers(
+                &member_keyed_launch_allowed_by_id(),
+                member_keyed_operator
+            ),
+            ([true; 6], [true; 4], [false, false]),
+            "an allow that names the default mob by id"
+        );
+        assert_eq!(
+            member_keyed_default_mob_by_id_answers(
+                &member_keyed_launch_denied_by_id(),
+                member_keyed_operator
+            ),
+            ([false; 6], [false; 4], [true, true]),
+            "a deny that names the default mob by id"
+        );
+    }
+
+    /// The row above for a caller a console keeps apart from other people.
+    /// A record whose member attributes were not captured is refused on
+    /// every path, whatever the rule says: on a plain view, on a view of
+    /// the default mob taken by its id, on the views a stored record is
+    /// judged in, and in the second mob where the allow for every mob would
+    /// grant it. The agent itself is answered by the rule, one answer on
+    /// every path, as for the operator. An admin reads both on every path.
+    #[test]
+    fn member_keyed_access_a_caller_kept_apart_is_refused_an_uncaptured_record_on_every_path() {
+        for (caller, kept_apart) in member_keyed_kept_apart_callers() {
+            assert_eq!(
+                member_keyed_default_mob_by_id_answers(
+                    &member_keyed_launch_allowed_by_id(),
+                    kept_apart
+                ),
+                ([true; 6], [false; 4], [false, false]),
+                "{caller}: an allow that names the default mob by id"
+            );
+            assert_eq!(
+                member_keyed_default_mob_by_id_answers(
+                    &member_keyed_launch_denied_by_id(),
+                    kept_apart
+                ),
+                ([false; 6], [false; 4], [true, false]),
+                "{caller}: a deny that names the default mob by id"
+            );
+        }
+        let admin: MemberKeyedCaller =
+            |controller| controller.view_for_subject(Some("root@example.test"));
+        for controller in [
+            member_keyed_launch_allowed_by_id(),
+            member_keyed_launch_denied_by_id(),
+        ] {
+            assert_eq!(
+                member_keyed_default_mob_by_id_answers(&controller, admin),
+                ([true; 6], [true; 4], [true, true]),
+                "an admin"
+            );
+        }
+    }
+
+    /// A controller that was never told the host's default mob cannot tell
+    /// whether a mob a rule lists is the default mob. It stays closed both
+    /// ways: an allow that lists mobs grants nothing there, and a deny that
+    /// lists mobs holds.
+    #[test]
+    fn member_keyed_access_without_a_known_default_mob_a_listed_mob_grants_nothing_and_denies() {
+        let allow = member_keyed_rules(vec![member_keyed_view_rule(
+            "launch-views",
+            AccessEffect::Allow,
+            &["launch"],
+        )]);
+        assert!(!allow.view_for_subject(None).can_view_agent("alice"));
+        let every = member_keyed_rules(vec![member_keyed_view_rule(
+            "all-view",
+            AccessEffect::Allow,
+            &["*"],
+        )]);
+        assert!(every.view_for_subject(None).can_view_agent("alice"));
+        let deny = member_keyed_rules(vec![
+            member_keyed_view_rule("all-view", AccessEffect::Allow, &["*"]),
+            member_keyed_view_rule("launch-hidden", AccessEffect::Deny, &["launch"]),
+        ]);
+        let view = deny.view_for_subject(None);
+        assert!(!view.can_view_agent("alice"));
+        assert!(!view.allows_agent("agent.view", "alice"));
+    }
+
+    /// A check may name the mob of its agent itself. The view reads that
+    /// name through the one default mob the controller was told: the
+    /// default mob's id is the default mob however the caller spells it,
+    /// and any other id is another mob, also when the caller calls it the
+    /// default. A controller that was never told its default mob takes no
+    /// caller's word for it.
+    #[test]
+    fn member_keyed_access_a_checks_named_mob_is_read_through_the_controllers_default_mob() {
+        // An allow that lists no mobs grants in the default mob only, so
+        // it tells which mob a check was read as.
+        let rules = || {
+            member_keyed_rules(vec![member_keyed_view_rule(
+                "default-views",
+                AccessEffect::Allow,
+                &[],
+            )])
+        };
+        let allowed = |controller: &AccessController, mob: AccessResourceMob<'_>| {
+            controller
+                .view_for_subject(None)
+                .decide(
+                    "agent.view",
+                    &AccessResource::for_identity("alice").in_mob(mob),
+                )
+                .is_allow()
+        };
+        let told = rules();
+        told.bind_default_mob(&member_keyed_default_mob());
+        assert!(allowed(&told, AccessResourceMob::Default(None)));
+        assert!(
+            allowed(&told, AccessResourceMob::Other("launch")),
+            "the default mob named as another mob is the default mob"
+        );
+        assert!(allowed(&told, AccessResourceMob::Default(Some("launch"))));
+        assert!(!allowed(&told, AccessResourceMob::Other("second")));
+        assert!(
+            !allowed(&told, AccessResourceMob::Default(Some("second"))),
+            "a check cannot call another mob the default mob"
+        );
+
+        let untold = rules();
+        assert!(allowed(&untold, AccessResourceMob::Default(None)));
+        assert!(!allowed(&untold, AccessResourceMob::Other("launch")));
+        assert!(
+            !allowed(&untold, AccessResourceMob::Default(Some("launch"))),
+            "a controller that was not told its default mob takes no check's word for it"
+        );
+    }
+
+    /// A stored record whose mob is blank (empty or only white space) names
+    /// no mob. No release writes one: a record written before records
+    /// carried a mob has no mob at all, and is the default mob's. So a
+    /// record with a blank mob is withheld from everyone but an
+    /// administrator: no rule reaches it, neither an allow written for the
+    /// default mob nor one that lists every mob, before or after the view
+    /// is refreshed, and a blank mob named to a view is no better.
+    #[test]
+    fn member_keyed_access_a_stored_record_with_a_blank_mob_is_withheld_from_all_but_administrators()
+     {
+        let controller = member_keyed_rules(vec![
+            member_keyed_view_rule("default-views", AccessEffect::Allow, &[]),
+            member_keyed_view_rule("every-mob-views", AccessEffect::Allow, &["*"]),
+        ]);
+        controller.bind_default_mob(&member_keyed_default_mob());
+        let view = controller.view_for_subject(None);
+        let admin = controller.view_for_subject(Some("root@example.test"));
+        // What the rules reach: a record without a mob (the default mob's)
+        // and a record of another mob.
+        assert!(view.in_stored_mob(None).can_view_agent("alice"));
+        assert!(
+            view.in_stored_mob(Some(&MobId::from("second")))
+                .can_view_agent("alice")
+        );
+        for blank in ["", " ", "\t "] {
+            let blank_mob = MobId::from(blank);
+            let of_blank = view.in_stored_mob(Some(&blank_mob));
+            assert!(!of_blank.can_view_agent("alice"), "{blank:?}");
+            assert!(
+                !of_blank.refreshed().can_view_agent("alice"),
+                "{blank:?}: after a refresh"
+            );
+            assert!(
+                !view.in_mob(&blank_mob).can_view_agent("alice"),
+                "{blank:?}: named to a view as a mob"
+            );
+            assert!(
+                admin
+                    .in_stored_mob(Some(&blank_mob))
+                    .can_view_agent("alice"),
+                "{blank:?}: an administrator reads it"
+            );
+        }
+    }
+
+    /// An allow that lists no mobs reaches a record without a mob and no
+    /// record of another mob.
+    #[test]
+    fn member_keyed_access_a_stored_record_without_a_mob_is_the_default_mobs() {
+        let controller = member_keyed_rules(vec![member_keyed_view_rule(
+            "default-views",
+            AccessEffect::Allow,
+            &[],
+        )]);
+        controller.bind_default_mob(&member_keyed_default_mob());
+        let view = controller.view_for_subject(None);
+        assert!(view.in_stored_mob(None).can_view_agent("alice"));
+        assert!(
+            !view
+                .in_stored_mob(Some(&MobId::from("second")))
+                .can_view_agent("alice")
+        );
+    }
+
+    /// A deny that lists no mobs holds in every mob of the host, and an
+    /// allow that lists none grants in the default mob only. So a deny
+    /// written for a host with one mob keeps denying when a second mob
+    /// appears, and nothing is granted there until a rule names it. The
+    /// agents of the first question are ones the records were told of in
+    /// both mobs: the deny holds for the agent it names and reaches no
+    /// other. A name the records were never told of cannot be ruled out of
+    /// a deny that names another agent, so it is refused in every mob while
+    /// that deny applies. The
+    /// record questions are asked by the one operator of a console that
+    /// identifies nobody, for whom the rules decide them; a caller a console
+    /// keeps apart from other people is the next row's.
+    #[test]
+    fn member_keyed_access_a_deny_without_mobs_denies_in_every_mob() {
+        let default_mob = member_keyed_default_mob();
+        let second = MobId::from("second");
+        let by_name = member_keyed_rules(vec![
+            member_keyed_view_rule("all-view", AccessEffect::Allow, &["*"]),
+            AccessRule {
+                agents: vec!["alice".to_string()],
+                ..member_keyed_view_rule("alice-hidden", AccessEffect::Deny, &[])
+            },
+        ]);
+        by_name.bind_default_mob(&default_mob);
+        // The records are told of `alice` and of `carol` in both mobs, and
+        // of `dana` in neither.
+        for name in ["alice", "carol"] {
+            let known = AgentResourceAttributes {
+                identity: name.to_string(),
+                ..member_keyed_attributes("worker")
+            };
+            by_name.record_agent_attributes(known.clone());
+            by_name.record_agent_attributes_in(&second, known);
+        }
+        let view = by_name.view_for_subject(None);
+        let in_second = view.in_mob(&second);
+        assert_eq!(
+            [
+                view.can_view_agent("alice"),
+                in_second.can_view_agent("alice"),
+                view.can_view_agent("carol"),
+                in_second.can_view_agent("carol"),
+            ],
+            [false, false, true, true],
+            "the deny holds in every mob for the agent it names, and for no other agent the \
+             records know"
+        );
+        assert_eq!(
+            [
+                view.knows_agent("dana"),
+                view.can_view_agent("dana"),
+                in_second.knows_agent("dana"),
+                in_second.can_view_agent("dana"),
+            ],
+            [false; 4],
+            "a name the records do not know is refused in every mob while the deny applies"
+        );
+
+        // A record whose member attributes were not captured is asked for
+        // by the one operator of a console that identifies nobody: the
+        // rules alone decide it for that caller. With no deny the operator
+        // reads it in every mob.
+        let open = member_keyed_rules(vec![member_keyed_view_rule(
+            "all-view",
+            AccessEffect::Allow,
+            &["*"],
+        )]);
+        open.bind_default_mob(&default_mob);
+        let view = member_keyed_operator(&open);
+        let in_second = view.in_mob(&second);
+        for view in [&view, &in_second] {
+            assert!(view.can_view_uncaptured_member("alice"));
+            assert!(!view.has_deny_undecidable_by_identity("agent.view", "alice"));
+        }
+
+        // A deny by role cannot be decided for such a record: the record is
+        // refused in every mob.
+        let by_role = member_keyed_rules(vec![
+            member_keyed_view_rule("all-view", AccessEffect::Allow, &["*"]),
+            AccessRule {
+                roles: vec!["secret".to_string()],
+                ..member_keyed_view_rule("deny-secret-role", AccessEffect::Deny, &[])
+            },
+        ]);
+        by_role.bind_default_mob(&default_mob);
+        let view = member_keyed_operator(&by_role);
+        let in_second = view.in_mob(&second);
+        for view in [&view, &in_second] {
+            assert!(!view.can_view_uncaptured_member("alice"));
+            assert!(view.has_deny_undecidable_by_identity("agent.view", "alice"));
+        }
+
+        // A deny that lists mobs holds in those mobs, and in no other.
+        let listed = member_keyed_secret_role_denied_in_launch();
+        listed.bind_default_mob(&default_mob);
+        let view = member_keyed_operator(&listed);
+        let in_second = view.in_mob(&second);
+        assert!(view.has_deny_undecidable_by_identity("agent.view", "alice"));
+        assert!(!view.can_view_uncaptured_member("alice"));
+        assert!(!in_second.has_deny_undecidable_by_identity("agent.view", "alice"));
+        assert!(in_second.can_view_uncaptured_member("alice"));
+
+        let allow = member_keyed_rules(vec![member_keyed_view_rule(
+            "default-views",
+            AccessEffect::Allow,
+            &[],
+        )]);
+        allow.bind_default_mob(&default_mob);
+        let view = allow.view_for_subject(None);
+        assert!(view.can_view_agent("alice"));
+        assert!(!view.in_mob(&second).can_view_agent("alice"));
+    }
+
+    /// The row above for a caller a console keeps apart from other people
+    /// (a person who is not an admin, and a caller the console did not
+    /// identify): a record whose member attributes were not captured is
+    /// refused in every mob and on every view taken for a mob, also where
+    /// no deny applies and an allow reaches the mob. The rules themselves
+    /// answer what they answer the operator, and an admin reads the record
+    /// in every mob.
+    #[test]
+    fn member_keyed_access_a_caller_kept_apart_reads_no_uncaptured_record_in_any_mob() {
+        let default_mob = member_keyed_default_mob();
+        let second = MobId::from("second");
+        let open = member_keyed_rules(vec![member_keyed_view_rule(
+            "all-view",
+            AccessEffect::Allow,
+            &["*"],
+        )]);
+        let listed = member_keyed_secret_role_denied_in_launch();
+        for controller in [&open, &listed] {
+            controller.bind_default_mob(&default_mob);
+        }
+        for (caller, kept_apart) in member_keyed_kept_apart_callers() {
+            for (rules, controller) in [("no deny", &open), ("a deny in launch", &listed)] {
+                let view = kept_apart(controller);
+                let in_second = view.in_mob(&second);
+                assert_eq!(
+                    [
+                        view.can_view_uncaptured_member("alice"),
+                        view.in_mob(default_mob.mob_id())
+                            .can_view_uncaptured_member("alice"),
+                        view.in_stored_mob(None).can_view_uncaptured_member("alice"),
+                        view.in_stored_mob(Some(default_mob.mob_id()))
+                            .can_view_uncaptured_member("alice"),
+                        in_second.can_view_uncaptured_member("alice"),
+                        view.in_stored_mob(Some(&second))
+                            .can_view_uncaptured_member("alice"),
+                        in_second.refreshed().can_view_uncaptured_member("alice"),
+                    ],
+                    [false; 7],
+                    "{caller}, {rules}: refused in the default mob and in the second"
+                );
+                assert!(
+                    in_second.can_view_agent("alice"),
+                    "{caller}, {rules}: the allow reaches the second mob's agent"
+                );
+            }
+            // The rules answer this caller what they answer the operator.
+            let view = kept_apart(&listed);
+            assert_eq!(
+                [
+                    view.has_deny_undecidable_by_identity("agent.view", "alice"),
+                    view.in_mob(&second)
+                        .has_deny_undecidable_by_identity("agent.view", "alice"),
+                ],
+                [true, false],
+                "{caller}"
+            );
+        }
+        let admin = listed.view_for_subject(Some("root@example.test"));
+        assert_eq!(
+            [
+                admin.can_view_uncaptured_member("alice"),
+                admin.in_mob(&second).can_view_uncaptured_member("alice"),
+                admin
+                    .in_stored_mob(Some(&second))
+                    .can_view_uncaptured_member("alice"),
+            ],
+            [true; 3],
+            "an admin reads it in every mob"
+        );
+    }
+
+    /// An allow rule for `subjects` and `groups` whose `mobs` are `mobs`.
+    fn addressing_rule(id: &str, subjects: &[&str], groups: &[&str], mobs: &[&str]) -> AccessRule {
+        AccessRule {
+            subjects: subjects.iter().map(|name| (*name).to_string()).collect(),
+            groups: groups.iter().map(|name| (*name).to_string()).collect(),
+            ..member_keyed_view_rule(id, AccessEffect::Allow, mobs)
+        }
+    }
+
+    /// A caller may address a mob other than the launch mob when access is
+    /// not enforced, when the caller is an administrator, or when an allow
+    /// rule that applies to the caller selects that mob. An allow that
+    /// lists no mobs selects no other mob, whoever it applies to.
+    #[test]
+    fn a_caller_addresses_another_mob_through_an_allow_that_selects_it() {
+        let second = MobId::from("second");
+        let third = MobId::from("third");
+        let controller = AccessController::new(AccessControlConfig {
+            enabled: true,
+            admins: vec!["root@example.test".to_string()],
+            groups: BTreeMap::from([(
+                "second-team".to_string(),
+                crate::access::model::AccessGroup {
+                    description: None,
+                    members: vec!["member@example.test".to_string()],
+                },
+            )]),
+            rules: vec![
+                addressing_rule("named", &["named@example.test"], &[], &["second"]),
+                addressing_rule("team", &[], &["second-team"], &["second"]),
+                addressing_rule("launch-only", &["launch@example.test"], &[], &[]),
+                addressing_rule("everywhere", &["all@example.test"], &[], &["*"]),
+            ],
+            ..AccessControlConfig::default()
+        })
+        .expect("controller");
+        let may = |subject: Option<&str>, mob: &MobId| {
+            controller
+                .view_for_subject(subject)
+                .may_address_other_mob(mob)
+        };
+        for (subject, of_second, of_third) in [
+            (Some("root@example.test"), true, true),
+            (Some("named@example.test"), true, false),
+            (Some("member@example.test"), true, false),
+            (Some("all@example.test"), true, true),
+            (Some("launch@example.test"), false, false),
+            (Some("nobody@example.test"), false, false),
+            (None, false, false),
+        ] {
+            assert_eq!(
+                [may(subject, &second), may(subject, &third)],
+                [of_second, of_third],
+                "{subject:?}"
+            );
+        }
+
+        // Not enforced: every caller may, a caller who is not signed in
+        // included; so may every caller of a console without access rules.
+        let open = AccessController::new(AccessControlConfig::default()).expect("controller");
+        assert!(
+            open.view_for_subject(None).may_address_other_mob(&second)
+                && open
+                    .view_for_subject(Some("nobody@example.test"))
+                    .may_address_other_mob(&second)
+        );
+        assert!(
+            AccessController::audience_only()
+                .view_for_subject(None)
+                .may_address_other_mob(&second)
+        );
+    }
+
+    /// Who an allow that selects a mob applies to is read as every access
+    /// check reads it: `"*"` is every signed-in caller and nobody else, and
+    /// a rule that lists neither subjects nor groups is every caller.
+    #[test]
+    fn an_allow_that_selects_a_mob_applies_to_the_callers_every_check_reads() {
+        let second = MobId::from("second");
+        let signed_in = member_keyed_rules(vec![addressing_rule("any", &["*"], &[], &["second"])]);
+        assert!(
+            signed_in
+                .view_for_subject(Some("anyone@example.test"))
+                .may_address_other_mob(&second)
+        );
+        assert!(
+            !signed_in
+                .view_for_subject(None)
+                .may_address_other_mob(&second)
+        );
+        let everyone = member_keyed_rules(vec![addressing_rule("all", &[], &[], &["second"])]);
+        assert!(
+            everyone
+                .view_for_subject(None)
+                .may_address_other_mob(&second)
+        );
+    }
+
+    /// A deny rule neither lets a caller address a mob nor takes the
+    /// address away: a deny alone, which reaches every mob, selects none
+    /// for its caller, and a caller whose allow selects a mob addresses it
+    /// whatever a deny takes away in it. The answer does not depend on the
+    /// default mob the controller was told, nor on the mob the view was
+    /// taken for.
+    #[test]
+    fn a_deny_rule_neither_gives_nor_takes_the_address_of_a_mob() {
+        let second = MobId::from("second");
+        let controller = member_keyed_rules(vec![
+            AccessRule {
+                subjects: vec!["denied@example.test".to_string()],
+                ..member_keyed_view_rule("deny-alone", AccessEffect::Deny, &[])
+            },
+            addressing_rule("both-allow", &["both@example.test"], &[], &["second"]),
+            AccessRule {
+                subjects: vec!["both@example.test".to_string()],
+                actions: vec!["*".to_string()],
+                ..member_keyed_view_rule("both-deny", AccessEffect::Deny, &["second"])
+            },
+        ]);
+        let answers = |controller: &AccessController| {
+            [
+                controller
+                    .view_for_subject(Some("denied@example.test"))
+                    .may_address_other_mob(&second),
+                controller
+                    .view_for_subject(Some("both@example.test"))
+                    .may_address_other_mob(&second),
+                controller
+                    .view_for_subject(Some("both@example.test"))
+                    .in_mob(&second)
+                    .may_address_other_mob(&second),
+            ]
+        };
+        assert_eq!(answers(&controller), [false, true, true]);
+        controller.bind_default_mob(&member_keyed_default_mob());
+        assert_eq!(answers(&controller), [false, true, true]);
     }
 
     fn seatings(of: &[(u64, Option<&str>)]) -> NameSeatings {
@@ -5521,5 +7790,56 @@ mod spawn_facts_not_known_tests {
             rule("its-role", AccessEffect::Allow, role),
             rule("off-a-spawner", AccessEffect::Deny, named("alpha")),
         ]));
+    }
+
+    /// A member with no owner of its own, of a mob whose owner cannot be
+    /// told, carries the owner no caller is. The one operator of a console
+    /// that identifies nobody, with no access control, is shown it. While a
+    /// runtime the controller was primed from still owes the first read of
+    /// who its members are private to, that operator is kept out of it as
+    /// every other caller is: of its row and of a record whose captured
+    /// lineage names that owner. Once the read is found done the operator
+    /// is shown both again.
+    #[test]
+    fn the_operator_is_kept_out_of_a_member_of_unknown_owner_while_a_first_read_is_owed() {
+        let of_unknown_owner = |identity: &str| AgentResourceAttributes {
+            identity: identity.to_string(),
+            agent_id: Some(identity.to_string()),
+            role: None,
+            labels: BTreeMap::from([(
+                crate::access::PRIVATE_TO_LABEL.to_string(),
+                UNDECIDED_PRIVATE_OWNER.to_string(),
+            )]),
+        };
+        let controller = AccessController::disabled();
+        controller.record_agent_attributes(of_unknown_owner("team/aide"));
+        // A record of a member the attribute cache does not hold.
+        let captured = [CapturedLineageLink {
+            identity: "team/usher".to_string(),
+            attributes: Some(of_unknown_owner("team/usher")),
+        }];
+        let operator = controller.view_for_subject(None).on_console(false);
+        assert!(!operator.hides_agent("team/aide"));
+        assert!(operator.can_view_captured_member(&captured));
+
+        let record = crate::private_owners::PrivateOwners::default().record_id();
+        let by_route = PrivateOwnerRecordReader::OwnRuntime;
+        controller.record_private_owner_record(record, by_route, true);
+        assert!(
+            operator.hides_agent("team/aide"),
+            "the operator is kept out while the first read is owed"
+        );
+        assert!(operator.refreshed().hides_agent("team/aide"));
+        assert!(
+            !operator.can_view_captured_member(&captured),
+            "a record of such a member is refused while the first read is owed"
+        );
+
+        controller.record_private_owner_record(record, by_route, false);
+        assert!(
+            !operator.hides_agent("team/aide"),
+            "the operator is shown the member once the read is done"
+        );
+        assert!(operator.can_view_captured_member(&captured));
     }
 }

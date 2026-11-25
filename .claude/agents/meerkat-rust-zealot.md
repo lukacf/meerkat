@@ -98,7 +98,7 @@ Apply the Rust Design Guidelines with extreme prejudice:
   preview-enabled OpenAI examples; prefer broadly available `gpt-5.5` for
   generally runnable OpenAI examples. Current Anthropic and Gemini examples
   use `claude-opus-5-5` and `gemini-3.8-flash` (the Gemini default
-  `gemini-4-argon` needs a paid Gemini API tier).
+  `gemini-4-neon` needs a paid Gemini API tier).
 - No older model names (gpt-4o-mini, gemini-2.0-flash, claude-3-7-sonnet-*)
 
 ### 6. VERSION AND SCHEMA HYGIENE

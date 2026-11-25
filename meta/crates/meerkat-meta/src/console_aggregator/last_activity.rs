@@ -233,6 +233,12 @@ impl LastActivityCache {
         let (outcome, acted) = {
             let _log = self.log.read().await;
             let outcome = store.append_if_absent(frame).await?;
+            // The entries are the default mob's members', by name: a frame
+            // of another mob's member of that name is not that member's
+            // activity, nor its departure.
+            if outcome.frame.mob_id.is_some() {
+                return Ok(outcome);
+            }
             let acted = outcome.disposition == AppendDisposition::Inserted
                 && is_activity_frame(&outcome.frame);
             if acted {

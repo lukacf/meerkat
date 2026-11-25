@@ -817,11 +817,21 @@ class ExternalToolDef:
 
 @dataclass(frozen=True)
 class AgentBuildContext:
-    """Read-only context provided to AgentCustomizer at build time."""
+    """Read-only context provided to AgentCustomizer at build time.
+
+    ``mob_id`` is the mob the member is in, as the host named it with the
+    callback; ``None`` when the host named none (a host of an earlier
+    release, which serves its own mob only). Two mobs of one host can each
+    have a member called ``identity``. On the wire the mob rides beside the
+    context, so ``to_dict()`` and ``from_dict()`` do not carry it. It is
+    given by keyword only: the context is built by position as before, and
+    a subclass may add fields of its own without defaults.
+    """
 
     identity: str
     active_peers: list[str]
     managed_edges: list[ManagedPeerEdge]
+    mob_id: str | None = field(default=None, kw_only=True)
 
     def to_dict(self) -> dict[str, Any]:
         return {

@@ -45,6 +45,8 @@ mod parallel_resume_restore;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod poisoned_scope_rows;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+mod profile_web_search_rows;
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod respawn_abandonment_replay_rows;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod retryable_restore_rows;
@@ -58,6 +60,8 @@ mod seat_build_inputs;
 mod seat_comms_key;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod seat_declared_wiring;
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+mod seat_lineage_rows;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod shared_transport_key_rows;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
@@ -1818,6 +1822,8 @@ struct CreateSessionRecord {
     application_tool_policy: meerkat_core::ApplicationToolPolicyBinding,
     /// The build's web search override.
     override_web_search: ToolCategoryOverride,
+    /// The tool families of the build's own tool grant gate.
+    grant_gated_families: BTreeSet<String>,
     /// Whether the build carries a final dispatch admission.
     tool_dispatch_admission: bool,
     /// The build's shell environment.
@@ -4926,6 +4932,12 @@ impl MockSessionService {
                     .as_ref()
                     .map(|build| build.override_web_search)
                     .unwrap_or(ToolCategoryOverride::Inherit),
+                grant_gated_families: req
+                    .build
+                    .as_ref()
+                    .and_then(|build| build.grant_gated_tools.as_ref())
+                    .map(|gate| gate.families.clone())
+                    .unwrap_or_default(),
                 tool_dispatch_admission: req
                     .build
                     .as_ref()
@@ -9386,6 +9398,7 @@ fn sample_definition() -> MobDefinition {
                 mob: true,
                 schedule: false,
                 image_generation: false,
+                web_search: None,
                 read_only: false,
                 deny: Vec::new(),
                 mcp: vec![],
@@ -96647,6 +96660,7 @@ fn summarize_mob_runtime_success(probe: MobRuntimeParityProbeInput, summary: &st
 fn summarize_mob_runtime_error(error: &MobError) -> String {
     match error {
         MobError::MobNotFound(_) => "mob_not_found".to_string(),
+        MobError::MobAlreadyExists(_) => "mob_already_exists".to_string(),
         MobError::ProfileNotFound(_) => "profile_not_found".to_string(),
         MobError::MemberNotFound(_) => "meerkat_not_found".to_string(),
         MobError::MemberSessionNotLive { .. } => "member_session_not_live".to_string(),

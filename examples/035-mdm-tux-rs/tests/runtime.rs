@@ -36,7 +36,7 @@ fn comms_config(root: &Path) -> ResolvedCommsConfig {
 }
 
 fn build() -> AgentBuildConfig {
-    let mut build = AgentBuildConfig::new("gpt-6-astra");
+    let mut build = AgentBuildConfig::new("gpt-6.2-astra");
     build.provider = Some(meerkat_core::Provider::OpenAI);
     build.system_prompt =
         SystemPromptOverride::Set("Synthetic managed system instructions.".into());
@@ -961,7 +961,7 @@ async fn actual_target_boot_and_restart_advertise_the_same_rpc_session() {
             "--name",
             "synthetic-target",
             "--model",
-            "gpt-6-astra",
+            "gpt-6.2-astra",
             "--provider",
             "openai",
             "--advertise",

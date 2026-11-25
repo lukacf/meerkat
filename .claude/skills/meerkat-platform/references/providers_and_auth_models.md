@@ -78,7 +78,7 @@ Rules:
 | No hints at all (global default) | `gpt-6-astra` |
 | Anthropic | `claude-opus-5-5` |
 | OpenAI | `gpt-6-astra` |
-| Gemini | `gemini-4-argon` (paid Gemini API tiers; on the free tier select `gemini-4-hydrogen` (0.9.15) or `gemini-3.8-flash`, for example `[models] gemini = "gemini-3.8-flash"`) |
+| Gemini | `gemini-4-neon` (paid Gemini API tiers; on the free tier select `gemini-4-hydrogen` (0.9.15) or `gemini-3.8-flash`, for example `[models] gemini = "gemini-3.8-flash"`) |
 | Self-hosted | `[self_hosted] default_model`, or the only configured alias |
 | Image generation (OpenAI / Gemini) | `gpt-image-2.6-sunburst` / `gemini-nano-banana-2.1` |
 
@@ -168,22 +168,23 @@ contains dots), it runs as a model id with no catalog row, without the
 Gemini (all 1,048,576 / 65,536 tokens, thinking via `thinking_level`):
 `gemini-4-carbon` (0.9.12, R; Google's strongest Gemini 4 reasoning model;
 paid Gemini API tiers only; levels `low`, `medium`, `high`, default
-`medium`), `gemini-4-argon` (default, R; paid Gemini API tiers only; levels
+`medium`), `gemini-4-argon` (R; paid Gemini API tiers only; levels
 `low`, `medium`, `high`, default `medium`), `gemini-4-hydrogen` (0.9.15, R;
 Google's fast Gemini 4 model, on the free tier and the paid Gemini API
 tiers; levels `low`, `medium`, `high`; Google's default for it is `high`,
-which applies when a request names no level), `gemini-3.8-flash` (R; the
+which applies when a request names no level), `gemini-4-neon` (default, R; stable,
+paid Gemini API tiers; low/medium/high, provider default high), `gemini-3.8-flash` (R; the
 recommended Flash model, also on the free tier), then `gemini-3.7-flash`,
 `gemini-3.6-flash`, `gemini-3.5-flash`, `gemini-3.5-flash-lite`,
 `gemini-3.1-pro-preview`, `gemini-3.1-flash-lite` and
 `gemini-3.1-flash-lite-preview` (S). `gemini-4-carbon`, `gemini-4-argon`,
 `gemini-3.8-flash`, `gemini-3.7-flash` and `gemini-3.1-pro-preview` accept
 only `low`, `medium` and `high` (Google refuses `minimal` for them), and
-the `gemini-4-hydrogen` row lists the same three; the
+the `gemini-4-hydrogen` and `gemini-4-neon` rows list the same three; the
 other rows also accept `minimal`, which is the default on
 `gemini-3.5-flash-lite` and the 3.1 Flash-Lite rows. Google also documents
-`xhigh` for `gemini-4-hydrogen`; Meerkat does not send it in 0.9.15: a
-`reasoning_effort` of `xhigh` on that model is refused as
+`xhigh` for `gemini-4-hydrogen` and `gemini-4-neon`; Meerkat does not send
+it: a `reasoning_effort` of `xhigh` on either model is refused as
 `unsupported_level` (`supported`: `low`, `medium`, `high`), and the Gemini
 `provider_tag` has no such value.
 
@@ -230,13 +231,13 @@ Capability flags come from the catalog row, never from the model name:
   `gemini-3.5-flash-lite` take no
   `temperature`, `top_p` or `top_k` (`supports_temperature: false`). The Anthropic and
   OpenAI clients drop a generic `temperature` for them. The
-  `gemini-4-hydrogen` row carries the same three flags false, so its catalog
-  profile reports `supports_temperature: false`.
+  `gemini-4-hydrogen` and `gemini-4-neon` rows carry the same three flags false,
+  so each catalog profile reports `supports_temperature: false`.
 - Default per-call timeout (catalog `call_timeout_secs`): 300 s for Claude
   Opus and Fable rows, 120 s for Sonnet rows, `claude-haiku-5-5` and the
   Gemini Flash and Flash-Lite rows, 60 s for Haiku 4.5, 600 s for OpenAI rows
   and `gemini-3.1-pro-preview`, 900 s for `gemini-4-carbon`,
-  `gemini-4-argon` and `gemini-4-hydrogen`, 7200 s for `gpt-5.5-pro`. Custom
+  `gemini-4-argon`, `gemini-4-hydrogen` and `gemini-4-neon`, 7200 s for `gpt-5.5-pro`. Custom
   and self-hosted entries set their own.
 
 Thinking and effort are typed per model (tables above); `between_tools`, and
@@ -334,7 +335,7 @@ lists a model's direct-route levels as `reasoning_effort_levels`.
 - Gemini (`"provider": "gemini"`): `thinking` (`include_thoughts`,
   `thinking_level`, `thinking_budget`), `thinking_level` (`minimal`, `low`,
   `medium`, `high`; each model's `params_schema` lists the levels it accepts:
-  `gemini-4-carbon`, `gemini-4-argon`, `gemini-4-hydrogen`,
+  `gemini-4-carbon`, `gemini-4-argon`, `gemini-4-hydrogen`, `gemini-4-neon`,
   `gemini-3.8-flash`, `gemini-3.7-flash` and `gemini-3.1-pro-preview` refuse
   `minimal`), `thinking_budget`, `top_k`,
   `top_p`, `cached_content_name`.

@@ -3757,9 +3757,10 @@ async fn retained_live_boundary_join_without_observers_finalizes_before_return()
             .unwrap()
             .unwrap()
             .applied_durable
-            .unwrap()
-            .input_id(),
-        &input_id
+            .iter()
+            .map(|appends| appends.input_id().clone())
+            .collect::<Vec<_>>(),
+        vec![input_id.clone()]
     );
     drop(run_guard);
     assert_eq!(

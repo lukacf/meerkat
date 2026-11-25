@@ -27,11 +27,11 @@ use super::contracts::{
     AgentCustomizer, ContinuityStore, LeaseProvider, RosterProvider, TopologyProvider,
 };
 use super::types::{
-    AgentBuildContext, AgentBuildDraft, AgentIdentity, CheckpointVersion, ContinuityGeneration,
-    ContinuityRecord, ContinuityResolveState, ContinuityStoreError, CustomizerError,
-    DurableAgentSpec, FencingToken, LeaseAcquireResult, LeaseError, LeaseGrant, LeaseRenewResult,
-    LocalExternalToolOverlay, ManagedPeerEdge, RosterContext, RosterError, SessionSnapshot,
-    TopologyContext, TopologyError,
+    AgentBuildContext, AgentBuildDraft, AgentIdentity, AgentRuntimeServices, CheckpointVersion,
+    ContinuityGeneration, ContinuityRecord, ContinuityResolveState, ContinuityStoreError,
+    CustomizerError, DurableAgentSpec, FencingToken, LeaseAcquireResult, LeaseError, LeaseGrant,
+    LeaseRenewResult, LocalExternalToolOverlay, ManagedPeerEdge, RosterContext, RosterError,
+    SessionSnapshot, TopologyContext, TopologyError,
 };
 use crate::mob_handle_runtime::SessionCreatedContext;
 
@@ -444,22 +444,115 @@ impl RosterProvider for GatewayRosterProvider {
 // REQ-38: Gateway AgentCustomizer bridge
 // ---------------------------------------------------------------------------
 
+/// The process's one counter of customize scopes.
+///
+/// A scope id names one build to the SDK, which routes that build's
+/// callback tools by the id alone, so that the SDK can register
+/// external-tool handlers in `customize_build` (parity with the
+/// `build_agent` scope). A fresh scope per call is correct:
+/// `customize_build` runs again at each seat, fresh life and role
+/// migration of the identity and for each build of its member (a
+/// restarted member's first wake included, and a member the start builds
+/// held once the roster pass composes it), and the host re-registers
+/// under the new scope.
+///
+/// Every customizer bridge of the process draws from this counter,
+/// however many bridges a host builds (one per mob) and wherever it
+/// builds them: there is no second counter to construct and nothing for
+/// a caller to hand on, so two bridges never mint the same scope id. It
+/// starts at 1 in each process, so a scope id names a build only within
+/// the process that minted it; nothing stores one. The id's form is
+/// unchanged and opaque to the SDK.
+static NEXT_CUSTOMIZE_SCOPE: AtomicU64 = AtomicU64::new(1);
+
+/// The mob a member-building callback names.
+struct CallbackMob {
+    /// The text of the mob's id; never empty.
+    id: String,
+    /// The mob's incarnation, as its canonical text
+    /// ([`meerkat_mob::MobHandle::incarnation`]): the same for every build
+    /// of this mob, restarts included, and another for a mob created under
+    /// this id after it.
+    incarnation: String,
+}
+
+/// The mob a member-building callback names: the text of its id and of its
+/// incarnation, both read from one handle.
+///
+/// It is the mob whose handle `services` hold: the mob of the identity
+/// runtime that issued the build (`customize_build`) or that the bridge
+/// serves (`after_create`, `compute_edges`). `Ok(None)` without a handle:
+/// the callback then names no mob, and its `mob_id` is left out.
+///
+/// An id that is the empty text names no mob: no request can address it,
+/// and an SDK reads an empty `mob_id` as a mob of its own. Sent, it would
+/// file the member under a mob that does not exist; left out, under the
+/// host's own mob. The callback is refused instead: `Err` carries the text
+/// of its error, and the host is not asked.
+fn callback_mob(services: &AgentRuntimeServices) -> Result<Option<CallbackMob>, String> {
+    let Some(mob) = services.mob_handle() else {
+        return Ok(None);
+    };
+    let id = mob.mob_id().to_string();
+    if id.is_empty() {
+        return Err(
+            "the member's mob has an empty id: a callback cannot name it, so the host is not \
+             asked"
+                .to_string(),
+        );
+    }
+    Ok(Some(CallbackMob {
+        id,
+        incarnation: mob.incarnation().to_string(),
+    }))
+}
+
+/// The id of the mob a member-building callback names ([`callback_mob`]),
+/// for the callbacks that name the mob alone.
+fn callback_mob_id(services: &AgentRuntimeServices) -> Result<Option<String>, String> {
+    Ok(callback_mob(services)?.map(|mob| mob.id))
+}
+
 /// Gateway-side `AgentCustomizer` that delegates to Python/TypeScript via JSON-RPC.
+///
+/// Wire shape of `callback/agent_customizer/customize_build` params:
+///
+/// ```json
+/// { "scope_id": "customize-a:b-7", "mob_id": "my-mob", "mob_incarnation": "0f6c...", "context": { ... }, "spec": { ... }, "draft": { ... } }
+/// ```
+///
+/// and of `callback/agent_customizer/after_create` params:
+///
+/// ```json
+/// { "identity": "a:b", "session_id": "...", "mob_id": "my-mob", "model": "...", "labels": { ... }, "system_prompt": null }
+/// ```
+///
+/// `mob_id` is the id of the mob the member belongs to. `customize_build`
+/// reads it from the build's own context (the mob handle of its
+/// `runtime_services`); `after_create`, whose context carries no services,
+/// from the runtime services the bridge was given
+/// ([`Self::with_runtime_services`]): one bridge serves one mob's identity
+/// runtime. A gateway names its launch mob in every such callback. `mob_id`
+/// is left out, never null and never empty, when there is no mob handle; a
+/// mob whose id is the empty text is refused, and the host is not asked. It
+/// sits beside the context, whose own members are unchanged. An SDK that
+/// does not know it ignores it.
+///
+/// `mob_incarnation` is the incarnation of that mob, as text, in
+/// `customize_build` alone (the callback whose scope an SDK keeps): present
+/// exactly when `mob_id` is, read from the same handle. Every build of one
+/// mob names the same incarnation, across restarts too; a mob created under
+/// the id of a destroyed one names another, which is how an SDK learns that
+/// the scopes it keeps under that mob id are of a mob that is gone. An SDK
+/// that does not know the member ignores it.
 pub struct GatewayAgentCustomizer {
     bridge: Arc<dyn CallbackBridge>,
     /// The host's installed artifacts, from its trusted bootstrap. `None`:
     /// the host selected none, and callback tools stay unassociated.
     installed_artifacts: Option<Arc<crate::tool_artifacts::InstalledArtifacts>>,
-    /// Monotonic counter for minting a per-call tool-handler scope, so the SDK
-    /// can register external-tool handlers in `customize_build` (parity with the
-    /// `build_agent` scope). A fresh scope per call is correct: `customize_build`
-    /// runs again at each seat, fresh life and role migration of the identity
-    /// and for each build of its member (a restarted member's first wake
-    /// included, and a member the start builds held once the roster pass
-    /// composes it), and the host re-registers under the new scope. The counter
-    /// starts at 1 in each process, so a scope id names a call only within the
-    /// process that minted it.
-    next_scope: AtomicU64,
+    /// The runtime services of the identity runtime this bridge serves:
+    /// their mob is the one `after_create` names. Empty: it names none.
+    runtime_services: AgentRuntimeServices,
 }
 
 impl GatewayAgentCustomizer {
@@ -467,7 +560,7 @@ impl GatewayAgentCustomizer {
         Self {
             bridge: Arc::new(bridge),
             installed_artifacts: None,
-            next_scope: AtomicU64::new(1),
+            runtime_services: AgentRuntimeServices::empty(),
         }
     }
 
@@ -480,6 +573,29 @@ impl GatewayAgentCustomizer {
     ) -> Self {
         self.installed_artifacts = installed_artifacts;
         self
+    }
+
+    /// The runtime services of the identity runtime this bridge serves (the
+    /// services that runtime was built with). `after_create` names their
+    /// mob; without them it names none. `customize_build` does not read
+    /// them: each build's context carries its own.
+    #[must_use]
+    pub fn with_runtime_services(mut self, runtime_services: AgentRuntimeServices) -> Self {
+        self.runtime_services = runtime_services;
+        self
+    }
+
+    /// This bridge for another identity runtime: the same callback bridge
+    /// and the same installed artifacts, serving the runtime with
+    /// `runtime_services`. Its `after_create` names the mob of those
+    /// services; this bridge keeps naming its own.
+    #[must_use]
+    pub fn for_runtime_services(&self, runtime_services: AgentRuntimeServices) -> Self {
+        Self {
+            bridge: Arc::clone(&self.bridge),
+            installed_artifacts: self.installed_artifacts.clone(),
+            runtime_services,
+        }
     }
 }
 
@@ -684,16 +800,28 @@ impl AgentCustomizer for GatewayAgentCustomizer {
         spec: &DurableAgentSpec,
         draft: &mut AgentBuildDraft,
     ) -> Result<(), CustomizerError> {
+        // The member's mob, sent beside the scope id. A host can serve
+        // several mobs, and two of them can have a member of one name: the
+        // SDK keeps one live scope per mob and member name. The mob is the
+        // build's own, the one whose identity runtime issued this context,
+        // so a bridge that serves the builds of several mobs names each
+        // build's mob. A context without a mob leaves the member out; a mob
+        // with an empty id refuses the build before anything is minted. The
+        // mob's incarnation travels with its id: a mob created under the id
+        // of a destroyed one is another incarnation, and the SDK releases
+        // what it kept for the earlier one.
+        let mob = callback_mob(&context.runtime_services).map_err(CustomizerError::BuildFailed)?;
         // Mint a per-build scope so the SDK can register external-tool handlers
         // in `customize_build` and have them dispatched back through
         // `callback/call_tool` — the same mechanism `build_agent` uses. Keyed by
-        // identity for readability; the counter guarantees uniqueness per call.
+        // identity for readability; the process's one counter makes it unique
+        // per call across every bridge.
         let scope_id = format!(
             "customize-{}-{}",
             context.identity.as_str(),
-            self.next_scope.fetch_add(1, Ordering::Relaxed)
+            NEXT_CUSTOMIZE_SCOPE.fetch_add(1, Ordering::Relaxed)
         );
-        let params = json!({
+        let mut params = json!({
             "scope_id": scope_id,
             "context": serde_json::to_value(context)
                 .map_err(|e| CustomizerError::Io(format!("serialize context: {e}")))?,
@@ -702,6 +830,10 @@ impl AgentCustomizer for GatewayAgentCustomizer {
             "draft": serde_json::to_value(&*draft)
                 .map_err(|e| CustomizerError::Io(format!("serialize draft: {e}")))?,
         });
+        if let Some(mob) = mob {
+            params["mob_id"] = Value::String(mob.id);
+            params["mob_incarnation"] = Value::String(mob.incarnation);
+        }
         let result = self
             .bridge
             .call("callback/agent_customizer/customize_build", params)
@@ -739,13 +871,20 @@ impl AgentCustomizer for GatewayAgentCustomizer {
         session_id: &meerkat_core::types::SessionId,
         context: &SessionCreatedContext,
     ) -> Result<(), CustomizerError> {
-        let params = json!({
+        // The mob of the identity runtime this bridge serves, beside the
+        // identity: this callback's context carries no services.
+        let mob_id =
+            callback_mob_id(&self.runtime_services).map_err(CustomizerError::BuildFailed)?;
+        let mut params = json!({
             "identity": identity.as_str(),
             "session_id": session_id.to_string(),
             "model": context.model,
             "labels": context.labels,
             "system_prompt": context.system_prompt,
         });
+        if let Some(mob_id) = mob_id {
+            params["mob_id"] = Value::String(mob_id);
+        }
         self.bridge
             .call("callback/agent_customizer/after_create", params)
             .await
@@ -759,15 +898,41 @@ impl AgentCustomizer for GatewayAgentCustomizer {
 // ---------------------------------------------------------------------------
 
 /// Gateway-side `TopologyProvider` that delegates to Python/TypeScript via JSON-RPC.
+///
+/// Wire shape of `callback/topology_provider/compute_edges` params:
+///
+/// ```json
+/// { "target_identities": ["a:b", ...], "mob_id": "my-mob", "context": { "roster": [ ... ] } }
+/// ```
+///
+/// `mob_id` is the id of the mob whose edges are asked: the mob of the
+/// identity runtime this bridge serves, from the runtime services the
+/// bridge was given ([`Self::with_runtime_services`]). It is left out,
+/// never null and never empty, without them; a mob whose id is the empty
+/// text is refused, and the host is not asked. It sits beside the context,
+/// whose own members are unchanged.
 pub struct GatewayTopologyProvider {
     bridge: Box<dyn CallbackBridge>,
+    /// The runtime services of the identity runtime this bridge serves:
+    /// their mob is the one `compute_edges` names. Empty: it names none.
+    runtime_services: AgentRuntimeServices,
 }
 
 impl GatewayTopologyProvider {
     pub fn new(bridge: impl CallbackBridge + 'static) -> Self {
         Self {
             bridge: Box::new(bridge),
+            runtime_services: AgentRuntimeServices::empty(),
         }
+    }
+
+    /// The runtime services of the identity runtime this bridge serves (the
+    /// services that runtime was built with). `compute_edges` names their
+    /// mob; without them it names none.
+    #[must_use]
+    pub fn with_runtime_services(mut self, runtime_services: AgentRuntimeServices) -> Self {
+        self.runtime_services = runtime_services;
+        self
     }
 }
 
@@ -778,17 +943,22 @@ impl TopologyProvider for GatewayTopologyProvider {
         target_identities: &[AgentIdentity],
         context: &TopologyContext,
     ) -> Result<Vec<ManagedPeerEdge>, TopologyError> {
+        let mob_id =
+            callback_mob_id(&self.runtime_services).map_err(TopologyError::ProviderUnavailable)?;
         let id_strings: Vec<&str> = target_identities
             .iter()
             .map(AgentIdentity::as_str)
             .collect();
-        let params = json!({
+        let mut params = json!({
             "target_identities": id_strings,
             "context": serde_json::to_value(context)
                 .map_err(|e| TopologyError::ProviderUnavailable(
                     format!("serialize topology context: {e}")
                 ))?,
         });
+        if let Some(mob_id) = mob_id {
+            params["mob_id"] = Value::String(mob_id);
+        }
         let result = self
             .bridge
             .call("callback/topology_provider/compute_edges", params)
@@ -1896,6 +2066,387 @@ model = "gpt-5.5"
         assert!(scopes[1].starts_with("customize-agent:alpha-"));
     }
 
+    #[tokio::test]
+    async fn test_identity_first_gateway_customizers_of_two_mobs_mint_distinct_scopes() {
+        // Two customizer bridges of one process, built independently of each
+        // other (a host with one bridge per mob), build the same member name.
+        // The SDK routes a build's callback tools by scope id alone, so two
+        // bridges of one process must never mint the same one.
+        let mock = Arc::new(MockBridge::new());
+        let returned_draft = AgentBuildDraft {
+            compaction_curator: Default::default(),
+            model: None,
+            system_prompt: None,
+            additional_instructions: vec![],
+            labels: BTreeMap::new(),
+            app_context: None,
+            external_tools: vec![ExternalToolDef {
+                name: "my_tool".to_string(),
+                description: "A custom tool".to_string(),
+                input_schema: json!({"type": "object"}),
+                artifact: None,
+            }],
+            local_external_tools: Default::default(),
+            provider_params: None,
+        };
+        mock.set_response(
+            "callback/agent_customizer/customize_build",
+            Ok(serde_json::to_value(&returned_draft).unwrap()),
+        )
+        .await;
+
+        let customizers = [
+            GatewayAgentCustomizer::new(mock.clone()),
+            GatewayAgentCustomizer::new(mock.clone()),
+        ];
+        let id = AgentIdentity::parse("agent:alpha").unwrap();
+        let context = AgentBuildContext {
+            identity: id.clone(),
+            active_peers: vec![],
+            managed_edges: vec![],
+            runtime_services: Default::default(),
+        };
+        let spec = DurableAgentSpec {
+            identity: id,
+            profile: meerkat_mob::ProfileName::from("default"),
+            addressability: AgentAddressability::Addressable,
+            display_name: None,
+            labels: BTreeMap::new(),
+            context: None,
+            additional_instructions: vec![],
+            initial_message: None,
+            runtime_mode_override: None,
+            backend: None,
+            binding: None,
+            placement: None,
+        };
+
+        let mut scopes = Vec::new();
+        for customizer in &customizers {
+            let mut draft = AgentBuildDraft {
+                compaction_curator: Default::default(),
+                model: None,
+                system_prompt: None,
+                additional_instructions: vec![],
+                labels: BTreeMap::new(),
+                app_context: None,
+                external_tools: vec![],
+                local_external_tools: Default::default(),
+                provider_params: None,
+            };
+            customizer
+                .customize_build(&context, &spec, &mut draft)
+                .await
+                .unwrap();
+            let (_, params) = mock.last_call().await;
+            scopes.push(params["scope_id"].as_str().unwrap().to_string());
+        }
+        assert_ne!(
+            scopes[0], scopes[1],
+            "two bridges of one process: two scopes"
+        );
+        assert!(scopes[0].starts_with("customize-agent:alpha-"));
+        assert!(scopes[1].starts_with("customize-agent:alpha-"));
+    }
+
+    /// A mob runtime in memory whose handle answers `mob_id`: the mob a
+    /// build context names through its runtime services.
+    async fn mob_of(mob_id: &str, dir: &tempfile::TempDir) -> crate::MobRuntime {
+        let definition = meerkat_mob::MobDefinition::from_toml(&format!(
+            "[mob]\nid = \"{mob_id}\"\n\n[profiles.default]\nmodel = \"gpt-5.5\"\n"
+        ))
+        .expect("mob definition");
+        let spec = crate::MobBootstrapSpec::ephemeral(
+            definition,
+            meerkat_mob::MobStorage::in_memory(),
+            dir.path().to_path_buf(),
+            4,
+            None,
+        )
+        .expect("bootstrap spec");
+        crate::MobRuntime::bootstrap(spec)
+            .await
+            .expect("bootstrap runtime")
+    }
+
+    fn alpha_spec() -> DurableAgentSpec {
+        DurableAgentSpec {
+            identity: AgentIdentity::parse("agent:alpha").unwrap(),
+            profile: meerkat_mob::ProfileName::from("default"),
+            addressability: AgentAddressability::Addressable,
+            display_name: None,
+            labels: BTreeMap::new(),
+            context: None,
+            additional_instructions: vec![],
+            initial_message: None,
+            runtime_mode_override: None,
+            backend: None,
+            binding: None,
+            placement: None,
+        }
+    }
+
+    fn empty_draft() -> AgentBuildDraft {
+        AgentBuildDraft {
+            compaction_curator: Default::default(),
+            model: None,
+            system_prompt: None,
+            additional_instructions: vec![],
+            labels: BTreeMap::new(),
+            app_context: None,
+            external_tools: vec![],
+            local_external_tools: Default::default(),
+            provider_params: None,
+        }
+    }
+
+    /// The context of a build of `agent:alpha` issued for the mob of `mob`,
+    /// or for no mob.
+    fn alpha_context(mob: Option<&crate::MobRuntime>) -> AgentBuildContext {
+        AgentBuildContext {
+            identity: AgentIdentity::parse("agent:alpha").unwrap(),
+            active_peers: vec![],
+            managed_edges: vec![],
+            runtime_services: mob
+                .map(|mob| super::super::types::AgentRuntimeServices::new(mob.handle()))
+                .unwrap_or_default(),
+        }
+    }
+
+    /// The names of the members of a JSON object, sorted.
+    fn members_of(value: &Value) -> Vec<&str> {
+        let mut members: Vec<&str> = value
+            .as_object()
+            .expect("an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        members.sort_unstable();
+        members
+    }
+
+    #[tokio::test]
+    async fn test_identity_first_gateway_customizers_of_two_mobs_name_their_own_mob() {
+        // Two customizer bridges of one process, one per mob, build a member
+        // of one name. The SDK keeps one live scope per mob and member name,
+        // so each callback names the mob its member belongs to, beside the
+        // scope id and outside the context object.
+        let dirs = [
+            tempfile::tempdir().expect("fixture directory"),
+            tempfile::tempdir().expect("fixture directory"),
+        ];
+        let mobs = [
+            mob_of("customize-scope-mob-a", &dirs[0]).await,
+            mob_of("customize-scope-mob-b", &dirs[1]).await,
+        ];
+        let mock = Arc::new(MockBridge::new());
+        mock.set_response(
+            "callback/agent_customizer/customize_build",
+            Ok(serde_json::to_value(empty_draft()).unwrap()),
+        )
+        .await;
+        let customizers = [
+            GatewayAgentCustomizer::new(mock.clone()),
+            GatewayAgentCustomizer::new(mock.clone()),
+        ];
+        let spec = alpha_spec();
+        let mut named = Vec::new();
+        for (customizer, mob) in customizers.iter().zip(&mobs) {
+            let mut draft = empty_draft();
+            customizer
+                .customize_build(&alpha_context(Some(mob)), &spec, &mut draft)
+                .await
+                .unwrap();
+            let (_, params) = mock.last_call().await;
+            named.push(params["mob_id"].clone());
+            assert_eq!(params["context"]["identity"], "agent:alpha");
+            assert_eq!(
+                members_of(&params["context"]),
+                ["active_peers", "identity", "managed_edges"],
+                "the mob travels beside the context, not inside it"
+            );
+        }
+        assert_eq!(
+            named,
+            [
+                json!("customize-scope-mob-a"),
+                json!("customize-scope-mob-b")
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_identity_first_gateway_customizer_shared_by_two_mobs_names_each_builds_mob() {
+        // The mob is the build's, not the bridge's: one bridge that serves
+        // the builds of two mobs names each build's own mob.
+        let dirs = [
+            tempfile::tempdir().expect("fixture directory"),
+            tempfile::tempdir().expect("fixture directory"),
+        ];
+        let mobs = [
+            mob_of("customize-scope-mob-a", &dirs[0]).await,
+            mob_of("customize-scope-mob-b", &dirs[1]).await,
+        ];
+        let mock = Arc::new(MockBridge::new());
+        mock.set_response(
+            "callback/agent_customizer/customize_build",
+            Ok(serde_json::to_value(empty_draft()).unwrap()),
+        )
+        .await;
+        let customizer = GatewayAgentCustomizer::new(mock.clone());
+        let spec = alpha_spec();
+        let mut named = Vec::new();
+        for mob in [&mobs[0], &mobs[1], &mobs[0]] {
+            let mut draft = empty_draft();
+            customizer
+                .customize_build(&alpha_context(Some(mob)), &spec, &mut draft)
+                .await
+                .unwrap();
+            let (_, params) = mock.last_call().await;
+            named.push(params["mob_id"].clone());
+        }
+        assert_eq!(
+            named,
+            [
+                json!("customize-scope-mob-a"),
+                json!("customize-scope-mob-b"),
+                json!("customize-scope-mob-a")
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_customize_callback_names_the_incarnation_of_the_members_mob() {
+        // Beside the mob's id the callback names the mob's incarnation, as
+        // the text of the mob handle's own. An SDK keeps its scopes by mob
+        // id; the incarnation tells it which mob of that id a build is of.
+        let dirs = [
+            tempfile::tempdir().expect("fixture directory"),
+            tempfile::tempdir().expect("fixture directory"),
+        ];
+        let mobs = [
+            mob_of("customize-scope-mob-a", &dirs[0]).await,
+            mob_of("customize-scope-mob-b", &dirs[1]).await,
+        ];
+        let mock = Arc::new(MockBridge::new());
+        mock.set_response(
+            "callback/agent_customizer/customize_build",
+            Ok(serde_json::to_value(empty_draft()).unwrap()),
+        )
+        .await;
+        let customizer = GatewayAgentCustomizer::new(mock.clone());
+        let spec = alpha_spec();
+        let mut named = Vec::new();
+        for mob in &mobs {
+            let mut draft = empty_draft();
+            customizer
+                .customize_build(&alpha_context(Some(mob)), &spec, &mut draft)
+                .await
+                .unwrap();
+            let (_, params) = mock.last_call().await;
+            assert_eq!(
+                members_of(&params),
+                [
+                    "context",
+                    "draft",
+                    "mob_id",
+                    "mob_incarnation",
+                    "scope_id",
+                    "spec"
+                ],
+                "a callback that names a mob names its incarnation beside it"
+            );
+            assert_eq!(
+                members_of(&params["context"]),
+                ["active_peers", "identity", "managed_edges"],
+                "the incarnation travels beside the context, not inside it"
+            );
+            named.push(params["mob_incarnation"].clone());
+        }
+        assert_eq!(
+            named,
+            [
+                json!(mobs[0].handle().incarnation().to_string()),
+                json!(mobs[1].handle().incarnation().to_string())
+            ]
+        );
+        assert_ne!(named[0], named[1], "two mobs: two incarnations");
+    }
+
+    #[tokio::test]
+    async fn a_mob_made_under_a_used_id_is_named_by_an_incarnation_of_its_own() {
+        // A mob, its destroy, and a mob created under its id: the builds of
+        // the two name the same mob id and two incarnations, each the text
+        // of its own handle's. (One process keeps one mob of an id at a
+        // time, so the first is destroyed before the second is made.)
+        let dirs = [
+            tempfile::tempdir().expect("fixture directory"),
+            tempfile::tempdir().expect("fixture directory"),
+        ];
+        let mock = Arc::new(MockBridge::new());
+        mock.set_response(
+            "callback/agent_customizer/customize_build",
+            Ok(serde_json::to_value(empty_draft()).unwrap()),
+        )
+        .await;
+        let customizer = GatewayAgentCustomizer::new(mock.clone());
+        let spec = alpha_spec();
+        let mut named = Vec::new();
+        let mut of_the_handles = Vec::new();
+        for dir in &dirs {
+            let mob = mob_of("customize-scope-mob-a", dir).await;
+            let mut draft = empty_draft();
+            customizer
+                .customize_build(&alpha_context(Some(&mob)), &spec, &mut draft)
+                .await
+                .unwrap();
+            let (_, params) = mock.last_call().await;
+            assert_eq!(params["mob_id"], "customize-scope-mob-a");
+            named.push(params["mob_incarnation"].clone());
+            of_the_handles.push(json!(mob.handle().incarnation().to_string()));
+            mob.handle().destroy().await.expect("the mob is destroyed");
+        }
+        // What the row stands on: the second mob was made under the first
+        // one's id, and it has an incarnation of its own.
+        assert_ne!(
+            of_the_handles[0], of_the_handles[1],
+            "a mob created under a used id has an incarnation of its own"
+        );
+        assert_eq!(
+            named, of_the_handles,
+            "each build names the incarnation of its own mob"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_identity_first_gateway_customizer_without_a_mob_names_none() {
+        // A build whose context carries no mob (a host that sets no runtime
+        // services): the callback has the four members it had and no
+        // `mob_id`, neither a null nor an empty string.
+        let mock = Arc::new(MockBridge::new());
+        mock.set_response(
+            "callback/agent_customizer/customize_build",
+            Ok(serde_json::to_value(empty_draft()).unwrap()),
+        )
+        .await;
+        let customizer = GatewayAgentCustomizer::new(mock.clone());
+        let spec = alpha_spec();
+        let mut draft = empty_draft();
+        customizer
+            .customize_build(&alpha_context(None), &spec, &mut draft)
+            .await
+            .unwrap();
+        let (_, params) = mock.last_call().await;
+        assert_eq!(
+            members_of(&params),
+            ["context", "draft", "scope_id", "spec"]
+        );
+        assert_eq!(
+            members_of(&params["context"]),
+            ["active_peers", "identity", "managed_edges"]
+        );
+    }
+
     #[test]
     fn callback_result_string_becomes_single_text_block() {
         let blocks = callback_result_to_content(&json!({"content": "hello"}));
@@ -2090,6 +2641,292 @@ model = "gpt-5.5"
         let ctx = TopologyContext { roster: vec![] };
         let result = provider.compute_edges(&ids, &ctx).await.unwrap();
         assert!(result.is_empty());
+    }
+
+    /// The runtime services of the identity runtime that serves `mob`, or
+    /// of one that serves no mob.
+    fn services_of(mob: Option<&crate::MobRuntime>) -> AgentRuntimeServices {
+        mob.map(|mob| AgentRuntimeServices::new(mob.handle()))
+            .unwrap_or_default()
+    }
+
+    /// The customizer bridge of the identity runtime that serves `mob`, or
+    /// of one that serves no mob.
+    fn customizer_bridge_of(
+        mock: &Arc<MockBridge>,
+        mob: Option<&crate::MobRuntime>,
+    ) -> GatewayAgentCustomizer {
+        GatewayAgentCustomizer::new(mock.clone()).with_runtime_services(services_of(mob))
+    }
+
+    /// The topology bridge of the identity runtime that serves `mob`, or of
+    /// one that serves no mob.
+    fn topology_bridge_of(
+        mock: &Arc<MockBridge>,
+        mob: Option<&crate::MobRuntime>,
+    ) -> GatewayTopologyProvider {
+        GatewayTopologyProvider::new(mock.clone()).with_runtime_services(services_of(mob))
+    }
+
+    fn created_context() -> SessionCreatedContext {
+        SessionCreatedContext {
+            model: "gpt-5.5".to_string(),
+            labels: BTreeMap::new(),
+            system_prompt: None,
+        }
+    }
+
+    /// The params of one `after_create` callback of `customizer`.
+    async fn after_create_params(
+        mock: &Arc<MockBridge>,
+        customizer: &GatewayAgentCustomizer,
+    ) -> Value {
+        mock.set_response("callback/agent_customizer/after_create", Ok(Value::Null))
+            .await;
+        customizer
+            .after_create(
+                &AgentIdentity::parse("agent:alpha").unwrap(),
+                &meerkat_core::types::SessionId::new(),
+                &created_context(),
+            )
+            .await
+            .unwrap();
+        let (method, params) = mock.last_call().await;
+        assert_eq!(method, "callback/agent_customizer/after_create");
+        params
+    }
+
+    /// The params of one `compute_edges` callback of `provider`.
+    async fn compute_edges_params(
+        mock: &Arc<MockBridge>,
+        provider: &GatewayTopologyProvider,
+    ) -> Value {
+        mock.set_response("callback/topology_provider/compute_edges", Ok(json!([])))
+            .await;
+        provider
+            .compute_edges(
+                &[AgentIdentity::parse("agent:alpha").unwrap()],
+                &TopologyContext { roster: vec![] },
+            )
+            .await
+            .unwrap();
+        let (method, params) = mock.last_call().await;
+        assert_eq!(method, "callback/topology_provider/compute_edges");
+        params
+    }
+
+    #[tokio::test]
+    async fn test_identity_first_gateway_customizer_after_create_names_the_bridges_mob() {
+        // The bridge of a mob's identity runtime names that mob on
+        // `after_create`, beside the identity; the other members are as they
+        // were.
+        let dir = tempfile::tempdir().expect("fixture directory");
+        let mob = mob_of("customize-scope-mob-a", &dir).await;
+        let mock = Arc::new(MockBridge::new());
+        let params = after_create_params(&mock, &customizer_bridge_of(&mock, Some(&mob))).await;
+        assert_eq!(params["mob_id"], "customize-scope-mob-a");
+        assert_eq!(
+            members_of(&params),
+            [
+                "identity",
+                "labels",
+                "mob_id",
+                "model",
+                "session_id",
+                "system_prompt"
+            ]
+        );
+        assert_eq!(params["identity"], "agent:alpha");
+    }
+
+    #[tokio::test]
+    async fn test_identity_first_gateway_customizers_of_two_mobs_name_their_mob_after_create() {
+        let dirs = [
+            tempfile::tempdir().expect("fixture directory"),
+            tempfile::tempdir().expect("fixture directory"),
+        ];
+        let mobs = [
+            mob_of("customize-scope-mob-a", &dirs[0]).await,
+            mob_of("customize-scope-mob-b", &dirs[1]).await,
+        ];
+        let mock = Arc::new(MockBridge::new());
+        let mut named = Vec::new();
+        for mob in &mobs {
+            let customizer = customizer_bridge_of(&mock, Some(mob));
+            named.push(after_create_params(&mock, &customizer).await["mob_id"].clone());
+        }
+        assert_eq!(
+            named,
+            [
+                json!("customize-scope-mob-a"),
+                json!("customize-scope-mob-b")
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_identity_first_gateway_customizer_made_for_another_runtime_names_that_runtimes_mob()
+     {
+        // A gateway makes the bridge of each mob it hosts from its launch's
+        // bridge: the one made for another mob's services names that mob on
+        // `after_create`, and the launch's own keeps naming the launch mob.
+        let dirs = [
+            tempfile::tempdir().expect("fixture directory"),
+            tempfile::tempdir().expect("fixture directory"),
+        ];
+        let mobs = [
+            mob_of("customize-scope-mob-a", &dirs[0]).await,
+            mob_of("customize-scope-mob-b", &dirs[1]).await,
+        ];
+        let mock = Arc::new(MockBridge::new());
+        let of_the_launch = customizer_bridge_of(&mock, Some(&mobs[0]));
+        let of_the_other = of_the_launch.for_runtime_services(services_of(Some(&mobs[1])));
+        assert_eq!(
+            after_create_params(&mock, &of_the_other).await["mob_id"],
+            "customize-scope-mob-b"
+        );
+        assert_eq!(
+            after_create_params(&mock, &of_the_launch).await["mob_id"],
+            "customize-scope-mob-a"
+        );
+        // Made for a runtime that serves no mob, it names none.
+        let of_none = of_the_launch.for_runtime_services(services_of(None));
+        assert_eq!(
+            members_of(&after_create_params(&mock, &of_none).await),
+            ["identity", "labels", "model", "session_id", "system_prompt"]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_identity_first_gateway_customizer_after_create_without_a_mob_names_none() {
+        // A bridge that serves no mob: the callback has the five members it
+        // had and no `mob_id`, neither a null nor an empty string.
+        let mock = Arc::new(MockBridge::new());
+        let params = after_create_params(&mock, &customizer_bridge_of(&mock, None)).await;
+        assert_eq!(
+            members_of(&params),
+            ["identity", "labels", "model", "session_id", "system_prompt"]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_identity_first_gateway_topology_provider_names_the_bridges_mob() {
+        // The bridge of a mob's identity runtime names that mob on
+        // `compute_edges`, beside the target identities and outside the
+        // context object.
+        let dir = tempfile::tempdir().expect("fixture directory");
+        let mob = mob_of("customize-scope-mob-a", &dir).await;
+        let mock = Arc::new(MockBridge::new());
+        let params = compute_edges_params(&mock, &topology_bridge_of(&mock, Some(&mob))).await;
+        assert_eq!(params["mob_id"], "customize-scope-mob-a");
+        assert_eq!(
+            members_of(&params),
+            ["context", "mob_id", "target_identities"]
+        );
+        assert_eq!(members_of(&params["context"]), ["roster"]);
+        assert_eq!(params["target_identities"], json!(["agent:alpha"]));
+    }
+
+    #[tokio::test]
+    async fn test_identity_first_gateway_topology_providers_of_two_mobs_name_their_own_mob() {
+        let dirs = [
+            tempfile::tempdir().expect("fixture directory"),
+            tempfile::tempdir().expect("fixture directory"),
+        ];
+        let mobs = [
+            mob_of("customize-scope-mob-a", &dirs[0]).await,
+            mob_of("customize-scope-mob-b", &dirs[1]).await,
+        ];
+        let mock = Arc::new(MockBridge::new());
+        let mut named = Vec::new();
+        for mob in &mobs {
+            let provider = topology_bridge_of(&mock, Some(mob));
+            named.push(compute_edges_params(&mock, &provider).await["mob_id"].clone());
+        }
+        assert_eq!(
+            named,
+            [
+                json!("customize-scope-mob-a"),
+                json!("customize-scope-mob-b")
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_identity_first_gateway_topology_provider_without_a_mob_names_none() {
+        // A bridge that serves no mob: the callback has the two members it
+        // had and no `mob_id`.
+        let mock = Arc::new(MockBridge::new());
+        let params = compute_edges_params(&mock, &topology_bridge_of(&mock, None)).await;
+        assert_eq!(members_of(&params), ["context", "target_identities"]);
+        assert_eq!(members_of(&params["context"]), ["roster"]);
+    }
+
+    // A mob whose id is the empty text names no mob: no request can address
+    // it, and an SDK would read an empty `mob_id` as a mob of its own. The
+    // bridge sends no such callback: it refuses, and the host is not asked.
+
+    #[tokio::test]
+    async fn test_identity_first_gateway_customizer_refuses_a_build_of_a_mob_whose_id_is_empty() {
+        let dir = tempfile::tempdir().expect("fixture directory");
+        let mob = mob_of("", &dir).await;
+        let mock = Arc::new(MockBridge::new());
+        mock.set_response(
+            "callback/agent_customizer/customize_build",
+            Ok(serde_json::to_value(empty_draft()).unwrap()),
+        )
+        .await;
+        let customizer = customizer_bridge_of(&mock, Some(&mob));
+        let mut draft = empty_draft();
+        let refused = customizer
+            .customize_build(&alpha_context(Some(&mob)), &alpha_spec(), &mut draft)
+            .await;
+        let Err(CustomizerError::BuildFailed(reason)) = refused else {
+            panic!("expected the build refused, got {refused:?}");
+        };
+        assert!(reason.contains("empty id"), "{reason}");
+        assert_eq!(mock.call_count().await, 0, "the host was not asked");
+    }
+
+    #[tokio::test]
+    async fn test_identity_first_gateway_after_create_refuses_a_mob_whose_id_is_empty() {
+        let dir = tempfile::tempdir().expect("fixture directory");
+        let mob = mob_of("", &dir).await;
+        let mock = Arc::new(MockBridge::new());
+        mock.set_response("callback/agent_customizer/after_create", Ok(Value::Null))
+            .await;
+        let refused = customizer_bridge_of(&mock, Some(&mob))
+            .after_create(
+                &AgentIdentity::parse("agent:alpha").unwrap(),
+                &meerkat_core::types::SessionId::new(),
+                &created_context(),
+            )
+            .await;
+        let Err(CustomizerError::BuildFailed(reason)) = refused else {
+            panic!("expected the callback refused, got {refused:?}");
+        };
+        assert!(reason.contains("empty id"), "{reason}");
+        assert_eq!(mock.call_count().await, 0, "the host was not asked");
+    }
+
+    #[tokio::test]
+    async fn test_identity_first_gateway_topology_provider_refuses_a_mob_whose_id_is_empty() {
+        let dir = tempfile::tempdir().expect("fixture directory");
+        let mob = mob_of("", &dir).await;
+        let mock = Arc::new(MockBridge::new());
+        mock.set_response("callback/topology_provider/compute_edges", Ok(json!([])))
+            .await;
+        let refused = topology_bridge_of(&mock, Some(&mob))
+            .compute_edges(
+                &[AgentIdentity::parse("agent:alpha").unwrap()],
+                &TopologyContext { roster: vec![] },
+            )
+            .await;
+        let Err(TopologyError::ProviderUnavailable(reason)) = refused else {
+            panic!("expected the callback refused, got {refused:?}");
+        };
+        assert!(reason.contains("empty id"), "{reason}");
+        assert_eq!(mock.call_count().await, 0, "the host was not asked");
     }
 
     // -----------------------------------------------------------------------

@@ -3944,6 +3944,10 @@ fn repaired_placed_spawn_event(
     spawned.effective_model_override = record.rehydrated_effective_model_override();
     spawned.continuity_intent =
         domain_continuity_from_portable(&record.spec.overlay.continuity_intent);
+    // The carrier keeps nothing of who asked for the seat: the row records
+    // that who seated the member could not be shown.
+    let spawned = spawned
+        .with_seat_lineage(crate::MemberSeat::shell(crate::MemberSeatKind::Unproven).to_stored());
     Ok(NewMobEvent {
         mob_id: mob_id.clone(),
         timestamp: None,
@@ -6406,7 +6410,7 @@ async fn drive_recovered_placed_carrier_cleanup(
     Ok(())
 }
 
-fn recovered_public_phase_from_events(events: &[crate::event::MobEvent]) -> MobState {
+pub(crate) fn recovered_public_phase_from_events(events: &[crate::event::MobEvent]) -> MobState {
     events.iter().fold(MobState::Running, |phase, event| {
         match &event.kind {
             MobEventKind::MobReset => MobState::Running,
@@ -14873,7 +14877,10 @@ fn apply_restore_spec_build_inputs(
     config
         .tool_dispatch_admission
         .clone_from(&restore_spec.tool_dispatch_admission);
-    config.override_web_search = restore_spec.tool_category_overrides.web_search;
+    crate::build::apply_spawn_web_search_override(
+        config,
+        restore_spec.tool_category_overrides.web_search,
+    );
 }
 
 /// The restore spec's budget limits on the build of `req`, as a spawn sets
@@ -17799,6 +17806,27 @@ mod tests {
             .validate_for_mob(mob_id)
             .expect("valid waived autonomous placed carrier");
         record
+    }
+
+    /// The seat row a start writes again for a placed member records that
+    /// who seated the member could not be shown: the carrier keeps nothing
+    /// of who asked.
+    #[test]
+    fn a_repaired_placed_row_records_unproven() {
+        let mob_id = MobId::from("repair-seat-record");
+        let identity = AgentIdentity::from("placed-worker");
+        let record = test_waived_autonomous_placed_carrier(&mob_id, &identity);
+        let repaired = repaired_placed_spawn_event(&mob_id, &record).expect("spawn projection");
+        let MobEventKind::MemberSpawned(spawned) = repaired.kind else {
+            panic!("a seat row");
+        };
+        let stored = spawned
+            .seat_lineage()
+            .expect("the row stores a seat record");
+        assert_eq!(
+            crate::MemberSeat::from_stored(stored),
+            crate::MemberSeat::shell(crate::MemberSeatKind::Unproven)
+        );
     }
 
     /// A waived carrier committed before a crash, with no kickoff custody

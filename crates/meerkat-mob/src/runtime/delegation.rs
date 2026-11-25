@@ -79,6 +79,10 @@ pub enum DelegationExecutionSource {
 pub struct DelegationMemberOptions {
     /// Sealed runtime source proof, independent of optional comms wiring.
     pub creation_source: Option<crate::MemberCreationSourceWitness>,
+    /// The calling member's seat as a mob's handle sealed it
+    /// ([`crate::MobHandle::seal_seat_creator`]), for the helper's seat
+    /// record alone.
+    pub seat_creator: Option<crate::MemberSeatCreator>,
     pub placement: Option<HostId>,
     pub additional_instructions: Option<Vec<String>>,
     pub inherited_tool_filter: Option<meerkat_core::InheritedToolVisibilityAuthority>,
@@ -853,6 +857,7 @@ impl DelegationExecutionService {
                 .creation_source
                 .unwrap_or_else(crate::MemberCreationSourceWitness::unavailable),
         );
+        spec.seat.creator = member.seat_creator;
         spec.initial_message = None;
         spec.runtime_mode = Some(MobRuntimeMode::TurnDriven);
         spec.auto_wire_parent = false;

@@ -67,6 +67,49 @@ export function VoiceButton({
   );
 }
 
+/**
+ * A KNOWN LIMIT of this release: voice works with the agents of the mob the
+ * gateway was launched with. A gateway that hosts other mobs serves voice
+ * for that one mob only (its voice requests refuse another mob for every
+ * caller), so the console does not ask for voice with an agent of another
+ * mob. This is the sentence it shows there, in the place of the voice
+ * button: what is not available, and where voice works, by the mob's name.
+ */
+export function voiceLimitedToLaunchMobReason(agentLabel: string, launchMobName: string | null | undefined): string {
+  const where = launchMobName?.trim() || "this console's own team";
+  return `Voice is not available for ${agentLabel} yet. For now it works with agents of ${where} only.`;
+}
+
+/**
+ * The voice control of an agent voice cannot be started with, where the
+ * console offers voice: shown in the place of {@link VoiceButton}, marked
+ * unavailable, with the reason as its label and tooltip. It stays reachable
+ * (not a disabled button, which a reader would skip and which shows no
+ * tooltip): pressing it starts nothing and reports the reason.
+ */
+export function VoiceUnavailable({
+  reason,
+  onExplain,
+}: {
+  /** One or two sentences a person reads or hears: what is not available, and where voice works. */
+  reason: string;
+  onExplain?: () => void;
+}): React.JSX.Element {
+  return (
+    <button
+      type="button"
+      className="composer__voice composer__voice--unavailable"
+      aria-label={reason}
+      aria-disabled="true"
+      title={reason}
+      onClick={() => onExplain?.()}
+      data-testid="voice-unavailable"
+    >
+      <Glyph name="i-voice" />
+    </button>
+  );
+}
+
 /// A channel counts as speaking above this level and stops below the lower
 /// one (RMS of the sampled waveform), so the colour does not flicker.
 const SPEAKING_ON = 0.04;

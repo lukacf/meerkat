@@ -45,7 +45,7 @@ impl Pack for ArchitectPack {
         profiles.insert(
             ProfileName::from("critic"),
             turn_driven_profile(
-                resolve_model(overrides, "critic", "gpt-6-astra"),
+                resolve_model(overrides, "critic", "gpt-6.2-astra"),
                 "critic-skill",
                 "Architecture critic",
                 pp,

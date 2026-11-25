@@ -221,8 +221,10 @@ async fn a_member_first_polled_after_the_deadline_expires_while_the_pass_stays_a
     // Wake continuation: a wake outside a held pass refuses the expired
     // member typed, and nothing re-creates it unheld.
     let context = runtime
+        .default_mob()
         .identity_first_context
-        .clone()
+        .get()
+        .cloned()
         .expect("installed identity context");
     match context.runtime.materialize(&late).await {
         Err(IdentityRuntimeError::HeldCompletionOwed { identity }) => assert_eq!(identity, late),

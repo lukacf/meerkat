@@ -168,6 +168,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   gateway's start warning for such a Console now names this consequence for
   questions too.
 
+- The agent tool `delegate` of a Meta member owns its wait, as in Meerkat
+  (see Changed in the Meerkat changelog): a call whose wait ends without its
+  helper's result issues a cancel of the helper's run, starts the helper's
+  retirement and answers a typed error that names the helper's mob. Meta's
+  wrapper around the mob tools hands
+  `delegate` the plan the agent loop resolved for the call
+  (`dispatch_resolved_with_context`), so the call ends before the same
+  deadline as before (`[tools.tool_timeouts] delegate`, else `[tools]
+  default_timeout`). Without that forward a `delegate` of a Meta member
+  would have waited 30 minutes by default. The wrapper's own checks and
+  rewrites are unchanged.
+
 ## [0.9.18] - 2026-11-22
 
 Records that name a member carry the member's mob, so that one host can keep

@@ -160,6 +160,134 @@ them.
 
 - Configured self-hosted Chat Completions and Responses clients now describe an engine-authored closed set of string choices as a string enum in the outgoing tool schema. An optional parameter still stays out of `required`. The schema no longer advertises a description for each choice or an explicit `null` alternative.
 
+- `meerkat-mob-mcp`, `meerkat-mob` (the agent `delegate` tool): `delegate`
+  owns its wait, and a call that ends without its helper's result issues a
+  cancel of the helper's run and starts the helper's retirement. What a user
+  of an earlier release sees differently:
+  - A `delegate` call that reaches its time limit no longer answers the agent
+    loop's generic `Tool 'delegate' timed out after ...ms` (error `timeout`).
+    It ends by itself a little before that limit (15 seconds, or a quarter
+    of the limit when that is shorter), issues a cancel of its helper's run,
+    starts the helper's retirement, and answers `execution_failed` with typed
+    data: `kind`
+    `delegate_helper_ended`, `reason` (`max_run_elapsed`, `turn_failed`,
+    `not_started`, `run_lost`), `helper` (`cancelled_and_retired`, `retired`,
+    `already_gone`, `not_seated`, `end_pending`, `mob_not_running`,
+    `retirement_failed`, `unknown`), `mob_id`, `member_id`, `member_ref`,
+    `session_id` and `max_run_secs`. No `ToolExecutionTimedOut` event is emitted for such a
+    call; a host that watched that event for `delegate` sees
+    `ToolExecutionCompleted` with the error instead. The answer does not
+    wait for a helper that cannot be started or ended in time: the call
+    waits for the helper's end three quarters of that margin and then
+    answers `end_pending`, and the engine ends the helper without the call.
+    The deadline counts from the start of the call's dispatch, so the time
+    a call waited before it reached the tool (for a dispatch slot, in a
+    host's checks) is taken off its wait. The steps before the helper's
+    run count against the wait as well. The generic timeout remains for a
+    call that reaches the tool with no wait left, for a call whose implicit
+    mob's creation uses up the wait (no mob exists yet; the creation goes
+    on, and a later `delegate` of the session waits for it instead of
+    starting another), and for a call dispatched under a host's own,
+    shorter cut that the tool is not told of.
+  - By default the call lasts as long as before: it waits what its tool
+    deadline allows (`[tools.tool_timeouts] delegate`, else `[tools]
+    default_timeout`, 10 minutes by default). The new optional argument
+    `max_run_secs` sets a shorter wait; a longer one is clamped and the
+    answer says so (`max_run_limited_by: "call_deadline"`). To let
+    delegations run longer, raise `[tools.tool_timeouts] delegate`: it
+    stays the one knob for a longer wait.
+  - A helper's own tool calls are bounded by what the `delegate` that waits
+    for it has left, less room for the helper to report (30 seconds, or a
+    quarter of what is left when that is shorter). A helper's slow tool
+    therefore ends inside the helper, the helper reports it, and the caller
+    gets a result where it got an error: with the defaults a tool that the
+    helper starts at once is cut after 555 seconds, against the call's wait
+    of 585. The narrowest deadline wins, so a tool with a shorter
+    configured deadline keeps it, and no tool gets longer than its own; a
+    helper's `fork_off` and `council` calls, which own their deadline, are
+    bounded too. The timeout such a tool reports, and the timed-out event
+    of the helper's session, carry the shorter number. Outside a
+    `delegate` nothing changes. Not covered, and unchanged: a helper's long
+    model call (the report is itself a model call, so the delegate's wait
+    ends first: the call issues a cancel of the helper's run, starts the
+    helper's retirement and answers the typed error, with no partial
+    output); a helper placed on another host
+    (the bound is set in the calling host's process and does not travel:
+    there the helper's tools run under that host's own tool deadlines); and
+    a mob that runs without the runtime adapter (a standalone embedding
+    whose sessions are not runtime-backed). The bound fails open in the
+    few other cases in which the calling host holds none for the helper
+    (its session could not be read right after it was seated, its agent
+    was not built yet, or its session is registered anew during the call):
+    the helper then runs under its own tool deadlines alone, as before.
+  - A nested `delegate` (one a helper makes) inherits what the delegate
+    above it has left: it reads that bound as its call's deadline, so with
+    the defaults the levels wait 585, 540 and 495 seconds. When the bound
+    leaves a nested call less than 30 seconds, the call is refused before
+    anything is started (no mob, no helper): `execution_failed` with
+    `kind` `delegate_helper_ended`, `reason` `not_started`, `helper`
+    `not_seated`, `max_run_secs` (what was left), `max_run_limited_by:
+    "call_deadline"` and no `mob_id`. The floor is on what the delegate
+    above leaves, whatever `max_run_secs` the nested call names. A call
+    that is not nested, and one whose narrowest deadline is an operator's
+    own, are not held to it.
+  - The text of `delegate_helper_ended` says what the caller can do, by
+    what became of the helper and by what the calling session may do, and
+    the data carries the latter as `session_manages_mob`. A helper that is
+    gone leaves nothing to do, and the ids are for the record. For a helper
+    that is or may still be a member, a session that manages its implicit
+    mob (it does once one of its delegates has returned a result) is given
+    `mob_check_member` and `mob_retire_member` with the ids; a session that
+    does not is told that those tools are refused for it while the helper
+    is a member, and that the ids are for the host. The ids grant nothing:
+    the manage scope still leaves only with a result. A control-scope
+    refusal of the helper's seat, or of the bind of the call's objective
+    to its owner, now answers `access_denied` with no data, where 0.9.18
+    answered `execution_failed` with the mob's refusal text.
+  - A bounded call owns ending its helper even when the call is dropped:
+    when the calling turn is interrupted, or a deadline outside the tool
+    cuts the call, the run still issues a cancel of its helper's run and
+    starts the helper's retirement; no typed error is sent then, and the
+    host's log says how that went. The cancel and the
+    retirement name the exact member the call seated; the caller's other
+    work, another call's helper and a later member under the same id are
+    not touched.
+    While a bounded delegation runs, its mob reads one foreground owner
+    and is not unloaded when idle; a last-owner close of that mob waits
+    for the run to end (its limit, then the retirement).
+  - The result and every error of `delegate` name the helper's mob once
+    that mob exists (`mob_id`, and `data.mob_id` with `data.member_id` on
+    errors), so a model can address the helper in `implicit-<session id>`
+    after a call that returned no result. `member_not_found` is unchanged.
+  - Not closed by the engine: a helper whose call died with the host. A
+    restarted host restores it seated and idle (it does not run again); it
+    stays until its owner's session ends or it is retired by hand, and the
+    same call made again is refused with the mob and member id to retire.
+  - Rust: `DelegationExecutionService::execute_within`,
+    `DelegationRunBounds`, `DelegationHelperEnd`, `DelegationHelperEnded`,
+    `DelegationRunFailure`, `DelegationExecutionError::MaxRunElapsed` and
+    `RunLost`, and `ToolDispatchContext::dispatch_started` /
+    `with_dispatch_started` (`meerkat-core`: the agent loop tells each call
+    when its dispatch started) are new, and additive. So are the pieces of
+    the helper's inner deadline: `meerkat_core::ToolCallOuterBound` and
+    `ToolCallOuterBoundSlot`, `AgentBuilder::with_tool_call_outer_bound`,
+    `SessionRuntimeBindings::tool_call_outer_bound`,
+    `ToolDispatchContext::outer_call_bound` / `with_outer_call_bound`,
+    `MeerkatMachine::session_tool_call_outer_bound` (`meerkat-runtime`) and
+    `DelegationExecutionService::HELPER_REPORT_RESERVE`. A call bounded this
+    way has one more contributor in its deadline chain, with the existing
+    owner `ToolDeadlineOwner::DirectCaller`.
+  - Embedders that wrap the agent mob tools in a dispatcher of their own:
+    `delegate`'s catalog entry now says that the tool owns its deadline, so
+    the agent loop's default tool deadline no longer cuts it, and the tool
+    reads the deadline from the plan the loop resolved for the call. A
+    wrapper that forwards the tools' `tool_catalog` must forward
+    `AgentToolDispatcher::dispatch_resolved_with_context` too. One that
+    lowers the call to `dispatch_with_context` hands `delegate` no deadline:
+    a call with no `max_run_secs` then waits 30 minutes instead of the
+    loop's 10. Meta's mob tool wrapper forwards the plan in this release.
+  See [`delegate`: its wait and how it ends](docs/reference/builtin-tools.mdx).
+
 ### Fixed
 
 - `meerkat-openai`: a session whose history holds a tool call that another provider issued under a long id can continue on a Responses model. The Responses request wrote every stored tool-use id unchanged as the `call_id` of the call (`function_call`) and of its result (`function_call_output`). The provider refuses a whole request for one `call_id` over its limit (its refusal names a maximum length of 64), so once such a session was switched to a Responses model every later request failed the same way, a compaction on that model included: each of them replays the same history. Now, in a request that carries the history, a stored id of more than 64 bytes is replaced, in the request only, by a short id derived from it (`call_sha256_` and the first 32 hex digits of the id's SHA-256). The call and its result carry the same one in every such request, and two different stored ids get different ones. The stored session, its events and what every other wire is sent keep the id as it was issued, so a switch back to the issuing provider sends that provider its own id. A request for a history whose ids are within the limit is byte for byte what it was, with one designed exception: a stored id that itself has the derived form is derived again, whatever its length, so it cannot meet the `call_id` derived for another id. Two stored ids that would derive one `call_id` in one request are refused as an invalid request instead of being sent paired wrongly. This holds for every Responses backend: the OpenAI API, the ChatGPT backend, Azure OpenAI, the Copilot Responses route and a self-hosted server in Responses mode. The rule does not ask who issued an id: a self-hosted Responses server that itself issues ids over 64 bytes, or of the derived form, is sent the derived id in place of its own in such a request, on the call and on its result alike. A continuation of a stored response (`previous_response_id`) is exempt: it carries a result without its call, which the server holds under the id it issued, so every id in it is written as stored, as before. The Chat Completions request and the realtime text turn are unchanged and carry the stored id as stored: no limit is established for them. Reported against 0.9.18. No public type, wire format, schema or SDK changes.
@@ -187,6 +315,10 @@ them.
   Standard, among them the percent-encoding of `^` in a path.
 
 ### Upgrade notes
+
+- Tool calls made by a `delegate` helper are bounded by the delegate's remaining wait: the timeout a helper's tool reports can be shorter than its configured deadline (555 seconds against 600 with the defaults, for a tool the helper starts at once). Nested delegates inherit their parent's remaining wait and can be refused when too little is left (under 30 seconds). The one knob for longer delegations stays the `delegate` entry of the tool deadline table (`[tools.tool_timeouts] delegate`): to keep a long tool deadline inside helpers, set that entry above it by more than 45 seconds. A helper's long model call and a helper placed on another host are not covered: see the `delegate` entry under Changed.
+
+- `delegate`, one refusal changes its error code. When the mob refuses a `delegate` call because the control scope of the principal the call acts for does not cover it, 0.9.18 answers `execution_failed` and this release answers `access_denied`. One call has two such sites: adding the helper to the session's implicit mob, and binding the call's objective to its owner. The new answer is the tool's ordinary access denial, in its existing wording and with no data; like the 0.9.18 text, it names no principal, no mob and no member. A caller that matches on error codes and runs against both versions treats both answers as the scope refusal. On this release it is `access_denied` from `delegate`, the same code as the tool's other permission refusals: they are not told apart, and none succeeds if the same call is made again. On 0.9.18 it is an `execution_failed` from `delegate` that carries no typed data and whose message reads `tool 'delegate' failed: control scope denied: requires <scope>`; that release gives no other mark. Ordinary failures of the helper's execution are not part of this and stay `execution_failed`: a helper whose turn failed or was not admitted answers `execution_failed` in 0.9.18 with a message of its own (for instance `delegated turn failed` or `failed to admit delegated helper turn`), never the message above, and from this release with `data.kind` `delegate_helper_ended`. Every other refusal of the mob keeps its code as well. The refusal occurs for a principal other than the mob's owner that holds no live grant of the control scope the mob requires for sending commands.
 
 - After a denial, do not resend the input: it ran on the retained model. Changing or clearing the level does not revive the denied switch. To use the target, choose a supported level or explicitly clear the held level, then request the switch again.
 

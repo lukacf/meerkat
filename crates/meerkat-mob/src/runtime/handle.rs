@@ -21439,6 +21439,13 @@ impl MobHandle {
         }
     }
 
+    /// The authority under which the engine ends a member it seated for
+    /// one bounded call (a delegation's helper), the same as for a fork
+    /// child: the owner's, whatever principal made the call.
+    pub(super) fn bounded_child_cleanup_authority(&self) -> MobHandle {
+        self.fork_child_cleanup_authority()
+    }
+
     fn fork_child_cleanup_authority(&self) -> MobHandle {
         self.clone()
             .with_command_authority(crate::control_policy::CommandAuthority::principal(

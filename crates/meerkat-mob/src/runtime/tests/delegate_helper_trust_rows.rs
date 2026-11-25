@@ -892,3 +892,294 @@ async fn a_retired_member_of_a_mob_that_is_no_delegation_mob_keeps_its_key_pair(
         "a member of a mob that is no delegation mob keeps its key pair"
     );
 }
+
+/// How long a row watches for something that must not happen.
+const QUIET: Duration = Duration::from_secs(1);
+
+/// Whether the key pair of `session` is gone from `root` within the wait.
+/// Nobody awaits a retirement that a run's own task or a detached task
+/// issues, and the key pair is deleted once the seat has ended.
+async fn wait_until_no_key_pair(root: &std::path::Path, session: &SessionId) -> bool {
+    tokio::time::timeout(WAIT, async {
+        while key_pair_files_exist(root, session) != (false, false) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .is_ok()
+}
+
+/// A bounded delegation (the run owns its helper: it watches its own limit
+/// and its own caller) that ends at its limit: the run cancels and retires
+/// its helper itself. Afterwards the caller's router holds no row for the
+/// helper, the caller's peers listing does not name it, and its session's
+/// key pair is deleted.
+#[tokio::test]
+async fn a_bounded_delegation_ended_at_its_limit_leaves_no_row_and_no_key_pair() {
+    let (handle, service, keys) = delegation_mob_with_key_pairs("helper-trust-limit").await;
+    let caller_name = "caller/lead/limit";
+    let caller = caller_runtime(caller_name);
+    let caller_dyn: Arc<dyn CoreCommsRuntime> = caller.clone();
+    let helper = AgentIdentity::from("helper-limit");
+    let delegation_service = DelegationExecutionService::new(handle.clone());
+
+    // The helper's turn does not end by itself, and the run pauses once its
+    // limit has elapsed, before it cancels the helper.
+    service.hold_start_turns();
+    let (mut limit_elapsed, go_on) =
+        crate::runtime::delegation::hold_delegation_limit_for_test(helper.clone());
+    let call = delegation_service.execute_within(
+        delegation_from(&helper, caller_name, &caller_dyn),
+        DelegationRunBounds::new(Duration::from_millis(500), WAIT),
+    );
+    tokio::pin!(call);
+    // A limit that elapses while the start is still in flight answers the
+    // caller before the run reaches its pause: either order is this row's.
+    let mut answer = None;
+    tokio::time::timeout(WAIT, async {
+        loop {
+            tokio::select! {
+                settled = &mut call, if answer.is_none() => answer = Some(settled),
+                paused = &mut limit_elapsed => {
+                    paused.expect("the run reaches its limit with its helper seated");
+                    break;
+                }
+            }
+        }
+    })
+    .await
+    .expect("the run's limit elapses");
+
+    let helper_peer = helper_peer_id(&handle, &helper).await;
+    let session = helper_session(&handle, &helper).await;
+    assert!(
+        router_row_peer_ids(&caller).contains(&helper_peer),
+        "a live helper has its row on the caller's router"
+    );
+    assert_eq!(
+        key_pair_files_exist(keys.path(), &session),
+        (true, true),
+        "a live helper's session has its key pair"
+    );
+
+    drop(go_on);
+    let answer = match answer {
+        Some(answer) => answer,
+        None => tokio::time::timeout(WAIT, &mut call)
+            .await
+            .expect("the delegation answers once its helper was ended"),
+    };
+    let failure = match answer {
+        Ok(_) => panic!("a run that reached its limit has no result"),
+        Err(failure) => failure,
+    };
+    assert!(
+        matches!(
+            failure.error,
+            DelegationExecutionError::MaxRunElapsed { .. }
+        ),
+        "the delegation ended at its limit: {}",
+        failure.error
+    );
+
+    assert!(
+        wait_until_no_member(&handle, &helper).await,
+        "the helper of a delegation that ended at its limit is retired"
+    );
+    assert!(
+        !router_row_peer_ids(&caller).contains(&helper_peer),
+        "the caller's router holds no row for the helper of a delegation that ended at its limit"
+    );
+    assert!(
+        !listed_peer_ids(caller_dyn.as_ref())
+            .await
+            .contains(&helper_peer),
+        "the caller's peers listing does not name the helper of a run that ended at its limit"
+    );
+    assert!(
+        wait_until_no_key_pair(keys.path(), &session).await,
+        "the retired helper's session key pair is deleted: {:?}",
+        key_pair_files_exist(keys.path(), &session)
+    );
+    service.release_held_start_turns();
+}
+
+/// A bounded delegation whose caller stops listening (the call is dropped
+/// while the helper's turn runs): the run's own task goes on, cancels and
+/// retires its helper. Afterwards the caller's router holds no row for the
+/// helper, the caller's peers listing does not name it, and its session's
+/// key pair is deleted.
+#[tokio::test]
+async fn a_bounded_delegation_whose_caller_is_gone_leaves_no_row_and_no_key_pair() {
+    let (handle, service, keys) = delegation_mob_with_key_pairs("helper-trust-caller-gone").await;
+    let caller_name = "caller/lead/caller-gone";
+    let caller = caller_runtime(caller_name);
+    let caller_dyn: Arc<dyn CoreCommsRuntime> = caller.clone();
+    let helper = AgentIdentity::from("helper-caller-gone");
+    let delegation_service = DelegationExecutionService::new(handle.clone());
+
+    service.hold_start_turns();
+    let mut held = service.held_start_turn_entries();
+    let entered_before = *held.borrow_and_update();
+    let (helper_peer, session) = {
+        let call = delegation_service.execute_within(
+            delegation_from(&helper, caller_name, &caller_dyn),
+            DelegationRunBounds::new(Duration::from_mins(10), WAIT),
+        );
+        tokio::pin!(call);
+        tokio::time::timeout(WAIT, async {
+            tokio::select! {
+                outcome = &mut call => panic!(
+                    "the helper's turn is held and the limit is far, so the call cannot end: ok={}",
+                    outcome.is_ok()
+                ),
+                entered = held.wait_for(|entries| *entries > entered_before) => {
+                    entered.expect("the helper's turn enters the hold");
+                }
+            }
+        })
+        .await
+        .expect("the delegation reaches its helper's turn");
+        let helper_peer = helper_peer_id(&handle, &helper).await;
+        let session = helper_session(&handle, &helper).await;
+        assert!(
+            router_row_peer_ids(&caller).contains(&helper_peer),
+            "a live helper has its row on the caller's router"
+        );
+        assert_eq!(
+            key_pair_files_exist(keys.path(), &session),
+            (true, true),
+            "a live helper's session has its key pair"
+        );
+        (helper_peer, session)
+        // The call is dropped here: nobody listens to the run any more.
+    };
+
+    assert!(
+        wait_until_no_member(&handle, &helper).await,
+        "the helper of a delegation nobody listens to is retired"
+    );
+    assert!(
+        !router_row_peer_ids(&caller).contains(&helper_peer),
+        "the caller's router holds no row for the helper of a delegation nobody listens to"
+    );
+    assert!(
+        !listed_peer_ids(caller_dyn.as_ref())
+            .await
+            .contains(&helper_peer),
+        "the caller's peers listing does not name the helper of a delegation nobody listens to"
+    );
+    assert!(
+        wait_until_no_key_pair(keys.path(), &session).await,
+        "the retired helper's session key pair is deleted: {:?}",
+        key_pair_files_exist(keys.path(), &session)
+    );
+    service.release_held_start_turns();
+}
+
+/// The one-call form retires its helper and is done with it: once the call
+/// has returned, a helper spawned again under the same name belongs to the
+/// delegation that spawned it, and nothing of the returned call retires it.
+#[tokio::test]
+async fn a_helper_spawned_again_under_a_returned_delegations_name_stays_a_member() {
+    let (handle, service) = delegation_mob("helper-trust-name-again").await;
+    let caller_name = "caller/lead/name-again";
+    let caller = caller_runtime(caller_name);
+    let caller_dyn: Arc<dyn CoreCommsRuntime> = caller.clone();
+    let helper = AgentIdentity::from("helper-name-again");
+    let delegation_service = DelegationExecutionService::new(handle.clone());
+
+    let outcome = delegation_service
+        .execute(delegation_from(&helper, caller_name, &caller_dyn))
+        .await
+        .expect("the first delegation succeeds");
+    assert_eq!(outcome.retirement_error(), None);
+    assert!(
+        !is_member(&handle, &helper).await,
+        "the returned delegation retired its helper"
+    );
+
+    // The same name again, over the split lifecycle, its turn held: this
+    // helper lives until the row retires it.
+    service.hold_start_turns();
+    let mut held = service.held_start_turn_entries();
+    let entered_before = *held.borrow_and_update();
+    let second = delegation_service
+        .start(delegation_from(&helper, caller_name, &caller_dyn))
+        .await
+        .expect("a second helper starts under the returned delegation's name");
+    tokio::time::timeout(WAIT, held.wait_for(|entries| *entries > entered_before))
+        .await
+        .expect("the second helper's turn is admitted")
+        .expect("the second helper's turn enters the hold");
+    let second_peer = helper_peer_id(&handle, &helper).await;
+
+    tokio::time::sleep(QUIET).await;
+    assert!(
+        is_member(&handle, &helper).await,
+        "nothing of the returned delegation retires a later helper of the same name"
+    );
+    assert!(
+        router_row_peer_ids(&caller).contains(&second_peer),
+        "the later helper is still its caller's peer"
+    );
+
+    service.release_held_start_turns();
+    let terminal = second.await_terminal().await;
+    delegation_service
+        .retire_terminalized(&terminal)
+        .await
+        .expect("the second helper is retired by its own delegation");
+    assert!(!is_member(&handle, &helper).await);
+    assert!(
+        !router_row_peer_ids(&caller).contains(&second_peer),
+        "the caller's router holds no row for the second helper once it is retired"
+    );
+}
+
+/// The one-call form asks its helper's retirement once and answers with
+/// what that came to. A retirement that did not complete is the answer's
+/// debt: once the call has returned, nothing of it asks for that retirement
+/// again behind the caller.
+#[tokio::test]
+async fn a_returned_delegation_asks_its_helpers_retirement_no_second_time() {
+    let (handle, service) = delegation_mob("helper-trust-debt").await;
+    let caller_name = "caller/lead/debt";
+    let caller = caller_runtime(caller_name);
+    let caller_dyn: Arc<dyn CoreCommsRuntime> = caller.clone();
+    let helper = AgentIdentity::from("helper-debt");
+    let helper_session_name =
+        test_comms_name_for(&handle.definition().id, "delegate", helper.as_str());
+    service
+        .set_archive_failure_for_comms_name(&helper_session_name)
+        .await;
+
+    let outcome = DelegationExecutionService::new(handle.clone())
+        .execute(delegation_from(&helper, caller_name, &caller_dyn))
+        .await
+        .expect("the helper's result survives a retirement that did not complete");
+    assert!(
+        outcome.retirement_error().is_some(),
+        "a retirement that did not complete is the answer's debt"
+    );
+    let session = service
+        .session_comms_names
+        .read()
+        .await
+        .iter()
+        .find(|(_, name)| **name == helper_session_name)
+        .map(|(session, _)| session.clone())
+        .expect("the helper's session");
+    let asked = service.archive_call_count(&session).await;
+    assert!(
+        asked > 0,
+        "the delegation asked its helper's retirement before it returned"
+    );
+
+    tokio::time::sleep(QUIET).await;
+    assert_eq!(
+        service.archive_call_count(&session).await,
+        asked,
+        "nothing asks the helper's retirement again once the call has returned"
+    );
+}

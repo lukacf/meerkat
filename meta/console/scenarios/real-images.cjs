@@ -404,6 +404,9 @@ async function liveModel() {
 }
 module.exports = {
   _oracles: { interactionCompletion, modelImageIngress, imageToolEvidence, assertOpenGraph, assertUnscheduledGraphCalls },
+  // For the rows of real-images.test.cjs: how a scenario of this file opens
+  // the console and which failure monitor it opens it under.
+  _rig: { openStock, failureMonitor: page => browserErrors(page) },
   browserScenarios: [{ id: "real-stock-image-upload", family: "real-images", backend: "real", run: uploadImage }],
   liveScenarios: [
     { id: "live-stock-image-generation", family: "live-provider", backend: "real-provider", run: liveImage },

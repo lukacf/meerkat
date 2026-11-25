@@ -691,6 +691,57 @@ work by owner gets a worker's owner key with `lower_agent_identity_owner_key`.
 `MeerkatMachine::resumed_run_admission_held` names a run that waits on its
 gate this way.
 
+#### Seeing A Run That Waits
+
+Nothing is emitted while a run waits on its gate, and nothing asks again on
+a timer, so a host that wants to notice a run that waits polls for it, from
+its own Rust code, in the process that hosts the mob:
+
+- `MobHandle::members_with_pending_resumed_runs()` lists locally seated
+  members whose sessions either mark a run or could not be read. Each
+  entry includes the member’s identity.
+- `MeerkatMachine::pending_resumed_run(&session_id)` checks one session.
+  `MeerkatMachine::pending_resumed_runs()` checks all registered sessions
+  in this process and returns entries in session ID order.
+
+A `NotReadableNow` entry identifies a session, not a run. It can appear
+when no run is marked: the poll could not tell. It does not say why the
+read failed or that an admission gate held a run. Poll again for the state.
+
+A `Pending` entry confirms a marked run. It carries the session, the
+run id (the one `stop_member_run` and `MeerkatMachine::stop_run` take),
+`marked_for` (how long this registration has marked the run, when it stamped
+the mark), `stop_requested` (a stop is recorded and its settlement has not
+committed yet) and the admission state:
+
+| State | Meaning |
+|-------|---------|
+| `MarkedNotHeld` | The run is marked and its gate has not left it undecided: it was not asked about yet, the first ask is still under way, or no gate is bound |
+| `Held` | Every attempt of the last ask ended undecided. `undecided`, when this registration noted the round, carries `rounds` (asks that ended undecided, each of up to 3 attempts), `undecided_for` (the time since the first of them), `cause` (`TimedOut` or `AnsweredUnavailable`) and `reason`, the gate's own text for the last round, cut at `RESUMED_RUN_ADMISSION_REASON_MAX_BYTES` (512 bytes). A gate's reason is the host's own text: do not put secrets in it |
+
+The answer comes from memory: the poll makes no store call, asks the gate
+nothing, wakes nothing and changes nothing, so it also answers for a worker
+whose runtime loop makes no pass, and it never moves `rounds`. The poll does not wait out a busy session: `PENDING_RESUMED_RUN_READ_BOUND`
+limits one wait for session state, not the duration of the whole poll:
+the lookup of the session comes before the wait, and a
+poll of several sessions or members reads them one after another. Whether a
+run is held, and which run, is the runtime machine's own state; the rounds,
+the times, the cause and the reason
+are what the current registration noted beside it. They start over at every
+registration, so after a restart `rounds` counts from one again and the
+times do not reach back before the restart: a host that alerts on a run
+that has waited for long keeps its own first-seen time for the run id.
+
+No answer for a session means that no run waits there: the run resumed, or
+its settlement committed. Read the terminal of the run's input to tell which.
+A session with no registration in this process gets no answer either: a
+member that was not woken yet is not listed, whatever its store holds, and
+is answered from the moment its session registers.
+To end a run that waits, stop it (`MobHandle::stop_member_run`) or settle it
+(`MobHandle::settle_member_retained_run`); a later `Continue` or `Superseded`
+from the gate, at the next wake or the next start, ends the wait as well.
+Meerkat never resumes or settles a waiting run because time has passed.
+
 Without a gate, the run continues. Other members' runs continue without
 asking.
 

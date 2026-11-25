@@ -4,7 +4,7 @@ description: "Meta Python SDK — typed builder API, async runtime, and streamin
 icon: "python"
 ---
 
-*Mirrored from Meerkat Meta main at [5f09cda4ef4a](https://github.com/lukacf/meerkat/commit/5f09cda4ef4ac96d41b72f5fe7413b7da4c4454c) on 2026-11-24; Meta version 0.9.18 at that commit.*
+*Mirrored from Meerkat Meta main at [b369115a60a9](https://github.com/lukacf/meerkat/commit/b369115a60a9d081cc2c96cd27c2739b2c459fdc) on 2026-11-25; Meta version 0.9.18 at that commit.*
 
 The Meta Python SDK provides a typed host API for launching and operating
 Meerkat mobs through the SDK-facing gateway. Apps own policy. Meerkat and
@@ -960,7 +960,7 @@ if health.last_delivery_error and health.last_delivery_error["class"] == "reload
 | `respawn_member(member_id)` | `None` | Respawn a previously retired member (identity-first: resets the identity onto a fresh session) |
 | `reload_member(member_id)` | `MemberReloadResult` | Non-destructive cold reload: same identity, same durable session, same generation (identity-first only) |
 | `member_health(member_id)` | `MemberHealth` | Lifecycle and delivery health from in-process reads; carries `actor_loop`, `open_stall_id`, and `last_delivery_error` |
-| `reconcile_edges()` | `ReconcileEdgesReport` | Converge mob.toml `[wiring]` (`auto_wire_orchestrator`, `role_wiring`) on the live roster. Needed after `runtime.reconcile()` or an identity-first boot only when the definition declares such wiring; `ensure_member` already runs it, and with no declared wiring the report is empty |
+| `reconcile_edges()` | `ReconcileEdgesReport` | Reconcile dynamic peer wiring. `desired_edges` lists the pairs this call targets, not all live connections. On an identity-first gateway it may be empty even when members are wired at spawn. For recorded peers, read `(await handle.get_member(member_id)).wired_to`. See [When to call `reconcile_edges`](/meta/concepts/roster#when-to-call-reconcile_edges). |
 
 `MemberSnapshot` exposes `agent_identity`, `role`, `state`, `wired_to`, and
 `labels`. Known state strings are exported from the top-level package as
@@ -1416,16 +1416,18 @@ lists the diverged definition fields as dotted paths, so a host can show what
 changed without parsing the message. Revert the edit, or move the stored
 definition with `declare_spec_update(expected_revision=...)`.
 
-In 0.9.15, with a gateway the SDK starts itself, `builder.build()` does not
-raise the exception of a refusal of the start itself, when the gateway
-refuses after it has accepted the init request; this refusal is one such. It
-raises `GatewayStartupCleanupError`, a `TransportError`, and the refusal is
-its `startup_error` (also its `__cause__`): `except
-CompositionProvenanceError` and `except RpcError` do not match it (see Known
-limitations in the Meta changelog). Catch both and read the refusal, so the
-code keeps working when the refusal is raised unwrapped (as it is where a
-host's own `gateway_transport()` stops cleanly; read from the source, not
-run), and do not retry a start whose `startup_error` is a typed refusal:
+If a gateway that the Python SDK starts or adopts **accepts** init and the
+SDK then reads a failed settlement:
+
+- In 0.9.15 and 0.9.16, `builder.build()` raises `GatewayStartupCleanupError`,
+  a transport error. Its `startup_error` is the underlying refusal.
+- From 0.9.17, `builder.build()` raises the refusal itself.
+
+This distinction is about a reported refusal, not a failure before acceptance
+or an exit without a settlement.
+
+To support both forms, check for the underlying refusal as below. Do not
+retry a start just because a typed refusal arrived inside a transport error.
 
 ```python
 from meerkat_meta import CompositionProvenanceError, GatewayStartupCleanupError
@@ -1573,8 +1575,18 @@ due while the application starts.
 
 This was shown by a run of the 0.9.16 source against the released 0.9.15
 gateway with the SDK's start held open; one unforced start on the published
-0.9.15 did not meet it. 0.9.17 adds the handler on the builder.
+0.9.15 did not meet it. 0.9.17 adds the handler on the builder. See Known limitations
+under 0.9.16 in the [Meta changelog](https://github.com/lukacf/meerkat/blob/main/meta/CHANGELOG.md).
 </Warning>
+
+### Who can schedule a host runnable?
+
+Any member with the schedule tools that is not private to a person can
+schedule any runnable your application registers and choose its parameters.
+The handler receives those parameters as `occurrence["payload"]` when supplied;
+the callback does not identify the member that created the schedule. Register
+only actions that any such member may invoke. Validate the payload in the
+handler; do not trust it to identify the caller.
 
 ## Adopting a gateway child the host started
 

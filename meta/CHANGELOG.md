@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Python identity results can be narrowed by their `outcome` string. For
+  example, after `if state.outcome == "refused":`, mypy and pyright know
+  that `state.refusal` is available on the result of `identities.operation()`.
+  The other outcome strings narrow to their corresponding result types.
+
 - Before setting the key, read its limits with the released versions in
   the Meerkat changelog's entry for it: what holds by source for 0.9.15,
   0.9.16, 0.9.17 and 0.9.18, what was observed on 0.9.16 only, and that
@@ -31,6 +36,123 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   placed on another host and the limit on a placed member's stored spec
   does not arise there; a Rust host that embeds Meta and binds a member
   host through the mob handle holds such specs.
+
+### Fixed
+
+- Console chat, two fixes. The notice for the reasoning effort a request was
+  sent with (`request_reasoning_effort_resolved`) no longer appears in a
+  chat. Telemetry of the event and peer notices are unchanged. And answering
+  or dismissing a question set no longer leaves its full card below every
+  later turn in the asking agent's chat. Only unanswered sets stay below the
+  newest turn. The page uses the decision time to place a one-line summary in
+  the conversation; expand it to review the questions and any answers,
+  without submitting them again. The page keeps the 20 most recently answered
+  or dismissed sets across all agents. These summaries are cleared when the
+  page reloads. Cards in the Pending tab of Approvals are unchanged.
+
+- An update of an agent's instructions that arrives while the agent's run is in a tool round answers by the agent's model, as one that arrives between runs does. Before, from the run's first tool round until the run committed, Meerkat's read of the agent's session failed and the update answered `applies_after_compaction` whatever the model: also for a model that takes the change at its next run (`applies_at_next_run`) and for a backend that takes it only with a fresh conversation (`applies_at_next_session`, reason `lowering_unavailable`). In the same state the agent's row of `meta/instruction_status` read `effective_read: unreadable`; it now shows the session's last committed state, in which a change the running run applied at its start reads `pending` until the run commits. Affected: 0.9.15 to 0.9.18 for the update's answer and 0.9.11 to 0.9.18 for the status row, agents on a SQLite realm. The change is in Meerkat's status read; no Meta code changed. Read from the source, not seen in a run.
+
+- An agent whose instructions have no section is no longer compared against its
+  session's build state. Since 0.9.15 the identity runtime compares an agent's
+  instructions with the sections its session was built with when the mob holds
+  no instruction record of the agent: for a configured agent at its first
+  registration in a process, for an agent whose record is its row before its
+  first delivery (a start compares no such agent), and again in the comparison
+  itself, which is reached when the mob's records could not be read and for an
+  agent listed again in one process. For an agent whose current text has no
+  section that comparison cannot find a difference (a session built with any
+  sections was not built with other sections than none, and a session whose
+  record does not say, or cannot be read, is answered the same way), but the
+  session's committed build state was read for it all the same: at a start, for
+  every configured agent that has a conversation, one after another, during the
+  start's identity bootstrap. On a store that keeps a session as one document
+  (a host store realm) each read is the session's whole committed body. Now
+  such an agent is answered without the read, wherever the comparison is
+  reached. Nothing else changes: an agent the mob holds a record of is
+  reconciled with that record as before, with no read of its session's build
+  state (a text withdrawn while the gateway was down is still recorded at the
+  start); an agent whose current text has a section is compared as before: one
+  build-state read per start while no record exists, two in the start that
+  records a first change, none once a record exists; and nothing is written
+  differently. One log line goes with the read: the warning that an agent's
+  build sections could not be read is no longer logged for an agent with no
+  section. Affected: Meta 0.9.15 and later up to this change (the comparison
+  does not exist before 0.9.15).
+
+- The WorkGraph resume gate says why it could not read, where it used to
+  leave Meerkat's admission attempt to time out in silence. For a durable
+  member's interrupted run that carries no attention projection, the gate
+  pages through every open work item of the mob's WorkGraph namespace, and
+  each page is one full list of the store. Over a store whose list takes
+  longer than one admission attempt
+  (`RESUMED_RUN_ADMISSION_ATTEMPT_TIMEOUT`, 8 seconds), Meerkat dropped the
+  gate in the middle of its scan: the gate logged nothing, and the only
+  detail was that the admission did not answer in time. The gate now ends
+  its own scan a little before the attempt ends (after seven eighths of it)
+  and answers unavailable with a reason that names the open work item list
+  by realm and namespace, the pages it had read and the time it waited. An
+  operator sees that reason in the gate's own warning
+  (`durable resume gate: the gate cannot decide`) and as the detail of
+  Meerkat's `resumed run admission is unavailable` warning. A scan that is
+  ended draws no verdict from the pages it read and writes nothing.
+
+  This changes when the gate gives up, not only what it says. The scan used
+  to read until Meerkat cut the attempt (8 seconds); it now ends itself after
+  7. A scan that would have finished in the last eighth of an attempt was
+  decided before and is answered unavailable now, so that run is held until
+  an attempt reads the list faster. Over a list that does not answer, one
+  round of three attempts takes 27 seconds where it took 30. The number of
+  attempts and of rounds is unchanged, and no run is ended or resumed that
+  was not. The cut is what lets the gate answer at all: an attempt that
+  Meerkat cuts from outside says nothing. A host that reads the cause of a
+  held run sees a list that is too slow as the admission having answered
+  unavailable, with this reason; a slow read of a single item, of the
+  store's clock or of a lease write is still cut by Meerkat and reads as
+  not answered in time. Both mean that the WorkGraph was too slow.
+
+  Nothing else changes: the projected path is untouched, and a list that the
+  scan reads inside its budget decides as before.
+
+- The WorkGraph resume gate's unavailable reasons are the gate's own
+  sentences. A WorkGraph read that failed used to put the store's whole
+  error text into the reason, and a run's attention projection that does
+  not decode put the decoder's text there; a store may print a path or an
+  id in its error. The reason of a failed read now names the error's kind
+  (`store error`, `backing store unavailable`, `unsupported backend` and so
+  on) with the realm and the namespace, and the reason of a projection
+  that does not decode is one fixed sentence. The store's and the
+  decoder's own text is in the gate's log, in the warnings
+  `durable resume gate: a WorkGraph read failed` and
+  `durable resume gate: the run's WorkGraph attention projection does not
+  decode`. A reader that matched the old reason text for either case finds
+  it there. The realm and the namespace are the only text in an unavailable
+  reason that the gate does not write itself; they come last in it, and a
+  control character in either is replaced by `?`. The verdicts are
+  unchanged.
+
+### Upgrade notes
+
+- Type checkers can now report mistakes that a `str` annotation
+  previously hid, such as comparing against an impossible outcome. The outcome
+  strings, returned objects and behavior at run time are unchanged.
+
+### Changed
+
+- `ask_user` on a gateway whose Console requires sign-in and trusts no
+  signing key (what a launch gets with neither `runtime_options.auth_config`
+  nor `console_require_app_auth = false`, the SDKs' default): the text the
+  asking agent's model reads with `asked` changes. Such a Console refuses
+  every caller, so no person can answer there; where a set is held (a launch
+  with a persistent state directory, as before) it is still held and the
+  call still answers `asked`, because the embedding host can read and answer
+  it (`meta/gating/questions`, `meta/gating/decide`). The result's `note`
+  said "A person is being asked". It now says that no person can answer in
+  the Console as it is configured, that the program that embeds the gateway
+  may still answer, and that the result is `timed_out` if none came by
+  `answer_by`. The note of every other `asked` result is unchanged, and so
+  are the outcome, the result's fields, the deadline and every default. The
+  gateway's start warning for such a Console now names this consequence for
+  questions too.
 
 ## [0.9.18] - 2026-11-22
 
@@ -3470,6 +3592,21 @@ frame's own `mob_id` follows with the surfaces that address a mob.
   were asked; they time out unless someone answers from a current page. An
   application that mounts the Console package builds it from the source of its
   gateway's release.
+
+- Added 2026-11-24, after the release. A persistent `meta_gateway`
+  (`persistent_sessions: true`) using the built-in default mob definition
+  (no `config/mob.toml` or `<workspace>/definition.json`) derives a different
+  mob ID after the upgrade. On its existing state it exits with code 1. The
+  `meta/init` error is `-32603`, `failed to bootstrap local runtime`, with a
+  null response ID. Only the gateway log says why:
+  `the supplied mob definition diverges from the canonical definition in this storage, in: id`.
+  Before upgrading, or after the first refused start, copy the `definition`
+  object from `<state directory>/event_log.sqlite3.composition.json` into a
+  new `<workspace>/definition.json`, then start the gateway. This was shown
+  with state from the published 0.9.15 gateway and a 0.9.16 release candidate.
+  The same refusal on upgrades since Meta 0.9.9 and the fact that it does not
+  affect the SDK-started `rpc_gateway` are read from the source. See the
+  [Meta 0.9.16 upgrade guide](https://docs.rkat.ai/guides/upgrading#meta-0-9-16).
 
 ### Added
 

@@ -21,7 +21,7 @@ use meerkat_mob::{MobDefinition, MobId, SpawnMemberSpec};
 use serde_json::{Value, json};
 
 use super::UnifiedRuntime;
-use super::mob_entries::lazy_start_tests::{StoredHost, known};
+use super::mob_entries::lazy_start_tests::{Known, StoredHost, known};
 use super::mob_entries_tests::{second_mob, set_of, shut_down};
 use crate::blob_store::{Base64BlobStoreAdapter, ObjectStoreBlobStore};
 use crate::mob_handle_runtime::{MobBootstrapOptions, MobBootstrapSpec};
@@ -2372,4 +2372,573 @@ async fn a_hosted_mob_that_holds_work_is_loaded_again_and_redefined_with_its_wor
         "the redefined mob lists its work: {listed_after_the_redefine}"
     );
     shut_down(&host, &[&second_id]).await;
+}
+
+/// The work whose run [`RoundThenHold`] keeps open.
+const KEEP_THE_RUN_OPEN: &str = "keep this run open after its first round";
+/// The id of the tool call that run commits its first round with.
+const FIRST_ROUND_CALL: &str = "call-of-the-first-round";
+/// What the store of [`ReadsThatFail`] says in its error: a path and a word
+/// no reason may carry.
+const THE_STORES_OWN_WORDS: &str = "no such file /var/lib/marker-51c9/workgraph.db";
+/// How long, at most, the listing row asks for a mob of the host that does
+/// not resolve after a restart, before it fails.
+const RESOLVES_WITHIN: Duration = Duration::from_secs(20);
+/// How long after a restart, at most, the listing row waits for the held
+/// run's first undecided round to be noted, before it fails.
+const HELD_WITHIN: Duration = Duration::from_mins(1);
+
+/// A model for a run that a restart leaves open. In a session that was sent
+/// [`KEEP_THE_RUN_OPEN`] it first asks for a tool no catalog has, so the
+/// run's first round commits with the refusal; with `hold`, its next request
+/// in that session never answers, so the run stays open. It counts the
+/// requests of that session made after the round. It answers every other
+/// request with text.
+#[derive(Default)]
+struct RoundThenHold {
+    hold: bool,
+    after_round: std::sync::atomic::AtomicUsize,
+}
+
+impl RoundThenHold {
+    fn holding() -> Self {
+        Self {
+            hold: true,
+            ..Self::default()
+        }
+    }
+
+    /// The requests of the open run made after its committed round.
+    fn after_round(&self) -> usize {
+        self.after_round.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl LlmClient for RoundThenHold {
+    fn project_replay_messages(&self, messages: &[Message]) -> Result<Vec<Message>, LlmError> {
+        Ok(messages.to_vec())
+    }
+
+    fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
+        let sent = format!("{:?}", request.messages);
+        let of_the_run = sent.contains(KEEP_THE_RUN_OPEN);
+        let after_round = of_the_run && sent.contains(FIRST_ROUND_CALL);
+        if after_round {
+            self.after_round
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.hold {
+                return Box::pin(futures::stream::pending());
+            }
+        }
+        let (lead, stop_reason) = if of_the_run && !after_round {
+            (
+                LlmEvent::ToolCallComplete {
+                    id: FIRST_ROUND_CALL.to_string(),
+                    name: "no_such_tool".to_string(),
+                    args: json!({}),
+                    meta: None,
+                },
+                StopReason::ToolUse,
+            )
+        } else {
+            (
+                LlmEvent::TextDelta {
+                    delta: "ok".to_string(),
+                    meta: None,
+                },
+                StopReason::EndTurn,
+            )
+        };
+        let events = vec![
+            Ok(lead),
+            Ok(crate::mob_handle_runtime::test_llm_usage::usage_event(
+                request,
+                Provider::OpenAI,
+            )),
+            Ok(LlmEvent::Done {
+                outcome: LlmDoneOutcome::success(stop_reason),
+            }),
+        ];
+        Box::pin(futures::stream::iter(events))
+    }
+
+    fn provider(&self) -> Provider {
+        Provider::OpenAI
+    }
+
+    async fn health_check(&self) -> Result<(), LlmError> {
+        Ok(())
+    }
+}
+
+/// The memory WorkGraph store behind reads of the items that can be made to
+/// fail, with [`THE_STORES_OWN_WORDS`] as the error's text. Nothing else
+/// changes: the host's own reads of the ledger go on.
+#[derive(Default)]
+struct ReadsThatFail {
+    inner: meerkat::MemoryWorkGraphStore,
+    failing: std::sync::atomic::AtomicBool,
+}
+
+impl ReadsThatFail {
+    fn fail_from_now(&self) {
+        self.failing
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn read_fault(&self) -> Result<(), meerkat::WorkGraphError> {
+        if self.failing.load(std::sync::atomic::Ordering::SeqCst) {
+            Err(meerkat::WorkGraphError::Store(
+                THE_STORES_OWN_WORDS.to_string(),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[async_trait]
+impl meerkat::WorkGraphStore for ReadsThatFail {
+    fn kind(&self) -> meerkat::WorkGraphStoreKind {
+        self.inner.kind()
+    }
+
+    async fn get_store_time_utc(
+        &self,
+    ) -> Result<chrono::DateTime<chrono::Utc>, meerkat::WorkGraphError> {
+        self.inner.get_store_time_utc().await
+    }
+
+    async fn insert_item(
+        &self,
+        item: meerkat::WorkItem,
+        event: meerkat::WorkGraphEvent,
+    ) -> Result<meerkat::WorkItem, meerkat::WorkGraphError> {
+        self.inner.insert_item(item, event).await
+    }
+
+    async fn update_item_cas(
+        &self,
+        item: meerkat::WorkItem,
+        expected_previous_revision: u64,
+        event: meerkat::WorkGraphEvent,
+    ) -> Result<meerkat::WorkItem, meerkat::WorkGraphError> {
+        self.inner
+            .update_item_cas(item, expected_previous_revision, event)
+            .await
+    }
+
+    async fn update_item_and_attention_cas(
+        &self,
+        item: meerkat::WorkItem,
+        expected_previous_revision: u64,
+        item_event: meerkat::WorkGraphEvent,
+        attention_updates: Vec<(meerkat::WorkAttentionBinding, u64, meerkat::WorkGraphEvent)>,
+    ) -> Result<meerkat::WorkItem, meerkat::WorkGraphError> {
+        self.inner
+            .update_item_and_attention_cas(
+                item,
+                expected_previous_revision,
+                item_event,
+                attention_updates,
+            )
+            .await
+    }
+
+    async fn get_item(
+        &self,
+        realm_id: &str,
+        namespace: &meerkat::WorkNamespace,
+        id: &meerkat::WorkItemId,
+    ) -> Result<Option<meerkat::WorkItem>, meerkat::WorkGraphError> {
+        self.read_fault()?;
+        self.inner.get_item(realm_id, namespace, id).await
+    }
+
+    async fn list_items(
+        &self,
+        filter: meerkat::WorkItemFilter,
+    ) -> Result<Vec<meerkat::WorkItem>, meerkat::WorkGraphError> {
+        self.read_fault()?;
+        self.inner.list_items(filter).await
+    }
+
+    async fn list_attention_matching_bounded(
+        &self,
+        filter: meerkat::AttentionListRequest,
+        observed_at: chrono::DateTime<chrono::Utc>,
+        limit: usize,
+    ) -> Result<Vec<meerkat::WorkAttentionBinding>, meerkat::WorkGraphError> {
+        self.inner
+            .list_attention_matching_bounded(filter, observed_at, limit)
+            .await
+    }
+
+    async fn insert_edge(
+        &self,
+        edge: meerkat::WorkEdge,
+        event: meerkat::WorkGraphEvent,
+    ) -> Result<meerkat::WorkEdge, meerkat::WorkGraphError> {
+        self.inner.insert_edge(edge, event).await
+    }
+
+    async fn list_edges(
+        &self,
+        realm_id: &str,
+        namespace: &meerkat::WorkNamespace,
+    ) -> Result<Vec<meerkat::WorkEdge>, meerkat::WorkGraphError> {
+        self.inner.list_edges(realm_id, namespace).await
+    }
+
+    async fn list_events(
+        &self,
+        filter: meerkat::WorkGraphEventFilter,
+    ) -> Result<Vec<meerkat::WorkGraphEvent>, meerkat::WorkGraphError> {
+        self.inner.list_events(filter).await
+    }
+
+    async fn latest_event_seq(
+        &self,
+        filter: meerkat::WorkGraphEventFilter,
+    ) -> Result<Option<i64>, meerkat::WorkGraphError> {
+        self.inner.latest_event_seq(filter).await
+    }
+}
+
+/// A definition with one durable, turn-driven profile, `worker`, under an id
+/// of its own.
+fn durable_worker_definition(tag: &str) -> MobDefinition {
+    MobDefinition::from_toml(&format!(
+        "[mob]\nid = \"mob-workgraph-waiting-{tag}-{}\"\n\n[profiles.worker]\nmodel = \"gpt-5.5\"\nruntime_mode = \"turn_driven\"\ndurable = true\n\n[profiles.worker.tools]\ncomms = true\n",
+        uuid::Uuid::new_v4().simple()
+    ))
+    .expect("a definition with a durable profile")
+}
+
+/// A launch over the state directory of `stored` with the WorkGraph
+/// `workgraph` composed as a gateway composes its own, and `model` as its
+/// members' model.
+async fn stored_launch_over(
+    stored: &StoredHost,
+    workgraph: WorkGraphService,
+    model: Arc<dyn LlmClient>,
+) -> UnifiedRuntime {
+    let (spec, _sessions, _machine, admission_slot) = stored
+        .spec_over(|builder| crate::workgraph_wiring::install_workgraph_tools(builder, &workgraph));
+    stored
+        .bootstrap(
+            spec.with_workgraph_service(Some(workgraph))
+                .with_workgraph_admission_slot(admission_slot)
+                .with_workgraph_admission_sidecar(stored.state_dir())
+                .with_options(MobBootstrapOptions {
+                    allow_ephemeral_sessions: false,
+                    notify_orchestrator_on_resume: true,
+                    default_llm_client: Some(model),
+                }),
+        )
+        .await
+}
+
+/// What a failure of the listing row prints beside the listing: the members
+/// of the mob `mob_id` or why it does not resolve, the open run's model
+/// requests since the restart, how the first launch stood down, and what the
+/// mob set held at the restart and holds now.
+async fn what_the_host_holds(
+    host: &UnifiedRuntime,
+    mob_id: &MobId,
+    stand_downs: &[String],
+    at_start: &Known,
+    model: &RoundThenHold,
+) -> String {
+    let now = known(host).await;
+    let members = match host.resolve_mob(Some(mob_id)).await {
+        Ok(mob) => format!("{:?}", mob.mob_handle().list_members().await),
+        Err(error) => format!("the mob does not resolve: {error:?}"),
+    };
+    format!(
+        "the mob's members: {members}; requests of the open run after the restart: {}; the \
+         first launch's stand-downs: {stand_downs:?}; at the restart the set managed {:?} and \
+         knew as not loaded {:?}; now it manages {:?} and knows as not loaded {:?}",
+        model.after_round(),
+        at_start.loaded,
+        at_start.not_loaded,
+        now.loaded,
+        now.not_loaded,
+    )
+}
+
+/// The members of the mob `mob_id` whose resumed run waits, as the host
+/// reads them through that mob's handle; or, in words, why the mob did not
+/// resolve or its handle did not list. The mob is reached by the request
+/// lookup alone ([`UnifiedRuntime::resolve_mob`]), as a host's request
+/// reaches it.
+async fn waiting_in(
+    host: &UnifiedRuntime,
+    mob_id: &MobId,
+) -> Result<Vec<meerkat_mob::MemberPendingResumedRun>, String> {
+    let mob = host
+        .resolve_mob(Some(mob_id))
+        .await
+        .map_err(|error| format!("the mob {mob_id} does not resolve: {error:?}"))?;
+    mob.mob_handle()
+        .members_with_pending_resumed_runs()
+        .await
+        .map_err(|error| format!("the handle of {mob_id} does not list: {error}"))
+}
+
+/// A host of two mobs, restarted while a durable member of ONE of them was
+/// in a run. After the restart that mob's resume gate cannot read the
+/// WorkGraph, so the run is held at its resumed-run admission. Each mob's
+/// handle lists the members whose resumed run waits: the handle of the
+/// member's mob names it, with the run held, the typed cause "answered
+/// unavailable" and the gate's own sentence for a failed read, which names
+/// that mob's realm and carries no word of the store's error; the handle of
+/// the other mob, which has a durable member of its own with no run open,
+/// lists nobody. The member's model is asked nothing for the held run.
+///
+/// What the row records and does not judge: the FIRST lookup of the second
+/// mob, made at once after the second launch returned, with its answer and
+/// its time, and the time until the mob resolved. Both are printed on a pass
+/// as on a failure (lines that begin "OBSERVED:"). When the row was written
+/// the first lookup was answered "not hosted" and the mob resolved a little
+/// later; a pass of this row does not say that answer is right.
+///
+/// Two limits, both failing the row. After the restart the row asks the same
+/// lookup again until the second mob resolves, for at most
+/// [`RESOLVES_WITHIN`]; it then reads that mob's listing until the held
+/// run's first undecided round is noted, at most [`HELD_WITHIN`] after the
+/// restart. The fault is in the store both mobs share and the held member is
+/// the hosted mob's: the row holds no member of each mob at once.
+#[tokio::test]
+async fn each_mobs_handle_lists_its_own_member_whose_resumed_run_the_gate_holds() {
+    let launch_definition = durable_worker_definition("host");
+    let launch_id = launch_definition.id.clone();
+    let stored = StoredHost::of(launch_definition);
+    let store = Arc::new(ReadsThatFail::default());
+    let workgraph = || {
+        let store: Arc<dyn meerkat::WorkGraphStore> = store.clone();
+        crate::workgraph_wiring::scoped_workgraph_service(store, launch_id.as_str())
+    };
+
+    // The first launch: the WorkGraph reads. The second mob's durable member
+    // starts a run that stays open after its first round; the launch mob's
+    // durable member is seated and has no run.
+    let model = Arc::new(RoundThenHold::holding());
+    let host = stored_launch_over(&stored, workgraph(), model.clone()).await;
+    let second_id = second_mob(&host, durable_worker_definition("second")).await;
+    let idle = {
+        let mob = host
+            .resolve_mob(Some(&launch_id))
+            .await
+            .expect("the launch mob resolves");
+        Box::pin(
+            mob.mob_handle()
+                .spawn_spec(SpawnMemberSpec::new("worker", "idle-keeper")),
+        )
+        .await
+    };
+    assert!(
+        idle.is_ok(),
+        "the launch mob seats a durable member that has no run: {:?}",
+        idle.as_ref().err()
+    );
+    let spawned = {
+        let mob = host
+            .resolve_mob(Some(&second_id))
+            .await
+            .expect("the second mob of the host resolves");
+        Box::pin(mob.spawn(
+            SpawnMemberSpec::new("worker", "keeper").with_initial_message(KEEP_THE_RUN_OPEN),
+        ))
+        .await
+    };
+    assert!(
+        spawned.is_ok(),
+        "the second mob seats its durable member with its work: {:?}",
+        spawned.as_ref().err()
+    );
+    for _ in 0..300 {
+        if model.after_round() > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        model.after_round() > 0,
+        "the member's run committed its first round and waits on its model"
+    );
+    assert_eq!(
+        waiting_in(&host, &second_id).await,
+        Ok(Vec::new()),
+        "a run that is under way is no resumed run that waits"
+    );
+    // The launch ends as a deploy ends it: the runtime's own shutdown asks
+    // every mob of the host and releases the state directory once the second
+    // mob stood down. A stand-down that still owes a member's unregister is
+    // asked again.
+    let mut stand_downs = Vec::new();
+    let mut released = false;
+    for _ in 0..50 {
+        let report = tokio::time::timeout(Duration::from_secs(30), host.shutdown())
+            .await
+            .expect("the runtime shuts down");
+        stand_downs.push(format!("{:?}", report.child_mob_stand_down));
+        if matches!(
+            report.child_mob_stand_down,
+            crate::ChildMobStandDownOutcome::Released { .. }
+        ) {
+            released = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert!(
+        released,
+        "the first launch released the state directory for the next one: {stand_downs:?}"
+    );
+    drop(host);
+
+    // The restart: the WorkGraph's item reads fail from now on.
+    store.fail_from_now();
+    let model = Arc::new(RoundThenHold::default());
+    let host = stored_launch_over(&stored, workgraph(), model.clone()).await;
+
+    // THE FIRST LOOKUP, made at once after the second launch returned, with
+    // nothing asked of the host before it. Its answer and its time are
+    // printed whether the row passes or fails. Observed when this row was
+    // written: that first lookup is answered "not hosted" for the second
+    // mob, which the set knows from its store; the mob resolves a little
+    // later. The row records that and takes no other way to the mob.
+    let launched = std::time::Instant::now();
+    let first = waiting_in(&host, &second_id).await;
+    let first_after = launched.elapsed();
+    eprintln!(
+        "OBSERVED: the first lookup of the second mob, {first_after:?} after the second launch \
+         returned, answered: {}",
+        match &first {
+            Ok(listed) => format!("resolved, {} member(s) listed as waiting", listed.len()),
+            Err(error) => error.clone(),
+        }
+    );
+    let at_start = known(&host).await;
+    // What is wrong beyond the listing, for a failure's message.
+    let diagnosis = || what_the_host_holds(&host, &second_id, &stand_downs, &at_start, &model);
+
+    // The same lookup is asked again until the mob resolves, for at most
+    // RESOLVES_WITHIN, and the time until it did is printed too. The one
+    // thing the row adds to the observation is this limit: it fails when the
+    // mob has not resolved by then, so it does not pass over a mob that
+    // never comes back. Whether the first lookup should be answered "not
+    // hosted" is not this row's to say, and a pass here does not say it is
+    // right.
+    let mut listed = first;
+    while listed.is_err() && launched.elapsed() < RESOLVES_WITHIN {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        listed = waiting_in(&host, &second_id).await;
+    }
+    let resolved_after = launched.elapsed();
+    eprintln!(
+        "OBSERVED: the second mob {} {resolved_after:?} after the second launch returned (the \
+         row's limit: {RESOLVES_WITHIN:?})",
+        if listed.is_ok() {
+            "resolved"
+        } else {
+            "had not resolved"
+        }
+    );
+    assert!(
+        listed.is_ok(),
+        "the second mob resolves within {RESOLVES_WITHIN:?} of the restart: after \
+         {resolved_after:?} it answers {listed:?}; {}",
+        diagnosis().await
+    );
+
+    // Once it resolves it keeps resolving, and its member's run is held with
+    // one undecided round noted within HELD_WITHIN: three attempts that the
+    // gate answers at once, and Meerkat's two pauses between them.
+    let held_with_a_round = |listed: &[meerkat_mob::MemberPendingResumedRun]| {
+        listed.iter().any(|member| {
+            matches!(
+                &member.run,
+                meerkat_runtime::PendingResumedRunRead::Pending(run)
+                    if matches!(
+                        &run.admission,
+                        meerkat_runtime::ResumedRunAdmissionState::Held(held)
+                            if held.undecided.is_some()
+                    )
+            )
+        })
+    };
+    let mut listed = listed.unwrap_or_default();
+    while !held_with_a_round(&listed) && launched.elapsed() < HELD_WITHIN {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        listed = match waiting_in(&host, &second_id).await {
+            Ok(listed) => listed,
+            Err(error) => panic!(
+                "the second mob resolved after {resolved_after:?} and then did not: {error}; {}",
+                diagnosis().await
+            ),
+        };
+    }
+    let [member] = listed.as_slice() else {
+        panic!(
+            "the second mob's handle lists its one held member within {HELD_WITHIN:?}, not \
+             {listed:?}; the mob resolved after {resolved_after:?}; {}",
+            diagnosis().await
+        );
+    };
+    assert_eq!(
+        member.agent_identity,
+        meerkat_mob::AgentIdentity::from("keeper"),
+        "the handle names the member"
+    );
+    let meerkat_runtime::PendingResumedRunRead::Pending(run) = &member.run else {
+        panic!("the held member's session is readable: {member:?}");
+    };
+    assert!(!run.stop_requested, "no stop was asked: {member:?}");
+    let meerkat_runtime::ResumedRunAdmissionState::Held(held) = &run.admission else {
+        panic!("the machine holds the run for its admission: {member:?}");
+    };
+    let undecided = held
+        .undecided
+        .as_ref()
+        .expect("the registration noted the undecided round");
+    assert_eq!(
+        undecided.cause,
+        meerkat_runtime::ResumedRunAdmissionUndecidedCause::AnsweredUnavailable,
+        "the gate answered, and answered unavailable: {undecided:?}"
+    );
+    assert_eq!(
+        undecided.reason,
+        format!(
+            "the WorkGraph could not be read: store error; no verdict was drawn; realm '{}' \
+             namespace 'default'",
+            realm_of(&second_id)
+        ),
+        "the reason is the gate's own sentence, for the realm of the member's mob"
+    );
+    assert!(
+        !undecided.reason.contains("marker-51c9") && !undecided.reason.contains("/var/lib"),
+        "no word of the store's error: {}",
+        undecided.reason
+    );
+    assert!(
+        undecided.reason.len() <= meerkat_runtime::RESUMED_RUN_ADMISSION_REASON_MAX_BYTES,
+        "the reason is inside the bound Meerkat cuts it at: {} bytes",
+        undecided.reason.len()
+    );
+
+    let of_the_launch_mob = waiting_in(&host, &launch_id).await;
+    assert_eq!(
+        of_the_launch_mob,
+        Ok(Vec::new()),
+        "the launch mob's handle lists nobody"
+    );
+    assert_eq!(
+        model.after_round(),
+        0,
+        "the held run asked its model nothing"
+    );
+    shut_down(&host, &[]).await;
 }

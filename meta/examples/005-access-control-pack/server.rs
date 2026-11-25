@@ -199,14 +199,14 @@ async fn run() {
 id = "access-control-mob"
 
 [profiles.lead]
-model = "gpt-6-astra"
+model = "gpt-6.2-astra"
 external_addressable = true
 
 [profiles.lead.tools]
 comms = true
 
 [profiles.scout]
-model = "gpt-6-astra"
+model = "gpt-6.2-astra"
 external_addressable = true
 
 [profiles.scout.tools]

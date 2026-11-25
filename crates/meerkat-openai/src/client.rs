@@ -383,6 +383,10 @@ fn invalid_replay(message: impl Into<String>) -> LlmError {
 /// provider's limit changes. Bytes are counted, and an id never has more
 /// characters than bytes, so an id within this bound is within the
 /// provider's whichever of the two it counts.
+///
+/// The bound is applied to every Responses target alike, a self-hosted
+/// server included, whoever issued the id: see the tradeoff at
+/// [`ResponsesCallIds`].
 const RESPONSES_CALL_ID_MAX_BYTES: usize = 64;
 
 /// What every derived `call_id` starts with.
@@ -411,7 +415,7 @@ fn has_derived_call_id_shape(id: &str) -> bool {
 /// The `call_id` derived from a stored tool-use id: the prefix and the
 /// first [`DERIVED_CALL_ID_HEX_DIGITS`] hex digits of the id's SHA-256. It
 /// depends on the stored id alone, so it is the same in a call, in its
-/// output and in every request.
+/// output and in every request that derives.
 fn derived_call_id(stored: &str) -> String {
     let digest = meerkat_core::approval::decision::Sha256Digest::of(stored.as_bytes());
     let digits = digest.as_str();
@@ -423,35 +427,79 @@ fn derived_call_id(stored: &str) -> String {
     call_id
 }
 
+/// What a Responses lowering carries, which decides whether it may replace
+/// a stored tool-use id ([`ResponsesCallIds`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResponsesCallIdMode {
+    /// The request carries the history itself: every call item it holds
+    /// comes with its output item, so the two can be given one `call_id`
+    /// that is not the stored one.
+    FullReplay,
+    /// The request continues a response the service stored
+    /// (`previous_response_id`) and carries only what followed the
+    /// service's own last step. A result in it answers a call of that
+    /// step, which the service holds under the id it issued and this
+    /// process stored as returned: any other `call_id` would name a call
+    /// the service does not have. Every id is written as stored.
+    ContinuationSuffix,
+}
+
 /// The `call_id`s one Responses lowering writes for stored tool-use ids.
 ///
 /// A stored tool-use id belongs to the conversation: another provider, or
 /// another server, may have issued it under no length rule, and the
-/// provider refuses a whole request for one `call_id` over its limit. An
-/// id the request can carry is written as stored. Any other is replaced,
-/// in the request only, by a short id derived from it
+/// provider refuses a whole request for one `call_id` over its limit. In a
+/// request that carries the history ([`ResponsesCallIdMode::FullReplay`])
+/// an id the request can carry is written as stored. Any other is
+/// replaced, in the request only, by a short id derived from it
 /// ([`derived_call_id`]). The stored transcript keeps the id it has, so
 /// every other wire still reads the stored one.
+///
+/// The tradeoff: the rule does not ask who issued an id. An id the target
+/// itself issued is replaced too in a full replay when it is over the
+/// bound or has the derived shape. The hosted services issue no such id
+/// (they refuse one). A self-hosted Responses server that issues such ids
+/// is sent the derived `call_id` in place of its own, on the call and on
+/// its output alike, so the two still match in the request.
+///
+/// A continuation ([`ResponsesCallIdMode::ContinuationSuffix`]) is exempt:
+/// it carries a result without its call, and the service holds that call
+/// under the id it issued, so there the stored id is the only one that
+/// matches. The full replay a refused continuation falls back to derives.
 ///
 /// No two stored ids of one lowering are written as one `call_id`:
 ///
 /// - A stored id written as stored never equals a derived `call_id`. Every
 ///   derived `call_id` has the derived shape
-///   ([`has_derived_call_id_shape`]), and a stored id of that shape is not
-///   written as stored: it is derived again, whatever its length.
+///   ([`has_derived_call_id_shape`]), and where ids are derived a stored id
+///   of that shape is not written as stored: it is derived again, whatever
+///   its length.
 /// - Two stored ids that derive one `call_id` are refused
 ///   ([`Self::admit`]); the request is not built.
-#[derive(Default)]
 struct ResponsesCallIds<'m> {
+    mode: ResponsesCallIdMode,
     /// Each derived `call_id` of this lowering, and the stored id it is for.
     derived: HashMap<String, &'m str>,
 }
 
 impl<'m> ResponsesCallIds<'m> {
+    fn new(mode: ResponsesCallIdMode) -> Self {
+        Self {
+            mode,
+            derived: HashMap::new(),
+        }
+    }
+
     /// The `call_id` this lowering writes for `stored`, in a call item and
     /// in its output item alike.
     fn lower(&mut self, stored: &'m str) -> Result<Cow<'m, str>, LlmError> {
-        if stored.len() <= RESPONSES_CALL_ID_MAX_BYTES && !has_derived_call_id_shape(stored) {
+        let as_stored = match self.mode {
+            ResponsesCallIdMode::ContinuationSuffix => true,
+            ResponsesCallIdMode::FullReplay => {
+                stored.len() <= RESPONSES_CALL_ID_MAX_BYTES && !has_derived_call_id_shape(stored)
+            }
+        };
+        if as_stored {
             return Ok(Cow::Borrowed(stored));
         }
         self.admit(stored, derived_call_id(stored)).map(Cow::Owned)
@@ -1649,11 +1697,24 @@ impl OpenAiClient {
     }
 
     /// Lower a request to the Responses body under `continuity`, the
-    /// decision the request was prepared with.
+    /// decision the request was prepared with. The request carries its
+    /// history itself.
     fn lower_request_body(
         &self,
         request: &LlmRequest,
         continuity: Option<&meerkat_core::OpenAiContinuityTarget>,
+    ) -> Result<Value, LlmError> {
+        self.lower_request_body_as(request, continuity, ResponsesCallIdMode::FullReplay)
+    }
+
+    /// [`Self::lower_request_body`] for a request that is what
+    /// `call_id_mode` says: one that carries its history, or the suffix of
+    /// a continuation.
+    fn lower_request_body_as(
+        &self,
+        request: &LlmRequest,
+        continuity: Option<&meerkat_core::OpenAiContinuityTarget>,
+        call_id_mode: ResponsesCallIdMode,
     ) -> Result<Value, LlmError> {
         let wire_tag = self.wire_openai_tag(request);
         let cache_breakpoints =
@@ -1667,6 +1728,7 @@ impl OpenAiClient {
                 cache_breakpoints,
                 web_search_evidence,
                 continuity,
+                call_id_mode,
             )?
         } else {
             Self::convert_to_responses_input_with_system_mode(
@@ -1675,6 +1737,7 @@ impl OpenAiClient {
                 cache_breakpoints,
                 web_search_evidence,
                 continuity,
+                call_id_mode,
             )?
         };
         let reasoning_enabled = Self::request_supports_reasoning_payload(request);
@@ -2065,7 +2128,15 @@ impl OpenAiClient {
 
         let mut continuation_request = request.clone();
         continuation_request.messages = request.messages[plan.replay_from_message_index..].to_vec();
-        let mut body = self.lower_request_body(&continuation_request, Some(continuity))?;
+        // The suffix holds no call, only results of the step the plan
+        // names, which the service holds under the ids it issued: they are
+        // written as stored. The full replay below, and the one a refused
+        // continuation falls back to, carry each call with its result.
+        let mut body = self.lower_request_body_as(
+            &continuation_request,
+            Some(continuity),
+            ResponsesCallIdMode::ContinuationSuffix,
+        )?;
         if self.is_chatgpt_backend_wire() {
             let full_body = self.lower_request_body(request, Some(continuity))?;
             if let Some(instructions) = full_body.get("instructions").cloned() {
@@ -2248,6 +2319,7 @@ impl OpenAiClient {
             // The image path sends user and system content only; under no
             // service it lowers no continuity material at all.
             None,
+            ResponsesCallIdMode::FullReplay,
         )
         .map(|(input, _, _)| input)
     }
@@ -2422,12 +2494,17 @@ impl OpenAiClient {
     /// assistant message's text replays with its `url_citation` annotations
     /// and a `web_search_call` with its sources; otherwise the message
     /// replays `annotations: []` and the call without `action.sources`.
+    ///
+    /// `call_id_mode`: whether `messages` are a history the request carries
+    /// itself or the suffix of a continuation, which decides whether a
+    /// stored tool-use id may be replaced ([`ResponsesCallIds`]).
     fn convert_to_responses_input_with_system_mode(
         messages: &[Message],
         system_mode: SystemMessageMode,
         cache_breakpoints: ResponsesCacheBreakpoints,
         web_search_evidence: bool,
         continuity: Option<&meerkat_core::OpenAiContinuityTarget>,
+        call_id_mode: ResponsesCallIdMode,
     ) -> Result<
         (
             Vec<Value>,
@@ -2441,7 +2518,7 @@ impl OpenAiClient {
         let mut authored_boundaries = Vec::new();
         // A call item and its output item take their `call_id` from here,
         // so the two always carry the same one.
-        let mut call_ids = ResponsesCallIds::default();
+        let mut call_ids = ResponsesCallIds::new(call_id_mode);
         let leading_system_count = messages
             .iter()
             .take_while(|message| matches!(message, Message::System(_)))
@@ -4404,6 +4481,8 @@ impl OpenAiClient {
             ResponsesCacheBreakpoints::EveryInput,
             self.backend_wire.carries_web_search_evidence(),
             Some(continuity),
+            // No continuation reaches this point (it returned above).
+            ResponsesCallIdMode::FullReplay,
         )?;
         // Every authored breakpoint is `{"mode": "explicit"}` without its own
         // `ttl`, so it takes the request-level `prompt_cache_options.ttl`.
@@ -12994,7 +13073,7 @@ mod tests {
         let at_bound = "b".repeat(RESPONSES_CALL_ID_MAX_BYTES);
         let over_bound = "b".repeat(RESPONSES_CALL_ID_MAX_BYTES + 1);
         let lookalike = derived_call_id(&over_bound);
-        let mut ids = ResponsesCallIds::default();
+        let mut ids = ResponsesCallIds::new(ResponsesCallIdMode::FullReplay);
 
         assert!(matches!(ids.lower("call_1"), Ok(Cow::Borrowed("call_1"))));
         assert!(matches!(ids.lower(""), Ok(Cow::Borrowed(""))));
@@ -13007,13 +13086,121 @@ mod tests {
         assert_ne!(derived_call_id(&lookalike), lookalike);
     }
 
+    /// A continuation's suffix writes every id as stored and borrowed: one
+    /// over the bound and one of the derived shape too.
+    #[test]
+    fn responses_call_ids_write_every_id_of_a_continuation_suffix_as_stored() {
+        let over_bound = "b".repeat(RESPONSES_CALL_ID_MAX_BYTES + 1);
+        let lookalike = derived_call_id(&over_bound);
+        let mut ids = ResponsesCallIds::new(ResponsesCallIdMode::ContinuationSuffix);
+
+        for stored in ["call_1", "", over_bound.as_str(), lookalike.as_str()] {
+            assert!(matches!(ids.lower(stored), Ok(Cow::Borrowed(id)) if id == stored));
+        }
+        assert!(ids.derived.is_empty());
+    }
+
+    /// The whole request body for a history whose ids are within the bound,
+    /// byte for byte. The reference is the same request lowered with no
+    /// derivation in play: the continuation mode writes every stored id as
+    /// stored, which is all the lowering did before ids were derived, and
+    /// nothing else in the body depends on the mode. The ids are an
+    /// OpenAI-shaped one, an Anthropic-shaped one, one exactly at the bound
+    /// and one a provider reuses in every round; the request has a system
+    /// row and a tool, so the body has more than its input.
+    #[test]
+    fn responses_body_for_ids_within_the_bound_is_byte_equal_to_the_as_stored_lowering() {
+        fn round(id: &str) -> [Message; 2] {
+            [
+                Message::BlockAssistant(BlockAssistantMessage::new(
+                    vec![AssistantBlock::ToolUse {
+                        id: id.to_string(),
+                        name: "lookup".to_string(),
+                        args: serde_json::value::RawValue::from_string("{}".to_string()).unwrap(),
+                        meta: None,
+                    }],
+                    StopReason::ToolUse,
+                )),
+                Message::tool_results(vec![ToolResult::new(
+                    id.to_string(),
+                    "lookup result".to_string(),
+                    false,
+                )]),
+            ]
+        }
+        fn request(ids: &[&str]) -> LlmRequest {
+            let mut messages = vec![
+                Message::System(meerkat_core::SystemMessage::new("Be brief.".to_string())),
+                Message::User(UserMessage::text("look it up")),
+            ];
+            for id in ids {
+                messages.extend(round(id));
+            }
+            messages.push(Message::User(UserMessage::text("and again")));
+            LlmRequest::new("gpt-5.2", messages).with_tools(vec![Arc::new(meerkat_core::ToolDef {
+                audience: Default::default(),
+                name: "lookup".into(),
+                description: "lookup tool".to_string(),
+                input_schema: serde_json::json!({"type": "object", "properties": {}}),
+                provenance: None,
+            })])
+        }
+        fn bytes(
+            client: &OpenAiClient,
+            request: &LlmRequest,
+            mode: ResponsesCallIdMode,
+        ) -> Vec<u8> {
+            let body = client
+                .lower_request_body_as(request, Some(&client.continuity_target()), mode)
+                .unwrap();
+            serde_json::to_vec(&body).unwrap()
+        }
+
+        let at_bound = "b".repeat(RESPONSES_CALL_ID_MAX_BYTES);
+        let ordinary = request(&[
+            "call_1",
+            "toolu_01synthetic",
+            at_bound.as_str(),
+            "fc_0",
+            "fc_0",
+        ]);
+        for client in [
+            OpenAiClient::new("test-key".to_string()),
+            OpenAiClient::new("test-key".to_string()).with_chatgpt_backend_wire(),
+        ] {
+            let as_stored = bytes(&client, &ordinary, ResponsesCallIdMode::ContinuationSuffix);
+            assert_eq!(
+                bytes(&client, &ordinary, ResponsesCallIdMode::FullReplay),
+                as_stored
+            );
+            assert_eq!(
+                serde_json::to_vec(&client.build_request_body(&ordinary).unwrap()).unwrap(),
+                as_stored,
+                "the body a request is sent with"
+            );
+            for id in ["call_1", "toolu_01synthetic", at_bound.as_str(), "fc_0"] {
+                let needle = format!("\"call_id\":\"{id}\"");
+                assert!(String::from_utf8_lossy(&as_stored).contains(&needle));
+            }
+
+            // The comparison can tell the two lowerings apart: with one id
+            // over the bound the bodies differ.
+            let over_bound = "b".repeat(RESPONSES_CALL_ID_MAX_BYTES + 1);
+            let long = request(&["call_1", over_bound.as_str()]);
+            assert_ne!(
+                bytes(&client, &long, ResponsesCallIdMode::FullReplay),
+                bytes(&client, &long, ResponsesCallIdMode::ContinuationSuffix)
+            );
+        }
+    }
+
     /// Two stored ids that derive one `call_id` in a lowering are refused
     /// as an invalid request, and the refusal holds nothing of either id.
     /// No two known inputs derive one value, so the row hands the second
     /// id the first one's derived `call_id`.
     #[test]
     fn responses_call_ids_refuse_one_derived_call_id_for_two_stored_ids() {
-        let mut ids = ResponsesCallIds::default();
+        let mut ids = ResponsesCallIds::new(ResponsesCallIdMode::FullReplay);
         let first = "first-stored-id-of-the-row";
         let second = "second-stored-id-of-the-row";
         let derived = derived_call_id(first);

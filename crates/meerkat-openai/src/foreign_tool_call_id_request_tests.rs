@@ -186,8 +186,12 @@ fn responses_request_derives_a_call_id_from_the_first_byte_over_the_bound() {
 
 /// A history whose ids the request can carry lowers to the bytes it lowered
 /// to before any id was derived: this row holds on both sides of that
-/// change. The ids are an OpenAI-shaped one, an Anthropic-shaped one, one
-/// exactly at the bound, and one a provider reuses in every round.
+/// change. It pins the input array against a literal written here; the
+/// whole body is compared, byte for byte, with the as-stored lowering in
+/// `responses_body_for_ids_within_the_bound_is_byte_equal_to_the_as_stored_lowering`
+/// (the client's own test module). The ids are an OpenAI-shaped one, an
+/// Anthropic-shaped one, one exactly at the bound, and one a provider
+/// reuses in every round.
 #[test]
 fn responses_request_for_ids_within_the_bound_is_byte_equal_to_the_stored_ids_lowering() {
     let at_bound = foreign_id("edge", RESPONSES_CALL_ID_BOUND);
@@ -387,10 +391,11 @@ fn responses_request_keeps_a_stored_id_shaped_like_a_derived_one_apart() {
     assert_eq!(round_call_ids(transcript(&[&lookalike])), [ids[1].clone()]);
 }
 
-/// The request a compaction sends: the typed rows of the history, tool
-/// rounds included, then the summary prompt as the last user row, with no
-/// tools. It is projected and lowered like an ordinary turn, and what the
-/// client measures for it is the body with the derived `call_id`.
+/// The request a compaction sends, modelled by hand (this crate cannot
+/// call the compactor): the typed rows of the history, tool rounds
+/// included, then the summary prompt as the last user row, with no tools.
+/// It is projected and lowered like an ordinary turn, and what the client
+/// measures for it is the body with the derived `call_id`.
 #[test]
 fn responses_summary_request_carries_the_long_stored_id_within_the_bound() {
     let stored = foreign_id("summary", 7000);

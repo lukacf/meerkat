@@ -46,5 +46,12 @@ jobs:
           echo "failed jobs: ${failed:-none}"
           [[ -n "${failed}" ]] || exit 0
           body="Run ${GITHUB_SERVER_URL}/${GH_REPO}/actions/runs/${RUN_ID} failed: ${failed}"
+          # The nightly example jobs get their route in words (their comment
+          # in nightly.yml says the same). Nobody is mentioned or assigned.
+          case ", ${failed}, " in
+            *", Standalone examples, "* | *", Meta long-term agents example (keyless), "*)
+              body+=$'\n\n'"Example jobs: an infrastructure fault (runner, workflow, environment) stays with the CI owner. A content failure (a failing test or assertion of example 034, 035 or Meta example pack 006) is reported to the maintainers with the run, the job, the revision and the failing command or assertion, and routed to the Examples owner."
+              ;;
+          esac
           issue="$(gh issue list --state open --search 'in:title "Nightly failures"' --json number,title --jq '[.[] | select(.title == "Nightly failures")][0].number // empty')"
           if [[ -n "${issue}" ]]; then gh issue comment "${issue}" --body "${body}"; else gh issue create --title "Nightly failures" --body "${body}"; fi

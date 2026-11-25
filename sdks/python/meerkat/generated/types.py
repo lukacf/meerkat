@@ -3604,6 +3604,7 @@ class WireMobToolConfig:
     read_only: Optional[bool] = None
     schedule: Optional[bool] = None
     shell: Optional[bool] = None
+    web_search: Optional[bool] = None
     workgraph: Optional[bool] = None
 
 
@@ -4937,6 +4938,7 @@ class MobToolConfigInput:
     read_only: Optional[bool] = None
     schedule: Optional[bool] = None
     shell: Optional[bool] = None
+    web_search: Optional[bool] = None
     workgraph: Optional[bool] = None
 
 
@@ -5241,6 +5243,7 @@ so production v1 specs carry an empty list."""
     read_only: Optional[bool] = None
     schedule: Optional[bool] = None
     shell: Optional[bool] = None
+    web_search: Optional[bool] = None
     workgraph: Optional[bool] = None
 
 

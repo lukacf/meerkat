@@ -550,4 +550,6 @@ pub type ExternalToolsProvider = std::sync::Arc<
 >;
 
 #[cfg(test)]
+mod profile_web_search_rows;
+#[cfg(test)]
 mod tests;

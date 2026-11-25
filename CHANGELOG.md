@@ -47,11 +47,101 @@ them.
   - `RequestUntilChangedSwitchTurnReasoningEffortRefusedAttached`
   - `RequestUntilChangedSwitchTurnReasoningEffortRefusedRunning`
 
+- `meerkat-mob`: the public struct `ToolConfig` gains the public field `web_search: Option<bool>` (the profile key `tools.web_search`, see Added). `meerkat-contracts`: the public structs `wire::PortableToolConfig`, `WireMobToolConfig` and `wire::MobToolConfigInput` gain the same field. Code that builds one of them with a struct literal adds the field; `..Default::default()` covers it.
+
 ### Added
 
 - Rust API: a host can poll a run that waits for its resume gate. After a kill and a restart, a durable worker's run whose resume gate cannot decide (it answers `Unavailable`, or takes too long) is neither resumed nor settled and waits, as documented since 0.9.11; until now nothing a host could read said that it waits, for how long, or why. `MobHandle::members_with_pending_resumed_runs()` (`meerkat-mob`) lists the locally seated members whose session marks a run that has neither resumed nor settled, and `MeerkatMachine::pending_resumed_run(&session_id)` / `pending_resumed_runs()` (`meerkat-runtime`) answer one session or every session of the process. An answer (`PendingResumedRunRead::Pending`) carries the session, the run id that `stop_member_run` takes, how long the registration has marked the run (`marked_for`), whether a stop is recorded and not settled yet (`stop_requested`), and whether the machine holds the run for its gate (`ResumedRunAdmissionState::Held`) with the undecided rounds, the time since the first of them, the typed cause (`TimedOut` or `AnsweredUnavailable`) and the gate's own reason for the last round, cut at `RESUMED_RUN_ADMISSION_REASON_MAX_BYTES` (512 bytes). The poll is answered from memory: no store call, no ask of the gate, no wake and no change, so it answers for a worker whose runtime loop makes no pass and never moves the round count. It does not wait out a busy session: the read gives up its wait for a session's own state after `PENDING_RESUMED_RUN_READ_BOUND` and answers `PendingResumedRunRead::NotReadableNow`, as it does for a registration that needs a reload; that answer means "ask again", not "no run waits". The constant is the length of that one wait, not a bound on the call: the lookup of the session comes before it, and a poll of several sessions or members reads them one after another. The new types are `#[non_exhaustive]`, and so is the `NotReadableNow` variant: match it with `..`. See [Durable runs: seeing a run that waits](docs/guides/durable-runs.mdx#seeing-a-run-that-waits).
 
   What this does not change: nothing is emitted on any stream or wire surface, no SDK or RPC method is added, nothing asks the gate again on a timer, and a waiting run is never resumed or settled because time has passed. A host that wants an alert polls and raises its own. Whether a run is held, and which run, is the runtime machine's state; the rounds, the times, the cause and the reason are noted by the current registration and start over at every registration, so they count from one again after a restart.
+
+- **A mob profile can state web search for its members:** the optional key
+  `tools.web_search`, in a TOML or stored definition, a realm profile, the
+  public profile input and the wire profile. A profile that omits it behaves
+  exactly as before: the provider's own web search rides the member's requests
+  where its model has one and the provider's switch is on, and a member whose
+  tools are governed (a read-only profile, a deny list, a tool access or
+  application tool policy, a dispatch admission, a tool grant gate that covers
+  `web_search`) has none, since governance turns the provider's own tools off.
+  - Before setting the key, its limits with the released versions, each
+    by the evidence it rests on.
+    - No new key is written when neither the profile sets the key nor a
+      spawn's own web search override is kept for the member (a test of
+      this change asserts it for a profile that does not set the key). A
+      kept override is stored in a local member's stored profile, which
+      the mob profile struct named next reads; a placed member's portable
+      spec keeps the profile's own value.
+    - By source, for 0.9.15, 0.9.16, 0.9.17 and 0.9.18, whose three
+      deciding source files are byte-identical: the mob profile struct
+      (`ToolConfig`) tolerates unknown keys and does not know this one, so
+      a set key is ignored there and is not preserved when the profile is
+      read into that struct and written again: `web_search = false` is not
+      enforced by that field. So, by source and not as an observed result
+      of running those four releases: do not rely on `web_search=false` in
+      a JSON mob profile to keep search disabled after a downgrade to
+      0.9.15, 0.9.16, 0.9.17 or 0.9.18. The strict forms reject the unknown
+      key: the portable stored spec of a placed member
+      (`PortableToolConfig`) and the two wire profile structs
+      (`WireMobToolConfig`, `MobToolConfigInput`).
+    - Observed on 0.9.16 only, with a debug build made from the 0.9.16 tag
+      (not the published binary). A hand-written JSON mob profile that
+      names the key is accepted without a warning. Over state written by
+      an older state of this change, with a placed member of a profile that
+      named the key: on the member host `rkat mob host` exits with
+      `host binding record serde failed`, naming the unknown field
+      `web_search`, and on the controlling host the mob is held as
+      quarantined (`store_unreadable`); a placed member of a profile
+      without the key is not affected; after a completed retire of the
+      member that build starts on both hosts. For an identity adopted
+      through `mob/adopt_member_identity_declaration` while its profile
+      named the key, no recovery on 0.9.16 was demonstrated. What another
+      release does after such a rejection is not shown by these
+      observations.
+    - Not verified: state written by this change read by a released 0.9.18
+      runtime.
+  - `web_search = true` is the build's explicit enable. Where the provider's
+    own search serves the member, it stays the provider's own. Where it does
+    not (a model without one, or a governed member), the member gets the
+    ordinary `web_search` tool, served by a helper that runs the provider's
+    default model through the realm's default binding for that provider, and
+    gated like any other tool: a read-only profile admits it, a deny list
+    that names it refuses it, and a tool grant gate that covers it keeps it
+    closed until a grant. Where that helper cannot be provided (the member's
+    provider is not Anthropic, OpenAI or Gemini, the provider's web search
+    switch is off, its default model has no web search, or the realm
+    resolves no default binding for it), the member's build fails with
+    `BuildAgentError::CapabilityUnavailable` (capability `web_search`), as an
+    explicit enable always has. Not verified over a GitHub Copilot binding:
+    the build succeeds wherever the helper's connection resolves, and
+    whether a search then works is decided at call time by what that route
+    serves. One limit, unchanged from a spawn's or a session's explicit
+    enable: on an ungoverned member whose model has its own search, the
+    enable gives no search and no error while that provider's web search
+    switch is off; the helper is not tried there.
+  - `web_search = false` is the build's explicit disable: no search of
+    either kind. One exception: the profile's own tool grant gate that
+    covers `web_search` mounts the tool closed whatever the switch says,
+    and a grant then opens it.
+  - A spawn's own `tool_category_overrides.web_search` wins over the profile
+    in both directions, and keeps winning when the member is revived: the
+    spawn's choice now travels in the member's stored profile. A member
+    placed on another host is the exception: its spawn's choice stays in
+    the overlay of its spec, as before, and a respawn of it does not carry
+    the choice, a disabling one included.
+  - A member's session records the choice it was built with, and a removed
+    key states no choice. A member built while its profile said `true`
+    keeps web search after the key is removed (`web_search = false` takes
+    it away), and one built while it said `false` keeps none
+    (`web_search = true` gives it back); only a new session returns to the
+    unset behaviour.
+  - A placed member and a declared identity carry their profile's choice in
+    their portable profile (`PortableToolConfig.web_search`), omitted when
+    the profile states none, so the specs and stored material of profiles
+    that omit the key keep their bytes and digests. An adaptive layer's
+    inline profile may state it, and an enable counts as the `web_search`
+    tool class in the layer's policy evidence; the layer decision schema
+    bundled in adaptive packs is unchanged.
+  See [Web search](docs/guides/mobs.mdx#web-search).
 
 ### Changed
 

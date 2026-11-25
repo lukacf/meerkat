@@ -73,8 +73,10 @@ pub(crate) struct SeatBuildInputs {
     pub(crate) application_tool_policy: Option<meerkat_core::ApplicationToolPolicyBinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) auth_binding: Option<meerkat_core::AuthBindingRef>,
-    /// The spec's web search override (`ToolCategoryOverrides::web_search`):
-    /// the one tool category the seat's profile override does not hold.
+    /// The spec's web search override (`ToolCategoryOverrides::web_search`).
+    /// A seat written before a profile could state web search holds it only
+    /// here; since then the seat's profile override holds it too, and the
+    /// first build applies the same choice from either.
     #[serde(default, skip_serializing_if = "web_search_inherits")]
     pub(crate) web_search: ToolCategoryOverride,
 }

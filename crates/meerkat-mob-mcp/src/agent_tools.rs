@@ -8851,6 +8851,111 @@ mod tests {
         }
     }
 
+    /// The objective-owner bind site, with a refusal the mob's own gate
+    /// gives (the row above hands one in for the helper's site). A
+    /// `delegate` call that carries an objective is made through the tool's
+    /// own dispatch by a surface that acts for a principal with no control
+    /// scope over the session's implicit mob: the first step the mob refuses
+    /// is the bind of the objective to its owner. The call answers the
+    /// tool's ordinary access denial, in its usual wording and with no data,
+    /// naming neither the mob, the member, the session nor the scope, and no
+    /// helper is seated.
+    #[tokio::test]
+    async fn a_delegate_whose_objective_bind_the_mob_refuses_for_scope_answers_access_denied() {
+        const MEMBER_ID: &str = "helper-scope-refused";
+        let service = Arc::new(RealCommsSessionSvc::new());
+        let state = Arc::new(
+            MobMcpState::new(service.clone(), meerkat_mob::MobControlPrincipal::Owner)
+                .expect("construct runtime authority"),
+        );
+        let session_id = SessionId::new();
+        let mut surface = AgentMobToolSurface::new_with_effective_authority(
+            Arc::clone(&state),
+            None,
+            Arc::new(std::sync::RwLock::new(create_only_authority())),
+            "claude-sonnet-4-5".to_string(),
+            session_id.clone(),
+            None,
+            None,
+            None,
+            meerkat_core::service::MobToolSnapshotContext::Standalone,
+        );
+        // The session's implicit mob exists before the refused call, made as
+        // the host makes it: the refusal below is the mob's, not the lack of
+        // a mob.
+        let (mob_id, created) = surface
+            .ensure_implicit_mob()
+            .await
+            .expect("the session's implicit mob");
+        assert!(created);
+        // A principal that resolves to no grant: its effective control scope
+        // is empty, so the mob's gate refuses the operator commands of the
+        // call. Every other fact of the surface is that of a caller whose
+        // delegate reaches its mob.
+        surface.control_principal = meerkat_mob::MobControlPrincipal::Unresolved;
+
+        let args = serde_json::value::RawValue::from_string(
+            json!({
+                "member_id": MEMBER_ID,
+                "task": "report back",
+                "result_label": "delegate_result",
+                "max_text_bytes": 4096
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let call = ToolCallView {
+            id: "delegate-scope-refused",
+            name: "delegate",
+            args: &args,
+        };
+        // The call carries an objective, as a turn that runs for one does.
+        let context = meerkat_core::ToolDispatchContext::default().with_turn_metadata(
+            std::collections::BTreeMap::from([(
+                meerkat_core::agent::TOOL_DISPATCH_OBJECTIVE_ID_KEY.to_string(),
+                json!(uuid::Uuid::new_v4().to_string()),
+            )]),
+        );
+        let error = AgentToolDispatcher::dispatch_with_context(&surface, call, &context)
+            .await
+            .expect_err("the mob refuses a principal with no control scope");
+
+        assert_eq!(
+            error,
+            ToolError::access_denied("delegate"),
+            "the code is access_denied, as for the tool's other permission refusals"
+        );
+        assert_eq!(
+            error.to_string(),
+            ToolError::access_denied("delegate").to_string(),
+            "the existing denial wording is kept"
+        );
+        assert!(error.structured_data().is_none(), "{error:?}");
+        let whole = format!("{error} | {error:?} | {}", error.to_error_payload());
+        let session = session_id.to_string();
+        for id in [
+            mob_id.as_str(),
+            MEMBER_ID,
+            session.as_str(),
+            "control scope",
+        ] {
+            assert!(
+                !whole.contains(id),
+                "a permission refusal names no id and no scope (`{id}`): {whole}"
+            );
+        }
+        // Nothing was seated under the member id the call gave.
+        let handle = state.handle_for(&mob_id).await.expect("implicit mob");
+        assert!(
+            handle
+                .get_member(&AgentIdentity::from(MEMBER_ID))
+                .await
+                .expect("read the roster")
+                .is_none(),
+            "a refused call seats no helper"
+        );
+    }
+
     /// An error of a delegate whose mob exists names that mob and the
     /// member id the call gave. A key the error already holds stays, and an
     /// error whose form carries no data is passed on as it is.
